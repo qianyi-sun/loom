@@ -42,22 +42,38 @@ from loom_cli.discovery import DatasetEntry, union_entries
 from loom_cli.output import render_datasets_json, render_datasets_table
 
 
+def _env_first(*names: str) -> str | None:
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
+
+
+def _target_db_url() -> str | None:
+    return _env_first("LOOM_DB_URL", "LOOM_SVC_DB_URL")
+
+
+def _target_minio_env(name: str) -> str | None:
+    return _env_first(f"LOOM_MINIO_{name}", f"LOOM_SVC_MINIO_{name}")
+
+
 def _add_import_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("benchmark")
     # Each secret falls back to an env var so operators don't have to
     # leak them through `ps`/shell history. CLI flag wins when both set.
-    p.add_argument("--db-url", default=os.environ.get("LOOM_DB_URL"))
+    p.add_argument("--db-url", default=_target_db_url())
     p.add_argument(
         "--minio-endpoint",
-        default=os.environ.get("LOOM_MINIO_ENDPOINT"),
+        default=_target_minio_env("ENDPOINT"),
     )
     p.add_argument(
         "--minio-access-key",
-        default=os.environ.get("LOOM_MINIO_ACCESS_KEY"),
+        default=_target_minio_env("ACCESS_KEY"),
     )
     p.add_argument(
         "--minio-secret-key",
-        default=os.environ.get("LOOM_MINIO_SECRET_KEY"),
+        default=_target_minio_env("SECRET_KEY"),
     )
     p.add_argument("--bucket", default="loom-benchmarks")
     p.add_argument(
@@ -114,7 +130,14 @@ def _add_register_args(p: argparse.ArgumentParser) -> None:
         "--hf-token", default=os.environ.get("HF_TOKEN"),
         help="HF read token (optional for public datasets).",
     )
-    p.add_argument("--db-url", default=os.environ.get("LOOM_DB_URL"))
+    p.add_argument(
+        "--db-url",
+        default=_target_db_url(),
+        help=(
+            "Postgres URL (defaults to env LOOM_DB_URL, then "
+            "LOOM_SVC_DB_URL inside deployed service pods)."
+        ),
+    )
     p.add_argument("--revision", default="main")
     p.add_argument("--registered-by", default=None)
 
@@ -124,15 +147,15 @@ def _add_verify_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--limit", type=int, default=10)
     p.add_argument(
         "--minio-endpoint",
-        default=os.environ.get("LOOM_MINIO_ENDPOINT"),
+        default=_target_minio_env("ENDPOINT"),
     )
     p.add_argument(
         "--minio-access-key",
-        default=os.environ.get("LOOM_MINIO_ACCESS_KEY"),
+        default=_target_minio_env("ACCESS_KEY"),
     )
     p.add_argument(
         "--minio-secret-key",
-        default=os.environ.get("LOOM_MINIO_SECRET_KEY"),
+        default=_target_minio_env("SECRET_KEY"),
     )
     p.add_argument("--bucket", default="loom-benchmarks")
     p.add_argument("--seed", type=int, default=0)
@@ -144,8 +167,8 @@ def _add_audit_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--json", dest="as_json", action="store_true")
     p.add_argument(
         "--db-url",
-        default=os.environ.get("LOOM_DB_URL"),
-        help="Postgres URL (defaults to env LOOM_DB_URL).",
+        default=_target_db_url(),
+        help="Postgres URL (defaults to env LOOM_DB_URL, then LOOM_SVC_DB_URL).",
     )
 
 
@@ -164,8 +187,11 @@ def _add_provision_public_beta_catalog_args(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--target-db-url",
-        default=os.environ.get("LOOM_DB_URL"),
-        help="Target public-beta Postgres URL (defaults to env LOOM_DB_URL).",
+        default=_target_db_url(),
+        help=(
+            "Target public-beta Postgres URL (defaults to env LOOM_DB_URL, "
+            "then LOOM_SVC_DB_URL inside deployed service pods)."
+        ),
     )
     p.add_argument(
         "--source-minio-endpoint",
@@ -181,15 +207,15 @@ def _add_provision_public_beta_catalog_args(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--target-minio-endpoint",
-        default=os.environ.get("LOOM_MINIO_ENDPOINT"),
+        default=_target_minio_env("ENDPOINT"),
     )
     p.add_argument(
         "--target-minio-access-key",
-        default=os.environ.get("LOOM_MINIO_ACCESS_KEY"),
+        default=_target_minio_env("ACCESS_KEY"),
     )
     p.add_argument(
         "--target-minio-secret-key",
-        default=os.environ.get("LOOM_MINIO_SECRET_KEY"),
+        default=_target_minio_env("SECRET_KEY"),
     )
     p.add_argument(
         "--target-bucket",
@@ -231,18 +257,18 @@ def _add_validate_local_args(p: argparse.ArgumentParser) -> None:
 
 def _add_publish_local_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("path", type=Path)
-    p.add_argument("--db-url", default=os.environ.get("LOOM_DB_URL"))
+    p.add_argument("--db-url", default=_target_db_url())
     p.add_argument(
         "--minio-endpoint",
-        default=os.environ.get("LOOM_MINIO_ENDPOINT"),
+        default=_target_minio_env("ENDPOINT"),
     )
     p.add_argument(
         "--minio-access-key",
-        default=os.environ.get("LOOM_MINIO_ACCESS_KEY"),
+        default=_target_minio_env("ACCESS_KEY"),
     )
     p.add_argument(
         "--minio-secret-key",
-        default=os.environ.get("LOOM_MINIO_SECRET_KEY"),
+        default=_target_minio_env("SECRET_KEY"),
     )
     p.add_argument("--bucket", default="loom-benchmarks")
     p.add_argument("--imported-by", default=None)
@@ -356,8 +382,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "[[local]] entries. Defaults to $LOOM_WORKER_FIXTURES_ROOT.",
     )
     p_sync.add_argument(
-        "--db-url", default=os.environ.get("LOOM_DB_URL"),
-        help="Postgres URL (defaults to env LOOM_DB_URL).",
+        "--db-url",
+        default=_target_db_url(),
+        help="Postgres URL (defaults to env LOOM_DB_URL, then LOOM_SVC_DB_URL).",
     )
     p_sync.add_argument(
         "--dry-run", action="store_true",
@@ -467,10 +494,22 @@ def _cmd_import(args: argparse.Namespace) -> int:
 
     missing = [
         f for f, v in (
-            ("--db-url / LOOM_DB_URL", args.db_url),
-            ("--minio-endpoint / LOOM_MINIO_ENDPOINT", args.minio_endpoint),
-            ("--minio-access-key / LOOM_MINIO_ACCESS_KEY", args.minio_access_key),
-            ("--minio-secret-key / LOOM_MINIO_SECRET_KEY", args.minio_secret_key),
+            ("--db-url / LOOM_DB_URL / LOOM_SVC_DB_URL", args.db_url),
+            (
+                "--minio-endpoint / LOOM_MINIO_ENDPOINT / "
+                "LOOM_SVC_MINIO_ENDPOINT",
+                args.minio_endpoint,
+            ),
+            (
+                "--minio-access-key / LOOM_MINIO_ACCESS_KEY / "
+                "LOOM_SVC_MINIO_ACCESS_KEY",
+                args.minio_access_key,
+            ),
+            (
+                "--minio-secret-key / LOOM_MINIO_SECRET_KEY / "
+                "LOOM_SVC_MINIO_SECRET_KEY",
+                args.minio_secret_key,
+            ),
         ) if not v
     ]
     if missing:
@@ -538,7 +577,8 @@ def _cmd_register(args: argparse.Namespace) -> int:
 
     if not args.db_url:
         print(
-            "error: register requires --db-url / env LOOM_DB_URL",
+            "error: register requires --db-url / env LOOM_DB_URL "
+            "or LOOM_SVC_DB_URL",
             file=sys.stderr,
         )
         return 2
@@ -567,9 +607,21 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
     missing = [
         f for f, v in (
-            ("--minio-endpoint / LOOM_MINIO_ENDPOINT", args.minio_endpoint),
-            ("--minio-access-key / LOOM_MINIO_ACCESS_KEY", args.minio_access_key),
-            ("--minio-secret-key / LOOM_MINIO_SECRET_KEY", args.minio_secret_key),
+            (
+                "--minio-endpoint / LOOM_MINIO_ENDPOINT / "
+                "LOOM_SVC_MINIO_ENDPOINT",
+                args.minio_endpoint,
+            ),
+            (
+                "--minio-access-key / LOOM_MINIO_ACCESS_KEY / "
+                "LOOM_SVC_MINIO_ACCESS_KEY",
+                args.minio_access_key,
+            ),
+            (
+                "--minio-secret-key / LOOM_MINIO_SECRET_KEY / "
+                "LOOM_SVC_MINIO_SECRET_KEY",
+                args.minio_secret_key,
+            ),
         ) if not v
     ]
     if missing:
@@ -610,7 +662,8 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 def _cmd_audit(args: argparse.Namespace) -> int:
     if not args.db_url:
         print(
-            "error: audit requires --db-url / env LOOM_DB_URL",
+            "error: audit requires --db-url / env LOOM_DB_URL "
+            "or LOOM_SVC_DB_URL",
             file=sys.stderr,
         )
         return 2
@@ -651,30 +704,41 @@ def _cmd_provision_public_beta_catalog(args: argparse.Namespace) -> int:
         if not present:
             missing.append(label)
 
-    require_present("--source-db-url / LOOM_CATALOG_SOURCE_DB_URL", present=bool(args.source_db_url))
-    require_present("--target-db-url / LOOM_DB_URL", present=bool(args.target_db_url))
     require_present(
-        "--source-minio-endpoint / LOOM_CATALOG_SOURCE_MINIO_ENDPOINT",
+        "--source-db-url / LOOM_CATALOG_SOURCE_DB_URL / LOOM_SOURCE_DB_URL",
+        present=bool(args.source_db_url),
+    )
+    require_present(
+        "--target-db-url / LOOM_DB_URL / LOOM_SVC_DB_URL",
+        present=bool(args.target_db_url),
+    )
+    require_present(
+        "--source-minio-endpoint / LOOM_CATALOG_SOURCE_MINIO_ENDPOINT / "
+        "LOOM_SOURCE_MINIO_ENDPOINT",
         present=bool(args.source_minio_endpoint),
     )
     require_present(
-        "--source-minio-access-key / LOOM_CATALOG_SOURCE_MINIO_ACCESS_KEY",
+        "--source-minio-access-key / LOOM_CATALOG_SOURCE_MINIO_ACCESS_KEY / "
+        "LOOM_SOURCE_MINIO_ACCESS_KEY",
         present=bool(args.source_minio_access_key),
     )
     require_present(
-        "--source-minio-secret-key / LOOM_CATALOG_SOURCE_MINIO_SECRET_KEY",
+        "--source-minio-secret-key / LOOM_CATALOG_SOURCE_MINIO_SECRET_KEY / "
+        "LOOM_SOURCE_MINIO_SECRET_KEY",
         present=bool(args.source_minio_secret_key),
     )
     require_present(
-        "--target-minio-endpoint / LOOM_MINIO_ENDPOINT",
+        "--target-minio-endpoint / LOOM_MINIO_ENDPOINT / LOOM_SVC_MINIO_ENDPOINT",
         present=bool(args.target_minio_endpoint),
     )
     require_present(
-        "--target-minio-access-key / LOOM_MINIO_ACCESS_KEY",
+        "--target-minio-access-key / LOOM_MINIO_ACCESS_KEY / "
+        "LOOM_SVC_MINIO_ACCESS_KEY",
         present=bool(args.target_minio_access_key),
     )
     require_present(
-        "--target-minio-secret-key / LOOM_MINIO_SECRET_KEY",
+        "--target-minio-secret-key / LOOM_MINIO_SECRET_KEY / "
+        "LOOM_SVC_MINIO_SECRET_KEY",
         present=bool(args.target_minio_secret_key),
     )
     if missing:
@@ -770,16 +834,27 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
 
     missing = [
         f for f, v in (
-            ("--db-url / LOOM_DB_URL", args.db_url),
-            ("--minio-endpoint / LOOM_MINIO_ENDPOINT", args.minio_endpoint),
-            ("--minio-access-key / LOOM_MINIO_ACCESS_KEY", args.minio_access_key),
-            ("--minio-secret-key / LOOM_MINIO_SECRET_KEY", args.minio_secret_key),
+            ("--db-url / LOOM_DB_URL / LOOM_SVC_DB_URL", args.db_url),
+            (
+                "--minio-endpoint / LOOM_MINIO_ENDPOINT / "
+                "LOOM_SVC_MINIO_ENDPOINT",
+                args.minio_endpoint,
+            ),
+            (
+                "--minio-access-key / LOOM_MINIO_ACCESS_KEY / "
+                "LOOM_SVC_MINIO_ACCESS_KEY",
+                args.minio_access_key,
+            ),
+            (
+                "--minio-secret-key / LOOM_MINIO_SECRET_KEY / "
+                "LOOM_SVC_MINIO_SECRET_KEY",
+                args.minio_secret_key,
+            ),
         ) if not v
     ]
     if missing:
         print(
-            "error: publish-local requires a database URL and object-store "
-            "endpoint/credentials",
+            f"error: publish-local requires: {', '.join(missing)}",
             file=sys.stderr,
         )
         return 2
@@ -863,7 +938,8 @@ def _cmd_sync_config(args: argparse.Namespace) -> int:
 
     if not args.db_url:
         print(
-            "error: sync-config requires --db-url / env LOOM_DB_URL",
+            "error: sync-config requires --db-url / env LOOM_DB_URL "
+            "or LOOM_SVC_DB_URL",
             file=sys.stderr,
         )
         return 2

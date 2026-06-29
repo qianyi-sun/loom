@@ -1599,9 +1599,15 @@ separate product policy exists.
 
 ### Benchmark catalog provisioning
 
-Before inviting beta users or starting manual New Batch testing, copy the
-known-good ready catalog and referenced task bundles into the target
-environment:
+Before inviting beta users or starting manual New Batch testing, restore the
+ready benchmark catalog through one of the official catalog paths below. Do not
+insert benchmark/task rows manually, patch JSON in SQL, or seed public-beta
+with `scripts/seed_test_data.py`; missing credentials or source artifacts are
+release blockers that should be fixed through the deployment Secret/profile and
+tracked in the launch issue.
+
+**Path A: copy from a known-good source catalog and object store.** Use this
+when the source environment already has runnable task rows and bundle objects:
 
 ```bash
 export LOOM_CATALOG_SOURCE_DB_URL="$SOURCE_LOOM_DB_URL"
@@ -1609,11 +1615,14 @@ export LOOM_CATALOG_SOURCE_MINIO_ENDPOINT="$SOURCE_LOOM_MINIO_ENDPOINT"
 export LOOM_CATALOG_SOURCE_MINIO_ACCESS_KEY="$SOURCE_LOOM_MINIO_ACCESS_KEY"
 export LOOM_CATALOG_SOURCE_MINIO_SECRET_KEY="$SOURCE_LOOM_MINIO_SECRET_KEY"
 
+# Outside Kubernetes, provide the target values explicitly:
 export LOOM_DB_URL="$PUBLIC_BETA_DB_URL"
 export LOOM_MINIO_ENDPOINT="$PUBLIC_BETA_MINIO_ENDPOINT"
 export LOOM_MINIO_ACCESS_KEY="$PUBLIC_BETA_MINIO_ACCESS_KEY"
 export LOOM_MINIO_SECRET_KEY="$PUBLIC_BETA_MINIO_SECRET_KEY"
 
+# Inside a deployed loom-service pod, the command also accepts the service
+# Secret names LOOM_SVC_DB_URL and LOOM_SVC_MINIO_* for target values.
 loom datasets provision-public-beta-catalog \
   --target-bucket loom-benchmarks \
   --imported-by "release:${IMAGE_TAG:-manual}"
@@ -1625,15 +1634,51 @@ fully runnable, creates the target bucket when needed, copies missing
 any source task bundle prefix has no objects. A healthy run reports non-zero
 `ready_benchmarks`, non-zero `ready_tasks`, and `missing=0`.
 
+**Path B: rebuild rows from the published Hugging Face manifest.** Use this
+when the published dataset repo is the source of truth for the benchmark, or
+when the source catalog/object-store pair is unavailable. For private or gated
+repos such as the current SkillLearnBench release repo, provision `HF_TOKEN`
+into the operator pod as a Kubernetes Secret or environment reference before
+running the command. Do not pass raw HF tokens in issue comments, command-line
+history, or committed files.
+
+```bash
+export LOOM_HF_ORG="${LOOM_HF_ORG:-PRHW}"
+
+# Outside Kubernetes, provide the target DB explicitly:
+export LOOM_DB_URL="$PUBLIC_BETA_DB_URL"
+
+# Inside loom-service pods, the command also accepts LOOM_SVC_DB_URL from the
+# service Secret. For gated repos, HF_TOKEN must already be present.
+loom datasets register skilllearnbench \
+  --revision "$PUBLISHED_SHA" \
+  --registered-by "release:${IMAGE_TAG:-manual}"
+```
+
+If the HF repo is private/gated and the pod lacks `HF_TOKEN`, the 401/403 is a
+real rollout blocker. Fix it by updating the Secret/profile and restarting the
+operator context; do not replace it with hand-written DB rows.
+
 Verify the target before continuing:
 
 ```bash
-loom datasets audit --all --db-url "$LOOM_DB_URL"
+loom datasets audit --all
 curl -sf -H "Authorization: Bearer $TEAM_A_TOKEN" \
   "$PUBLIC_SERVER_URL/api/v1/benchmarks?limit=200&include_empty=true"
 python scripts/benchmark_reward_gate.py readiness \
   --server-url "$PUBLIC_SERVER_URL" \
   --token env:TEAM_A_TOKEN
+```
+
+When validating SkillLearnBench specifically, confirm its rows carry runnable
+task configs instead of empty placeholders:
+
+```sql
+SELECT count(*) AS skilllearnbench_tasks
+FROM tasks
+WHERE benchmark_id = 'skilllearnbench'
+  AND jsonb_typeof(config) = 'object'
+  AND config ? 'environment';
 ```
 
 The public API response must include at least one benchmark with

@@ -236,6 +236,201 @@ def test_provision_public_beta_catalog_invokes_provisioner(
     assert "missing=0" in out
 
 
+def test_provision_public_beta_catalog_uses_service_target_env(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setenv("LOOM_CATALOG_SOURCE_DB_URL", "postgresql://source/db")
+    monkeypatch.setenv("LOOM_CATALOG_SOURCE_MINIO_ENDPOINT", "http://source-minio:9000")
+    monkeypatch.setenv("LOOM_CATALOG_SOURCE_MINIO_ACCESS_KEY", "source-access")
+    monkeypatch.setenv("LOOM_CATALOG_SOURCE_MINIO_SECRET_KEY", "source-secret")
+    monkeypatch.delenv("LOOM_DB_URL", raising=False)
+    monkeypatch.delenv("LOOM_MINIO_ENDPOINT", raising=False)
+    monkeypatch.delenv("LOOM_MINIO_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("LOOM_MINIO_SECRET_KEY", raising=False)
+    monkeypatch.setenv("LOOM_SVC_DB_URL", "postgresql://target/db")
+    monkeypatch.setenv("LOOM_SVC_MINIO_ENDPOINT", "http://target-minio:9000")
+    monkeypatch.setenv("LOOM_SVC_MINIO_ACCESS_KEY", "target-access")
+    monkeypatch.setenv("LOOM_SVC_MINIO_SECRET_KEY", "target-secret")
+
+    class FakeCatalog:
+        def __init__(self, db_url: str) -> None:
+            captured.setdefault("catalogs", []).append(db_url)
+
+    class FakeObjects:
+        def __init__(self, **kwargs: object) -> None:
+            captured.setdefault("stores", []).append(kwargs)
+
+    async def fake_provision(**kwargs: object):
+        from loom_cli.public_beta_catalog import ProvisionStats
+
+        captured.update(kwargs)
+        return ProvisionStats(
+            ready_benchmarks=1,
+            ready_tasks=100,
+            source_objects=200,
+            target_objects_uploaded=200,
+            target_objects_skipped=0,
+            target_objects_missing=0,
+            bytes_uploaded=123,
+            bytes_skipped=0,
+        )
+
+    monkeypatch.setattr(
+        "loom_cli.public_beta_catalog.PostgresCatalogStore",
+        FakeCatalog,
+    )
+    monkeypatch.setattr(
+        "loom_cli.public_beta_catalog.Boto3CatalogObjectStore",
+        FakeObjects,
+    )
+    monkeypatch.setattr(
+        "loom_cli.public_beta_catalog.provision_ready_benchmark_catalog",
+        fake_provision,
+    )
+
+    rc = dispatch(["provision-public-beta-catalog"])
+
+    assert rc == 0
+    assert captured["catalogs"] == [
+        "postgresql://source/db",
+        "postgresql://target/db",
+    ]
+    assert captured["stores"] == [
+        {
+            "endpoint_url": "http://source-minio:9000",
+            "access_key": "source-access",
+            "secret_key": "source-secret",
+        },
+        {
+            "endpoint_url": "http://target-minio:9000",
+            "access_key": "target-access",
+            "secret_key": "target-secret",
+        },
+    ]
+    assert "ready_tasks=100" in capsys.readouterr().out
+
+
+def test_register_uses_service_db_url_env(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.delenv("LOOM_DB_URL", raising=False)
+    monkeypatch.setenv("LOOM_SVC_DB_URL", "postgresql://target/db")
+
+    async def fake_register(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "registered": 100,
+            "legacy_placeholders": 0,
+            "skipped": 0,
+            "repo_id": "PRHW/loom-benchmark-skilllearnbench",
+            "revision": "main",
+        }
+
+    monkeypatch.setattr("loom_benchmark_tool.register_cmd.run_register", fake_register)
+
+    rc = dispatch(["register", "skilllearnbench"])
+
+    assert rc == 0
+    assert captured["db_url"] == "postgresql://target/db"
+    assert "registered=100" in capsys.readouterr().out
+
+
+def test_register_db_url_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    seen: list[str] = []
+
+    monkeypatch.setenv("LOOM_DB_URL", "postgresql://legacy/db")
+    monkeypatch.setenv("LOOM_SVC_DB_URL", "postgresql://service/db")
+
+    async def fake_register(**kwargs: object) -> dict[str, object]:
+        seen.append(str(kwargs["db_url"]))
+        return {
+            "registered": 1,
+            "legacy_placeholders": 0,
+            "skipped": 0,
+            "repo_id": "PRHW/loom-benchmark-skilllearnbench",
+            "revision": "main",
+        }
+
+    monkeypatch.setattr("loom_benchmark_tool.register_cmd.run_register", fake_register)
+
+    assert dispatch(["register", "skilllearnbench"]) == 0
+    assert dispatch([
+        "register",
+        "skilllearnbench",
+        "--db-url",
+        "postgresql://flag/db",
+    ]) == 0
+
+    assert seen == ["postgresql://legacy/db", "postgresql://flag/db"]
+    assert capsys.readouterr().out.count("registered=1") == 2
+
+
+def test_verify_minio_env_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stores: list[dict[str, object]] = []
+
+    monkeypatch.setenv("LOOM_MINIO_ENDPOINT", "http://legacy-minio:9000")
+    monkeypatch.setenv("LOOM_MINIO_ACCESS_KEY", "legacy-access")
+    monkeypatch.setenv("LOOM_MINIO_SECRET_KEY", "legacy-secret")
+    monkeypatch.setenv("LOOM_SVC_MINIO_ENDPOINT", "http://service-minio:9000")
+    monkeypatch.setenv("LOOM_SVC_MINIO_ACCESS_KEY", "service-access")
+    monkeypatch.setenv("LOOM_SVC_MINIO_SECRET_KEY", "service-secret")
+
+    class FakeObjectStore:
+        def __init__(self, **kwargs: object) -> None:
+            stores.append(kwargs)
+
+    async def fake_verify(**kwargs: object) -> dict[str, object]:
+        return {
+            "total": 1,
+            "passed": 1,
+            "failed": 0,
+            "results": [{"passed": True}],
+        }
+
+    monkeypatch.setattr("loom.trajectory.storage.MinioObjectStore", FakeObjectStore)
+    monkeypatch.setattr("loom_benchmark_tool.verify_cmd.run_verify", fake_verify)
+
+    assert dispatch(["verify", "skilllearnbench", "--limit", "1"]) == 0
+    assert dispatch([
+        "verify",
+        "skilllearnbench",
+        "--limit",
+        "1",
+        "--minio-endpoint",
+        "http://flag-minio:9000",
+        "--minio-access-key",
+        "flag-access",
+        "--minio-secret-key",
+        "flag-secret",
+    ]) == 0
+
+    assert stores == [
+        {
+            "endpoint_url": "http://legacy-minio:9000",
+            "access_key": "legacy-access",
+            "secret_key": "legacy-secret",
+        },
+        {
+            "endpoint_url": "http://flag-minio:9000",
+            "access_key": "flag-access",
+            "secret_key": "flag-secret",
+        },
+    ]
+    assert capsys.readouterr().out.count("passed=1") == 2
+
+
 def test_import_passes_instance_ids_to_benchmark_tool(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
