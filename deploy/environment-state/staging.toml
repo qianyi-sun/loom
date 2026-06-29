@@ -1,0 +1,127 @@
+# Staging DB-backed environment desired state.
+#
+# Apply after image rollout with:
+#   loom admin environment-state apply \
+#     --environment staging \
+#     --file deploy/environment-state/staging.toml \
+#     --var IMAGE_TAG="$IMAGE_TAG" \
+#     --var ENV_CONFIG_VERSION="$ENV_CONFIG_VERSION"
+
+environment = "staging"
+
+[[worker_pool_autoscaler_policies]]
+pool_name = "oldlab"
+actuator = "slurm"
+enabled = true
+min_slots = 1
+max_slots = 40
+scale_up_threshold_slots = 1
+scale_down_idle_seconds = 600
+scale_up_cooldown_seconds = 60
+scale_down_cooldown_seconds = 300
+drain_timeout_seconds = 600
+force = false
+
+[worker_pool_autoscaler_policies.actuator_config]
+backend = "docker"
+cpu_arch = "x86_64"
+allowed_nodes = [
+  "trt-eai-oldlab-1",
+  "trt-eai-oldlab-2",
+  "trt-eai-oldlab-3",
+  "trt-eai-oldlab-4",
+  "trt-eai-oldlab-5",
+]
+env_file = "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker.env"
+repo_dir = "/shared_work/qianyi/loom-remote-worker-staging"
+requested_cpus = 2
+requested_memory_mib = 8192
+requested_concurrency = 1
+max_jobs = 5
+pending_job_cap = 2
+time_limit = "04:00:00"
+resource_aware = true
+cpu_per_slot = 2
+memory_mib_per_slot = 8192
+reserved_cpus = 4
+reserved_memory_mib = 24576
+max_concurrency_per_node = 8
+max_cpu_load_ratio = 1.0
+exclusive = true
+external_runner = true
+
+[[worker_pool_autoscaler_policies]]
+pool_name = "gb10-arm64"
+actuator = "slurm"
+enabled = true
+min_slots = 0
+max_slots = 150
+scale_up_threshold_slots = 1
+scale_down_idle_seconds = 600
+scale_up_cooldown_seconds = 60
+scale_down_cooldown_seconds = 300
+drain_timeout_seconds = 600
+force = false
+
+[worker_pool_autoscaler_policies.actuator_config]
+backend = "docker"
+cpu_arch = "arm64"
+partition = "gb10"
+allowed_nodes = [
+  "trt-gb10-1",
+  "trt-gb10-2",
+  "trt-gb10-3",
+  "trt-gb10-4",
+  "trt-gb10-5",
+  "trt-gb10-6",
+  "trt-gb10-7",
+  "trt-gb10-8",
+  "trt-gb10-9",
+  "trt-gb10-10",
+  "trt-gb10-11",
+  "trt-gb10-12",
+  "trt-gb10-13",
+  "trt-gb10-14",
+  "trt-gb10-15",
+]
+env_file = "/shared_work/qianyi/loom-worker-capacity/staging-gb10-worker.env"
+repo_dir = "/shared_work/qianyi/loom-remote-worker-staging"
+requested_cpus = 20
+requested_memory_mib = 115000
+requested_concurrency = 10
+max_jobs = 15
+pending_job_cap = 2
+time_limit = "2-00:00:00"
+exclusive = true
+external_runner = true
+
+[[gb10_worker_pool_desired_states]]
+pool_name = "gb10-arm64"
+image_tag = "${IMAGE_TAG}"
+max_concurrent = 10
+env_config_version = "${ENV_CONFIG_VERSION}"
+target_slots = 150
+
+[gb10_worker_pool_desired_states.host_intents]
+trt-gb10-1 = "active"
+trt-gb10-2 = "active"
+trt-gb10-3 = "active"
+trt-gb10-4 = "active"
+trt-gb10-5 = "active"
+trt-gb10-6 = "active"
+trt-gb10-7 = "active"
+trt-gb10-8 = "active"
+trt-gb10-9 = "active"
+trt-gb10-10 = "active"
+trt-gb10-11 = "active"
+trt-gb10-12 = "active"
+trt-gb10-13 = "active"
+trt-gb10-14 = "active"
+trt-gb10-15 = "active"
+
+[gb10_worker_pool_desired_states.rollout_policy]
+mode = "all"
+
+[catalog_provisioning]
+required = true
+command = "loom datasets provision-public-beta-catalog --imported-by staging-provision"

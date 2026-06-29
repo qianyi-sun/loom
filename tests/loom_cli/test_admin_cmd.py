@@ -751,6 +751,179 @@ def test_worker_pool_autoscaler_status_json_format_emits_raw_json(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# loom admin environment-state apply/check
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _write_environment_state_profile(path: Path) -> None:
+    path.write_text(
+        """
+environment = "public-beta"
+
+[[worker_pool_autoscaler_policies]]
+pool_name = "gb10-arm64"
+actuator = "slurm"
+enabled = true
+min_slots = 0
+max_slots = 150
+scale_up_threshold_slots = 1
+scale_down_idle_seconds = 600
+scale_up_cooldown_seconds = 60
+scale_down_cooldown_seconds = 300
+drain_timeout_seconds = 600
+force = false
+
+[worker_pool_autoscaler_policies.actuator_config]
+backend = "docker"
+cpu_arch = "arm64"
+partition = "gb10"
+allowed_nodes = ["trt-gb10-1"]
+requested_concurrency = 10
+max_jobs = 15
+pending_job_cap = 2
+
+[[gb10_worker_pool_desired_states]]
+pool_name = "gb10-arm64"
+image_tag = "${IMAGE_TAG}"
+max_concurrent = 10
+env_config_version = "${ENV_CONFIG_VERSION}"
+target_slots = 150
+
+[gb10_worker_pool_desired_states.rollout_policy]
+mode = "all"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_environment_state_apply_puts_profile_resources(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    profile_path = tmp_path / "public-beta.state.toml"
+    _write_environment_state_profile(profile_path)
+    captured: list[dict[str, Any]] = []
+
+    def _fake_put(url, *, json, headers, timeout):  # type: ignore[no-untyped-def]
+        captured.append({"url": url, "json": json, "headers": headers})
+        return _StubResponse(200, json_data={"ok": True})
+
+    monkeypatch.setattr(httpx, "put", _fake_put)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+
+    rc = main(
+        [
+            "admin",
+            "environment-state",
+            "apply",
+            "--cp-url",
+            "http://cp:8080/",
+            "--file",
+            str(profile_path),
+            "--environment",
+            "public-beta",
+            "--var",
+            "IMAGE_TAG=public-beta-57a7509",
+            "--var",
+            "ENV_CONFIG_VERSION=public-beta-57a7509",
+        ]
+    )
+
+    assert rc == 0
+    assert [item["url"] for item in captured] == [
+        "http://cp:8080/admin/worker-pool-autoscaler-policies/public-beta/gb10-arm64",
+        "http://cp:8080/admin/gb10-worker-pools/public-beta/gb10-arm64/desired-state",
+    ]
+    assert captured[0]["headers"]["Authorization"] == "Bearer admin-secret"
+    assert captured[0]["json"]["actuator"] == "slurm"
+    assert captured[0]["json"]["actuator_config"]["partition"] == "gb10"
+    assert captured[1]["json"]["image_tag"] == "public-beta-57a7509"
+    assert "Applied environment state public-beta" in capsys.readouterr().out
+
+
+def test_environment_state_check_fails_with_actionable_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    profile_path = tmp_path / "public-beta.state.toml"
+    _write_environment_state_profile(profile_path)
+
+    def _fake_get(url, *, headers, timeout):  # type: ignore[no-untyped-def]
+        if url.endswith("/admin/worker-pool-autoscalers/status"):
+            return _StubResponse(
+                200,
+                json_data={
+                    "policies": [
+                        {
+                            "environment": "public-beta",
+                            "pool_name": "gb10-arm64",
+                            "actuator": "gb10",
+                            "enabled": True,
+                            "min_slots": 0,
+                            "max_slots": 150,
+                            "scale_up_threshold_slots": 1,
+                            "scale_down_idle_seconds": 600,
+                            "scale_up_cooldown_seconds": 60,
+                            "scale_down_cooldown_seconds": 300,
+                            "drain_timeout_seconds": 600,
+                            "force": False,
+                            "actuator_config": {"backend": "docker", "cpu_arch": "arm64"},
+                        },
+                    ],
+                },
+            )
+        if url.endswith("/admin/gb10-worker-pools/status"):
+            return _StubResponse(
+                200,
+                json_data={
+                    "desired_states": [
+                        {
+                            "environment": "public-beta",
+                            "pool_name": "gb10-arm64",
+                            "image_tag": "public-beta-old",
+                            "max_concurrent": 10,
+                            "env_config_version": "public-beta-old",
+                            "target_slots": 150,
+                            "host_intents": {},
+                            "rollout_policy": {"mode": "all"},
+                            "env": {},
+                        },
+                    ],
+                },
+            )
+        raise AssertionError(url)
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+
+    rc = main(
+        [
+            "admin",
+            "environment-state",
+            "check",
+            "--file",
+            str(profile_path),
+            "--environment",
+            "public-beta",
+            "--var",
+            "IMAGE_TAG=public-beta-57a7509",
+            "--var",
+            "ENV_CONFIG_VERSION=public-beta-57a7509",
+        ]
+    )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "Environment state drift for public-beta" in err
+    assert "worker_pool_autoscaler_policies[public-beta/gb10-arm64].actuator" in err
+    assert "desired='slurm' live='gb10'" in err
+    assert "gb10_worker_pool_desired_states[public-beta/gb10-arm64].image_tag" in err
+
+
+# ──────────────────────────────────────────────────────────────────────
 # loom admin tokens team — uses loom_service /api/v1/tokens
 # ──────────────────────────────────────────────────────────────────────
 

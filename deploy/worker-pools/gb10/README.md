@@ -328,7 +328,33 @@ commands that would run. Dry-run output does not print the full
 `.env.remote-worker` file because that file also contains worker and MinIO
 credentials.
 
-Set desired state through the CP admin API. This example canaries only
+For normal public-beta and staging rollouts, apply the repository
+environment-state profile instead of hand-patching Control Plane rows with
+one-off SQL or `curl`. The profile converges the GB10 Slurm autoscaler policy
+and the GB10 node-agent desired state together. The public-beta profile still
+writes the existing `production/gb10-arm64` CP desired-state key because that
+is what deployed GB10 node agents read today:
+
+```bash
+loom admin environment-state apply \
+  --cp-url http://127.0.0.1:18081 \
+  --admin-token env:LOOM_ADMIN_TOKEN \
+  --environment public-beta \
+  --file deploy/environment-state/public-beta.toml \
+  --var IMAGE_TAG="$IMAGE_TAG" \
+  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
+
+loom admin environment-state check \
+  --cp-url http://127.0.0.1:18081 \
+  --admin-token env:LOOM_ADMIN_TOKEN \
+  --environment public-beta \
+  --file deploy/environment-state/public-beta.toml \
+  --var IMAGE_TAG="$IMAGE_TAG" \
+  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
+```
+
+For manual canary experiments, set desired state through the CP admin API.
+This example canaries only
 `trt-gb10-1`; after it reports `applied`, change `rollout_policy` to
 `{"mode":"all"}` or expand `canary_hosts`. Autoscaler-managed policies may also
 write `target_slots` plus per-host `host_intents` of `active`, `draining`, or

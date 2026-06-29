@@ -23,7 +23,8 @@ import json
 import os
 import re
 import sys
-from typing import Any, cast
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
@@ -34,6 +35,9 @@ from loom_cli.server_client import (
     authed_client,
     require_logged_in,
 )
+
+if TYPE_CHECKING:
+    from loom_cli.environment_state import EnvironmentStateProfile
 
 # Same constraint as the CP route: prefix must be hex, 4-64 chars.
 # Catching this client-side avoids a round-trip just to hit the 400.
@@ -478,6 +482,249 @@ def _worker_pool_autoscaler_status(args: argparse.Namespace) -> int:
             f"reason={row.get('last_decision_reason') or '-'} "
             f"blocked={blocked} error={error}\n",
         )
+    return 0
+
+
+def _parse_environment_state_vars(values: list[str]) -> dict[str, str]:
+    variables: dict[str, str] = {}
+    for item in values:
+        if "=" not in item:
+            raise ValueError(f"--var must be KEY=VALUE, got {item!r}")
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"--var key cannot be empty in {item!r}")
+        variables[key] = value
+    return variables
+
+
+def _load_environment_state_profile_from_args(
+    args: argparse.Namespace,
+) -> EnvironmentStateProfile | None:
+    from loom_cli.environment_state import (
+        EnvironmentStateProfileError,
+        load_environment_state_profile,
+    )
+
+    try:
+        variables = _parse_environment_state_vars(args.var)
+        return load_environment_state_profile(
+            args.file,
+            variables=variables,
+            expected_environment=args.environment,
+        )
+    except (EnvironmentStateProfileError, ValueError) as e:
+        sys.stderr.write(f"error: {e}\n")
+        return None
+
+
+def _format_environment_state_value(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return repr(value)
+
+
+def _environment_state_label(profile: EnvironmentStateProfile) -> str:
+    if profile.control_plane_environment == profile.environment:
+        return profile.environment
+    return (
+        f"{profile.environment} "
+        f"(CP environment {profile.control_plane_environment})"
+    )
+
+
+def _fetch_environment_state(
+    *,
+    cp_url: str,
+    admin_token: str,
+) -> tuple[int, dict[str, Any] | None]:
+    headers = {"Authorization": f"Bearer {admin_token}"}
+    base = cp_url.rstrip("/")
+    try:
+        autoscaler_resp = httpx.get(
+            f"{base}/admin/worker-pool-autoscalers/status",
+            headers=headers,
+            timeout=10.0,
+        )
+        gb10_resp = httpx.get(
+            f"{base}/admin/gb10-worker-pools/status",
+            headers=headers,
+            timeout=10.0,
+        )
+    except httpx.RequestError as e:
+        sys.stderr.write(f"error: could not reach CP at {base}: {e}\n")
+        return 2, None
+
+    for name, resp in (
+        ("worker-pool autoscaler status", autoscaler_resp),
+        ("GB10 desired state status", gb10_resp),
+    ):
+        if resp.status_code != 200:
+            sys.stderr.write(
+                f"error: CP returned {resp.status_code} for {name}: {resp.text}\n",
+            )
+            return 1, None
+    return 0, {
+        "autoscaler_status": autoscaler_resp.json(),
+        "gb10_status": gb10_resp.json(),
+    }
+
+
+def _environment_state_apply(args: argparse.Namespace) -> int:
+    from loom_cli.environment_state import (
+        autoscaler_policy_payload,
+        gb10_desired_state_payload,
+    )
+
+    profile = _load_environment_state_profile_from_args(args)
+    if profile is None:
+        return 2
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 2
+
+    headers = {"Authorization": f"Bearer {admin_token}"}
+    base = args.cp_url.rstrip("/")
+    applied: list[dict[str, str]] = []
+    try:
+        for policy in profile.autoscaler_policies:
+            url = (
+                f"{base}/admin/worker-pool-autoscaler-policies/"
+                f"{policy['environment']}/{policy['pool_name']}"
+            )
+            resp = httpx.put(
+                url,
+                json=autoscaler_policy_payload(policy),
+                headers=headers,
+                timeout=10.0,
+            )
+            if resp.status_code != 200:
+                sys.stderr.write(
+                    f"error: CP returned {resp.status_code} for {url}: {resp.text}\n",
+                )
+                return 1
+            applied.append({"kind": "worker_pool_autoscaler_policy", "url": url})
+
+        for state in profile.gb10_desired_states:
+            url = (
+                f"{base}/admin/gb10-worker-pools/"
+                f"{state['environment']}/{state['pool_name']}/desired-state"
+            )
+            resp = httpx.put(
+                url,
+                json=gb10_desired_state_payload(state),
+                headers=headers,
+                timeout=10.0,
+            )
+            if resp.status_code != 200:
+                sys.stderr.write(
+                    f"error: CP returned {resp.status_code} for {url}: {resp.text}\n",
+                )
+                return 1
+            applied.append({"kind": "gb10_worker_pool_desired_state", "url": url})
+    except httpx.RequestError as e:
+        sys.stderr.write(f"error: could not reach CP at {base}: {e}\n")
+        return 2
+
+    if args.format == "json":
+        json.dump(
+            {
+                "environment": profile.environment,
+                "control_plane_environment": profile.control_plane_environment,
+                "profile": str(args.file),
+                "applied": applied,
+                "catalog_provisioning": profile.catalog_provisioning,
+            },
+            sys.stdout,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+        return 0
+
+    sys.stdout.write(
+        f"Applied environment state {_environment_state_label(profile)}: "
+        f"{len(profile.autoscaler_policies)} autoscaler polic"
+        f"{'y' if len(profile.autoscaler_policies) == 1 else 'ies'}, "
+        f"{len(profile.gb10_desired_states)} GB10 desired state"
+        f"{'' if len(profile.gb10_desired_states) == 1 else 's'}.\n",
+    )
+    if profile.catalog_provisioning.get("required"):
+        command = profile.catalog_provisioning.get("command")
+        if command:
+            sys.stdout.write(f"Catalog provisioning gate: {command}\n")
+    return 0
+
+
+def _environment_state_check(args: argparse.Namespace) -> int:
+    from loom_cli.environment_state import diff_environment_state
+
+    profile = _load_environment_state_profile_from_args(args)
+    if profile is None:
+        return 2
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 2
+
+    rc, live = _fetch_environment_state(
+        cp_url=args.cp_url,
+        admin_token=admin_token,
+    )
+    if rc != 0 or live is None:
+        return rc
+
+    drift = diff_environment_state(profile, live)
+    if args.format == "json":
+        json.dump(
+            {
+                "environment": profile.environment,
+                "control_plane_environment": profile.control_plane_environment,
+                "profile": str(args.file),
+                "ok": not drift,
+                "drift": [
+                    {
+                        "path": item.path,
+                        "desired": item.desired,
+                        "live": item.live,
+                    }
+                    for item in drift
+                ],
+                "catalog_provisioning": profile.catalog_provisioning,
+            },
+            sys.stdout,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+        return 1 if drift else 0
+
+    if drift:
+        sys.stderr.write(
+            f"Environment state drift for {_environment_state_label(profile)}: "
+            f"{len(drift)} difference(s)\n",
+        )
+        for item in drift:
+            sys.stderr.write(
+                f"  {item.path}: desired={_format_environment_state_value(item.desired)} "
+                f"live={_format_environment_state_value(item.live)}\n",
+            )
+        sys.stderr.write(
+            "Apply the versioned desired state with "
+            "`loom admin environment-state apply --file ...` after confirming "
+            "the profile matches this rollout.\n",
+        )
+        return 1
+
+    sys.stdout.write(
+        f"Environment state {_environment_state_label(profile)} "
+        "matches desired profile.\n",
+    )
+    if profile.catalog_provisioning.get("required"):
+        command = profile.catalog_provisioning.get("command")
+        if command:
+            sys.stdout.write(f"Catalog provisioning gate: {command}\n")
     return 0
 
 
@@ -1027,6 +1274,65 @@ def dispatch(argv: list[str]) -> int:
         help="Output format.",
     )
     p_autoscaler_status.set_defaults(handler=_worker_pool_autoscaler_status)
+
+    p_env_state = sub.add_parser(
+        "environment-state",
+        help=(
+            "Apply or check versioned environment desired state that lives "
+            "outside Kubernetes manifests."
+        ),
+    )
+    env_state_sub = p_env_state.add_subparsers(
+        dest="environment_state_op",
+        required=True,
+    )
+
+    def _add_environment_state_args(p: argparse.ArgumentParser) -> None:
+        _add_common_args(p)
+        p.add_argument(
+            "--file",
+            type=Path,
+            required=True,
+            help=(
+                "TOML desired-state profile, for example "
+                "deploy/environment-state/public-beta.toml."
+            ),
+        )
+        p.add_argument(
+            "--environment",
+            required=True,
+            help="Expected profile environment; rejects accidental cross-env apply.",
+        )
+        p.add_argument(
+            "--var",
+            action="append",
+            default=[],
+            metavar="KEY=VALUE",
+            help=(
+                "Template variable for ${KEY} placeholders in the profile. "
+                "Repeat for rollout-specific values such as IMAGE_TAG."
+            ),
+        )
+        p.add_argument(
+            "--format",
+            choices=["text", "json"],
+            default="text",
+            help="Output format.",
+        )
+
+    p_env_state_apply = env_state_sub.add_parser(
+        "apply",
+        help="Idempotently apply worker-pool and GB10 desired state through CP admin APIs.",
+    )
+    _add_environment_state_args(p_env_state_apply)
+    p_env_state_apply.set_defaults(handler=_environment_state_apply)
+
+    p_env_state_check = env_state_sub.add_parser(
+        "check",
+        help="Fail if live CP-backed environment state drifts from a desired profile.",
+    )
+    _add_environment_state_args(p_env_state_check)
+    p_env_state_check.set_defaults(handler=_environment_state_check)
 
     p_team = tok_sub.add_parser(
         "team",

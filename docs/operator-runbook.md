@@ -404,7 +404,44 @@ knob you need.
    kubectl rollout restart deploy/loom-service
    ```
 
-8. **Verify service-proxied downloads.** `loom_service` should use the
+8. **Apply versioned environment state.** Kubernetes manifests do not own
+   every rollout-critical runtime row. After the images and secrets are live,
+   apply the repository profile for the target environment, then check for
+   drift before trusting Monitor capacity or benchmark validation evidence:
+
+   ```bash
+   loom admin environment-state apply \
+     --cp-url http://localhost:8080 \
+     --admin-token env:ADMIN_TOKEN \
+     --environment public-beta \
+     --file deploy/environment-state/public-beta.toml \
+     --var IMAGE_TAG="$IMAGE_TAG" \
+     --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
+
+   loom admin environment-state check \
+     --cp-url http://localhost:8080 \
+     --admin-token env:ADMIN_TOKEN \
+     --environment public-beta \
+     --file deploy/environment-state/public-beta.toml \
+     --var IMAGE_TAG="$IMAGE_TAG" \
+     --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
+   ```
+
+   The command is idempotent and uses the existing Control Plane admin APIs for
+   worker-pool autoscaler policies and GB10 desired state. A drift failure is
+   actionable, for example desired `gb10-arm64` actuator `slurm` but live
+   `gb10`; fix it with the profile apply rather than a one-off SQL patch.
+   The public-beta profile currently targets the legacy Control Plane
+   environment name `production` because existing GB10 node agents read that
+   desired-state key; the CLI still requires `--environment public-beta` so
+   operators do not accidentally apply the staging profile.
+   Staging uses the same flow with `--environment staging` and
+   `deploy/environment-state/staging.toml`. Keep the catalog provisioning
+   command printed by the profile in the rollout evidence; that gate remains
+   separate because catalog data lives in the service DB/object store, not the
+   Control Plane admin API.
+
+9. **Verify service-proxied downloads.** `loom_service` should use the
    cluster-internal MinIO endpoint for object reads, then stream ATIF,
    trajectory, and artifact downloads through authenticated API routes. Browser
    and laptop CLI users should not need direct access to the MinIO S3 port.
@@ -2011,11 +2048,31 @@ mock provider and browser automation job.
   trajectory cache, benchmark cache, and trial scratch on each node's local
   ext4 disk; do not put those hot paths on `/shared_work`. Current public-beta
   validation uses `trt-gb10-1..15` at `LOOM_WORKER_MAX_CONCURRENT=10`, for 150
-  configured ARM64 slots. After every rollout, confirm the OLDLAB-1
-  `loom-remote-worker-tunnel-watchdog.timer` is active, run the local plus GB10
-  `check-remote` tunnel gates, verify Slurm worker status, then gate the
-  node-agent release target only for compose rollout compatibility before
-  treating the pool as healthy:
+  configured ARM64 slots. After every rollout, first apply and check the
+  versioned environment profile so DB-backed policy converges with the image
+  rollout:
+
+  ```bash
+  loom admin environment-state apply \
+    --cp-url http://control-node.lan:18081 \
+    --admin-token file:/secure/path/admin-token \
+    --environment public-beta \
+    --file deploy/environment-state/public-beta.toml \
+    --var IMAGE_TAG="$IMAGE_TAG" \
+    --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
+  loom admin environment-state check \
+    --cp-url http://control-node.lan:18081 \
+    --admin-token file:/secure/path/admin-token \
+    --environment public-beta \
+    --file deploy/environment-state/public-beta.toml \
+    --var IMAGE_TAG="$IMAGE_TAG" \
+    --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
+  ```
+
+  Then confirm the OLDLAB-1 `loom-remote-worker-tunnel-watchdog.timer` is
+  active, run the local plus GB10 `check-remote` tunnel gates, verify Slurm
+  worker status, then gate the node-agent release target only for compose
+  rollout compatibility before treating the pool as healthy:
 
   ```bash
   loom admin slurm-workers status \
