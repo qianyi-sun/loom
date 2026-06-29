@@ -1724,9 +1724,25 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    should show `preflight=valid`. A 401/403 should show `access-denied` without
    raw provider keys.
 10. **Submit small batches from SPA and CLI.** Pick `hello-world` (or another
-   canonical fixture). Submit once from the SPA New Batch page and once from the
-   CLI. The CLI commands below keep the no-model canary separate from the
-   provider-backed path:
+    canonical fixture). Submit once from the SPA New Batch page and once from the
+    CLI. Before submitting either canary, run the object-store write gate by
+    itself so MinIO free-space failures are caught before trial execution:
+    ```bash
+    python scripts/public_beta_smoke_gate.py \
+      --server-url https://loom.example.com \
+      --team-a-token "$TEAM_A_TOKEN" \
+      --team-b-token "$TEAM_B_TOKEN" \
+      --catalog-minio-endpoint "$PUBLIC_BETA_MINIO_ENDPOINT" \
+      --catalog-minio-access-key "$PUBLIC_BETA_MINIO_ACCESS_KEY" \
+      --catalog-minio-secret-key "$PUBLIC_BETA_MINIO_SECRET_KEY" \
+      --object-store-write-check-only \
+      --object-store-write-check-bucket trajectories \
+      --fail-on-skip \
+      --markdown-output public-beta-object-store-preflight.md \
+      --json-output public-beta-object-store-preflight.json
+    ```
+    The `object_store.minio_write_probe` row must be `PASS`. The CLI commands
+    below keep the no-model canary separate from the provider-backed path:
    ```bash
    # No-model oracle canary; no provider/model flags are needed.
    loom eval batch create \
@@ -1833,6 +1849,8 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
       --catalog-minio-endpoint "$PUBLIC_BETA_MINIO_ENDPOINT" \
       --catalog-minio-access-key "$PUBLIC_BETA_MINIO_ACCESS_KEY" \
       --catalog-minio-secret-key "$PUBLIC_BETA_MINIO_SECRET_KEY" \
+      --object-store-write-check \
+      --object-store-write-check-bucket trajectories \
       --secret-needle seeded-public-beta-secret \
       --internal-url-needle loom-minio.loom.svc.cluster.local \
       --allow-mutating-checks \
@@ -1844,7 +1862,10 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     Store `public-beta-smoke.json` with release artifacts if the environment has
     a private artifact store. The script redacts raw API tokens, seeded fake
     secrets, provider-key-like values, signed object-store URLs, and internal
-    service URLs before writing evidence.
+    service URLs before writing evidence. The `object_store.minio_write_probe`
+    row must pass before submitting canary or release-trial work; if it reports
+    `XMinioStorageFull`, reclaim/provision MinIO-backed storage first instead of
+    discovering the failure during worker trajectory or artifact upload.
 19. **Teardown clean.** `loom cluster down --yes` removes every applied
     object; PVCs survive (verify via `kubectl get pvc -n loom`). Pass
     `--with-volumes` only when wiping staging state intentionally.

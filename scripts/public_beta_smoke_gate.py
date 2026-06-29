@@ -19,9 +19,11 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 REQUIRED_CHECK_IDS: tuple[str, ...] = (
     "http.health",
@@ -32,6 +34,7 @@ REQUIRED_CHECK_IDS: tuple[str, ...] = (
     "providers.models",
     "benchmarks.runnable_catalog",
     "benchmarks.ready_bundle_objects",
+    "object_store.minio_write_probe",
     "runs.batch_detail",
     "runs.trial_detail",
     "artifacts.owner_atif_download",
@@ -392,7 +395,24 @@ def _s3_prefix_has_objects(
     bucket: str,
     prefix: str,
 ) -> bool:
-    client = boto3.client(
+    client = _s3_client(
+        endpoint_url=endpoint_url,
+        access_key=access_key,
+        secret_key=secret_key,
+        region=region,
+    )
+    response = client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+    return bool(response.get("KeyCount", 0) or response.get("Contents"))
+
+
+def _s3_client(
+    *,
+    endpoint_url: str,
+    access_key: str,
+    secret_key: str,
+    region: str,
+) -> Any:
+    return boto3.client(
         "s3",
         endpoint_url=endpoint_url,
         aws_access_key_id=access_key,
@@ -400,8 +420,37 @@ def _s3_prefix_has_objects(
         region_name=region,
         config=Config(signature_version="s3v4"),
     )
-    response = client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
-    return bool(response.get("KeyCount", 0) or response.get("Contents"))
+
+
+def _s3_put_delete_probe(
+    *,
+    endpoint_url: str,
+    access_key: str,
+    secret_key: str,
+    region: str,
+    bucket: str,
+    prefix: str,
+) -> str:
+    key_prefix = prefix.strip("/")
+    key = f"{key_prefix}/probe-{uuid4().hex}.txt" if key_prefix else f"probe-{uuid4().hex}.txt"
+    client = _s3_client(
+        endpoint_url=endpoint_url,
+        access_key=access_key,
+        secret_key=secret_key,
+        region=region,
+    )
+    client.put_object(Bucket=bucket, Key=key, Body=b"loom public beta minio write probe\n")
+    client.delete_object(Bucket=bucket, Key=key)
+    return key
+
+
+def _s3_error_summary(exc: Exception) -> str:
+    if isinstance(exc, ClientError):
+        error = exc.response.get("Error", {})
+        code = str(error.get("Code") or "ClientError")
+        message = str(error.get("Message") or exc)
+        return f"{code}: {message}"
+    return f"{type(exc).__name__}: {exc}"
 
 
 def run_smoke(args: argparse.Namespace) -> SmokeReport:
@@ -410,6 +459,14 @@ def run_smoke(args: argparse.Namespace) -> SmokeReport:
         max_scan_bytes=args.max_response_scan_bytes,
     )
     results: list[CheckResult] = []
+
+    if args.object_store_write_check_only:
+        _append_object_store_write_probe(args, results)
+        return SmokeReport(
+            server_url=args.server_url,
+            results=results,
+            response_bytes_scanned=client.response_bytes_scanned,
+        )
 
     health = client.request("GET", "/api/v1/health")
     results.append(_http_result(
@@ -476,6 +533,7 @@ def run_smoke(args: argparse.Namespace) -> SmokeReport:
     ))
 
     _append_benchmark_catalog_checks(client, args, results)
+    _append_object_store_write_probe(args, results)
 
     if args.batch_id:
         batch = client.request("GET", f"/api/v1/batches/{args.batch_id}", token=args.team_a_token)
@@ -765,6 +823,72 @@ def _append_benchmark_catalog_checks(
     ))
 
 
+def _append_object_store_write_probe(
+    args: argparse.Namespace,
+    results: list[CheckResult],
+) -> None:
+    if not (args.object_store_write_check or args.object_store_write_check_only):
+        results.append(CheckResult(
+            "object_store.minio_write_probe",
+            "object-store",
+            "skip",
+            "--object-store-write-check was not provided.",
+            (
+                "Pass --object-store-write-check for full release smoke, or "
+                "--object-store-write-check-only for a pre-canary storage gate."
+            ),
+        ))
+        return
+
+    missing_inputs = [
+        name for name, value in (
+            ("--catalog-minio-endpoint", args.catalog_minio_endpoint),
+            ("--catalog-minio-access-key", args.catalog_minio_access_key),
+            ("--catalog-minio-secret-key", args.catalog_minio_secret_key),
+        ) if not value
+    ]
+    if missing_inputs:
+        results.append(CheckResult(
+            "object_store.minio_write_probe",
+            "object-store",
+            "skip",
+            f"{', '.join(missing_inputs)} not provided.",
+            "Pass MinIO object-store credentials before submitting canary trials.",
+        ))
+        return
+
+    bucket = args.object_store_write_check_bucket
+    try:
+        key = _s3_put_delete_probe(
+            endpoint_url=args.catalog_minio_endpoint,
+            access_key=args.catalog_minio_access_key,
+            secret_key=args.catalog_minio_secret_key,
+            region=args.catalog_minio_region,
+            bucket=bucket,
+            prefix=args.object_store_write_check_prefix,
+        )
+    except Exception as exc:  # pragma: no cover - live gate covers real MinIO failures
+        results.append(CheckResult(
+            "object_store.minio_write_probe",
+            "object-store",
+            "fail",
+            f"MinIO write/delete probe failed for bucket {bucket}: {_s3_error_summary(exc)}",
+            (
+                "Reclaim or provision object-store free space, verify the MinIO "
+                "PVC/host disk, credentials, and runtime bucket, then rerun before "
+                "trial execution."
+            ),
+        ))
+        return
+
+    results.append(CheckResult(
+        "object_store.minio_write_probe",
+        "object-store",
+        "pass",
+        f"Wrote and deleted probe object {bucket}/{key} before trial execution.",
+    ))
+
+
 def _append_artifact_checks(
     client: SmokeClient,
     args: argparse.Namespace,
@@ -1023,6 +1147,21 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--catalog-minio-region", default="us-east-1")
     parser.add_argument("--catalog-bundle-benchmark-limit", type=int, default=20)
     parser.add_argument("--catalog-bundle-task-limit", type=int, default=200)
+    parser.add_argument(
+        "--object-store-write-check",
+        action="store_true",
+        help="Run an explicit write/delete object-store probe.",
+    )
+    parser.add_argument(
+        "--object-store-write-check-only",
+        action="store_true",
+        help=(
+            "Only run the write/delete object-store probe. Intended as a "
+            "pre-canary storage gate."
+        ),
+    )
+    parser.add_argument("--object-store-write-check-bucket", default="trajectories")
+    parser.add_argument("--object-store-write-check-prefix", default="_ops/public-beta-smoke")
     parser.add_argument("--max-response-scan-bytes", type=int, default=1_000_000)
     parser.add_argument("--fail-on-skip", action="store_true")
     parser.add_argument("--json-output", type=Path, default=None)
@@ -1037,6 +1176,7 @@ def main(argv: list[str] | None = None) -> int:
     secret_values = [
         args.team_a_token,
         args.team_b_token,
+        args.catalog_minio_endpoint,
         *args.secret_needle,
         *args.internal_url_needle,
     ]
