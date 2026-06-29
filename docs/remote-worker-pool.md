@@ -481,7 +481,32 @@ Desired state is stored per `(environment, pool_name)` and includes:
 - optional compatibility target slots and per-host intents:
   `active`, `draining`, or `stopped`.
 
-Write desired state through the CP admin API:
+For public-beta and staging release rollouts, apply the repository
+environment-state profile so the Slurm autoscaler policy and GB10 compatibility
+desired state converge together. The public-beta profile writes the existing
+`production/gb10-arm64` CP key until GB10 node-agent environment names are
+renamed in a coordinated rollout:
+
+```bash
+loom admin environment-state apply \
+  --cp-url http://control-node.lan:18081 \
+  --admin-token env:LOOM_ADMIN_TOKEN \
+  --environment public-beta \
+  --file deploy/environment-state/public-beta.toml \
+  --var IMAGE_TAG="$IMAGE_TAG" \
+  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
+
+loom admin environment-state check \
+  --cp-url http://control-node.lan:18081 \
+  --admin-token env:LOOM_ADMIN_TOKEN \
+  --environment public-beta \
+  --file deploy/environment-state/public-beta.toml \
+  --var IMAGE_TAG="$IMAGE_TAG" \
+  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
+```
+
+For a one-off node-agent canary experiment, write desired state through the CP
+admin API:
 
 ```bash
 curl -sS -X PUT \

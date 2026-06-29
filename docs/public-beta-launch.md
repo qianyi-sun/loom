@@ -69,6 +69,16 @@ Attach these to the release issue or release PR:
   `loom datasets provision-public-beta-catalog` with non-zero
   `ready_benchmarks`, non-zero `ready_tasks`, and `missing=0`, plus
   `/api/v1/benchmarks` evidence with at least one runnable entry.
+- Environment desired-state transcript showing
+  `loom admin environment-state apply` and
+  `loom admin environment-state check` against
+  `deploy/environment-state/public-beta.toml` or
+  `deploy/environment-state/staging.toml`, with the rollout `IMAGE_TAG` and
+  `ENV_CONFIG_VERSION` variables supplied. This must converge worker-pool
+  autoscaler policies and GB10 desired state before Monitor/resource-pool
+  screenshots are used as evidence. The public-beta profile targets the
+  existing CP desired-state environment `production` until GB10 node agents are
+  renamed in a coordinated rollout.
 - Benchmark reward acceptance transcript from
   `scripts/benchmark_reward_gate.py`: the readiness gate must pass against the
   user-visible catalog, and the supported-benchmark sweep gate must prove every
@@ -256,6 +266,22 @@ checkouts, local-build fallback using an old tree, and env files that did not
 apply even when the pool still has healthy heartbeats.
 
 ```bash
+loom admin environment-state apply \
+  --cp-url http://control-node.lan:18081 \
+  --admin-token file:/secure/path/admin-token \
+  --environment public-beta \
+  --file deploy/environment-state/public-beta.toml \
+  --var IMAGE_TAG="$IMAGE_TAG" \
+  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
+
+loom admin environment-state check \
+  --cp-url http://control-node.lan:18081 \
+  --admin-token file:/secure/path/admin-token \
+  --environment public-beta \
+  --file deploy/environment-state/public-beta.toml \
+  --var IMAGE_TAG="$IMAGE_TAG" \
+  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
+
 loom admin slurm-workers status \
   --cp-url http://control-node.lan:18081 \
   --admin-token file:/secure/path/admin-token
