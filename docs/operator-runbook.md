@@ -226,7 +226,7 @@ Each verb:
 
 | Command | What it does | Exit codes |
 |---|---|---|
-| `loom cluster preflight` | API-side checks: namespace exists, required Secrets present, IngressClass installed, default StorageClass available, PSS labels OK; protected environments also check storage boundary and recent backup manifest when supplied | 0 pass / 1 fail / 2 cluster unreachable |
+| `loom cluster preflight` | API-side checks: namespace exists, required Secrets present, IngressClass installed, default StorageClass available, PSS labels OK, and schema-doctor reconciliation for rendered env/Secret drift; protected environments also check storage boundary and recent backup manifest when supplied. Optional runtime-derived worker env such as hostname, idle-exit, fixtures root, benchmark cache, and blocking-I/O executor override may stay unset. | 0 pass / 1 fail / 2 cluster unreachable |
 | `loom cluster backup manifest/check` | Write or verify metadata-only backup manifests for public-beta/staging destructive-operation guards | 0 verified / 1 invalid manifest / 2 bad input |
 | `loom cluster render` | Print the rendered YAML to stdout (no cluster contact) | 0 / 2 on bad config |
 | `loom cluster audit` | Static public/internal boundary check on rendered manifests: TLS ingress, only `/api/v1` → `loom-service` and `/` → `loom-web`, no LoadBalancer/NodePort, no unsafe hostPort, required NetworkPolicies present | 0 clean / 1 violation / 2 bad config |
