@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import io
 import subprocess
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
 from loom_cli.__main__ import main
+from loom_cli.cluster_backup_guard import write_backup_manifest
 from loom_cli.cluster_cmd import (
     DeleteResult,
     delete_manifests,
@@ -303,6 +305,80 @@ def test_cli_down_with_volumes_deletes_pvcs(
     assert "persistentvolumeclaim/data-loom-postgres-0 deleted" in out
 
 
+def test_cli_down_protected_volume_delete_requires_verified_backup(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captures = _patch_full_down_path(
+        monkeypatch, pvc_names=["data-loom-postgres-0"],
+    )
+
+    rc = main([
+        "cluster", "down",
+        "--yes",
+        "--namespace", "loom-public-beta",
+        "--environment", "public-beta",
+        "--with-volumes",
+    ])
+
+    assert rc == 1
+    assert "delete_ns" not in captures
+    assert captures["core"].deleted == []
+    err = capsys.readouterr().err
+    assert "backup manifest" in err
+    assert "public-beta" in err
+
+
+def test_cli_down_protected_namespace_delete_requires_acknowledgement(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Any,
+) -> None:
+    manifest = _write_valid_backup_manifest(tmp_path)
+    captures = _patch_full_down_path(monkeypatch)
+
+    rc = main([
+        "cluster", "down",
+        "--yes",
+        "--namespace", "loom-public-beta",
+        "--environment", "public-beta",
+        "--delete-namespace",
+        "--backup-manifest", str(manifest),
+    ])
+
+    assert rc == 1
+    assert "delete_ns" not in captures
+    assert captures["core"].deleted_namespace is None
+    err = capsys.readouterr().err
+    assert "--acknowledge-data-loss public-beta" in err
+
+
+def test_cli_down_protected_volume_delete_allows_recent_backup_and_ack(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    manifest = _write_valid_backup_manifest(tmp_path)
+    captures = _patch_full_down_path(
+        monkeypatch, pvc_names=["data-loom-postgres-0"],
+    )
+
+    rc = main([
+        "cluster", "down",
+        "--yes",
+        "--namespace", "loom-public-beta",
+        "--environment", "public-beta",
+        "--with-volumes",
+        "--backup-manifest", str(manifest),
+        "--acknowledge-data-loss", "public-beta",
+    ])
+
+    assert rc == 0
+    assert captures["delete_ns"] == "loom-public-beta"
+    assert captures["core"].deleted == [
+        ("loom-public-beta", "data-loom-postgres-0"),
+    ]
+
+
 def test_cli_down_with_volumes_handles_empty_pvc_list(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -507,6 +583,29 @@ def test_cli_down_context_flag_threads_through(
     captures = _patch_full_down_path(monkeypatch)
     main(["cluster", "down", "--yes", "--context", "prod-cluster"])
     assert captures["delete_context"] == "prod-cluster"
+
+
+def _write_valid_backup_manifest(tmp_path: Any):
+    postgres = tmp_path / "postgres.dump"
+    postgres.write_text("pg", encoding="utf-8")
+    minio = tmp_path / "minio"
+    minio.mkdir()
+    (minio / "object").write_text("obj", encoding="utf-8")
+    secrets = tmp_path / "secrets.yaml"
+    secrets.write_text("redacted", encoding="utf-8")
+    manifest = tmp_path / "backup-manifest.json"
+    write_backup_manifest(
+        environment="public-beta",
+        namespace="loom-public-beta",
+        output_path=manifest,
+        components={
+            "postgres": postgres,
+            "minio": minio,
+            "k8s_secrets": secrets,
+        },
+        now=datetime.now(UTC),
+    )
+    return manifest
 
 
 def test_cli_down_invalid_config_returns_2(

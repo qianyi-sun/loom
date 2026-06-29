@@ -25,6 +25,13 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, cast
 
+from loom_cli.cluster_backup_guard import (
+    DEFAULT_BACKUP_MAX_AGE_HOURS,
+    infer_environment,
+    is_protected_environment,
+    validate_backup_manifest,
+    write_backup_manifest,
+)
 from loom_cli.cluster_config import ClusterConfig, load_cluster_config
 from loom_config.doctor import reconcile as _doctor_reconcile
 from loom_config.loader import load_schema as _load_schema
@@ -938,6 +945,110 @@ def _check_default_storage_class(
     )
 
 
+def _storage_class_is_default(sc: Any) -> bool:
+    anns = getattr(sc.metadata, "annotations", None) or {}
+    return (
+        anns.get("storageclass.kubernetes.io/is-default-class") == "true"
+        or anns.get("storageclass.beta.kubernetes.io/is-default-class") == "true"
+    )
+
+
+def _check_protected_storage_boundary(
+    storage_v1: Any,
+    *,
+    environment: str,
+) -> PreflightCheck:
+    try:
+        result = storage_v1.list_storage_class()
+    except Exception as exc:
+        return PreflightCheck(
+            name="protected-storage-boundary",
+            outcome="fail",
+            detail=(
+                "failed to list StorageClass resources for protected "
+                f"environment {environment!r}: {_exception_to_note(exc)}"
+            ),
+        )
+    default_classes = [
+        sc for sc in (result.items or []) if _storage_class_is_default(sc)
+    ]
+    if not default_classes:
+        return PreflightCheck(
+            name="protected-storage-boundary",
+            outcome="fail",
+            detail=(
+                f"protected environment {environment!r} has no default "
+                "StorageClass to audit"
+            ),
+        )
+    unsafe: list[str] = []
+    for sc in default_classes:
+        name = getattr(sc.metadata, "name", "<unknown>")
+        provisioner = str(getattr(sc, "provisioner", "") or "")
+        reclaim_policy = str(getattr(sc, "reclaim_policy", "") or "")
+        reasons: list[str] = []
+        if "local-path" in provisioner:
+            reasons.append(f"provisioner={provisioner}")
+        if reclaim_policy == "Delete":
+            reasons.append("reclaimPolicy=Delete")
+        if reasons:
+            unsafe.append(f"{name} ({', '.join(reasons)})")
+    if unsafe:
+        return PreflightCheck(
+            name="protected-storage-boundary",
+            outcome="fail",
+            detail=(
+                f"protected environment {environment!r} uses disposable "
+                "storage boundary: " + "; ".join(unsafe)
+            ),
+            remediation=(
+                "Move critical state to external Postgres/MinIO or explicit "
+                "host-managed Retain volumes before treating this environment "
+                "as preproduction durable."
+            ),
+        )
+    return PreflightCheck(
+        name="protected-storage-boundary",
+        outcome="pass",
+        detail=(
+            f"protected environment {environment!r} default StorageClass "
+            "does not use local-path or Delete reclaim policy"
+        ),
+    )
+
+
+def _check_backup_manifest(
+    manifest_path: Path | None,
+    *,
+    environment: str,
+    namespace: str,
+    max_age_hours: int,
+) -> PreflightCheck:
+    problems = validate_backup_manifest(
+        manifest_path,
+        environment=environment,
+        namespace=namespace,
+        max_age_hours=max_age_hours,
+    )
+    if problems:
+        return PreflightCheck(
+            name="backup-manifest",
+            outcome="fail",
+            detail="; ".join(problems),
+            remediation=(
+                "Create a fresh metadata manifest with `loom cluster backup "
+                "manifest ...` after dumping Postgres, mirroring MinIO, and "
+                "backing up Kubernetes/runtime secrets."
+            ),
+        )
+    assert manifest_path is not None
+    return PreflightCheck(
+        name="backup-manifest",
+        outcome="pass",
+        detail=f"recent backup manifest verified: {manifest_path}",
+    )
+
+
 def _check_pss_enforce(
     core_v1: Any,
     namespace: str,
@@ -992,6 +1103,9 @@ def collect_preflight(
     namespace: str,
     *,
     context: str | None,
+    environment: str | None = None,
+    backup_manifest: Path | None = None,
+    backup_max_age_hours: int = DEFAULT_BACKUP_MAX_AGE_HOURS,
 ) -> PreflightReport:
     """Pure-collection function — every API client passed in so tests
     can inject fakes. If `namespace-exists` fails, the namespace-
@@ -1005,6 +1119,22 @@ def collect_preflight(
     # missing — they're useful diagnostics on their own.
     checks.append(_check_ingress_class_installed(networking_v1))
     checks.append(_check_default_storage_class(storage_v1))
+    env_name = infer_environment(environment=environment, namespace=namespace)
+    if env_name in {"public-beta", "staging", "production"}:
+        checks.append(
+            _check_protected_storage_boundary(
+                storage_v1,
+                environment=env_name,
+            )
+        )
+        checks.append(
+            _check_backup_manifest(
+                backup_manifest,
+                environment=env_name,
+                namespace=namespace,
+                max_age_hours=backup_max_age_hours,
+            )
+        )
 
     if ns_check.outcome == "pass":
         checks.extend(_check_required_secrets(core_v1, namespace))
@@ -1073,6 +1203,12 @@ def _preflight(args: argparse.Namespace) -> int:
             storage_v1,
             args.namespace,
             context=args.context,
+            environment=args.environment,
+            backup_manifest=(
+                Path(args.backup_manifest).resolve()
+                if args.backup_manifest else None
+            ),
+            backup_max_age_hours=args.backup_max_age_hours,
         )
     except Exception as exc:
         sys.stderr.write(
@@ -1114,6 +1250,40 @@ def _preflight(args: argparse.Namespace) -> int:
     # Exit 1 only when something explicitly failed; warns alone keep
     # exit 0 so CI scripts don't have to special-case them.
     return 1 if report.any_fail else 0
+
+
+def _backup_manifest(args: argparse.Namespace) -> int:
+    try:
+        write_backup_manifest(
+            environment=args.environment,
+            namespace=args.namespace,
+            output_path=Path(args.output).resolve(),
+            components={
+                "postgres": Path(args.postgres_dump).resolve(),
+                "minio": Path(args.minio_snapshot).resolve(),
+                "k8s_secrets": Path(args.k8s_secrets).resolve(),
+            },
+        )
+    except (OSError, ValueError, FileNotFoundError) as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    sys.stdout.write(f"backup manifest written: {Path(args.output).resolve()}\n")
+    return 0
+
+
+def _backup_check(args: argparse.Namespace) -> int:
+    problems = validate_backup_manifest(
+        Path(args.manifest).resolve(),
+        environment=args.environment,
+        namespace=args.namespace,
+        max_age_hours=args.max_age_hours,
+    )
+    if problems:
+        for problem in problems:
+            sys.stderr.write(f"error: {problem}\n")
+        return 1
+    sys.stdout.write(f"backup manifest verified: {Path(args.manifest).resolve()}\n")
+    return 0
 
 
 def _doctor(args: argparse.Namespace) -> int:
@@ -1267,6 +1437,12 @@ def _up(args: argparse.Namespace) -> int:
                 storage_v1,
                 args.namespace,
                 context=args.context,
+                environment=args.environment,
+                backup_manifest=(
+                    Path(args.backup_manifest).resolve()
+                    if args.backup_manifest else None
+                ),
+                backup_max_age_hours=args.backup_max_age_hours,
             )
         except Exception as exc:
             sys.stderr.write(
@@ -1457,7 +1633,51 @@ def delete_namespace_resource(
     core_v1.delete_namespace(name=namespace)
 
 
+def _guard_protected_destructive_down(args: argparse.Namespace) -> int | None:
+    if not (args.with_volumes or args.delete_namespace):
+        return None
+    if not is_protected_environment(
+        environment=args.environment,
+        namespace=args.namespace,
+    ):
+        return None
+    environment = infer_environment(
+        environment=args.environment,
+        namespace=args.namespace,
+    )
+    manifest = (
+        Path(args.backup_manifest).resolve()
+        if args.backup_manifest else None
+    )
+    problems = validate_backup_manifest(
+        manifest,
+        environment=environment,
+        namespace=args.namespace,
+        max_age_hours=args.backup_max_age_hours,
+    )
+    if problems:
+        sys.stderr.write(
+            f"error: refusing destructive operation in protected "
+            f"environment {environment!r}; backup manifest is not valid:\n",
+        )
+        for problem in problems:
+            sys.stderr.write(f"  - {problem}\n")
+        return 1
+    if args.acknowledge_data_loss != environment:
+        sys.stderr.write(
+            "error: destructive protected-environment operation requires "
+            f"`--acknowledge-data-loss {environment}` after verifying restore "
+            "readiness.\n",
+        )
+        return 1
+    return None
+
+
 def _down(args: argparse.Namespace) -> int:
+    guard_result = _guard_protected_destructive_down(args)
+    if guard_result is not None:
+        return guard_result
+
     try:
         _, _, core_v1, _ = _load_clients(args.context)
     except RuntimeError as exc:
@@ -1653,6 +1873,32 @@ def dispatch(argv: list[str]) -> int:
         help="Kubernetes namespace (default: loom).",
     )
     p_preflight.add_argument(
+        "--environment",
+        default=None,
+        help=(
+            "Logical environment name. Protected environments "
+            "(public-beta/staging/production) get storage and backup "
+            "guard checks. If omitted, inferred from namespace when possible."
+        ),
+    )
+    p_preflight.add_argument(
+        "--backup-manifest",
+        default=None,
+        help=(
+            "Path to a recent `loom cluster backup manifest` JSON file "
+            "for protected environment checks."
+        ),
+    )
+    p_preflight.add_argument(
+        "--backup-max-age-hours",
+        type=int,
+        default=DEFAULT_BACKUP_MAX_AGE_HOURS,
+        help=(
+            "Maximum accepted backup manifest age for protected "
+            f"environments (default: {DEFAULT_BACKUP_MAX_AGE_HOURS})."
+        ),
+    )
+    p_preflight.add_argument(
         "--format",
         choices=["table", "json"],
         default="table",
@@ -1668,6 +1914,43 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_preflight.set_defaults(handler=_preflight)
+
+    p_backup = sub.add_parser(
+        "backup",
+        help=(
+            "Create or verify metadata manifests for protected "
+            "public-beta/staging backups."
+        ),
+    )
+    backup_sub = p_backup.add_subparsers(dest="backup_cmd", required=True)
+    p_backup_manifest = backup_sub.add_parser(
+        "manifest",
+        help=(
+            "Write a metadata-only manifest after Postgres, MinIO, and "
+            "Kubernetes/runtime secrets have been backed up."
+        ),
+    )
+    p_backup_manifest.add_argument("--environment", required=True)
+    p_backup_manifest.add_argument("--namespace", required=True)
+    p_backup_manifest.add_argument("--output", required=True)
+    p_backup_manifest.add_argument("--postgres-dump", required=True)
+    p_backup_manifest.add_argument("--minio-snapshot", required=True)
+    p_backup_manifest.add_argument("--k8s-secrets", required=True)
+    p_backup_manifest.set_defaults(handler=_backup_manifest)
+
+    p_backup_check = backup_sub.add_parser(
+        "check",
+        help="Verify a backup manifest is recent and complete.",
+    )
+    p_backup_check.add_argument("--environment", required=True)
+    p_backup_check.add_argument("--namespace", required=True)
+    p_backup_check.add_argument("--manifest", required=True)
+    p_backup_check.add_argument(
+        "--max-age-hours",
+        type=int,
+        default=DEFAULT_BACKUP_MAX_AGE_HOURS,
+    )
+    p_backup_check.set_defaults(handler=_backup_check)
 
     p_up = sub.add_parser(
         "up",
@@ -1687,6 +1970,31 @@ def dispatch(argv: list[str]) -> int:
         "--namespace",
         default="loom",
         help="Kubernetes namespace (default: loom).",
+    )
+    p_up.add_argument(
+        "--environment",
+        default=None,
+        help=(
+            "Logical environment name passed through to preflight. "
+            "Protected environments can require backup manifest checks."
+        ),
+    )
+    p_up.add_argument(
+        "--backup-manifest",
+        default=None,
+        help=(
+            "Recent `loom cluster backup manifest` JSON file passed "
+            "through to preflight for protected environments."
+        ),
+    )
+    p_up.add_argument(
+        "--backup-max-age-hours",
+        type=int,
+        default=DEFAULT_BACKUP_MAX_AGE_HOURS,
+        help=(
+            "Maximum accepted backup manifest age during preflight "
+            f"(default: {DEFAULT_BACKUP_MAX_AGE_HOURS})."
+        ),
     )
     p_up.add_argument(
         "--config",
@@ -1751,6 +2059,16 @@ def dispatch(argv: list[str]) -> int:
         help="Kubernetes namespace (default: loom).",
     )
     p_down.add_argument(
+        "--environment",
+        default=None,
+        help=(
+            "Logical environment name. Protected environments "
+            "(public-beta/staging/production) require a recent backup "
+            "manifest and acknowledgement before --with-volumes or "
+            "--delete-namespace."
+        ),
+    )
+    p_down.add_argument(
         "--config",
         default=None,
         help=(
@@ -1779,6 +2097,33 @@ def dispatch(argv: list[str]) -> int:
             "StatefulSet PVCs survive normal teardown; pass this when "
             "you want to wipe the database + object store too. "
             "DESTRUCTIVE — data is unrecoverable."
+        ),
+    )
+    p_down.add_argument(
+        "--backup-manifest",
+        default=None,
+        help=(
+            "Recent verified backup manifest required before destructive "
+            "protected-environment operations."
+        ),
+    )
+    p_down.add_argument(
+        "--backup-max-age-hours",
+        type=int,
+        default=DEFAULT_BACKUP_MAX_AGE_HOURS,
+        help=(
+            "Maximum accepted backup manifest age for destructive protected "
+            f"operations (default: {DEFAULT_BACKUP_MAX_AGE_HOURS})."
+        ),
+    )
+    p_down.add_argument(
+        "--acknowledge-data-loss",
+        default=None,
+        metavar="ENVIRONMENT",
+        help=(
+            "Explicit acknowledgement required for protected "
+            "--with-volumes/--delete-namespace operations. Value must match "
+            "the logical environment, for example `public-beta`."
         ),
     )
     p_down.add_argument(

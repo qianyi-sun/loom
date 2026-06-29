@@ -268,6 +268,7 @@ def _patch_full_up_path(
 
     def _collect_preflight(*args, **kwargs):  # type: ignore[no-untyped-def]
         captures["preflight_called"] = True
+        captures["preflight_kwargs"] = kwargs
         return preflight_report
 
     monkeypatch.setattr(
@@ -427,6 +428,28 @@ def test_cli_up_namespace_flag_threads_through(
     captures = _patch_full_up_path(monkeypatch)
     main(["cluster", "up", "--namespace", "loom-stage"])
     assert captures["apply_ns"] == "loom-stage"
+
+
+def test_cli_up_backup_guard_flags_thread_to_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    manifest = tmp_path / "backup-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    captures = _patch_full_up_path(monkeypatch)
+
+    rc = main([
+        "cluster", "up",
+        "--namespace", "loom-public-beta",
+        "--environment", "public-beta",
+        "--backup-manifest", str(manifest),
+        "--backup-max-age-hours", "12",
+    ])
+
+    assert rc == 0
+    assert captures["preflight_kwargs"]["environment"] == "public-beta"
+    assert captures["preflight_kwargs"]["backup_manifest"] == manifest.resolve()
+    assert captures["preflight_kwargs"]["backup_max_age_hours"] == 12
 
 
 def test_cli_up_config_file_invalid_returns_2(
