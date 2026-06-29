@@ -1730,6 +1730,61 @@ def test_trial_download_artifact_without_key_errors_before_http(
     assert len(mock_server.requests) == 0
 
 
+def test_artifact_export_writes_run_library_jsonl_with_filters(
+    mock_server: MockServer,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", "/api/v1/run-library/artifacts/export")] = httpx.Response(
+        200,
+        content=(
+            b'{"id":"artifact-1","artifact_type":"metric_table",'
+            b'"content_hash":"sha256:abc"}\n'
+        ),
+        headers={"content-type": "application/x-ndjson"},
+    )
+    output = tmp_path / "artifacts.jsonl"
+
+    rc = main(
+        [
+            "eval",
+            "artifact",
+            "export",
+            "--scope",
+            "all",
+            "--artifact-type",
+            "metric_table",
+            "--owner-team-id",
+            "00000000-0000-0000-0000-0000000000aa",
+            "--source-trial-id",
+            _TRIAL_ID,
+            "--safety-state",
+            "safe",
+            "--provenance-relation",
+            "produced_from",
+            "--format",
+            "jsonl",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert rc == 0
+    assert output.read_bytes().startswith(b'{"id":"artifact-1"')
+    assert mock_server[0].method == "GET"
+    assert mock_server[0].url.path == "/api/v1/run-library/artifacts/export"
+    assert mock_server[0].url.params.get("scope") == "all"
+    assert mock_server[0].url.params.get("artifact_type") == "metric_table"
+    assert mock_server[0].url.params.get("owner_team_id") == (
+        "00000000-0000-0000-0000-0000000000aa"
+    )
+    assert mock_server[0].url.params.get("source_trial_id") == _TRIAL_ID
+    assert mock_server[0].url.params.get("safety_state") == "safe"
+    assert mock_server[0].url.params.get("provenance_relation") == "produced_from"
+    assert mock_server[0].url.params.get("format") == "jsonl"
+    assert "Exported artifact metadata" in capsys.readouterr().out
+
+
 def test_eval_usage_calls_public_usage_route(
     mock_server: MockServer,
     capsys: pytest.CaptureFixture[str],

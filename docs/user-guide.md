@@ -318,13 +318,30 @@ Use the SPA top-level **Run Library** page:
 Open a Library row to inspect task selection, agent/model config, trial rollup,
 debug evidence, provenance, and artifact groups. Safe shared artifacts expose
 Download, Copy URL, and Reuse actions. Blocked artifacts show only a safe reason
-and cannot be downloaded or reused by another team.
+and cannot be downloaded or reused by another team. Typed artifact rows also
+show the artifact type, owner team, source trial/batch, safety/redaction state,
+and content-hash prefix. Use **Export artifact metadata** on the detail page to
+download safe typed artifact metadata for that run as JSONL.
 
 Clone config and reuse artifact both create new records in your current team and
 record `source_provenance`. They do not copy the source team's provider
 connection or credentials; choose a provider connection owned by your team when
 the source config requires one. The Run Library detail page shows that selector
 before cloning provider-backed work.
+
+From the CLI, export safe Run Library artifact metadata with:
+
+```bash
+loom eval artifact export \
+  --scope all \
+  --artifact-type metric_table \
+  --safety-state safe \
+  --format jsonl \
+  --output run-library-artifacts.jsonl
+```
+
+The export contains redacted metadata and storage pointers only; it does not
+copy object bodies or source-team provider credentials.
 
 ## Default views and diagnostics
 

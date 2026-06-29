@@ -799,6 +799,43 @@ def _trial_download(args: argparse.Namespace) -> int:
     return _run_with_error_handling(_body)
 
 
+def _artifact_export(args: argparse.Namespace) -> int:
+    def _body() -> int:
+        cfg = require_logged_in()
+        params: dict[str, Any] = {
+            "scope": args.scope,
+            "format": args.format,
+        }
+        for attr, param_name in (
+            ("artifact_type", "artifact_type"),
+            ("owner_team_id", "owner_team_id"),
+            ("source_batch_id", "source_batch_id"),
+            ("source_trial_id", "source_trial_id"),
+            ("safety_state", "safety_state"),
+            ("provenance_relation", "provenance_relation"),
+            ("limit", "limit"),
+        ):
+            value = getattr(args, attr, None)
+            if value is not None:
+                params[param_name] = value
+        with authed_client(cfg) as c:
+            resp = c.get("/api/v1/run-library/artifacts/export", params=params)
+        assert_2xx_response(resp, action="export Run Library artifacts")
+
+        default_name = (
+            "run-library-artifacts.json"
+            if args.format == "json"
+            else "run-library-artifacts.jsonl"
+        )
+        output = Path(args.output) if args.output else Path(default_name)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(resp.content)
+        print(f"Exported artifact metadata to {output}")
+        return 0
+
+    return _run_with_error_handling(_body)
+
+
 def _usage(args: argparse.Namespace) -> int:
     def _body() -> int:
         cfg = require_logged_in()
@@ -1109,6 +1146,50 @@ def dispatch(argv: list[str]) -> int:
         help="Destination path. Defaults to a filename derived from the trial/key.",
     )
     p_td.set_defaults(handler=_trial_download)
+
+    # --- artifact ---
+    p_artifact = sub.add_parser(
+        "artifact",
+        help="Browse and export typed Run Library artifacts.",
+    )
+    artifact_sub = p_artifact.add_subparsers(
+        dest="artifact_cmd",
+        required=True,
+    )
+
+    p_artifact_export = artifact_sub.add_parser(
+        "export",
+        help="Export safe typed Run Library artifact metadata.",
+    )
+    p_artifact_export.add_argument(
+        "--scope",
+        choices=["my", "all"],
+        default="my",
+        help="Run Library scope to export.",
+    )
+    p_artifact_export.add_argument("--artifact-type", default=None)
+    p_artifact_export.add_argument("--owner-team-id", default=None)
+    p_artifact_export.add_argument("--source-batch-id", default=None)
+    p_artifact_export.add_argument("--source-trial-id", default=None)
+    p_artifact_export.add_argument("--safety-state", default=None)
+    p_artifact_export.add_argument("--provenance-relation", default=None)
+    p_artifact_export.add_argument(
+        "--format",
+        choices=["jsonl", "json"],
+        default="jsonl",
+    )
+    p_artifact_export.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Maximum artifact records to export.",
+    )
+    p_artifact_export.add_argument(
+        "--output",
+        default=None,
+        help="Destination path. Defaults to run-library-artifacts.jsonl.",
+    )
+    p_artifact_export.set_defaults(handler=_artifact_export)
 
     # --- diagnose ---
     p_diag = sub.add_parser(

@@ -64,8 +64,8 @@ Start with the overview, drill into the area you care about:
   — event-sourced JSONL trajectories; ATIF v1.7 projection; how
   trajectories flow from sandbox to MinIO to ATIF
 - **[architecture/run-library.md](architecture/run-library.md)** —
-  org-wide completed-run metadata, safe shared artifacts, clone/reuse
-  provenance, and the team boundary for shared results
+  org-wide completed-run metadata, typed safe shared artifacts, metadata
+  export, clone/reuse provenance, and the team boundary for shared results
 - **[architecture/pipeline-platform-governance.md](architecture/pipeline-platform-governance.md)** —
   post-v1 governance baseline for pipeline extensibility, typed
   artifacts, RunGraph, recipes, plugins, SkillMarkdown injection, and

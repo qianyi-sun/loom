@@ -454,6 +454,10 @@ async def test_runner_projects_successful_trial_outputs(  # type: ignore[no-unty
         "bucket": "artifacts",
         "key": f"{team_id}/{trial_id}/main/result.txt",
         "size": 5,
+        "content_hash": (
+            "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e"
+            "1b161e5c1fa7425e73043362938b9824"
+        ),
         "share_status": "shared",
         "blocked_reason": None,
     }]

@@ -29,9 +29,15 @@ boundary.
 
 New batches and trials default to `visibility = "org"` and
 `share_status = "shared"` so completed metadata enters the org-wide Library by
-default. Teams can opt out by setting `team` or `private`; unsafe artifacts
-still need their own artifact-level `share_status = "shared"` before another
-team can download or reuse the object body.
+default. Teams can opt out by setting `team` or `private`.
+
+Reusable outputs are also recorded in the typed `artifacts` registry. A typed
+artifact stores `artifact_type`, schema version, owner team, source batch/trial,
+content hash, storage pointer, redaction state, safety state, retention,
+provenance, and per-type metadata. When a trial has typed artifact records, the
+Run Library uses those records as the policy source and treats legacy
+`trajectory_index["artifacts"]` entries only as compatibility fallback for
+older trials.
 
 A batch is visible in the org-wide Run Library only when:
 
@@ -40,19 +46,30 @@ A batch is visible in the org-wide Run Library only when:
 - `state` is terminal enough to inspect (`finished` or `cancelled`).
 
 A trial artifact can be downloaded or reused across teams only when the parent
-batch is Run-Library-readable and the artifact's own `share_status` is
-`shared`. A hand-submitted trial with no parent batch uses its own visibility
-and share status. `pending_scan` and `blocked` artifacts remain owner-team
-diagnostics.
+batch is Run-Library-readable and the typed artifact has
+`visibility = "org"`, `share_status = "shared"`, `safety_state = "safe"`, and
+`redaction_state` of `not_required` or `redacted`. A hand-submitted trial with
+no parent batch uses its own visibility and share status. `pending_scan`,
+`unsafe`, and redaction-blocked artifacts remain owner-team diagnostics even if
+legacy artifact JSON still says `share_status = "shared"`.
 
 ## API Surface
 
 - `GET /api/v1/run-library/batches`: list library rows. `scope=my` shows the
   caller's team. `scope=all` shows the caller's team plus org-shared completed
-  runs from other teams; platform admins can inspect all rows.
+  runs from other teams; platform admins can inspect all rows. Artifact-level
+  filters include `artifact_type`, `owner_team_id`, `source_batch_id`,
+  `source_trial_id`, `safety_state`, and `provenance_relation`.
 - `GET /api/v1/run-library/batches/{batch_id}`: detail view with owner-team
   label, task/config summary data, deterministic diagnosis, redacted batch
-  debug evidence, provenance, trial rollup, and grouped artifact inventory.
+  debug evidence, provenance, trial rollup, and grouped typed artifact
+  inventory.
+- `GET /api/v1/run-library/artifacts`: list typed artifact metadata under the
+  same Run Library read policy and artifact filters.
+- `GET /api/v1/run-library/artifacts/export`: export safe typed artifact
+  metadata as JSONL or JSON. The export route does not read or include object
+  bodies; it only emits redacted metadata for artifacts that pass the
+  download/reuse gate.
 - `PATCH /api/v1/run-library/batches/{batch_id}/visibility`: owner/admin update
   for `visibility` and `share_status`.
 - `POST /api/v1/run-library/batches/{batch_id}/clone-config`: create a new
@@ -76,7 +93,9 @@ The top-level Run Library page provides:
 - URL-backed team, state, artifact-type, free-text search, benchmark, agent,
   model provider/name, provider connection, and provider model filters. These
   are server-side structured filters; the UI does not parse generated display
-  names to find reusable runs.
+  names to find reusable runs. The artifact-type filter accepts both legacy
+  artifact groups and typed artifact names such as `metric_table` and
+  `training_data_export`.
 - Owner-team labels.
 - Human-readable task, agent/model, status, score, cost, trial, artifact, and
   share-state columns.
@@ -86,13 +105,16 @@ internal-team registry so admins can filter by any team name. Non-admin users
 only see teams returned by their session membership.
 
 The Run Library detail page groups artifacts into reports, trajectories,
-reusable outputs, logs/diagnostics, and raw/internal diagnostics. Shared
-artifacts expose Download, Copy URL, and Reuse actions. Blocked artifacts show
-only a safe blocked reason and do not expose cross-team actions. The same
-Diagnosis and Debug evidence cards used by Batch Detail appear on Run Library
-detail when the API includes `diagnosis` and `debug_evidence`; diagnosis shows
-the human-readable summary, primary cause, impact, reason clusters, and next
-actions first, while the exact redacted debug JSON remains collapsed.
+reusable outputs, logs/diagnostics, and raw/internal diagnostics. Each typed
+artifact row shows a human-readable artifact type, owner team, source, safety /
+redaction state, and content-hash prefix. Shared safe artifacts expose Download,
+Copy URL, and Reuse actions. Blocked artifacts show only a safe blocked reason
+and do not expose cross-team actions. The page can export safe typed artifact
+metadata for the run. The same Diagnosis and Debug evidence cards used by Batch
+Detail appear on Run Library detail when the API includes `diagnosis` and
+`debug_evidence`; diagnosis shows the human-readable summary, primary cause,
+impact, reason clusters, and next actions first, while the exact redacted debug
+JSON remains collapsed.
 
 Existing Batch Detail and Trial Detail pages also show owner team, visibility,
 share status, and provenance when those fields are present, so cloned/reused
@@ -109,7 +131,12 @@ Run Library changes should cover these cases:
 - Cross-team direct artifact routes remain denied.
 - Cross-team Run Library artifact download works only for safe shared
   artifacts.
+- Typed `safety_state=unsafe` blocks cross-team download/reuse even when legacy
+  artifact JSON still says `share_status=shared`.
+- Artifact list/export filters cover type, owner team, source batch/trial,
+  safety state, and provenance relation.
 - Blocked artifacts return a safe denial and cannot be reused.
 - Clone/reuse creates destination-team records with source provenance and does
-  not copy source provider secrets.
+  not copy source provider secrets; typed reuse provenance records source
+  artifact id, type, schema version, and content hash.
 - Cross-team mutation of the original source run remains denied.

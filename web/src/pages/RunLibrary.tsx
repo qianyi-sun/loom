@@ -26,6 +26,22 @@ const ARTIFACT_LABELS: Array<[keyof ArtifactSummary, string]> = [
   ["raw_diagnostics", "Raw/internal"],
 ];
 
+const TYPED_ARTIFACT_LABELS: Array<[string, string]> = [
+  ["trajectory", "Trajectory"],
+  ["atif_projection", "ATIF projection"],
+  ["trajectory_bundle", "Trajectory bundle"],
+  ["completion_set", "Completion set"],
+  ["task_set", "Task set"],
+  ["task_split", "Task split"],
+  ["skill_markdown", "Skill markdown"],
+  ["workflow_spec", "Workflow spec"],
+  ["verifier_replay", "Verifier replay"],
+  ["debug_bundle", "Debug bundle"],
+  ["metric_table", "Metric table"],
+  ["evidence_bundle", "Evidence bundle"],
+  ["training_data_export", "Training data export"],
+];
+
 const STATE_OPTIONS = [
   ["", "Any state"],
   ["finished", "Finished"],
@@ -325,6 +341,11 @@ export default function RunLibrary(): JSX.Element {
             >
               <option value="">Any artifact</option>
               {ARTIFACT_LABELS.map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+              {TYPED_ARTIFACT_LABELS.map(([value, label]) => (
                 <option key={value} value={value}>
                   {label}
                 </option>
