@@ -189,13 +189,16 @@ def _benchmarks_sync_config(db_url: str) -> None:
 
 def _seed_test_data(db_url: str) -> tuple[int, dict[str, str]]:
     """Run seed_test_data.py with `--mode dev --print all`. Dev mode
-    registers the benchmark slate from HF Hub so the SPA dropdown is
+    registers the benchmark-source slate from HF Hub so the SPA dropdown is
     populated + submittable out of the box. Skips the hello-world Task
     + card-e2e RateCard test fixtures.
 
-    Default register path: reads manifests from `{HF_ORG}/loom-benchmark-*`
-    on HF Hub (a few seconds total). Works without HF_TOKEN for public
-    datasets; pass through HF_TOKEN if set for gated ones.
+    Default register path: reads benchmark bundle manifests from
+    `{HF_ORG}/loom-benchmark-*` on HF Hub (a few seconds total). Works without
+    HF_TOKEN for public datasets; pass through HF_TOKEN if set for gated ones.
+    HF is used only for benchmark source manifests/bundles here, not trial
+    artifacts, trajectories, logs, debug outputs, Docker images, or runtime
+    caches.
 
     Air-gapped path: set `LOOM_LOCAL_IMPORT=1` and `loom service up`
     will pass `--local-import` to seed, falling back to the slow
@@ -329,13 +332,13 @@ def _print_summary(tokens: dict[str, str]) -> None:
     print()
     if tokens.get("team"):
         team_token = tokens["team"]
-        print("Team token (use as Bearer; SPA login as a team user):")
+        print("Team API token (dev automation only; not browser login):")
         print(f"  {team_token}")
         print()
     if tokens.get("admin"):
         print(
             "Admin token (DEV-ONLY; file-backed singleton; "
-            "SPA login as admin):",
+            "not browser login):",
         )
         print("  raw token not printed by `loom service up`")
         print(
