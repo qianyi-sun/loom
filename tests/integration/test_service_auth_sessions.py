@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -18,6 +19,7 @@ from loom.db.schema import (
     Task,
     Team,
     TeamMembership,
+    TeamQuota,
     Token,
     Trial,
     User,
@@ -89,15 +91,21 @@ async def auth_setup(
         s.execute(insert(User).values(
             id=user_id,
             email="owner@example.com",
+            username="owner",
+            username_normalized="owner",
             display_name="Owner Example",
             is_platform_admin=False,
+            status="active",
             created_at=datetime.now(UTC),
         ))
         s.execute(insert(User).values(
             id=admin_user_id,
             email="admin@example.com",
+            username="admin",
+            username_normalized="admin",
             display_name="Admin Example",
             is_platform_admin=True,
+            status="active",
             created_at=datetime.now(UTC),
         ))
         s.execute(insert(TeamMembership).values(
@@ -108,6 +116,9 @@ async def auth_setup(
         ))
         s.execute(insert(TeamMembership).values(
             team_id=team_c, user_id=user_id, role="owner",
+        ))
+        s.execute(insert(TeamMembership).values(
+            team_id=team_d, user_id=admin_user_id, role="owner",
         ))
         s.commit()
     try:
@@ -124,6 +135,7 @@ async def auth_setup(
             s.execute(delete(Token))
             s.execute(delete(TeamMembership))
             s.execute(delete(User))
+            s.execute(delete(TeamQuota))
             s.execute(delete(Team))
             s.commit()
         sync_engine.dispose()
@@ -384,6 +396,40 @@ async def test_viewer_cannot_submit_trial_but_member_can(
         assert captured[-1]["method"] == "POST"
         assert captured[-1]["url"].endswith("/trials")
         assert captured[-1]["auth"] == ""
+
+
+async def test_legacy_team_token_cannot_submit_trial_forwarder(
+    auth_setup: tuple[FastAPI, UUID, UUID, UUID, UUID],
+    postgres_url: str,
+) -> None:
+    app, _team_a, team_b, _team_c, _team_d = auth_setup
+    captured = app.state.session_auth_test_cp_requests
+    legacy_raw = f"loom_team_{uuid4().hex}"
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(insert(Token).values(
+            token_hash=hashlib.sha256(legacy_raw.encode()).digest(),
+            type="team",
+            scopes=["read:own", "submit"],
+            team_id=team_b,
+            issued_at=datetime.now(UTC),
+            expires_at=None,
+        ))
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/trials",
+            json={"task_id": "local/task-1", "config": {"agent": {"name": "fake"}}},
+            headers={"Authorization": f"Bearer {legacy_raw}"},
+        )
+
+    assert r.status_code == 403
+    assert "legacy team token" in r.json()["detail"]
+    assert captured == []
 
 
 async def test_session_team_reads_are_scoped_to_current_team(

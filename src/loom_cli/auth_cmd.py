@@ -344,8 +344,22 @@ def _format_scopes(scopes: object) -> str:
 def _principal_label(data: dict[str, object]) -> str:
     auth_kind = str(data.get("auth_kind") or "unknown")
     principal_type = str(data.get("principal_type") or "unknown")
+    credential_type = str(data.get("credential_type") or "")
+    labels = {
+        "browser_session": "browser session",
+        "user_owned_api_token": "user-owned API token",
+        "legacy_team_token": "legacy team token",
+        "service_credential": "service credential",
+        "admin_bearer_token": "admin bearer token",
+        "worker_token": "worker token",
+        "step_session": "step session",
+    }
+    if credential_type in labels:
+        return labels[credential_type]
     if auth_kind in {"bearer", "token"} and principal_type == "team":
-        return "team token"
+        if data.get("user_id"):
+            return "user-owned API token"
+        return "legacy team token"
     if auth_kind == "session" and principal_type == "user":
         return "browser session"
     return f"{principal_type} via {auth_kind}"
@@ -359,6 +373,14 @@ def _team_label(data: dict[str, object]) -> str:
     if role:
         return f"{team} ({role})"
     return team
+
+
+def _user_label(data: dict[str, object]) -> str:
+    username = data.get("username")
+    user_id = data.get("user_id")
+    if username and user_id:
+        return f"{username} ({user_id})"
+    return str(username or user_id or "(none)")
 
 
 def _whoami(args: argparse.Namespace) -> int:
@@ -383,6 +405,8 @@ def _whoami(args: argparse.Namespace) -> int:
 
     print(f"Server:    {cfg.server_url}")
     print(f"Principal: {_principal_label(data)}")
+    if data.get("username") or data.get("user_id"):
+        print(f"User:      {_user_label(data)}")
     print(f"Team:      {_team_label(data)}")
     print(f"Scopes:    {_format_scopes(data.get('scopes'))}")
     print(f"Token:     {data.get('token_prefix') or '(session)'}")

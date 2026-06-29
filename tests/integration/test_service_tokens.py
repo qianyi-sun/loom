@@ -176,6 +176,7 @@ async def test_owner_creates_named_api_token_and_whoami_updates_last_used(
         transport=transport, base_url="http://svc",
     ) as ac:
         body, _cookies = await _login(ac)
+        user_id = str(body["user"]["id"])
         csrf = str(body["csrf_token"])
         switched = await ac.post(
             "/api/v1/auth/team",
@@ -223,7 +224,10 @@ async def test_owner_creates_named_api_token_and_whoami_updates_last_used(
         assert whoami.status_code == 200, whoami.text
         assert whoami.json() == {
             "auth_kind": "bearer",
+            "credential_type": "user_owned_api_token",
             "principal_type": "team",
+            "user_id": user_id,
+            "username": "owner",
             "team_id": str(team_c),
             "team_name": "Gamma-" + str(team_c),
             "role": None,
@@ -238,6 +242,31 @@ async def test_owner_creates_named_api_token_and_whoami_updates_last_used(
             if entry["token_hash_prefix"] == prefix
         )
         assert used_item["last_used_at"] is not None
+
+
+async def test_legacy_team_token_whoami_reports_compatibility_credential(
+    svc_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    app, raw, team_id = svc_setup
+    token_hash_prefix = hashlib.sha256(raw.encode()).digest().hex()[:8]
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        whoami = await ac.get(
+            "/api/v1/auth/whoami",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert whoami.status_code == 200, whoami.text
+    body = whoami.json()
+    assert body["auth_kind"] == "bearer"
+    assert body["credential_type"] == "legacy_team_token"
+    assert body["principal_type"] == "team"
+    assert body["user_id"] is None
+    assert body["username"] is None
+    assert body["team_id"] == str(team_id)
+    assert body["token_prefix"] == token_hash_prefix
 
 
 async def test_owner_rotates_token_revoking_old_secret(

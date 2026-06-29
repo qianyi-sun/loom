@@ -37,6 +37,7 @@ from loom_service.agent_catalog import (
 )
 from loom_service.auth_guards import (
     require_scope,
+    require_submitting_user,
     require_team_or_admin,
 )
 from loom_service.debug_evidence import build_trial_debug_evidence
@@ -722,6 +723,7 @@ async def submit_trial(
     requests from touching the upstream at all."""
     s, ctx = sc
     require_scope(ctx, "submit")
+    require_submitting_user(ctx)
     _validate_agent_name(payload.config)
 
     # Validate the optional provider_connection_id before forwarding.

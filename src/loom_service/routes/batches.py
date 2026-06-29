@@ -44,6 +44,7 @@ from loom_service.agent_catalog import (
 )
 from loom_service.auth_guards import (
     require_scope,
+    require_submitting_user,
     require_team_or_admin,
 )
 from loom_service.batch_identity import build_batch_identity
@@ -329,6 +330,7 @@ async def create_batch(
     s, ctx = sc
     try:
         require_scope(ctx, "submit")
+        require_submitting_user(ctx)
     except HTTPException:
         SUBMISSION_REJECTS_TOTAL.labels(reason="permission").inc()
         raise
@@ -1288,6 +1290,7 @@ async def rerun_failed_batch(
     s, ctx = sc
     try:
         require_scope(ctx, "submit")
+        require_submitting_user(ctx)
     except HTTPException:
         SUBMISSION_REJECTS_TOTAL.labels(reason="permission").inc()
         raise
@@ -1392,7 +1395,7 @@ async def rerun_failed_batch(
         trial_config=dict(b.trial_config),
         state="submitted",
         created_by_token_prefix=token_prefix,
-        submitted_by_user_id=ctx.user_id or b.submitted_by_user_id,
+        submitted_by_user_id=ctx.user_id,
         expected_trial_count=len(targets),
         n_per_task=1,
         backend=b.backend,

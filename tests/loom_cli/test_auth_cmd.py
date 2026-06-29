@@ -477,7 +477,7 @@ def test_whoami_when_not_logged_in_returns_2(
     assert "loom auth login --server URL --token env:LOOM_API_TOKEN" in err
 
 
-def test_whoami_prints_server_principal_team_scopes_and_prefix(
+def test_whoami_prints_legacy_team_token_scopes_and_prefix(
     monkeypatch: pytest.MonkeyPatch,
     mock_auth_server: MockAuthServer,
     capsys: pytest.CaptureFixture[str],
@@ -514,10 +514,52 @@ def test_whoami_prints_server_principal_team_scopes_and_prefix(
     )
     out = capsys.readouterr().out
     assert "Server:    https://loom.test" in out
-    assert "Principal: team token" in out
+    assert "Principal: legacy team token" in out
     assert "Team:      Team Alpha (owner)" in out
     assert "Scopes:    providers:manage, read:own, submit" in out
     assert "Token:     loom_api_abcd1234" in out
+    assert raw_token not in out
+
+
+def test_whoami_prints_user_owned_api_token_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_auth_server: MockAuthServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    raw_token = "loom_api_user_owned_secret_abcdef123456"
+    monkeypatch.setenv("TOK", raw_token)
+    assert main([
+        "auth", "login",
+        "--server", "https://loom.test",
+        "--token", "env:TOK",
+    ]) == 0
+    capsys.readouterr()
+    mock_auth_server.canned[("GET", "/api/v1/auth/whoami")] = httpx.Response(
+        200,
+        json={
+            "auth_kind": "bearer",
+            "principal_type": "team",
+            "credential_type": "user_owned_api_token",
+            "user_id": "11111111-1111-1111-1111-111111111111",
+            "username": "ada",
+            "team_id": "00000000-0000-0000-0000-000000000001",
+            "team_name": "Team Alpha",
+            "role": "owner",
+            "scopes": ["read:own", "submit"],
+            "token_prefix": "loom_api_user1234",
+            "expires_at": "2026-07-22T00:00:00Z",
+        },
+    )
+
+    rc = main(["auth", "whoami"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Principal: user-owned API token" in out
+    assert "User:      ada (11111111-1111-1111-1111-111111111111)" in out
+    assert "Team:      Team Alpha (owner)" in out
+    assert "Scopes:    read:own, submit" in out
+    assert "Token:     loom_api_user1234" in out
     assert raw_token not in out
 
 

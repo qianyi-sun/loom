@@ -429,9 +429,9 @@ Four token kinds, all bearer-format:
 
 Admin callers to `POST /api/v1/tokens`, `POST /api/v1/tokens/{prefix}/rotate`,
 and `DELETE /api/v1/tokens/{prefix}` must send `X-Loom-Admin-Actor`; those
-service-token mutations are recorded in `admin_audit_events` with safe metadata
+token mutations are recorded in `admin_audit_events` with safe metadata
 such as names and token hash prefixes. Team callers minting, rotating, or
-revoking their own team API tokens do not need an admin actor, but they must
+revoking their own user-owned API tokens do not need an admin actor, but they must
 hold `tokens:manage`.
 
 `tokens` table tracks `last_seen_at` and `last_used_at` per token for rotation

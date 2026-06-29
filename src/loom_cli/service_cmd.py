@@ -332,7 +332,7 @@ def _print_summary(tokens: dict[str, str]) -> None:
     print()
     if tokens.get("team"):
         team_token = tokens["team"]
-        print("Team API token (dev automation only; not browser login):")
+        print("Legacy dev team token (compat only; not browser login):")
         print(f"  {team_token}")
         print()
     if tokens.get("admin"):

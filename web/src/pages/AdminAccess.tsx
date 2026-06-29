@@ -103,7 +103,7 @@ const TOKEN_SCOPE_OPTIONS = [
   {
     value: "tokens:manage",
     label: "Manage API tokens",
-    description: "Create, rotate, revoke, and list team API tokens.",
+    description: "Create, rotate, revoke, and list user-owned API tokens.",
   },
 ] as const;
 
@@ -490,7 +490,7 @@ export default function AdminAccess(): JSX.Element {
         <p className="mt-1 text-sm text-slate-500">
           {isAdmin
             ? "Approve pending team registrations, issue invites, and audit access decisions."
-            : "Manage team invites and CLI/API tokens for the current team."}
+            : "Manage team invites and user-owned API tokens for the current team."}
         </p>
       </header>
 

@@ -276,7 +276,7 @@ export default function Benchmarks(): JSX.Element {
           <CommandSnippet
             label="Remote catalog"
             command={benchmarkCommands[0]}
-            helperText="Read the service catalog with a team token reference."
+            helperText="Read the service catalog with a user-owned API token."
           />
           <CommandSnippet
             label="Readiness audit"

@@ -283,7 +283,7 @@ HttpOnly and never readable by frontend JavaScript.
 
 All existing execution/control views are scoped to the selected current team.
 Viewer users can read same-team resources, member users can submit work, and
-owner users can manage team API tokens/provider connections. Switching teams
+owner users can manage user-owned API tokens/provider connections. Switching teams
 clears query cache so Home, Monitor, Batch Detail, Trial Detail, Providers,
 Usage, and Settings reload against the new team context.
 

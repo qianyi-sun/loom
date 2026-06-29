@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Task, Team, TeamQuota, Token, Trial
+from loom.db.schema import Task, Team, TeamQuota, Token, Trial, User
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
@@ -18,13 +18,23 @@ def seed_team(postgres_url: str) -> Iterator[tuple[UUID, str]]:
     engine = create_engine(postgres_url)
     session_factory = sessionmaker(engine)
     team_id = uuid4()
+    user_id = uuid4()
+    username = f"TrialSubmitter-{user_id.hex[:8]}"
     raw = f"loom_team_{uuid4().hex}"
     with session_factory() as s:
         s.execute(insert(Team).values(id=team_id, name=f"sub-{team_id}"))
+        s.execute(insert(User).values(
+            id=user_id,
+            username=username,
+            username_normalized=username.casefold(),
+            status="active",
+            is_platform_admin=False,
+        ))
         s.execute(insert(TeamQuota).values(team_id=team_id))
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(raw.encode()).digest(),
             type="team", scopes=["submit"], team_id=team_id,
+            created_by_user_id=user_id,
             issued_at=datetime.now(UTC), expires_at=None,
         ))
         s.execute(insert(Task).values(
@@ -49,6 +59,7 @@ def seed_team(postgres_url: str) -> Iterator[tuple[UUID, str]]:
             s.execute(delete(Trial))
             s.execute(delete(Token))
             s.execute(delete(TeamQuota))
+            s.execute(delete(User).where(User.id == user_id))
             s.execute(delete(Team))
             s.execute(delete(Task))
             s.commit()
@@ -84,6 +95,32 @@ def test_submit_creates_trial(app, seed_team):  # type: ignore[no-untyped-def]
         assert "trial_id" in body
         assert body["state"] == "queued"
         assert "submitted_at" in body
+
+
+def test_submit_rejects_legacy_team_token_without_user_owner(
+    app, seed_team, postgres_url: str,  # type: ignore[no-untyped-def]
+) -> None:
+    team_id, _raw = seed_team
+    legacy_raw = f"loom_team_{uuid4().hex}"
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    with session_factory() as s:
+        s.execute(insert(Token).values(
+            token_hash=hashlib.sha256(legacy_raw.encode()).digest(),
+            type="team", scopes=["submit"], team_id=team_id,
+            issued_at=datetime.now(UTC), expires_at=None,
+        ))
+        s.commit()
+    engine.dispose()
+
+    with TestClient(app) as client:
+        r = client.post(
+            "/trials",
+            headers={"Authorization": f"Bearer {legacy_raw}"},
+            json={"task_id": "hello", "config": {"agent_name": "oracle", "agent_model": None}},
+        )
+        assert r.status_code == 403
+        assert "legacy team token" in r.json()["detail"]
 
 
 def test_submit_rejects_unknown_task(app, seed_team):  # type: ignore[no-untyped-def]

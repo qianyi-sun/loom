@@ -18,6 +18,7 @@ from uuid import UUID
 from fastapi import HTTPException
 
 from loom.auth import AuthContext, is_platform_admin_role
+from loom.submission_identity import require_submitting_user as _require_submitting_user
 
 
 def require_human_or_admin(ctx: AuthContext | None) -> AuthContext:
@@ -68,3 +69,7 @@ def require_team_or_admin(ctx: AuthContext, target_team_id: UUID) -> None:
             status_code=403,
             detail="cross-team access requires admin scope",
         )
+
+
+def require_submitting_user(ctx: AuthContext) -> None:
+    _require_submitting_user(ctx)

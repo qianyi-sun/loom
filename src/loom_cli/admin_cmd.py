@@ -4,7 +4,7 @@ Subcommands:
 
 - ``loom admin tokens worker {mint,revoke,rotate}`` — worker-token
   rotation via the Control Plane's admin surface.
-- ``loom admin tokens team {mint,revoke,rotate}`` — team-token
+- ``loom admin tokens team {mint,revoke,rotate}`` — legacy team-token
   rotation via loom_service's /api/v1/tokens route.
 - ``loom admin rate-cards sync-yibuapi`` — sync the official YibuAPI
   pricing catalog into the service rate-card store.
@@ -768,7 +768,7 @@ def _mint_team_token(args: argparse.Namespace) -> int:
                 json=body,
                 headers=headers or None,
             )
-            data = assert_2xx(resp, action="mint team token")
+            data = assert_2xx(resp, action="mint legacy team token")
     except HttpStatusError as e:
         sys.stderr.write(f"error: {e}\n")
         return 1
@@ -815,7 +815,7 @@ def _revoke_team_token(args: argparse.Namespace) -> int:
                 f"/api/v1/tokens/{args.prefix}",
                 headers=headers or None,
             )
-            assert_2xx(resp, action="revoke team token")
+            assert_2xx(resp, action="revoke legacy team token")
     except HttpStatusError as e:
         sys.stderr.write(f"error: {e}\n")
         return 1
@@ -832,7 +832,7 @@ def _revoke_team_token(args: argparse.Namespace) -> int:
 
 
 def _rotate_team_token(args: argparse.Namespace) -> int:
-    """Mint a new team token + print the rollout checklist. Does NOT
+    """Mint a new legacy team token + print the rollout checklist. Does NOT
     auto-revoke the old token — premature delete would break clients
     still using the old credential."""
     rc = _mint_team_token(args)
@@ -1337,7 +1337,7 @@ def dispatch(argv: list[str]) -> int:
     p_team = tok_sub.add_parser(
         "team",
         help=(
-            "Team-token operations via `loom_service`'s "
+            "Legacy team-token operations via `loom_service`'s "
             "`/api/v1/tokens` route. Uses the server + bearer from "
             "`loom auth login`."
         ),
@@ -1346,14 +1346,14 @@ def dispatch(argv: list[str]) -> int:
 
     p_team_mint = team_sub.add_parser(
         "mint",
-        help="Issue a new team token. Admin caller is recorded in audit.",
+        help="Issue a legacy team token. Admin caller is recorded in audit.",
     )
     _add_team_mint_args(p_team_mint)
     p_team_mint.set_defaults(handler=_mint_team_token)
 
     p_team_revoke = team_sub.add_parser(
         "revoke",
-        help="Revoke a team token by its 8-hex-char prefix.",
+        help="Revoke a legacy team token by its 8-hex-char prefix.",
     )
     p_team_revoke.add_argument(
         "prefix",
@@ -1365,7 +1365,7 @@ def dispatch(argv: list[str]) -> int:
         help=(
             "Sets `X-Loom-Admin-Actor`. Required when the logged-in "
             "bearer is an admin token (audit trail). Ignored when "
-            "the bearer is a team token."
+            "the bearer is a user-owned API token."
         ),
     )
     p_team_revoke.set_defaults(handler=_revoke_team_token)
@@ -1373,7 +1373,7 @@ def dispatch(argv: list[str]) -> int:
     p_team_rotate = team_sub.add_parser(
         "rotate",
         help=(
-            "Mint a new team token + print the rollout procedure. "
+            "Mint a new legacy team token + print the rollout procedure. "
             "Does NOT revoke the old token automatically."
         ),
     )

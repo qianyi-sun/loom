@@ -96,7 +96,7 @@ export default function InviteAccept(): JSX.Element {
       <header>
         <h1 className="text-2xl font-bold text-slate-900">{title}</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Invite links add a browser user to a team without exposing a raw team token.
+          Invite links add a browser user to a team without exposing raw API credentials.
         </p>
       </header>
 
