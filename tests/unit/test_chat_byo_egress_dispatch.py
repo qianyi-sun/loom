@@ -55,13 +55,20 @@ class _StubRetrySettings:
     llm_retry_budget_sec = 30.0
 
 
+def _unexpected_session_factory() -> Any:
+    raise AssertionError("success path must not open an audit session")
+
+
 async def test_openai_compatible_byo_chat_uses_egress_pool() -> None:
     pool = _CapturingEgressPool()
     connection_id = uuid4()
+    team_id = uuid4()
+    trial_id = uuid4()
 
     try:
         body, attempt = await _forward_openai_compatible_byo_chat(
             egress_client_pool=pool,
+            session_factory=_unexpected_session_factory,
             connection_id=connection_id,
             base_url="https://byo.example.com/v1/",
             api_key="sk-real-byo-key",
@@ -70,6 +77,14 @@ async def test_openai_compatible_byo_chat_uses_egress_pool() -> None:
             extra_kwargs={"temperature": 0},
             timeout=30.0,
             settings=_StubRetrySettings(),
+            audit_team_id=team_id,
+            audit_trial_id=trial_id,
+            audit_step_id="main",
+            provider_label="openai-compatible",
+            request_params={
+                "status": "available",
+                "parameters": {"temperature": 0},
+            },
         )
     finally:
         await pool.client.aclose()

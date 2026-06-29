@@ -17,7 +17,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from loom.auth import verify_bearer_token
 from loom.models.types import ModelSpec
 from loom_llm_gateway.dialect import DIALECTS
-from loom_llm_gateway.llm_calls import record_call
+from loom_llm_gateway.llm_calls import record_call, record_failed_call
 from loom_llm_gateway.rate_card import (
     compute_cost_usd,
     hash_table,
@@ -25,6 +25,7 @@ from loom_llm_gateway.rate_card import (
 )
 from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.retry import send_with_retry
+from loom_llm_gateway.routes._facade_common import http_failure_category
 
 router = APIRouter()
 
@@ -47,17 +48,21 @@ async def gemini_generate_content(
     signing_key = settings.step_jwt_signing_key.get_secret_value()
     async with request.app.state.session_factory() as session:
         ctx = await verify_bearer_token(
-            session, authorization, signing_key=signing_key,
+            session,
+            authorization,
+            signing_key=signing_key,
         )
     if ctx is None or "llm:call" not in ctx.scopes:
         raise HTTPException(status_code=401, detail="not authorized")
     if ctx.trial_id is None or ctx.step_id is None or ctx.team_id is None:
         raise HTTPException(
-            status_code=403, detail="step-scoped token required",
+            status_code=403,
+            detail="step-scoped token required",
         )
     if settings.google_api_key is None:
         raise HTTPException(
-            status_code=503, detail="google_api_key not configured on Gateway",
+            status_code=503,
+            detail="google_api_key not configured on Gateway",
         )
 
     # Parse the model name out of "<name>:<action>" — e.g. the path
@@ -75,27 +80,64 @@ async def gemini_generate_content(
         raise HTTPException(
             status_code=400,
             detail=f"action {action!r} not supported on the Gateway in v1 "
-                   "(cost attribution requires the final usage block)",
+            "(cost attribution requires the final usage block)",
         )
 
     upstream: httpx.AsyncClient = request.app.state.upstream_client
-    outcome = await send_with_retry(
-        lambda: upstream.post(
-            f"{GEMINI_BASE_URL}/v1beta/models/{model_path}",
-            json=payload,
-            params={"key": settings.google_api_key.get_secret_value()},
-            headers={"content-type": "application/json"},
-            timeout=settings.upstream_timeout_sec,
-        ),
-        settings=settings, dialect="gemini",
-    )
+    try:
+        outcome = await send_with_retry(
+            lambda: upstream.post(
+                f"{GEMINI_BASE_URL}/v1beta/models/{model_path}",
+                json=payload,
+                params={"key": settings.google_api_key.get_secret_value()},
+                headers={"content-type": "application/json"},
+                timeout=settings.upstream_timeout_sec,
+            ),
+            settings=settings,
+            dialect="gemini",
+        )
+    except httpx.TimeoutException as exc:
+        await _record_failed_gemini_call(
+            request=request,
+            ctx=ctx,
+            model_name=model_name,
+            request_payload=payload,
+            failure_category="upstream_timeout",
+            failure_error_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=504,
+            detail=f"gemini upstream timeout: {exc}",
+        ) from exc
+    except httpx.RequestError as exc:
+        await _record_failed_gemini_call(
+            request=request,
+            ctx=ctx,
+            model_name=model_name,
+            request_payload=payload,
+            failure_category="upstream_transport",
+            failure_error_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"gemini upstream request error: {type(exc).__name__}: {exc}",
+        ) from exc
     upstream_response = outcome.response
     if upstream_response.status_code >= 400:
+        await _record_failed_gemini_call(
+            request=request,
+            ctx=ctx,
+            model_name=model_name,
+            request_payload=payload,
+            failure_category=http_failure_category(upstream_response.status_code),
+            failure_status_code=upstream_response.status_code,
+            attempt=outcome.attempt,
+        )
         raise HTTPException(
             status_code=upstream_response.status_code,
             detail=f"gemini upstream returned "
-                   f"{upstream_response.status_code}: "
-                   f"{upstream_response.text[:500]}",
+            f"{upstream_response.status_code}: "
+            f"{upstream_response.text[:500]}",
         )
     body: dict[str, Any] = upstream_response.json()
 
@@ -110,12 +152,13 @@ async def gemini_generate_content(
         raise HTTPException(
             status_code=502,
             detail=f"gemini 200 response missing usageMetadata for action "
-                   f"{action!r}; cost cannot be attributed",
+            f"{action!r}; cost cannot be attributed",
         )
 
     table = await request.app.state.rate_card_cache.get()
     entry = lookup_entry(
-        table, ModelSpec(provider="google", name=model_name),
+        table,
+        ModelSpec(provider="google", name=model_name),
     )
     cost = compute_cost_usd(
         entry,
@@ -139,3 +182,34 @@ async def gemini_generate_content(
             request_params=normalize_request_params(payload),
         )
     return body
+
+
+async def _record_failed_gemini_call(
+    *,
+    request: Request,
+    ctx: Any,
+    model_name: str,
+    request_payload: dict[str, Any],
+    failure_category: str,
+    attempt: int = 1,
+    failure_status_code: int | None = None,
+    failure_error_type: str | None = None,
+) -> None:
+    assert ctx.team_id is not None
+    assert ctx.trial_id is not None
+    assert ctx.step_id is not None
+    async with request.app.state.session_factory() as session:
+        await record_failed_call(
+            session,
+            team_id=ctx.team_id,
+            trial_id=ctx.trial_id,
+            step_id=ctx.step_id,
+            dialect="gemini",
+            model=model_name,
+            provider="google",
+            attempt=attempt,
+            request_params=normalize_request_params(request_payload),
+            failure_category=failure_category,
+            failure_status_code=failure_status_code,
+            failure_error_type=failure_error_type,
+        )

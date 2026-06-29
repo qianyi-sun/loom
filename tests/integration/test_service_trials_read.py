@@ -444,9 +444,7 @@ async def test_trial_detail_returns_service_download_urls(
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["id"] == str(trial_ids[0])
-    assert body["atif_url"] == (
-        f"http://svc/api/v1/trials/{trial_ids[0]}/atif"
-    )
+    assert body["atif_url"] == (f"http://svc/api/v1/trials/{trial_ids[0]}/atif")
     assert body["trajectory_url"] == (
         f"http://svc/api/v1/trials/{trial_ids[0]}/trajectory/download"
     )
@@ -697,31 +695,22 @@ async def test_trial_debug_evidence_is_structured_and_redacted(
                                 "rewards": {"passed": 0.0},
                                 "error": {
                                     "kind": "missing_tests",
-                                    "message": (
-                                        "pytest could not read "
-                                        "sk-provider-secret"
-                                    ),
+                                    "message": ("pytest could not read sk-provider-secret"),
                                 },
                             },
                             "error": {
                                 "phase": "verifier",
                                 "reason": "exception",
                                 "message": (
-                                    "raw signed url "
-                                    "https://minio.internal/a?"
-                                    "X-Amz-Signature=secret"
+                                    "raw signed url https://minio.internal/a?X-Amz-Signature=secret"
                                 ),
                             },
                         }
                     ],
                 },
                 trajectory_index={
-                    "trajectory_uri": (
-                        f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"
-                    ),
-                    "atif_uri": (
-                        f"s3://trajectories/{team_id}/{trial_id}/atif.json"
-                    ),
+                    "trajectory_uri": (f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"),
+                    "atif_uri": (f"s3://trajectories/{team_id}/{trial_id}/atif.json"),
                     "artifacts": [
                         {
                             "step_name": "main",
@@ -729,9 +718,7 @@ async def test_trial_debug_evidence_is_structured_and_redacted(
                             "key": artifact_key,
                             "size": 99,
                             "share_status": "blocked",
-                            "blocked_reason": (
-                                "secret-like content sk-artifact-secret"
-                            ),
+                            "blocked_reason": ("secret-like content sk-artifact-secret"),
                         }
                     ],
                 },
@@ -843,15 +830,11 @@ async def test_trial_debug_evidence_is_structured_and_redacted(
         "type": "trial",
         "id": str(trial_id),
     }
-    assert diagnosis_body["primary_cause"]["reason_code"] == (
-        "trial.verifier_error"
-    )
+    assert diagnosis_body["primary_cause"]["reason_code"] == ("trial.verifier_error")
     assert diagnosis_body["primary_cause"]["category"] == "verifier"
     assert diagnosis_body["primary_cause"]["attribution"] == "benchmark"
     assert "not reliable" in diagnosis_body["impact"]
-    assert diagnosis_body["reason_clusters"][0]["representative_trial_id"] == (
-        str(trial_id)
-    )
+    assert diagnosis_body["reason_clusters"][0]["representative_trial_id"] == (str(trial_id))
     rendered_diagnosis = json.dumps(diagnosis_body)
     assert "loom_api_supersecret" not in rendered_diagnosis
     assert "sk-provider-secret" not in rendered_diagnosis
@@ -861,9 +844,86 @@ async def test_trial_debug_evidence_is_structured_and_redacted(
 
     assert detail.status_code == 200, detail.text
     assert detail.json()["debug_evidence"]["failure"] == body["failure"]
-    assert detail.json()["diagnosis"]["primary_cause"] == (
-        diagnosis_body["primary_cause"]
-    )
+    assert detail.json()["diagnosis"]["primary_cause"] == (diagnosis_body["primary_cause"])
+
+
+async def test_trial_debug_evidence_distinguishes_failed_upstream_attempt(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id, trial_ids = trials_setup
+    trial_id = trial_ids[1]
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            update(Trial)
+            .where(Trial.id == trial_id)
+            .values(
+                state="failed",
+                failure_reason="gateway_error",
+                failure_message="Loom gateway returned HTTP 500.",
+                config={
+                    "agent": {
+                        "name": "litellm",
+                        "model": {"provider": "openai", "name": "gpt-debug"},
+                    },
+                },
+            ),
+        )
+        s.execute(
+            insert(LlmCall).values(
+                id=uuid4(),
+                team_id=team_id,
+                trial_id=trial_id,
+                step_id="main",
+                model="openai/gpt-debug",
+                dialect="openai_chat",
+                input_tokens=0,
+                output_tokens=0,
+                provider_extras={
+                    "_loom_call_status": "failed",
+                    "_loom_failure_category": "upstream_http_5xx",
+                    "_loom_failure_status_code": 500,
+                    "_loom_usage_status": "missing",
+                },
+                request_params={
+                    "status": "available",
+                    "parameters": {"temperature": 0, "top_p": 0.5},
+                },
+                cost_usd=Decimal("0.000000"),
+                rate_card_hash="failed-upstream",
+                attempt=2,
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        debug = await ac.get(
+            f"/api/v1/trials/{trial_id}/debug",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert debug.status_code == 200, debug.text
+    body = debug.json()
+    assert body["provider"]["llm_calls_count"] == 1
+    assert body["provider"]["call_status_counts"] == {"failed": 1}
+    assert body["provider"]["failed_llm_calls_count"] == 1
+    assert body["provider"]["failure_category_counts"] == {
+        "upstream_http_5xx": 1,
+    }
+    assert body["provider"]["llm_evidence_status"] == "calls_observed"
+    assert body["provider"]["request_params_status_counts"] == {"available": 1}
+    assert body["provider"]["request_params"][0]["parameters"] == {
+        "temperature": 0,
+        "top_p": 0.5,
+    }
+    assert body["failure"]["reason_code"] == "trial.gateway_error"
 
 
 async def test_trial_debug_cross_team_forbidden(

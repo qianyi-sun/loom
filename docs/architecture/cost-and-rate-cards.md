@@ -16,9 +16,16 @@ missing-rate-card calls behind a zero-dollar total.
 If a provider omits all or part of its usage block, the Gateway records
 that fact in `provider_extras` and the read APIs expose
 `partial_usage_llm_calls_count`, `missing_usage_llm_calls_count`,
-`usage_reporting_status`, and `usage_estimate_confidence` so callers can
-distinguish a complete estimate from a lower-confidence token/cost
-projection.
+`failed_upstream_llm_calls_count`, `usage_reporting_status`, and
+`usage_estimate_confidence` so callers can distinguish a complete estimate
+from a lower-confidence token/cost projection.
+If the Gateway attempted an upstream provider request and the upstream
+returned an error or the provider transport failed, it records a
+zero-token `llm_calls` audit row with `rate_card_hash=failed-upstream`
+and `provider_extras._loom_call_status=failed`. Trial/batch debug
+evidence surfaces these rows through call-status and failure-category
+counts; usage/cost projections should treat them as audit evidence,
+not billable provider usage.
 
 ```
 provider response
@@ -53,6 +60,12 @@ Why this shape:
   "no calls were made", "self-deployed token-only model", and
   "rate-card lookup missed" using `llm_calls_count`, token totals,
   `cost_status`, and `pricing_modes`.
+- **Failed attempts stay visible without becoming spend** — failed
+  upstream attempts are counted as `llm_calls` for debug evidence, but
+  carry zero tokens, zero cost, `rate_card_hash=failed-upstream`, and
+  explicit failure metadata in `provider_extras`. Usage projections expose
+  them as `pricing_modes=["failed-upstream"]` with
+  `cost_status=failed_upstream`, not as priced provider usage.
 - **Cost attribution stays auditable** — the Gateway records a
   per-call `cost_usd` snapshot and `rate_card_hash` for metrics and
   diagnostics. Consumers that need fleet-wide totals should query
@@ -60,9 +73,9 @@ Why this shape:
   projection fields for local debugging.
 - **Usage confidence is separate from pricing mode** — `cost_status`
   says whether Loom had a price source (`estimated`,
-  `not_applicable`, `price_unknown`, `mixed`); `usage_estimate_confidence`
-  says whether the provider returned complete token usage (`high`,
-  `partial`, `missing`, `none`).
+  `not_applicable`, `price_unknown`, `failed_upstream`, `mixed`);
+  `usage_estimate_confidence` says whether the provider returned complete
+  token usage (`high`, `partial`, `missing`, `none`).
 
 (Harbor froze `cost_usd` at emit time. RFC0001 acknowledges this
 goes wrong when prices move.)
@@ -148,6 +161,8 @@ group, and group ratio; unresolved non-facade hashes remain visible with
 
 - `team_id`, `user_id`, `provider_connection_id`, `model`,
   `benchmark_id`, `batch_id`, `status`, and `pricing_mode` filters.
+  `pricing_mode` accepts `priced`, `tokens-only`, `price-unknown`, and
+  `failed-upstream`.
 - `breakdown_by=team|user|provider_connection|model|benchmark|batch|status|pricing_mode`.
 - `include_batches=true` for per-batch drilldown when not using a
   breakdown dimension.

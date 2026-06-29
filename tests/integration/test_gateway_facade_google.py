@@ -42,7 +42,8 @@ _TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
 
 @pytest.fixture
 async def facade_setup(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
 ) -> AsyncIterator[tuple[object, str, UUID, UUID, UUID, dict[str, object]]]:
     """Yields (app, step_jwt, team_id, trial_id, connection_id, captures).
 
@@ -60,7 +61,8 @@ async def facade_setup(
     async_engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
-        async_engine, expire_on_commit=False,
+        async_engine,
+        expire_on_commit=False,
     )
     app.state.rate_card_cache = RateCardCache(
         session_factory=app.state.session_factory,
@@ -74,56 +76,69 @@ async def facade_setup(
     with session_local() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
         s.execute(insert(TeamQuota).values(team_id=team_id))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw_team_token.encode()).digest(),
-            type="team", scopes=["submit", "read:own"],
-            team_id=team_id, issued_at=datetime.now(UTC),
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw_team_token.encode()).digest(),
+                type="team",
+                scopes=["submit", "read:own"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+            )
+        )
         s.commit()
 
     async_session_factory = async_sessionmaker(
-        async_engine, expire_on_commit=False,
+        async_engine,
+        expire_on_commit=False,
     )
     async with async_session_factory() as ses:
         store = LocalEncryptedSecretStore(ses)
         # Realistic-ish Google API key shape (`AIza...`).
         ref = await store.put(
-            namespace=f"team:{team_id}", value="AIzaSy-google-XYZ-1234",
+            namespace=f"team:{team_id}",
+            value="AIzaSy-google-XYZ-1234",
         )
         await ses.commit()
 
     connection_id = uuid4()
     with session_local() as s:
-        s.execute(insert(ProviderConnection).values(
-            id=connection_id, team_id=team_id,
-            provider_type="google",
-            display_name="google-prod",
-            base_url="https://generativelanguage.googleapis.com",
-            upstream_host="generativelanguage.googleapis.com",
-            resolved_egress_ips=["172.217.0.10"],
-            encrypted_api_key_ref=ref,
-            pricing_source="operator-supplied",
-            pricing_data={
-                "input_usd_per_1m": 0.075,
-                "output_usd_per_1m": 0.30,
-            },
-            created_by="admin:fixture",
-        ))
+        s.execute(
+            insert(ProviderConnection).values(
+                id=connection_id,
+                team_id=team_id,
+                provider_type="google",
+                display_name="google-prod",
+                base_url="https://generativelanguage.googleapis.com",
+                upstream_host="generativelanguage.googleapis.com",
+                resolved_egress_ips=["172.217.0.10"],
+                encrypted_api_key_ref=ref,
+                pricing_source="operator-supplied",
+                pricing_data={
+                    "input_usd_per_1m": 0.075,
+                    "output_usd_per_1m": 0.30,
+                },
+                created_by="admin:fixture",
+            )
+        )
         s.commit()
 
-    canned_default = httpx.Response(200, json={
-        "candidates": [{
-            "content": {"role": "model",
-                        "parts": [{"text": "hello"}]},
-            "finishReason": "STOP",
-        }],
-        "usageMetadata": {
-            "promptTokenCount": 200,
-            "candidatesTokenCount": 80,
-            "totalTokenCount": 280,
-            "cachedContentTokenCount": 40,
+    canned_default = httpx.Response(
+        200,
+        json={
+            "candidates": [
+                {
+                    "content": {"role": "model", "parts": [{"text": "hello"}]},
+                    "finishReason": "STOP",
+                }
+            ],
+            "usageMetadata": {
+                "promptTokenCount": 200,
+                "candidatesTokenCount": 80,
+                "totalTokenCount": 280,
+                "cachedContentTokenCount": 40,
+            },
         },
-    })
+    )
     captures: dict[str, object] = {
         "requests": [],
         "response": canned_default,
@@ -145,7 +160,9 @@ async def facade_setup(
 
     trial_id = uuid4()
     step_jwt = mint_step_jwt(
-        team_id=team_id, trial_id=trial_id, step_id="step-1",
+        team_id=team_id,
+        trial_id=trial_id,
+        step_id="step-1",
         ttl_sec=60,
         signing_key=settings.step_jwt_signing_key.get_secret_value(),
     )
@@ -169,19 +186,24 @@ async def facade_setup(
 
 
 async def _post(
-    app: object, jwt: str,
-    *, path_suffix: str = "gemini-2.5-flash:generateContent",
+    app: object,
+    jwt: str,
+    *,
+    path_suffix: str = "gemini-2.5-flash:generateContent",
     **headers: str,
 ) -> httpx.Response:
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     body = {
-        "contents": [{
-            "role": "user",
-            "parts": [{"text": "hi"}],
-        }],
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": "hi"}],
+            }
+        ],
     }
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         return await client.post(
             f"/google/v1beta/models/{path_suffix}",
@@ -199,11 +221,14 @@ async def _post(
 
 
 async def test_facade_forwards_with_query_string_key_and_records_llm_call(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, team_id, trial_id, conn_id, captures = facade_setup
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 200, r.text
     body = r.json()
@@ -217,9 +242,7 @@ async def test_facade_forwards_with_query_string_key_and_records_llm_call(
     # Upstream URL targets the connection's base_url + the same model
     # path the caller supplied. ?key=... carries the decrypted key in
     # the query string (Google API convention).
-    assert up.url.path == (
-        "/v1beta/models/gemini-2.5-flash:generateContent"
-    )
+    assert up.url.path == ("/v1beta/models/gemini-2.5-flash:generateContent")
     assert up.url.params["key"] == "AIzaSy-google-XYZ-1234"
     # Authorization header to the upstream MUST NOT carry the step-JWT
     # (we strip everything except content-type + the `?key=` query).
@@ -249,7 +272,8 @@ async def test_facade_forwards_with_query_string_key_and_records_llm_call(
 
 
 async def test_facade_rate_card_pricing_uses_google_provider(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
     sync_engine = create_engine(postgres_url)
@@ -262,24 +286,30 @@ async def test_facade_rate_card_pricing_uses_google_provider(
             ),
             {"id": conn_id},
         )
-        conn.execute(insert(RateCard).values(
-            id="card-google",
-            captured_at=datetime.now(UTC),
-            table={
-                "entries": [{
-                    "provider": "google",
-                    "model": "gemini-2.5-flash",
-                    "input_per_mtok": 0.075,
-                    "output_per_mtok": 0.30,
-                    "cache_read_per_mtok": 0.01,
-                    "cache_write_per_mtok": 0.0,
-                }],
-            },
-        ))
+        conn.execute(
+            insert(RateCard).values(
+                id="card-google",
+                captured_at=datetime.now(UTC),
+                table={
+                    "entries": [
+                        {
+                            "provider": "google",
+                            "model": "gemini-2.5-flash",
+                            "input_per_mtok": 0.075,
+                            "output_per_mtok": 0.30,
+                            "cache_read_per_mtok": 0.01,
+                            "cache_write_per_mtok": 0.0,
+                        }
+                    ],
+                },
+            )
+        )
     sync_engine.dispose()
 
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 200, r.text
 
@@ -295,7 +325,8 @@ async def test_facade_rate_card_pricing_uses_google_provider(
 
 
 async def test_facade_rate_card_missing_entry_records_missing_marker(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
     sync_engine = create_engine(postgres_url)
@@ -308,24 +339,30 @@ async def test_facade_rate_card_missing_entry_records_missing_marker(
             ),
             {"id": conn_id},
         )
-        conn.execute(insert(RateCard).values(
-            id="card-google-missing",
-            captured_at=datetime.now(UTC),
-            table={
-                "entries": [{
-                    "provider": "google",
-                    "model": "not-gemini-2.5-flash",
-                    "input_per_mtok": 0.075,
-                    "output_per_mtok": 0.30,
-                    "cache_read_per_mtok": 0.01,
-                    "cache_write_per_mtok": 0.0,
-                }],
-            },
-        ))
+        conn.execute(
+            insert(RateCard).values(
+                id="card-google-missing",
+                captured_at=datetime.now(UTC),
+                table={
+                    "entries": [
+                        {
+                            "provider": "google",
+                            "model": "not-gemini-2.5-flash",
+                            "input_per_mtok": 0.075,
+                            "output_per_mtok": 0.30,
+                            "cache_read_per_mtok": 0.01,
+                            "cache_write_per_mtok": 0.0,
+                        }
+                    ],
+                },
+            )
+        )
     sync_engine.dispose()
 
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 200, r.text
 
@@ -340,17 +377,22 @@ async def test_facade_rate_card_missing_entry_records_missing_marker(
 
 
 async def test_facade_count_tokens_action_returns_body_without_audit(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     """countTokens is a legitimate `usageMetadata`-less response;
     the facade returns the body but doesn't write llm_calls.
     Matches the legacy /v1beta route's behavior."""
     app, jwt, _team_id, _trial_id, conn_id, captures = facade_setup
-    captures["response"] = httpx.Response(200, json={  # type: ignore[index]
-        "totalTokens": 27,
-    })
+    captures["response"] = httpx.Response(
+        200,
+        json={  # type: ignore[index]
+            "totalTokens": 27,
+        },
+    )
     r = await _post(
-        app, jwt,
+        app,
+        jwt,
         path_suffix="gemini-2.5-flash:countTokens",
         **{"x-loom-provider-connection-id": str(conn_id)},
     )
@@ -373,7 +415,9 @@ async def test_facade_rejects_non_step_token(facade_setup) -> None:
     app, _jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
     bogus = f"loom_team_{uuid4().hex}"
     r = await _post(
-        app, bogus, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        bogus,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code in (401, 403)
 
@@ -391,7 +435,8 @@ async def test_facade_rejects_path_without_action(facade_setup) -> None:
     """Path must be `<model>:<action>`. Missing `:` → 400."""
     app, jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
     r = await _post(
-        app, jwt,
+        app,
+        jwt,
         path_suffix="gemini-2.5-flash",  # no colon
         **{"x-loom-provider-connection-id": str(conn_id)},
     )
@@ -402,7 +447,8 @@ async def test_facade_rejects_path_without_action(facade_setup) -> None:
 async def test_facade_rejects_stream_variant(facade_setup) -> None:
     app, jwt, _team_id, _trial_id, conn_id, captures = facade_setup
     r = await _post(
-        app, jwt,
+        app,
+        jwt,
         path_suffix="gemini-2.5-flash:streamGenerateContent",
         **{"x-loom-provider-connection-id": str(conn_id)},
     )
@@ -417,13 +463,16 @@ async def test_facade_rejects_stream_variant(facade_setup) -> None:
 
 
 async def test_facade_returns_404_for_cross_team_connection(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     app, _jwt, _team_a, _trial_a, conn_id, captures = facade_setup
     settings: GatewaySettings = app.state.settings  # type: ignore[attr-defined]
     other_team = uuid4()
     other_jwt = mint_step_jwt(
-        team_id=other_team, trial_id=uuid4(), step_id="s",
+        team_id=other_team,
+        trial_id=uuid4(),
+        step_id="s",
         ttl_sec=60,
         signing_key=settings.step_jwt_signing_key.get_secret_value(),
     )
@@ -435,7 +484,8 @@ async def test_facade_returns_404_for_cross_team_connection(
     sync_engine.dispose()
 
     r = await _post(
-        app, other_jwt,
+        app,
+        other_jwt,
         **{"x-loom-provider-connection-id": str(conn_id)},
     )
     sync_engine = create_engine(postgres_url)
@@ -450,38 +500,48 @@ async def test_facade_returns_404_for_cross_team_connection(
 
 
 async def test_facade_rejects_openai_compatible_type_connection(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
     sync_engine = create_engine(postgres_url)
     with sync_engine.begin() as conn:
-        conn.execute(text(
-            "UPDATE provider_connections SET provider_type='openai-compatible' "
-            "WHERE id = :id",
-        ), {"id": conn_id})
+        conn.execute(
+            text(
+                "UPDATE provider_connections SET provider_type='openai-compatible' WHERE id = :id",
+            ),
+            {"id": conn_id},
+        )
     sync_engine.dispose()
 
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 400
     assert "openai-compatible" in r.json()["detail"]
 
 
 async def test_facade_returns_404_for_soft_deleted_connection(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
     sync_engine = create_engine(postgres_url)
     with sync_engine.begin() as conn:
-        conn.execute(text(
-            "UPDATE provider_connections SET deleted_at = now() "
-            "WHERE id = :id",
-        ), {"id": conn_id})
+        conn.execute(
+            text(
+                "UPDATE provider_connections SET deleted_at = now() WHERE id = :id",
+            ),
+            {"id": conn_id},
+        )
     sync_engine.dispose()
 
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 404
 
@@ -491,16 +551,21 @@ async def test_facade_returns_404_for_soft_deleted_connection(
 # ──────────────────────────────────────────────────────────────────────
 
 
-async def test_facade_surfaces_upstream_403_without_llm_call_row(
-    facade_setup, postgres_url: str,
+async def test_facade_surfaces_upstream_403_records_failed_audit_row(
+    facade_setup,
+    postgres_url: str,
 ) -> None:
-    """Google rejects bad keys with 403 (not 401). Match that shape."""
-    app, jwt, _team_id, _trial_id, conn_id, captures = facade_setup
+    """Google rejects bad keys with 403 and the facade records the
+    failed upstream attempt."""
+    app, jwt, _team_id, trial_id, conn_id, captures = facade_setup
     captures["response"] = httpx.Response(  # type: ignore[index]
-        403, json={"error": {"code": 403, "message": "API key invalid"}},
+        403,
+        json={"error": {"code": 403, "message": "API key invalid"}},
     )
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 403
     assert "API key invalid" in r.json()["detail"]
@@ -508,7 +573,22 @@ async def test_facade_surfaces_upstream_403_without_llm_call_row(
     with sync_engine.connect() as conn:
         rows = list(conn.execute(text("SELECT * FROM llm_calls")))
     sync_engine.dispose()
-    assert rows == []
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert row["trial_id"] == trial_id
+    assert row["dialect"] == "gemini_facade"
+    assert row["model"] == "gemini-2.5-flash"
+    assert row["input_tokens"] == 0
+    assert row["output_tokens"] == 0
+    assert float(row["cost_usd"]) == 0.0
+    assert row["rate_card_hash"] == "failed-upstream"
+    assert row["provider_extras"] == {
+        "_loom_call_status": "failed",
+        "_loom_failure_category": "upstream_http_4xx",
+        "_loom_failure_status_code": 403,
+        "_loom_usage_status": "missing",
+    }
+    assert "contents" not in row["request_params"]
 
 
 async def test_facade_redacts_api_key_from_upstream_error_body(
@@ -525,7 +605,9 @@ async def test_facade_redacts_api_key_from_upstream_error_body(
         ),
     )
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 403
     detail = r.json()["detail"]
@@ -534,20 +616,28 @@ async def test_facade_redacts_api_key_from_upstream_error_body(
 
 
 async def test_facade_returns_502_on_missing_usage_metadata(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     """generateContent without usageMetadata is a contract violation;
     countTokens is exempt (separate test above)."""
     app, jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
     facade_setup_captures: dict[str, object] = facade_setup[5]  # type: ignore[index]
-    facade_setup_captures["response"] = httpx.Response(200, json={
-        "candidates": [{
-            "content": {"role": "model", "parts": [{"text": "x"}]},
-        }],
-        # no usageMetadata
-    })
+    facade_setup_captures["response"] = httpx.Response(
+        200,
+        json={
+            "candidates": [
+                {
+                    "content": {"role": "model", "parts": [{"text": "x"}]},
+                }
+            ],
+            # no usageMetadata
+        },
+    )
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 502
     assert "usageMetadata" in r.json()["detail"]
@@ -576,7 +666,9 @@ async def test_facade_returns_504_on_upstream_timeout(facade_setup) -> None:
         upstream_timeout_sec=app.state.settings.upstream_timeout_sec,  # type: ignore[attr-defined]
     )
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 504
     assert "timeout" in r.json()["detail"]

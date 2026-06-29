@@ -45,7 +45,8 @@ _TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
 
 @pytest.fixture
 async def facade_setup(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
 ) -> AsyncIterator[tuple[object, str, UUID, UUID, UUID, dict[str, list[httpx.Request]]]]:
     """Yields (app, step_jwt, team_id, trial_id, connection_id, captures).
 
@@ -71,7 +72,8 @@ async def facade_setup(
     async_engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
-        async_engine, expire_on_commit=False,
+        async_engine,
+        expire_on_commit=False,
     )
     app.state.rate_card_cache = RateCardCache(
         session_factory=app.state.session_factory,
@@ -86,61 +88,75 @@ async def facade_setup(
     with session_local() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
         s.execute(insert(TeamQuota).values(team_id=team_id))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw_team_token.encode()).digest(),
-            type="team", scopes=["submit", "read:own"],
-            team_id=team_id, issued_at=datetime.now(UTC),
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw_team_token.encode()).digest(),
+                type="team",
+                scopes=["submit", "read:own"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+            )
+        )
         s.commit()
 
     # SecretStore put runs against the async engine so the same row
     # is visible to the route.
     async_session_factory = async_sessionmaker(
-        async_engine, expire_on_commit=False,
+        async_engine,
+        expire_on_commit=False,
     )
     async with async_session_factory() as ses:
         store = LocalEncryptedSecretStore(ses)
         ref = await store.put(
-            namespace=f"team:{team_id}", value="sk-upstream-XYZ",
+            namespace=f"team:{team_id}",
+            value="sk-upstream-XYZ",
         )
         await ses.commit()
 
     connection_id = uuid4()
     with session_local() as s:
-        s.execute(insert(ProviderConnection).values(
-            id=connection_id, team_id=team_id,
-            provider_type="openai-compatible",
-            display_name="openai-prod",
-            base_url="https://api.openai.com/v1",
-            upstream_host="api.openai.com",
-            resolved_egress_ips=["104.18.0.1"],
-            encrypted_api_key_ref=ref,
-            pricing_source="operator-supplied",
-            pricing_data={
-                "input_usd_per_1m": 5.0,
-                "output_usd_per_1m": 15.0,
-            },
-            created_by="admin:fixture",
-        ))
+        s.execute(
+            insert(ProviderConnection).values(
+                id=connection_id,
+                team_id=team_id,
+                provider_type="openai-compatible",
+                display_name="openai-prod",
+                base_url="https://api.openai.com/v1",
+                upstream_host="api.openai.com",
+                resolved_egress_ips=["104.18.0.1"],
+                encrypted_api_key_ref=ref,
+                pricing_source="operator-supplied",
+                pricing_data={
+                    "input_usd_per_1m": 5.0,
+                    "output_usd_per_1m": 15.0,
+                },
+                created_by="admin:fixture",
+            )
+        )
         s.commit()
 
     # Upstream MockTransport with a settable canned response. Tests
     # mutate `captures["response"]` to change the canned body/status.
-    canned_default = httpx.Response(200, json={
-        "id": "chatcmpl_test",
-        "object": "chat.completion",
-        "model": "gpt-4o",
-        "choices": [{
-            "index": 0,
-            "finish_reason": "stop",
-            "message": {"role": "assistant", "content": "hello"},
-        }],
-        "usage": {
-            "prompt_tokens": 100,
-            "completion_tokens": 50,
-            "total_tokens": 150,
+    canned_default = httpx.Response(
+        200,
+        json={
+            "id": "chatcmpl_test",
+            "object": "chat.completion",
+            "model": "gpt-4o",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "hello"},
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150,
+            },
         },
-    })
+    )
     captures: dict[str, object] = {
         "requests": [],
         "response": canned_default,
@@ -162,7 +178,9 @@ async def facade_setup(
 
     trial_id = uuid4()
     step_jwt = mint_step_jwt(
-        team_id=team_id, trial_id=trial_id, step_id="step-1",
+        team_id=team_id,
+        trial_id=trial_id,
+        step_id="step-1",
         ttl_sec=60,
         signing_key=settings.step_jwt_signing_key.get_secret_value(),
     )
@@ -200,7 +218,8 @@ async def _post(
         "messages": [{"role": "user", "content": "hi"}],
     }
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         return await client.post(
             "/openai/v1/chat/completions",
@@ -218,11 +237,14 @@ async def _post(
 
 
 async def test_facade_forwards_with_decrypted_key_and_records_llm_call(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, team_id, trial_id, conn_id, captures = facade_setup
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 200, r.text
     body = r.json()
@@ -240,6 +262,7 @@ async def test_facade_forwards_with_decrypted_key_and_records_llm_call(
     assert up.headers["Authorization"] == "Bearer sk-upstream-XYZ"
     # The user's body is forwarded verbatim — same model + messages.
     import json
+
     sent = json.loads(up.content)
     assert sent["model"] == "gpt-4o"
     assert sent["messages"] == [{"role": "user", "content": "hi"}]
@@ -269,7 +292,8 @@ async def test_facade_forwards_with_decrypted_key_and_records_llm_call(
 
 
 async def test_facade_records_redacted_request_params(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, _team_id, _trial_id, conn_id, captures = facade_setup
     body = {
@@ -325,7 +349,8 @@ async def test_facade_records_redacted_request_params(
 
 
 async def test_facade_rate_card_pricing_uses_connection_provider(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
     sync_engine = create_engine(postgres_url)
@@ -339,24 +364,30 @@ async def test_facade_rate_card_pricing_uses_connection_provider(
             ),
             {"id": conn_id},
         )
-        conn.execute(insert(RateCard).values(
-            id="card-together",
-            captured_at=datetime.now(UTC),
-            table={
-                "entries": [{
-                    "provider": "together",
-                    "model": "gpt-4o",
-                    "input_per_mtok": 2.0,
-                    "output_per_mtok": 8.0,
-                    "cache_read_per_mtok": 0.0,
-                    "cache_write_per_mtok": 0.0,
-                }],
-            },
-        ))
+        conn.execute(
+            insert(RateCard).values(
+                id="card-together",
+                captured_at=datetime.now(UTC),
+                table={
+                    "entries": [
+                        {
+                            "provider": "together",
+                            "model": "gpt-4o",
+                            "input_per_mtok": 2.0,
+                            "output_per_mtok": 8.0,
+                            "cache_read_per_mtok": 0.0,
+                            "cache_write_per_mtok": 0.0,
+                        }
+                    ],
+                },
+            )
+        )
     sync_engine.dispose()
 
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 200, r.text
 
@@ -374,7 +405,8 @@ async def test_facade_rate_card_pricing_uses_connection_provider(
 
 
 async def test_facade_rate_card_missing_entry_records_missing_marker(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
     sync_engine = create_engine(postgres_url)
@@ -388,24 +420,30 @@ async def test_facade_rate_card_missing_entry_records_missing_marker(
             ),
             {"id": conn_id},
         )
-        conn.execute(insert(RateCard).values(
-            id="card-no-match",
-            captured_at=datetime.now(UTC),
-            table={
-                "entries": [{
-                    "provider": "together",
-                    "model": "not-gpt-4o",
-                    "input_per_mtok": 2.0,
-                    "output_per_mtok": 8.0,
-                    "cache_read_per_mtok": 0.0,
-                    "cache_write_per_mtok": 0.0,
-                }],
-            },
-        ))
+        conn.execute(
+            insert(RateCard).values(
+                id="card-no-match",
+                captured_at=datetime.now(UTC),
+                table={
+                    "entries": [
+                        {
+                            "provider": "together",
+                            "model": "not-gpt-4o",
+                            "input_per_mtok": 2.0,
+                            "output_per_mtok": 8.0,
+                            "cache_read_per_mtok": 0.0,
+                            "cache_write_per_mtok": 0.0,
+                        }
+                    ],
+                },
+            )
+        )
     sync_engine.dispose()
 
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 200, r.text
 
@@ -430,7 +468,8 @@ async def test_facade_rejects_non_step_token(facade_setup) -> None:
     app, _jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
     bogus = f"loom_team_{uuid4().hex}"
     r = await _post(
-        app, bogus,
+        app,
+        bogus,
         **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code in (401, 403)
@@ -450,7 +489,9 @@ async def test_facade_rejects_malformed_connection_id_header(
 ) -> None:
     app, jwt, _team_id, _trial_id, _conn_id, _captures = facade_setup
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": "not-a-uuid"},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": "not-a-uuid"},
     )
     assert r.status_code == 400
     assert "not a valid UUID" in r.json()["detail"]
@@ -460,7 +501,8 @@ async def test_facade_rejects_stream_true(facade_setup) -> None:
     app, jwt, _team_id, _trial_id, conn_id, captures = facade_setup
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         r = await client.post(
             "/openai/v1/chat/completions",
@@ -484,7 +526,8 @@ async def test_facade_rejects_missing_model_field(facade_setup) -> None:
     app, jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         r = await client.post(
             "/openai/v1/chat/completions",
@@ -504,7 +547,8 @@ async def test_facade_rejects_missing_model_field(facade_setup) -> None:
 
 
 async def test_facade_returns_404_for_cross_team_connection(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     """A JWT scoped to team_a can't use team_b's connection — 404
     (not 403) so existence isn't leaked across teams."""
@@ -512,7 +556,9 @@ async def test_facade_returns_404_for_cross_team_connection(
     settings: GatewaySettings = app.state.settings  # type: ignore[attr-defined]
     other_team = uuid4()
     other_jwt = mint_step_jwt(
-        team_id=other_team, trial_id=uuid4(), step_id="s",
+        team_id=other_team,
+        trial_id=uuid4(),
+        step_id="s",
         ttl_sec=60,
         signing_key=settings.step_jwt_signing_key.get_secret_value(),
     )
@@ -526,7 +572,8 @@ async def test_facade_returns_404_for_cross_team_connection(
     sync_engine.dispose()
 
     r = await _post(
-        app, other_jwt,
+        app,
+        other_jwt,
         **{"x-loom-provider-connection-id": str(conn_id)},
     )
     # Clean up the extra team so the fixture's teardown stays simple.
@@ -539,39 +586,49 @@ async def test_facade_returns_404_for_cross_team_connection(
 
 
 async def test_facade_returns_404_for_soft_deleted_connection(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
     sync_engine = create_engine(postgres_url)
     with sync_engine.begin() as conn:
-        conn.execute(text(
-            "UPDATE provider_connections SET deleted_at = now() "
-            "WHERE id = :id",
-        ), {"id": conn_id})
+        conn.execute(
+            text(
+                "UPDATE provider_connections SET deleted_at = now() WHERE id = :id",
+            ),
+            {"id": conn_id},
+        )
     sync_engine.dispose()
 
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 404
 
 
 async def test_facade_rejects_anthropic_type_connection(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     """Anthropic-typed connections don't speak the chat-completion
     shape — route 400s so operators get a clear hint."""
     app, jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
     sync_engine = create_engine(postgres_url)
     with sync_engine.begin() as conn:
-        conn.execute(text(
-            "UPDATE provider_connections SET provider_type='anthropic' "
-            "WHERE id = :id",
-        ), {"id": conn_id})
+        conn.execute(
+            text(
+                "UPDATE provider_connections SET provider_type='anthropic' WHERE id = :id",
+            ),
+            {"id": conn_id},
+        )
     sync_engine.dispose()
 
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 400
     assert "anthropic" in r.json()["detail"]
@@ -582,17 +639,21 @@ async def test_facade_rejects_anthropic_type_connection(
 # ──────────────────────────────────────────────────────────────────────
 
 
-async def test_facade_surfaces_upstream_401(
-    facade_setup, postgres_url: str,
+async def test_facade_surfaces_upstream_401_records_failed_audit_row(
+    facade_setup,
+    postgres_url: str,
 ) -> None:
-    """Upstream 401 → return 401 with the upstream body excerpt; no
-    llm_calls row should be written."""
-    app, jwt, _team_id, _trial_id, conn_id, captures = facade_setup
+    """Upstream 401 returns the upstream excerpt and leaves durable
+    failed-call audit evidence."""
+    app, jwt, _team_id, trial_id, conn_id, captures = facade_setup
     captures["response"] = httpx.Response(  # type: ignore[index]
-        401, json={"error": {"message": "Invalid API key"}},
+        401,
+        json={"error": {"message": "Invalid API key"}},
     )
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 401
     assert "Invalid API key" in r.json()["detail"]
@@ -601,7 +662,22 @@ async def test_facade_surfaces_upstream_401(
     with sync_engine.connect() as conn:
         rows = list(conn.execute(text("SELECT * FROM llm_calls")))
     sync_engine.dispose()
-    assert rows == []
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert row["trial_id"] == trial_id
+    assert row["dialect"] == "openai_facade"
+    assert row["model"] == "gpt-4o"
+    assert row["input_tokens"] == 0
+    assert row["output_tokens"] == 0
+    assert float(row["cost_usd"]) == 0.0
+    assert row["rate_card_hash"] == "failed-upstream"
+    assert row["provider_extras"] == {
+        "_loom_call_status": "failed",
+        "_loom_failure_category": "upstream_http_4xx",
+        "_loom_failure_status_code": 401,
+        "_loom_usage_status": "missing",
+    }
+    assert "messages" not in row["request_params"]
 
 
 async def test_facade_redacts_api_key_from_upstream_error_body(
@@ -615,13 +691,12 @@ async def test_facade_redacts_api_key_from_upstream_error_body(
     # SecretStore round-trips. Have the upstream echo it.
     captures["response"] = httpx.Response(  # type: ignore[index]
         401,
-        text=(
-            "Auth failed. Token sent: Bearer sk-upstream-XYZ. "
-            "Check Authorization header."
-        ),
+        text=("Auth failed. Token sent: Bearer sk-upstream-XYZ. Check Authorization header."),
     )
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 401
     detail = r.json()["detail"]
@@ -630,18 +705,24 @@ async def test_facade_redacts_api_key_from_upstream_error_body(
 
 
 async def test_facade_handles_missing_upstream_usage_block(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     """An operator endpoint that returns 200 without `usage` should
     still produce an llm_calls row with 0/0 + cost 0 — best-effort
     attribution beats silent loss."""
     app, jwt, _team_id, _trial_id, conn_id, captures = facade_setup
-    captures["response"] = httpx.Response(200, json={  # type: ignore[index]
-        "id": "no-usage",
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": "x"}}],
-    })
+    captures["response"] = httpx.Response(
+        200,
+        json={  # type: ignore[index]
+            "id": "no-usage",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "x"}}],
+        },
+    )
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 200
 
@@ -658,16 +739,22 @@ async def test_facade_handles_missing_upstream_usage_block(
 
 
 async def test_facade_marks_partial_upstream_usage_block(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, _team_id, _trial_id, conn_id, captures = facade_setup
-    captures["response"] = httpx.Response(200, json={  # type: ignore[index]
-        "id": "partial-usage",
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": "x"}}],
-        "usage": {"prompt_tokens": 123},
-    })
+    captures["response"] = httpx.Response(
+        200,
+        json={  # type: ignore[index]
+            "id": "partial-usage",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "x"}}],
+            "usage": {"prompt_tokens": 123},
+        },
+    )
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 200
 
@@ -681,12 +768,8 @@ async def test_facade_marks_partial_upstream_usage_block(
     assert row["output_tokens"] == 0
     assert float(row["cost_usd"]) == pytest.approx(0.000615)
     assert row["provider_extras"]["_loom_usage_status"] == "partial"
-    assert row["provider_extras"]["_loom_missing_usage_keys"] == [
-        "completion_tokens"
-    ]
-    assert row["provider_extras"]["_loom_provider_usage"] == {
-        "prompt_tokens": 123
-    }
+    assert row["provider_extras"]["_loom_missing_usage_keys"] == ["completion_tokens"]
+    assert row["provider_extras"]["_loom_provider_usage"] == {"prompt_tokens": 123}
 
 
 async def test_facade_returns_502_on_upstream_request_error(
@@ -710,7 +793,9 @@ async def test_facade_returns_502_on_upstream_request_error(
         upstream_timeout_sec=app.state.settings.upstream_timeout_sec,  # type: ignore[attr-defined]
     )
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 502
     assert "ConnectError" in r.json()["detail"]
@@ -735,7 +820,9 @@ async def test_facade_returns_504_on_upstream_timeout(
         upstream_timeout_sec=app.state.settings.upstream_timeout_sec,  # type: ignore[attr-defined]
     )
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 504
     assert "timeout" in r.json()["detail"]
@@ -757,7 +844,9 @@ async def test_facade_routes_using_jwt_scope_without_header(
     settings: GatewaySettings = app.state.settings  # type: ignore[attr-defined]
     # Mint a JWT whose scope includes the connection_id.
     scoped_jwt = mint_step_jwt(
-        team_id=team_id, trial_id=trial_id, step_id="step-1",
+        team_id=team_id,
+        trial_id=trial_id,
+        step_id="step-1",
         ttl_sec=60,
         signing_key=settings.step_jwt_signing_key.get_secret_value(),
         provider_connection_id=conn_id,
@@ -781,14 +870,17 @@ async def test_facade_400s_when_jwt_and_header_mismatch(
     app, _jwt, team_id, trial_id, conn_id, captures = facade_setup
     settings: GatewaySettings = app.state.settings  # type: ignore[attr-defined]
     scoped_jwt = mint_step_jwt(
-        team_id=team_id, trial_id=trial_id, step_id="step-1",
+        team_id=team_id,
+        trial_id=trial_id,
+        step_id="step-1",
         ttl_sec=60,
         signing_key=settings.step_jwt_signing_key.get_secret_value(),
         provider_connection_id=conn_id,
     )
     bogus_header = str(uuid4())
     r = await _post(
-        app, scoped_jwt,
+        app,
+        scoped_jwt,
         **{"x-loom-provider-connection-id": bogus_header},
     )
     assert r.status_code == 400
@@ -808,13 +900,16 @@ async def test_facade_accepts_matching_jwt_scope_and_header(
     app, _jwt, team_id, trial_id, conn_id, captures = facade_setup
     settings: GatewaySettings = app.state.settings  # type: ignore[attr-defined]
     scoped_jwt = mint_step_jwt(
-        team_id=team_id, trial_id=trial_id, step_id="step-1",
+        team_id=team_id,
+        trial_id=trial_id,
+        step_id="step-1",
         ttl_sec=60,
         signing_key=settings.step_jwt_signing_key.get_secret_value(),
         provider_connection_id=conn_id,
     )
     r = await _post(
-        app, scoped_jwt,
+        app,
+        scoped_jwt,
         **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 200

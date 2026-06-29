@@ -88,8 +88,10 @@ def _empty_usage_projection() -> dict[str, Any]:
 
 
 def _priced_call_filter() -> Any:
-    return ~LlmCall.rate_card_hash.like("facade:tokens-only%") & ~LlmCall.rate_card_hash.like(
-        "facade:rate-card:missing%"
+    return (
+        ~LlmCall.rate_card_hash.like("facade:tokens-only%")
+        & ~LlmCall.rate_card_hash.like("facade:rate-card:missing%")
+        & (LlmCall.rate_card_hash != "failed-upstream")
     )
 
 
@@ -128,6 +130,9 @@ async def _usage_by_trial_ids(
                 )
                 .label("price_unknown_llm_calls_count"),
                 func.count(LlmCall.id)
+                .filter(LlmCall.rate_card_hash == "failed-upstream")
+                .label("failed_upstream_llm_calls_count"),
+                func.count(LlmCall.id)
                 .filter(usage_status_filter("partial"))
                 .label("partial_usage_llm_calls_count"),
                 func.count(LlmCall.id)
@@ -150,6 +155,9 @@ async def _usage_by_trial_ids(
             ),
             price_unknown_llm_calls_count=int(
                 row.price_unknown_llm_calls_count or 0,
+            ),
+            failed_upstream_llm_calls_count=int(
+                row.failed_upstream_llm_calls_count or 0,
             ),
             partial_usage_llm_calls_count=int(
                 row.partial_usage_llm_calls_count or 0,
@@ -223,12 +231,9 @@ def _trial_row(
         "priced_llm_calls_count": usage_projection["priced_llm_calls_count"],
         "token_only_llm_calls_count": usage_projection["token_only_llm_calls_count"],
         "price_unknown_llm_calls_count": usage_projection["price_unknown_llm_calls_count"],
-        "partial_usage_llm_calls_count": usage_projection[
-            "partial_usage_llm_calls_count"
-        ],
-        "missing_usage_llm_calls_count": usage_projection[
-            "missing_usage_llm_calls_count"
-        ],
+        "failed_upstream_llm_calls_count": usage_projection["failed_upstream_llm_calls_count"],
+        "partial_usage_llm_calls_count": usage_projection["partial_usage_llm_calls_count"],
+        "missing_usage_llm_calls_count": usage_projection["missing_usage_llm_calls_count"],
         "usage_reporting_status": usage_projection["usage_reporting_status"],
         "usage_estimate_confidence": usage_projection["usage_estimate_confidence"],
         "llm_evidence_status": llm_evidence["llm_evidence_status"],
@@ -245,7 +250,8 @@ def _trial_row(
                 "team_id": str(t.team_id),
                 "team_name": owner_team.name if owner_team else None,
             }
-            if submitted_by_user is not None else None
+            if submitted_by_user is not None
+            else None
         ),
     }
     if owner_team is not None:
@@ -367,7 +373,8 @@ async def list_trials(
                 owner_team=teams_by_id.get(r.team_id),
                 submitted_by_user=(
                     users_by_id.get(r.submitted_by_user_id)
-                    if r.submitted_by_user_id is not None else None
+                    if r.submitted_by_user_id is not None
+                    else None
                 ),
             )
             for r in rows

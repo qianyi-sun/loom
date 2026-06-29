@@ -26,7 +26,8 @@ from loom_llm_gateway.rate_card import RateCardCache
 
 @pytest.fixture
 async def gateway_setup(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
 ) -> AsyncIterator[tuple[object, str, UUID, UUID]]:
     """Build the gateway app + return (app, step_jwt, team_id, trial_id)
     with a seeded rate card + mocked Anthropic upstream."""
@@ -77,27 +78,33 @@ async def gateway_setup(
     sync_engine = create_engine(postgres_url)
     session_local = sessionmaker(sync_engine)
     with session_local() as s:
-        s.execute(insert(RateCard).values(
-            id="card-test",
-            captured_at=datetime.now(UTC),
-            table={
-                "id": "card-test",
-                "entries": [{
-                    "provider": "anthropic",
-                    "model": "claude-opus-4-7",
-                    "input_per_mtok": 15.0,
-                    "output_per_mtok": 75.0,
-                    "cache_read_per_mtok": 1.5,
-                    "cache_write_per_mtok": 18.75,
-                }],
-            },
-        ))
+        s.execute(
+            insert(RateCard).values(
+                id="card-test",
+                captured_at=datetime.now(UTC),
+                table={
+                    "id": "card-test",
+                    "entries": [
+                        {
+                            "provider": "anthropic",
+                            "model": "claude-opus-4-7",
+                            "input_per_mtok": 15.0,
+                            "output_per_mtok": 75.0,
+                            "cache_read_per_mtok": 1.5,
+                            "cache_write_per_mtok": 18.75,
+                        }
+                    ],
+                },
+            )
+        )
         s.commit()
 
     team_id = uuid4()
     trial_id = uuid4()
     step_jwt = mint_step_jwt(
-        team_id=team_id, trial_id=trial_id, step_id="main",
+        team_id=team_id,
+        trial_id=trial_id,
+        step_id="main",
         ttl_sec=60,
         signing_key=settings.step_jwt_signing_key.get_secret_value(),
     )
@@ -115,12 +122,14 @@ async def gateway_setup(
 
 
 async def test_messages_native_passthrough_records_llm_call(  # type: ignore[no-untyped-def]
-    gateway_setup, postgres_url,
+    gateway_setup,
+    postgres_url,
 ):
     app, step_jwt, team_id, trial_id = gateway_setup
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         r = await client.post(
             "/v1/messages",
@@ -158,7 +167,8 @@ async def test_messages_native_passthrough_records_llm_call(  # type: ignore[no-
 
 
 async def test_messages_rejects_non_step_token(  # type: ignore[no-untyped-def]
-    gateway_setup, postgres_url,
+    gateway_setup,
+    postgres_url,
 ):
     """A regular team-token bearer must be rejected — only step-scoped
     JWTs carry the trial_id/step_id needed for cost attribution."""
@@ -167,18 +177,25 @@ async def test_messages_rejects_non_step_token(  # type: ignore[no-untyped-def]
     sync_engine = create_engine(postgres_url)
     session_local = sessionmaker(sync_engine)
     from loom.db.schema import Token
+
     with session_local() as s:
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw.encode()).digest(),
-            type="team", scopes=["submit"], team_id=None,
-            issued_at=datetime.now(UTC), expires_at=None,
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw.encode()).digest(),
+                type="team",
+                scopes=["submit"],
+                team_id=None,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
+            )
+        )
         s.commit()
     sync_engine.dispose()
 
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         r = await client.post(
             "/v1/messages",
@@ -214,7 +231,8 @@ async def test_messages_redacts_upstream_error_detail(gateway_setup):  # type: i
 
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         r = await client.post(
             "/v1/messages",
@@ -244,47 +262,66 @@ def _canned_anthropic_stream() -> bytes:
     """Sample Anthropic SSE stream with the same totals as the
     non-streaming canned response — 100 input, 20 cache_write, 30
     cache_read, 50 output (final cumulative count)."""
-    return b"".join([
-        _sse_block("message_start", {
-            "type": "message_start",
-            "message": {
-                "id": "msg_stream",
-                "type": "message",
-                "role": "assistant",
-                "model": "claude-opus-4-7",
-                "content": [],
-                "usage": {
-                    "input_tokens": 100,
-                    "cache_creation_input_tokens": 20,
-                    "cache_read_input_tokens": 30,
-                    "output_tokens": 1,
+    return b"".join(
+        [
+            _sse_block(
+                "message_start",
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_stream",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude-opus-4-7",
+                        "content": [],
+                        "usage": {
+                            "input_tokens": 100,
+                            "cache_creation_input_tokens": 20,
+                            "cache_read_input_tokens": 30,
+                            "output_tokens": 1,
+                        },
+                    },
                 },
-            },
-        }),
-        _sse_block("content_block_start", {
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "text", "text": ""},
-        }),
-        _sse_block("content_block_delta", {
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "text_delta", "text": "hello"},
-        }),
-        _sse_block("content_block_stop", {
-            "type": "content_block_stop", "index": 0,
-        }),
-        _sse_block("message_delta", {
-            "type": "message_delta",
-            "delta": {"stop_reason": "end_turn"},
-            "usage": {"output_tokens": 50},
-        }),
-        _sse_block("message_stop", {"type": "message_stop"}),
-    ])
+            ),
+            _sse_block(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""},
+                },
+            ),
+            _sse_block(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "hello"},
+                },
+            ),
+            _sse_block(
+                "content_block_stop",
+                {
+                    "type": "content_block_stop",
+                    "index": 0,
+                },
+            ),
+            _sse_block(
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 50},
+                },
+            ),
+            _sse_block("message_stop", {"type": "message_stop"}),
+        ]
+    )
 
 
 async def test_messages_stream_passthrough_records_llm_call(  # type: ignore[no-untyped-def]
-    gateway_setup, postgres_url,
+    gateway_setup,
+    postgres_url,
 ):
     """Streaming requests get the upstream SSE bytes forwarded verbatim,
     and `_extract_stream_usage` recovers the same token totals the
@@ -310,7 +347,8 @@ async def test_messages_stream_passthrough_records_llm_call(  # type: ignore[no-
 
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         async with client.stream(
             "POST",
@@ -347,12 +385,13 @@ async def test_messages_stream_passthrough_records_llm_call(  # type: ignore[no-
     assert float(row["cost_usd"]) == pytest.approx(0.00567, abs=1e-6)
 
 
-async def test_messages_stream_upstream_error_raises_no_llm_call(  # type: ignore[no-untyped-def]
-    gateway_setup, postgres_url,
+async def test_messages_stream_upstream_error_records_failed_audit_row(  # type: ignore[no-untyped-def]
+    gateway_setup,
+    postgres_url,
 ):
     """Upstream returns 429 (not an SSE stream); the route must surface
-    the error to the client and NOT write a partial llm_calls row."""
-    app, step_jwt, _team_id, _trial_id = gateway_setup
+    the error to the client and write a failed-attempt audit row."""
+    app, step_jwt, team_id, trial_id = gateway_setup
 
     def _handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, json={"error": "rate_limited"})
@@ -365,7 +404,8 @@ async def test_messages_stream_upstream_error_raises_no_llm_call(  # type: ignor
 
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         r = await client.post(
             "/v1/messages",
@@ -384,14 +424,32 @@ async def test_messages_stream_upstream_error_raises_no_llm_call(  # type: ignor
     with sync_engine.connect() as conn:
         rows = list(conn.execute(text("SELECT * FROM llm_calls")))
     sync_engine.dispose()
-    assert rows == []
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert row["trial_id"] == trial_id
+    assert row["team_id"] == team_id
+    assert row["step_id"] == "main"
+    assert row["dialect"] == "anthropic"
+    assert row["model"] == "claude-opus-4-7"
+    assert row["input_tokens"] == 0
+    assert row["output_tokens"] == 0
+    assert float(row["cost_usd"]) == 0.0
+    assert row["rate_card_hash"] == "failed-upstream"
+    assert row["provider_extras"] == {
+        "_loom_call_status": "failed",
+        "_loom_failure_category": "upstream_http_4xx",
+        "_loom_failure_status_code": 429,
+        "_loom_usage_status": "missing",
+    }
+    assert "messages" not in row["request_params"]
 
 
 async def test_messages_rejects_missing_model(gateway_setup):  # type: ignore[no-untyped-def]
     app, step_jwt, _team_id, _trial_id = gateway_setup
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         r = await client.post(
             "/v1/messages",

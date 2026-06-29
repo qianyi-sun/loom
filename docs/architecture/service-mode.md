@@ -282,7 +282,11 @@ The same detail API also exposes user-facing diagnosis and debug evidence:
   Trial debug evidence includes per-call `request_params` summaries
   and `request_params_status_counts` so score-alignment audits can
   distinguish matched generation settings from legacy/unavailable
-  request-parameter evidence.
+  request-parameter evidence. Provider summaries also include
+  `call_status_counts`, `failed_llm_calls_count`, and
+  `failure_category_counts`, so a terminal model-backed trial with an
+  upstream provider failure is distinguishable from a trial where no
+  provider request was attempted.
 - `GET /api/v1/batches/{batch_id}` includes `debug_evidence`;
   `GET /api/v1/batches/{batch_id}/debug` returns that object directly.
   Batch debug evidence carries the same provider summary fields across
@@ -386,10 +390,11 @@ configurations.
 - Rate-card lookup (`rate_cards` table) per (provider, model)
 - Provider-connection facade cost lookup via
   `provider_connections.rate_card_provider` for BYO endpoints
-- Cost compute at request time; row inserted into `llm_calls` BEFORE
-  the response returns, so finalize can fetch a guaranteed-complete
-  set for adapters that did not already write gateway-backed
-  `llm_call` trajectory events.
+- Cost compute at request time for successful calls; failed upstream
+  attempts insert zero-token `llm_calls` rows with
+  `provider_extras._loom_call_status=failed` before surfacing the
+  error, so finalize/debug paths can distinguish failed provider
+  attempts from missing Gateway evidence.
 - Per-call attribution via `(team_id, trial_id, step_id)` fields on
   the `llm_calls` row
 - Per-call redacted request-parameter audit via `request_params`;

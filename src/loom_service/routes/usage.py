@@ -43,7 +43,7 @@ router = APIRouter()
 
 _TRUNC_UNITS: frozenset[str] = frozenset({"day", "week", "month"})
 _PRICING_MODES: frozenset[str] = frozenset(
-    {"priced", "tokens-only", "price-unknown"},
+    {"priced", "tokens-only", "price-unknown", "failed-upstream"},
 )
 _USAGE_STATUS_SQL = f"l.provider_extras ->> '{USAGE_STATUS_KEY}'"
 _BREAKDOWN_FIELDS: dict[str, tuple[str, str]] = {
@@ -67,6 +67,7 @@ def _pricing_mode_expr() -> str:
         "WHEN l.rate_card_hash LIKE 'facade:tokens-only%%' THEN 'tokens-only' "
         "WHEN l.rate_card_hash LIKE 'facade:rate-card:missing%%' "
         "THEN 'price-unknown' "
+        "WHEN l.rate_card_hash = 'failed-upstream' THEN 'failed-upstream' "
         "ELSE 'priced' END"
     )
 
@@ -277,6 +278,7 @@ async def get_usage(
                         FILTER (
                             WHERE l.rate_card_hash NOT LIKE 'facade:tokens-only%%'
                               AND l.rate_card_hash NOT LIKE 'facade:rate-card:missing%%'
+                              AND l.rate_card_hash != 'failed-upstream'
                         ) AS priced_llm_calls_count,
                     COUNT(l.id)
                         FILTER (
@@ -286,6 +288,10 @@ async def get_usage(
                         FILTER (
                             WHERE l.rate_card_hash LIKE 'facade:rate-card:missing%%'
                         ) AS price_unknown_llm_calls_count,
+                    COUNT(l.id)
+                        FILTER (
+                            WHERE l.rate_card_hash = 'failed-upstream'
+                        ) AS failed_upstream_llm_calls_count,
                     COUNT(l.id)
                         FILTER (
                             WHERE {_USAGE_STATUS_SQL} = 'partial'
@@ -345,6 +351,8 @@ async def get_usage(
                     AS token_only_llm_calls_count,
                 COALESCE(l.price_unknown_llm_calls_count, 0)
                     AS price_unknown_llm_calls_count,
+                COALESCE(l.failed_upstream_llm_calls_count, 0)
+                    AS failed_upstream_llm_calls_count,
                 COALESCE(l.partial_usage_llm_calls_count, 0)
                     AS partial_usage_llm_calls_count,
                 COALESCE(l.missing_usage_llm_calls_count, 0)
@@ -381,6 +389,7 @@ async def get_usage(
                     FILTER (
                         WHERE l.rate_card_hash NOT LIKE 'facade:tokens-only%%'
                           AND l.rate_card_hash NOT LIKE 'facade:rate-card:missing%%'
+                          AND l.rate_card_hash != 'failed-upstream'
                     ) AS priced_llm_calls_count,
                 COUNT(l.id)
                     FILTER (
@@ -390,6 +399,10 @@ async def get_usage(
                     FILTER (
                         WHERE l.rate_card_hash LIKE 'facade:rate-card:missing%%'
                     ) AS price_unknown_llm_calls_count,
+                COUNT(l.id)
+                    FILTER (
+                        WHERE l.rate_card_hash = 'failed-upstream'
+                    ) AS failed_upstream_llm_calls_count,
                 COUNT(l.id)
                     FILTER (
                         WHERE {_USAGE_STATUS_SQL} = 'partial'
@@ -423,6 +436,7 @@ async def get_usage(
                 (r.priced_llm_calls_count or 0)
                 + (r.token_only_llm_calls_count or 0)
                 + (r.price_unknown_llm_calls_count or 0)
+                + (r.failed_upstream_llm_calls_count or 0)
             ),
             total_prompt_tokens=int(r.llm_input_tokens or 0),
             total_completion_tokens=int(r.llm_output_tokens or 0),
@@ -431,6 +445,9 @@ async def get_usage(
             token_only_llm_calls_count=int(r.token_only_llm_calls_count or 0),
             price_unknown_llm_calls_count=int(
                 r.price_unknown_llm_calls_count or 0,
+            ),
+            failed_upstream_llm_calls_count=int(
+                r.failed_upstream_llm_calls_count or 0,
             ),
             partial_usage_llm_calls_count=int(
                 r.partial_usage_llm_calls_count or 0,
@@ -455,34 +472,19 @@ async def get_usage(
             "priced_llm_calls_count": usage["priced_llm_calls_count"],
             "token_only_llm_calls_count": usage["token_only_llm_calls_count"],
             "price_unknown_llm_calls_count": usage["price_unknown_llm_calls_count"],
-            "partial_usage_llm_calls_count": usage[
-                "partial_usage_llm_calls_count"
-            ],
-            "missing_usage_llm_calls_count": usage[
-                "missing_usage_llm_calls_count"
-            ],
+            "failed_upstream_llm_calls_count": usage["failed_upstream_llm_calls_count"],
+            "partial_usage_llm_calls_count": usage["partial_usage_llm_calls_count"],
+            "missing_usage_llm_calls_count": usage["missing_usage_llm_calls_count"],
             "usage_reporting_status": usage["usage_reporting_status"],
             "usage_estimate_confidence": usage["usage_estimate_confidence"],
             "llm_input_tokens": int(r.llm_input_tokens),
             "llm_output_tokens": int(r.llm_output_tokens),
-            "daytona_compute_seconds": (
-                float(r.daytona_compute_seconds) if include_cloud else 0.0
-            ),
-            "daytona_cost_usd": (
-                float(r.daytona_cost_usd) if include_cloud else 0.0
-            ),
-            "modal_compute_seconds": (
-                float(r.modal_compute_seconds) if include_cloud else 0.0
-            ),
-            "modal_cost_usd": (
-                float(r.modal_cost_usd) if include_cloud else 0.0
-            ),
-            "cloud_compute_seconds": (
-                float(r.cloud_compute_seconds) if include_cloud else 0.0
-            ),
-            "cloud_cost_usd": (
-                float(r.cloud_cost_usd) if include_cloud else 0.0
-            ),
+            "daytona_compute_seconds": (float(r.daytona_compute_seconds) if include_cloud else 0.0),
+            "daytona_cost_usd": (float(r.daytona_cost_usd) if include_cloud else 0.0),
+            "modal_compute_seconds": (float(r.modal_compute_seconds) if include_cloud else 0.0),
+            "modal_cost_usd": (float(r.modal_cost_usd) if include_cloud else 0.0),
+            "cloud_compute_seconds": (float(r.cloud_compute_seconds) if include_cloud else 0.0),
+            "cloud_cost_usd": (float(r.cloud_cost_usd) if include_cloud else 0.0),
         }
         if breakdown_by is not None:
             bucket["breakdown_by"] = breakdown_by
@@ -516,6 +518,7 @@ async def _batch_usage_rollups(
                 FILTER (
                     WHERE l.rate_card_hash NOT LIKE 'facade:tokens-only%%'
                       AND l.rate_card_hash NOT LIKE 'facade:rate-card:missing%%'
+                      AND l.rate_card_hash != 'failed-upstream'
                 ) AS priced_llm_calls_count,
             COUNT(l.id)
                 FILTER (
@@ -525,6 +528,10 @@ async def _batch_usage_rollups(
                 FILTER (
                     WHERE l.rate_card_hash LIKE 'facade:rate-card:missing%%'
                 ) AS price_unknown_llm_calls_count,
+            COUNT(l.id)
+                FILTER (
+                    WHERE l.rate_card_hash = 'failed-upstream'
+                ) AS failed_upstream_llm_calls_count,
             COUNT(l.id)
                 FILTER (
                     WHERE {_USAGE_STATUS_SQL} = 'partial'
@@ -547,6 +554,7 @@ async def _batch_usage_rollups(
                 (row.priced_llm_calls_count or 0)
                 + (row.token_only_llm_calls_count or 0)
                 + (row.price_unknown_llm_calls_count or 0)
+                + (row.failed_upstream_llm_calls_count or 0)
             ),
             total_prompt_tokens=int(row.llm_input_tokens or 0),
             total_completion_tokens=int(row.llm_output_tokens or 0),
@@ -555,6 +563,9 @@ async def _batch_usage_rollups(
             token_only_llm_calls_count=int(row.token_only_llm_calls_count or 0),
             price_unknown_llm_calls_count=int(
                 row.price_unknown_llm_calls_count or 0,
+            ),
+            failed_upstream_llm_calls_count=int(
+                row.failed_upstream_llm_calls_count or 0,
             ),
             partial_usage_llm_calls_count=int(
                 row.partial_usage_llm_calls_count or 0,

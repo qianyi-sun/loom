@@ -32,14 +32,20 @@ _RATE_CARD_TABLE = {
     "id": "card-test",
     "entries": [
         {
-            "provider": "openai", "model": "gpt-5",
-            "input_per_mtok": 5.0, "output_per_mtok": 10.0,
-            "cache_read_per_mtok": 0.5, "cache_write_per_mtok": 6.25,
+            "provider": "openai",
+            "model": "gpt-5",
+            "input_per_mtok": 5.0,
+            "output_per_mtok": 10.0,
+            "cache_read_per_mtok": 0.5,
+            "cache_write_per_mtok": 6.25,
         },
         {
-            "provider": "google", "model": "gemini-2.0-flash",
-            "input_per_mtok": 0.075, "output_per_mtok": 0.30,
-            "cache_read_per_mtok": 0.019, "cache_write_per_mtok": 0.09,
+            "provider": "google",
+            "model": "gemini-2.0-flash",
+            "input_per_mtok": 0.075,
+            "output_per_mtok": 0.30,
+            "cache_read_per_mtok": 0.019,
+            "cache_write_per_mtok": 0.09,
         },
     ],
 }
@@ -47,7 +53,8 @@ _RATE_CARD_TABLE = {
 
 @pytest.fixture
 async def gateway(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
 ) -> AsyncIterator[tuple[object, str, UUID, UUID]]:
     for k, v in {
         "LOOM_GW_DB_URL": postgres_url,
@@ -61,7 +68,8 @@ async def gateway(
     async_engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
-        async_engine, expire_on_commit=False,
+        async_engine,
+        expire_on_commit=False,
     )
     app.state.rate_card_cache = RateCardCache(
         session_factory=app.state.session_factory,
@@ -70,34 +78,48 @@ async def gateway(
 
     def _handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "api.openai.com":
-            assert (
-                request.headers["authorization"]
-                == "Bearer test-openai-key"
-            )
-            return httpx.Response(200, json={
-                "id": "resp_test",
-                "model": "gpt-5",
-                "output": [{"type": "message", "content": [
-                    {"type": "output_text", "text": "ok"},
-                ]}],
-                "usage": {
-                    "input_tokens": 200, "output_tokens": 80,
-                    "output_tokens_details": {"reasoning_tokens": 20},
+            assert request.headers["authorization"] == "Bearer test-openai-key"
+            return httpx.Response(
+                200,
+                json={
+                    "id": "resp_test",
+                    "model": "gpt-5",
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {"type": "output_text", "text": "ok"},
+                            ],
+                        }
+                    ],
+                    "usage": {
+                        "input_tokens": 200,
+                        "output_tokens": 80,
+                        "output_tokens_details": {"reasoning_tokens": 20},
+                    },
                 },
-            })
+            )
         if request.url.host == "generativelanguage.googleapis.com":
             assert request.url.params["key"] == "test-google-key"
-            return httpx.Response(200, json={
-                "candidates": [{"content": {
-                    "parts": [{"text": "ok"}], "role": "model",
-                }}],
-                "usageMetadata": {
-                    "promptTokenCount": 150,
-                    "candidatesTokenCount": 60,
-                    "cachedContentTokenCount": 40,
-                    "thoughtsTokenCount": 12,
+            return httpx.Response(
+                200,
+                json={
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [{"text": "ok"}],
+                                "role": "model",
+                            }
+                        }
+                    ],
+                    "usageMetadata": {
+                        "promptTokenCount": 150,
+                        "candidatesTokenCount": 60,
+                        "cachedContentTokenCount": 40,
+                        "thoughtsTokenCount": 12,
+                    },
                 },
-            })
+            )
         return httpx.Response(404)
 
     app.state.upstream_client = httpx.AsyncClient(
@@ -108,16 +130,21 @@ async def gateway(
     sync_engine = create_engine(postgres_url)
     session_local = sessionmaker(sync_engine)
     with session_local() as s:
-        s.execute(insert(RateCard).values(
-            id="card-test", captured_at=datetime.now(UTC),
-            table=_RATE_CARD_TABLE,
-        ))
+        s.execute(
+            insert(RateCard).values(
+                id="card-test",
+                captured_at=datetime.now(UTC),
+                table=_RATE_CARD_TABLE,
+            )
+        )
         s.commit()
 
     team_id = uuid4()
     trial_id = uuid4()
     step_jwt = mint_step_jwt(
-        team_id=team_id, trial_id=trial_id, step_id="main",
+        team_id=team_id,
+        trial_id=trial_id,
+        step_id="main",
         ttl_sec=60,
         signing_key=settings.step_jwt_signing_key.get_secret_value(),
     )
@@ -136,10 +163,9 @@ async def gateway(
 
 @pytest.fixture
 async def gateway_with_provider_connection(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
-) -> AsyncIterator[
-    tuple[object, str, UUID, UUID, UUID, dict[str, list[httpx.Request]]]
-]:
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
+) -> AsyncIterator[tuple[object, str, UUID, UUID, UUID, dict[str, list[httpx.Request]]]]:
     for k, v in {
         "LOOM_GW_DB_URL": postgres_url,
         "LOOM_SECRET_STORE_MASTER_KEY": _TEST_MASTER_KEY,
@@ -151,7 +177,8 @@ async def gateway_with_provider_connection(
     async_engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
-        async_engine, expire_on_commit=False,
+        async_engine,
+        expire_on_commit=False,
     )
     app.state.rate_card_cache = RateCardCache(
         session_factory=app.state.session_factory,
@@ -183,18 +210,26 @@ async def gateway_with_provider_connection(
                 content=f"data: {json.dumps(payload)}\n\n".encode(),
                 headers={"content-type": "text/event-stream"},
             )
-        return httpx.Response(200, json={
-            "id": "resp_provider",
-            "model": body["model"],
-            "output": [{"type": "message", "content": [
-                {"type": "output_text", "text": "ok"},
-            ]}],
-            "usage": {
-                "input_tokens": 21,
-                "output_tokens": 7,
-                "output_tokens_details": {"reasoning_tokens": 3},
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_provider",
+                "model": body["model"],
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": "ok"},
+                        ],
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 21,
+                    "output_tokens": 7,
+                    "output_tokens_details": {"reasoning_tokens": 3},
+                },
             },
-        })
+        )
 
     app.state.upstream_client = httpx.AsyncClient(
         transport=httpx.MockTransport(_handler),
@@ -211,12 +246,14 @@ async def gateway_with_provider_connection(
     connection_id = uuid4()
 
     async_session_factory = async_sessionmaker(
-        async_engine, expire_on_commit=False,
+        async_engine,
+        expire_on_commit=False,
     )
     async with async_session_factory() as ses:
         store = LocalEncryptedSecretStore(ses)
         ref = await store.put(
-            namespace=f"team:{team_id}", value="sk-provider-XYZ",
+            namespace=f"team:{team_id}",
+            value="sk-provider-XYZ",
         )
         await ses.commit()
 
@@ -224,18 +261,20 @@ async def gateway_with_provider_connection(
     session_local = sessionmaker(sync_engine)
     with session_local() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
-        s.execute(insert(ProviderConnection).values(
-            id=connection_id,
-            team_id=team_id,
-            provider_type="openai-compatible",
-            display_name="provider",
-            base_url="https://provider.example/v1",
-            upstream_host="provider.example",
-            resolved_egress_ips=["203.0.113.10"],
-            encrypted_api_key_ref=ref,
-            pricing_source="tokens-only",
-            created_by="test",
-        ))
+        s.execute(
+            insert(ProviderConnection).values(
+                id=connection_id,
+                team_id=team_id,
+                provider_type="openai-compatible",
+                display_name="provider",
+                base_url="https://provider.example/v1",
+                upstream_host="provider.example",
+                resolved_egress_ips=["203.0.113.10"],
+                encrypted_api_key_ref=ref,
+                pricing_source="tokens-only",
+                created_by="test",
+            )
+        )
         s.commit()
 
     step_jwt = mint_step_jwt(
@@ -267,7 +306,8 @@ async def test_responses_native_passthrough(gateway, postgres_url):  # type: ign
     app, step_jwt, team_id, trial_id = gateway
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         r = await client.post(
             "/v1/responses",
@@ -293,27 +333,86 @@ async def test_responses_native_passthrough(gateway, postgres_url):  # type: ign
     assert row["team_id"] == team_id
 
 
+async def test_responses_upstream_500_records_failed_audit_row(  # type: ignore[no-untyped-def]
+    gateway,
+    postgres_url,
+):
+    app, step_jwt, team_id, trial_id = gateway
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "api.openai.com"
+        return httpx.Response(500, text="internal provider error")
+
+    await app.state.upstream_client.aclose()
+    app.state.upstream_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(_handler),
+        timeout=app.state.settings.upstream_timeout_sec,
+    )
+
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://gw",
+    ) as client:
+        r = await client.post(
+            "/v1/responses",
+            headers={"Authorization": f"Bearer {step_jwt}"},
+            json={"model": "gpt-5", "input": "hi", "temperature": 0.2},
+        )
+    assert r.status_code == 500
+    assert "internal provider error" in r.json()["detail"]
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+    sync_engine.dispose()
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert row["trial_id"] == trial_id
+    assert row["team_id"] == team_id
+    assert row["step_id"] == "main"
+    assert row["dialect"] == "openai_responses"
+    assert row["model"] == "gpt-5"
+    assert row["input_tokens"] == 0
+    assert row["output_tokens"] == 0
+    assert float(row["cost_usd"]) == 0.0
+    assert row["rate_card_hash"] == "failed-upstream"
+    assert row["provider_extras"] == {
+        "_loom_call_status": "failed",
+        "_loom_failure_category": "upstream_http_5xx",
+        "_loom_failure_status_code": 500,
+        "_loom_usage_status": "missing",
+    }
+    assert row["request_params"] == {
+        "status": "available",
+        "parameters": {"temperature": 0.2},
+    }
+
+
 @pytest.mark.parametrize("path", ["/v1/responses", "/openai/v1/responses"])
 async def test_responses_routes_provider_connection_from_step_jwt(
-    gateway_with_provider_connection, postgres_url: str, path: str,
+    gateway_with_provider_connection,
+    postgres_url: str,
+    path: str,
 ) -> None:
-    app, step_jwt, team_id, trial_id, _conn_id, captures = (
-        gateway_with_provider_connection
-    )
+    app, step_jwt, team_id, trial_id, _conn_id, captures = gateway_with_provider_connection
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     payload = {
         "model": "qwen2.5-coder-7b-instruct",
         "instructions": "You are Codex.",
-        "input": [{
-            "role": "user",
-            "content": [{"type": "input_text", "text": "hi"}],
-        }],
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hi"}],
+            }
+        ],
         "parallel_tool_calls": True,
         "reasoning": {"effort": "low"},
         "store": False,
     }
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         r = await client.post(
             path,
@@ -344,11 +443,10 @@ async def test_responses_routes_provider_connection_from_step_jwt(
 
 
 async def test_responses_merges_query_request_params_into_provider_payload_and_audit(
-    gateway_with_provider_connection, postgres_url: str,
+    gateway_with_provider_connection,
+    postgres_url: str,
 ) -> None:
-    app, step_jwt, team_id, trial_id, _conn_id, captures = (
-        gateway_with_provider_connection
-    )
+    app, step_jwt, team_id, trial_id, _conn_id, captures = gateway_with_provider_connection
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     payload = {
         "model": "qwen2.5-coder-7b-instruct",
@@ -367,7 +465,8 @@ async def test_responses_merges_query_request_params_into_provider_payload_and_a
         },
     }
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         r = await client.post(
             "/v1/responses",
@@ -411,11 +510,10 @@ async def test_responses_merges_query_request_params_into_provider_payload_and_a
 
 
 async def test_responses_provider_connection_stream_passthrough(
-    gateway_with_provider_connection, postgres_url: str,
+    gateway_with_provider_connection,
+    postgres_url: str,
 ) -> None:
-    app, step_jwt, team_id, trial_id, _conn_id, captures = (
-        gateway_with_provider_connection
-    )
+    app, step_jwt, team_id, trial_id, _conn_id, captures = gateway_with_provider_connection
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     payload = {
         "model": "qwen2.5-coder-7b-instruct",
@@ -424,7 +522,8 @@ async def test_responses_provider_connection_stream_passthrough(
         "store": False,
     }
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         r = await client.post(
             "/v1/responses",
@@ -460,25 +559,27 @@ async def test_responses_provider_connection_stream_passthrough(
 
 
 async def test_responses_facade_falls_back_to_chat_completions_for_chat_only_provider(
-    gateway_with_provider_connection, postgres_url: str,
+    gateway_with_provider_connection,
+    postgres_url: str,
 ) -> None:
-    app, step_jwt, team_id, trial_id, _conn_id, captures = (
-        gateway_with_provider_connection
-    )
+    app, step_jwt, team_id, trial_id, _conn_id, captures = gateway_with_provider_connection
 
     def _chat_only_handler(request: httpx.Request) -> httpx.Response:
         captures["requests"].append(request)
         assert request.url.host == "provider.example"
         assert request.headers["authorization"] == "Bearer sk-provider-XYZ"
         if request.url.path == "/v1/responses":
-            return httpx.Response(400, json={
-                "error": {
-                    "message": "you must provide a messages parameter",
-                    "type": "invalid_request_error",
-                    "param": "messages",
-                    "code": "missing_required_parameter",
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "message": "you must provide a messages parameter",
+                        "type": "invalid_request_error",
+                        "param": "messages",
+                        "code": "missing_required_parameter",
+                    },
                 },
-            })
+            )
         assert request.url.path == "/v1/chat/completions"
         body = json.loads(request.content)
         assert body["model"] == "qwen3.6-35b-a3b"
@@ -491,14 +592,16 @@ async def test_responses_facade_falls_back_to_chat_completions_for_chat_only_pro
             {
                 "role": "assistant",
                 "content": None,
-                "tool_calls": [{
-                    "id": "call_old",
-                    "type": "function",
-                    "function": {
-                        "name": "exec_command",
-                        "arguments": "{\"cmd\":\"pwd\"}",
-                    },
-                }],
+                "tool_calls": [
+                    {
+                        "id": "call_old",
+                        "type": "function",
+                        "function": {
+                            "name": "exec_command",
+                            "arguments": '{"cmd":"pwd"}',
+                        },
+                    }
+                ],
             },
             {
                 "role": "tool",
@@ -506,42 +609,51 @@ async def test_responses_facade_falls_back_to_chat_completions_for_chat_only_pro
                 "content": "ok",
             },
         ]
-        assert body["tools"] == [{
-            "type": "function",
-            "function": {
-                "name": "exec_command",
-                "description": "run commands",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"cmd": {"type": "string"}},
-                    "required": ["cmd"],
+        assert body["tools"] == [
+            {
+                "type": "function",
+                "function": {
+                    "name": "exec_command",
+                    "description": "run commands",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"cmd": {"type": "string"}},
+                        "required": ["cmd"],
+                    },
                 },
-            },
-        }]
-        return httpx.Response(200, json={
-            "id": "chatcmpl_compat",
-            "model": body["model"],
-            "choices": [{
-                "index": 0,
-                "finish_reason": "tool_calls",
-                "message": {
-                    "role": "assistant",
-                    "tool_calls": [{
-                        "id": "call_new",
-                        "type": "function",
-                        "function": {
-                            "name": "exec_command",
-                            "arguments": "{\"cmd\":\"echo hi\"}",
+            }
+        ]
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl_compat",
+                "model": body["model"],
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "call_new",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "exec_command",
+                                        "arguments": '{"cmd":"echo hi"}',
+                                    },
+                                }
+                            ],
                         },
-                    }],
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 7,
+                    "total_tokens": 18,
                 },
-            }],
-            "usage": {
-                "prompt_tokens": 11,
-                "completion_tokens": 7,
-                "total_tokens": 18,
             },
-        })
+        )
 
     app.state.upstream_client = httpx.AsyncClient(
         transport=httpx.MockTransport(_chat_only_handler),
@@ -566,7 +678,7 @@ async def test_responses_facade_falls_back_to_chat_completions_for_chat_only_pro
                 "type": "function_call",
                 "call_id": "call_old",
                 "name": "exec_command",
-                "arguments": "{\"cmd\":\"pwd\"}",
+                "arguments": '{"cmd":"pwd"}',
             },
             {
                 "type": "function_call_output",
@@ -594,7 +706,8 @@ async def test_responses_facade_falls_back_to_chat_completions_for_chat_only_pro
     }
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         r = await client.post(
             "/openai/v1/responses",
@@ -636,7 +749,8 @@ async def test_gemini_native_passthrough(gateway, postgres_url):  # type: ignore
     app, step_jwt, team_id, trial_id = gateway
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         r = await client.post(
             "/v1beta/models/gemini-2.0-flash:generateContent",
@@ -664,11 +778,65 @@ async def test_gemini_native_passthrough(gateway, postgres_url):  # type: ignore
     assert row["team_id"] == team_id
 
 
+async def test_gemini_upstream_503_records_failed_audit_row(  # type: ignore[no-untyped-def]
+    gateway,
+    postgres_url,
+):
+    app, step_jwt, team_id, trial_id = gateway
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "generativelanguage.googleapis.com"
+        return httpx.Response(503, json={"error": "temporarily unavailable"})
+
+    await app.state.upstream_client.aclose()
+    app.state.upstream_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(_handler),
+        timeout=app.state.settings.upstream_timeout_sec,
+    )
+
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://gw",
+    ) as client:
+        r = await client.post(
+            "/v1beta/models/gemini-2.0-flash:generateContent",
+            headers={"Authorization": f"Bearer {step_jwt}"},
+            json={"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
+        )
+    assert r.status_code == 503
+    assert "temporarily unavailable" in r.json()["detail"]
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+    sync_engine.dispose()
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert row["trial_id"] == trial_id
+    assert row["team_id"] == team_id
+    assert row["step_id"] == "main"
+    assert row["dialect"] == "gemini"
+    assert row["model"] == "gemini-2.0-flash"
+    assert row["input_tokens"] == 0
+    assert row["output_tokens"] == 0
+    assert float(row["cost_usd"]) == 0.0
+    assert row["rate_card_hash"] == "failed-upstream"
+    assert row["provider_extras"] == {
+        "_loom_call_status": "failed",
+        "_loom_failure_category": "upstream_http_5xx",
+        "_loom_failure_status_code": 503,
+        "_loom_usage_status": "missing",
+    }
+    assert "contents" not in row["request_params"]
+
+
 async def test_gemini_rejects_path_without_colon(gateway):  # type: ignore[no-untyped-def]
     app, step_jwt, _t, _tr = gateway
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         r = await client.post(
             "/v1beta/models/gemini-2.0-flash",

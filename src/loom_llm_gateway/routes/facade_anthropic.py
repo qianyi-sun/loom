@@ -51,6 +51,8 @@ from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
     compute_facade_cost_usd,
     decrypt_facade_api_key,
+    http_failure_category,
+    record_facade_failed_call,
     redact_api_key,
     resolve_facade_connection,
     resolve_provider_connection_id,
@@ -80,7 +82,8 @@ _ANTHROPIC_VERSION = "2023-06-01"
 
 
 def _step_authorization_for_anthropic_client(
-    authorization: str | None, x_api_key: str | None,
+    authorization: str | None,
+    x_api_key: str | None,
 ) -> str | None:
     if authorization:
         return authorization
@@ -96,7 +99,8 @@ async def anthropic_messages_facade(
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="x-api-key"),
     x_loom_provider_connection_id: str | None = Header(
-        default=None, alias="x-loom-provider-connection-id",
+        default=None,
+        alias="x-loom-provider-connection-id",
     ),
 ) -> dict[str, Any] | StreamingResponse:
     settings = request.app.state.settings
@@ -106,7 +110,8 @@ async def anthropic_messages_facade(
         ctx = await verify_facade_auth(
             session,
             _step_authorization_for_anthropic_client(
-                authorization, x_api_key,
+                authorization,
+                x_api_key,
             ),
             signing_key,
         )
@@ -114,7 +119,8 @@ async def anthropic_messages_facade(
     assert ctx.trial_id is not None
     assert ctx.step_id is not None
     connection_id = resolve_provider_connection_id(
-        ctx, x_loom_provider_connection_id,
+        ctx,
+        x_loom_provider_connection_id,
     )
 
     if not isinstance(payload.get("model"), str) or not payload["model"]:
@@ -122,7 +128,9 @@ async def anthropic_messages_facade(
 
     async with request.app.state.session_factory() as session:
         row = await resolve_facade_connection(
-            session, connection_id, ctx.team_id,
+            session,
+            connection_id,
+            ctx.team_id,
             supported_types=_ANTHROPIC_TYPES,
             dialect_label="/anthropic/v1/messages",
         )
@@ -134,9 +142,7 @@ async def anthropic_messages_facade(
     # per-connection_id client whose CONNECT carries the routing
     # header Envoy matches against. When off (default), it returns
     # the shared upstream_client and the call goes direct.
-    upstream: httpx.AsyncClient = await (
-        request.app.state.egress_client_pool.get(connection_id)
-    )
+    upstream: httpx.AsyncClient = await request.app.state.egress_client_pool.get(connection_id)
 
     if payload.get("stream"):
         return await _stream_anthropic_messages(
@@ -159,31 +165,57 @@ async def anthropic_messages_facade(
                 timeout=settings.upstream_timeout_sec,
                 follow_redirects=False,
             ),
-            settings=settings, dialect="facade_anthropic",
+            settings=settings,
+            dialect="facade_anthropic",
         )
         upstream_response = outcome.response
     except httpx.TimeoutException as e:
+        await record_facade_failed_call(
+            request=request,
+            ctx=ctx,
+            row=row,
+            dialect=_FACADE_DIALECT,
+            model=payload["model"],
+            request_payload=payload,
+            failure_category="upstream_timeout",
+            failure_error_type=type(e).__name__,
+        )
         raise HTTPException(
             status_code=504,
             detail=f"upstream timeout against {upstream_url}: {e}",
         ) from e
     except httpx.RequestError as e:
+        await record_facade_failed_call(
+            request=request,
+            ctx=ctx,
+            row=row,
+            dialect=_FACADE_DIALECT,
+            model=payload["model"],
+            request_payload=payload,
+            failure_category="upstream_transport",
+            failure_error_type=type(e).__name__,
+        )
         raise HTTPException(
             status_code=502,
-            detail=(
-                f"upstream request error against {upstream_url}: "
-                f"{type(e).__name__}: {e}"
-            ),
+            detail=(f"upstream request error against {upstream_url}: {type(e).__name__}: {e}"),
         ) from e
 
     if upstream_response.status_code >= 400:
         excerpt = redact_api_key(upstream_response.text, api_key)
+        await record_facade_failed_call(
+            request=request,
+            ctx=ctx,
+            row=row,
+            dialect=_FACADE_DIALECT,
+            model=payload["model"],
+            request_payload=payload,
+            failure_category=http_failure_category(upstream_response.status_code),
+            failure_status_code=upstream_response.status_code,
+            attempt=outcome.attempt,
+        )
         raise HTTPException(
             status_code=upstream_response.status_code,
-            detail=(
-                f"upstream returned {upstream_response.status_code}: "
-                f"{excerpt}"
-            ),
+            detail=(f"upstream returned {upstream_response.status_code}: {excerpt}"),
         )
 
     try:
@@ -238,15 +270,14 @@ async def anthropic_messages_facade(
 
 
 def _anthropic_upstream_headers(
-    request: Request, api_key: str,
+    request: Request,
+    api_key: str,
 ) -> dict[str, str]:
     # Anthropic uses x-api-key (not Authorization). Matches the existing
     # /v1/messages route's header convention.
     headers = {
         "x-api-key": api_key,
-        "anthropic-version": (
-            request.headers.get("anthropic-version") or _ANTHROPIC_VERSION
-        ),
+        "anthropic-version": (request.headers.get("anthropic-version") or _ANTHROPIC_VERSION),
         "content-type": "application/json",
     }
     accept = request.headers.get("accept")
@@ -280,29 +311,53 @@ async def _stream_anthropic_messages(
     try:
         upstream_response = await stream_cm.__aenter__()
     except httpx.TimeoutException as e:
+        await record_facade_failed_call(
+            request=request,
+            ctx=ctx,
+            row=row,
+            dialect=_FACADE_DIALECT,
+            model=payload["model"],
+            request_payload=payload,
+            failure_category="upstream_timeout",
+            failure_error_type=type(e).__name__,
+        )
         raise HTTPException(
             status_code=504,
             detail=f"upstream timeout against {upstream_url}: {e}",
         ) from e
     except httpx.RequestError as e:
+        await record_facade_failed_call(
+            request=request,
+            ctx=ctx,
+            row=row,
+            dialect=_FACADE_DIALECT,
+            model=payload["model"],
+            request_payload=payload,
+            failure_category="upstream_transport",
+            failure_error_type=type(e).__name__,
+        )
         raise HTTPException(
             status_code=502,
-            detail=(
-                f"upstream request error against {upstream_url}: "
-                f"{type(e).__name__}: {e}"
-            ),
+            detail=(f"upstream request error against {upstream_url}: {type(e).__name__}: {e}"),
         ) from e
 
     if upstream_response.status_code >= 400:
         body = await upstream_response.aread()
         await stream_cm.__aexit__(None, None, None)
         excerpt = redact_api_key(body.decode(errors="replace"), api_key)
+        await record_facade_failed_call(
+            request=request,
+            ctx=ctx,
+            row=row,
+            dialect=_FACADE_DIALECT,
+            model=payload["model"],
+            request_payload=payload,
+            failure_category=http_failure_category(upstream_response.status_code),
+            failure_status_code=upstream_response.status_code,
+        )
         raise HTTPException(
             status_code=upstream_response.status_code,
-            detail=(
-                f"upstream returned {upstream_response.status_code}: "
-                f"{excerpt}"
-            ),
+            detail=(f"upstream returned {upstream_response.status_code}: {excerpt}"),
         )
 
     return StreamingResponse(
@@ -316,7 +371,8 @@ async def _stream_anthropic_messages(
             request_payload=payload,
         ),
         media_type=upstream_response.headers.get(
-            "content-type", "text/event-stream",
+            "content-type",
+            "text/event-stream",
         ),
         status_code=upstream_response.status_code,
     )
@@ -425,8 +481,7 @@ async def _record_anthropic_usage_from_stream(
     usage = DIALECTS["anthropic"].extract_tokens(usage_body)
     if usage.input_tokens == 0 and usage.output_tokens == 0:
         logger.warning(
-            "anthropic facade stream completed without usage block "
-            "trial_id=%s step_id=%s model=%s",
+            "anthropic facade stream completed without usage block trial_id=%s step_id=%s model=%s",
             ctx.trial_id,
             ctx.step_id,
             model,

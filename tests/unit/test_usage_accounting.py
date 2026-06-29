@@ -61,6 +61,28 @@ def test_missing_rate_card_is_price_unknown_not_zero_cost() -> None:
     assert summary["pricing_modes"] == ["price-unknown"]
 
 
+def test_failed_upstream_usage_is_not_priced() -> None:
+    summary = summarize_usage_counts(
+        llm_calls_count=1,
+        total_prompt_tokens=0,
+        total_completion_tokens=0,
+        total_cost_usd=Decimal("0"),
+        priced_llm_calls_count=0,
+        token_only_llm_calls_count=0,
+        price_unknown_llm_calls_count=0,
+        failed_upstream_llm_calls_count=1,
+        missing_usage_llm_calls_count=1,
+    )
+
+    assert summary["estimated_cost_usd"] is None
+    assert summary["cost_currency"] is None
+    assert summary["cost_status"] == "failed_upstream"
+    assert summary["pricing_modes"] == ["failed-upstream"]
+    assert summary["priced_llm_calls_count"] == 0
+    assert summary["failed_upstream_llm_calls_count"] == 1
+    assert summary["usage_reporting_status"] == "missing"
+
+
 def test_mixed_usage_marks_partial_cost_status() -> None:
     summary = summarize_usage_counts(
         llm_calls_count=3,

@@ -154,7 +154,9 @@ def _print_trial_summary(item: dict[str, Any]) -> None:
     if item.get("llm_evidence_status") is not None:
         print(f"llm_evidence:     {item['llm_evidence_status']}")
     if item.get("no_call") is True:
-        print("warning:          invalid benchmark evidence; trial did not reach the gateway/provider.")
+        print(
+            "warning:          invalid benchmark evidence; trial did not reach the gateway/provider."
+        )
     if (
         item.get("total_prompt_tokens") is not None
         or item.get("total_completion_tokens") is not None
@@ -823,9 +825,7 @@ def _artifact_export(args: argparse.Namespace) -> int:
         assert_2xx_response(resp, action="export Run Library artifacts")
 
         default_name = (
-            "run-library-artifacts.json"
-            if args.format == "json"
-            else "run-library-artifacts.jsonl"
+            "run-library-artifacts.json" if args.format == "json" else "run-library-artifacts.jsonl"
         )
         output = Path(args.output) if args.output else Path(default_name)
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -1242,7 +1242,7 @@ def dispatch(argv: list[str]) -> int:
     p_usage.add_argument("--status", default=None)
     p_usage.add_argument(
         "--pricing-mode",
-        choices=["priced", "tokens-only", "price-unknown"],
+        choices=["priced", "tokens-only", "price-unknown", "failed-upstream"],
         default=None,
     )
     p_usage.add_argument(

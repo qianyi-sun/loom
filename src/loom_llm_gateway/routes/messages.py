@@ -31,7 +31,7 @@ from loom.auth import AuthContext, verify_bearer_token
 from loom.models.types import ModelSpec
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.dialect import DIALECTS, TokenUsage
-from loom_llm_gateway.llm_calls import record_call
+from loom_llm_gateway.llm_calls import record_call, record_failed_call
 from loom_llm_gateway.rate_card import (
     compute_cost_usd,
     hash_table,
@@ -39,7 +39,10 @@ from loom_llm_gateway.rate_card import (
 )
 from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.retry import send_with_retry
-from loom_llm_gateway.routes._facade_common import redact_api_key
+from loom_llm_gateway.routes._facade_common import (
+    http_failure_category,
+    redact_api_key,
+)
 
 router = APIRouter()
 
@@ -59,7 +62,9 @@ async def messages(
 
     async with request.app.state.session_factory() as session:
         ctx = await verify_bearer_token(
-            session, authorization, signing_key=signing_key,
+            session,
+            authorization,
+            signing_key=signing_key,
         )
     if ctx is None or "llm:call" not in ctx.scopes:
         raise HTTPException(status_code=401, detail="not authorized")
@@ -91,26 +96,62 @@ async def messages(
 
     # 1. Forward to Anthropic native endpoint.
     upstream: httpx.AsyncClient = request.app.state.upstream_client
-    outcome = await send_with_retry(
-        lambda: upstream.post(
-            f"{ANTHROPIC_BASE_URL}/v1/messages",
-            json=payload,
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            timeout=settings.upstream_timeout_sec,
-        ),
-        settings=settings, dialect="anthropic",
-    )
+    try:
+        outcome = await send_with_retry(
+            lambda: upstream.post(
+                f"{ANTHROPIC_BASE_URL}/v1/messages",
+                json=payload,
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                timeout=settings.upstream_timeout_sec,
+            ),
+            settings=settings,
+            dialect="anthropic",
+        )
+    except httpx.TimeoutException as exc:
+        await _record_failed_message_call(
+            request=request,
+            ctx=ctx,
+            model_name=model_name,
+            request_payload=payload,
+            failure_category="upstream_timeout",
+            failure_error_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=504,
+            detail=f"anthropic upstream timeout: {exc}",
+        ) from exc
+    except httpx.RequestError as exc:
+        await _record_failed_message_call(
+            request=request,
+            ctx=ctx,
+            model_name=model_name,
+            request_payload=payload,
+            failure_category="upstream_transport",
+            failure_error_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"anthropic upstream request error: {type(exc).__name__}: {exc}",
+        ) from exc
     upstream_response = outcome.response
     if upstream_response.status_code >= 400:
         excerpt = redact_api_key(upstream_response.text, api_key)
+        await _record_failed_message_call(
+            request=request,
+            ctx=ctx,
+            model_name=model_name,
+            request_payload=payload,
+            failure_category=http_failure_category(upstream_response.status_code),
+            failure_status_code=upstream_response.status_code,
+            attempt=outcome.attempt,
+        )
         raise HTTPException(
             status_code=upstream_response.status_code,
-            detail=f"anthropic upstream returned {upstream_response.status_code}: "
-                   f"{excerpt}",
+            detail=f"anthropic upstream returned {upstream_response.status_code}: {excerpt}",
         )
     body: dict[str, Any] = upstream_response.json()
 
@@ -122,8 +163,7 @@ async def messages(
     if usage.input_tokens == 0 and usage.output_tokens == 0:
         raise HTTPException(
             status_code=502,
-            detail="anthropic 200 response missing usage block; "
-                   "cost cannot be attributed",
+            detail="anthropic 200 response missing usage block; cost cannot be attributed",
         )
     table = await request.app.state.rate_card_cache.get()
     entry = lookup_entry(table, ModelSpec(provider="anthropic", name=model_name))
@@ -192,14 +232,14 @@ def _parse_sse_blocks(buffer: bytes) -> tuple[list[tuple[str, dict[str, Any]]], 
         sep = buffer.find(b"\n\n")
         if sep < 0:
             break
-        block, buffer = buffer[:sep], buffer[sep + 2:]
+        block, buffer = buffer[:sep], buffer[sep + 2 :]
         event_name: str | None = None
         data_chunks: list[str] = []
         for line in block.split(b"\n"):
             if line.startswith(b"event: "):
-                event_name = line[len(b"event: "):].decode("utf-8", "replace")
+                event_name = line[len(b"event: ") :].decode("utf-8", "replace")
             elif line.startswith(b"data: "):
-                data_chunks.append(line[len(b"data: "):].decode("utf-8", "replace"))
+                data_chunks.append(line[len(b"data: ") :].decode("utf-8", "replace"))
         if event_name is None or not data_chunks:
             continue
         try:
@@ -241,7 +281,34 @@ async def _stream_messages(
         },
         timeout=settings.upstream_timeout_sec,
     )
-    upstream_response = await stream_ctx.__aenter__()
+    try:
+        upstream_response = await stream_ctx.__aenter__()
+    except httpx.TimeoutException as exc:
+        await _record_failed_message_call(
+            request=request,
+            ctx=ctx,
+            model_name=model_name,
+            request_payload=payload,
+            failure_category="upstream_timeout",
+            failure_error_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=504,
+            detail=f"anthropic upstream timeout: {exc}",
+        ) from exc
+    except httpx.RequestError as exc:
+        await _record_failed_message_call(
+            request=request,
+            ctx=ctx,
+            model_name=model_name,
+            request_payload=payload,
+            failure_category="upstream_transport",
+            failure_error_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"anthropic upstream request error: {type(exc).__name__}: {exc}",
+        ) from exc
 
     if upstream_response.status_code >= 400:
         try:
@@ -249,14 +316,22 @@ async def _stream_messages(
         finally:
             await stream_ctx.__aexit__(None, None, None)
         excerpt = redact_api_key(body.decode("utf-8", "replace"), api_key)
+        await _record_failed_message_call(
+            request=request,
+            ctx=ctx,
+            model_name=model_name,
+            request_payload=payload,
+            failure_category=http_failure_category(upstream_response.status_code),
+            failure_status_code=upstream_response.status_code,
+        )
         raise HTTPException(
             status_code=upstream_response.status_code,
-            detail=f"anthropic upstream returned {upstream_response.status_code}: "
-                   f"{excerpt}",
+            detail=f"anthropic upstream returned {upstream_response.status_code}: {excerpt}",
         )
 
     content_type = upstream_response.headers.get(
-        "content-type", "text/event-stream",
+        "content-type",
+        "text/event-stream",
     )
 
     async def event_iter() -> Any:
@@ -336,4 +411,35 @@ async def _record_stream_call(
             rate_card_hash=hash_table(table),
             attempt=1,
             request_params=normalize_request_params(request_payload),
+        )
+
+
+async def _record_failed_message_call(
+    *,
+    request: Request,
+    ctx: AuthContext,
+    model_name: str,
+    request_payload: dict[str, Any],
+    failure_category: str,
+    attempt: int = 1,
+    failure_status_code: int | None = None,
+    failure_error_type: str | None = None,
+) -> None:
+    assert ctx.team_id is not None
+    assert ctx.trial_id is not None
+    assert ctx.step_id is not None
+    async with request.app.state.session_factory() as session:
+        await record_failed_call(
+            session,
+            team_id=ctx.team_id,
+            trial_id=ctx.trial_id,
+            step_id=ctx.step_id,
+            dialect="anthropic",
+            model=model_name,
+            provider="anthropic",
+            attempt=attempt,
+            request_params=normalize_request_params(request_payload),
+            failure_category=failure_category,
+            failure_status_code=failure_status_code,
+            failure_error_type=failure_error_type,
         )

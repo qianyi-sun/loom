@@ -55,6 +55,8 @@ from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
     compute_facade_cost_usd,
     decrypt_facade_api_key,
+    http_failure_category,
+    record_facade_failed_call,
     redact_api_key,
     resolve_facade_connection,
     resolve_provider_connection_id,
@@ -90,7 +92,8 @@ async def openai_chat_facade(
     payload: dict[str, Any],
     authorization: str | None = Header(default=None),
     x_loom_provider_connection_id: str | None = Header(
-        default=None, alias="x-loom-provider-connection-id",
+        default=None,
+        alias="x-loom-provider-connection-id",
     ),
 ) -> dict[str, Any]:
     settings = request.app.state.settings
@@ -100,13 +103,16 @@ async def openai_chat_facade(
     # + step_id + team_id are pulled from the JWT (not the body).
     async with request.app.state.session_factory() as session:
         ctx = await verify_facade_auth(
-            session, authorization, signing_key,
+            session,
+            authorization,
+            signing_key,
         )
     assert ctx.team_id is not None  # narrowed by verify_facade_auth
     assert ctx.trial_id is not None
     assert ctx.step_id is not None
     connection_id = resolve_provider_connection_id(
-        ctx, x_loom_provider_connection_id,
+        ctx,
+        x_loom_provider_connection_id,
     )
 
     # Streaming is rejected (501) for the same reason /v1/messages
@@ -131,7 +137,9 @@ async def openai_chat_facade(
     # SecretStore.get sees the same transaction the lookup did.
     async with request.app.state.session_factory() as session:
         row = await resolve_facade_connection(
-            session, connection_id, ctx.team_id,
+            session,
+            connection_id,
+            ctx.team_id,
             supported_types=_OPENAI_SHAPED_TYPES,
             dialect_label="/openai/v1/chat/completions",
         )
@@ -143,9 +151,7 @@ async def openai_chat_facade(
         "content-type": "application/json",
     }
     # #190 PR-C2: per-connection egress proxy when LOOM_GW_EGRESS_PROXY_URL set.
-    upstream: httpx.AsyncClient = await (
-        request.app.state.egress_client_pool.get(connection_id)
-    )
+    upstream: httpx.AsyncClient = await request.app.state.egress_client_pool.get(connection_id)
     try:
         outcome = await send_with_retry(
             lambda: upstream.post(
@@ -155,31 +161,57 @@ async def openai_chat_facade(
                 timeout=settings.upstream_timeout_sec,
                 follow_redirects=False,
             ),
-            settings=settings, dialect="facade_openai",
+            settings=settings,
+            dialect="facade_openai",
         )
         upstream_response = outcome.response
     except httpx.TimeoutException as e:
+        await record_facade_failed_call(
+            request=request,
+            ctx=ctx,
+            row=row,
+            dialect=_FACADE_DIALECT,
+            model=payload["model"],
+            request_payload=payload,
+            failure_category="upstream_timeout",
+            failure_error_type=type(e).__name__,
+        )
         raise HTTPException(
             status_code=504,
             detail=f"upstream timeout against {upstream_url}: {e}",
         ) from e
     except httpx.RequestError as e:
+        await record_facade_failed_call(
+            request=request,
+            ctx=ctx,
+            row=row,
+            dialect=_FACADE_DIALECT,
+            model=payload["model"],
+            request_payload=payload,
+            failure_category="upstream_transport",
+            failure_error_type=type(e).__name__,
+        )
         raise HTTPException(
             status_code=502,
-            detail=(
-                f"upstream request error against {upstream_url}: "
-                f"{type(e).__name__}: {e}"
-            ),
+            detail=(f"upstream request error against {upstream_url}: {type(e).__name__}: {e}"),
         ) from e
 
     if upstream_response.status_code >= 400:
         excerpt = redact_api_key(upstream_response.text, api_key)
+        await record_facade_failed_call(
+            request=request,
+            ctx=ctx,
+            row=row,
+            dialect=_FACADE_DIALECT,
+            model=payload["model"],
+            request_payload=payload,
+            failure_category=http_failure_category(upstream_response.status_code),
+            failure_status_code=upstream_response.status_code,
+            attempt=outcome.attempt,
+        )
         raise HTTPException(
             status_code=upstream_response.status_code,
-            detail=(
-                f"upstream returned {upstream_response.status_code}: "
-                f"{excerpt}"
-            ),
+            detail=(f"upstream returned {upstream_response.status_code}: {excerpt}"),
         )
 
     try:

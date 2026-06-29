@@ -301,7 +301,8 @@ def _serialize(
                 "team_id": str(b.team_id),
                 "team_name": owner_team.name if owner_team else None,
             }
-            if submitted_by_user is not None else None
+            if submitted_by_user is not None
+            else None
         ),
     }
     if owner_team is not None:
@@ -541,9 +542,7 @@ async def create_batch(
         combinations_jsonb = []
 
     explicit_name = payload.name.strip() if payload.name else ""
-    explicit_description = (
-        payload.description.strip() if payload.description else ""
-    )
+    explicit_description = payload.description.strip() if payload.description else ""
     generated_identity = build_batch_identity(
         task_filter=payload.task_filter,
         trial_config=trial_config,
@@ -701,7 +700,8 @@ async def list_batches(
                 owner_team=teams_by_id.get(r.team_id),
                 submitted_by_user=(
                     users_by_id.get(r.submitted_by_user_id)
-                    if r.submitted_by_user_id is not None else None
+                    if r.submitted_by_user_id is not None
+                    else None
                 ),
             )
             for r in items
@@ -730,8 +730,10 @@ def _empty_usage_projection() -> dict[str, Any]:
 
 
 def _priced_call_filter() -> Any:
-    return ~LlmCall.rate_card_hash.like("facade:tokens-only%") & ~LlmCall.rate_card_hash.like(
-        "facade:rate-card:missing%"
+    return (
+        ~LlmCall.rate_card_hash.like("facade:tokens-only%")
+        & ~LlmCall.rate_card_hash.like("facade:rate-card:missing%")
+        & (LlmCall.rate_card_hash != "failed-upstream")
     )
 
 
@@ -770,6 +772,9 @@ async def _usage_totals_for_trials(
                 )
                 .label("price_unknown_llm_calls_count"),
                 func.count(LlmCall.id)
+                .filter(LlmCall.rate_card_hash == "failed-upstream")
+                .label("failed_upstream_llm_calls_count"),
+                func.count(LlmCall.id)
                 .filter(usage_status_filter("partial"))
                 .label("partial_usage_llm_calls_count"),
                 func.count(LlmCall.id)
@@ -787,6 +792,9 @@ async def _usage_totals_for_trials(
         token_only_llm_calls_count=int(row.token_only_llm_calls_count or 0),
         price_unknown_llm_calls_count=int(
             row.price_unknown_llm_calls_count or 0,
+        ),
+        failed_upstream_llm_calls_count=int(
+            row.failed_upstream_llm_calls_count or 0,
         ),
         partial_usage_llm_calls_count=int(
             row.partial_usage_llm_calls_count or 0,
@@ -852,6 +860,9 @@ async def _usage_by_batch_ids(
                 )
                 .label("price_unknown_llm_calls_count"),
                 func.count(LlmCall.id)
+                .filter(LlmCall.rate_card_hash == "failed-upstream")
+                .label("failed_upstream_llm_calls_count"),
+                func.count(LlmCall.id)
                 .filter(usage_status_filter("partial"))
                 .label("partial_usage_llm_calls_count"),
                 func.count(LlmCall.id)
@@ -875,6 +886,9 @@ async def _usage_by_batch_ids(
             ),
             price_unknown_llm_calls_count=int(
                 row.price_unknown_llm_calls_count or 0,
+            ),
+            failed_upstream_llm_calls_count=int(
+                row.failed_upstream_llm_calls_count or 0,
             ),
             partial_usage_llm_calls_count=int(
                 row.partial_usage_llm_calls_count or 0,
@@ -1162,27 +1176,18 @@ async def get_batch(
         "effective_priced_llm_calls_count": effective_usage["priced_llm_calls_count"],
         "effective_token_only_llm_calls_count": effective_usage["token_only_llm_calls_count"],
         "effective_price_unknown_llm_calls_count": effective_usage["price_unknown_llm_calls_count"],
-        "effective_partial_usage_llm_calls_count": effective_usage[
-            "partial_usage_llm_calls_count"
+        "effective_failed_upstream_llm_calls_count": effective_usage[
+            "failed_upstream_llm_calls_count"
         ],
-        "effective_missing_usage_llm_calls_count": effective_usage[
-            "missing_usage_llm_calls_count"
-        ],
+        "effective_partial_usage_llm_calls_count": effective_usage["partial_usage_llm_calls_count"],
+        "effective_missing_usage_llm_calls_count": effective_usage["missing_usage_llm_calls_count"],
         "effective_usage_reporting_status": effective_usage["usage_reporting_status"],
-        "effective_usage_estimate_confidence": effective_usage[
-            "usage_estimate_confidence"
-        ],
+        "effective_usage_estimate_confidence": effective_usage["usage_estimate_confidence"],
         "no_call_trial_count": llm_evidence["no_call_trial_count"],
         "llm_evidence_status": llm_evidence["llm_evidence_status"],
-        "model_backed_terminal_trial_count": llm_evidence[
-            "model_backed_terminal_trial_count"
-        ],
-        "effective_no_call_trial_count": effective_llm_evidence[
-            "no_call_trial_count"
-        ],
-        "effective_llm_evidence_status": effective_llm_evidence[
-            "llm_evidence_status"
-        ],
+        "model_backed_terminal_trial_count": llm_evidence["model_backed_terminal_trial_count"],
+        "effective_no_call_trial_count": effective_llm_evidence["no_call_trial_count"],
+        "effective_llm_evidence_status": effective_llm_evidence["llm_evidence_status"],
         "effective_model_backed_terminal_trial_count": effective_llm_evidence[
             "model_backed_terminal_trial_count"
         ],

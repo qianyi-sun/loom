@@ -198,9 +198,9 @@ or BYO OpenAI-compatible dispatch because:
 
 | Failure                                | Response                              |
 |----------------------------------------|---------------------------------------|
-| Upstream timeout (>120s)               | 504, `llm_calls` row inserted with `error_kind` |
-| Upstream non-2xx                       | Forwarded or surfaced with a redacted excerpt; `llm_calls` row with `error_kind` where the dialect path records failed calls |
-| LiteLLM adapter exception or malformed upstream response | 502 with sanitized diagnostic text; provider API keys and `Authorization: Bearer` values are redacted before logs or responses |
+| Upstream timeout (>120s)               | 504, failed-attempt `llm_calls` row inserted with zero tokens and `provider_extras._loom_failure_category=upstream_timeout` |
+| Upstream non-2xx                       | Forwarded or surfaced with a redacted excerpt; failed-attempt `llm_calls` row inserted with zero tokens and `provider_extras._loom_failure_category=upstream_http_4xx` or `upstream_http_5xx` |
+| LiteLLM adapter exception or malformed upstream response | 502 with sanitized diagnostic text; failed-attempt `llm_calls` row inserted with `provider_extras._loom_failure_category=upstream_transport`; provider API keys and `Authorization: Bearer` values are redacted before logs or responses |
 | BYO `/responses` endpoint is actually chat-only | One fallback POST to `/chat/completions`; success returns synthetic Responses JSON/SSE and records normal `openai_responses` usage from chat `usage` tokens |
 | Rate-card missing                      | 422 `RateCardNotFoundError`; no row inserted |
 | Bearer invalid / over RPM              | 401 / 429; no upstream call          |
@@ -208,9 +208,17 @@ or BYO OpenAI-compatible dispatch because:
 | Model not in team allowlist            | 403; no upstream call                 |
 
 A failed call still produces an `llm_calls` row when the upstream
-was contacted — necessary so the team is debited for partial work
-and so retries appear in attribution. Pre-upstream failures (auth,
-rate-card, license) leave no row.
+was contacted or the provider client attempted transport. The row
+uses `input_tokens=0`, `output_tokens=0`, `cost_usd=0`, and
+`rate_card_hash=failed-upstream`; `provider_extras` carries
+`_loom_call_status=failed`, `_loom_failure_category`, and optional
+status/error metadata. Failed rows also carry
+`_loom_usage_status=missing` because no successful provider usage block
+was observed. This makes debug evidence distinguish "no request
+attempted" from "request attempted and failed upstream" while keeping
+prompt bodies, messages, headers, bearer tokens, API keys, and
+credentials out of persistence. Pre-upstream failures (auth, rate-card,
+license) leave no row.
 
 ## Persistence schema
 
@@ -221,21 +229,20 @@ rate-card, license) leave no row.
 | `team_id`        | from bearer token                                        |
 | `trial_id`       | from `X-Loom-Trial`                                      |
 | `step_id`        | from `X-Loom-Step`                                       |
-| `provider`       | matches rate-card key (`anthropic`, `local:vllm`, ...)   |
+| `dialect`        | route/dialect label such as `openai_chat`, `openai_responses`, `anthropic`, or `gemini` |
 | `model`          | exact model id the request used                          |
 | `input_tokens`   | from DialectAdapter                                      |
 | `output_tokens`  | from DialectAdapter                                      |
-| `provider_extras`| JSONB — cache + reasoning counters verbatim              |
+| `provider_extras`| JSONB — cache + reasoning counters verbatim on success; `_loom_call_status=failed` plus failure metadata on failed upstream attempts |
 | `request_params` | JSONB — redacted normalized generation controls. NULL means pre-#85 legacy/unavailable data |
 | `cost_usd`       | computed at insert; cached for usage metrics/audits     |
-| `rate_card_id`   | FK to the rate-card row used; re-pricing follows the row |
-| `error_kind`     | non-null when upstream returned a non-2xx                |
+| `rate_card_hash` | rate-card table hash or sentinel such as `failed-upstream` |
+| `attempt`        | gateway-internal attempt number that produced the success or final failed response |
 
-Why both `cost_usd` (frozen) and `rate_card_id` (re-derivable)? The
-column is a fast index for `/api/v1/usage` and Gateway cost metrics;
-trial and batch detail responses expose token totals and call counts
-instead. Re-derive from `provider_extras` + a *different* rate card to
-model what-if pricing without touching history.
+The frozen `cost_usd` column is a fast index for `/api/v1/usage` and
+Gateway cost metrics; trial and batch detail responses expose token
+totals, call counts, request-parameter summaries, and failed-call
+status counts for local debugging.
 
 ## See also
 

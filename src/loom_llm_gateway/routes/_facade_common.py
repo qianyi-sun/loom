@@ -36,12 +36,14 @@ from loom.security.secret_store import (
 )
 from loom_llm_gateway.dialect import TokenUsage
 from loom_llm_gateway.errors import RateCardNotFoundError
+from loom_llm_gateway.llm_calls import record_failed_call
 from loom_llm_gateway.rate_card import (
     RateCardCache,
     compute_cost_usd,
     hash_table,
     lookup_entry,
 )
+from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.yibuapi_pricing import (
     YIBUAPI_RATE_CARD_PROVIDER,
     normalize_yibuapi_model_name,
@@ -343,3 +345,44 @@ def redact_api_key(text: str, api_key: str, *, limit: int = 500) -> str:
         excerpt = excerpt.replace(api_key, "[REDACTED]")
     excerpt = _BEARER_VALUE_RE.sub(r"\1[REDACTED]", excerpt)
     return redact_text(excerpt)
+
+
+def http_failure_category(status_code: int) -> str:
+    if 400 <= status_code < 500:
+        return "upstream_http_4xx"
+    if 500 <= status_code < 600:
+        return "upstream_http_5xx"
+    return "upstream_http_error"
+
+
+async def record_facade_failed_call(
+    *,
+    request: Any,
+    ctx: AuthContext,
+    row: ProviderConnection,
+    dialect: str,
+    model: str,
+    request_payload: dict[str, Any],
+    failure_category: str,
+    attempt: int = 1,
+    failure_status_code: int | None = None,
+    failure_error_type: str | None = None,
+) -> None:
+    assert ctx.team_id is not None
+    assert ctx.trial_id is not None
+    assert ctx.step_id is not None
+    async with request.app.state.session_factory() as audit_session:
+        await record_failed_call(
+            audit_session,
+            team_id=ctx.team_id,
+            trial_id=ctx.trial_id,
+            step_id=ctx.step_id,
+            dialect=dialect,
+            model=model,
+            provider=row.provider_type,
+            attempt=attempt,
+            request_params=normalize_request_params(request_payload),
+            failure_category=failure_category,
+            failure_status_code=failure_status_code,
+            failure_error_type=failure_error_type,
+        )
