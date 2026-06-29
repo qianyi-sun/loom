@@ -22,12 +22,13 @@ import DocsCallout from "../components/DocsCallout";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
-import Pagination, {
+import Pagination from "../components/Pagination";
+import {
   initialPage,
   nextPage,
   prevPage,
   type PageState,
-} from "../components/Pagination";
+} from "../components/paginationState";
 import { cn } from "../lib/cn";
 import { benchmarkCatalogCommands } from "../lib/quickstartSnippets";
 

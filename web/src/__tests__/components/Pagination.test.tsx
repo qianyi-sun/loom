@@ -3,11 +3,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   default as Pagination,
+} from "../../components/Pagination";
+import {
   initialPage,
   nextPage,
   prevPage,
   type PageState,
-} from "../../components/Pagination";
+} from "../../components/paginationState";
 
 describe("Pagination helpers", () => {
   it("initial state has no cursor and empty stack", () => {
