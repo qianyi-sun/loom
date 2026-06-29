@@ -180,10 +180,10 @@ entry needs it on day one.
 |---|---|---|
 | `src/loom_*/config/_generated.py` | Codegen from `service_config`. One Pydantic class per service, with the right fields, types, defaults, and env-var prefixes | yes — preserves mypy typing; CI verifies it matches schema |
 | `src/loom_*/config.py` | Reduced to a re-export of `_generated.ServiceSettings` plus any one-off helpers (e.g., gateway's `LocalProviderConfig` parser stays here) | yes |
-| K8s `*.yaml.j2` env blocks | Templates call a Jinja2 macro that loops over `schema.service_config_for("<service>")` and emits `valueFrom`/`value` blocks. No hand-written env entries | n/a (templates) |
+| K8s `*.yaml.j2` env blocks | Templates call a Jinja2 macro that loops over `schema.service_config_for("<service>")` and emits `valueFrom`/`value` blocks for required, defaulted, and secret-backed entries. A small number of template-local entries are still explicit when the Kubernetes renderer supplies a value that the service treats as optional at runtime, such as admin secret file paths or the worker subprocess gateway URL. | n/a (templates) |
 | `src/loom_cli/cluster_config.py` | Replaced with a generic loader walking `render_config`. Unknown TOML keys raise as today | yes |
 | `config/cluster-config.example.toml` | Generated from `render_config` defaults + descriptions, committed so operators have a copy-paste starting point | yes |
-| `loom cluster doctor` | New CLI. Walks the schema against a target cluster: every required Secret key exists in `loom-secrets`, every declared env var is present in each running pod's env block, no orphan settings. Exit 1 on any violation. Wired into `loom cluster preflight` | new code |
+| `loom cluster doctor` | New CLI. Walks the schema against a target cluster: every required Secret key exists in `loom-secrets`, every rendered env var is present in each running pod's env block, and no orphan settings exist. "Rendered env var" means required, defaulted, secret-backed, or explicitly injected by the Kubernetes template; optional runtime-derived settings can stay unset without producing `missing_env`. Exit 1 on any violation. Wired into `loom cluster preflight` | new code |
 | `loom cluster bootstrap-secrets` | New CLI. Walks `secret` entries, emits one `kubectl create secret generic loom-secrets --from-literal=...` line. `--rotate` runs each entry's `generate:` command and substitutes the new value | new code |
 
 ## Codegen rules (`_generated.py`)

@@ -8,9 +8,11 @@ end-to-end CLI tests pin the dispatch + format paths.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml  # type: ignore[import-untyped]
 
 from loom_cli.__main__ import main
 from loom_cli.cluster_cmd import (
@@ -24,7 +26,10 @@ from loom_cli.cluster_cmd import (
     _format_preflight_json,
     _format_preflight_table,
     collect_preflight,
+    render_manifests,
 )
+from loom_cli.cluster_config import ClusterConfig
+from loom_config.loader import load_schema
 
 
 class _FakeApiException(Exception):  # noqa: N818
@@ -50,10 +55,18 @@ class _FakeCoreV1:
         self, *, namespace_present: bool = True,
         namespace_labels: dict[str, str] | None = None,
         secrets: set[str] | None = None,
+        secret_data: dict[str, str] | None = None,
+        pod_envs: dict[str, set[str]] | None = None,
     ) -> None:
         self.namespace_present = namespace_present
         self.namespace_labels = namespace_labels or {}
         self.secrets = secrets or set()
+        self.secret_data = (
+            _all_schema_secret_data()
+            if secret_data is None and "loom-secrets" in self.secrets
+            else secret_data or {}
+        )
+        self.pod_envs = pod_envs or {}
 
     def read_namespace(self, *, name: str) -> Any:
         if not self.namespace_present:
@@ -63,7 +76,19 @@ class _FakeCoreV1:
     def read_namespaced_secret(self, *, name: str, namespace: str) -> Any:
         if name not in self.secrets:
             raise _FakeApiException(404)
-        return _Spec(metadata=_Spec(name=name))
+        return _Spec(metadata=_Spec(name=name), data=self.secret_data)
+
+    def list_namespaced_pod(self, *, namespace: str) -> Any:
+        pods = []
+        for pod_name, env_names in self.pod_envs.items():
+            env = [_Spec(name=name) for name in env_names]
+            pods.append(
+                _Spec(
+                    metadata=_Spec(name=pod_name),
+                    spec=_Spec(containers=[_Spec(env=env)]),
+                ),
+            )
+        return _Spec(items=pods)
 
 
 class _FakeNetworkingV1:
@@ -75,13 +100,16 @@ class _FakeNetworkingV1:
         return _Spec(items=items)
 
 
+_StorageClassSpec = tuple[str, bool] | tuple[str, bool, str, str]
+
+
 class _FakeStorageV1:
     """Stub for the storage check. `classes` is a list of (name,
     is_default) tuples, or (name, is_default, provisioner, reclaim_policy)
     tuples; the fake builds the right annotation shape."""
 
     def __init__(
-        self, classes: list[tuple[str, bool]] | None = None,
+        self, classes: list[_StorageClassSpec] | None = None,
     ) -> None:
         self.classes = classes or []
 
@@ -210,7 +238,7 @@ def test_collect_preflight_flags_public_beta_local_path_delete_storage() -> None
 
 
 def test_collect_preflight_passes_protected_storage_with_recent_manifest(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     from datetime import UTC, datetime
 
@@ -406,7 +434,10 @@ def test_format_json_is_stable_and_parseable() -> None:
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _patch_clients(monkeypatch, *, core, net, storage, apps=None) -> None:
+def _patch_clients(
+    monkeypatch: pytest.MonkeyPatch, *, core: Any, net: Any, storage: Any,
+    apps: Any | None = None,
+) -> None:
     """Helper: wire fake clients into the CLI's lazy loader. `apps`
     is unused by preflight but must be present so the 4-tuple
     destructure works."""
@@ -414,6 +445,30 @@ def _patch_clients(monkeypatch, *, core, net, storage, apps=None) -> None:
         "loom_cli.cluster_cmd._load_clients",
         lambda _ctx: (apps or object(), net, core, storage),
     )
+
+
+def _rendered_deployment_env_names(deployment_name: str) -> set[str]:
+    docs = list(yaml.safe_load_all(render_manifests(ClusterConfig())))
+    deployment = next(
+        doc
+        for doc in docs
+        if doc
+        and doc.get("kind") == "Deployment"
+        and doc.get("metadata", {}).get("name") == deployment_name
+    )
+    env = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+    return {entry["name"] for entry in env}
+
+
+def _all_schema_secret_data() -> dict[str, str]:
+    schema = load_schema(Path("config/loom-schema.toml"))
+    secret_keys = set(schema.infra_secrets)
+    for entry in schema.service_config.values():
+        if entry.secret is None:
+            continue
+        for svc in entry.used_by:
+            secret_keys.add(entry.secret_key_for(svc))
+    return {key: "AAA=" for key in secret_keys}
 
 
 def test_cli_preflight_all_pass_returns_0(
@@ -431,6 +486,45 @@ def test_cli_preflight_all_pass_returns_0(
     out = capsys.readouterr().out
     assert "namespace-exists" in out
     assert "pass" in out
+
+
+def test_cli_preflight_schema_doctor_accepts_default_rendered_worker_env(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Default k8s render omits optional worker env that the worker can
+    derive at runtime, but schema-doctor should still accept the rendered
+    pod shape and keep checking env that templates explicitly inject.
+    """
+    worker_env = _rendered_deployment_env_names("loom-worker")
+    assert "LOOM_WORKER_SUBPROCESS_GATEWAY_URL" in worker_env
+    for optional_env in (
+        "LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS",
+        "LOOM_WORKER_HOSTNAME",
+        "LOOM_WORKER_BLOCKING_IO_MAX_WORKERS",
+        "LOOM_WORKER_FIXTURES_ROOT",
+        "LOOM_WORKER_BENCHMARK_CACHE",
+    ):
+        assert optional_env not in worker_env
+
+    _patch_clients(
+        monkeypatch,
+        core=_FakeCoreV1(
+            secrets={"loom-secrets", "loom-admin-secret"},
+            secret_data=_all_schema_secret_data(),
+            pod_envs={"loom-worker-abc": worker_env},
+        ),
+        net=_FakeNetworkingV1(["nginx"]),
+        storage=_FakeStorageV1([("standard", True)]),
+    )
+
+    rc = main(["cluster", "preflight"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "schema-doctor" in out
+    assert "schema reconciliation clean" in out
+    assert "LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS" not in out
 
 
 def test_cli_preflight_any_fail_returns_1(

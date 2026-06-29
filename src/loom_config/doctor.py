@@ -5,7 +5,17 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from loom_config.loader import Schema
+from loom_config.loader import Schema, ServiceConfigEntry
+
+_K8S_TEMPLATE_ENV_ENTRIES: Mapping[str, frozenset[str]] = {
+    # These schema entries are optional from the service Settings point of
+    # view, but the default Kubernetes templates inject concrete values for
+    # them. Doctor should still flag drift if they disappear from live pods.
+    "control-plane": frozenset({"admin_secret_file"}),
+    "llm-gateway": frozenset({"admin_secret_file"}),
+    "loom-service": frozenset({"admin_secret_file"}),
+    "worker": frozenset({"subprocess_gateway_url"}),
+}
 
 
 @dataclass(frozen=True)
@@ -58,7 +68,7 @@ def reconcile(schema: Schema, core_v1_api: Any, namespace: str) -> DoctorReport:
         pod_svc = _service_from_pod_name(pod.metadata.name, schema.service_prefix)
         if pod_svc is None:
             continue
-        expected = {e.env_var_for(pod_svc) for e in schema.service_config_for(pod_svc)}
+        expected = _expected_env_vars_for_service(schema, pod_svc)
         for c in pod.spec.containers:
             present = {e.name for e in (c.env or [])}
             for missing in expected - present:
@@ -86,6 +96,25 @@ def reconcile(schema: Schema, core_v1_api: Any, namespace: str) -> DoctorReport:
         ))
 
     return DoctorReport(violations=violations)
+
+
+def _expected_env_vars_for_service(schema: Schema, service: str) -> set[str]:
+    """Env vars the default Kubernetes render should put in a service pod."""
+    template_entries = _K8S_TEMPLATE_ENV_ENTRIES.get(service, frozenset())
+    return {
+        entry.env_var_for(service)
+        for entry in schema.service_config_for(service)
+        if _entry_emits_env_by_default(entry) or entry.name in template_entries
+    }
+
+
+def _entry_emits_env_by_default(entry: ServiceConfigEntry) -> bool:
+    return (
+        entry.secret is not None
+        or entry.required
+        or entry.default is not None
+        or entry.default_per_service is not None
+    )
 
 
 def _service_from_pod_name(name: str | None, prefix: Mapping[str, str]) -> str | None:
