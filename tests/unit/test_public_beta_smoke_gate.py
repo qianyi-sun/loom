@@ -4,6 +4,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+from botocore.exceptions import ClientError
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "public_beta_smoke_gate.py"
 
@@ -18,6 +20,25 @@ def _load_gate_module():
     return module
 
 
+def _empty_catalog_client(gate):
+    class FakeClient:
+        def __init__(self, server_url: str, *, max_scan_bytes: int) -> None:
+            self.server_url = server_url
+            self.evidence_chunks: list[str] = []
+            self.response_bytes_scanned = 0
+
+        def request(self, method: str, path: str, **kwargs):
+            if path == "/api/v1/models":
+                body = b'{"items":[{"provider":"openai","name":"gpt-4o-mini"}]}'
+            elif path == "/api/v1/benchmarks":
+                body = b'{"items":[]}'
+            else:
+                body = b'{"items":[]}'
+            return gate.HttpResponse(status_code=200, headers={}, body=body)
+
+    return FakeClient
+
+
 def test_gate_declares_required_public_beta_checks() -> None:
     gate = _load_gate_module()
 
@@ -30,6 +51,7 @@ def test_gate_declares_required_public_beta_checks() -> None:
         "providers.models",
         "benchmarks.runnable_catalog",
         "benchmarks.ready_bundle_objects",
+        "object_store.minio_write_probe",
         "runs.batch_detail",
         "runs.trial_detail",
         "artifacts.owner_atif_download",
@@ -238,3 +260,134 @@ def test_run_smoke_fails_when_ready_task_bundle_prefix_is_missing(monkeypatch) -
     assert result.status == "fail"
     assert "humaneval/HumanEval/0" in result.detail
     assert "missing" in result.detail.lower()
+
+
+def test_run_smoke_fails_when_minio_write_probe_hits_storage_full(monkeypatch) -> None:
+    gate = _load_gate_module()
+
+    class StorageFullS3:
+        def put_object(self, **_kwargs: object) -> None:
+            raise ClientError(
+                {
+                    "Error": {
+                        "Code": "XMinioStorageFull",
+                        "Message": "Storage backend reached minimum free drive threshold",
+                    },
+                },
+                "PutObject",
+            )
+
+    monkeypatch.setattr(gate, "SmokeClient", _empty_catalog_client(gate))
+    monkeypatch.setattr(gate.boto3, "client", lambda *_args, **_kwargs: StorageFullS3())
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+        "--catalog-minio-endpoint",
+        "http://minio:9000",
+        "--catalog-minio-access-key",
+        "access",
+        "--catalog-minio-secret-key",
+        "secret",
+        "--object-store-write-check",
+    ])
+
+    report = gate.run_smoke(args)
+    result = next(r for r in report.results if r.check_id == "object_store.minio_write_probe")
+
+    assert result.status == "fail"
+    assert "XMinioStorageFull" in result.detail
+    assert "free" in result.remediation.lower()
+
+
+def test_run_smoke_minio_write_probe_deletes_probe_object(monkeypatch) -> None:
+    gate = _load_gate_module()
+    s3 = _RecordingS3()
+
+    monkeypatch.setattr(gate, "SmokeClient", _empty_catalog_client(gate))
+    monkeypatch.setattr(gate.boto3, "client", lambda *_args, **_kwargs: s3)
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+        "--catalog-minio-endpoint",
+        "http://minio:9000",
+        "--catalog-minio-access-key",
+        "access",
+        "--catalog-minio-secret-key",
+        "secret",
+        "--object-store-write-check",
+    ])
+
+    report = gate.run_smoke(args)
+    result = next(r for r in report.results if r.check_id == "object_store.minio_write_probe")
+
+    assert result.status == "pass"
+    assert "trajectories" in result.detail
+    assert s3.objects == {}
+
+
+def test_run_smoke_skips_minio_write_probe_without_explicit_opt_in(monkeypatch) -> None:
+    gate = _load_gate_module()
+
+    class ExplodingS3:
+        def put_object(self, **_kwargs: object) -> None:
+            raise AssertionError("write probe should not run without opt-in")
+
+    monkeypatch.setattr(gate, "SmokeClient", _empty_catalog_client(gate))
+    monkeypatch.setattr(gate.boto3, "client", lambda *_args, **_kwargs: ExplodingS3())
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+        "--catalog-minio-endpoint",
+        "http://minio:9000",
+        "--catalog-minio-access-key",
+        "access",
+        "--catalog-minio-secret-key",
+        "secret",
+    ])
+
+    report = gate.run_smoke(args)
+    result = next(r for r in report.results if r.check_id == "object_store.minio_write_probe")
+
+    assert result.status == "skip"
+    assert "--object-store-write-check" in result.detail
+
+
+def test_run_smoke_can_run_only_minio_write_probe(monkeypatch) -> None:
+    gate = _load_gate_module()
+    s3 = _RecordingS3()
+
+    monkeypatch.setattr(gate, "SmokeClient", _empty_catalog_client(gate))
+    monkeypatch.setattr(gate.boto3, "client", lambda *_args, **_kwargs: s3)
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+        "--catalog-minio-endpoint",
+        "http://minio:9000",
+        "--catalog-minio-access-key",
+        "access",
+        "--catalog-minio-secret-key",
+        "secret",
+        "--object-store-write-check-only",
+    ])
+
+    report = gate.run_smoke(args)
+
+    assert [r.check_id for r in report.results] == ["object_store.minio_write_probe"]
+    assert report.results[0].status == "pass"
+    assert "trajectories/_ops/public-beta-smoke/probe-" in report.results[0].detail
+    assert s3.objects == {}
+
+
+class _RecordingS3:
+    def __init__(self) -> None:
+        self.objects: dict[tuple[str, str], bytes] = {}
+
+    def put_object(self, *, Bucket: str, Key: str, Body: bytes) -> None:  # noqa: N803
+        self.objects[(Bucket, Key)] = Body
+
+    def delete_object(self, *, Bucket: str, Key: str) -> None:  # noqa: N803
+        del self.objects[(Bucket, Key)]
