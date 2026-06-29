@@ -544,7 +544,16 @@ sidecars do not fail at docker-py's default read timeout. It also passes
 `LOOM_WORKER_MINIO_READ_TIMEOUT_SEC`,
 `LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC`, and
 `LOOM_WORKER_MINIO_OPERATION_ATTEMPTS` into the worker object store used for
-task materialization, artifacts, and trajectory upload.
+task materialization, artifacts, and trajectory upload. Pre-start task bundle
+materialization is also bounded by
+`LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC` (default 300 seconds); when it
+expires, the worker writes a redacted setup failure back to the control plane
+instead of leaving the trial indefinitely `claimed`.
+
+Private or gated `hf://` benchmark sources use the standard `HF_TOKEN`
+environment variable read by `huggingface_hub`. The default k8s render wires
+`HF_TOKEN` from the optional `loom-secrets/huggingface-api-key` key, so public
+deployments without gated HF sources continue to boot without that key.
 
 Use the CPU/memory formula as an upper-bound planning heuristic, not as
 the default:

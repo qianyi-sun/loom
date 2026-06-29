@@ -35,7 +35,6 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
-from pydantic import ValidationError
 
 from loom.agent.base import AgentRuntime
 from loom.agent.gateway_client import LLMGatewayClient
@@ -48,6 +47,7 @@ from loom.models.result import FailureReason
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
+from loom.security.redaction import redact_text
 from loom.trajectory.cp_event_sink import CpEventSink
 from loom.trajectory.storage import MinioObjectStore, ObjectStore
 from loom.verifier.base import Verifier
@@ -68,10 +68,9 @@ from loom_worker.sandbox_singleton import (
     SingletonStartupError,
 )
 from loom_worker.signal_handler import ShutdownState, install_signal_handlers
-from loom_worker.task_image import TaskImageBuildError, resolve_task_image
+from loom_worker.task_image import resolve_task_image
 from loom_worker.task_sidecars import DockerTaskSidecarRuntime
 from loom_worker.trial_cache import (
-    TrialCacheError,
     evict_stale_cache,
     resolve_trial_image,
 )
@@ -573,6 +572,7 @@ async def _spawn_trial(
                 trial_id=trial_id,
                 fixtures_root=settings.fixtures_root,
                 benchmark_cache=settings.benchmark_cache,
+                timeout_sec=settings.task_materialize_timeout_sec,
             )
             task_image = await resolve_task_image(
                 task_config=task_config,
@@ -592,14 +592,7 @@ async def _spawn_trial(
                 cp_client=cp_client,
                 worker_id=worker_id,
             )
-        except (
-            httpx.HTTPError,
-            ValidationError,
-            OSError,
-            ValueError,
-            TaskImageBuildError,
-            TrialCacheError,
-        ) as exc:
+        except Exception as exc:
             if task_dir is not None:
                 shutil.rmtree(task_dir, ignore_errors=True)
             await _mark_setup_failed(
@@ -787,11 +780,12 @@ async def _mark_setup_failed(
     worker_id: UUID,
     detail: str,
 ) -> None:
+    safe_detail = redact_text(detail, limit=1000).strip()
     logger.warning(
         "trial_setup_failed trial_id=%s worker_id=%s detail=%s",
         trial_id,
         worker_id,
-        detail,
+        safe_detail,
     )
     try:
         ok = await cp_client.patch_state(
@@ -799,7 +793,7 @@ async def _mark_setup_failed(
             worker_id=worker_id,
             state="failed",
             failure_reason=FailureReason.INTERNAL_ERROR.value,
-            failure_message=detail,
+            failure_message=safe_detail,
         )
     except Exception:
         logger.exception(
@@ -822,6 +816,7 @@ async def _materialize_task_dir(
     trial_id: UUID,
     fixtures_root: Path | None = None,
     benchmark_cache: Path | None = None,
+    timeout_sec: float | None = None,
 ) -> Path:
     """Create a fresh tempdir and populate it from `bundle["source"]`.
 
@@ -835,12 +830,38 @@ async def _materialize_task_dir(
         fixtures_root=fixtures_root,
         benchmark_cache=benchmark_cache,
     )
-    return await dispatch_materialize(
-        source=bundle.get("source"),
-        task_dir=task_dir,
-        trial_id=trial_id,
-        materializers=materializers,
-    )
+    source = bundle.get("source")
+    if timeout_sec is not None and timeout_sec <= 0:
+        raise ValueError("task_materialize_timeout_sec must be > 0")
+    try:
+        if timeout_sec is None:
+            return await dispatch_materialize(
+                source=source,
+                task_dir=task_dir,
+                trial_id=trial_id,
+                materializers=materializers,
+            )
+        async with asyncio.timeout(timeout_sec):
+            return await dispatch_materialize(
+                source=source,
+                task_dir=task_dir,
+                trial_id=trial_id,
+                materializers=materializers,
+            )
+    except TimeoutError as exc:
+        raise TimeoutError(
+            f"task materialization timed out after {timeout_sec:g}s "
+            f"(source_scheme={_source_scheme_for_diagnostic(source)})",
+        ) from exc
+
+
+def _source_scheme_for_diagnostic(source: object) -> str:
+    if not isinstance(source, str) or not source:
+        return "none"
+    scheme, sep, _rest = source.partition(":")
+    if not sep or not scheme:
+        return "unknown"
+    return scheme
 
 
 def _default_agent_factory(

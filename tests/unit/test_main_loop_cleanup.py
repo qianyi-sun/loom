@@ -127,6 +127,7 @@ class _FakeSettings:
     gateway_url = "http://gw:9100"
     fixtures_root = None  # disables the fixture:// resolver path
     benchmark_cache = None  # use HF's default cache
+    task_materialize_timeout_sec = 300.0
     # Phase D: required even when isolation is off because the worker
     # reads it to construct the LocalTrialRunner.
     sandbox_step_jwt_ttl_sec = 600
@@ -538,6 +539,102 @@ async def test_setup_failure_inside_pool_marks_claimed_trial_failed() -> None:
             "failure_message": "500 task bundle unavailable",
         }
     ]
+
+
+async def test_materialize_timeout_marks_claimed_trial_failed() -> None:
+    from loom_worker.vllm_registry import WorkerVLLMRegistry
+
+    class _HangingMaterializer:
+        def matches(self, source: str | None) -> bool:
+            return source == "hf://PRHW/private@rev/task-1"
+
+        async def materialize(
+            self, *, source: str, task_dir: Path, trial_id,  # type: ignore[no-untyped-def]
+        ) -> Path:
+            await asyncio.Event().wait()
+            return task_dir
+
+    settings = _FakeSettings()
+    settings.task_materialize_timeout_sec = 0.01
+    cp = _FakeCPClient()
+    cp.bundle["source"] = "hf://PRHW/private@rev/task-1"
+    pool = RunnerPool(max_concurrent=1)
+    trial_id = uuid4()
+    worker_id = uuid4()
+
+    with patch.object(ml, "build_default_materializers") as build_materializers:
+        build_materializers.return_value = (_HangingMaterializer(),)
+        await ml._spawn_trial(
+            pool=pool,
+            settings=settings,  # type: ignore[arg-type]
+            cp_client=cp,  # type: ignore[arg-type]
+            gateway_client=None,  # type: ignore[arg-type]
+            object_store=None,  # type: ignore[arg-type]
+            worker_id=worker_id,
+            payload={
+                "trial_id": str(trial_id),
+                "team_id": str(uuid4()),
+                "task_id": "skilllearnbench/private-task",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
+            vllm_registry=WorkerVLLMRegistry(enabled=False),
+        )
+        try:
+            await pool.wait_all(timeout=1.0)
+            assert pool.in_flight == 0
+        finally:
+            pool.cancel_all()
+            await pool.wait_all(timeout=1.0)
+
+    assert len(cp.patch_calls) == 1
+    patch_call = cp.patch_calls[0]
+    assert patch_call["trial_id"] == trial_id
+    assert patch_call["worker_id"] == worker_id
+    assert patch_call["state"] == "failed"
+    assert patch_call["failure_reason"] == FailureReason.INTERNAL_ERROR.value
+    failure_message = str(patch_call["failure_message"])
+    assert "task materialization timed out after 0.01s" in failure_message
+    assert "source_scheme=hf" in failure_message
+    assert "PRHW/private" not in failure_message
+
+
+async def test_setup_failure_redacts_secret_detail_before_state_patch() -> None:
+    from loom_worker.vllm_registry import WorkerVLLMRegistry
+
+    async def fail_materialize(**_kwargs: object) -> Path:
+        raise RuntimeError(
+            "hf auth failed with Authorization: Bearer "
+            "hf_abcdefghijklmnopqrstuvwxyz1234567890"
+        )
+
+    settings = _FakeSettings()
+    cp = _FakeCPClient()
+    pool = RunnerPool(max_concurrent=1)
+    trial_id = uuid4()
+    worker_id = uuid4()
+
+    with patch.object(ml, "_materialize_task_dir", fail_materialize):
+        await ml._spawn_trial(
+            pool=pool,
+            settings=settings,  # type: ignore[arg-type]
+            cp_client=cp,  # type: ignore[arg-type]
+            gateway_client=None,  # type: ignore[arg-type]
+            object_store=None,  # type: ignore[arg-type]
+            worker_id=worker_id,
+            payload={
+                "trial_id": str(trial_id),
+                "team_id": str(uuid4()),
+                "task_id": "skilllearnbench/private-task",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
+            vllm_registry=WorkerVLLMRegistry(enabled=False),
+        )
+        await pool.wait_all(timeout=2.0)
+
+    assert len(cp.patch_calls) == 1
+    failure_message = str(cp.patch_calls[0]["failure_message"])
+    assert "hf_abcdefghijklmnopqrstuvwxyz1234567890" not in failure_message
+    assert "Bearer [REDACTED:bearer]" in failure_message
 
 
 async def test_runtime_bucket_bootstrap_creates_required_runtime_buckets() -> None:

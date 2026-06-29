@@ -14,6 +14,7 @@ def test_redact_text_covers_public_beta_secret_shapes() -> None:
         "Cookie: loom_session=loom_session_secret123; loom_csrf=loom_csrf_abc "
         "invite=loom_invite_invitationsecret "
         "provider=sk-live-super-secret "
+        "hf=hf_abcdefghijklmnopqrstuvwxyz1234567890 "
         "signed=https://minio.internal:9000/artifacts/team/trial/out.txt?"
         "X-Amz-Signature=abcdef&X-Amz-Credential=minio%2F20260622 "
         "ref=loom://provider-connection/123e4567-e89b-12d3-a456-426614174000 "
@@ -28,6 +29,7 @@ def test_redact_text_covers_public_beta_secret_shapes() -> None:
         "loom_csrf_abc",
         "loom_invite_invitationsecret",
         "sk-live-super-secret",
+        "hf_abcdefghijklmnopqrstuvwxyz1234567890",
         "X-Amz-Signature=abcdef",
         "X-Amz-Credential=minio%2F20260622",
         "loom://provider-connection/123e4567-e89b-12d3-a456-426614174000",

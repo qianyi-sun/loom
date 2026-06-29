@@ -18,6 +18,7 @@ _LOOM_WORKER_ENVS = [
     "LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC",
     "LOOM_WORKER_MINIO_OPERATION_ATTEMPTS",
     "LOOM_WORKER_DOCKER_API_TIMEOUT_SEC",
+    "LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC",
     "LOOM_WORKER_MAX_CONCURRENT",
     "LOOM_WORKER_POOL_NAME",
     "LOOM_WORKER_BLOCKING_IO_MAX_WORKERS",
@@ -25,6 +26,8 @@ _LOOM_WORKER_ENVS = [
     "LOOM_WORKER_TRAJECTORY_CACHE_DIR",
     "LOOM_WORKER_SUBPROCESS_GATEWAY_URL",
     "LOOM_WORKER_HOSTNAME",
+    "LOOM_WORKER_HUGGINGFACE_API_KEY",
+    "HF_TOKEN",
 ]
 
 
@@ -52,6 +55,7 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     monkeypatch.setenv("LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC", "600")
     monkeypatch.setenv("LOOM_WORKER_MINIO_OPERATION_ATTEMPTS", "4")
     monkeypatch.setenv("LOOM_WORKER_DOCKER_API_TIMEOUT_SEC", "900")
+    monkeypatch.setenv("LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC", "12.5")
     monkeypatch.setenv("LOOM_WORKER_MAX_CONCURRENT", "10")
     monkeypatch.setenv("LOOM_WORKER_POOL_NAME", "gb10-arm64")
     monkeypatch.setenv("LOOM_WORKER_BLOCKING_IO_MAX_WORKERS", "40")
@@ -71,6 +75,7 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     assert s.minio_operation_timeout_sec == 600
     assert s.minio_operation_attempts == 4
     assert s.docker_api_timeout_sec == 900
+    assert s.task_materialize_timeout_sec == 12.5
     assert s.blocking_io_max_workers == 40
     assert s.idle_exit_after_seconds == 300
     assert s.drain_timeout_sec == 600
@@ -108,3 +113,23 @@ def test_token_is_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     s = WorkerSettings(_env_file=None)
     assert "supersecret" not in repr(s)
     assert s.token.get_secret_value() == "supersecret"
+
+
+def test_hf_token_override_is_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The worker exposes the standard HF_TOKEN env for
+    huggingface_hub while still treating it as a SecretStr in settings.
+    """
+    hf_token = "hf_abcdefghijklmnopqrstuvwxyz1234567890"
+    monkeypatch.setenv("LOOM_WORKER_CONTROL_PLANE_URL", "http://cp:8080")
+    monkeypatch.setenv("LOOM_WORKER_GATEWAY_URL", "http://gw:9100")
+    monkeypatch.setenv("LOOM_WORKER_TOKEN", "loom_w_test")
+    monkeypatch.setenv("LOOM_WORKER_MINIO_ENDPOINT", "http://m:9000")
+    monkeypatch.setenv("LOOM_WORKER_MINIO_ACCESS_KEY", "x")
+    monkeypatch.setenv("LOOM_WORKER_MINIO_SECRET_KEY", "y")
+    monkeypatch.setenv("HF_TOKEN", hf_token)
+
+    s = WorkerSettings(_env_file=None)
+
+    assert s.huggingface_api_key is not None
+    assert s.huggingface_api_key.get_secret_value() == hf_token
+    assert hf_token not in repr(s)

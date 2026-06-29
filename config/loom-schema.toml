@@ -304,9 +304,11 @@ python_type = "SecretStr"
 secret      = { key = "together-api-key" }
 
 [service_config.huggingface_api_key]
-used_by     = ["llm-gateway"]
-python_type = "SecretStr"
-secret      = { key = "huggingface-api-key" }
+used_by      = ["llm-gateway", "worker"]
+python_type  = "SecretStr"
+secret       = { key = "huggingface-api-key" }
+env_override = { worker = "HF_TOKEN" }
+description  = "Optional Hugging Face read token. Gateway uses it for HF model endpoints; worker exposes it as HF_TOKEN for private/gated hf:// benchmark materialization."
 
 [service_config.rate_card_cache_ttl_sec]
 used_by     = ["llm-gateway"]
@@ -587,6 +589,12 @@ python_type = "Path"
 used_by     = ["worker"]
 python_type = "Path"
 # no default → `Path | None = None`
+
+[service_config.task_materialize_timeout_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 300.0
+description = "Wall-clock timeout for pre-start task bundle materialization, including hf://, fixture://, and s3:// sources. Exceeding it fails the claimed trial through setup failure writeback instead of leaving it stuck claimed."
 
 [service_config.enable_worker_vllm]
 used_by     = ["worker"]

@@ -55,6 +55,10 @@ def test_remote_worker_compose_uses_operator_supplied_endpoints() -> None:
     assert env["LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC"] == (
         "${LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC:-300}"
     )
+    assert env["LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC"] == (
+        "${LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC:-300}"
+    )
+    assert env["HF_TOKEN"] is None
     assert env["LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS"] == (
         "${LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS:-}"
     )

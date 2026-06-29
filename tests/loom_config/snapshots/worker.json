@@ -59,6 +59,11 @@
     "default": "None",
     "required": false
   },
+  "huggingface_api_key": {
+    "annotation": "pydantic.types.SecretStr | None",
+    "default": "None",
+    "required": false
+  },
   "idle_exit_after_seconds": {
     "annotation": "float | None",
     "default": "None",
@@ -124,6 +129,11 @@
     "default": "PydanticUndefined",
     "required": true
   },
+  "pool_name": {
+    "annotation": "<class 'str'>",
+    "default": "'default'",
+    "required": false
+  },
   "sandbox_isolation": {
     "annotation": "<class 'bool'>",
     "default": "False",
@@ -162,6 +172,11 @@
   "task_image_build_max_files": {
     "annotation": "<class 'int'>",
     "default": "2000",
+    "required": false
+  },
+  "task_materialize_timeout_sec": {
+    "annotation": "<class 'float'>",
+    "default": "300.0",
     "required": false
   },
   "token": {
