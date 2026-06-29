@@ -235,7 +235,7 @@ remote service surface is described in
 
 ## Shipped adapters
 
-### `packages/loom-benchmarks/` — 21 adapters across 10 series
+### `packages/loom-benchmarks/` — 19 adapter files / 23 catalog entries across 10 series
 
 Source of truth: `packages/loom-benchmarks/loom_benchmarks/benchmarks.json`.
 Use `loom datasets list` to enumerate at runtime.
@@ -248,7 +248,7 @@ Use `loom datasets list` to enumerate at runtime.
 | `tool-use` | bfcl, tau2-bench |
 | `browsing` | browsecomp |
 | `knowledge` | mmlu-pro |
-| `reasoning` | gpqa, math-500, hendrycks-math |
+| `reasoning` | gpqa, gpqa-diamond, math-500, hendrycks-math |
 | `ui-agent` | osworld, webarena |
 | `research-agent` | gaia |
 | `skill` | skillflow, skilllearnbench |
@@ -305,6 +305,32 @@ into a structured verifier result. When upstream folder names contain spaces or
 shell-significant characters, the adapter derives a sanitized instance id from
 the relative bundle path while preserving the original files inside the task
 bundle.
+
+SkillLearnBench Dockerfiles `COPY skills /root/.<agent>/skills`, but
+`skills/` lives at the upstream repo root — not in any per-task
+bundle — under `skills/<method>/<family>/<skill-name>/`. The chosen
+method (the "system under test" from SkillLearnBench's perspective)
+is what the agent reads at runtime, and the SLB score reflects skill
+quality. The adapter materializes the selected method's per-family
+bundle into each converted task's `skills/` directory before checksum,
+overlaying the empty `.keep` placeholder. `skill_method` is sourced
+from the catalog entry's `params.skill_method` (default
+`human_authored`); adding additional methods is purely a catalog
+operation — sibling rows that share the same upstream + different
+slug + different `params.skill_method` value, with no adapter code
+change.
+
+The SkillLearnBench adapter also emits an `oracle_eligible=true|false`
+per-instance tag, derived from `solution/solve.sh` presence in the
+upstream bundle plus two additional filters: a hardcoded ignore-list
+of upstream instances whose `solve.sh` is broken or non-deterministic,
+and a docker-compose external-env check (e.g. `GH_TOKEN`) for tasks
+that need credentials the platform doesn't supply to oracle runs.
+Today's slate is 58 oracle_eligible=true / 42 false. The tag is
+consumed by the batch-create preflight in `loom_service.task_compat`
+(`task_provides_capability`); operators select with
+`tag_filters={"oracle_eligible": ["true"]}` when assembling oracle
+batches.
 
 For #49 dual-architecture dispatch, portable benchmark compatibility must be
 declared explicitly. The SkillLearnBench `human_authored` catalog row carries

@@ -32,7 +32,8 @@ class AgentAdapter(Protocol):
     name: str                                  # slug, e.g. "claude-code"
     supports_os: frozenset[str]                # {"linux", ...}
     endpoint_dialect: EndpointDialect          # "openai_chat" | "anthropic" | ...
-    api_key_env: str                           # e.g. "ANTHROPIC_API_KEY"
+    api_key_env: str                           # e.g. "OPENAI_API_KEY",
+                                               # "ANTHROPIC_AUTH_TOKEN"
     base_url_env: str
     model_name_template: str                   # Agent-facing model id template
     supports_multi_turn: bool                  # metadata only in v1
@@ -62,6 +63,19 @@ holds module-level instances. `TrajectoryEventLike` is any
 pydantic-serialisable object with `.model_dump()`; the worker's
 `SubprocessAgent._bridge()` adapts back to the canonical
 `loom.models.trajectory.TrajectoryEvent` union.
+
+`api_key_env` names the env var the agent CLI will read for its
+upstream credential. The worker `SubprocessAgent` writes the step
+JWT into that env var inside the trial container, so the agent
+talks to Loom's gateway with a step-scoped credential rather than a
+provider key. The choice of env var matters for the wire shape:
+Anthropic's `claude` CLI sends `ANTHROPIC_API_KEY` as `x-api-key:
+<value>` and `ANTHROPIC_AUTH_TOKEN` as `Authorization: Bearer
+<value>`. Loom's gateway routes authenticate step JWTs via
+`verify_bearer_token`, which only accepts the Bearer header, so the
+`claude-code` adapter sets `api_key_env="ANTHROPIC_AUTH_TOKEN"`.
+OpenAI-dialect agents have no such ambiguity — `OPENAI_API_KEY` is
+already sent as `Authorization: Bearer ...`.
 
 Canonical source: `packages/loom-launcher/loom_launcher/adapter.py`.
 

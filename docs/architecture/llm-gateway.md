@@ -58,13 +58,20 @@ upstream shape, so client-side parsing stays standard. The
 normalisation (TokenUsage → cost) happens *next to* the forward, not
 *after* it.
 
-Most streaming routes remain disabled at v1 where cost attribution
-depends on a final usage block. OpenAI Responses and the Anthropic
-provider facade are the exceptions: the Gateway accepts `stream=true`
-on `/v1/responses`, `/openai/v1/responses`, and
+Streaming is supported on the OpenAI Responses routes and on both
+Anthropic Messages routes. The Gateway accepts `stream=true` on
+`/v1/messages`, `/v1/responses`, `/openai/v1/responses`, and
 `/anthropic/v1/messages`, forwards the native SSE stream to the
 selected provider, and records usage from the terminal usage-bearing
-SSE event when present.
+SSE event. For Anthropic streams that means tee-parsing the upstream
+bytes as they pass through the route: `message_start` carries the
+input + cache token counts, the final `message_delta` carries the
+cumulative `output_tokens`, and `record_call` runs after the upstream
+stream completes (or on client disconnect, with whatever usage was
+accumulated). Cost attribution is preserved without buffering the
+full response. Other native routes (`/v1/chat/completions`) still
+reject `stream=true` because their cost path expects the full JSON
+body.
 
 For provider connections that are OpenAI-chat-compatible but not
 Responses-compatible, the Responses facade has a narrow compatibility

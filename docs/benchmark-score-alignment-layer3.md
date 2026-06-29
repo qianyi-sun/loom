@@ -27,6 +27,20 @@ is the human-readable narrative; the machine-readable form lives in
   skills materialized into each bundle's `skills/` directory by the
   adapter (#533), `oracle_eligible` tag set per upstream `solve.sh`
   presence (#536), preflight consumes the tag (#545).
+- **Slate evolution since this batch:** the eligibility logic was
+  later tightened in #552 (`_UPSTREAM_BAD_ORACLE_INSTANCE_IDS` for
+  upstream `solve.sh` files that don't actually solve their task, +
+  docker-compose external-env gating for tasks that need credentials
+  like `GH_TOKEN` that the platform doesn't supply to oracle runs).
+  Current production slate is **58 oracle_eligible=true / 42 false**,
+  not the 73/27 captured in this batch. A re-run on current `dev`
+  (`slb-548-verify-58`, batch `901100ab-acd6-4078-84b7-3f727cc9d062`)
+  scored 56/58 reward=1.0 — the 2 outliers
+  (`python-scala-translation-1`/`-2`) hit a host
+  `fs.inotify.max_user_instances` limit at sbt-compile time, not a
+  Loom regression. This file preserves the original 73-batch
+  evidence as a snapshot; for current eligibility see
+  `packages/loom-benchmarks/loom_benchmarks/adapters/skilllearnbench.py`.
 - **Batch:** `slb-phase3-oracle-73` (id
   `20a18b8a-8164-4fef-97b3-e319e504b856`). Submitted via
   `loom eval batch create --agent oracle --task-filter '{"benchmark_id":"skilllearnbench","tag_filters":{"oracle_eligible":["true"]}}'`,
