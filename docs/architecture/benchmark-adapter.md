@@ -306,6 +306,14 @@ shell-significant characters, the adapter derives a sanitized instance id from
 the relative bundle path while preserving the original files inside the task
 bundle.
 
+For #49 dual-architecture dispatch, portable benchmark compatibility must be
+declared explicitly. The SkillLearnBench `human_authored` catalog row carries
+`params.cpu_arch = "any"`, so its generated task configs are claimable by both
+x86_64 and ARM64 workers without operator DB patches. Unmarked bundle-backed
+benchmarks, including SkillFlow today, keep the `TaskConfig` default
+`environment.cpu_arch = "x86_64"` until dual-architecture reward/artifact
+evidence exists.
+
 The #307 reasoning/browsing wave pins and publishes complete selected official
 sets: GPQA Extended (546), MATH-500 (500), Hendrycks MATH test (5000),
 MMLU-Pro test (12032), tau2-bench default leaderboard domains (278), and

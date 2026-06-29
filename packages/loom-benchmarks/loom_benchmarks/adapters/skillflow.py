@@ -318,6 +318,9 @@ class SkillFlowAdapter(CatalogBackedAdapter):
             'user = "root"',
             "build_timeout_sec = 1800",
         ]
+        cpu_arch = self._task_cpu_arch()
+        if cpu_arch is not None:
+            environment_lines.append(f"cpu_arch = {toml_string(cpu_arch)}")
         if dockerfile.exists():
             build_context = (
                 "."
@@ -367,6 +370,21 @@ class SkillFlowAdapter(CatalogBackedAdapter):
               "*.xlsx",
             ]
         """).strip() + "\n")
+
+    def _task_cpu_arch(self) -> str | None:
+        """Return explicit catalog-declared task CPU compatibility.
+
+        Omitted means preserve the TaskConfig default (`x86_64`). Adapters must
+        opt in via catalog metadata before emitting `any` or `arm64`.
+        """
+        cpu_arch = self._params.get("cpu_arch")
+        if cpu_arch is None:
+            return None
+        if cpu_arch not in {"x86_64", "arm64", "any"}:
+            raise ValueError(
+                f"{self.name} params.cpu_arch must be x86_64, arm64, or any",
+            )
+        return cpu_arch
 
     @staticmethod
     def _write_reward_verifier(out_dir: Path) -> None:

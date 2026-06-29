@@ -144,6 +144,15 @@ def test_catalog_aime_year_params_match_subclass_year_filter() -> None:
     assert CATALOG["aime-24"].params == {"year": "2024"}
 
 
+def test_skilllearnbench_catalog_declares_dual_arch_portability() -> None:
+    """#49: certified portable benchmarks must declare compatibility
+    explicitly in catalog metadata before adapters emit `cpu_arch=any`."""
+    params = CATALOG["skilllearnbench"].params
+
+    assert params["skill_method"] == "human_authored"
+    assert params["cpu_arch"] == "any"
+
+
 def test_livecodebench_upstream_is_pinned_to_hf_revision() -> None:
     """#307: LiveCodeBench must publish a stable official task set;
     floating HF HEAD would make future publish/register runs drift."""

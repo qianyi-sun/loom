@@ -166,7 +166,9 @@ aggregate is computed from the steps that completed.
   the image, verifier, and expected artifacts have been proven credible on both
   x86_64 and ARM64 workers. Legacy tasks that omit this field are scheduled as
   x86_64-only so newly attached ARM64 worker pools cannot accidentally claim
-  architecture-specific images.
+  architecture-specific images. Catalog-backed adapters may emit
+  `cpu_arch = "any"` from explicit benchmark metadata only after that benchmark
+  has dual-architecture evidence; do not change the schema default to `any`.
 - **Auxiliary services:** add `[[environment.sidecars]]` entries for Docker
   services that must run beside the primary sandbox. Sidecars support
   `docker_image` or `dockerfile`/`docker_build_context`, `command`,
