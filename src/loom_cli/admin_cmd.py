@@ -551,6 +551,11 @@ def _fetch_environment_state(
             headers=headers,
             timeout=10.0,
         )
+        slurm_resp = httpx.get(
+            f"{base}/admin/slurm-worker-jobs/status",
+            headers=headers,
+            timeout=10.0,
+        )
     except httpx.RequestError as e:
         sys.stderr.write(f"error: could not reach CP at {base}: {e}\n")
         return 2, None
@@ -558,6 +563,7 @@ def _fetch_environment_state(
     for name, resp in (
         ("worker-pool autoscaler status", autoscaler_resp),
         ("GB10 desired state status", gb10_resp),
+        ("Slurm worker job status", slurm_resp),
     ):
         if resp.status_code != 200:
             sys.stderr.write(
@@ -567,6 +573,7 @@ def _fetch_environment_state(
     return 0, {
         "autoscaler_status": autoscaler_resp.json(),
         "gb10_status": gb10_resp.json(),
+        "slurm_status": slurm_resp.json(),
     }
 
 
@@ -658,7 +665,10 @@ def _environment_state_apply(args: argparse.Namespace) -> int:
 
 
 def _environment_state_check(args: argparse.Namespace) -> int:
-    from loom_cli.environment_state import diff_environment_state
+    from loom_cli.environment_state import (
+        diff_environment_state,
+        diff_external_slurm_runner_prerequisites,
+    )
 
     profile = _load_environment_state_profile_from_args(args)
     if profile is None:
@@ -677,6 +687,7 @@ def _environment_state_check(args: argparse.Namespace) -> int:
         return rc
 
     drift = diff_environment_state(profile, live)
+    drift.extend(diff_external_slurm_runner_prerequisites(profile))
     if args.format == "json":
         json.dump(
             {

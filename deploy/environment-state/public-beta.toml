@@ -30,14 +30,11 @@ force = false
 backend = "docker"
 cpu_arch = "x86_64"
 allowed_nodes = [
-  "trt-eai-oldlab-1",
-  "trt-eai-oldlab-2",
   "trt-eai-oldlab-3",
   "trt-eai-oldlab-4",
-  "trt-eai-oldlab-5",
 ]
-env_file = "/shared_work/qianyi/loom-worker-capacity/public-beta-oldlab-worker.env"
-repo_dir = "/shared_work/qianyi/loom-remote-worker"
+env_file = "/shared_work/qianyi/loom-worker-capacity/public-beta-oldlab-worker-${IMAGE_TAG}.env"
+repo_dir = "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}"
 requested_cpus = 2
 requested_memory_mib = 8192
 requested_concurrency = 1
@@ -129,3 +126,8 @@ mode = "all"
 [catalog_provisioning]
 required = true
 command = "loom datasets provision-public-beta-catalog --imported-by public-beta-provision"
+
+[external_slurm_runner_prerequisites]
+pools = ["oldlab"]
+expected_repo_ref = "${IMAGE_TAG}"
+require_clean_repo = true

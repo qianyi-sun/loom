@@ -9,7 +9,9 @@ from typing import Any
 import httpx
 import pytest
 
+import loom_cli.environment_state as environment_state
 from loom_cli.__main__ import main
+from loom_cli.environment_state import StateDrift
 
 
 class _StubResponse:
@@ -894,6 +896,8 @@ def test_environment_state_check_fails_with_actionable_drift(
                     ],
                 },
             )
+        if url.endswith("/admin/slurm-worker-jobs/status"):
+            return _StubResponse(200, json_data={"jobs": []})
         raise AssertionError(url)
 
     monkeypatch.setattr(httpx, "get", _fake_get)
@@ -921,6 +925,107 @@ def test_environment_state_check_fails_with_actionable_drift(
     assert "worker_pool_autoscaler_policies[public-beta/gb10-arm64].actuator" in err
     assert "desired='slurm' live='gb10'" in err
     assert "gb10_worker_pool_desired_states[public-beta/gb10-arm64].image_tag" in err
+
+
+def test_environment_state_check_fetches_slurm_jobs_and_reports_external_prereq_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    profile_path = tmp_path / "public-beta.state.toml"
+    _write_environment_state_profile(profile_path)
+    called_urls: list[str] = []
+
+    def _fake_get(url, *, headers, timeout):  # type: ignore[no-untyped-def]
+        called_urls.append(url)
+        if url.endswith("/admin/worker-pool-autoscalers/status"):
+            return _StubResponse(
+                200,
+                json_data={
+                    "policies": [
+                        {
+                            "environment": "public-beta",
+                            "pool_name": "gb10-arm64",
+                            "actuator": "slurm",
+                            "enabled": True,
+                            "min_slots": 0,
+                            "max_slots": 150,
+                            "scale_up_threshold_slots": 1,
+                            "scale_down_idle_seconds": 600,
+                            "scale_up_cooldown_seconds": 60,
+                            "scale_down_cooldown_seconds": 300,
+                            "drain_timeout_seconds": 600,
+                            "force": False,
+                            "actuator_config": {
+                                "backend": "docker",
+                                "cpu_arch": "arm64",
+                                "partition": "gb10",
+                                "allowed_nodes": ["trt-gb10-1"],
+                                "requested_concurrency": 10,
+                                "max_jobs": 15,
+                                "pending_job_cap": 2,
+                            },
+                        },
+                    ],
+                },
+            )
+        if url.endswith("/admin/gb10-worker-pools/status"):
+            return _StubResponse(
+                200,
+                json_data={
+                    "desired_states": [
+                        {
+                            "environment": "public-beta",
+                            "pool_name": "gb10-arm64",
+                            "image_tag": "public-beta-57a7509",
+                            "max_concurrent": 10,
+                            "env_config_version": "public-beta-57a7509",
+                            "target_slots": 150,
+                            "host_intents": {},
+                            "rollout_policy": {"mode": "all"},
+                            "env": {},
+                        },
+                    ],
+                },
+            )
+        if url.endswith("/admin/slurm-worker-jobs/status"):
+            return _StubResponse(200, json_data={"jobs": []})
+        raise AssertionError(url)
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setattr(
+        environment_state,
+        "diff_external_slurm_runner_prerequisites",
+        lambda profile: [
+            StateDrift(
+                path="external_slurm_runner_prerequisites[production/oldlab].env_file",
+                desired="/shared_work/qianyi/loom-worker-capacity/public-beta-oldlab-worker.env",
+                live="missing",
+            ),
+        ],
+    )
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+
+    rc = main(
+        [
+            "admin",
+            "environment-state",
+            "check",
+            "--file",
+            str(profile_path),
+            "--environment",
+            "public-beta",
+            "--var",
+            "IMAGE_TAG=public-beta-57a7509",
+            "--var",
+            "ENV_CONFIG_VERSION=public-beta-57a7509",
+        ]
+    )
+
+    assert rc == 1
+    assert "http://localhost:8080/admin/slurm-worker-jobs/status" in called_urls
+    err = capsys.readouterr().err
+    assert "external_slurm_runner_prerequisites[production/oldlab].env_file" in err
 
 
 # ──────────────────────────────────────────────────────────────────────

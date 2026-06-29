@@ -407,7 +407,11 @@ knob you need.
 8. **Apply versioned environment state.** Kubernetes manifests do not own
    every rollout-critical runtime row. After the images and secrets are live,
    apply the repository profile for the target environment, then check for
-   drift before trusting Monitor capacity or benchmark validation evidence:
+   drift before trusting Monitor capacity or benchmark validation evidence.
+   Run the check from the Slurm submit/shared-storage host when the profile
+   contains external Slurm runner pools; the gate also verifies runner env
+   files, shared git checkouts, clean git status, and active Slurm job launch
+   env:
 
    ```bash
    loom admin environment-state apply \
@@ -428,9 +432,12 @@ knob you need.
    ```
 
    The command is idempotent and uses the existing Control Plane admin APIs for
-   worker-pool autoscaler policies and GB10 desired state. A drift failure is
-   actionable, for example desired `gb10-arm64` actuator `slurm` but live
-   `gb10`; fix it with the profile apply rather than a one-off SQL patch.
+   worker-pool autoscaler policies, GB10 desired state, and Slurm worker job
+   status. A drift failure is actionable, for example desired `gb10-arm64`
+   actuator `slurm` but live `gb10`, or an active OLDLAB Slurm job still
+   pointing at an older `LOOM_REMOTE_WORKER_REPO_DIR`; fix it with the profile
+   apply and by draining/replacing stale Slurm jobs rather than a one-off SQL
+   patch.
    The public-beta profile currently targets the legacy Control Plane
    environment name `production` because existing GB10 node agents read that
    desired-state key; the CLI still requires `--environment public-beta` so
@@ -2145,6 +2152,11 @@ mock provider and browser automation job.
   missing-Slurm records are exposed as `stale=<slots>` and
   `stale_jobs=<count>` in the CLI plus
   `loom_slurm_worker_stale_slots` / `loom_slurm_worker_stale_jobs` metrics.
+  `loom admin environment-state check` also fails when a running Slurm job's
+  redacted `LOOM_REMOTE_WORKER_ENV_FILE` or
+  `LOOM_REMOTE_WORKER_REPO_DIR` differs from the profile, or when the
+  profile's external runner env file is absent, the repo checkout is on the
+  wrong release, or the checkout is dirty.
   Use `--format json` for release evidence or automation. If Loom backlog has
   drained but Slurm still has pending elastic jobs, cancel those Slurm job ids
   with `scancel`; the controller will record cancellation on its next

@@ -8,6 +8,7 @@ import pytest
 from loom_cli.environment_state import (
     EnvironmentStateProfileError,
     diff_environment_state,
+    diff_external_slurm_runner_prerequisites,
     load_environment_state_profile,
 )
 
@@ -202,6 +203,154 @@ def test_diff_environment_state_reports_missing_live_policy(tmp_path: Path) -> N
     assert drift[0].live is None
     assert drift[1].path == "gb10_worker_pool_desired_states[public-beta/gb10-arm64]"
     assert drift[1].live is None
+
+
+def test_diff_environment_state_reports_active_slurm_job_runtime_drift(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path.write_text(
+        """
+environment = "public-beta"
+control_plane_environment = "production"
+
+[[worker_pool_autoscaler_policies]]
+pool_name = "oldlab"
+actuator = "slurm"
+enabled = true
+min_slots = 1
+max_slots = 40
+
+[worker_pool_autoscaler_policies.actuator_config]
+backend = "docker"
+cpu_arch = "x86_64"
+env_file = "/shared_work/qianyi/loom-worker-capacity/public-beta-oldlab-worker.env"
+repo_dir = "/shared_work/qianyi/loom-remote-worker"
+requested_cpus = 2
+requested_memory_mib = 8192
+requested_concurrency = 1
+external_runner = true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    profile = load_environment_state_profile(profile_path)
+
+    drift = diff_environment_state(
+        profile,
+        {
+            "autoscaler_status": {
+                "policies": [
+                    {
+                        "environment": "production",
+                        "pool_name": "oldlab",
+                        "actuator": "slurm",
+                        "enabled": True,
+                        "min_slots": 1,
+                        "max_slots": 40,
+                        "scale_up_threshold_slots": 1,
+                        "scale_down_idle_seconds": 600,
+                        "scale_up_cooldown_seconds": 60,
+                        "scale_down_cooldown_seconds": 300,
+                        "drain_timeout_seconds": 600,
+                        "force": False,
+                        "actuator_config": {
+                            "backend": "docker",
+                            "cpu_arch": "x86_64",
+                            "env_file": "/shared_work/qianyi/loom-worker-capacity/public-beta-oldlab-worker.env",
+                            "repo_dir": "/shared_work/qianyi/loom-remote-worker",
+                            "requested_cpus": 2,
+                            "requested_memory_mib": 8192,
+                            "requested_concurrency": 1,
+                            "external_runner": True,
+                        },
+                    },
+                ],
+            },
+            "gb10_status": {"desired_states": []},
+            "slurm_status": {
+                "jobs": [
+                    {
+                        "environment": "production",
+                        "pool_name": "oldlab",
+                        "job_id": "14893",
+                        "state": "running",
+                        "redacted_env": {
+                            "LOOM_REMOTE_WORKER_ENV_FILE": "/shared_work/qianyi/loom-worker-capacity/issue45-oldlab-4-warm-1608b05.env",
+                            "LOOM_REMOTE_WORKER_REPO_DIR": "/shared_work/qianyi/loom-remote-worker-1608b05",
+                            "LOOM_WORKER_MAX_CONCURRENT": "1",
+                        },
+                    },
+                ],
+            },
+        },
+    )
+
+    assert [item.path for item in drift] == [
+        "slurm_worker_jobs[production/oldlab/14893].LOOM_REMOTE_WORKER_ENV_FILE",
+        "slurm_worker_jobs[production/oldlab/14893].LOOM_REMOTE_WORKER_REPO_DIR",
+    ]
+    assert drift[0].desired.endswith("public-beta-oldlab-worker.env")
+    assert drift[0].live.endswith("issue45-oldlab-4-warm-1608b05.env")
+
+
+def test_external_slurm_runner_prerequisite_check_reports_missing_env_and_dirty_repo(
+    tmp_path: Path,
+) -> None:
+    repo_dir = tmp_path / "loom-remote-worker"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path.write_text(
+        f"""
+environment = "public-beta"
+control_plane_environment = "production"
+
+[[worker_pool_autoscaler_policies]]
+pool_name = "oldlab"
+actuator = "slurm"
+enabled = true
+min_slots = 1
+max_slots = 40
+
+[worker_pool_autoscaler_policies.actuator_config]
+backend = "docker"
+cpu_arch = "x86_64"
+env_file = "{tmp_path / 'missing.env'}"
+repo_dir = "{repo_dir}"
+requested_concurrency = 1
+external_runner = true
+
+[external_slurm_runner_prerequisites]
+expected_repo_ref = "public-beta-57a7509"
+require_clean_repo = true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    profile = load_environment_state_profile(profile_path)
+
+    def _runner(command: list[str], *, cwd: Path | None = None) -> tuple[int, str, str]:
+        assert command[:2] == ["git", "-C"]
+        if command[-2:] == ["rev-parse", "HEAD"]:
+            return 0, "62eb0a6d0000000000000000000000000000000\n", ""
+        if command[-3:] == ["status", "--short", "--untracked-files=no"]:
+            return 0, " M src/loom/trial/step_runner.py\n", ""
+        raise AssertionError(command)
+
+    drift = diff_external_slurm_runner_prerequisites(profile, runner=_runner)
+
+    assert [item.path for item in drift] == [
+        "external_slurm_runner_prerequisites[production/oldlab].env_file",
+        "external_slurm_runner_prerequisites[production/oldlab].repo_dir.git_head",
+        "external_slurm_runner_prerequisites[production/oldlab].repo_dir.git_status",
+    ]
+    assert drift[0].desired == str(tmp_path / "missing.env")
+    assert drift[0].live == "missing"
+    assert drift[1].desired == "public-beta-57a7509"
+    assert drift[1].live.startswith("62eb0a6")
+    assert drift[2].desired == "clean"
+    assert "step_runner.py" in drift[2].live
 
 
 @pytest.mark.parametrize(
