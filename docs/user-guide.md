@@ -2,8 +2,8 @@
 
 Everything a researcher needs to run LLMs against customizable tasks
 from a laptop. Pluggable agents (use one of the 11 shipped harnesses
-or write your own); pluggable task adapters (21 ship in the core package,
-plus optional Terminal-Bench-2). One
+or write your own); pluggable task adapters (23 catalog entries ship in the
+core package, plus optional Terminal-Bench-2). One
 `uv sync`, then `loom run`.
 
 ## Install

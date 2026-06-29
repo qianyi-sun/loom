@@ -25,7 +25,7 @@ src/loom_worker/                   # Worker process
 src/loom_service/                  # REST surface for SPA / external clients
 src/loom_benchmark_tool/           # `loom-benchmark` operator CLI
 packages/loom-launcher/            # PyPI-style agent-adapter framework
-packages/loom-benchmarks/          # PyPI-style benchmark-adapter framework + 13 adapters
+packages/loom-benchmarks/          # PyPI-style benchmark-adapter framework + 23 catalog entries (19 adapter files)
 packages/loom-benchmark-terminal-bench-2/  # TB-2 canonical adapter
 migrations/                        # Alembic
 tests/{unit,contract,integration,system,property,loom_cli,fixtures}/
