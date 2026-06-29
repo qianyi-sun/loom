@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -67,6 +69,7 @@ class EnvironmentStateProfile:
     autoscaler_policies: list[dict[str, Any]]
     gb10_desired_states: list[dict[str, Any]]
     catalog_provisioning: dict[str, Any]
+    external_slurm_runner_prerequisites: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -248,12 +251,20 @@ def load_environment_state_profile(
         )
     ]
     catalog = raw.get("catalog_provisioning", {})
+    external_slurm_runner_prerequisites = raw.get(
+        "external_slurm_runner_prerequisites",
+        {},
+    )
     return EnvironmentStateProfile(
         environment=environment,
         control_plane_environment=control_plane_environment,
         autoscaler_policies=autoscaler_policies,
         gb10_desired_states=gb10_desired_states,
         catalog_provisioning=_as_dict(catalog, "catalog_provisioning"),
+        external_slurm_runner_prerequisites=_as_dict(
+            external_slurm_runner_prerequisites,
+            "external_slurm_runner_prerequisites",
+        ),
     )
 
 
@@ -291,6 +302,67 @@ def _append_field_drift(
                     live=live_value,
                 ),
             )
+
+
+def _external_slurm_policies(
+    profile: EnvironmentStateProfile,
+) -> list[dict[str, Any]]:
+    return [
+        policy
+        for policy in profile.autoscaler_policies
+        if policy.get("actuator") == "slurm"
+        and policy.get("actuator_config", {}).get("external_runner") is True
+    ]
+
+
+_TERMINAL_SLURM_JOB_STATES = {"completed", "failed", "cancelled", "stale"}
+
+
+def _append_active_slurm_job_drift(
+    drift: list[StateDrift],
+    *,
+    desired_policies: dict[tuple[str, str], dict[str, Any]],
+    jobs: object,
+) -> None:
+    if not isinstance(jobs, list):
+        return
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        environment = job.get("environment")
+        pool_name = job.get("pool_name")
+        if not isinstance(environment, str) or not isinstance(pool_name, str):
+            continue
+        desired = desired_policies.get((environment, pool_name))
+        if desired is None:
+            continue
+        state = str(job.get("state") or "").strip().lower()
+        if state in _TERMINAL_SLURM_JOB_STATES:
+            continue
+        redacted_env = job.get("redacted_env")
+        if not isinstance(redacted_env, dict):
+            continue
+        actuator_config = desired.get("actuator_config", {})
+        if not isinstance(actuator_config, dict):
+            continue
+        job_id = str(job.get("job_id") or job.get("id") or "unknown")
+        prefix = f"slurm_worker_jobs[{environment}/{pool_name}/{job_id}]"
+        expected = {
+            "LOOM_REMOTE_WORKER_ENV_FILE": actuator_config.get("env_file"),
+            "LOOM_REMOTE_WORKER_REPO_DIR": actuator_config.get("repo_dir"),
+        }
+        for env_key, desired_value in expected.items():
+            if desired_value is None:
+                continue
+            live_value = redacted_env.get(env_key)
+            if live_value != desired_value:
+                drift.append(
+                    StateDrift(
+                        path=f"{prefix}.{env_key}",
+                        desired=desired_value,
+                        live=live_value,
+                    ),
+                )
 
 
 def diff_environment_state(
@@ -342,6 +414,120 @@ def diff_environment_state(
             fields=_GB10_COMPARE_FIELDS,
             live_defaults=_GB10_DEFAULTS,
         )
+    _append_active_slurm_job_drift(
+        drift,
+        desired_policies={
+            (policy["environment"], policy["pool_name"]): policy
+            for policy in _external_slurm_policies(profile)
+        },
+        jobs=_as_dict(live.get("slurm_status", {}), "slurm_status").get(
+            "jobs",
+            [],
+        ),
+    )
+    return drift
+
+
+SubprocessRunner = Callable[[list[str]], tuple[int, str, str]]
+
+
+def _default_subprocess_runner(command: list[str]) -> tuple[int, str, str]:
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return completed.returncode, completed.stdout, completed.stderr
+
+
+def _expected_git_prefix(expected_ref: str) -> str:
+    match = re.search(r"([0-9a-f]{7,40})$", expected_ref.strip())
+    return match.group(1) if match else expected_ref.strip()
+
+
+def diff_external_slurm_runner_prerequisites(
+    profile: EnvironmentStateProfile,
+    *,
+    runner: SubprocessRunner | None = None,
+) -> list[StateDrift]:
+    settings = profile.external_slurm_runner_prerequisites
+    if not settings:
+        return []
+
+    command_runner = runner or _default_subprocess_runner
+    expected_repo_ref = settings.get("expected_repo_ref")
+    require_clean_repo = bool(settings.get("require_clean_repo", False))
+    configured_pools = settings.get("pools")
+    checked_pools = set(configured_pools) if isinstance(configured_pools, list) else None
+    drift: list[StateDrift] = []
+    for policy in _external_slurm_policies(profile):
+        if checked_pools is not None and policy["pool_name"] not in checked_pools:
+            continue
+        key = (policy["environment"], policy["pool_name"])
+        prefix = f"external_slurm_runner_prerequisites[{key[0]}/{key[1]}]"
+        actuator_config = policy.get("actuator_config", {})
+        if not isinstance(actuator_config, dict):
+            continue
+
+        env_file = actuator_config.get("env_file")
+        if isinstance(env_file, str) and not Path(env_file).is_file():
+            drift.append(
+                StateDrift(
+                    path=f"{prefix}.env_file",
+                    desired=env_file,
+                    live="missing",
+                ),
+            )
+
+        repo_dir = actuator_config.get("repo_dir")
+        if not isinstance(repo_dir, str):
+            continue
+        repo_path = Path(repo_dir)
+        if not repo_path.is_dir():
+            drift.append(
+                StateDrift(
+                    path=f"{prefix}.repo_dir",
+                    desired=repo_dir,
+                    live="missing",
+                ),
+            )
+            continue
+
+        if isinstance(expected_repo_ref, str) and expected_repo_ref.strip():
+            rc, stdout, stderr = command_runner(["git", "-C", repo_dir, "rev-parse", "HEAD"])
+            live_head = stdout.strip()
+            if rc != 0:
+                drift.append(
+                    StateDrift(
+                        path=f"{prefix}.repo_dir.git_head",
+                        desired=expected_repo_ref,
+                        live=(stderr or stdout).strip() or f"git exited {rc}",
+                    ),
+                )
+            elif not live_head.startswith(_expected_git_prefix(expected_repo_ref)):
+                drift.append(
+                    StateDrift(
+                        path=f"{prefix}.repo_dir.git_head",
+                        desired=expected_repo_ref,
+                        live=live_head,
+                    ),
+                )
+
+        if require_clean_repo:
+            rc, stdout, stderr = command_runner(
+                ["git", "-C", repo_dir, "status", "--short", "--untracked-files=no"],
+            )
+            live_status = stdout.strip()
+            if rc != 0 or live_status:
+                drift.append(
+                    StateDrift(
+                        path=f"{prefix}.repo_dir.git_status",
+                        desired="clean",
+                        live=live_status or stderr.strip() or f"git exited {rc}",
+                    ),
+                )
+
     return drift
 
 

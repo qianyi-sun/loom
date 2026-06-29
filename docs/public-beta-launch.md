@@ -290,12 +290,15 @@ scripts/ops/worker_service_tunnels.py install-systemd \
   --subprocess-gateway-local-port 30444
 ```
 
-For GB10 public-beta rollouts, gate the Slurm-managed capacity first and then
-gate node-agent convergence only for compose rollout compatibility. The Slurm
-check catches pending/stale capacity requests and confirms the active
-`gb10-arm64` pool shape; the node-agent check catches stale host-local
-checkouts, local-build fallback using an old tree, and env files that did not
-apply even when the pool still has healthy heartbeats.
+For GB10 and OLDLAB public-beta rollouts, gate the Slurm-managed capacity first
+and then gate node-agent convergence only for compose rollout compatibility.
+Run `environment-state check` from the Slurm submit/shared-storage host so it
+can validate external runner env files and shared worker checkouts in addition
+to CP-backed state. The Slurm check catches pending/stale capacity requests,
+active jobs launched from stale `LOOM_REMOTE_WORKER_*` paths, and the active
+`gb10-arm64`/`oldlab` pool shapes; the node-agent check catches stale
+host-local checkouts, local-build fallback using an old tree, and env files
+that did not apply even when the pool still has healthy heartbeats.
 
 ```bash
 loom admin environment-state apply \
