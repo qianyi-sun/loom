@@ -226,7 +226,7 @@ Each verb:
 
 | Command | What it does | Exit codes |
 |---|---|---|
-| `loom cluster preflight` | API-side checks: namespace exists, required Secrets present, IngressClass installed, default StorageClass available, PSS labels OK, and schema-doctor reconciliation for rendered env/Secret drift; protected environments also check storage boundary and recent backup manifest when supplied. Optional runtime-derived worker env such as hostname, idle-exit, fixtures root, benchmark cache, and blocking-I/O executor override may stay unset. | 0 pass / 1 fail / 2 cluster unreachable |
+| `loom cluster preflight` | API-side checks: namespace exists, required Secrets present, IngressClass installed, default StorageClass available, PSS labels OK, and schema-doctor reconciliation for rendered env/Secret drift. Protected environments also check the live critical PVC/PV storage boundary and a recent backup manifest; pass `--config cluster-config.toml` so first deploys can prove static host-path Retain PVs before the PVCs exist. Optional runtime-derived worker env such as hostname, idle-exit, fixtures root, benchmark cache, and blocking-I/O executor override may stay unset. | 0 pass / 1 fail / 2 cluster unreachable |
 | `loom cluster backup manifest/check` | Write or verify metadata-only backup manifests for public-beta/staging destructive-operation guards | 0 verified / 1 invalid manifest / 2 bad input |
 | `loom cluster render` | Print the rendered YAML to stdout (no cluster contact) | 0 / 2 on bad config |
 | `loom cluster audit` | Static public/internal boundary check on rendered manifests: TLS ingress, only `/api/v1` → `loom-service` and `/` → `loom-web`, no LoadBalancer/NodePort, no unsafe hostPort, required NetworkPolicies present | 0 clean / 1 violation / 2 bad config |
@@ -705,8 +705,10 @@ loom cluster up --config cluster-config.toml --skip-preflight
 loom cluster status
 ```
 
-`--skip-preflight` is safe here because preflight checks (Secrets,
-IngressClass, StorageClass) don't change between rollouts.
+Use `--skip-preflight` only for same-storage-boundary image rollbacks where
+Secrets, IngressClass, and critical PVC/PV bindings are already known-good. Do
+not skip preflight during public-beta/staging storage migration or restore
+work; pass `--config`, `--environment`, and `--backup-manifest` instead.
 
 Migration rollbacks: `alembic downgrade -1` from a Control Plane pod or
 one-off migration Job, then restart DB-facing services so their startup schema
@@ -1556,6 +1558,32 @@ export BACKUP_ROOT=/data/loom-public-beta/backups/$(date -u +%Y%m%dT%H%M%SZ)
 install -d -m 700 "$BACKUP_ROOT"/{postgres,minio,secrets}
 ```
 
+Protected embedded deployments should also use host-managed static PVs instead
+of the kind/local-path default. Keep the data root outside the kind node's
+Docker volume boundary:
+
+```toml
+namespace = "loom-public-beta"
+persistent_storage_backend = "static-host-path"
+persistent_storage_host_path_root = "/data/loom-public-beta"
+```
+
+Create the host directories before first apply:
+
+```bash
+install -d -m 700 \
+  /data/loom-public-beta/postgres \
+  /data/loom-public-beta/minio \
+  /data/loom-public-beta/trajectories \
+  /data/loom-public-beta/backups
+```
+
+For an existing public-beta/staging namespace that already has local-path PVCs,
+do not assume changing `cluster-config.toml` is enough: StatefulSet
+`volumeClaimTemplates` and PVC binding fields are effectively immutable. Take a
+fresh backup, pause writers, and treat the move to static PVs as a restore or
+data-copy operation before deleting old PVCs/PVs.
+
 - **Postgres:** run a standard `pg_dump` of the `loom` DB into
   `$BACKUP_ROOT/postgres/loom.dump`. The dump includes DB-backed worker-pool
   desired state, environment state, catalog rows, users, teams, provider
@@ -1593,12 +1621,26 @@ secret values. Use it for protected preflight:
 loom cluster preflight \
   --environment "$ENVIRONMENT" \
   --namespace "$NAMESPACE" \
+  --config cluster-config.toml \
   --backup-manifest "$BACKUP_ROOT/backup-manifest.json"
 ```
 
-Use the same `--environment` and `--backup-manifest` flags on `loom cluster up`
-when rolling a protected environment so its preflight evaluates the same backup
-and storage checks before apply.
+Use the same `--environment`, `--config`, and `--backup-manifest` flags on
+`loom cluster up` when rolling a protected environment so its preflight
+evaluates the same backup and storage checks before apply.
+
+```bash
+loom cluster up \
+  --environment "$ENVIRONMENT" \
+  --namespace "$NAMESPACE" \
+  --config cluster-config.toml \
+  --backup-manifest "$BACKUP_ROOT/backup-manifest.json"
+```
+
+For a new protected namespace, this `--config` path lets preflight accept the
+static Retain PV plan before the PVCs exist. For an existing namespace, live
+critical PVC/PV bindings are audited first and must already be on the durable
+boundary.
 
 For protected destructive operations, pass both the manifest and an exact
 environment acknowledgement:
@@ -1622,11 +1664,14 @@ Restore drill checklist:
 
 1. Recreate the cluster or isolated namespace.
 2. Restore Kubernetes/runtime secrets first.
-3. Restore Postgres with `pg_restore`.
-4. Restore MinIO buckets by mirroring objects back.
-5. Deploy the matching image tag and run `loom cluster preflight` with the
-   backup manifest.
-6. Verify API health, login/setup path, provider-secret decryption,
+3. Ensure `cluster-config.toml` uses the intended durable storage boundary.
+   For protected embedded deployments, this is `static-host-path` under
+   `/data/<environment>`.
+4. Restore Postgres with `pg_restore`.
+5. Restore MinIO buckets by mirroring objects back.
+6. Deploy the matching image tag and run `loom cluster preflight` with the
+   config and backup manifest.
+7. Verify API health, login/setup path, provider-secret decryption,
    benchmark/agent catalog rows, batches/trials, artifacts, trajectories, cost
    records, and Monitor worker pools.
 

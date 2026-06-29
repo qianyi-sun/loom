@@ -277,6 +277,7 @@ def _patch_full_up_path(
 
     def _apply(yaml_text, ns, *, context, extra_args=()):  # type: ignore[no-untyped-def]
         captures["apply_yaml_len"] = len(yaml_text)
+        captures["apply_yaml_text"] = yaml_text
         captures["apply_ns"] = ns
         return ApplyResult(
             returncode=apply_returncode,
@@ -450,6 +451,30 @@ def test_cli_up_backup_guard_flags_thread_to_preflight(
     assert captures["preflight_kwargs"]["environment"] == "public-beta"
     assert captures["preflight_kwargs"]["backup_manifest"] == manifest.resolve()
     assert captures["preflight_kwargs"]["backup_max_age_hours"] == 12
+
+
+def test_cli_up_config_file_threads_static_host_path_to_preflight_and_render(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    cfg = tmp_path / "cluster.toml"
+    cfg.write_text(
+        'namespace = "loom-public-beta"\n'
+        'persistent_storage_backend = "static-host-path"\n'
+        'persistent_storage_host_path_root = "/data/loom-public-beta"\n',
+        encoding="utf-8",
+    )
+    captures = _patch_full_up_path(monkeypatch)
+
+    rc = main(["cluster", "up", "--config", str(cfg)])
+
+    assert rc == 0
+    assert (
+        captures["preflight_kwargs"]["cluster_config"].persistent_storage_backend
+        == "static-host-path"
+    )
+    assert "kind: PersistentVolume" in captures["apply_yaml_text"]
+    assert "path: \"/data/loom-public-beta/postgres\"" in captures["apply_yaml_text"]
 
 
 def test_cli_up_config_file_invalid_returns_2(

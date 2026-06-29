@@ -73,4 +73,8 @@ metadata:
   name: loom-worker-trajectories
 spec:
   accessModes: [ ReadWriteOnce ]
+{% if static_host_path_storage %}
+  storageClassName: ""
+  volumeName: {{ worker_trajectories_pv_name }}
+{% endif %}
   resources: { requests: { storage: {{ worker_trajectory_storage_gi }}Gi } }

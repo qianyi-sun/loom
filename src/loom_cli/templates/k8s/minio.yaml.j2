@@ -34,6 +34,10 @@ spec:
     - metadata: { name: data }
       spec:
         accessModes: [ ReadWriteOnce ]
+{% if static_host_path_storage %}
+        storageClassName: ""
+        volumeName: {{ minio_pv_name }}
+{% endif %}
         resources: { requests: { storage: {{ minio_storage_gi }}Gi } }
 ---
 apiVersion: v1
