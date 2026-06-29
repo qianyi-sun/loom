@@ -447,7 +447,10 @@ knob you need.
    `deploy/environment-state/staging.toml`. Keep the catalog provisioning
    command printed by the profile in the rollout evidence; that gate remains
    separate because catalog data lives in the service DB/object store, not the
-   Control Plane admin API.
+   Control Plane admin API. The profile also lists the operator-only env keys
+   required by that gate: `HF_TOKEN`, `LOOM_SVC_DB_URL`, and
+   `LOOM_SVC_MINIO_*`. Those credentials belong in the operator context, not
+   the runtime worker pods.
 
 9. **Verify service-proxied downloads.** `loom_service` should use the
    cluster-internal MinIO endpoint for object reads, then stream ATIF,
@@ -1768,30 +1771,46 @@ fully runnable, creates the target bucket when needed, copies missing
 any source task bundle prefix has no objects. A healthy run reports non-zero
 `ready_benchmarks`, non-zero `ready_tasks`, and `missing=0`.
 
-**Path B: rebuild rows from the published Hugging Face manifest.** Use this
-when the published dataset repo is the source of truth for the benchmark, or
-when the source catalog/object-store pair is unavailable. For private or gated
-repos such as the current SkillLearnBench release repo, provision `HF_TOKEN`
-into the operator pod as a Kubernetes Secret or environment reference before
-running the command. Do not pass raw HF tokens in issue comments, command-line
-history, or committed files.
+**Path B: rebuild rows from the published Hugging Face manifest and mirror
+runtime bundles internally.** Use this when the published dataset repo is the
+source of truth for the benchmark, or when the source catalog/object-store pair
+is unavailable. For private or gated repos such as the current SkillLearnBench
+release repo, provision `HF_TOKEN` into the operator pod as a Kubernetes Secret
+or environment reference before running the command. Do not pass raw HF tokens
+in issue comments, command-line history, or committed files.
+
+Hugging Face is the publication and provenance boundary only. Runtime worker
+pods should materialize benchmark bundles from internal object storage, not from
+HF, so workers do not need HF tokens or broad outbound 443 egress for benchmark
+sources.
 
 ```bash
 export LOOM_HF_ORG="${LOOM_HF_ORG:-PRHW}"
 
-# Outside Kubernetes, provide the target DB explicitly:
+# Outside Kubernetes, provide the target DB and object-store values explicitly:
 export LOOM_DB_URL="$PUBLIC_BETA_DB_URL"
+export LOOM_MINIO_ENDPOINT="$PUBLIC_BETA_MINIO_ENDPOINT"
+export LOOM_MINIO_ACCESS_KEY="$PUBLIC_BETA_MINIO_ACCESS_KEY"
+export LOOM_MINIO_SECRET_KEY="$PUBLIC_BETA_MINIO_SECRET_KEY"
 
 # Inside loom-service pods, the command also accepts LOOM_SVC_DB_URL from the
-# service Secret. For gated repos, HF_TOKEN must already be present.
+# service Secret and LOOM_SVC_MINIO_* for target object storage. For gated
+# repos, HF_TOKEN must already be present in the operator context.
 loom datasets register skilllearnbench \
   --revision "$PUBLISHED_SHA" \
+  --mirror-to-object-store \
+  --bucket loom-benchmarks \
   --registered-by "release:${IMAGE_TAG:-manual}"
 ```
 
 If the HF repo is private/gated and the pod lacks `HF_TOKEN`, the 401/403 is a
 real rollout blocker. Fix it by updating the Secret/profile and restarting the
 operator context; do not replace it with hand-written DB rows.
+
+The mirror path is idempotent. It downloads the exact HF revision with the
+operator token, writes bundle objects under deterministic internal keys, stores
+`s3://...` runtime sources in `tasks.source`, and preserves HF repo/revision/
+path/checksum provenance in task tags without storing tokens.
 
 Runtime workers also support private/gated `hf://` sources as a compatibility
 path. `loom cluster render` injects the optional `loom-secrets` key
@@ -1818,7 +1837,7 @@ for that mirror when the benchmark has already been provisioned internally.
 Verify the target before continuing:
 
 ```bash
-loom datasets audit --all
+loom datasets audit --all --verify-bundles
 curl -sf -H "Authorization: Bearer $TEAM_A_TOKEN" \
   "$PUBLIC_SERVER_URL/api/v1/benchmarks?limit=200&include_empty=true"
 python scripts/benchmark_reward_gate.py readiness \

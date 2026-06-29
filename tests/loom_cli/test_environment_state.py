@@ -399,6 +399,18 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert gb10_state["max_concurrent"] == 10
     assert gb10_state["target_slots"] == 150
     assert profile.catalog_provisioning["required"] is True
+    command = profile.catalog_provisioning["command"]
+    assert "loom datasets provision-public-beta-catalog" in command
+    assert "loom datasets register skilllearnbench" in command
+    assert "--mirror-to-object-store" in command
+    assert "loom datasets audit --all --verify-bundles" in command
+    assert profile.catalog_provisioning["required_env"] == [
+        "HF_TOKEN",
+        "LOOM_SVC_DB_URL",
+        "LOOM_SVC_MINIO_ENDPOINT",
+        "LOOM_SVC_MINIO_ACCESS_KEY",
+        "LOOM_SVC_MINIO_SECRET_KEY",
+    ]
 
 
 def test_public_beta_oldlab_policy_allows_all_five_oldlab_submit_nodes() -> None:

@@ -171,7 +171,9 @@ already passed the runnable boundary.
 
 Source materialization stays behind the existing worker materializer boundary:
 
-- `hf://...`: fetch one bundle path from a HuggingFace dataset repo.
+- `hf://...`: fetch one bundle path from a HuggingFace dataset repo. This is
+  acceptable for local development and short-lived validation, but it should not
+  be the public-beta/staging runtime boundary for private or gated benchmarks.
 - `s3://...`: fetch one object-store prefix from S3-compatible storage.
 - `fixture://...`: dev/test fixture path only.
 - no `source`: allowed only for inline rows whose validated `TaskConfig` is
@@ -180,10 +182,12 @@ Source materialization stays behind the existing worker materializer boundary:
   the same configured `fixtures_root` or after the bundle is published to object
   storage.
 
-Production should prefer object-store-backed sources for user-owned benchmarks.
-Local folders are useful for dev and small internal pilots, but the scalable
-path is: validate local bundle -> publish to managed object storage -> register
-manifest -> smoke.
+Production should prefer object-store-backed sources for all runtime benchmark
+materialization. For HF-published first-party benchmarks, the scalable path is:
+publish schema-v3 manifest and bundles to HF -> operator-side register with
+`--mirror-to-object-store` -> persist `s3://...` task sources with HF
+provenance -> smoke. Workers should not need HF tokens or direct HF egress to
+run benchmark sources.
 
 ## Operator CLI
 
@@ -195,7 +199,14 @@ loom datasets audit --all --db-url "$LOOM_DB_URL"
 loom datasets audit humaneval --db-url "$LOOM_DB_URL"
 loom datasets audit --all --db-url "$LOOM_DB_URL" --json
 loom datasets publish humaneval --hf-org "$LOOM_HF_ORG"
-loom datasets register humaneval --hf-org "$LOOM_HF_ORG" --db-url "$LOOM_DB_URL"
+loom datasets register humaneval --hf-org "$LOOM_HF_ORG" --db-url "$LOOM_DB_URL" \
+  --mirror-to-object-store --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
+  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
+  --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
+loom datasets audit --all --db-url "$LOOM_DB_URL" --verify-bundles \
+  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
+  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
+  --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
 loom datasets verify humaneval --limit 3
 ```
 

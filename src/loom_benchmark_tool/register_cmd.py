@@ -2,9 +2,12 @@
 counterpart to `publish`.
 
 Reads the manifest from `{hf_org}/loom-benchmark-{benchmark}` on HF
-Hub, upserts the Benchmark row, and upserts a Task row per entry with
-`source = "hf://{repo_id}@{revision}/{hf_path}"`. No upstream fetch,
-no conversion, no MinIO.
+Hub, upserts the Benchmark row, and upserts a Task row per entry. By
+default task rows point at `hf://{repo_id}@{revision}/{hf_path}` for
+back-compat. In protected deployments, pass `mirror_to_object_store`
+with an object store so the operator process downloads the exact HF
+revision, mirrors bundles into internal S3/MinIO, and stores `s3://...`
+runtime sources while retaining HF provenance in tags.
 
 New manifests carry validated per-task `TaskConfig` payloads, so
 registered rows are runnable immediately after this command commits.
@@ -15,6 +18,11 @@ runnable until republished or backfilled.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -23,6 +31,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from loom.db.schema import Benchmark
 from loom.db.schema import Task as TaskRow
 from loom.models.task import TaskConfig
+from loom.trajectory.storage import ObjectStore
 from loom_benchmark_tool.db_url import normalize_db_url
 from loom_benchmark_tool.manifest import (
     read_manifest_from_hf,
@@ -40,6 +49,153 @@ def _hf_source_url(
     parses this exact shape; keep the format here in lockstep with
     `loom_worker.main_loop._materialize_hf_dir`."""
     return f"hf://{repo_id}@{revision}/{hf_path}"
+
+
+@dataclass(frozen=True)
+class MirrorResult:
+    source: str
+    uploaded: int
+    skipped: int
+    bytes_uploaded: int
+    bytes_skipped: int
+
+
+def _safe_key_part(value: str) -> str:
+    return value.strip("/").replace("/", "__")
+
+
+def _validate_relative_prefix(value: str, *, label: str) -> str:
+    prefix = value.strip("/")
+    if not prefix:
+        raise ValueError(f"{label} must not be empty")
+    parts = Path(prefix).parts
+    if prefix.startswith("/") or ".." in parts:
+        raise ValueError(f"{label} contains unsafe path segments: {value!r}")
+    return prefix
+
+
+def _bundle_checksum(bundle_dir: Path) -> str:
+    hasher = hashlib.sha256()
+    for path in sorted(bundle_dir.rglob("*")):
+        if path.is_dir():
+            continue
+        rel = path.relative_to(bundle_dir).as_posix().encode("utf-8")
+        hasher.update(b"\x00" + rel + b"\x00")
+        hasher.update(path.read_bytes())
+    return hasher.hexdigest()
+
+
+def _mirror_prefix(
+    *,
+    repo_id: str,
+    revision: str,
+    task_id: str,
+    checksum: str,
+    hf_path: str,
+) -> str:
+    benchmark_id = task_id.split("/", 1)[0]
+    return (
+        f"{_safe_key_part(benchmark_id)}/"
+        f"{_safe_key_part(repo_id)}/"
+        f"{_safe_key_part(revision)}/"
+        f"{_validate_relative_prefix(hf_path, label='hf_path')}/"
+        f"{_safe_key_part(checksum)}/"
+    )
+
+
+async def mirror_manifest_task_bundle(
+    *,
+    repo_id: str,
+    revision: str,
+    task_id: str,
+    checksum: str,
+    hf_path: str,
+    snapshot_root: Path,
+    object_store: ObjectStore,
+    bucket: str,
+) -> MirrorResult:
+    """Mirror one manifest task bundle from a local HF snapshot into S3/MinIO.
+
+    Re-running against the same snapshot is idempotent: existing byte-identical
+    objects are skipped, while missing or changed objects are written.
+    """
+    relative_prefix = _validate_relative_prefix(hf_path, label="hf_path")
+    bundle_dir = snapshot_root / relative_prefix
+    if not bundle_dir.is_dir():
+        raise FileNotFoundError(
+            f"HF bundle path {relative_prefix!r} not found under {snapshot_root}",
+        )
+    actual_checksum = _bundle_checksum(bundle_dir)
+    if actual_checksum != checksum:
+        raise ValueError(
+            "HF bundle checksum mismatch for "
+            f"{task_id}: manifest={checksum} actual={actual_checksum}",
+        )
+
+    await object_store.ensure_bucket(bucket)
+    target_prefix = _mirror_prefix(
+        repo_id=repo_id,
+        revision=revision,
+        task_id=task_id,
+        checksum=checksum,
+        hf_path=hf_path,
+    )
+    uploaded = 0
+    skipped = 0
+    bytes_uploaded = 0
+    bytes_skipped = 0
+    for path in sorted(bundle_dir.rglob("*")):
+        if path.is_dir():
+            continue
+        rel = path.relative_to(bundle_dir).as_posix()
+        key = f"{target_prefix}{rel}"
+        body = path.read_bytes()
+        try:
+            existing = await object_store.get_object(bucket=bucket, key=key)
+        except Exception:
+            existing = None
+        if existing == body:
+            skipped += 1
+            bytes_skipped += len(body)
+            continue
+        await object_store.put_object(bucket=bucket, key=key, body=body)
+        uploaded += 1
+        bytes_uploaded += len(body)
+
+    if uploaded + skipped == 0:
+        raise FileNotFoundError(f"HF bundle path {relative_prefix!r} has no files")
+
+    return MirrorResult(
+        source=f"s3://{bucket}/{target_prefix}",
+        uploaded=uploaded,
+        skipped=skipped,
+        bytes_uploaded=bytes_uploaded,
+        bytes_skipped=bytes_skipped,
+    )
+
+
+async def _download_hf_bundle_snapshot(
+    *,
+    repo_id: str,
+    revision: str,
+    hf_token: str | None,
+    tasks: list[dict[str, Any]],
+) -> Path:
+    from huggingface_hub import snapshot_download
+
+    patterns = [
+        f"{_validate_relative_prefix(str(task['hf_path']), label='hf_path')}/*"
+        for task in tasks
+    ]
+    snapshot = await asyncio.to_thread(
+        snapshot_download,
+        repo_id=repo_id,
+        revision=revision,
+        repo_type="dataset",
+        allow_patterns=patterns,
+        token=hf_token,
+    )
+    return Path(snapshot)
 
 
 def task_config_from_manifest_entry(entry: dict[str, Any]) -> dict[str, Any]:
@@ -71,6 +227,9 @@ async def run_register(
     db_url: str,
     revision: str = "main",
     registered_by: str | None = None,
+    mirror_to_object_store: bool = False,
+    object_store: ObjectStore | None = None,
+    bucket: str = "loom-benchmarks",
 ) -> dict[str, Any]:
     """Read manifest from HF, upsert Benchmark + Task rows. Returns
     `{"registered": N, "skipped": M, "repo_id": str, "revision": str}`.
@@ -86,6 +245,24 @@ async def run_register(
         hf_token=hf_token,
         revision=revision,
     )
+    manifest_tasks = list(manifest["tasks"])
+
+    snapshot_root: Path | None = None
+    mirrored = 0
+    mirror_uploaded = 0
+    mirror_skipped = 0
+    mirror_bytes_uploaded = 0
+    mirror_bytes_skipped = 0
+    mirrored_at = datetime.now(UTC).isoformat()
+    if mirror_to_object_store:
+        if object_store is None:
+            raise ValueError("mirror_to_object_store requires object_store")
+        snapshot_root = await _download_hf_bundle_snapshot(
+            repo_id=repo_id,
+            revision=revision,
+            hf_token=hf_token,
+            tasks=manifest_tasks,
+        )
 
     engine = create_async_engine(normalize_db_url(db_url))
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -150,7 +327,7 @@ async def run_register(
         # postgres, and the per-row upsert lets a re-register pick up
         # checksum drift (publish bumped → task row's checksum updated).
         async with session_factory() as session:
-            for t in manifest["tasks"]:
+            for t in manifest_tasks:
                 source = _hf_source_url(
                     repo_id=repo_id,
                     revision=revision,
@@ -158,10 +335,37 @@ async def run_register(
                 )
                 # PR-1: per-task tags from manifest v2. v1 manifests
                 # omit `tags`; treat absent + {} identically.
-                tags = t.get("tags") or {}
+                tags = dict(t.get("tags") or {})
                 config = task_config_from_manifest_entry(t)
                 if not config:
                     legacy_placeholders += 1
+                if mirror_to_object_store:
+                    assert object_store is not None
+                    assert snapshot_root is not None
+                    mirror = await mirror_manifest_task_bundle(
+                        repo_id=repo_id,
+                        revision=revision,
+                        task_id=t["task_id"],
+                        checksum=t["checksum"],
+                        hf_path=t["hf_path"],
+                        snapshot_root=snapshot_root,
+                        object_store=object_store,
+                        bucket=bucket,
+                    )
+                    source = mirror.source
+                    mirrored += 1
+                    mirror_uploaded += mirror.uploaded
+                    mirror_skipped += mirror.skipped
+                    mirror_bytes_uploaded += mirror.bytes_uploaded
+                    mirror_bytes_skipped += mirror.bytes_skipped
+                    tags.update({
+                        "hf_repo_id": repo_id,
+                        "hf_revision": revision,
+                        "hf_path": t["hf_path"],
+                        "hf_checksum": t["checksum"],
+                        "runtime_source_kind": "internal_object_store",
+                        "runtime_source_mirrored_at": mirrored_at,
+                    })
                 await session.execute(
                     pg_insert(TaskRow)
                     .values(
@@ -200,6 +404,11 @@ async def run_register(
         "registered": registered,
         "legacy_placeholders": legacy_placeholders,
         "skipped": skipped,
+        "mirrored": mirrored,
+        "mirror_uploaded": mirror_uploaded,
+        "mirror_skipped": mirror_skipped,
+        "mirror_bytes_uploaded": mirror_bytes_uploaded,
+        "mirror_bytes_skipped": mirror_bytes_skipped,
         "repo_id": repo_id,
         "revision": revision,
     }

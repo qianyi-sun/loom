@@ -9,7 +9,7 @@ Subcommands:
 - provision-public-beta-catalog [--source-db-url --target-db-url --source-minio-* --target-minio-*]
 - publish-local <path> [--db-url --minio-* --bucket ...]
 - publish <slug> [--hf-org --hf-token --cache-dir --limit --private]
-- register <slug> [--hf-org --hf-token --db-url --revision]
+- register <slug> [--hf-org --hf-token --db-url --revision --mirror-to-object-store --minio-*]
 - verify <slug> [--limit --minio-* --bucket --seed]
 - audit [--all | <slug>] [--db-url] [--json]
 
@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 from collections.abc import Callable
@@ -36,6 +37,7 @@ from loom_cli import remote as remote_mod
 from loom_cli.benchmark_readiness import (
     render_readiness_json,
     render_readiness_table,
+    run_bundle_presence_audit,
     run_readiness_audit,
 )
 from loom_cli.discovery import DatasetEntry, union_entries
@@ -140,6 +142,44 @@ def _add_register_args(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument("--revision", default="main")
     p.add_argument("--registered-by", default=None)
+    p.add_argument(
+        "--mirror-to-object-store",
+        action="store_true",
+        help=(
+            "Download HF task bundles with the operator HF token, mirror them "
+            "into internal object storage, and register s3:// runtime sources "
+            "instead of hf:// worker sources."
+        ),
+    )
+    p.add_argument(
+        "--minio-endpoint",
+        default=_target_minio_env("ENDPOINT"),
+        help=(
+            "Target object-store endpoint for --mirror-to-object-store "
+            "(env LOOM_MINIO_ENDPOINT, then LOOM_SVC_MINIO_ENDPOINT)."
+        ),
+    )
+    p.add_argument(
+        "--minio-access-key",
+        default=_target_minio_env("ACCESS_KEY"),
+        help=(
+            "Target object-store access key for --mirror-to-object-store "
+            "(env LOOM_MINIO_ACCESS_KEY, then LOOM_SVC_MINIO_ACCESS_KEY)."
+        ),
+    )
+    p.add_argument(
+        "--minio-secret-key",
+        default=_target_minio_env("SECRET_KEY"),
+        help=(
+            "Target object-store secret key for --mirror-to-object-store "
+            "(env LOOM_MINIO_SECRET_KEY, then LOOM_SVC_MINIO_SECRET_KEY)."
+        ),
+    )
+    p.add_argument(
+        "--bucket",
+        default=os.environ.get("LOOM_BENCHMARK_BUCKET", "loom-benchmarks"),
+        help="Target object-store bucket for mirrored task bundles.",
+    )
 
 
 def _add_verify_args(p: argparse.ArgumentParser) -> None:
@@ -169,6 +209,26 @@ def _add_audit_args(p: argparse.ArgumentParser) -> None:
         "--db-url",
         default=_target_db_url(),
         help="Postgres URL (defaults to env LOOM_DB_URL, then LOOM_SVC_DB_URL).",
+    )
+    p.add_argument(
+        "--verify-bundles",
+        action="store_true",
+        help=(
+            "Also verify internal s3:// task bundle prefixes in object storage "
+            "by reading each mirrored task.toml."
+        ),
+    )
+    p.add_argument(
+        "--minio-endpoint",
+        default=_target_minio_env("ENDPOINT"),
+    )
+    p.add_argument(
+        "--minio-access-key",
+        default=_target_minio_env("ACCESS_KEY"),
+    )
+    p.add_argument(
+        "--minio-secret-key",
+        default=_target_minio_env("SECRET_KEY"),
     )
 
 
@@ -337,7 +397,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ))
     _add_register_args(sub.add_parser(
         "register",
-        help="Read a benchmark's HF manifest + upsert task rows pointing at hf:// URLs.",
+        help=(
+            "Read a benchmark's HF manifest and upsert task rows; optionally "
+            "mirror bundles into internal object storage."
+        ),
     ))
     _add_verify_args(sub.add_parser(
         "verify",
@@ -573,6 +636,7 @@ def _cmd_publish(args: argparse.Namespace) -> int:
 
 
 def _cmd_register(args: argparse.Namespace) -> int:
+    from loom.trajectory.storage import MinioObjectStore
     from loom_benchmark_tool.register_cmd import run_register
 
     if not args.db_url:
@@ -582,6 +646,35 @@ def _cmd_register(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    object_store = None
+    if args.mirror_to_object_store:
+        missing = [
+            f for f, v in (
+                (
+                    "--minio-endpoint / LOOM_MINIO_ENDPOINT / "
+                    "LOOM_SVC_MINIO_ENDPOINT",
+                    args.minio_endpoint,
+                ),
+                (
+                    "--minio-access-key / LOOM_MINIO_ACCESS_KEY / "
+                    "LOOM_SVC_MINIO_ACCESS_KEY",
+                    args.minio_access_key,
+                ),
+                (
+                    "--minio-secret-key / LOOM_MINIO_SECRET_KEY / "
+                    "LOOM_SVC_MINIO_SECRET_KEY",
+                    args.minio_secret_key,
+                ),
+            ) if not v
+        ]
+        if missing:
+            print(f"error: register mirror requires: {', '.join(missing)}", file=sys.stderr)
+            return 2
+        object_store = MinioObjectStore(
+            endpoint_url=args.minio_endpoint,
+            access_key=args.minio_access_key,
+            secret_key=args.minio_secret_key,
+        )
     result = asyncio.run(run_register(
         benchmark=args.benchmark,
         hf_org=args.hf_org,
@@ -589,15 +682,24 @@ def _cmd_register(args: argparse.Namespace) -> int:
         db_url=args.db_url,
         revision=args.revision,
         registered_by=args.registered_by,
+        mirror_to_object_store=args.mirror_to_object_store,
+        object_store=object_store,
+        bucket=args.bucket,
     ))
-    print(
-        f"register {args.benchmark}: "
-        f"registered={result['registered']} "
-        f"legacy_placeholders={result['legacy_placeholders']} "
-        f"skipped={result['skipped']} "
-        f"repo={result['repo_id']} "
-        f"rev={result['revision']}",
-    )
+    parts = [
+        f"register {args.benchmark}:",
+        f"registered={result['registered']}",
+        f"legacy_placeholders={result['legacy_placeholders']}",
+        f"skipped={result['skipped']}",
+    ]
+    if args.mirror_to_object_store:
+        parts.extend([
+            f"mirrored={result['mirrored']}",
+            f"mirror_uploaded={result['mirror_uploaded']}",
+            f"mirror_skipped={result['mirror_skipped']}",
+        ])
+    parts.extend([f"repo={result['repo_id']}", f"rev={result['revision']}"])
+    print(" ".join(parts))
     return 0
 
 
@@ -660,6 +762,8 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
 
 def _cmd_audit(args: argparse.Namespace) -> int:
+    from loom.trajectory.storage import MinioObjectStore
+
     if not args.db_url:
         print(
             "error: audit requires --db-url / env LOOM_DB_URL "
@@ -680,14 +784,71 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         )
         return 2
 
+    object_store = None
+    if args.verify_bundles:
+        missing = [
+            f for f, v in (
+                (
+                    "--minio-endpoint / LOOM_MINIO_ENDPOINT / "
+                    "LOOM_SVC_MINIO_ENDPOINT",
+                    args.minio_endpoint,
+                ),
+                (
+                    "--minio-access-key / LOOM_MINIO_ACCESS_KEY / "
+                    "LOOM_SVC_MINIO_ACCESS_KEY",
+                    args.minio_access_key,
+                ),
+                (
+                    "--minio-secret-key / LOOM_MINIO_SECRET_KEY / "
+                    "LOOM_SVC_MINIO_SECRET_KEY",
+                    args.minio_secret_key,
+                ),
+            ) if not v
+        ]
+        if missing:
+            print(f"error: audit --verify-bundles requires: {', '.join(missing)}", file=sys.stderr)
+            return 2
+        object_store = MinioObjectStore(
+            endpoint_url=args.minio_endpoint,
+            access_key=args.minio_access_key,
+            secret_key=args.minio_secret_key,
+        )
+
     items = asyncio.run(run_readiness_audit(
         db_url=args.db_url,
         benchmark=None if args.all_benchmarks else args.benchmark,
     ))
+    bundle_report = None
+    if args.verify_bundles:
+        assert object_store is not None
+        bundle_report = asyncio.run(run_bundle_presence_audit(
+            db_url=args.db_url,
+            object_store=object_store,
+            benchmark=None if args.all_benchmarks else args.benchmark,
+        ))
     if args.as_json:
-        print(render_readiness_json(items))
+        payload = json.loads(render_readiness_json(items))
+        if bundle_report is not None:
+            payload["bundle_presence"] = {
+                "s3_tasks": bundle_report.s3_tasks,
+                "verified": bundle_report.verified,
+                "missing": bundle_report.missing,
+                "missing_sources": bundle_report.missing_sources,
+            }
+        print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(render_readiness_table(items))
+        if bundle_report is not None:
+            print(
+                "bundle_presence "
+                f"s3_tasks={bundle_report.s3_tasks} "
+                f"verified={bundle_report.verified} "
+                f"missing={bundle_report.missing}",
+            )
+            for source in bundle_report.missing_sources[:10]:
+                print(f"  missing {source}")
+    if bundle_report is not None and bundle_report.missing > 0:
+        return 1
     return 0
 
 

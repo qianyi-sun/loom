@@ -31,8 +31,16 @@ For platform onboarding, publish and register the full pinned task set:
 ```bash
 loom datasets publish terminal-bench-2 --hf-org "$LOOM_HF_ORG"
 loom datasets register terminal-bench-2 --hf-org "$LOOM_HF_ORG" \
-  --db-url "$LOOM_DB_URL"
-loom datasets audit terminal-bench-2 --db-url "$LOOM_DB_URL"
+  --db-url "$LOOM_DB_URL" \
+  --mirror-to-object-store \
+  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
+  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
+  --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
+loom datasets audit terminal-bench-2 --db-url "$LOOM_DB_URL" \
+  --verify-bundles \
+  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
+  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
+  --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
 ```
 
 Converted TB-2 tasks set `[environment].workdir = "/app"` because upstream
