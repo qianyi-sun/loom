@@ -65,7 +65,8 @@ running `loom service up`.
 # One-time — uv creates .venv/ on first sync; activate it after.
 # Dependency resolution is intentionally constrained in pyproject.toml
 # to stay valid on both local macOS development and Linux x86_64 CI.
-uv sync --extra dev
+uv python install 3.11
+uv sync --extra dev --python 3.11
 uv pip install -e packages/loom-launcher \
                -e packages/loom-benchmarks \
                -e packages/loom-benchmark-terminal-bench-2
@@ -86,11 +87,18 @@ metadata still report the required `repository-checks` status, but skip the
 heavy install/test/coverage steps:
 
 ```bash
+uv run ruff check src tests packages migrations
+uv run mypy
 pytest tests/unit tests/contract tests/property tests/loom_cli \
        packages/loom-launcher/tests packages/loom-benchmarks/tests \
        packages/loom-benchmark-terminal-bench-2/tests
        # ~10 s, no external deps
 ```
+
+Local verification should use Python 3.11, matching the `repository-checks`
+job. The repository root `.python-version` pins uv-managed virtualenv creation
+to 3.11; if a local `.venv` was created with another interpreter, remove it and
+rerun `uv sync --extra dev --python 3.11` before running mypy.
 
 Heavier suites are opt-in:
 
