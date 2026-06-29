@@ -1,7 +1,8 @@
 /**
  * App shell. Sidebar on the left, scrollable main content area on the
  * right. Unauthenticated visitors are redirected to /settings unless
- * they are on a public onboarding route such as invite acceptance.
+ * they are on a public onboarding route such as password setup/reset
+ * or invite acceptance.
  */
 import { Navigate, Outlet, useLocation } from "react-router-dom";
 
@@ -14,7 +15,10 @@ export default function Layout(): JSX.Element {
   const loc = useLocation();
   const isSettings = loc.pathname.startsWith("/settings");
   const isInviteAccept = loc.pathname.startsWith("/invites/accept");
-  const isPublicRoute = isSettings || isInviteAccept;
+  const isPasswordAction =
+    loc.pathname.startsWith("/auth/setup") ||
+    loc.pathname.startsWith("/auth/reset");
+  const isPublicRoute = isSettings || isInviteAccept || isPasswordAction;
 
   if (isLoading) {
     return <div className="min-h-screen bg-slate-50" />;
