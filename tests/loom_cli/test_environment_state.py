@@ -399,3 +399,30 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert gb10_state["max_concurrent"] == 10
     assert gb10_state["target_slots"] == 150
     assert profile.catalog_provisioning["required"] is True
+
+
+def test_public_beta_oldlab_policy_allows_all_five_oldlab_submit_nodes() -> None:
+    profile = load_environment_state_profile(
+        Path("deploy/environment-state/public-beta.toml"),
+        variables={
+            "IMAGE_TAG": "public-beta-test",
+            "ENV_CONFIG_VERSION": "public-beta-test",
+        },
+        expected_environment="public-beta",
+    )
+
+    oldlab_policy = next(
+        policy
+        for policy in profile.autoscaler_policies
+        if policy["pool_name"] == "oldlab"
+    )
+
+    assert oldlab_policy["environment"] == "production"
+    assert oldlab_policy["actuator_config"]["allowed_nodes"] == [
+        "TRT-EAI-OLDLAB-1",
+        "trt-EAI-OLDLAB-2",
+        "trt-eai-oldlab-3",
+        "trt-eai-oldlab-4",
+        "trt-eai-oldlab-5",
+    ]
+    assert oldlab_policy["actuator_config"]["max_jobs"] == 5
