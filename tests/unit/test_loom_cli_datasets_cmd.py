@@ -374,6 +374,67 @@ def test_register_db_url_precedence(
     assert capsys.readouterr().out.count("registered=1") == 2
 
 
+def test_register_mirror_to_object_store_passes_minio_target(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, object] = {}
+    stores: list[dict[str, object]] = []
+
+    class FakeObjectStore:
+        def __init__(self, **kwargs: object) -> None:
+            stores.append(kwargs)
+
+    async def fake_register(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "registered": 100,
+            "legacy_placeholders": 0,
+            "skipped": 0,
+            "mirrored": 100,
+            "mirror_uploaded": 200,
+            "mirror_skipped": 0,
+            "repo_id": "PRHW/loom-benchmark-skilllearnbench",
+            "revision": "7908700",
+        }
+
+    monkeypatch.setattr("loom.trajectory.storage.MinioObjectStore", FakeObjectStore)
+    monkeypatch.setattr("loom_benchmark_tool.register_cmd.run_register", fake_register)
+
+    rc = dispatch([
+        "register",
+        "skilllearnbench",
+        "--db-url",
+        "postgresql://target/db",
+        "--revision",
+        "7908700",
+        "--mirror-to-object-store",
+        "--minio-endpoint",
+        "http://target-minio:9000",
+        "--minio-access-key",
+        "target-access",
+        "--minio-secret-key",
+        "target-secret",
+        "--bucket",
+        "loom-benchmarks",
+    ])
+
+    assert rc == 0
+    assert stores == [
+        {
+            "endpoint_url": "http://target-minio:9000",
+            "access_key": "target-access",
+            "secret_key": "target-secret",
+        }
+    ]
+    assert captured["mirror_to_object_store"] is True
+    assert captured["object_store"] is not None
+    assert captured["bucket"] == "loom-benchmarks"
+    out = capsys.readouterr().out
+    assert "mirrored=100" in out
+    assert "mirror_uploaded=200" in out
+
+
 def test_verify_minio_env_precedence(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

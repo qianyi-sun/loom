@@ -26,7 +26,10 @@ sample subsets:
 
 Publish/register still follows the normal schema-v3 path. After publication,
 `loom datasets register <slug>` must store valid `TaskConfig` rows before the
-SPA marks the benchmark ready.
+SPA marks the benchmark ready. Protected shared environments should use
+`register --mirror-to-object-store` so runtime task sources point at internal
+object storage while HF repo/revision/checksum provenance remains on the task
+rows.
 
 ## SkillFlow and SkillLearnBench task bundles
 

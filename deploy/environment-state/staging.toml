@@ -121,7 +121,14 @@ mode = "all"
 
 [catalog_provisioning]
 required = true
-command = "loom datasets provision-public-beta-catalog --imported-by staging-provision"
+command = "loom datasets provision-public-beta-catalog --imported-by staging-provision && loom datasets register skilllearnbench --hf-org PRHW --revision \"$PUBLISHED_SHA\" --mirror-to-object-store --bucket loom-benchmarks --registered-by staging-provision && loom datasets audit --all --verify-bundles"
+required_env = [
+  "HF_TOKEN",
+  "LOOM_SVC_DB_URL",
+  "LOOM_SVC_MINIO_ENDPOINT",
+  "LOOM_SVC_MINIO_ACCESS_KEY",
+  "LOOM_SVC_MINIO_SECRET_KEY",
+]
 
 [external_slurm_runner_prerequisites]
 pools = ["oldlab"]

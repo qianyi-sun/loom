@@ -184,7 +184,11 @@ published manifest into catalog rows:
 
 ```bash
 loom datasets publish humaneval --hf-org PRHW
-loom datasets register humaneval --hf-org PRHW --db-url "$LOOM_DB_URL"
+loom datasets register humaneval --hf-org PRHW --db-url "$LOOM_DB_URL" \
+  --mirror-to-object-store \
+  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
+  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
+  --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
 ```
 
 The publish command validates every generated `task.toml` against
@@ -192,7 +196,10 @@ The publish command validates every generated `task.toml` against
 raw `task_config` for each task, alongside the bundle checksum,
 `hf_path`, split, tags, and license metadata. The register command
 validates that payload again, verifies `task_config.task.id` matches
-the manifest `task_id`, and writes it to `tasks.config`.
+the manifest `task_id`, and writes it to `tasks.config`. In
+public-beta/staging/production, registration should also mirror the exact HF
+revision into internal object storage and write `s3://...` task sources so
+workers do not need HF tokens or direct HF egress.
 
 That stored config is the runnable boundary used by the service,
 batch runner, and SPA. Legacy manifests that lack `task_config` are

@@ -815,11 +815,15 @@ For a narrower diagnostic, add repeated `--expected-benchmark BENCHMARK_ID`
 arguments.
 
 For public-beta or release deployments, operators should provision the ready
-catalog with `loom datasets provision-public-beta-catalog` before inviting
-users. That command copies only runnable benchmark/task rows and their
-referenced `s3://` bundles from a known-good source environment into the target
-database/object store. It is separate from `scripts/seed_test_data.py`, which is
-only for disposable auth/run fixtures.
+catalog before inviting users. Use `loom datasets provision-public-beta-catalog`
+when copying runnable benchmark/task rows and referenced `s3://` bundles from a
+known-good source environment into the target database/object store. For
+HF-published first-party benchmarks in protected environments, use
+`loom datasets register --mirror-to-object-store` so runtime rows point at
+internal object storage while preserving HF repo/revision/checksum provenance.
+Follow either path with `loom datasets audit --all --verify-bundles`. These
+commands are separate from `scripts/seed_test_data.py`, which is only for
+disposable auth/run fixtures.
 
 Batch fan-out still treats deterministic non-license policy/config failures as
 terminal defense-in-depth instead of leaving the batch `submitted`; open Batch

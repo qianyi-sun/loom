@@ -290,12 +290,27 @@ For first-party adapter-backed benchmarks, prefer the manifest path:
 ```bash
 loom datasets publish my-benchmark --hf-org "$LOOM_HF_ORG"
 loom datasets register my-benchmark --hf-org "$LOOM_HF_ORG" \
-    --db-url "$LOOM_DB_URL"
+    --db-url "$LOOM_DB_URL" \
+    --mirror-to-object-store \
+    --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
+    --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
+    --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
+loom datasets audit my-benchmark --db-url "$LOOM_DB_URL" \
+    --verify-bundles \
+    --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
+    --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
+    --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
 ```
 
 Legacy manifests without `task_config` remain metadata placeholders.
 They must be republished or backfilled before users can launch them
 from the batch UI.
+
+For public-beta/staging/production, `register --mirror-to-object-store` is the
+preferred path for HF-published benchmarks. It keeps Hugging Face as the
+publication/provenance source, mirrors each task bundle into internal object
+storage, stores `s3://...` runtime sources, and lets workers run without HF
+tokens or direct HF egress.
 
 For user-owned local benchmarks that do not need a Python adapter, use the
 folder-first registry path instead:
