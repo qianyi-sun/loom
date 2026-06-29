@@ -164,6 +164,7 @@ def test_skilllearnbench_converts_real_bundle_to_loom_task_config(
         "skilllearnbench/stock-data-visualization/stock-data-visualization-1"
     )
     assert cfg.task.id == converted.task_id
+    assert cfg.environment.cpu_arch == "any"
     assert cfg.environment.dockerfile.as_posix() == "environment/Dockerfile"
     assert cfg.environment.docker_build_context.as_posix() == "."
     assert cfg.environment.workdir.as_posix() == "/root"

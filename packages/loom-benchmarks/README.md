@@ -55,7 +55,12 @@ derived from upstream `solution/solve.sh` suitability; 58 of the 100 upstream
 SLB tasks form the deterministic oracle slate and 42 tag
 `oracle_eligible=false`. The excluded tasks are agent-only, require external
 oracle secrets, or ship known-bad upstream oracle solutions whose `solve.sh`
-does not match the task/tests.
+does not match the task/tests. The `human_authored` SkillLearnBench catalog row
+also declares `params.cpu_arch=any`; converted task configs therefore carry an
+explicit portable CPU-architecture requirement and can be scheduled on either
+x86_64 or ARM64 workers. Other bundle-backed adapters keep the default
+`x86_64` task requirement until their own dual-architecture evidence is added
+to catalog metadata.
 
 For official bundles, the adapter copies each task directory, preserves the
 upstream `environment/Dockerfile`, writes a Loom-owned `task.toml`, and adds a
