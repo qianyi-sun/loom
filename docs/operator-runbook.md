@@ -545,7 +545,37 @@ knob you need.
     `python scripts/check_no_provider_keys_in_artifacts.py <artifact-path>`
     before publishing or attaching them to issues.
 
-12. **Write one-off remote secret files with the checked helper.** Do not pipe a
+12. **Post generated GitHub issue/comment bodies from files.** Long generated
+    Markdown must go through a file-backed path so shell quoting, backticks,
+    `$()` fragments, or heredocs cannot corrupt the body or expose secrets.
+    Write the body to a temporary file, scan that file before submission, submit
+    it with `--body-file`, then remove the temporary file after the API call
+    succeeds:
+    ```bash
+    BODY_FILE=$(mktemp)
+    $EDITOR "$BODY_FILE"
+
+    if rg -n --pcre2 \
+      '(github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|api[_-]?key=)' \
+      "$BODY_FILE"; then
+      echo "Potential secret leak in GitHub body; do not submit"
+      exit 1
+    fi
+
+    # Choose the mutation you need.
+    gh issue edit "$ISSUE_NUMBER" --repo qianyi-sun/loom --body-file "$BODY_FILE"
+    # gh issue comment "$ISSUE_NUMBER" --repo qianyi-sun/loom --body-file "$BODY_FILE"
+    rm -f "$BODY_FILE"
+    ```
+    Do not paste raw bearer tokens, provider keys, signed URLs, or exact secret
+    values into issues, PRs, comments, generated Markdown, shell history, or
+    shared evidence. If a token-like value reaches a public issue body, replace
+    the current body with a redacted file-backed body, revoke or rotate the
+    credential, resolve the GitHub secret-scanning alert only after verifying
+    the exposed value is inactive, and record the residual risk that GitHub's
+    historical edit records or caches may have contained the old body.
+
+13. **Write one-off remote secret files with the checked helper.** Do not pipe a
     token-producing command into `ssh` while also using an SSH heredoc; the
     heredoc consumes stdin and can route the token into shell source or command
     output. Use the helper when a benchmark or incident run needs a short-lived
