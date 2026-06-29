@@ -27,6 +27,7 @@ from loom.db.schema import (
     TeamQuota,
     Token,
     Trial,
+    User,
 )
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
@@ -74,6 +75,9 @@ async def run_library_setup(
     team_b = uuid4()
     raw_a = f"loom_team_{uuid4().hex}"
     raw_b = f"loom_team_{uuid4().hex}"
+    legacy_raw_b = f"loom_team_{uuid4().hex}"
+    user_a = uuid4()
+    user_b = uuid4()
     task_id = f"local/task-{uuid4().hex[:8]}"
     batch_shared = uuid4()
     batch_default = uuid4()
@@ -98,17 +102,43 @@ async def run_library_setup(
     with sl() as s:
         s.execute(insert(Team).values(id=team_a, name="Alpha Research"))
         s.execute(insert(Team).values(id=team_b, name="Beta Apps"))
+        s.execute(insert(User).values(
+            id=user_a,
+            username="AlphaOwner",
+            username_normalized="alphaowner",
+            status="active",
+            is_platform_admin=False,
+        ))
+        s.execute(insert(User).values(
+            id=user_b,
+            username="BetaOwner",
+            username_normalized="betaowner",
+            status="active",
+            is_platform_admin=False,
+        ))
         s.execute(insert(TeamQuota).values(team_id=team_a))
         s.execute(insert(TeamQuota).values(team_id=team_b))
-        for raw, team_id in ((raw_a, team_a), (raw_b, team_b)):
+        for raw, team_id, user_id in (
+            (raw_a, team_a, user_a),
+            (raw_b, team_b, user_b),
+        ):
             s.execute(insert(Token).values(
                 token_hash=hashlib.sha256(raw.encode()).digest(),
                 type="team",
                 scopes=["read:own", "submit", "providers:manage"],
                 team_id=team_id,
+                created_by_user_id=user_id,
                 issued_at=now,
                 expires_at=None,
             ))
+        s.execute(insert(Token).values(
+            token_hash=hashlib.sha256(legacy_raw_b.encode()).digest(),
+            type="team",
+            scopes=["read:own", "submit", "providers:manage"],
+            team_id=team_b,
+            issued_at=now,
+            expires_at=None,
+        ))
         s.execute(insert(Task).values(
             id=task_id,
             checksum="1" * 64,
@@ -372,8 +402,10 @@ async def run_library_setup(
             "app": app,
             "raw_a": raw_a,
             "raw_b": raw_b,
+            "legacy_raw_b": legacy_raw_b,
             "team_a": team_a,
             "team_b": team_b,
+            "user_b": user_b,
             "batch_shared": batch_shared,
             "batch_default": batch_default,
             "batch_private": batch_private,
@@ -404,6 +436,7 @@ async def run_library_setup(
             s.execute(delete(Token))
             s.execute(delete(Task))
             s.execute(delete(TeamQuota))
+            s.execute(delete(User).where(User.id.in_([user_a, user_b])))
             s.execute(delete(Team))
             s.commit()
         sync_engine.dispose()
@@ -872,6 +905,7 @@ async def test_typed_registry_policy_controls_reuse_and_records_provenance(
     safe_artifact_id = run_library_setup["safe_artifact_id"]
     conn_a = run_library_setup["conn_a"]
     postgres_url = run_library_setup["postgres_url"]
+    user_b = run_library_setup["user_b"]
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
@@ -914,6 +948,7 @@ async def test_typed_registry_policy_controls_reuse_and_records_provenance(
         ).scalar_one()
         assert row.provider_connection_id is None
         assert row.provider_connection_id != conn_a
+        assert row.submitted_by_user_id == user_b
         assert row.source_provenance[0]["source_artifact_id"] == str(safe_artifact_id)
     sync_engine.dispose()
 
@@ -927,6 +962,7 @@ async def test_clone_config_uses_destination_provider_and_records_provenance(
     conn_a = run_library_setup["conn_a"]
     conn_b = run_library_setup["conn_b"]
     team_b = run_library_setup["team_b"]
+    user_b = run_library_setup["user_b"]
     postgres_url = run_library_setup["postgres_url"]
 
     transport = httpx.ASGITransport(app=app)
@@ -961,10 +997,58 @@ async def test_clone_config_uses_destination_provider_and_records_provenance(
             select(Batch).where(Batch.id == UUID(body["batch_id"])),
         ).scalar_one()
         assert row.team_id == team_b
+        assert row.submitted_by_user_id == user_b
         assert row.provider_connection_id == conn_b
         assert row.provider_connection_id != conn_a
         assert row.source_provenance[0]["source_batch_id"] == str(batch_shared)
     sync_engine.dispose()
+
+
+async def test_legacy_team_token_cannot_clone_run_library_batch(
+    run_library_setup: dict[str, object],
+) -> None:
+    app = run_library_setup["app"]
+    legacy_raw_b = run_library_setup["legacy_raw_b"]
+    batch_shared = run_library_setup["batch_shared"]
+    conn_b = run_library_setup["conn_b"]
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        cloned = await ac.post(
+            f"/api/v1/run-library/batches/{batch_shared}/clone-config",
+            json={
+                "name": "legacy clone from alpha",
+                "provider_connection_id": str(conn_b),
+            },
+            headers={"Authorization": f"Bearer {legacy_raw_b}"},
+        )
+
+    assert cloned.status_code == 403
+    assert "legacy team token" in cloned.json()["detail"]
+
+
+async def test_legacy_team_token_cannot_reuse_run_library_artifact(
+    run_library_setup: dict[str, object],
+) -> None:
+    app = run_library_setup["app"]
+    legacy_raw_b = run_library_setup["legacy_raw_b"]
+    trial_id = run_library_setup["trial_shared"]
+    safe_key = run_library_setup["safe_key"]
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        reused = await ac.post(
+            f"/api/v1/run-library/trials/{trial_id}/artifacts/reuse",
+            json={"key": safe_key, "name": "legacy reuse of alpha report"},
+            headers={"Authorization": f"Bearer {legacy_raw_b}"},
+        )
+
+    assert reused.status_code == 403
+    assert "legacy team token" in reused.json()["detail"]
 
 
 async def test_reuse_shared_artifact_creates_provenance_and_blocks_raw(

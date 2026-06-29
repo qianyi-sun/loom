@@ -116,12 +116,12 @@ requests include the CSRF header. You should not paste a raw bearer token into
 the production SPA.
 
 Your current team controls execution, cost attribution, provider credentials,
-members, and team API tokens. Roles are enforced by the API:
+members, and user-owned API tokens. Roles are enforced by the API:
 
 - `viewer` can read the current team's batches, trials, provider summaries, and
   usage.
 - `member` can also submit work for the current team.
-- `owner` can manage team API tokens and provider connections.
+- `owner` can manage user-owned API tokens and provider connections.
 - `platform_admin` is an operator role with cross-team inspection/admin access.
 
 The app shell always shows the current team and role beside the primary
@@ -157,10 +157,11 @@ The CLI uses the same username/password account by default. Use
 then `loom auth whoami` to verify the active server, user, current team, role,
 and scopes. Team owners can still create, rotate, or revoke named API tokens
 from Team access for automation; those tokens are user-owned, scoped, and
-shown only once on create/rotate. Completed run metadata and safe artifacts are
-shared across teams through the Run Library; ordinary batch, trial, trajectory,
-ATIF, artifact, cancellation, rerun, and provider routes remain current-team
-scoped.
+shown only once on create/rotate. Legacy unowned team tokens are read/compat
+credentials only and cannot create batches, direct trials, reruns, clones, or
+artifact reuse jobs. Completed run metadata and safe artifacts are shared
+across teams through the Run Library; ordinary batch, trial, trajectory, ATIF,
+artifact, cancellation, rerun, and provider routes remain current-team scoped.
 
 Monitor lists show `username / team` for each batch and trial when the submitter
 is known, with legacy team fallback for old rows. Ordinary users see their

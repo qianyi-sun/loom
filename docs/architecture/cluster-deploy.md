@@ -303,7 +303,7 @@ loom cluster {render,preflight,up,down} --nodes HOSTFILE
 
 ```
 loom auth login --server URL --username USER --password {env:VAR | file:PATH | -}
-loom auth login --server URL --token {env:VAR | file:PATH | -}    # automation/legacy token path
+loom auth login --server URL --token {env:VAR | file:PATH | -}    # user-owned API token for automation
 loom auth {status,whoami,logout}
 
 loom providers create --name N --type {openai-compatible,anthropic,google,custom} \

@@ -299,6 +299,24 @@ async def _serialize_me(
     return payload
 
 
+def _credential_type(ctx: AuthContext) -> str:
+    if ctx.auth_kind == "session" and ctx.type == "user":
+        return "browser_session"
+    if ctx.type == "team" and ctx.user_id is not None:
+        return "user_owned_api_token"
+    if ctx.type == "team" and ctx.team_id is None and "submit:batch" in ctx.scopes:
+        return "service_credential"
+    if ctx.type == "team":
+        return "legacy_team_token"
+    if ctx.type == "admin":
+        return "admin_bearer_token"
+    if ctx.type == "worker":
+        return "worker_token"
+    if ctx.type == "step_session":
+        return "step_session"
+    return f"{ctx.type}_credential"
+
+
 @router.get("/public-teams")
 async def public_teams(request: Request) -> dict[str, list[dict[str, str]]]:
     # `admin` is a real system team, but it is not a self-service
@@ -879,10 +897,20 @@ async def whoami(sc: SessionAndCtx) -> dict[str, Any]:
         )).scalar_one_or_none()
         team_name = team.name if team is not None else None
 
+    username = None
+    if ctx.user_id is not None:
+        user = (await session.execute(
+            select(User).where(User.id == ctx.user_id),
+        )).scalar_one_or_none()
+        username = user.username if user is not None else None
+
     await session.commit()
     return {
         "auth_kind": ctx.auth_kind,
+        "credential_type": _credential_type(ctx),
         "principal_type": ctx.type,
+        "user_id": str(ctx.user_id) if ctx.user_id else None,
+        "username": username,
         "team_id": str(ctx.team_id) if ctx.team_id else None,
         "team_name": team_name,
         "role": ctx.role,

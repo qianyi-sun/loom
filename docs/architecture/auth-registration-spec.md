@@ -84,7 +84,7 @@ flowchart TD
 | Admin | File-backed singleton secret | Global administration | Compared in memory with `hmac.compare_digest`; not stored in `tokens`. |
 | Browser user | Username/password plus `user_sessions` row and `loom_session` cookie | Current team role | Normal SPA identity. The raw session secret is HttpOnly; unsafe requests must send the CSRF header. |
 | User-owned API token | `tokens` row with `type='team'` and `created_by_user_id` | One team plus submitting user | CLI/API identity for service workflows. Submissions made with the token carry both `team_id` and `user_id`. |
-| Legacy team token | `tokens` row with `type='team'` and no user owner | One team | Compatibility path for old automation; it cannot create admin credentials or cross team scope. |
+| Legacy team token | `tokens` row with `type='team'` and no user owner | One team | Compatibility path for old automation; it cannot create user-facing work, admin credentials, or cross-team scope. |
 | Worker | `tokens` row with `type='worker'` | Internal worker APIs | Not accepted by `loom_service` user/admin routes. |
 | Step session | `loom_step_<jwt>` | One trial step | Gateway-only runtime token, out of scope for #10. |
 
@@ -100,7 +100,7 @@ without making the singleton admin secret a browser identity.
 | --- | --- | --- |
 | `viewer` | `read:own` | Read-only access to the current team's execution/control resources. |
 | `member` | `read:own`, `submit` | Submit team work without managing credentials or tokens. |
-| `owner` | `read:own`, `submit`, `tokens:manage`, `providers:manage`, `team:manage` | Manage team API tokens, provider connections, and team-admin surfaces exposed by the service. |
+| `owner` | `read:own`, `submit`, `tokens:manage`, `providers:manage`, `team:manage` | Manage user-owned API tokens, provider connections, and team-admin surfaces exposed by the service. |
 | `platform_admin` | `admin:platform` | Global operator/admin user for inspection and incident response. |
 
 The team boundary remains the execution, cost attribution, credential, member,
@@ -592,7 +592,7 @@ to browser CSRF.
 for every caller. Admin credentials are created and rotated only by local
 operator commands and mounted secret files.
 
-Team API-token behavior stays database-backed:
+API-token behavior stays database-backed:
 
 - tokens are named and reveal a raw `loom_api_...` value only at creation or
   rotation time;
@@ -602,19 +602,23 @@ Team API-token behavior stays database-backed:
   not hold;
 - supported public team scopes include `read:own`, `submit`,
   `providers:manage`, and `tokens:manage`;
-- admin callers can mint team tokens for approved teams;
+- admin callers can mint legacy team tokens for approved teams only for
+  migration or non-submitting compatibility;
 - browser users must have the owner-derived `tokens:manage` scope before they
-  can mint, rotate, revoke, or list team API tokens through the SPA/API;
+  can mint, rotate, revoke, or list user-owned API tokens through the SPA/API;
 - admin callers must send `X-Loom-Admin-Actor` for token mint/rotate/revoke so
   the action can be written to `admin_audit_events`;
 - token list/detail responses reveal only names, scopes, metadata, last-used
   timestamps, and hash prefixes.
 
-Batch and direct-trial creation stores `submitted_by_user_id` from the browser
-session or user-owned API token. Batch fan-out copies the parent batch
-submitter onto child trials. List/detail APIs expose both `submitted_by_user`
-and `owner_team`; frontends render the stable ownership label as
-`username / team`.
+Batch and direct-trial creation requires a browser session or user-owned API
+token and stores `submitted_by_user_id` from that principal. Legacy team tokens
+without `created_by_user_id` are rejected for batch creation, direct trial
+creation, failed-case reruns, Run Library clone, and Run Library artifact reuse.
+Batch fan-out uses the internal `submit:batch` credential and copies the parent
+batch submitter onto child trials. List/detail APIs expose both
+`submitted_by_user` and `owner_team`; frontends render the stable ownership
+label as `username / team`.
 
 Provider connection creation, key rotation, provider tests, model refresh,
 manual model insertion, hide/unhide, and delete are similarly owner-gated for

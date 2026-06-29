@@ -17,6 +17,7 @@ from loom.db.schema import Trial as TrialRow
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.request_params import coerce_request_params
+from loom.submission_identity import require_submitting_user
 from loom_control_plane.scheduler.requires_caps import derive_requires_caps
 
 router = APIRouter()
@@ -73,6 +74,7 @@ async def submit_trial(
                 status_code=403,
                 detail="batch belongs to another team",
             )
+        require_submitting_user(ctx)
         submit_team_id = ctx.team_id
         submitter_user_id = ctx.user_id
     elif "submit:batch" in ctx.scopes and batch_team_id is not None:

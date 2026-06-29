@@ -177,11 +177,14 @@ Gateway, Postgres, MinIO, or worker routes.
 - `loom auth login --server URL --username USER --password env:LOOM_PASSWORD`
   stores the public server URL and browser-session credentials for the approved
   account in `$XDG_CONFIG_HOME/loom/config.toml`. `loom auth login --token ...`
-  remains available for user-owned API tokens used by automation. The config
-  directory is owner-only and the config file is written with mode `0600` on
-  POSIX systems.
+  remains available for user-owned API tokens used by automation. Legacy
+  unowned team tokens may still authenticate for compatibility, but user-facing
+  submissions reject them because they cannot provide a submitting user. The
+  config directory is owner-only and the config file is written with mode
+  `0600` on POSIX systems.
 - `loom auth whoami` calls `GET /api/v1/auth/whoami` and prints server, team,
-  role/scopes, and token prefix without printing raw token material.
+  role/scopes, credential type, submitting user when present, and token prefix
+  without printing raw token material.
 - `loom providers ...` manages team provider connections through
   `/api/v1/provider-connections`; provider keys use `env:VAR`, `file:PATH`, or
   stdin sources rather than literal argv values.

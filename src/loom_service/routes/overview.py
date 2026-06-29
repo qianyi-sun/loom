@@ -74,9 +74,10 @@ def _capabilities(ctx: AuthContext) -> dict[str, bool]:
     admin = is_admin(ctx)
     scopes = set(ctx.scopes)
     has_team = ctx.team_id is not None
+    has_submitter = ctx.user_id is not None
     return {
         "can_read": True,
-        "can_submit": has_team and (admin or "submit" in scopes),
+        "can_submit": has_team and has_submitter and (admin or "submit" in scopes),
         "can_manage_providers": (
             has_team and (admin or "providers:manage" in scopes)
         ),

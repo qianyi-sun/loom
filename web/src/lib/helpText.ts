@@ -14,7 +14,7 @@ export const STATUS_HELP_TEXT: Record<string, string> = {
   running: "A worker is actively running this item.",
   submitted: "Submitted and waiting for scheduling or worker pickup.",
   succeeded: "Finished successfully and recorded result artifacts.",
-  team: "Team token used for normal batch and monitoring API calls.",
+  team: "API token that authorizes scoped API requests.",
 };
 
 export const EMPTY_BENCHMARK_HELP =

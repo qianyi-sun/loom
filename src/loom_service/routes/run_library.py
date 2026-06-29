@@ -17,6 +17,7 @@ from loom.security.redaction import redact_mapping, redact_text
 from loom_service.auth_guards import (
     is_admin,
     require_scope,
+    require_submitting_user,
     require_team_or_admin,
 )
 from loom_service.debug_evidence import build_batch_debug_evidence
@@ -1213,6 +1214,7 @@ async def clone_run_library_batch_config(
 ) -> dict[str, Any]:
     session, ctx = sc
     require_scope(ctx, "submit")
+    require_submitting_user(ctx)
     if ctx.team_id is None:
         raise HTTPException(status_code=400, detail="team context required")
     source, _team = await _load_batch_with_team(session, batch_id)
@@ -1330,6 +1332,7 @@ async def reuse_run_library_artifact(
 ) -> dict[str, Any]:
     session, ctx = sc
     require_scope(ctx, "submit")
+    require_submitting_user(ctx)
     if ctx.team_id is None:
         raise HTTPException(status_code=400, detail="team context required")
     trial, batch = await _load_trial_with_batch(session, trial_id)

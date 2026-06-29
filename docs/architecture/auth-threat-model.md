@@ -28,8 +28,9 @@ Out of scope for this document:
 
 | Attacker | Capabilities | Primary concern |
 | --- | --- | --- |
-| Curious tenant | Has a valid team token and normal platform access | Cross-team run, artifact, provider, usage, and progress visibility |
-| Malicious tenant | Has a valid team token and intentionally submits adversarial payloads | Privilege escalation, endpoint probing, resource abuse, artifact poisoning |
+| Curious tenant | Has a valid user-owned API token and normal platform access | Cross-team run, artifact, provider, usage, and progress visibility |
+| Malicious tenant | Has a valid user-owned API token and intentionally submits adversarial payloads | Privilege escalation, endpoint probing, resource abuse, artifact poisoning |
+| Legacy automation holder | Has a valid unowned legacy team token | Unattributed submissions, wrong-team CLI configs, compatibility-scope creep |
 | Drive-by external | No valid token; can reach public SPA/API endpoints | Token guessing, registration spam, brute force, unauthenticated metadata leaks |
 | Targeted external | Can phish, scrape logs, exploit web/API bugs, and replay leaked tokens | Admin takeover, provider-secret theft, durable data exfiltration |
 | Supply-chain or CI attacker | Can influence dependency, workflow, image, or PR code paths | Secret exfiltration from CI/deploy, malicious release artifacts |

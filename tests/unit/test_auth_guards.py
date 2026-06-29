@@ -12,6 +12,7 @@ from loom_service.auth_guards import (
     is_admin,
     require_human_or_admin,
     require_scope,
+    require_submitting_user,
     require_team_or_admin,
 )
 
@@ -21,6 +22,7 @@ def _ctx(
     type_: str,
     scopes: list[str],
     team_id: UUID | None = None,
+    user_id: UUID | None = None,
     role: str | None = None,
 ) -> AuthContext:
     return AuthContext(
@@ -29,6 +31,7 @@ def _ctx(
         scopes=scopes,
         team_id=team_id,
         expires_at=None,
+        user_id=user_id,
         role=role,
     )
 
@@ -153,6 +156,45 @@ def test_require_scope_platform_admin_user_wildcard() -> None:
     )
     require_scope(ctx, "submit")
     require_scope(ctx, "admin:tokens")
+
+
+def test_require_submitting_user_allows_browser_session() -> None:
+    user_id = uuid4()
+    ctx = _ctx(
+        type_="user",
+        scopes=role_scopes("member"),
+        team_id=uuid4(),
+        user_id=user_id,
+        role="member",
+    )
+    require_submitting_user(ctx)
+
+
+def test_require_submitting_user_allows_user_owned_api_token() -> None:
+    ctx = _ctx(
+        type_="team",
+        scopes=["read:own", "submit"],
+        team_id=uuid4(),
+        user_id=uuid4(),
+    )
+    require_submitting_user(ctx)
+
+
+def test_require_submitting_user_rejects_legacy_team_token() -> None:
+    ctx = _ctx(type_="team", scopes=["read:own", "submit"], team_id=uuid4())
+    with pytest.raises(HTTPException) as ei:
+        require_submitting_user(ctx)
+    assert ei.value.status_code == 403
+    assert "legacy team token" in ei.value.detail
+    assert "user-owned API token" in ei.value.detail
+
+
+def test_require_submitting_user_rejects_admin_secret_token() -> None:
+    ctx = _ctx(type_="admin", scopes=["admin:tokens"])
+    with pytest.raises(HTTPException) as ei:
+        require_submitting_user(ctx)
+    assert ei.value.status_code == 403
+    assert "user-owned API token" in ei.value.detail
 
 
 def test_team_or_admin_other_team_forbidden() -> None:

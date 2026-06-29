@@ -215,7 +215,7 @@ async def camp_setup(
 async def test_post_batch_materializes_count(
     camp_setup: tuple[FastAPI, str, UUID],
 ) -> None:
-    app, raw, _team_id = camp_setup
+    app, raw, team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport,
@@ -231,11 +231,60 @@ async def test_post_batch_materializes_count(
                 "trial_config": {"agent": {"name": "oracle"}},
             },
         )
+        detail = await ac.get(
+            f"/api/v1/batches/{r.json()['batch_id']}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["expected_trial_count"] == 3
     assert body["state"] == "submitted"
     UUID(body["batch_id"])  # parseable
+    assert detail.status_code == 200, detail.text
+    detail_body = detail.json()
+    assert detail_body["owner_team"] == {
+        "id": str(team_id),
+        "name": f"t-{team_id}",
+    }
+    assert detail_body["submitted_by_user"]["username"].startswith("BatchOwner-")
+    assert detail_body["submitted_by_user"]["team_id"] == str(team_id)
+
+
+async def test_legacy_team_token_cannot_create_batch(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, _raw, team_id = camp_setup
+    legacy_raw = f"loom_team_{uuid4().hex}"
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(insert(Token).values(
+            token_hash=hashlib.sha256(legacy_raw.encode()).digest(),
+            type="team",
+            scopes=["read:own", "submit"],
+            team_id=team_id,
+            issued_at=datetime.now(UTC),
+            expires_at=None,
+        ))
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {legacy_raw}"},
+            json={
+                "name": "legacy token batch",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {"agent": {"name": "oracle"}},
+            },
+        )
+
+    assert r.status_code == 403
+    assert "legacy team token" in r.json()["detail"]
 
 
 async def test_post_batch_sanitizes_trial_request_params(
@@ -2116,6 +2165,73 @@ async def test_rerun_failed_batch_creates_linked_exact_targets(
             "failure_reason": "gateway_error",
         }
     ]
+
+
+async def test_legacy_team_token_cannot_rerun_failed_batch(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, _raw, team_id = camp_setup
+    batch_id = uuid4()
+    failed_trial_id = uuid4()
+    legacy_raw = f"loom_team_{uuid4().hex}"
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(insert(Token).values(
+            token_hash=hashlib.sha256(legacy_raw.encode()).digest(),
+            type="team",
+            scopes=["read:own", "submit"],
+            team_id=team_id,
+            issued_at=datetime.now(UTC),
+            expires_at=None,
+        ))
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="gateway-flaked",
+                task_filter={"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+                trial_config={
+                    "agent_name": "litellm",
+                    "agent_model": {"provider": "openai", "name": "qwen"},
+                },
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=1,
+                n_per_task=1,
+                result_status="failed",
+                finished_at=datetime.now(UTC),
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=failed_trial_id,
+                task_id="local/mit-0",
+                team_id=team_id,
+                state="failed",
+                failure_reason="gateway_error",
+                failure_message="Loom gateway returned HTTP 503.",
+                config={},
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+                batch_id=batch_id,
+                sample_idx=0,
+                combination_idx=0,
+                result=None,
+            )
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        r = await ac.post(
+            f"/api/v1/batches/{batch_id}/rerun-failed",
+            headers={"Authorization": f"Bearer {legacy_raw}"},
+        )
+
+    assert r.status_code == 403
+    assert "legacy team token" in r.json()["detail"]
 
 
 async def test_get_batch_detail_effective_rollup_uses_successful_rerun(

@@ -499,7 +499,7 @@ knob you need.
    The approval response reveals a raw `loom_invite_...` code and browser invite
    link exactly once. Deliver the link to the requested contact; the contact
    accepts it to create their user session and the selected team membership
-   without seeing a raw team token. Loom does not email the link in public beta.
+   without seeing raw API credentials. Loom does not email the link in public beta.
    If the link is lost, resend the invite to rotate the stored hash and reveal a
    replacement:
    ```bash
@@ -935,22 +935,27 @@ curl -X DELETE http://localhost:8080/admin/worker-tokens/$OLD_PREFIX \
   -H "Authorization: Bearer $LOOM_ADMIN_TOKEN"
 ```
 
-### Team API tokens — `loom admin tokens team`
+### Legacy team-token compatibility — `loom admin tokens team`
 
-Team API-token rotation hits `loom_service`'s public `/api/v1/tokens`
-route, so it uses the bearer + server URL from `loom auth login`
-(no port-forward). Tokens are named, scoped, hash-stored, and reveal the raw
-`loom_api_...` value only on mint/rotate. Admin callers must supply
-`--admin-actor NAME`, which the server records in `admin_audit_events`.
+Normal automation should use a user-owned API token created from a browser or
+username/password user session. `loom admin tokens team` exists for legacy
+unowned team-token rotation, revocation, and migration support. Tokens minted
+with an admin bearer have no `created_by_user_id`; they can authenticate for
+non-submitting compatibility, but the service rejects them for batch creation,
+direct trial creation, failed-case reruns, Run Library clone, and artifact
+reuse. The route is public (`/api/v1/tokens`), so it uses the bearer + server
+URL from `loom auth login` (no port-forward). Raw `loom_api_...` values are
+shown only on mint/rotate. Admin callers must supply `--admin-actor NAME`,
+which the server records in `admin_audit_events`.
 
 ```bash
 loom auth login --server https://loom.example.com --token env:LOOM_ADMIN_TOKEN
 
-# Mint a fresh team token + print the rollout checklist.
+# Mint a fresh legacy team token + print the rollout checklist.
 loom admin tokens team rotate \
   --name nightly-cli \
   --team-id <UUID> \
-  --scopes read:own,submit,providers:manage \
+  --scopes read:own \
   --expires-in-days 90 \
   --admin-actor qianyi
 
@@ -964,10 +969,27 @@ One-off mint / revoke without the rollout reminder:
 loom admin tokens team mint \
   --name support-cli \
   --team-id <UUID> \
-  --scopes read:own,submit \
+  --scopes read:own \
   --admin-actor qianyi
 loom admin tokens team revoke 01234567 --admin-actor qianyi
 ```
+
+Legacy token migration checklist:
+
+1. On every host that may submit work, run `loom auth whoami`. If it prints
+   `Principal: legacy team token` or no `User:` line, do not submit from that
+   config.
+2. Run `loom auth logout`, then log in with the approved username/password:
+   `loom auth login --server https://loom.example.com --username USER --password env:LOOM_PASSWORD`.
+3. For unattended jobs, create a named API token from Team access or a
+   user-owned session and store it as `LOOM_API_TOKEN`; verify `loom auth whoami`
+   prints `Principal: user-owned API token` and the intended user/team.
+4. The known oldlab1 stale-config failure mode is a lingering
+   `$XDG_CONFIG_HOME/loom/config.toml` or repo-local shell env that still points
+   at an old EAI team token. Check oldlab1 before validation runs, especially
+   under `/home/qianyi/dev/loom` and any Slurm submit shell, because stale
+   configs can otherwise submit into the wrong owner team with no
+   `submitted_by_user`.
 
 `--scopes` accepts a comma-separated list. Known team scopes: `read:own`,
 `submit`, `providers:manage`, and `tokens:manage`; anything else is rejected
@@ -1695,7 +1717,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    fixed teams such as Team A and Team B exist, then submit username requests
    for each team. Approve each request in Admin access -> Accounts, open the
    setup link in a fresh browser profile, set a password, and confirm the user
-   lands in the selected team without seeing a raw team token. Capture only
+   lands in the selected team without seeing raw API credentials. Capture only
    safe prefixes and redacted links in shared evidence.
 6. **CLI login.** In a fresh shell, sign in with the approved account:
    ```bash
@@ -1717,7 +1739,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    HTTP response code. Exit code is 0 for valid, 1 for invalid.
 8. **Model discovery.** `loom providers models smoke-openai --refresh`
    followed by `loom providers models smoke-openai` returns a
-   non-empty catalog. `curl /api/v1/models` from a team token shows
+   non-empty catalog. `curl /api/v1/models` from a user-owned API token shows
    the agent-capable view.
 9. **Model preflight.** Run
    `loom providers models smoke-openai --preflight gpt-4o-mini`. The model row
