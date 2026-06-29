@@ -22,12 +22,13 @@ import DocsCallout from "../components/DocsCallout";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
-import Pagination, {
+import Pagination from "../components/Pagination";
+import {
   initialPage,
   nextPage,
   prevPage,
   type PageState,
-} from "../components/Pagination";
+} from "../components/paginationState";
 import { StatusPill, type StatusVariant } from "../components/StatusPill";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";

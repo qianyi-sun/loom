@@ -36,11 +36,13 @@ import {
 } from "../api/client";
 import {
   AgentModelPicker,
+  type AgentModelValue,
+} from "../components/AgentModelPicker";
+import {
   buildAgentModel,
   buildProviderOverride,
   type ProviderOverride,
-  type AgentModelValue,
-} from "../components/AgentModelPicker";
+} from "../components/agentModelSelection";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
