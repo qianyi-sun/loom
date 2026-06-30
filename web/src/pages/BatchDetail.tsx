@@ -90,6 +90,18 @@ export default function BatchDetail(): JSX.Element {
     },
   });
 
+  const diagnosticsQuery = useQuery({
+    queryKey: ["batch-diagnostics", batchId],
+    queryFn: async () => {
+      const [diagnosis, debugEvidence] = await Promise.all([
+        api.getBatchDiagnosis(batchId!),
+        api.getBatchDebug(batchId!),
+      ]);
+      return { diagnosis, debugEvidence };
+    },
+    enabled: false,
+  });
+
   const cancel = useMutation({
     mutationFn: () => api.cancelBatch(batchId!),
     onSuccess: () =>
@@ -143,6 +155,10 @@ export default function BatchDetail(): JSX.Element {
   const showNoCallWarning =
     c.llm_evidence_status === "no_calls_invalid" ||
     c.llm_evidence_status === "partial_no_calls";
+  const diagnosis = c.diagnosis ?? diagnosticsQuery.data?.diagnosis ?? null;
+  const debugEvidence =
+    c.debug_evidence ?? diagnosticsQuery.data?.debugEvidence ?? null;
+  const hasDiagnostics = Boolean(diagnosis || debugEvidence);
 
   return (
     <div className="space-y-6">
@@ -306,6 +322,24 @@ export default function BatchDetail(): JSX.Element {
             ))}
           </div>
 
+          {!hasDiagnostics ? (
+            <div className="space-y-2">
+              <Button
+                variant="secondary"
+                onClick={() => void diagnosticsQuery.refetch()}
+                disabled={diagnosticsQuery.isFetching}
+                title="Fetch batch diagnosis and debug evidence for this batch."
+              >
+                {diagnosticsQuery.isFetching
+                  ? "Loading diagnostics..."
+                  : "Load diagnostics"}
+              </Button>
+              {diagnosticsQuery.isError ? (
+                <ErrorState error={diagnosticsQuery.error} />
+              ) : null}
+            </div>
+          ) : null}
+
           {ACTIVE_STATES.has(c.state) ? (
             <div className="space-y-2">
               <Button
@@ -401,13 +435,13 @@ export default function BatchDetail(): JSX.Element {
       </Card>
 
       <DiagnosisCard
-        diagnosis={c.diagnosis}
+        diagnosis={diagnosis}
         onRerunFailed={
           rerunnableFailedCount > 0 ? () => rerunFailed.mutate() : undefined
         }
         rerunDisabled={rerunFailed.isPending}
       />
-      <DebugEvidenceCard evidence={c.debug_evidence} />
+      <DebugEvidenceCard evidence={debugEvidence} />
 
       {showBenchmarkSummary ? (
         <Card>

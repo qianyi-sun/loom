@@ -98,9 +98,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             time_limit=settings.slurm_worker_controller_time_limit,
             requested_cpus=settings.slurm_worker_controller_requested_cpus,
             requested_memory_mib=settings.slurm_worker_controller_requested_memory_mib,
-            requested_concurrency=(
-                settings.slurm_worker_controller_requested_concurrency
-            ),
+            requested_concurrency=(settings.slurm_worker_controller_requested_concurrency),
             max_jobs=settings.slurm_worker_controller_max_jobs,
             pending_job_cap=settings.slurm_worker_controller_pending_job_cap,
             min_queued_trials=settings.slurm_worker_controller_min_queued_trials,
@@ -109,9 +107,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             squeue_path=settings.slurm_worker_controller_squeue_path,
             sacct_path=settings.slurm_worker_controller_sacct_path,
             scancel_path=settings.slurm_worker_controller_scancel_path,
-            command_timeout_seconds=(
-                settings.slurm_worker_controller_command_timeout_seconds
-            ),
+            command_timeout_seconds=(settings.slurm_worker_controller_command_timeout_seconds),
         )
 
         crash_detector_task = asyncio.create_task(
@@ -119,6 +115,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 session_factory=session_factory,
                 expiry_sec=settings.worker_heartbeat_expiry_sec,
                 interval_sec=settings.worker_reclaim_sweep_interval_sec,
+                claimed_without_start_expiry_sec=(settings.claimed_without_start_expiry_sec),
             ),
             name="loom-cp-crash-detector",
         )
@@ -190,13 +187,16 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 if t is None:
                     continue
                 with contextlib.suppress(
-                    asyncio.CancelledError, asyncio.TimeoutError,
+                    asyncio.CancelledError,
+                    asyncio.TimeoutError,
                 ):
                     await asyncio.wait_for(t, timeout=5.0)
             await engine.dispose()
 
     app = FastAPI(
-        title="Loom Control Plane", version="0.0.1", lifespan=lifespan,
+        title="Loom Control Plane",
+        version="0.0.1",
+        lifespan=lifespan,
     )
     app.include_router(health.router)
     app.include_router(trials.router)

@@ -286,8 +286,18 @@ function mockRunLibrary({
           }),
         );
       }
-      if (url.endsWith("/api/v1/run-library/batches/batch-alpha")) {
-        return Promise.resolve(jsonResponse(detailBatch));
+      if (parsed.pathname === "/api/v1/run-library/batches/batch-alpha") {
+        return Promise.resolve(
+          jsonResponse(
+            parsed.searchParams.get("include_debug") === "true"
+              ? detailBatch
+              : {
+                  ...detailBatch,
+                  debug_evidence: undefined,
+                  diagnosis: undefined,
+                },
+          ),
+        );
       }
       if (parsed.pathname === "/api/v1/run-library/artifacts/export") {
         return Promise.resolve(
@@ -477,6 +487,7 @@ describe("RunLibraryBatchDetail", () => {
     const fetchMock = mockRunLibrary();
     const createObjectURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:report");
     vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    const user = userEvent.setup();
 
     renderWithProviders(
       <Routes>
@@ -496,7 +507,12 @@ describe("RunLibraryBatchDetail", () => {
     expect(screen.getByText("Ada / Dev")).toBeInTheDocument();
     expect(screen.getByText("Visibility")).toBeInTheDocument();
     expect(screen.getByText("org / shared")).toBeInTheDocument();
-    expect(screen.getByText("Diagnosis")).toBeInTheDocument();
+    expect(screen.getByText("Load diagnostics")).toBeInTheDocument();
+    expect(screen.queryByText("Diagnosis")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Load diagnostics" }));
+
+    expect(await screen.findByText("Diagnosis")).toBeInTheDocument();
     expect(
       screen.getByText(
         "The batch failed because most failed child trials hit provider gateway errors before scoring.",
@@ -531,7 +547,6 @@ describe("RunLibraryBatchDetail", () => {
       }),
     ).not.toBeInTheDocument();
 
-    const user = userEvent.setup();
     await user.selectOptions(
       screen.getByLabelText("Provider connection"),
       "beta-provider",

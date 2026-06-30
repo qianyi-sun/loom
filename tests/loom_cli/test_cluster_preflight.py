@@ -753,6 +753,73 @@ def test_cli_preflight_schema_doctor_accepts_default_rendered_worker_env(
     assert "LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS" not in out
 
 
+def test_cli_preflight_schema_doctor_accepts_target_env_added_during_rollout(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Preflight runs before apply during a rollout.
+
+    Live pods may still be on the previous image/env surface, so schema-doctor
+    must check the target rendered Deployment instead of rejecting the old pod.
+    """
+    control_plane_env = _rendered_deployment_env_names("loom-control-plane")
+    assert "LOOM_CP_CLAIMED_WITHOUT_START_EXPIRY_SEC" in control_plane_env
+    old_live_control_plane_env = control_plane_env - {
+        "LOOM_CP_CLAIMED_WITHOUT_START_EXPIRY_SEC",
+    }
+
+    _patch_clients(
+        monkeypatch,
+        core=_FakeCoreV1(
+            secrets={"loom-secrets", "loom-admin-secret"},
+            secret_data=_all_schema_secret_data(),
+            pod_envs={"loom-control-plane-old": old_live_control_plane_env},
+        ),
+        net=_FakeNetworkingV1(["nginx"]),
+        storage=_FakeStorageV1([("standard", True)]),
+    )
+
+    rc = main(["cluster", "preflight"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "schema-doctor" in out
+    assert "schema reconciliation clean" in out
+    assert "LOOM_CP_CLAIMED_WITHOUT_START_EXPIRY_SEC" not in out
+
+
+def test_cli_preflight_schema_doctor_fails_when_target_render_omits_env(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    original_render = render_manifests
+
+    def _broken_render(config: ClusterConfig) -> str:
+        return original_render(config).replace(
+            "LOOM_CP_CLAIMED_WITHOUT_START_EXPIRY_SEC",
+            "LOOM_CP_BROKEN_CLAIMED_WITHOUT_START_EXPIRY_SEC",
+        )
+
+    monkeypatch.setattr("loom_cli.cluster_cmd.render_manifests", _broken_render)
+    _patch_clients(
+        monkeypatch,
+        core=_FakeCoreV1(
+            secrets={"loom-secrets", "loom-admin-secret"},
+            secret_data=_all_schema_secret_data(),
+        ),
+        net=_FakeNetworkingV1(["nginx"]),
+        storage=_FakeStorageV1([("standard", True)]),
+    )
+
+    rc = main(["cluster", "preflight"])
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "schema-doctor" in out
+    assert "Rendered Deployment loom-control-plane" in out
+    assert "LOOM_CP_CLAIMED_WITHOUT_START_EXPIRY_SEC" in out
+
+
 def test_cli_preflight_any_fail_returns_1(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

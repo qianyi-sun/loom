@@ -74,6 +74,18 @@ def _queue_status(
     return "idle"
 
 
+def _resource_trials_stmt() -> Any:
+    return (
+        select(
+            Trial.state,
+            Trial.worker_id,
+            Trial.requires_caps,
+        )
+        .select_from(Trial)
+        .where(Trial.state.in_(("queued", "claimed", "running")))
+    )
+
+
 @router.get("/monitor/summary")
 async def get_monitor_summary(
     sc: SessionAndCtx,
@@ -128,11 +140,7 @@ async def get_monitor_summary(
         provider_model_id=provider_model_id,
         state=None,
     )
-    resource_trials_stmt = select(
-        Trial.state,
-        Trial.worker_id,
-        Trial.requires_caps,
-    ).select_from(Trial)
+    resource_trials_stmt = _resource_trials_stmt()
     resource_trials_stmt = apply_trial_monitor_filters(
         resource_trials_stmt,
         target_team=target_team,
@@ -179,8 +187,7 @@ async def get_monitor_summary(
             "model_provider": model_provider,
             "model_name": model_value,
             "provider_connection_id": (
-                str(provider_connection_id)
-                if provider_connection_id else None
+                str(provider_connection_id) if provider_connection_id else None
             ),
             "provider_model_id": provider_model_id,
             "batch_id": str(batch_id) if batch_id else None,

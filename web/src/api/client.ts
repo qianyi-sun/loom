@@ -1005,8 +1005,12 @@ export const api = {
   listRunLibraryBatches: (
     q: Record<string, string | undefined> = {},
   ) => apiFetch<RunLibraryBatchList>(`/api/v1/run-library/batches${qs(q)}`),
-  getRunLibraryBatch: (id: string) =>
-    apiFetch<RunLibraryBatchDetail>(`/api/v1/run-library/batches/${id}`),
+  getRunLibraryBatch: (id: string, includeDebug = false) =>
+    apiFetch<RunLibraryBatchDetail>(
+      `/api/v1/run-library/batches/${id}${qs({
+        include_debug: includeDebug ? "true" : undefined,
+      })}`,
+    ),
   cloneRunLibraryBatchConfig: (
     id: string,
     body: {

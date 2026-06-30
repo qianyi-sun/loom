@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 import pytest
+from botocore.exceptions import ConnectionClosedError
 
 from loom.agent.oracle import OracleAgent
 from loom.driver.base import StartOptions
@@ -61,6 +62,13 @@ class _ScoredVerifierError:
         )
 
 
+class _FailingAtifObjectStore(FakeObjectStore):
+    async def put_object(self, *, bucket: str, key: str, body: bytes) -> str:
+        if key.endswith("/atif.json"):
+            raise ConnectionClosedError(endpoint_url="http://127.0.0.1:19000")
+        return await super().put_object(bucket=bucket, key=key, body=body)
+
+
 @pytest.fixture
 def hello_task(tmp_path: Path) -> Path:
     d = tmp_path / "task"
@@ -83,17 +91,24 @@ async def test_trial_run_happy_path(hello_task: Path, tmp_path: Path):
         verifier=VerifierDefaults(name="pass"),
         steps=[StepConfig(name="main")],
     )
-    handler = command_table_handler({
-        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
-            return_code=0, stdout=b"hello\n", stderr=b"",
-            truncated=False, duration_sec=0.05,
-        ),
-    })
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
+                return_code=0,
+                stdout=b"hello\n",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.05,
+            ),
+        }
+    )
     store = FakeObjectStore()
     trial_id = uuid4()
     ctx = TrialContext(
-        trial_id=trial_id, team_id=uuid4(),
-        task_config=task, task_checksum="0" * 64,
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=task,
+        task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(),
         driver=FakeDriver(exec_handler=handler),
@@ -114,12 +129,61 @@ async def test_trial_run_happy_path(hello_task: Path, tmp_path: Path):
     assert result.atif_uri is not None
     assert (ctx.trajectory_bucket, ctx.trajectory_key) in store.objects
     assert (
-        ctx.trajectory_bucket, f"{ctx.team_id}/{ctx.trial_id}/atif.json",
+        ctx.trajectory_bucket,
+        f"{ctx.team_id}/{ctx.trial_id}/atif.json",
     ) in store.objects
 
 
+async def test_trial_run_records_finalize_failure_message(
+    hello_task: Path,
+    tmp_path: Path,
+):
+    task = TaskConfig(
+        schema_version="1",
+        task=TaskMetadata(id="hello", name="hello"),
+        environment=EnvironmentConfig(os="linux", docker_image="alpine"),
+        agent=AgentDefaults(name="oracle"),
+        verifier=VerifierDefaults(name="pass"),
+        steps=[StepConfig(name="main")],
+    )
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
+                return_code=0,
+                stdout=b"hello\n",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.05,
+            ),
+        }
+    )
+    trial_id = uuid4()
+    ctx = TrialContext(
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=task,
+        task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(),
+        driver=FakeDriver(exec_handler=handler),
+        agent=OracleAgent(task_dir=hello_task, trial_id=trial_id),
+        verifier=_AlwaysPassVerifier(),
+        object_store=_FailingAtifObjectStore(),
+        local_trajectory_path=tmp_path / "events.jsonl",
+    )
+
+    result = await Trial(ctx=ctx).run()
+
+    assert result.state == TrialState.FAILED
+    assert result.failure_reason == FailureReason.TRAJECTORY_FLUSH_FAILED
+    assert result.failure_message is not None
+    assert "finalize trajectory failed" in result.failure_message
+    assert "ConnectionClosedError" in result.failure_message
+
+
 async def test_trial_run_respects_environment_workdir(
-    hello_task: Path, tmp_path: Path,
+    hello_task: Path,
+    tmp_path: Path,
 ):
     class _WorkdirVerifier:
         name = "workdir"
@@ -140,18 +204,25 @@ async def test_trial_run_respects_environment_workdir(
         verifier=VerifierDefaults(name="pass"),
         steps=[StepConfig(name="main")],
     )
-    handler = command_table_handler({
-        "chmod +x /app/solution/solve.sh && /app/solution/solve.sh": ExecResult(
-            return_code=0, stdout=b"hello\n", stderr=b"",
-            truncated=False, duration_sec=0.05,
-        ),
-    })
+    handler = command_table_handler(
+        {
+            "chmod +x /app/solution/solve.sh && /app/solution/solve.sh": ExecResult(
+                return_code=0,
+                stdout=b"hello\n",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.05,
+            ),
+        }
+    )
     driver = FakeDriver(exec_handler=handler)
     store = FakeObjectStore()
     trial_id = uuid4()
     ctx = TrialContext(
-        trial_id=trial_id, team_id=uuid4(),
-        task_config=task, task_checksum="0" * 64,
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=task,
+        task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(),
         driver=driver,
@@ -169,7 +240,8 @@ async def test_trial_run_respects_environment_workdir(
 
 
 async def test_trial_run_passes_task_sandbox_start_options(
-    hello_task: Path, tmp_path: Path,
+    hello_task: Path,
+    tmp_path: Path,
 ):
     class _CaptureStartOptionsDriver(FakeDriver):
         start_options: list[StartOptions | None]
@@ -200,12 +272,17 @@ async def test_trial_run_passes_task_sandbox_start_options(
         verifier=VerifierDefaults(name="pass"),
         steps=[StepConfig(name="main")],
     )
-    handler = command_table_handler({
-        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
-            return_code=0, stdout=b"hello\n", stderr=b"",
-            truncated=False, duration_sec=0.05,
-        ),
-    })
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
+                return_code=0,
+                stdout=b"hello\n",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.05,
+            ),
+        }
+    )
     driver = _CaptureStartOptionsDriver(exec_handler=handler)
     store = FakeObjectStore()
     trial_id = uuid4()
@@ -241,7 +318,8 @@ async def test_trial_run_passes_task_sandbox_start_options(
 
 
 async def test_trial_run_driver_start_failure_classified(
-    hello_task: Path, tmp_path: Path,
+    hello_task: Path,
+    tmp_path: Path,
 ):
     """Regression for Bug 1: a DriverError from start() used to escape
     Trial.run unhandled. Now classified into FailureReason.ENV_START_FAILURE
@@ -264,8 +342,10 @@ async def test_trial_run_driver_start_failure_classified(
     store = FakeObjectStore()
     trial_id = uuid4()
     ctx = TrialContext(
-        trial_id=trial_id, team_id=uuid4(),
-        task_config=task, task_checksum="0" * 64,
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=task,
+        task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(),
         driver=_BoomDriver(),
@@ -280,7 +360,8 @@ async def test_trial_run_driver_start_failure_classified(
 
 
 async def test_trial_run_state_patch_failure_doesnt_kill_trial(
-    hello_task: Path, tmp_path: Path,
+    hello_task: Path,
+    tmp_path: Path,
 ):
     """Regression for Bug 2: a state_patch HTTP error used to propagate out
     of Trial.run. Now logged + continued."""
@@ -292,17 +373,24 @@ async def test_trial_run_state_patch_failure_doesnt_kill_trial(
         verifier=VerifierDefaults(name="pass"),
         steps=[StepConfig(name="main")],
     )
-    handler = command_table_handler({
-        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
-            return_code=0, stdout=b"hello\n", stderr=b"",
-            truncated=False, duration_sec=0.05,
-        ),
-    })
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
+                return_code=0,
+                stdout=b"hello\n",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.05,
+            ),
+        }
+    )
     store = FakeObjectStore()
     trial_id = uuid4()
     ctx = TrialContext(
-        trial_id=trial_id, team_id=uuid4(),
-        task_config=task, task_checksum="0" * 64,
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=task,
+        task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(),
         driver=FakeDriver(exec_handler=handler),
@@ -321,7 +409,8 @@ async def test_trial_run_state_patch_failure_doesnt_kill_trial(
 
 
 async def test_trial_run_cancellation_stashes_result(
-    hello_task: Path, tmp_path: Path,
+    hello_task: Path,
+    tmp_path: Path,
 ):
     """Regression for Bug 4: cancellation re-raises CancelledError, so the
     in-flight TrialResult used to be lost. Now stashed on trial.result so the
@@ -350,8 +439,10 @@ async def test_trial_run_cancellation_stashes_result(
     store = FakeObjectStore()
     trial_id = uuid4()
     ctx = TrialContext(
-        trial_id=trial_id, team_id=uuid4(),
-        task_config=task, task_checksum="0" * 64,
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=task,
+        task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(),
         driver=FakeDriver(),
@@ -372,7 +463,8 @@ async def test_trial_run_cancellation_stashes_result(
 
 
 async def test_trial_run_unscored_agent_error_marks_failed(
-    hello_task: Path, tmp_path: Path,
+    hello_task: Path,
+    tmp_path: Path,
 ):
     """Agent error without a usable verifier score remains a platform failure."""
     task = TaskConfig(
@@ -385,17 +477,24 @@ async def test_trial_run_unscored_agent_error_marks_failed(
     )
     # No matching command → falls through to default ExecResult(rc=0) → solve.sh exits 0.
     # Force agent error by passing a handler that returns non-zero.
-    handler = command_table_handler({
-        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
-            return_code=42, stdout=b"", stderr=b"oops",
-            truncated=False, duration_sec=0.01,
-        ),
-    })
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
+                return_code=42,
+                stdout=b"",
+                stderr=b"oops",
+                truncated=False,
+                duration_sec=0.01,
+            ),
+        }
+    )
     store = FakeObjectStore()
     trial_id = uuid4()
     ctx = TrialContext(
-        trial_id=trial_id, team_id=uuid4(),
-        task_config=task, task_checksum="0" * 64,
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=task,
+        task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(),
         driver=FakeDriver(exec_handler=handler),
@@ -412,7 +511,8 @@ async def test_trial_run_unscored_agent_error_marks_failed(
 
 
 async def test_trial_run_scored_agent_error_stays_succeeded(
-    hello_task: Path, tmp_path: Path,
+    hello_task: Path,
+    tmp_path: Path,
 ):
     """Agent errors with explicit verifier rewards remain scored outcomes."""
     task = TaskConfig(
@@ -423,17 +523,24 @@ async def test_trial_run_scored_agent_error_stays_succeeded(
         verifier=VerifierDefaults(name="structured"),
         steps=[StepConfig(name="main")],
     )
-    handler = command_table_handler({
-        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
-            return_code=42, stdout=b"", stderr=b"oops",
-            truncated=False, duration_sec=0.01,
-        ),
-    })
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
+                return_code=42,
+                stdout=b"",
+                stderr=b"oops",
+                truncated=False,
+                duration_sec=0.01,
+            ),
+        }
+    )
     store = FakeObjectStore()
     trial_id = uuid4()
     ctx = TrialContext(
-        trial_id=trial_id, team_id=uuid4(),
-        task_config=task, task_checksum="0" * 64,
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=task,
+        task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(),
         driver=FakeDriver(exec_handler=handler),
@@ -454,7 +561,8 @@ async def test_trial_run_scored_agent_error_stays_succeeded(
 
 
 async def test_trial_run_empty_reward_verifier_error_marks_failed(
-    hello_task: Path, tmp_path: Path,
+    hello_task: Path,
+    tmp_path: Path,
 ):
     """Verifier infrastructure errors without rewards are platform failures."""
     task = TaskConfig(
@@ -465,17 +573,24 @@ async def test_trial_run_empty_reward_verifier_error_marks_failed(
         verifier=VerifierDefaults(name="pytest"),
         steps=[StepConfig(name="main")],
     )
-    handler = command_table_handler({
-        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
-            return_code=0, stdout=b"hello\n", stderr=b"",
-            truncated=False, duration_sec=0.05,
-        ),
-    })
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
+                return_code=0,
+                stdout=b"hello\n",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.05,
+            ),
+        }
+    )
     store = FakeObjectStore()
     trial_id = uuid4()
     ctx = TrialContext(
-        trial_id=trial_id, team_id=uuid4(),
-        task_config=task, task_checksum="0" * 64,
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=task,
+        task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(),
         driver=FakeDriver(exec_handler=handler),
@@ -495,7 +610,8 @@ async def test_trial_run_empty_reward_verifier_error_marks_failed(
 
 
 async def test_trial_run_scored_verifier_error_stays_succeeded(
-    hello_task: Path, tmp_path: Path,
+    hello_task: Path,
+    tmp_path: Path,
 ):
     """Verifier errors with an explicit reward remain scored outcomes."""
     task = TaskConfig(
@@ -506,17 +622,24 @@ async def test_trial_run_scored_verifier_error_stays_succeeded(
         verifier=VerifierDefaults(name="structured"),
         steps=[StepConfig(name="main")],
     )
-    handler = command_table_handler({
-        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
-            return_code=0, stdout=b"hello\n", stderr=b"",
-            truncated=False, duration_sec=0.05,
-        ),
-    })
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
+                return_code=0,
+                stdout=b"hello\n",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.05,
+            ),
+        }
+    )
     store = FakeObjectStore()
     trial_id = uuid4()
     ctx = TrialContext(
-        trial_id=trial_id, team_id=uuid4(),
-        task_config=task, task_checksum="0" * 64,
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=task,
+        task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(),
         driver=FakeDriver(exec_handler=handler),

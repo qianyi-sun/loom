@@ -33,7 +33,15 @@ from loom_cli.cluster_backup_guard import (
     write_backup_manifest,
 )
 from loom_cli.cluster_config import ClusterConfig, load_cluster_config
-from loom_config.doctor import reconcile as _doctor_reconcile
+from loom_config.doctor import (
+    DoctorReport,
+)
+from loom_config.doctor import (
+    reconcile as _doctor_reconcile,
+)
+from loom_config.doctor import (
+    reconcile_rendered as _doctor_reconcile_rendered,
+)
 from loom_config.loader import load_schema as _load_schema
 
 # Repo root: cluster_cmd.py → loom_cli → src → loom (parents[2])
@@ -1506,6 +1514,55 @@ def _format_preflight_json(report: PreflightReport) -> str:
     return json.dumps(obj, indent=2) + "\n"
 
 
+def _append_schema_doctor_check(
+    report: PreflightReport,
+    doctor_report: DoctorReport,
+) -> None:
+    if doctor_report.ok:
+        report.checks.append(PreflightCheck(
+            name="schema-doctor",
+            outcome="pass",
+            detail="schema reconciliation clean",
+        ))
+        return
+    report.checks.append(PreflightCheck(
+        name="schema-doctor",
+        outcome="fail",
+        detail=f"{len(doctor_report.violations)} schema violation(s)",
+        remediation="\n".join(
+            f"  - {v.kind}: {v.entry}: {v.detail}"
+            for v in doctor_report.violations
+        ),
+    ))
+
+
+def _append_target_schema_doctor_check(
+    report: PreflightReport,
+    *,
+    core_v1: Any,
+    namespace: str,
+    config: ClusterConfig,
+    rendered_manifests: str | None = None,
+) -> None:
+    schema = _load_schema(_REPO_ROOT / "config" / "loom-schema.toml")
+    try:
+        manifests = rendered_manifests or render_manifests(config)
+        doctor_report = _doctor_reconcile_rendered(
+            schema,
+            core_v1,
+            namespace=namespace,
+            rendered_manifests=manifests,
+        )
+    except Exception as exc:
+        report.checks.append(PreflightCheck(
+            name="schema-doctor",
+            outcome="warn",
+            detail=f"doctor could not run: {type(exc).__name__}: {exc}",
+        ))
+    else:
+        _append_schema_doctor_check(report, doctor_report)
+
+
 def _preflight(args: argparse.Namespace) -> int:
     try:
         _apps_v1, net_v1, core_v1, storage_v1 = _load_clients(args.context)
@@ -1544,32 +1601,12 @@ def _preflight(args: argparse.Namespace) -> int:
         )
         return 2
     if not args.no_doctor:
-        schema = _load_schema(_REPO_ROOT / "config" / "loom-schema.toml")
-        try:
-            doctor_report = _doctor_reconcile(schema, core_v1, namespace=args.namespace)
-        except Exception as exc:
-            report.checks.append(PreflightCheck(
-                name="schema-doctor",
-                outcome="warn",
-                detail=f"doctor could not run: {type(exc).__name__}: {exc}",
-            ))
-        else:
-            if doctor_report.ok:
-                report.checks.append(PreflightCheck(
-                    name="schema-doctor",
-                    outcome="pass",
-                    detail="schema reconciliation clean",
-                ))
-            else:
-                report.checks.append(PreflightCheck(
-                    name="schema-doctor",
-                    outcome="fail",
-                    detail=f"{len(doctor_report.violations)} schema violation(s)",
-                    remediation="\n".join(
-                        f"  - {v.kind}: {v.entry}: {v.detail}"
-                        for v in doctor_report.violations
-                    ),
-                ))
+        _append_target_schema_doctor_check(
+            report,
+            core_v1=core_v1,
+            namespace=args.namespace,
+            config=cluster_config,
+        )
 
     if args.format == "json":
         sys.stdout.write(_format_preflight_json(report))
@@ -1763,6 +1800,12 @@ def _up(args: argparse.Namespace) -> int:
         sys.stderr.write(f"error: render failed: {exc}\n")
         return 2
 
+    try:
+        manifests = render_manifests(config)
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        sys.stderr.write(f"error: render failed: {exc}\n")
+        return 2
+
     # 1. Preflight
     if not args.skip_preflight:
         try:
@@ -1779,6 +1822,13 @@ def _up(args: argparse.Namespace) -> int:
                 ),
                 backup_max_age_hours=args.backup_max_age_hours,
                 cluster_config=config,
+            )
+            _append_target_schema_doctor_check(
+                report,
+                core_v1=core_v1,
+                namespace=args.namespace,
+                config=config,
+                rendered_manifests=manifests,
             )
         except Exception as exc:
             sys.stderr.write(
@@ -1797,12 +1847,6 @@ def _up(args: argparse.Namespace) -> int:
         sys.stdout.write("Preflight: all checks passed.\n")
 
     # 2. Render
-    try:
-        manifests = render_manifests(config)
-    except (FileNotFoundError, ValueError, RuntimeError) as exc:
-        sys.stderr.write(f"error: render failed: {exc}\n")
-        return 2
-
     # 3. Apply
     try:
         result = apply_manifests(

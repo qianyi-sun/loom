@@ -217,6 +217,12 @@ export default function RunLibraryBatchDetail(): JSX.Element {
     enabled: !!batchId,
   });
 
+  const diagnosticsQuery = useQuery({
+    queryKey: ["run-library-batch-diagnostics", batchId],
+    queryFn: () => api.getRunLibraryBatch(batchId!, true),
+    enabled: false,
+  });
+
   const providers = useQuery({
     queryKey: ["providers"],
     queryFn: () => api.listProviderConnections(),
@@ -255,6 +261,10 @@ export default function RunLibraryBatchDetail(): JSX.Element {
   const firstSharedArtifact = GROUP_ORDER.flatMap(
     (group) => batch.artifact_inventory[group] ?? [],
   ).find(artifactActionsAllowed);
+  const diagnosis = batch.diagnosis ?? diagnosticsQuery.data?.diagnosis ?? null;
+  const debugEvidence =
+    batch.debug_evidence ?? diagnosticsQuery.data?.debug_evidence ?? null;
+  const hasDiagnostics = Boolean(diagnosis || debugEvidence);
 
   return (
     <div className="space-y-6">
@@ -378,8 +388,26 @@ export default function RunLibraryBatchDetail(): JSX.Element {
         </Card.Body>
       </Card>
 
-      <DiagnosisCard diagnosis={batch.diagnosis} />
-      <DebugEvidenceCard evidence={batch.debug_evidence} />
+      {!hasDiagnostics ? (
+        <div className="space-y-2">
+          <Button
+            variant="secondary"
+            onClick={() => void diagnosticsQuery.refetch()}
+            disabled={diagnosticsQuery.isFetching}
+            title="Fetch batch diagnosis and debug evidence for this shared run."
+          >
+            {diagnosticsQuery.isFetching
+              ? "Loading diagnostics..."
+              : "Load diagnostics"}
+          </Button>
+          {diagnosticsQuery.isError ? (
+            <ErrorState error={diagnosticsQuery.error} />
+          ) : null}
+        </div>
+      ) : null}
+
+      <DiagnosisCard diagnosis={diagnosis} />
+      <DebugEvidenceCard evidence={debugEvidence} />
 
       <Card>
         <Card.Header

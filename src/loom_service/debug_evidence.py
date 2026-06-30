@@ -464,9 +464,13 @@ def build_trial_debug_evidence(
 
 def _summary_from_trials(trials: Sequence[Trial]) -> dict[str, int]:
     counts = Counter(str(trial.state) for trial in trials)
+    claimed_without_started = sum(
+        1 for trial in trials if trial.state == "claimed" and trial.started_at is None
+    )
     return {
         "queued": counts.get("queued", 0),
         "claimed": counts.get("claimed", 0),
+        "claimed_without_started": claimed_without_started,
         "running": counts.get("running", 0),
         "succeeded": counts.get("succeeded", 0),
         "failed": counts.get("failed", 0),

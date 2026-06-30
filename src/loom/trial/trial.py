@@ -31,6 +31,7 @@ from loom.models.trajectory import (
     TrialStartEvent,
 )
 from loom.models.trial import TrialConfig
+from loom.security.redaction import redact_text
 from loom.trajectory.cp_event_sink import CpEventSink
 from loom.trajectory.storage import ObjectStore
 from loom.trajectory.writer import TrajectoryWriter
@@ -185,9 +186,11 @@ class Trial:
                             force_build=self.ctx.trial_config.force_build,
                             network=self.ctx.sandbox_network,
                             volumes=self.ctx.sandbox_volumes,
-                            environment=tuple(sorted(
-                                self.ctx.task_config.environment.environment.items(),
-                            )),
+                            environment=tuple(
+                                sorted(
+                                    self.ctx.task_config.environment.environment.items(),
+                                )
+                            ),
                             extra_hosts=_merge_extra_hosts(
                                 self.ctx.task_config.environment.extra_hosts,
                                 self.ctx.sandbox_extra_hosts,
@@ -344,11 +347,15 @@ class Trial:
                 )
                 result.atif_uri = atif_uri
                 result.atif_schema_version = "1.7"
-            except (Exception, TimeoutError):
+            except (Exception, TimeoutError) as exc:
                 if result.state == TrialState.SUCCEEDED:
                     result.state = TrialState.FAILED
                     result.failure_reason = (
                         result.failure_reason or FailureReason.TRAJECTORY_FLUSH_FAILED
+                    )
+                    result.failure_message = result.failure_message or _exception_message(
+                        "finalize trajectory failed",
+                        exc,
                     )
 
             result.finished_at = datetime.now(UTC)
@@ -528,16 +535,25 @@ def _first_terminal_step_failure(result: TrialResult) -> tuple[FailureReason, st
 
 def _failure_from_step_error(error: StepError) -> tuple[FailureReason, str | None]:
     if error.phase == "agent":
-        reason = FailureReason.AGENT_TIMEOUT if error.reason == "timeout" else FailureReason.AGENT_ERROR
+        reason = (
+            FailureReason.AGENT_TIMEOUT if error.reason == "timeout" else FailureReason.AGENT_ERROR
+        )
         return reason, error.message
     if error.phase == "verifier":
         reason = (
-            FailureReason.VERIFIER_TIMEOUT if error.reason == "timeout" else FailureReason.VERIFIER_ERROR
+            FailureReason.VERIFIER_TIMEOUT
+            if error.reason == "timeout"
+            else FailureReason.VERIFIER_ERROR
         )
         return reason, error.message
     if error.phase == "artifacts":
         return FailureReason.ARTIFACT_UPLOAD_FAILED, error.message
     return FailureReason.INTERNAL_ERROR, error.message
+
+
+def _exception_message(prefix: str, exc: BaseException) -> str:
+    message = f"{prefix}: {type(exc).__name__}: {exc}"
+    return redact_text(message, limit=1000).strip()
 
 
 def _format_tb(exc: BaseException) -> str:
