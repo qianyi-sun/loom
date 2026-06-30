@@ -34,19 +34,25 @@ def test_resolve_url_falls_back_to_default_file(monkeypatch: pytest.MonkeyPatch)
     assert url.endswith("default-catalog.json")
 
 
-def test_load_default_returns_non_builtin_entries(
+def test_load_default_excludes_builtin_entry_point_slugs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
+    """Default catalog only holds entries that AREN'T already shipped as
+    builtin entry-points — `union_entries(builtin > catalog)` masks any
+    duplicate slug, so listing a builtin here is dead code that hides
+    bugs (e.g. PR #224's catalog `task_count: 86` for `terminal-bench-2`
+    never reached `loom datasets list` because the builtin row won).
+
+    Asserting absence pins the invariant: anyone adding a row for a slug
+    that already exists as a builtin entry-point should fail this test."""
     monkeypatch.delenv("LOOM_CATALOG_URL", raising=False)
     monkeypatch.setenv("LOOM_CACHE_DIR", str(tmp_path))
     entries = load_catalog_entries(url=None)
     slugs = {e.slug for e in entries}
-    # Default catalog only holds entries that aren't already shipped as
-    # builtin entry-points (which union_entries would mask anyway).
-    assert "terminal-bench-2" in slugs
-    tb2 = next(e for e in entries if e.slug == "terminal-bench-2")
-    assert tb2.source == "catalog"
-    assert tb2.available_pip_spec == "loom-benchmark-terminal-bench-2"
+    assert "terminal-bench-2" not in slugs, (
+        "terminal-bench-2 is a builtin entry-point — listing it in the "
+        "default catalog is masked dead code"
+    )
 
 
 def test_file_catalog_url_decodes_escaped_path(

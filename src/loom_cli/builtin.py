@@ -31,13 +31,22 @@ def load_builtin_entries() -> list[DatasetEntry]:
             )
             continue
         upstream = getattr(adapter, "upstream_source", None)
+        # Adapters whose pinned upstream has a fixed task count can declare
+        # `task_count = <int>` as a class attribute; consumed by
+        # `loom datasets list` so users see real metadata instead of `-`.
+        # Dynamic-count adapters (HF subset, dataset revision, etc.) leave
+        # it unset and the column stays `-`.
+        task_count_attr = getattr(adapter, "task_count", None)
+        task_count = (
+            task_count_attr if isinstance(task_count_attr, int) else None
+        )
         out.append(DatasetEntry(
             slug=ep.name,
             source="builtin",
             display_name=getattr(adapter, "display_name", ep.name),
             license_spdx=getattr(adapter, "license_spdx", "UNKNOWN"),
             license_url=getattr(adapter, "license_url", ""),
-            task_count=None,
+            task_count=task_count,
             status="installed",
             available_pip_spec=None,
             entry_point=f"{ep.module}:{ep.attr}" if ep.attr else ep.value,
