@@ -1,0 +1,604 @@
+[
+  {
+    "task_id": "terminal-bench-2/aimo-airline-departures",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 1,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/blind-maze-explorer-5x5",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 5,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/blind-maze-explorer-algorithm",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 22,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/blind-maze-explorer-algorithm.easy",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 20,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/blind-maze-explorer-algorithm.hard",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 11,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/broken-networking",
+    "state": "failed",
+    "reward": null,
+    "llm_calls": 0,
+    "failure_reason": "internal_error"
+  },
+  {
+    "task_id": "terminal-bench-2/broken-python",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 11,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/build-initramfs-qemu",
+    "state": "failed",
+    "reward": null,
+    "llm_calls": 25,
+    "failure_reason": "verifier_timeout"
+  },
+  {
+    "task_id": "terminal-bench-2/build-linux-kernel-qemu",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 34,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/build-tcc-qemu",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 13,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/cartpole-rl-training",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 15,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/chem-property-targeting",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 15,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/chess-best-move",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 19,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/conda-env-conflict-resolution",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 19,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/configure-git-webserver",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 28,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/count-dataset-tokens",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 13,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/crack-7z-hash",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 28,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/crack-7z-hash.easy",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 11,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/crack-7z-hash.hard",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 51,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/create-bucket",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 3,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/cron-broken-network",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 7,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/csv-to-parquet",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 14,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/decommissioning-service-with-sensitive-data",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 10,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/download-youtube",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 2,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/eval-mteb",
+    "state": "failed",
+    "reward": null,
+    "llm_calls": 24,
+    "failure_reason": "retry_exhausted"
+  },
+  {
+    "task_id": "terminal-bench-2/eval-mteb.hard",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 49,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/extract-moves-from-video",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 2,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/extract-safely",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 5,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/fibonacci-server",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 7,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/fix-git",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 4,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/fix-pandas-version",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 8,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/fix-permissions",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 5,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/form-filling",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 23,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/get-bitcoin-nodes",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 7,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/git-multibranch",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 15,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/git-workflow-hack",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 22,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/gpt2-codegolf",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 3,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/grid-pattern-transform",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 12,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/hello-world",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 3,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/heterogeneous-dates",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 5,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/hf-model-inference",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 15,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/incompatible-python-fasttext",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 14,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/incompatible-python-fasttext.base_with_hint",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 8,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/intrusion-detection",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 17,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/jupyter-notebook-server",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 22,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/modernize-fortran-build",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 6,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/new-encrypt-command",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 10,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/nginx-request-logging",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 13,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/oom",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 22,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/openssl-selfsigned-cert",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 11,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/organization-json-generator",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 9,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/password-recovery",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 2,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/path-tracing",
+    "state": "failed",
+    "reward": 1.0,
+    "llm_calls": 38,
+    "failure_reason": "trajectory_flush_failed"
+  },
+  {
+    "task_id": "terminal-bench-2/path-tracing-reverse",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 108,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/play-zork",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 107,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/polyglot-c-py",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 76,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/polyglot-rust-c",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 50,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/processing-pipeline",
+    "state": "failed",
+    "reward": null,
+    "llm_calls": 31,
+    "failure_reason": "verifier_timeout"
+  },
+  {
+    "task_id": "terminal-bench-2/prove-plus-comm",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 10,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/pytorch-model-cli",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 25,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/pytorch-model-cli.easy",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 25,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/pytorch-model-cli.hard",
+    "state": "failed",
+    "reward": null,
+    "llm_calls": 19,
+    "failure_reason": "agent_timeout"
+  },
+  {
+    "task_id": "terminal-bench-2/qemu-alpine-ssh",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 54,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/qemu-startup",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 12,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/raman-fitting",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 25,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/raman-fitting.easy",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 18,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/recover-obfuscated-files",
+    "state": "failed",
+    "reward": 1.0,
+    "llm_calls": 6,
+    "failure_reason": "trajectory_flush_failed"
+  },
+  {
+    "task_id": "terminal-bench-2/reshard-c4-data",
+    "state": "failed",
+    "reward": null,
+    "llm_calls": 24,
+    "failure_reason": "retry_exhausted"
+  },
+  {
+    "task_id": "terminal-bench-2/run-pdp11-code",
+    "state": "failed",
+    "reward": null,
+    "llm_calls": 126,
+    "failure_reason": "retry_exhausted"
+  },
+  {
+    "task_id": "terminal-bench-2/sanitize-git-repo",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 38,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/sanitize-git-repo.hard",
+    "state": "failed",
+    "reward": null,
+    "llm_calls": 36,
+    "failure_reason": "verifier_timeout"
+  },
+  {
+    "task_id": "terminal-bench-2/security-vulhub-minio",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 61,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/simple-sheets-put",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 9,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/simple-web-scraper",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 6,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/solana-data",
+    "state": "failed",
+    "reward": null,
+    "llm_calls": 38,
+    "failure_reason": "internal_error"
+  },
+  {
+    "task_id": "terminal-bench-2/sqlite-db-truncate",
+    "state": "failed",
+    "reward": null,
+    "llm_calls": 45,
+    "failure_reason": "retry_exhausted"
+  },
+  {
+    "task_id": "terminal-bench-2/sqlite-with-gcov",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 16,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/super-benchmark-upet",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 39,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/swe-bench-astropy-1",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 29,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/swe-bench-astropy-2",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 25,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/swe-bench-fsspec",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 42,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/swe-bench-langcodes",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 17,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/tmux-advanced-workflow",
+    "state": "succeeded",
+    "reward": 1.0,
+    "llm_calls": 20,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/train-fasttext",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 15,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/vim-terminal-task",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 5,
+    "failure_reason": null
+  },
+  {
+    "task_id": "terminal-bench-2/write-compressor",
+    "state": "succeeded",
+    "reward": 0.0,
+    "llm_calls": 9,
+    "failure_reason": null
+  }
+]
