@@ -298,6 +298,127 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Verify storage lifecycle round-trip against real MinIO
+        # Closes #230. Exercises the entire pipeline end-to-end:
+        # CLI subcommand → boto3 → real MinIO → boto3 read-back → doctor
+        # diff. The unit tests for the renderer pass against a stub S3
+        # client; this step is the only thing that catches a wire-
+        # format mismatch (boto3 vs MinIO).
+        #
+        # 1. Pull MinIO creds from the live Secret bootstrapped above
+        #    (--smoke-defaults values, so deterministic).
+        # 2. Pre-create the three reference buckets (MinIO doesn't
+        #    auto-create on PUT; production buckets are created by
+        #    loom_service at startup, but we want lifecycle apply to
+        #    succeed even on a fresh cluster).
+        # 3. Apply the example storage-lifecycle.toml.
+        # 4. doctor --storage-lifecycle-config should exit 0.
+        # 5. Re-apply (idempotency); doctor still exit 0.
+        # 6. Tamper: drop a rule out-of-band; doctor should exit 1 and
+        #    name the missing rule.
+        run: |
+          set -euo pipefail
+
+          ACCESS_KEY=$(kubectl --context kind-loom-staging -n loom \
+            get secret loom-secrets \
+            -o jsonpath='{.data.minio-access-key}' | base64 -d)
+          SECRET_KEY=$(kubectl --context kind-loom-staging -n loom \
+            get secret loom-secrets \
+            -o jsonpath='{.data.minio-secret-key}' | base64 -d)
+          export LOOM_SVC_MINIO_ACCESS_KEY="${ACCESS_KEY}"
+          export LOOM_SVC_MINIO_SECRET_KEY="${SECRET_KEY}"
+          echo "::add-mask::${ACCESS_KEY}"
+          echo "::add-mask::${SECRET_KEY}"
+
+          kubectl --context kind-loom-staging -n loom port-forward \
+            svc/loom-minio 19000:9000 &
+          PF_PID=$!
+          trap "kill ${PF_PID} 2>/dev/null || true" EXIT
+          sleep 3
+
+          export LOOM_SVC_MINIO_ENDPOINT="http://localhost:19000"
+
+          # Pre-create reference buckets so apply has somewhere to land.
+          for bucket in trajectories artifacts atif; do
+            uv run python -c "
+          import os, boto3
+          from botocore.config import Config
+          s3 = boto3.client(
+              's3', endpoint_url=os.environ['LOOM_SVC_MINIO_ENDPOINT'],
+              aws_access_key_id=os.environ['LOOM_SVC_MINIO_ACCESS_KEY'],
+              aws_secret_access_key=os.environ['LOOM_SVC_MINIO_SECRET_KEY'],
+              region_name='us-east-1',
+              config=Config(signature_version='s3v4'),
+          )
+          try:
+              s3.create_bucket(Bucket='${bucket}')
+          except s3.exceptions.BucketAlreadyOwnedByYou:
+              pass
+          "
+          done
+
+          echo "::group::dry-run apply"
+          uv run loom cluster bootstrap-storage-lifecycle \
+            --config config/storage-lifecycle.example.toml \
+            --endpoint "${LOOM_SVC_MINIO_ENDPOINT}" --dry-run
+          echo "::endgroup::"
+
+          echo "::group::first apply"
+          uv run loom cluster bootstrap-storage-lifecycle \
+            --config config/storage-lifecycle.example.toml \
+            --endpoint "${LOOM_SVC_MINIO_ENDPOINT}"
+          echo "::endgroup::"
+
+          echo "::group::doctor after first apply (must exit 0)"
+          uv run loom cluster doctor \
+            --context kind-loom-staging --namespace loom \
+            --storage-lifecycle-config config/storage-lifecycle.example.toml \
+            --storage-lifecycle-endpoint "${LOOM_SVC_MINIO_ENDPOINT}"
+          echo "::endgroup::"
+
+          echo "::group::second apply (idempotency check)"
+          uv run loom cluster bootstrap-storage-lifecycle \
+            --config config/storage-lifecycle.example.toml \
+            --endpoint "${LOOM_SVC_MINIO_ENDPOINT}"
+          uv run loom cluster doctor \
+            --context kind-loom-staging --namespace loom \
+            --storage-lifecycle-config config/storage-lifecycle.example.toml \
+            --storage-lifecycle-endpoint "${LOOM_SVC_MINIO_ENDPOINT}"
+          echo "::endgroup::"
+
+          echo "::group::tamper: remove trajectories lifecycle, doctor must fail"
+          uv run python -c "
+          import os, boto3
+          from botocore.config import Config
+          s3 = boto3.client(
+              's3', endpoint_url=os.environ['LOOM_SVC_MINIO_ENDPOINT'],
+              aws_access_key_id=os.environ['LOOM_SVC_MINIO_ACCESS_KEY'],
+              aws_secret_access_key=os.environ['LOOM_SVC_MINIO_SECRET_KEY'],
+              region_name='us-east-1',
+              config=Config(signature_version='s3v4'),
+          )
+          s3.delete_bucket_lifecycle(Bucket='trajectories')
+          "
+          if uv run loom cluster doctor \
+               --context kind-loom-staging --namespace loom \
+               --storage-lifecycle-config config/storage-lifecycle.example.toml \
+               --storage-lifecycle-endpoint "${LOOM_SVC_MINIO_ENDPOINT}"; then
+            echo "::error::doctor should have FAILED after removing lifecycle, but it passed"
+            exit 1
+          fi
+          echo "doctor correctly reported drift after tamper"
+          echo "::endgroup::"
+
+          echo "::group::heal: re-apply, doctor should exit 0 again"
+          uv run loom cluster bootstrap-storage-lifecycle \
+            --config config/storage-lifecycle.example.toml \
+            --endpoint "${LOOM_SVC_MINIO_ENDPOINT}"
+          uv run loom cluster doctor \
+            --context kind-loom-staging --namespace loom \
+            --storage-lifecycle-config config/storage-lifecycle.example.toml \
+            --storage-lifecycle-endpoint "${LOOM_SVC_MINIO_ENDPOINT}"
+          echo "::endgroup::"
+
       - name: Capture pod state on success (for reference)
         if: success()
         run: |
