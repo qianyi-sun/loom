@@ -1,0 +1,43 @@
+{
+  "schema_version": "1.7",
+  "trajectory_id": "9ed861fe80ebb48d2eb5dfe6b7dfd84b9a6d4c90573999b8e529cc2827c01b15",
+  "session_id": "ef2bb48a-67a7-47d0-88c5-ea41f2608572",
+  "metadata": {
+    "task_id": "terminal-bench-2/hello-world",
+    "agent_name": "claude-code",
+    "agent_version": "1.0",
+    "final_state": "succeeded",
+    "reward": {
+      "resolved": 0.0
+    },
+    "error": null,
+    "verifier_name": null,
+    "verifier_rewards": null
+  },
+  "steps": [
+    {
+      "step_id": "main",
+      "llm_call_count": 21,
+      "is_copied_context": false,
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "",
+          "name": null,
+          "tool_calls": null,
+          "tool_call_id": null
+        }
+      ],
+      "reasoning_content": "{\"agents\": [\"claude\", \"Explore\", \"general-purpose\", \"Plan\", \"statusline-setup\"], \"analytics_disabled\": true, \"apiKeySource\": \"none\", \"claude_code_version\": \"2.1.183\", \"cwd\": \"/app\", \"fast_mode_state\": \"off\", \"mcp_servers\": [], \"memory_paths\": {\"auto\": \"/root/.claude/projects/-app/memory/\"}, \"model\": \"claude-sonnet-4-5\", \"output_style\": \"default\", \"permissionMode\": \"acceptEdits\", \"plugins\": [], \"product_feedback_disabled\": false, \"session_id\": \"37ca21df-ea9e-4a33-96b2-b17227374c0c\", \"skills\": [\"deep-research\", \"design-sync\", \"update-config\", \"verify\", \"debug\", \"code-review\", \"simplify\", \"batch\", \"fewer-permission-prompts\", \"loop\", \"claude-api\", \"run\", \"run-skill-generator\"], \"slash_commands\": [\"deep-research\", \"design-sync\", \"update-config\", \"verify\", \"debug\", \"code-review\", \"simplify\", \"batch\", \"fewer-permission-prompts\", \"loop\", \"claude-api\", \"run\", \"run-skill-generator\", \"clear\", \"compact\", \"config\", \"context\", \"heapdump\", \"init\", \"reload-skills\", \"review\", \"security-review\", \"usage\", \"insights\", \"goal\", \"team-onboarding\"], \"subtype\": \"init\", \"tools\": [\"Bash\", \"Edit\", \"Glob\", \"Grep\", \"Read\", \"Write\"], \"type\": \"system\", \"uuid\": \"8e321605-9f77-4fdc-b524-1ebfea4c9f70\"}\n---\n{\"attempt\": 1, \"error\": \"server_error\", \"error_status\": 503, \"max_retries\": 10, \"retry_delay_ms\": 621.2112002903388, \"session_id\": \"37ca21df-ea9e-4a33-96b2-b17227374c0c\", \"subtype\": \"api_retry\", \"type\": \"system\", \"uuid\": \"ea45ebd5-d9fc-4d13-a111-6dfef54de92d\"}\n---\n{\"attempt\": 2, \"error\": \"server_error\", \"error_status\": 503, \"max_retries\": 10, \"retry_delay_ms\": 1035.187281266091, \"session_id\": \"37ca21df-ea9e-4a33-96b2-b17227374c0c\", \"subtype\": \"api_retry\", \"type\": \"system\", \"uuid\": \"184fd3c6-e5d4-4313-8246-776070ef3318\"}\n---\n{\"attempt\": 3, \"error\": \"server_error\", \"error_status\": 503, \"max_retries\": 10, \"retry_delay_ms\": 2491.0808447396494, \"session_id\": \"37ca21df-ea9e-4a33-96b2-b17227374c0c\", \"subtype\": \"api_retry\", \"type\": \"system\", \"uuid\": \"d7ea39cf-c2dc-428f-8d13-ecea816b0482\"}\n---\n{\"attempt\": 4, \"error\": \"server_error\", \"error_status\": 503, \"max_retries\": 10, \"retry_delay_ms\": 4706.743985430098, \"session_id\": \"37ca21df-ea9e-4a33-96b2-b17227374c0c\", \"subtype\": \"api_retry\", \"type\": \"system\", \"uuid\": \"9e8e1ec2-571a-4e2c-a2ff-2f2a9ba27f0f\"}\n---\n{\"attempt\": 5, \"error\": \"server_error\", \"error_status\": 503, \"max_retries\": 10, \"retry_delay_ms\": 9133.706120669749, \"session_id\": \"37ca21df-ea9e-4a33-96b2-b17227374c0c\", \"subtype\": \"api_retry\", \"type\": \"system\", \"uuid\": \"3bfadb21-7217-41dd-a4f6-6f422dc5c088\"}\n---\n{\"attempt\": 6, \"error\": \"server_error\", \"error_status\": 503, \"max_retries\": 10, \"retry_delay_ms\": 16529.674504212417, \"session_id\": \"37ca21df-ea9e-4a33-96b2-b17227374c0c\", \"subtype\": \"api_retry\", \"type\": \"system\", \"uuid\": \"9290a9d8-5a8e-44e0-936d-26fb386794f9\"}\n---\n{\"attempt\": 7, \"error\": \"server_error\", \"error_status\": 503, \"max_retries\": 10, \"retry_delay_ms\": 37489.17661876897, \"session_id\": \"37ca21df-ea9e-4a33-96b2-b17227374c0c\", \"subtype\": \"api_retry\", \"type\": \"system\", \"uuid\": \"c341d013-3c13-4f85-b5c3-ae06dbfd6ba3\"}\n---\n{\"attempt\": 8, \"error\": \"server_error\", \"error_status\": 503, \"max_retries\": 10, \"retry_delay_ms\": 33964.23274666721, \"session_id\": \"37ca21df-ea9e-4a33-96b2-b17227374c0c\", \"subtype\": \"api_retry\", \"type\": \"system\", \"uuid\": \"3f2afaff-6662-4045-bfca-872483b615fa\"}\n---\n{\"attempt\": 9, \"error\": \"server_error\", \"error_status\": 503, \"max_retries\": 10, \"retry_delay_ms\": 33564.69707886258, \"session_id\": \"37ca21df-ea9e-4a33-96b2-b17227374c0c\", \"subtype\": \"api_retry\", \"type\": \"system\", \"uuid\": \"fb1fb76c-fa9d-4422-96af-f147ecb75be8\"}\n---\n{\"attempt\": 10, \"error\": \"server_error\", \"error_status\": 503, \"max_retries\": 10, \"retry_delay_ms\": 39591.68410223846, \"session_id\": \"37ca21df-ea9e-4a33-96b2-b17227374c0c\", \"subtype\": \"api_retry\", \"type\": \"system\", \"uuid\": \"0a858bc2-75d2-4c19-806b-1dcc57c6ad27\"}\n---\n{\"error\": \"server_error\", \"message\": {\"container\": null, \"content\": [{\"text\": \"API Error: 503 {\\\"detail\\\":\\\"upstream returned 503: {\\\\\\\"error\\\\\\\":{\\\\\\\"code\\\\\\\":\\\\\\\"model_not_found\\\\\\\",\\\\\\\"message\\\\\\\":\\\\\\\"No available channel for model claude-sonnet-4-5 under group default (distributor) (request id: 20260630221928268385058268d9d6BATm8jgi)\\\\\\\",\\\\\\\"type\\\\\\\":\\\\\\\"new_api_error\\\\\\\"}}\\\"}. This is a server-side issue, usually temporary \\u2014 try again in a moment. If it persists, check your inference gateway (host.docker.internal:30444).\", \"type\": \"text\"}], \"context_management\": null, \"id\": \"9bccf74f-9be8-40e7-a080-c3a98ddf8112\", \"model\": \"<synthetic>\", \"role\": \"assistant\", \"stop_details\": null, \"stop_reason\": \"stop_sequence\", \"stop_sequence\": \"\", \"type\": \"message\", \"usage\": {\"cache_creation\": {\"ephemeral_1h_input_tokens\": 0, \"ephemeral_5m_input_tokens\": 0}, \"cache_creation_input_tokens\": 0, \"cache_read_input_tokens\": 0, \"inference_geo\": null, \"input_tokens\": 0, \"iterations\": null, \"output_tokens\": 0, \"server_tool_use\": {\"web_fetch_requests\": 0, \"web_search_requests\": 0}, \"service_tier\": null, \"speed\": null}}, \"parent_tool_use_id\": null, \"session_id\": \"37ca21df-ea9e-4a33-96b2-b17227374c0c\", \"type\": \"assistant\", \"uuid\": \"77322a4e-0b38-475f-a911-d36536eb6a10\"}\n---\n{\"api_error_status\": 503, \"duration_api_ms\": 0, \"duration_ms\": 181258, \"fast_mode_state\": \"off\", \"is_error\": true, \"modelUsage\": {}, \"num_turns\": 1, \"permission_denials\": [], \"result\": \"API Error: 503 {\\\"detail\\\":\\\"upstream returned 503: {\\\\\\\"error\\\\\\\":{\\\\\\\"code\\\\\\\":\\\\\\\"model_not_found\\\\\\\",\\\\\\\"message\\\\\\\":\\\\\\\"No available channel for model claude-sonnet-4-5 under group default (distributor) (request id: 20260630221928268385058268d9d6BATm8jgi)\\\\\\\",\\\\\\\"type\\\\\\\":\\\\\\\"new_api_error\\\\\\\"}}\\\"}. This is a server-side issue, usually temporary \\u2014 try again in a moment. If it persists, check your inference gateway (host.docker.internal:30444).\", \"session_id\": \"37ca21df-ea9e-4a33-96b2-b17227374c0c\", \"stop_reason\": \"stop_sequence\", \"subtype\": \"success\", \"terminal_reason\": \"completed\", \"total_cost_usd\": 0, \"type\": \"result\", \"usage\": {\"cache_creation\": {\"ephemeral_1h_input_tokens\": 0, \"ephemeral_5m_input_tokens\": 0}, \"cache_creation_input_tokens\": 0, \"cache_read_input_tokens\": 0, \"inference_geo\": \"\", \"input_tokens\": 0, \"iterations\": [], \"output_tokens\": 0, \"server_tool_use\": {\"web_fetch_requests\": 0, \"web_search_requests\": 0}, \"service_tier\": \"standard\", \"speed\": \"standard\"}, \"uuid\": \"1f63fe17-7536-468b-a09e-42d0cd456b63\"}",
+      "tool_calls": null,
+      "metrics": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_input_tokens": 0,
+        "cache_write_tokens": 0,
+        "thinking_tokens": 0,
+        "cost_usd": 0.0
+      }
+    }
+  ]
+}
