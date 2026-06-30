@@ -20,7 +20,7 @@ v1 is **team-private**: the owning team is the only consumer. Loom's existing au
 ## Design principles
 
 - **Divergence stops at the catalog.** A user benchmark must materialise into the same `task.toml` bundle layout as first-party. The trial worker has no idea — and no reason to care — whether a bundle came from a user or a first-party adapter.
-- **One consumption surface.** First-party and user benchmarks live in the same `benchmarks` table, are listed by the same API, and render on the same SPA page. The distinguisher is an `owning_team_id` column plus a `u/<team_handle>/<slug>` id namespace, not a parallel system.
+- **One consumption surface.** First-party and user benchmarks live in the same `benchmarks` table, are listed by the same API, and render on the same SPA page. The distinguisher is an `owning_team_id` column plus a `u/<owning_team_id>/<slug>` id namespace, not a parallel system.
 - **Trust boundary = the existing trial sandbox.** Verifier scripts ride the same isolation primitives first-party verifiers already use. The only new sandboxed surface is the optional `transform()`, executed during materialisation.
 - **Forward-compat for sharing without building it.** A `visibility` column ships in v1 with the single value `private`. Promoting a benchmark later is `UPDATE visibility = 'cluster'` plus the filter rule already in place.
 
@@ -33,7 +33,7 @@ Three tables; names are illustrative and will be reconciled with the actual Loom
 | Column | Type | Notes |
 |---|---|---|
 | `id` | text PK | unchanged |
-| `id` | text PK | unchanged; first-party is bare (`humaneval`), user-brought is `u/<team_handle>/<slug>` |
+| `id` | text PK | unchanged; first-party is bare (`humaneval`), user-brought is `u/<owning_team_id>/<slug>` |
 | `series` | text | unchanged; user benchmarks default to `user` |
 | existing columns | | unchanged |
 | `owning_team_id` | uuid NULL FK → `teams(id)` | NEW. `NULL` = first-party / system. NOT NULL = user-brought. ON DELETE: see Migration. |
@@ -206,7 +206,7 @@ If the platform cannot guarantee the no-network constraint for in-process subpro
 
 Extend the existing SPA Benchmarks page:
 
-- Render `u/<team_handle>/<slug>` benchmarks alongside system ones, with an "owned by your team" badge derived from `owning_team_id == current_team_id`.
+- Render `u/<owning_team_id>/<slug>` benchmarks alongside system ones, with an "owned by your team" badge derived from `owning_team_id == current_team_id`.
 - Add a "My benchmarks" filter toggle.
 - Status indicator (`materialising` / `ready` / `partial` / `failed`) with a detail panel showing the first 50 per-instance errors.
 - "Submit benchmark" CTA: drag-and-drop directory upload, or paste a manifest with separate file pickers for verifier and transform.
@@ -220,7 +220,7 @@ CLI/UI → build multipart (manifest + verifier + [transform])
        → POST /api/v1/user-benchmarks
 API    → validate manifest (pydantic, extra=forbid)
        → upload blobs to benchmarks/user/<owning_team_id>/<slug>/
-       → INSERT benchmarks (kind=user, status=materialising, owning_team_id=caller_team, id=u/<team_handle>/<slug>)
+       → INSERT benchmarks (kind=user, status=materialising, owning_team_id=caller_team, id=u/<owning_team_id>/<slug>)
        → INSERT benchmark_manifests
        → enqueue materialise(benchmark_id)
        → 202 + benchmark_id
@@ -320,6 +320,7 @@ These do not block design approval; they require code-level reconciliation when 
 - Whether the `transform` sandbox should reuse an existing worker-side primitive from [`sandbox-isolation.md`](sandbox-isolation.md) or introduce a new helper.
 - The choice of job queue for materialisation jobs (reuse the trial queue with a distinct kind, or stand up a sibling queue) — both work; the call belongs in the plan.
 - Whether `loom benchmarks list` should default to a kind-filter or show both kinds with a column; ditto the SPA. Default chosen here is "show both with column / badge"; revisit during plan if the kind mixture is noisy.
+- The namespace uses the raw team UUID (`u/<owning_team_id>/<slug>`) for unambiguous PK uniqueness. Adding a human-readable `team_handle` column to `teams` is a separate follow-up; URLs and IDs use the UUID form until then.
 
 ## Future shapes (informational)
 
