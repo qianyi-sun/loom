@@ -43,6 +43,8 @@ class LoomServiceSettings(BaseSettings):
     minio_region: str = "us-east-1"
     minio_secret_key: SecretStr
     signed_url_expiry_sec: int = 3600
+    storage_auth_kind: str = "static_keys"
+    storage_backend: str = "minio"
     team_registration_open: bool = False
     trajectories_bucket: str = "trajectories"
 
