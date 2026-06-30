@@ -76,6 +76,10 @@ spec:
           value: '600'
         - name: LOOM_WORKER_SANDBOX_WORKER_INDEX
           value: '0'
+        - name: LOOM_WORKER_STORAGE_AUTH_KIND
+          value: 'static_keys'
+        - name: LOOM_WORKER_STORAGE_BACKEND
+          value: 'minio'
         - name: LOOM_TASK_IMAGE_BUILD_MAX_BYTES
           value: '536870912'
         - name: LOOM_TASK_IMAGE_BUILD_MAX_FILES

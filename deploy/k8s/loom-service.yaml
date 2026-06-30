@@ -75,6 +75,10 @@ spec:
                   key: minio-secret-key
             - name: LOOM_SVC_SIGNED_URL_EXPIRY_SEC
               value: "3600"
+            - name: LOOM_SVC_STORAGE_AUTH_KIND
+              value: "static_keys"
+            - name: LOOM_SVC_STORAGE_BACKEND
+              value: "minio"
             - name: LOOM_SVC_TEAM_REGISTRATION_OPEN
               value: "False"
             - name: LOOM_SVC_TRAJECTORIES_BUCKET
