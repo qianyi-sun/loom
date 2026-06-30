@@ -1,0 +1,65 @@
+# Loom storage retention policy.
+#
+# Read by `loom cluster bootstrap-storage-lifecycle` and applied via
+# boto3 `put_bucket_lifecycle_configuration` to the configured object
+# store. Re-applying the same config is a no-op at the storage layer.
+#
+# Strategies shipped:
+#   expire_after_days
+#       Delete objects N days after creation.
+#   keep_forever
+#       Sentinel — emits no lifecycle rule. Documents intent.
+#   cleanup_incomplete_uploads_after_hours
+#       Aborts stuck multipart uploads. Doesn't touch completed objects.
+#
+# Provider-neutral by design. The same config renders into MinIO,
+# AWS S3, Cloudflare R2, Backblaze B2, and Wasabi — they share the
+# S3 lifecycle schema. GCS and Azure renderers will land as separate
+# follow-up work.
+#
+# See docs/architecture/storage-retention.md for the design rationale
+# and docs/operator-runbook.md#storage-retention-policy for the
+# operator workflow.
+
+# Which renderer to use. Required.
+#   "minio" | "s3" | "r2" | "b2" | "wasabi"
+backend = "minio"
+
+# Trajectories accumulate fastest. 30d is the SOC2-equivalent default
+# for log-style data; tune for your team's investigation cadence.
+[[retention]]
+bucket = "trajectories"
+strategy = "expire_after_days"
+days = 30
+
+# Artifacts (workspace + evidence bundles) tend to be larger but
+# less numerous. 180d gives a generous review window for failures
+# without unbounded growth.
+[[retention]]
+bucket = "artifacts"
+strategy = "expire_after_days"
+days = 180
+
+# ATIF projections are small, queryable, and represent the
+# permanent record of a trial. Keep them.
+[[retention]]
+bucket = "atif"
+strategy = "keep_forever"
+
+# Clean up stuck multipart uploads across every bucket. Matches the
+# behavior previously documented inline in cluster-deploy.md. Each
+# bucket is configured separately because S3 lifecycle is per-bucket.
+[[retention]]
+bucket = "trajectories"
+strategy = "cleanup_incomplete_uploads_after_hours"
+hours = 336  # 14 days — long trials (SWE-Bench-class) need this
+
+[[retention]]
+bucket = "artifacts"
+strategy = "cleanup_incomplete_uploads_after_hours"
+hours = 168  # 7 days
+
+[[retention]]
+bucket = "atif"
+strategy = "cleanup_incomplete_uploads_after_hours"
+hours = 168

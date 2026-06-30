@@ -2335,6 +2335,87 @@ def _bootstrap_secrets(args: argparse.Namespace) -> int:
     return 0
 
 
+def _bootstrap_storage_lifecycle(args: argparse.Namespace) -> int:
+    """Apply storage retention rules from storage-lifecycle.toml.
+
+    Reads the operator-managed config, renders provider-neutral rules
+    into the S3 LifecycleConfiguration dict shape, and applies via
+    boto3. Re-applying the same config is a no-op at the storage layer.
+
+    Print-only mode (``--dry-run``) emits the rendered rules to stdout
+    as JSON so operators can inspect before mutating the live store.
+    """
+    import json
+    import os
+
+    import boto3
+    from botocore.config import Config
+
+    from loom.storage_retention import apply_lifecycle_to_s3
+    from loom.storage_retention_loader import load_retention_config
+
+    config_path = Path(args.config)
+    try:
+        cfg = load_retention_config(config_path)
+    except (FileNotFoundError, ValueError) as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+
+    if args.dry_run:
+        rendered: dict[str, Any] = {}
+        for bucket in sorted({r.bucket for r in cfg.rules}):
+            from loom.storage_retention import render_bucket_lifecycle
+            rb = render_bucket_lifecycle(cfg, bucket=bucket)
+            if rb["Rules"]:
+                rendered[bucket] = rb
+        json.dump({"backend": cfg.backend, "lifecycle": rendered},
+                  sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    # Live apply path. Reuse the service settings for credentials so
+    # operators don't have to plumb separate auth for this subcommand.
+    endpoint = args.endpoint or os.environ.get(
+        "LOOM_SVC_MINIO_ENDPOINT", "http://loom-minio:9000",
+    )
+    access_key = os.environ.get(
+        "LOOM_SVC_MINIO_ACCESS_KEY",
+    ) or os.environ.get("MINIO_ROOT_USER", "")
+    secret_key = os.environ.get(
+        "LOOM_SVC_MINIO_SECRET_KEY",
+    ) or os.environ.get("MINIO_ROOT_PASSWORD", "")
+    if not access_key or not secret_key:
+        sys.stderr.write(
+            "error: MinIO credentials not found. Set "
+            "LOOM_SVC_MINIO_ACCESS_KEY + LOOM_SVC_MINIO_SECRET_KEY "
+            "(or MINIO_ROOT_USER + MINIO_ROOT_PASSWORD) in the env.\n",
+        )
+        return 2
+
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        region_name=os.environ.get("LOOM_SVC_MINIO_REGION", "us-east-1"),
+        config=Config(signature_version="s3v4"),
+    )
+    applied = apply_lifecycle_to_s3(s3, cfg)
+
+    sys.stdout.write(
+        f"Applied storage lifecycle rules to {len(applied)} bucket(s):\n",
+    )
+    for bucket, rendered in sorted(applied.items()):
+        n = len(rendered["Rules"])
+        sys.stdout.write(f"  {bucket}: {n} rule(s)\n")
+    if not applied:
+        sys.stdout.write(
+            "  (no rules applied — every bucket resolved to keep_forever "
+            "or had no matching rules).\n",
+        )
+    return 0
+
+
 def dispatch(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="loom cluster",
@@ -2730,6 +2811,39 @@ def dispatch(argv: list[str]) -> int:
         help="Run each entry's `generate` command to mint fresh values.",
     )
     p_boot.set_defaults(handler=_bootstrap_secrets)
+
+    p_lifecycle = sub.add_parser(
+        "bootstrap-storage-lifecycle",
+        help=(
+            "Apply storage retention rules from storage-lifecycle.toml "
+            "to the configured object store. Idempotent."
+        ),
+    )
+    p_lifecycle.add_argument(
+        "--config",
+        default=str(_REPO_ROOT / "config" / "storage-lifecycle.example.toml"),
+        help=(
+            "Path to storage-lifecycle.toml. Defaults to the bundled "
+            "example so operators can preview without committing config."
+        ),
+    )
+    p_lifecycle.add_argument(
+        "--endpoint",
+        default=None,
+        help=(
+            "Object-store endpoint URL. Defaults to "
+            "$LOOM_SVC_MINIO_ENDPOINT or http://loom-minio:9000."
+        ),
+    )
+    p_lifecycle.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Render rules to stdout as JSON without contacting the "
+            "store. Useful for review before a real apply."
+        ),
+    )
+    p_lifecycle.set_defaults(handler=_bootstrap_storage_lifecycle)
 
     args = parser.parse_args(argv)
     return cast(int, args.handler(args))

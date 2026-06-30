@@ -66,6 +66,10 @@ Start with the overview, drill into the area you care about:
 - **[architecture/run-library.md](architecture/run-library.md)** —
   org-wide completed-run metadata, typed safe shared artifacts, metadata
   export, clone/reuse provenance, and the team boundary for shared results
+- **[architecture/storage-retention.md](architecture/storage-retention.md)** —
+  operator-configurable object-store retention policy; provider-neutral
+  rules rendered into S3-compatible lifecycle dicts; idempotent apply via
+  `loom cluster bootstrap-storage-lifecycle`
 - **[architecture/storage-backend-pluggability.md](architecture/storage-backend-pluggability.md)** —
   design spec for swapping MinIO for managed object storage (AWS S3,
   GCS) as a first-class deployment shape at v1.0; what the operator

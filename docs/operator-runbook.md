@@ -1062,6 +1062,123 @@ Response per case:
 The query is also useful as a quarterly hygiene check independent
 of the alert.
 
+### Storage retention policy
+
+Loom's object store accumulates trajectories and artifacts. Without
+a server-side lifecycle policy, the disk fills silently and trial
+uploads start failing. The `loom cluster bootstrap-storage-lifecycle`
+subcommand applies operator-configurable retention rules to every
+configured bucket via the storage backend's native lifecycle API
+(`put_bucket_lifecycle_configuration` for S3-compatible backends).
+
+The config lives in `config/storage-lifecycle.toml` (operator-owned;
+copy the bundled `storage-lifecycle.example.toml` as the starting
+point). It's provider-neutral — the same config renders into MinIO,
+AWS S3, Cloudflare R2, Backblaze B2, and Wasabi.
+
+Strategies shipped:
+
+| Strategy | Use case | Notes |
+|---|---|---|
+| `expire_after_days` | Trajectories, raw artifacts | Deletes objects N days after creation. The 95% case. |
+| `keep_forever` | ATIF, evidence bundles | Explicit no-op; documents intent so future config changes don't accidentally apply expiry. |
+| `cleanup_incomplete_uploads_after_hours` | Every bucket | Aborts stuck multipart uploads. Doesn't touch completed objects. |
+
+Recommended defaults in the example file:
+
+- `trajectories`: expire after 30 days. Highest churn; least information density past a successful trial finalize.
+- `artifacts`: expire after 180 days. Larger objects, generous review window.
+- `atif`: keep forever. Small, queryable, the permanent record.
+
+Apply the policy:
+
+```bash
+# Dry-run: print the rendered lifecycle rules without contacting
+# the store. Useful for review before a real apply.
+loom cluster bootstrap-storage-lifecycle \
+  --config config/storage-lifecycle.toml --dry-run
+
+# Live apply. Idempotent — re-running produces no change at the
+# storage layer if the config is unchanged.
+loom cluster bootstrap-storage-lifecycle \
+  --config config/storage-lifecycle.toml
+```
+
+Credentials default to `LOOM_SVC_MINIO_ACCESS_KEY` +
+`LOOM_SVC_MINIO_SECRET_KEY` (falling back to `MINIO_ROOT_USER` +
+`MINIO_ROOT_PASSWORD`). Endpoint defaults to
+`$LOOM_SVC_MINIO_ENDPOINT` or `http://loom-minio:9000`; override
+with `--endpoint URL` for out-of-cluster runs (port-forward
+required).
+
+Tuning:
+
+- If `LoomMinioPVCUsageHigh` fires sooner than expected, shorten the
+  trajectory window. Edit `storage-lifecycle.toml`, re-run the
+  subcommand. The new rules take effect on the next MinIO lifecycle
+  sweep.
+- If batches frequently get aborted mid-upload, lengthen the
+  `cleanup_incomplete_uploads_after_hours` window for the affected
+  bucket — `trajectories` defaults to 14 days to cover SWE-Bench-class
+  long trials.
+
+### MinIO PVC usage
+
+MinIO ships as a single-replica `StatefulSet` with a 500Gi PVC
+(`deploy/k8s/minio.yaml`). The PVC name is `data-loom-minio-0` and
+appears in `kubelet_volume_stats_*` metrics from that name.
+
+`LoomMinioPVCUsageHigh` (warning) fires when utilization is above
+80% for 15 minutes; `LoomMinioPVCUsageCritical` (critical) at >95%
+for 5 minutes. Both link back to this section.
+
+Triage:
+
+```bash
+# Per-mount disk usage from inside the MinIO pod.
+kubectl exec -n loom loom-minio-0 -- df -h /data
+
+# Per-bucket breakdown (run from any host with `mc` configured).
+mc du loom-minio/trajectories loom-minio/artifacts loom-minio/atif
+```
+
+Remediation paths, in priority order:
+
+1. **Retention rules missing or stale.** Most common cause for
+   first-time fills. Apply or re-apply the policy:
+   ```bash
+   loom cluster bootstrap-storage-lifecycle \
+     --config config/storage-lifecycle.toml
+   ```
+   MinIO's background lifecycle sweep applies new rules within
+   minutes to hours; usage should trend down on the next dashboard
+   refresh.
+
+2. **Disk grew faster than expected even with retention.** The
+   retention window may be longer than the disk can support at the
+   current trial volume. Either shorten the window in
+   `storage-lifecycle.toml` (then re-apply), or expand the PVC if the
+   StorageClass supports volume resize:
+   ```bash
+   kubectl patch pvc data-loom-minio-0 -n loom \
+     --type='merge' -p '{"spec":{"resources":{"requests":{"storage":"1Ti"}}}}'
+   ```
+
+3. **Emergency — disk is full RIGHT NOW.** Manual expire of old
+   objects buys time:
+   ```bash
+   mc rm --recursive --older-than 14d loom-minio/trajectories
+   ```
+   Then apply the retention policy permanently. If the StorageClass
+   doesn't support resize, the durable answer is migration to
+   external object storage via `loom cluster --storage external`.
+
+4. **Long-term durability.** Single-node MinIO + a fixed PVC is fine
+   for cluster-internal scratch space but is not durable archival
+   storage (no replication, no off-cluster backup beyond manual
+   `mc mirror`). For runs you want to keep forever, migrate to
+   managed object storage. The design discussion is tracked in #221.
+
 ### Legacy team-token compatibility — `loom admin tokens team`
 
 Normal automation should use a user-owned API token created from a browser or
@@ -1562,6 +1679,8 @@ the `groups` block into your `prometheus.yml`.
 | `LoomWorkerTrialFailureRateHigh` | warning | worker `loom_worker_trials_completed_total{result!="succeeded"}` ratio > 20% for 15m | Many worker-run trials are failing, cancelling, or crashing. | Inspect `sum by (result) (rate(loom_worker_trials_completed_total[5m]))`; compare recent trajectories for common failure reasons. |
 | `LoomRetryExhaustedSpiking` | warning | `rate(loom_retry_exhausted_total[5m]) > 0.1` for 10m | CP's retry-exhausted sweeper is transitioning > 6 trials/min to `failed/retry_exhausted`. Indicates workloads are exhausting their retry budget or a flaky upstream is causing real failures across many trials. | Inspect `sum by (team_id, task_id) (rate(loom_trials_state_total{to_state="failed"}[15m]))`; correlate with `LoomWorkerTrialFailureRateHigh` + recent provider/sandbox failures; inspect `max_attempts` only if the workload is genuinely retry-heavy. |
 | `LoomWorkerTokenStaleness` | warning | `loom_worker_tokens_stale_count > 0` for 1h | Live worker tokens are flagged as either unused for 30+ days (`reason="unused_30d"` — usually a decommissioned pool whose token was never revoked) or older than 90 days since mint (`reason="aged_90d"` — rotation overdue). Soft signal; never auto-revokes (would 401 in-flight claims). | See [Worker-token staleness](#worker-token-staleness) below. |
+| `LoomMinioPVCUsageHigh` | warning | PVC `data-loom-minio-0` > 80% used for 15m | The disk backing MinIO is filling. Without intervention trial uploads will start failing with "no space left on device." | See [MinIO PVC usage](#minio-pvc-usage) below. |
+| `LoomMinioPVCUsageCritical` | **critical** | PVC `data-loom-minio-0` > 95% used for 5m | Trial uploads will fail within minutes to hours. Page on-call. | See [MinIO PVC usage](#minio-pvc-usage) below. |
 
 Thresholds are starting points — tune per team's trial volume +
 workload shape. Halve the `for:` durations for staging.
