@@ -184,6 +184,80 @@ spec:
                   the operator runbook.
             runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/operator-runbook.md#worker-token-staleness"
 
+        # MinIO PVC fullness. Without a retention policy the disk fills
+        # silently and trial uploads start failing with "no space left
+        # on device." 80% warns; 95% pages.
+        #
+        # The PVC name is deterministic from the StatefulSet's
+        # volumeClaimTemplates[0].metadata.name = "data" plus the pod
+        # ordinal "0" (single replica). If the StatefulSet name or
+        # volume name changes, update both selectors.
+        - alert: LoomMinioPVCUsageHigh
+          expr: |
+            (
+              kubelet_volume_stats_used_bytes{persistentvolumeclaim="data-loom-minio-0"}
+              /
+              kubelet_volume_stats_capacity_bytes{persistentvolumeclaim="data-loom-minio-0"}
+            ) > 0.80
+          for: 15m
+          labels:
+            severity: warning
+            component: minio
+          annotations:
+            summary: "MinIO PVC > 80% used"
+            description: |
+              MinIO storage utilization has been above 80% for 15
+              minutes. Without intervention the PVC will fill and
+              worker trial uploads will start failing with
+              "no space left on device."
+
+              Triage:
+                kubectl exec -n loom loom-minio-0 -- df -h /data
+                mc du loom-minio/trajectories \
+                      loom-minio/artifacts \
+                      loom-minio/atif
+
+              Remediation paths:
+                - If retention rules are missing or stale: re-run
+                  `loom cluster bootstrap-storage-lifecycle`.
+                - If retention is in place but disk grew faster than
+                  expected: expand the PVC (StorageClass must support
+                  resize) and/or tighten the retention windows in
+                  storage-lifecycle.toml.
+                - If long-term durable storage matters: migrate to
+                  external object store via `loom cluster
+                  --storage external`.
+            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/operator-runbook.md#minio-pvc-usage"
+
+        # Trial uploads will start failing within minutes to hours.
+        # Page on-call.
+        - alert: LoomMinioPVCUsageCritical
+          expr: |
+            (
+              kubelet_volume_stats_used_bytes{persistentvolumeclaim="data-loom-minio-0"}
+              /
+              kubelet_volume_stats_capacity_bytes{persistentvolumeclaim="data-loom-minio-0"}
+            ) > 0.95
+          for: 5m
+          labels:
+            severity: critical
+            component: minio
+          annotations:
+            summary: "MinIO PVC > 95% used — trial uploads will fail soon"
+            description: |
+              MinIO storage utilization > 95%. Trial uploads will
+              start failing within minutes to hours depending on
+              incoming volume. Page on-call.
+
+              Emergency response:
+                - Expand the PVC immediately if StorageClass allows
+                  it.
+                - Manually expire old trajectories:
+                    mc rm --recursive --older-than 14d \
+                      loom-minio/trajectories
+                - Stop accepting new trials until the disk clears.
+            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/operator-runbook.md#minio-pvc-usage"
+
     - name: loom.platform.latency
       interval: 30s
       rules:
