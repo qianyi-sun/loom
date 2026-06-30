@@ -375,15 +375,22 @@ knob you need.
 
    The Control Plane's `POST /admin/worker-tokens` route is
    intentionally NOT exposed via Ingress (see
-   `deploy/k8s/ingress.yaml`). Reach it via port-forward:
+   `deploy/k8s/ingress.yaml`). Reach it via port-forward. Pipe the
+   token straight into the secret store so it never appears on
+   `argv` (visible to `ps`) or in shell history:
    ```bash
    kubectl port-forward deploy/loom-control-plane 8080:8080 &
-   curl -X POST http://localhost:8080/admin/worker-tokens \
-     -H "Authorization: Bearer $ADMIN_TOKEN" \
-     -d '{"expires_in_days": 365}'
+   loom admin tokens worker mint --format json --expires-in-days 365 \
+     | jq -r .token \
+     | kubectl create secret generic loom-secrets \
+         --from-file=worker-token=/dev/stdin \
+         --dry-run=client -o yaml \
+     | kubectl apply -f -
+   kubectl rollout restart deploy/loom-worker
    ```
-   Update the `worker-token` key in `loom-secrets` with the returned
-   raw token, then `kubectl rollout restart deploy/loom-worker`.
+   If you need to see the raw token (e.g. to install on a Slurm
+   worker host), append `--show-secret` to the mint command instead
+   of `--format json`.
 
 7. **(Optional) Provision the batch-runner CP token.** The
    `loom_service` batch-runner needs a `submit:batch` internal token
@@ -392,16 +399,20 @@ knob you need.
    team-less; Control Plane derives each child trial's `team_id` from
    the parent batch row, so one runner can safely process multiple teams.
 
-   Mint it through Control Plane's admin endpoint, then patch the
-   service secret:
+   Mint it through Control Plane's admin endpoint, then install it
+   into the secret store via stdin — never pass the raw token on
+   `kubectl patch -p ...` argv (visible to `ps`, ends up in shell
+   history):
    ```bash
    kubectl port-forward deploy/loom-control-plane 8080:8080 &
-   RAW=$(curl -sS -X POST http://localhost:8080/admin/batch-runner-tokens \
+   curl -sS -X POST http://localhost:8080/admin/batch-runner-tokens \
      -H "Authorization: Bearer $ADMIN_TOKEN" \
      -d '{"expires_in_days": 365}' \
-     | jq -r .token)
-   kubectl patch secret loom-secrets \
-     -p "{\"stringData\":{\"batch-runner-cp-token\":\"$RAW\"}}"
+     | jq -r .token \
+     | kubectl create secret generic loom-secrets \
+         --from-file=batch-runner-cp-token=/dev/stdin \
+         --dry-run=client -o yaml \
+     | kubectl apply -f -
    kubectl rollout restart deploy/loom-service
    ```
 
@@ -921,23 +932,37 @@ kubectl port-forward deploy/loom-control-plane 8080:8080 &
 export LOOM_ADMIN_TOKEN=$(yq '.[admin].token' loom-admin-secret.toml)
 ```
 
-Then use the CLI (since #80):
+Then use the CLI. The mint/rotate commands default to printing only
+the token's hash prefix in text mode — the raw token stays off your
+terminal scrollback. The recommended install pattern pipes the JSON
+output straight into the Secret store so the raw value never lands
+on `argv` (visible to `ps`) or in shell history:
 
 ```bash
-# Mint + print rollout checklist (does NOT revoke the old token).
-loom admin tokens worker rotate --expires-in-days 365
-
-# Rollout: update Secret + restart workers (the checklist above tells
-# you the kubectl commands).
-
-# After workers re-register cleanly, revoke the old token by prefix:
+# One-shot rotate: mint, install, restart, revoke old.
+loom admin tokens worker rotate --format json --expires-in-days 365 \
+  | jq -r .token \
+  | kubectl create secret generic loom-secrets \
+      --from-file=worker-token=/dev/stdin \
+      --dry-run=client -o yaml \
+  | kubectl apply -f -
+kubectl rollout restart deploy/loom-worker
+# After workers re-register cleanly (no 401s), revoke the old prefix:
 loom admin tokens worker revoke <OLD_PREFIX>
 ```
 
-For one-off mint or revoke without the rollout reminder:
+If you need to read the raw token (e.g., to drop it into a Slurm
+worker host's `~/.loom/worker.env`), pass `--show-secret` instead
+of `--format json`:
 
 ```bash
-loom admin tokens worker mint --expires-in-days 365
+loom admin tokens worker mint --show-secret --expires-in-days 365
+```
+
+Or one-off without the rollout reminder:
+
+```bash
+loom admin tokens worker mint --expires-in-days 365   # prefix only
 loom admin tokens worker revoke ab12cd34
 ```
 

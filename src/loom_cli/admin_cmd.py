@@ -193,13 +193,28 @@ def _mint_worker_token(args: argparse.Namespace) -> int:
     if args.format == "json":
         json.dump(data, sys.stdout, indent=2)
         sys.stdout.write("\n")
-    else:
+    elif args.show_secret:
         sys.stdout.write(
             f"New worker token minted.\n"
             f"  prefix: {data['token_hash_prefix']}\n"
             f"  token:  {data['token']}\n"
             f"\nNext: update the `worker-token` key in `loom-secrets` "
             f"and restart `deploy/loom-worker`.\n",
+        )
+    else:
+        sys.stdout.write(
+            f"New worker token minted.\n"
+            f"  prefix: {data['token_hash_prefix']}\n"
+            f"\nThe raw token was NOT printed (terminal scrollback risk).\n"
+            f"Pipe it straight into the secret store without exposing it\n"
+            f"via shell history or `ps`:\n"
+            f"\n"
+            f"  loom admin tokens worker mint --format json | jq -r .token \\\n"
+            f"    | kubectl create secret generic loom-secrets \\\n"
+            f"        --from-file=worker-token=/dev/stdin \\\n"
+            f"        --dry-run=client -o yaml | kubectl apply -f -\n"
+            f"\n"
+            f"Or re-run with --show-secret to print the raw token to stdout.\n",
         )
     return 0
 
@@ -252,16 +267,37 @@ def _rotate_worker_token(args: argparse.Namespace) -> int:
     if rc != 0:
         return rc
     if args.format != "json":
+        if args.show_secret:
+            install_step = (
+                "  1. Install the new token into `loom-secrets` without\n"
+                "     exposing it via shell history or `ps`:\n"
+                "       kubectl create secret generic loom-secrets \\\n"
+                '         --from-literal=worker-token="$NEW_TOKEN" \\\n'
+                "         --dry-run=client -o yaml | kubectl apply -f -\n"
+                "     (Or use the pipe-stdin form from `--format json`.)\n"
+            )
+        else:
+            install_step = (
+                "  1. The new token was NOT captured. To proceed without\n"
+                "     orphaning it, re-run rotate piping straight into\n"
+                "     the secret store, then revoke the prefix printed\n"
+                "     above:\n"
+                "       loom admin tokens worker rotate --format json \\\n"
+                "         | jq -r .token \\\n"
+                "         | kubectl create secret generic loom-secrets \\\n"
+                "             --from-file=worker-token=/dev/stdin \\\n"
+                "             --dry-run=client -o yaml \\\n"
+                "         | kubectl apply -f -\n"
+                "     Then revoke the prefix above so it doesn't linger.\n"
+            )
         sys.stdout.write(
             "\nRotation checklist:\n"
-            "  1. Update `worker-token` key in `loom-secrets`:\n"
-            "       kubectl patch secret loom-secrets \\\n"
-            '         -p \'{"stringData":{"worker-token":"<NEW>"}}\'\n'
-            "  2. Restart workers:\n"
-            "       kubectl rollout restart deploy/loom-worker\n"
-            "  3. Verify workers re-register (no 401s in worker logs).\n"
-            "  4. Revoke the OLD token by its hash prefix:\n"
-            "       loom admin tokens worker revoke <OLD_PREFIX>\n",
+            + install_step
+            + "  2. Restart workers:\n"
+            + "       kubectl rollout restart deploy/loom-worker\n"
+            + "  3. Verify workers re-register (no 401s in worker logs).\n"
+            + "  4. Revoke the OLD token by its hash prefix:\n"
+            + "       loom admin tokens worker revoke <OLD_PREFIX>\n",
         )
     return 0
 
@@ -1169,6 +1205,15 @@ def dispatch(argv: list[str]) -> int:
         default="text",
         help="Output format. JSON for scripting.",
     )
+    p_mint.add_argument(
+        "--show-secret",
+        action="store_true",
+        help=(
+            "Print the raw token to stdout in text mode. Default is "
+            "prefix-only to keep the raw value out of terminal "
+            "scrollback. JSON mode always includes the token."
+        ),
+    )
     p_mint.set_defaults(handler=_mint_worker_token)
 
     p_revoke = worker_sub.add_parser(
@@ -1202,6 +1247,15 @@ def dispatch(argv: list[str]) -> int:
         choices=["text", "json"],
         default="text",
         help="Output format.",
+    )
+    p_rotate.add_argument(
+        "--show-secret",
+        action="store_true",
+        help=(
+            "Print the raw token to stdout in text mode. Default is "
+            "prefix-only; pipe `--format json` into the secret store "
+            "to avoid putting the raw value in shell history."
+        ),
     )
     p_rotate.set_defaults(handler=_rotate_worker_token)
 
