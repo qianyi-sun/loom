@@ -48,6 +48,7 @@ from loom_control_plane.metrics import (
     WORKER_POOL_PENDING_SLOTS,
     WORKER_POOL_TOTAL_SLOTS,
     WORKER_POOL_WORKERS,
+    WORKER_TOKENS_STALE_COUNT,
     WORKERS_ACTIVE,
 )
 from loom_control_plane.slurm_worker_jobs import (
@@ -81,6 +82,26 @@ SELECT team_id::text, state, count(*) AS cnt
   FROM trials
  WHERE state IN ('queued', 'claimed', 'running')
  GROUP BY team_id, state
+""")
+
+# Worker-token staleness audit. Counts live worker tokens that have
+# either gone unused for >30 days (last_seen_at falls back to issued_at
+# for never-used tokens, so a token minted yesterday is NOT flagged) or
+# are >90 days old since mint (rotation overdue). Filters out revoked
+# and naturally-expired rows since those can't authenticate anyway.
+_WORKER_TOKENS_STALENESS_SQL = text("""
+SELECT
+    COUNT(*) FILTER (
+        WHERE COALESCE(last_seen_at, issued_at)
+              < NOW() - INTERVAL '30 days'
+    ) AS unused_30d,
+    COUNT(*) FILTER (
+        WHERE issued_at < NOW() - INTERVAL '90 days'
+    ) AS aged_90d
+  FROM tokens
+ WHERE type = 'worker'
+   AND revoked_at IS NULL
+   AND (expires_at IS NULL OR expires_at > NOW())
 """)
 
 _SLURM_WORKER_GAUGES = (
@@ -188,6 +209,16 @@ async def refresh_once(session: Any, *, expiry_sec: int) -> None:
         WORKER_POOL_AUTOSCALER_IDLE_SECONDS.labels(**labels).set(
             int(pool.get("autoscaler_idle_seconds") or 0),
         )
+
+    # Worker-token staleness audit. Re-publishes the gauge each tick;
+    # the alert fires when either reason has a non-zero count for >1h.
+    staleness_row = (await session.execute(_WORKER_TOKENS_STALENESS_SQL)).one()
+    WORKER_TOKENS_STALE_COUNT.labels(reason="unused_30d").set(
+        int(staleness_row.unused_30d),
+    )
+    WORKER_TOKENS_STALE_COUNT.labels(reason="aged_90d").set(
+        int(staleness_row.aged_90d),
+    )
 
     slurm_summary = summarize_jobs(await fetch_slurm_worker_metric_rows(session))
     for gauge in _SLURM_WORKER_GAUGES:

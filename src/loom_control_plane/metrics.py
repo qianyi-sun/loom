@@ -120,6 +120,22 @@ RETRY_EXHAUSTED_TOTAL = Counter(
     "Trials transitioned to failed because attempt_count >= max_attempts",
 )
 
+# Live worker tokens flagged by the staleness audit. Labels:
+#   reason="unused_30d"  — last_seen_at (or issued_at, if never used)
+#                          is older than 30 days
+#   reason="aged_90d"    — issued_at is older than 90 days (rotation
+#                          overdue per SOC2-equivalent service-credential
+#                          cadence)
+# Counts only non-revoked, non-expired worker-type tokens. An operator-
+# facing alert fires when either count is > 0 for 1 hour; the metric is
+# a SOFT signal (no auto-revocation — revoking a live worker pool's
+# token 401s in-flight claims).
+WORKER_TOKENS_STALE_COUNT = Gauge(
+    "loom_worker_tokens_stale_count",
+    "Live worker tokens flagged by the staleness audit",
+    labelnames=("reason",),
+)
+
 SLURM_WORKER_DESIRED_SLOTS = Gauge(
     "loom_slurm_worker_desired_slots",
     "Desired Slurm worker slots by environment and pool",
