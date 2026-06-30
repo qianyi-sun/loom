@@ -1219,6 +1219,148 @@ audit the diff before applying. `loom cluster doctor
 --storage-lifecycle-config <path>` is the cheap reverse check —
 "are my expected rules actually live?"
 
+#### Deployment shapes
+
+The retention engine works across S3-compatible backends and (when
+the GCS renderer ships) GCS. Each shape has different operator
+prerequisites, monitoring story, and backup posture. Pick the
+section below that matches your deployment.
+
+##### Shape 1: MinIO single-node (default)
+
+The bundled `deploy/k8s/minio.yaml`. Cluster-internal scratch
+space; **not** durable archival storage. Right for developer and
+single-research-cluster deployments.
+
+- **Bucket creation:** Loom does it at startup (loom_service ensures
+  `trajectories`, `artifacts`, `atif` exist).
+- **Credentials:** `minio-access-key` / `minio-secret-key` in
+  `loom-secrets` (minted by `bootstrap-secrets`).
+- **Bootstrap retention:**
+  ```bash
+  kubectl port-forward -n loom service/loom-minio 9000:9000 &
+  loom cluster bootstrap-storage-lifecycle \
+    --config config/storage-lifecycle.toml \
+    --endpoint http://localhost:9000
+  ```
+- **Monitoring:** `LoomMinioPVCUsageHigh` / `LoomMinioPVCUsageCritical`
+  on `kubelet_volume_stats_*` for `data-loom-minio-0`. See [MinIO PVC
+  usage](#minio-pvc-usage) below.
+- **Backup:** operator-driven `mc mirror` to off-cluster (no
+  Loom-side automation).
+- **Limitations:** no replication, no off-cluster durability, single
+  point of failure.
+
+##### Shape 2: AWS S3 (managed, durable)
+
+Recommended for production research clusters that need durable
+archival. Loom does not deploy or manage the bucket; the operator
+pre-creates it.
+
+- **Bucket pre-creation (operator's IaC, e.g. Terraform):**
+  - Region matching the Loom service deployment.
+  - **Versioning enabled** (recommended for accidental-delete
+    recovery — pairs with `keep_forever` ATIF retention).
+  - Cross-region replication optional.
+  - Public access blocked.
+  - **Do NOT pre-create lifecycle rules** — Loom applies them via
+    `bootstrap-storage-lifecycle` and `doctor` would otherwise flag
+    drift.
+- **IAM policy for IRSA** (preferred over static keys on EKS):
+  ```json
+  {
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucketLifecycleConfiguration",
+        "s3:PutBucketLifecycleConfiguration",
+        "s3:GetObject", "s3:PutObject", "s3:DeleteObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::loom-prod-trajectories",
+        "arn:aws:s3:::loom-prod-trajectories/*"
+      ]
+    }]
+  }
+  ```
+  Annotate the Loom service account:
+  `eks.amazonaws.com/role-arn: arn:aws:iam::123:role/loom-storage`.
+- **Bootstrap retention:**
+  ```bash
+  loom cluster bootstrap-storage-lifecycle \
+    --config config/storage-lifecycle.toml \
+    --endpoint https://s3.us-east-1.amazonaws.com
+  ```
+  No port-forward required — S3 is reachable from the cluster.
+- **Monitoring:** CloudWatch `BucketSizeBytes` metric per bucket;
+  alarm at provisioned capacity threshold or growth rate. No
+  Prometheus rule ships from Loom for managed backends; wire CloudWatch
+  → alertmanager via your incident tooling.
+- **Backup:** provider-side. Object Versioning + cross-region
+  replication; no Loom-side automation.
+
+> The IRSA path requires #251 (boto3 credentials abstraction) before
+> it's wired end-to-end. Until then, the operator falls back to static
+> access keys provisioned via `loom-secrets`.
+
+##### Shape 3: GCS (managed, durable)
+
+Recommended for production deployments on GKE. Same shape as
+AWS S3 with provider-specific differences.
+
+- **Bucket pre-creation:**
+  - Location matching the Loom service deployment.
+  - Object Versioning enabled.
+  - **Do NOT pre-set lifecycle rules** — Loom applies them.
+- **Workload Identity** (preferred over service-account JSON):
+  - Roles on the bucket: `roles/storage.objectAdmin`,
+    `roles/storage.legacyBucketReader`.
+  - Annotate the Loom service account:
+    `iam.gke.io/gcp-service-account: loom@<project>.iam.gserviceaccount.com`.
+- **Bootstrap retention:**
+  ```bash
+  loom cluster bootstrap-storage-lifecycle \
+    --config config/storage-lifecycle.toml \
+    --endpoint https://storage.googleapis.com
+  ```
+- **Monitoring:** Stackdriver / Cloud Monitoring
+  `storage.googleapis.com/storage/total_bytes` per bucket; alert at
+  threshold.
+- **Backup:** Object Versioning + scheduled `gsutil rsync` if
+  off-platform copy is required.
+
+> GCS requires #254 (GCS lifecycle renderer) before
+> `bootstrap-storage-lifecycle` works against it natively. Until
+> then, operators using GCS apply lifecycle manually via `gsutil
+> lifecycle set`.
+
+##### Shape 4: On-prem distributed MinIO (erasure coding)
+
+For air-gapped or hybrid deployments where AWS/GCS isn't available
+but operators want durable storage.
+
+- **Pre-deploy:** distributed MinIO (4-node minimum for EC4+2;
+  6-node for EC4+3). Operator's call on hardware, drive layout,
+  erasure-set configuration. See MinIO upstream docs.
+- **Endpoint:** load-balanced front door, e.g.
+  `http://minio-lb.internal:9000`. Loom config:
+  ```toml
+  [service_config.minio_endpoint]
+  value = "http://minio-lb.internal:9000"
+  ```
+- **Credentials:** static root key in `loom-secrets`, same shape
+  as Shape 1.
+- **Bootstrap retention:** identical to Shape 1, just with the
+  operator's endpoint.
+- **Monitoring:** MinIO Prometheus exporter (operator's
+  responsibility — distributed MinIO exposes its own metrics
+  endpoint per node).
+- **Backup:** distributed MinIO has site-level replication built
+  in (`mc admin replicate`); use it. Don't rely on per-node disk
+  redundancy alone.
+
 ### MinIO PVC usage
 
 MinIO ships as a single-replica `StatefulSet` with a 500Gi PVC
