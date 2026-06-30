@@ -597,11 +597,24 @@ class TerminalBench2Adapter:
 
     @staticmethod
     def _render_reference_shell_wrapper() -> str:
+        # OracleAgent runs `solution/solve.sh` with cwd=`<workdir>/solution`
+        # but every TB-2 task's verifier (`run-tests.sh`) checks the world
+        # state from the task workdir itself (e.g. hello-world expects
+        # `hello.txt` at `/app/hello.txt`, not `/app/solution/hello.txt`).
+        # Earlier wrapper used `$(pwd)/solution/reference.sh` and silently
+        # produced the broken path `<workdir>/solution/solution/...`; `exit
+        # 0` then masked the failure so trials shipped as state=succeeded
+        # with reward=0 because the reference solution never ran.
+        # Anchor at the wrapper's own directory via BASH_SOURCE, then chdir
+        # to the task root (one level up) so the reference solution writes
+        # its outputs where the verifier expects them.
         return "\n".join((
             "#!/usr/bin/env bash",
             "set +e",
-            'task_root="${LOOM_TASK_ROOT:-$(pwd)}"',
-            'bash "$task_root/solution/reference.sh"',
+            'solve_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"',
+            'task_root="$(dirname "$solve_dir")"',
+            'cd "$task_root"',
+            'bash "$solve_dir/reference.sh"',
             "exit 0",
             "",
         ))
@@ -609,11 +622,18 @@ class TerminalBench2Adapter:
     @staticmethod
     def _render_solution_yaml_script(solution_yaml: Path) -> str:
         data = yaml.safe_load(solution_yaml.read_text()) or []
+        # Same task-root chdir as `_render_reference_shell_wrapper` — the
+        # generated commands write files with paths relative to cwd, but
+        # OracleAgent invokes solve.sh with cwd=`<workdir>/solution`, so
+        # without chdir the reference outputs land at the wrong path and
+        # the verifier scores 0.
         lines = [
             "#!/usr/bin/env bash",
             "set +e",
             "# Generated from Terminal-Bench solution.yaml.",
             "# Reference commands are best-effort; verifier output is the score.",
+            'solve_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"',
+            'cd "$(dirname "$solve_dir")"',
             "",
         ]
         if not isinstance(data, list):
