@@ -2,8 +2,10 @@
 
 Status: shipped. Operator-configurable lifecycle rules applied to the
 object store via the storage backend's native API. Pluggable across
-S3-compatible providers (MinIO, AWS S3, R2, B2, Wasabi). GCS and Azure
-renderers will land when those backends ship.
+S3-compatible providers (MinIO, AWS S3, R2, B2, Wasabi). GCS renderer
+ships with a JSON-dialect output today; the SDK integration follows
+once the first GCS deployment lands. Azure Blob is the next family on
+the roadmap.
 
 ## Goal
 
@@ -147,6 +149,50 @@ The bundled `storage-lifecycle.example.toml` sets:
 These match SOC2-equivalent service-data-retention conventions.
 Operators are expected to tune per their team's investigation
 cadence and disk size.
+
+## GCS renderer
+
+GCS speaks its own lifecycle JSON dialect, not S3-compatible XML.
+`render_gcs_lifecycle` produces a dict matching the GCS bucket
+resource's `lifecycle` field:
+
+```json
+{
+  "rule": [
+    {"action": {"type": "Delete"}, "condition": {"age": 30}},
+    {
+      "action": {"type": "AbortIncompleteMultipartUpload"},
+      "condition": {"age": 14}
+    }
+  ]
+}
+```
+
+Two important differences from the S3 renderer:
+
+- **GCS supports multi-rule policies natively** — we don't need the
+  MinIO single-merged-rule workaround. Each `RetentionRule` emits
+  its own GCS rule.
+- **GCS honors `AbortIncompleteMultipartUpload`** on both apply and
+  get. Unlike MinIO, the field is preserved on round-trip, so the
+  renderer emits it without doctor reporting drift.
+
+The `apply_lifecycle_to_gcs` function exists with the right signature
+but raises `NotImplementedError` today — the `google-cloud-storage`
+SDK integration is intentionally deferred until the first GCS
+deployment lands. In the meantime, operators with a GCS deployment
+capture the rendered JSON via `--dry-run` (once the bootstrap
+subcommand dispatches on backend) and apply manually via:
+
+```bash
+gcloud storage buckets update gs://<bucket> \
+  --lifecycle-file=<rendered>.json
+# or
+gsutil lifecycle set <rendered>.json gs://<bucket>
+```
+
+The renderer + dataclass surface generalize cleanly; adding the SDK
+integration is mechanical when the time comes.
 
 ## Idempotency
 

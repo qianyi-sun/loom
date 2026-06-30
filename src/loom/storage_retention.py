@@ -98,6 +98,13 @@ S3_COMPATIBLE_BACKENDS: frozenset[str] = frozenset({
     "wasabi",
 })
 
+# GCS speaks its own lifecycle JSON dialect — see render_gcs_lifecycle
+# below. Listed separately so the validator surfaces "supported, but
+# uses a different renderer" vs "outright unknown backend."
+GCS_BACKENDS: frozenset[str] = frozenset({"gcs"})
+
+SUPPORTED_BACKENDS: frozenset[str] = S3_COMPATIBLE_BACKENDS | GCS_BACKENDS
+
 
 @dataclass(frozen=True)
 class RetentionRule:
@@ -151,12 +158,12 @@ class RetentionConfig:
     rules: tuple[RetentionRule, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
-        if self.backend not in S3_COMPATIBLE_BACKENDS:
+        if self.backend not in SUPPORTED_BACKENDS:
             raise ValueError(
                 f"backend={self.backend!r} is not supported by the "
-                f"current renderer; supported: "
-                f"{sorted(S3_COMPATIBLE_BACKENDS)}. (Add GCS / Azure "
-                f"renderers when those backends ship.)",
+                f"current renderers; supported: "
+                f"{sorted(SUPPORTED_BACKENDS)}. (Azure Blob renderer "
+                f"is the next family on the roadmap.)",
             )
         # Multiple rules per bucket are valid (e.g. one for object
         # expiry + one for multipart cleanup), but two of the SAME
@@ -264,3 +271,94 @@ def apply_lifecycle_to_s3(
         )
         applied[bucket] = rendered
     return applied
+
+
+# ──────────────────────────────────────────────────────────────────────
+# GCS renderer
+# ──────────────────────────────────────────────────────────────────────
+
+# GCS speaks its own lifecycle JSON dialect, not S3-compatible XML. Two
+# important differences from the S3 path:
+#
+#   - GCS supports MULTI-RULE policies natively (one action per rule).
+#     We don't need MinIO's single-merged-rule workaround.
+#   - GCS condition fields use `age` (days since object creation) rather
+#     than `Days`. Other names also differ (storageClass, numNewerVersions,
+#     etc.) but we don't use those today.
+#
+# This renderer produces the dict shape that the GCS REST API's
+# `lifecycle` field on a bucket-patch accepts. The SDK integration
+# (google-cloud-storage) is intentionally NOT taken on in this PR —
+# adding the dep is a separate scope. Operators with a GCS deployment
+# today can capture the rendered JSON via `--dry-run` and apply it via
+# `gsutil lifecycle set` or `gcloud storage buckets update --lifecycle-file`.
+
+
+def render_gcs_lifecycle(
+    config: RetentionConfig,
+    *,
+    bucket: str,
+) -> dict[str, Any]:
+    """Render the bucket's retention rules as GCS lifecycle JSON.
+
+    Returns a ``{"rule": [...]}`` dict matching the GCS bucket
+    resource's ``lifecycle`` field. Empty list when no rules apply.
+
+    Unlike the S3 path, GCS accepts multi-rule policies natively — we
+    emit one rule per RetentionRule (no merging required).
+    """
+    if config.backend not in GCS_BACKENDS:
+        raise ValueError(
+            f"render_gcs_lifecycle called with backend={config.backend!r}; "
+            f"GCS renderer only handles {sorted(GCS_BACKENDS)}",
+        )
+
+    rules: list[dict[str, Any]] = []
+    for rule in config.rules:
+        if rule.bucket != bucket:
+            continue
+        if rule.strategy == "expire_after_days":
+            assert rule.days is not None
+            rules.append({
+                "action": {"type": "Delete"},
+                "condition": {"age": rule.days},
+            })
+        elif rule.strategy == "cleanup_incomplete_uploads_after_hours":
+            assert rule.hours is not None
+            # GCS expresses multipart cleanup in days. Round up.
+            days = max(1, (rule.hours + 23) // 24)
+            rules.append({
+                "action": {"type": "AbortIncompleteMultipartUpload"},
+                "condition": {"age": days},
+            })
+        # keep_forever: contributes nothing; absence of a Delete action
+        # means objects never auto-expire.
+
+    return {"rule": rules}
+
+
+def apply_lifecycle_to_gcs(
+    gcs_client: Any,
+    config: RetentionConfig,
+    *,
+    buckets: tuple[str, ...] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Apply rendered GCS lifecycle to each bucket via google-cloud-storage.
+
+    Mirror of ``apply_lifecycle_to_s3``. The SDK integration is left as a
+    follow-up; today this function raises ``NotImplementedError`` with a
+    clear pointer at the operator workaround (use ``--dry-run`` and
+    ``gsutil lifecycle set``).
+
+    The signature is shipped now so that callers (bootstrap-storage-
+    lifecycle) can dispatch on backend without conditional imports.
+    """
+    raise NotImplementedError(
+        "GCS lifecycle apply requires google-cloud-storage integration "
+        "(deferred until the first GCS deployment lands). For now, run "
+        "`loom cluster bootstrap-storage-lifecycle --dry-run` to capture "
+        "the rendered JSON, then apply via:\n"
+        "  gcloud storage buckets update gs://<bucket> "
+        "--lifecycle-file=<file>.json\n"
+        "or `gsutil lifecycle set <file>.json gs://<bucket>`.",
+    )

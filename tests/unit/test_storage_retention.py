@@ -75,8 +75,10 @@ def test_keep_forever_rejects_any_duration() -> None:
 
 
 def test_unsupported_backend_raises() -> None:
-    with pytest.raises(ValueError, match="not supported by the current"):
-        RetentionConfig(backend="gcs", rules=())
+    # gcs is now accepted via the GCS renderer (#254); use an
+    # actually-unknown backend to exercise the validator.
+    with pytest.raises(ValueError, match="not supported"):
+        RetentionConfig(backend="azure", rules=())
 
 
 def test_duplicate_strategy_for_one_bucket_raises() -> None:
