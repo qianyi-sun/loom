@@ -2207,6 +2207,90 @@ async def test_batch_detail_default_does_not_materialize_llm_call_rows(
     assert body["llm_evidence_status"] == "no_calls_invalid"
 
 
+async def test_batch_detail_default_does_not_select_trajectory_index(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_service.routes import batches as batch_routes
+
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+    trial_id = uuid4()
+    now = datetime.now(UTC)
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="lightweight-default-detail",
+                task_filter={"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+                trial_config={
+                    "agent_name": "codex",
+                    "agent_model": {"provider": "openai", "name": "qwen"},
+                },
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=1,
+                result_status="succeeded",
+                finished_at=now,
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=trial_id,
+                batch_id=batch_id,
+                team_id=team_id,
+                task_id="local/mit-0",
+                state="succeeded",
+                config={
+                    "agent_name": "codex",
+                    "agent_model": {"provider": "openai", "name": "qwen"},
+                },
+                requires_caps={},
+                submitted_at=now,
+                started_at=now,
+                finished_at=now,
+                result={"aggregate_reward": 1.0},
+                trajectory_index={
+                    "trajectory_uri": "s3://trajectories/large.jsonl",
+                    "artifacts": [
+                        {
+                            "key": f"artifact-{i}.json",
+                            "size": 1024,
+                            "share_status": "shared",
+                        }
+                        for i in range(200)
+                    ],
+                },
+            )
+        )
+    sync_engine.dispose()
+
+    original_select = batch_routes.select
+
+    def fail_on_full_trial_row_select(*entities: object, **kwargs: object) -> object:
+        if any(entity is Trial for entity in entities):
+            raise AssertionError("default batch detail should not load full Trial rows")
+        return original_select(*entities, **kwargs)
+
+    monkeypatch.setattr(batch_routes, "select", fail_on_full_trial_row_select)
+
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        response = await ac.get(
+            f"/api/v1/batches/{batch_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert response.status_code == 200, response.text
+
+
 async def test_rerun_failed_batch_creates_linked_exact_targets(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,

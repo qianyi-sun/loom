@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Any, NoReturn
 from uuid import UUID
@@ -83,6 +84,23 @@ _RERUNNABLE_FAILURE_REASONS: frozenset[str] = frozenset(
         "exhausted_retries",
     }
 )
+
+
+@dataclass(frozen=True)
+class _BatchTrialProjection:
+    id: UUID
+    team_id: UUID
+    task_id: str
+    config: dict[str, Any]
+    state: str
+    failure_reason: str | None
+    failure_message: str | None
+    result: dict[str, Any] | None
+    started_at: datetime | None
+    sample_idx: int
+    combination_idx: int
+    provider_connection_id: UUID | None
+    provider_model_id: str | None
 
 
 class _CreateBatch(BaseModel):
@@ -738,7 +756,7 @@ def _priced_call_filter() -> Any:
 
 async def _usage_totals_for_trials(
     session: Any,
-    trials: Sequence[Trial],
+    trials: Sequence[Any],
 ) -> dict[str, Any]:
     trial_ids = [trial.id for trial in trials]
     if not trial_ids:
@@ -826,7 +844,7 @@ async def _llm_calls_for_trials(
 
 async def _llm_call_counts_for_trials(
     session: Any,
-    trials: Sequence[Trial],
+    trials: Sequence[Any],
 ) -> dict[UUID, int]:
     trial_ids = [trial.id for trial in trials]
     if not trial_ids:
@@ -839,6 +857,58 @@ async def _llm_call_counts_for_trials(
         )
     ).all()
     return {trial_id: int(count or 0) for trial_id, count in rows if trial_id is not None}
+
+
+async def _trial_projections_for_batch_ids(
+    session: Any,
+    batch_ids: Sequence[UUID],
+) -> list[_BatchTrialProjection]:
+    if not batch_ids:
+        return []
+    rows = (
+        await session.execute(
+            select(
+                Trial.id,
+                Trial.team_id,
+                Trial.task_id,
+                Trial.config,
+                Trial.state,
+                Trial.failure_reason,
+                Trial.failure_message,
+                Trial.result,
+                Trial.started_at,
+                Trial.sample_idx,
+                Trial.combination_idx,
+                Trial.provider_connection_id,
+                Trial.provider_model_id,
+            ).where(Trial.batch_id.in_(list(batch_ids))),
+        )
+    ).all()
+    return [
+        _BatchTrialProjection(
+            id=row.id,
+            team_id=row.team_id,
+            task_id=row.task_id,
+            config=row.config,
+            state=row.state,
+            failure_reason=row.failure_reason,
+            failure_message=row.failure_message,
+            result=row.result,
+            started_at=row.started_at,
+            sample_idx=row.sample_idx,
+            combination_idx=row.combination_idx,
+            provider_connection_id=row.provider_connection_id,
+            provider_model_id=row.provider_model_id,
+        )
+        for row in rows
+    ]
+
+
+async def _trial_projections_for_batch(
+    session: Any,
+    batch_id: UUID,
+) -> list[_BatchTrialProjection]:
+    return await _trial_projections_for_batch_ids(session, [batch_id])
 
 
 async def _usage_by_batch_ids(
@@ -931,7 +1001,7 @@ def _empty_trial_summary() -> dict[str, int]:
     }
 
 
-def _summary_from_trials(trials: Sequence[Trial]) -> dict[str, int]:
+def _summary_from_trials(trials: Sequence[Any]) -> dict[str, int]:
     summary = _empty_trial_summary()
     for trial in trials:
         state = str(trial.state)
@@ -939,7 +1009,7 @@ def _summary_from_trials(trials: Sequence[Trial]) -> dict[str, int]:
     return summary
 
 
-def _rollup_from_trials(trials: Sequence[Trial]) -> float | None:
+def _rollup_from_trials(trials: Sequence[Any]) -> float | None:
     reward_sum = 0.0
     reward_n = 0
     for trial in trials:
@@ -954,7 +1024,7 @@ def _rollup_from_trials(trials: Sequence[Trial]) -> float | None:
 
 async def _benchmark_summary_from_trials(
     session: Any,
-    trials: Sequence[Trial],
+    trials: Sequence[Any],
 ) -> list[dict[str, Any]]:
     task_ids = sorted({trial.task_id for trial in trials})
     if not task_ids:
@@ -1028,14 +1098,14 @@ def _trial_key(trial: Trial) -> tuple[str, int, int]:
     return (trial.task_id, int(trial.sample_idx), int(trial.combination_idx))
 
 
-def _is_rerunnable_failure(trial: Trial) -> bool:
+def _is_rerunnable_failure(trial: Any) -> bool:
     return str(trial.state) == "failed" and trial.failure_reason in _RERUNNABLE_FAILURE_REASONS
 
 
 def _effective_trials(
-    original_trials: Sequence[Trial],
-    rerun_trials: Sequence[Trial],
-) -> list[Trial]:
+    original_trials: Sequence[Any],
+    rerun_trials: Sequence[Any],
+) -> list[Any]:
     original_by_key = {_trial_key(trial): trial for trial in original_trials}
     effective = dict(original_by_key)
     for trial in rerun_trials:
@@ -1049,7 +1119,7 @@ def _effective_trials(
     return list(effective.values())
 
 
-def _result_status_from_trials(trials: Sequence[Trial]) -> str | None:
+def _result_status_from_trials(trials: Sequence[Any]) -> str | None:
     if not trials:
         return None
     states = [str(trial.state) for trial in trials]
@@ -1106,15 +1176,21 @@ async def get_batch(
             )
         ).scalar_one_or_none()
 
-    original_trials = (
-        (
-            await s.execute(
-                select(Trial).where(Trial.batch_id == batch_id),
+    original_trials: list[Any] = []
+    debug_trials: list[Trial] | None = None
+    if include_debug:
+        debug_trials = list(
+            (
+                await s.execute(
+                    select(Trial).where(Trial.batch_id == batch_id),
+                )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
+        original_trials = list(debug_trials)
+    else:
+        original_trials = list(await _trial_projections_for_batch(s, batch_id))
     summary = _summary_from_trials(original_trials)
     avg_reward = _rollup_from_trials(original_trials)
     usage = await _usage_totals_for_trials(s, original_trials)
@@ -1144,16 +1220,11 @@ async def get_batch(
         .all()
     )
     rerun_batch_ids = [child.id for child in rerun_batches]
-    rerun_trials: list[Trial] = []
+    rerun_trials: list[Any] = []
     if rerun_batch_ids:
-        rerun_trials = list(
-            (
-                await s.execute(
-                    select(Trial).where(Trial.batch_id.in_(rerun_batch_ids)),
-                )
-            )
-            .scalars()
-            .all()
+        rerun_trials = await _trial_projections_for_batch_ids(
+            s,
+            rerun_batch_ids,
         )
     effective_trials = _effective_trials(original_trials, rerun_trials)
     effective_summary = _summary_from_trials(effective_trials)
@@ -1220,16 +1291,17 @@ async def get_batch(
         "benchmark_summary": benchmark_summary,
     }
     if include_debug:
-        llm_calls = await _llm_calls_for_trials(s, original_trials)
+        debug_trials = debug_trials or []
+        llm_calls = await _llm_calls_for_trials(s, debug_trials)
         debug_evidence = build_batch_debug_evidence(
             b,
-            trials=original_trials,
+            trials=debug_trials,
             llm_calls=llm_calls,
         )
         extra["debug_evidence"] = debug_evidence
         extra["diagnosis"] = build_batch_diagnosis(
             debug_evidence,
-            trial_failures=trial_failure_records(original_trials),
+            trial_failures=trial_failure_records(debug_trials),
         )
 
     return _serialize(
