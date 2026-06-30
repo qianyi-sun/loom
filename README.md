@@ -34,13 +34,39 @@ Loom turns a model/agent evaluation into a tracked run:
 5. Users inspect results in Monitor, Trial/Batch detail, Run Library, or through
    the CLI/API.
 
-Out of the box, Loom includes benchmark adapters such as HumanEval, MBPP,
-LiveCodeBench, BFCL, BrowseComp, GPQA, MATH-500, full Hendrycks MATH,
-MMLU-Pro, AIME, SWE-Bench variants, SkillFlow, and SkillLearnBench. Some
-visible catalog rows can be intentionally disabled until their runtime, dataset,
-or release-scope requirements are available. Agents are also pluggable; the
-shipped catalog includes CLI harnesses for common coding agents plus an
-`oracle` baseline.
+Out of the box, Loom includes benchmark adapters across coding, math,
+reasoning, tool use, and agent tasks. Agents are also pluggable; the shipped
+catalog includes CLI harnesses for common coding agents plus an `oracle`
+baseline. The current supported set is listed below.
+
+## v1.0 Status
+
+v1.0 ships a curated subset of the built-in catalog. Unsupported rows stay
+visible for transparency but cannot be selected from New Batch; the platform
+labels them at the API and UI boundaries.
+
+**Supported benchmarks (`Selectable`):**
+
+| Benchmark id | Task family |
+|---|---|
+| `humaneval`, `mbpp`, `livecodebench`, `swe-bench-verified`, `terminal-bench-2` | Code generation and software engineering |
+| `aime-24`, `aime-25`, `math-500` | Math |
+| `gpqa`, `mmlu-pro` | Reasoning |
+| `skillflow`, `skilllearnbench` | Agent / skill |
+
+**Visible but disabled:**
+
+| Reason | Benchmark ids |
+|---|---|
+| `Not in v1.0` (catalog transparency) | `aime-22`, `aime-23`, `bfcl`, `browsecomp`, `hendrycks-math`, `swe-bench`, `swe-bench-multimodal`, `tau2-bench` |
+| `Deferred` (needs dataset or auth) | `gaia` (Hugging Face token + published bundle) |
+| `Unsupported runtime` (needs UI sandbox) | `osworld`, `webarena` |
+
+The allowlist lives in `src/loom/benchmark_readiness.py:V1_SUPPORTED_BENCHMARK_IDS`
+so the CLI, API, and SPA agree. Out-of-tree benchmark adapters published via
+the `loom.benchmarks` entry-point (for example Terminal-Bench-2 in
+`packages/loom-benchmark-terminal-bench-2/`) are still selectable independently
+of this list.
 
 ## Architecture
 
@@ -160,9 +186,69 @@ registration script, and an owner-only API-key file. See
 [`docs/provider-onboarding.md#gpu-cluster-checkpoint`](docs/provider-onboarding.md#gpu-cluster-checkpoint)
 for the full workflow.
 
+## Providers and Agents
+
+Two catalogs you pick from when creating a batch.
+
+**Provider connection types** (the `--type` value on `loom providers create`):
+
+| Type | Use for |
+|---|---|
+| `openai-compatible` | OpenAI, Together, Fireworks, vLLM, Ollama, LM Studio, any service exposing `/v1/chat/completions` |
+| `anthropic` | Anthropic API (native dialect) |
+| `google` | Google Gemini API |
+| `custom` | Escape hatch when none of the above fit; tokens-only cost accounting |
+
+`openai-compatible`, `anthropic`, and `google` route to native dialects in
+the LLM Gateway and get rate-card-based cost lookup. `custom` falls back to
+token totals only.
+
+**Agent catalog** (the `--agent` value on `loom eval batch create`):
+
+- **Builtins:** `oracle` (ground-truth canary, no model), `litellm`
+  (multi-provider tool-loop; accepts any provider + api/local-server/hf
+  model source).
+- **CLI adapters from `loom-launcher`:** `claude-code` (Anthropic),
+  `codex` (OpenAI), `gemini-cli` (Google), `kimi-cli` (Moonshot),
+  `qwen-cli` (Alibaba), plus provider-agnostic `aider`, `openhands`,
+  `openhands-sdk`, `opencode`, `swe-agent`, `mini-swe-agent`. CLI
+  adapters install on demand into the trial sandbox via a layered image;
+  the build is cached per `(task-image, agent)` pair.
+
+The web app's New Batch dropdown is the same list. Provider/model
+compatibility is enforced at submit time — incompatible combos fail with a
+400 rather than blowing up on a worker. Sources of truth:
+`src/loom_service/agent_catalog.py` and
+`src/loom_service/routes/provider_connections.py`.
+
+## Choosing a Quickstart
+
+Pick the path that matches what you have:
+
+| You have… | Use |
+|---|---|
+| An account on a running Loom (e.g. `https://yylx.world`) and want clicks | [Submit From the Web App](#quickstart-submit-from-the-web-app) |
+| The same account but prefer a terminal | [Submit From the CLI](#quickstart-submit-from-the-cli-to-any-loom-server) |
+| No account; you want to run the full stack on your own machine | [Run Loom Locally](#quickstart-run-loom-locally) |
+| No stack at all, just a task + a model key, throwaway run | [Laptop-Only `loom run`](#quickstart-laptop-only-loom-run) |
+
+The web and CLI paths submit into a running service and persist
+trajectories/ATIF/usage server-side. `loom service up` runs that same
+service stack against local Docker + Postgres + MinIO. `loom run` is a
+one-shot in-process trial that writes `events.jsonl` + `atif.json` to a
+local directory and exits — no DB, no team, no provider registration.
+
 ## Quickstart: Submit From the Web App
 
 Use this path when presenting the public UI.
+
+> **Need an account?** Public beta uses admin-approved username/password
+> accounts (no email, no automatic mail). On the sign-in page, use the
+> **Request account** card: enter a username, pick an existing team, and
+> wait for an admin to approve and share the one-time password setup link.
+> If the team you need doesn't exist, ask an admin to create it first.
+> Full flow:
+> [`docs/user-guide.md#web-sessions-and-teams`](docs/user-guide.md#web-sessions-and-teams).
 
 1. Open [https://yylx.world](https://yylx.world) or your local Loom URL.
 2. Sign in and select the team that owns the run.
@@ -206,7 +292,11 @@ source .venv/bin/activate
 loom --help
 ```
 
-Authenticate with your approved username/password account:
+Authenticate with your approved username/password account. The CLI uses the
+same account as the web app; if you don't have one yet, follow the request-
+access flow in
+[`docs/user-guide.md#web-sessions-and-teams`](docs/user-guide.md#web-sessions-and-teams)
+first.
 
 ```bash
 export LOOM_PASSWORD=...
@@ -385,21 +475,9 @@ models, lives in [`docs/user-guide.md#local-llms`](docs/user-guide.md#local-llms
 - [`docs/contributor-quickstart.md`](docs/contributor-quickstart.md) - repo
   layout, tests, and contribution workflow.
 
-## Repository Governance
+## License and Contributing
 
-The canonical development repository is
-[`qianyi-sun/loom`](https://github.com/qianyi-sun/loom). The old
-`carinrc/loom` repository is retained as a historical issue and PR archive.
-
-Loom is licensed under Apache-2.0. Normal development uses PRs into `dev`;
-`main` is reserved for release promotion. The required `repository-checks`
-workflow runs with read-only default GitHub token permissions. Workflows that
-publish benchmark bundles or deploy infrastructure use protected GitHub
-Environments so secrets are not available to pull request code.
-
-Repository public-readiness was completed pre-migration (historical:
-carinrc#12). Maintainers should keep branch protection, read-only default
-workflow tokens, selected Actions sources, protected publish/deploy
-environments, and secret scanning enabled. External
-pull requests are not accepted yet; use issues for discussion until the
-contribution policy is opened.
+Loom is licensed under Apache-2.0. The canonical development repository is
+[`qianyi-sun/loom`](https://github.com/qianyi-sun/loom). Contribution
+workflow, branch conventions, release flow, and maintainer-only repository
+hardening live in [`CONTRIBUTING.md`](CONTRIBUTING.md).

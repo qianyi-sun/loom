@@ -169,3 +169,25 @@ worker-token secrets.
    secrets.
 7. After merge, tag the `main` commit `vX.Y.Z` to create the GitHub
    release
+
+## Repository Hardening (maintainers)
+
+These settings are part of Loom's public-readiness posture and must stay
+on. They are listed here, not in the user-facing README, so maintainers
+have one place to audit them.
+
+- **Default `GITHUB_TOKEN` permissions are read-only.** The required
+  `repository-checks` workflow inherits read-only token scope; jobs that
+  need to write must opt in per-job and per-permission.
+- **Publish and deploy workflows use protected GitHub Environments.**
+  Secrets for benchmark-bundle publish or infrastructure deploy live in
+  protected Environments so they are not available to pull request code.
+- **Branch protection on `main` and `dev`** keeps `repository-checks`
+  required, blocks direct pushes, and enforces squash-only merges.
+- **Selected Actions sources** restricts third-party actions to the
+  pinned allowlist; new actions are added by maintainer review.
+- **Secret scanning** is enabled at the repo level.
+
+External pull requests for issue-scoped work go through the same review
+gate; they cannot reach publish/deploy secrets because those live in
+protected Environments rather than as repository secrets.
