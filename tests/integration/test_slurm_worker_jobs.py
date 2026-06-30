@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -140,6 +141,10 @@ def test_record_submission_redacts_env_and_blocks_duplicate_active_capacity(
     assert row.pending_reason == "Resources"
     assert row.redacted_env == {
         "LOOM_WORKER_TOKEN": "<redacted>",
+        "LOOM_WORKER_AUTH_FINGERPRINT": (
+            f"sha256:{hashlib.sha256(b'loom_w_secret').hexdigest()[:12]} "
+            "len=13"
+        ),
         "LOOM_WORKER_MAX_CONCURRENT": "6",
         "PATH": "/usr/bin",
     }

@@ -88,8 +88,8 @@ allowed_nodes = [
   "trt-gb10-14",
   "trt-gb10-15",
 ]
-env_file = "/shared_work/qianyi/loom-worker-capacity/gb10-remote-worker.env"
-repo_dir = "/shared_work/qianyi/loom-remote-worker"
+env_file = "/shared_work/qianyi/loom-worker-capacity/public-beta-gb10-worker-${IMAGE_TAG}.env"
+repo_dir = "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}"
 requested_cpus = 20
 requested_memory_mib = 115000
 requested_concurrency = 10
@@ -138,9 +138,10 @@ required_env = [
 ]
 
 [external_slurm_runner_prerequisites]
-pools = ["oldlab"]
+pools = ["oldlab", "gb10-arm64"]
 expected_repo_ref = "${IMAGE_TAG}"
 require_clean_repo = true
+require_worker_token_parity = true
 
 [[external_slurm_autoscaler_supervisors]]
 name = "oldlab"

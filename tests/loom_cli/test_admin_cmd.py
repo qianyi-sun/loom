@@ -1065,7 +1065,7 @@ def test_environment_state_check_fetches_slurm_jobs_and_reports_external_prereq_
     monkeypatch.setattr(
         environment_state,
         "diff_external_slurm_runner_prerequisites",
-        lambda profile: [
+        lambda profile, **kwargs: [
             StateDrift(
                 path="external_slurm_runner_prerequisites[production/oldlab].env_file",
                 desired="/shared_work/qianyi/loom-worker-capacity/public-beta-oldlab-worker.env",
@@ -1095,6 +1095,117 @@ def test_environment_state_check_fetches_slurm_jobs_and_reports_external_prereq_
     assert "http://localhost:8080/admin/slurm-worker-jobs/status" in called_urls
     err = capsys.readouterr().err
     assert "external_slurm_runner_prerequisites[production/oldlab].env_file" in err
+
+
+def test_environment_state_check_passes_worker_token_without_leaking_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    profile_path = tmp_path / "public-beta.state.toml"
+    _write_environment_state_profile(profile_path)
+    active_token = "loom_w_current_environment_secret"
+
+    def _fake_get(url, *, headers, timeout):  # type: ignore[no-untyped-def]
+        if url.endswith("/admin/worker-pool-autoscalers/status"):
+            return _StubResponse(
+                200,
+                json_data={
+                    "policies": [
+                        {
+                            "environment": "public-beta",
+                            "pool_name": "gb10-arm64",
+                            "actuator": "slurm",
+                            "enabled": True,
+                            "min_slots": 0,
+                            "max_slots": 150,
+                            "scale_up_threshold_slots": 1,
+                            "scale_down_idle_seconds": 600,
+                            "scale_up_cooldown_seconds": 60,
+                            "scale_down_cooldown_seconds": 300,
+                            "drain_timeout_seconds": 600,
+                            "force": False,
+                            "actuator_config": {
+                                "backend": "docker",
+                                "cpu_arch": "arm64",
+                                "partition": "gb10",
+                                "allowed_nodes": ["trt-gb10-1"],
+                                "requested_concurrency": 10,
+                                "max_jobs": 15,
+                                "pending_job_cap": 2,
+                            },
+                        },
+                    ],
+                },
+            )
+        if url.endswith("/admin/gb10-worker-pools/status"):
+            return _StubResponse(
+                200,
+                json_data={
+                    "desired_states": [
+                        {
+                            "environment": "public-beta",
+                            "pool_name": "gb10-arm64",
+                            "image_tag": "public-beta-57a7509",
+                            "max_concurrent": 10,
+                            "env_config_version": "public-beta-57a7509",
+                            "target_slots": 150,
+                            "host_intents": {},
+                            "rollout_policy": {"mode": "all"},
+                            "env": {},
+                        },
+                    ],
+                },
+            )
+        if url.endswith("/admin/slurm-worker-jobs/status"):
+            return _StubResponse(200, json_data={"jobs": []})
+        raise AssertionError(url)
+
+    def _fake_external_prereqs(profile, *, expected_worker_token=None):  # type: ignore[no-untyped-def]
+        assert expected_worker_token == active_token
+        return [
+            StateDrift(
+                path=(
+                    "external_slurm_runner_prerequisites"
+                    "[public-beta/gb10-arm64].worker_token_fingerprint"
+                ),
+                desired="sha256:active123456 len=33",
+                live="sha256:stale1234567 len=28",
+            ),
+        ]
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setattr(
+        environment_state,
+        "diff_external_slurm_runner_prerequisites",
+        _fake_external_prereqs,
+    )
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+    monkeypatch.setenv("LOOM_WORKER_TOKEN", active_token)
+
+    rc = main(
+        [
+            "admin",
+            "environment-state",
+            "check",
+            "--file",
+            str(profile_path),
+            "--environment",
+            "public-beta",
+            "--var",
+            "IMAGE_TAG=public-beta-57a7509",
+            "--var",
+            "ENV_CONFIG_VERSION=public-beta-57a7509",
+            "--worker-token",
+            "env:LOOM_WORKER_TOKEN",
+        ]
+    )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "worker_token_fingerprint" in err
+    assert "sha256:active123456 len=33" in err
+    assert active_token not in err
 
 
 # ──────────────────────────────────────────────────────────────────────

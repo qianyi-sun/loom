@@ -15,12 +15,17 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Protocol
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import SlurmWorkerJob, Trial
+from loom.worker_token import (
+    WORKER_AUTH_FINGERPRINT_ENV_KEY,
+    worker_token_fingerprint_from_env_file,
+)
 from loom_control_plane.slurm_worker_jobs import (
     ACTIVE_STATES,
     SlurmWorkerJobObservation,
@@ -1009,9 +1014,25 @@ async def run_elastic_slurm_worker_controller_loop(
 
 
 def _worker_env(config: ElasticSlurmWorkerControllerConfig) -> dict[str, str]:
-    return {
+    env = {
         "LOOM_WORKER_MAX_CONCURRENT": str(config.requested_concurrency),
         "LOOM_WORKER_POOL_NAME": config.pool_name,
         "LOOM_REMOTE_WORKER_ENV_FILE": config.env_file,
         "LOOM_REMOTE_WORKER_REPO_DIR": config.repo_dir,
     }
+    try:
+        fingerprint = worker_token_fingerprint_from_env_file(Path(config.env_file))
+    except OSError as exc:
+        logger.warning(
+            "slurm_worker_token_fingerprint_unavailable",
+            extra={
+                "environment": config.environment,
+                "pool_name": config.pool_name,
+                "env_file": config.env_file,
+                "err": str(exc),
+            },
+        )
+    else:
+        if fingerprint:
+            env[WORKER_AUTH_FINGERPRINT_ENV_KEY] = fingerprint
+    return env

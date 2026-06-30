@@ -11,6 +11,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from loom.worker_token import (
+    DEFAULT_WORKER_TOKEN_ENV_KEY,
+    WORKER_AUTH_FINGERPRINT_ENV_KEY,
+    read_env_file_value,
+    worker_token_fingerprint,
+)
+
 _PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 _AUTOSCALER_DEFAULTS: dict[str, Any] = {
@@ -433,6 +440,7 @@ def _append_active_slurm_job_drift(
     *,
     desired_policies: dict[tuple[str, str], dict[str, Any]],
     jobs: object,
+    expected_worker_token: str | None = None,
 ) -> None:
     if not isinstance(jobs, list):
         return
@@ -473,11 +481,24 @@ def _append_active_slurm_job_drift(
                         live=live_value,
                     ),
                 )
+        if expected_worker_token:
+            desired_fingerprint = worker_token_fingerprint(expected_worker_token)
+            live_fingerprint = redacted_env.get(WORKER_AUTH_FINGERPRINT_ENV_KEY)
+            if live_fingerprint != desired_fingerprint:
+                drift.append(
+                    StateDrift(
+                        path=f"{prefix}.{WORKER_AUTH_FINGERPRINT_ENV_KEY}",
+                        desired=desired_fingerprint,
+                        live=live_fingerprint or "missing",
+                    ),
+                )
 
 
 def diff_environment_state(
     profile: EnvironmentStateProfile,
     live: dict[str, Any],
+    *,
+    expected_worker_token: str | None = None,
 ) -> list[StateDrift]:
     drift: list[StateDrift] = []
     live_autoscalers = _index_live(
@@ -534,6 +555,7 @@ def diff_environment_state(
             "jobs",
             [],
         ),
+        expected_worker_token=expected_worker_token,
     )
     return drift
 
@@ -560,6 +582,7 @@ def diff_external_slurm_runner_prerequisites(
     profile: EnvironmentStateProfile,
     *,
     runner: SubprocessRunner | None = None,
+    expected_worker_token: str | None = None,
 ) -> list[StateDrift]:
     settings = profile.external_slurm_runner_prerequisites
     if not settings:
@@ -568,6 +591,12 @@ def diff_external_slurm_runner_prerequisites(
     command_runner = runner or _default_subprocess_runner
     expected_repo_ref = settings.get("expected_repo_ref")
     require_clean_repo = bool(settings.get("require_clean_repo", False))
+    require_worker_token_parity = bool(
+        settings.get("require_worker_token_parity", False),
+    )
+    worker_token_env_key = str(
+        settings.get("worker_token_env_key") or DEFAULT_WORKER_TOKEN_ENV_KEY,
+    )
     configured_pools = settings.get("pools")
     checked_pools = set(configured_pools) if isinstance(configured_pools, list) else None
     drift: list[StateDrift] = []
@@ -589,6 +618,44 @@ def diff_external_slurm_runner_prerequisites(
                     live="missing",
                 ),
             )
+        elif require_worker_token_parity and isinstance(env_file, str):
+            if not expected_worker_token:
+                drift.append(
+                    StateDrift(
+                        path=f"{prefix}.worker_token_fingerprint",
+                        desired="active worker token fingerprint",
+                        live="missing --worker-token",
+                    ),
+                )
+            else:
+                desired_fingerprint = worker_token_fingerprint(expected_worker_token)
+                try:
+                    live_worker_token = read_env_file_value(
+                        Path(env_file),
+                        worker_token_env_key,
+                    )
+                except OSError as exc:
+                    drift.append(
+                        StateDrift(
+                            path=f"{prefix}.worker_token_fingerprint",
+                            desired=desired_fingerprint,
+                            live=f"unreadable env file: {exc}",
+                        ),
+                    )
+                else:
+                    live_fingerprint = (
+                        worker_token_fingerprint(live_worker_token)
+                        if live_worker_token
+                        else f"missing {worker_token_env_key}"
+                    )
+                    if live_fingerprint != desired_fingerprint:
+                        drift.append(
+                            StateDrift(
+                                path=f"{prefix}.worker_token_fingerprint",
+                                desired=desired_fingerprint,
+                                live=live_fingerprint,
+                            ),
+                        )
 
         repo_dir = actuator_config.get("repo_dir")
         if not isinstance(repo_dir, str):

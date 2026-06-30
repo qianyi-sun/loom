@@ -454,6 +454,90 @@ def test_collect_preflight_passes_static_host_path_config_before_pvcs_exist(
     assert not report.any_fail
 
 
+def test_collect_preflight_fails_kind_static_host_path_without_host_bind_mount(
+    tmp_path: Path,
+) -> None:
+    namespace = "loom-public-beta"
+    manifest = _write_recent_manifest(
+        tmp_path,
+        environment="public-beta",
+        namespace=namespace,
+    )
+    core = _FakeCoreV1(
+        secrets={"loom-secrets", "loom-admin-secret"},
+    )
+    cfg = ClusterConfig(
+        namespace=namespace,
+        persistent_storage_backend="static-host-path",
+        persistent_storage_host_path_root="/data/loom-public-beta",
+    )
+
+    report = collect_preflight(
+        core,
+        _FakeNetworkingV1(["nginx"]),
+        _FakeStorageV1([
+            ("standard", True, "rancher.io/local-path", "Delete"),
+        ]),
+        namespace,
+        context="kind-loom-public-beta",
+        environment="public-beta",
+        backup_manifest=manifest,
+        cluster_config=cfg,
+        kind_node_mounts=[
+            {"Type": "volume", "Source": "kind-var", "Destination": "/var"},
+        ],
+    )
+
+    by_name = {check.name: check for check in report.checks}
+    assert by_name["kind-host-storage-mount"].outcome == "fail"
+    assert "/data/loom-public-beta" in by_name["kind-host-storage-mount"].detail
+    assert report.any_fail
+
+
+def test_collect_preflight_passes_kind_static_host_path_with_host_bind_mount(
+    tmp_path: Path,
+) -> None:
+    namespace = "loom-public-beta"
+    manifest = _write_recent_manifest(
+        tmp_path,
+        environment="public-beta",
+        namespace=namespace,
+    )
+    core = _FakeCoreV1(
+        secrets={"loom-secrets", "loom-admin-secret"},
+    )
+    cfg = ClusterConfig(
+        namespace=namespace,
+        persistent_storage_backend="static-host-path",
+        persistent_storage_host_path_root="/data/loom-public-beta",
+    )
+
+    report = collect_preflight(
+        core,
+        _FakeNetworkingV1(["nginx"]),
+        _FakeStorageV1([
+            ("standard", True, "rancher.io/local-path", "Delete"),
+        ]),
+        namespace,
+        context="kind-loom-public-beta",
+        environment="public-beta",
+        backup_manifest=manifest,
+        cluster_config=cfg,
+        kind_node_mounts=[
+            {
+                "Type": "bind",
+                "Source": "/data/loom-public-beta",
+                "Destination": "/data/loom-public-beta",
+            },
+        ],
+    )
+
+    by_name = {check.name: check for check in report.checks}
+    assert by_name["kind-host-storage-mount"].outcome == "pass"
+    assert "/data/loom-public-beta" in by_name["kind-host-storage-mount"].detail
+    assert not report.any_fail
+
+
 def test_collect_preflight_fails_when_critical_pv_uses_delete_reclaim(
     tmp_path: Path,
 ) -> None:
@@ -920,6 +1004,229 @@ def test_cli_preflight_config_allows_static_host_path_before_pvcs_exist(
     ])
 
     assert rc == 0
+
+
+def test_cli_preflight_threads_kind_node_mounts_for_static_host_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    namespace = "loom-public-beta"
+    manifest = _write_recent_manifest(
+        tmp_path,
+        environment="public-beta",
+        namespace=namespace,
+    )
+    cfg = tmp_path / "cluster.toml"
+    cfg.write_text(
+        'namespace = "loom-public-beta"\n'
+        'persistent_storage_backend = "static-host-path"\n'
+        'persistent_storage_host_path_root = "/data/loom-public-beta"\n',
+        encoding="utf-8",
+    )
+    mounts = [
+        {
+            "Type": "bind",
+            "Source": "/data/loom-public-beta",
+            "Destination": "/data/loom-public-beta",
+        },
+    ]
+    captures: dict[str, Any] = {}
+    _patch_clients(
+        monkeypatch,
+        core=_FakeCoreV1(secrets={"loom-secrets", "loom-admin-secret"}),
+        net=_FakeNetworkingV1(["nginx"]),
+        storage=_FakeStorageV1([
+            ("standard", True, "rancher.io/local-path", "Delete"),
+        ]),
+    )
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._read_kind_node_mounts",
+        lambda context: mounts,
+        raising=False,
+    )
+
+    def _collect_preflight(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captures["preflight_kwargs"] = kwargs
+        return PreflightReport(
+            namespace=namespace,
+            context=kwargs["context"],
+            checks=[
+                PreflightCheck(
+                    name="kind-host-storage-mount",
+                    outcome="pass",
+                    detail="mounted",
+                ),
+            ],
+        )
+
+    monkeypatch.setattr("loom_cli.cluster_cmd.collect_preflight", _collect_preflight)
+
+    rc = main([
+        "cluster", "preflight",
+        "--context", "kind-loom-public-beta",
+        "--namespace", namespace,
+        "--environment", "public-beta",
+        "--backup-manifest", str(manifest),
+        "--config", str(cfg),
+        "--no-doctor",
+    ])
+
+    assert rc == 0
+    assert captures["preflight_kwargs"]["kind_node_mounts"] == mounts
+
+
+def test_cli_preflight_uses_current_kind_context_for_static_host_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    namespace = "loom-public-beta"
+    manifest = _write_recent_manifest(
+        tmp_path,
+        environment="public-beta",
+        namespace=namespace,
+    )
+    cfg = tmp_path / "cluster.toml"
+    cfg.write_text(
+        'namespace = "loom-public-beta"\n'
+        'persistent_storage_backend = "static-host-path"\n'
+        'persistent_storage_host_path_root = "/data/loom-public-beta"\n',
+        encoding="utf-8",
+    )
+    mounts = [
+        {
+            "Type": "bind",
+            "Source": "/data/loom-public-beta",
+            "Destination": "/data/loom-public-beta",
+        },
+    ]
+    captures: dict[str, Any] = {}
+    _patch_clients(
+        monkeypatch,
+        core=_FakeCoreV1(secrets={"loom-secrets", "loom-admin-secret"}),
+        net=_FakeNetworkingV1(["nginx"]),
+        storage=_FakeStorageV1([
+            ("standard", True, "rancher.io/local-path", "Delete"),
+        ]),
+    )
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._effective_kube_context",
+        lambda context: "kind-loom-public-beta",
+    )
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._read_kind_node_mounts",
+        lambda context: mounts,
+        raising=False,
+    )
+
+    def _collect_preflight(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captures["preflight_kwargs"] = kwargs
+        return PreflightReport(
+            namespace=namespace,
+            context=kwargs["context"],
+            checks=[
+                PreflightCheck(
+                    name="kind-host-storage-mount",
+                    outcome="pass",
+                    detail="mounted",
+                ),
+            ],
+        )
+
+    monkeypatch.setattr("loom_cli.cluster_cmd.collect_preflight", _collect_preflight)
+
+    rc = main([
+        "cluster", "preflight",
+        "--namespace", namespace,
+        "--environment", "public-beta",
+        "--backup-manifest", str(manifest),
+        "--config", str(cfg),
+        "--no-doctor",
+    ])
+
+    assert rc == 0
+    assert captures["preflight_kwargs"]["context"] == "kind-loom-public-beta"
+    assert captures["preflight_kwargs"]["kind_node_mounts"] == mounts
+
+
+def test_cli_up_threads_kind_node_mounts_for_static_host_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    namespace = "loom-public-beta"
+    manifest = _write_recent_manifest(
+        tmp_path,
+        environment="public-beta",
+        namespace=namespace,
+    )
+    cfg = tmp_path / "cluster.toml"
+    cfg.write_text(
+        'namespace = "loom-public-beta"\n'
+        'persistent_storage_backend = "static-host-path"\n'
+        'persistent_storage_host_path_root = "/data/loom-public-beta"\n',
+        encoding="utf-8",
+    )
+    mounts = [
+        {
+            "Type": "bind",
+            "Source": "/data/loom-public-beta",
+            "Destination": "/data/loom-public-beta",
+        },
+    ]
+    captures: dict[str, Any] = {}
+    _patch_clients(
+        monkeypatch,
+        core=_FakeCoreV1(secrets={"loom-secrets", "loom-admin-secret"}),
+        net=_FakeNetworkingV1(["nginx"]),
+        storage=_FakeStorageV1([
+            ("standard", True, "rancher.io/local-path", "Delete"),
+        ]),
+    )
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._effective_kube_context",
+        lambda context: "kind-loom-public-beta",
+    )
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._read_kind_node_mounts",
+        lambda context: mounts,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._append_target_schema_doctor_check",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd.apply_manifests",
+        lambda *args, **kwargs: _Spec(returncode=0, summary_lines=[], stderr=""),
+    )
+
+    def _collect_preflight(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captures["preflight_kwargs"] = kwargs
+        return PreflightReport(
+            namespace=namespace,
+            context=kwargs["context"],
+            checks=[
+                PreflightCheck(
+                    name="kind-host-storage-mount",
+                    outcome="pass",
+                    detail="mounted",
+                ),
+            ],
+        )
+
+    monkeypatch.setattr("loom_cli.cluster_cmd.collect_preflight", _collect_preflight)
+
+    rc = main([
+        "cluster", "up",
+        "--namespace", namespace,
+        "--environment", "public-beta",
+        "--backup-manifest", str(manifest),
+        "--config", str(cfg),
+        "--no-wait",
+    ])
+
+    assert rc == 0
+    assert captures["preflight_kwargs"]["context"] == "kind-loom-public-beta"
+    assert captures["preflight_kwargs"]["kind_node_mounts"] == mounts
 
 
 def test_cli_preflight_warn_alone_returns_0(

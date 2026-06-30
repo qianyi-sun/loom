@@ -422,8 +422,8 @@ knob you need.
    drift before trusting Monitor capacity or benchmark validation evidence.
    Run the check from the Slurm submit/shared-storage host when the profile
    contains external Slurm runner pools; the gate also verifies runner env
-   files, shared git checkouts, clean git status, and active Slurm job launch
-   env:
+   files, worker-token fingerprints, shared git checkouts, clean git status,
+   and active Slurm job launch env:
 
    ```bash
    loom admin environment-state apply \
@@ -440,7 +440,8 @@ knob you need.
      --environment public-beta \
      --file deploy/environment-state/public-beta.toml \
      --var IMAGE_TAG="$IMAGE_TAG" \
-     --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
+     --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+     --worker-token file:/secure/path/worker-token
    ```
 
    The command is idempotent and uses the existing Control Plane admin APIs for
@@ -936,21 +937,35 @@ export LOOM_ADMIN_TOKEN=$(yq '.[admin].token' loom-admin-secret.toml)
 ```
 
 Then use the CLI. The mint/rotate commands default to printing only
-the token's hash prefix in text mode — the raw token stays off your
-terminal scrollback. The recommended install pattern pipes the JSON
-output straight into the Secret store so the raw value never lands
-on `argv` (visible to `ps`) or in shell history:
+the token's hash prefix in text mode. When no remote workers are attached,
+pipe the JSON output straight into the Secret store so the raw value never
+lands on `argv` (visible to `ps`) or in shell history. When GB10/OLDLAB
+remote pools need the same token, write it once to a root/operator-readable
+`0600` file, install Kubernetes from that file, distribute the same value to
+remote env files, and use that file as the `--worker-token file:` proof source:
 
 ```bash
 # One-shot rotate: mint, install, restart, revoke old.
+install -m 600 /dev/null /secure/path/worker-token
 loom admin tokens worker rotate --format json --expires-in-days 365 \
-  | jq -r .token \
-  | kubectl create secret generic loom-secrets \
-      --from-file=worker-token=/dev/stdin \
-      --dry-run=client -o yaml \
+  | jq -r .token > /secure/path/worker-token
+kubectl create secret generic loom-secrets \
+  --from-file=worker-token=/secure/path/worker-token \
+  --dry-run=client -o yaml \
   | kubectl apply -f -
 kubectl rollout restart deploy/loom-worker
-# After workers re-register cleanly (no 401s), revoke the old prefix:
+# Distribute the same token to attached remote-worker env files
+# (GB10/OLDLAB) without printing it, restart those pools, then prove parity:
+loom admin environment-state check \
+  --cp-url http://localhost:8080 \
+  --admin-token env:LOOM_ADMIN_TOKEN \
+  --environment public-beta \
+  --file deploy/environment-state/public-beta.toml \
+  --var IMAGE_TAG="$IMAGE_TAG" \
+  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+  --worker-token file:/secure/path/worker-token
+# After in-cluster and remote workers re-register cleanly (no 401s),
+# revoke the old prefix:
 loom admin tokens worker revoke <OLD_PREFIX>
 ```
 
@@ -1667,6 +1682,21 @@ persistent_storage_backend = "static-host-path"
 persistent_storage_host_path_root = "/data/loom-public-beta"
 ```
 
+For kind-backed protected environments, the kind control-plane node must also
+bind the host data root into the node. A static hostPath PV under `/data/...`
+without this mount still lives inside the node container's filesystem and is
+not a durable host boundary. `loom cluster preflight --context kind-...`
+fails `kind-host-storage-mount` when the Docker inspect mount list does not
+show a bind mount covering `/data` or the exact environment root:
+
+```yaml
+nodes:
+  - role: control-plane
+    extraMounts:
+      - hostPath: /data/loom-public-beta
+        containerPath: /data/loom-public-beta
+```
+
 Create the host directories before first apply:
 
 ```bash
@@ -2377,9 +2407,9 @@ mock provider and browser automation job.
   Gateway/provider error rate, and Control Plane state-patch health are clean.
   The remote-worker env file and `REPO_DIR` must be readable from every
   included Slurm node. For OLDLAB public-beta capacity, use a shared checkout
-  path such as `/shared_work/<operator>/loom-remote-worker`; a control-node
-  `/home` checkout can be incomplete on OLDLAB 4/5 and must not be assumed
-  valid without a Slurm-side check.
+  path such as `/shared_work/<operator>/loom-remote-worker-${IMAGE_TAG}`; a
+  control-node `/home` checkout can be incomplete on OLDLAB 4/5 and must not be
+  assumed valid without a Slurm-side check.
   Autoscaler Slurm jobs default to exclusive node allocation. For shared
   OLDLAB validation where a node already has another small Slurm job, set the
   policy `actuator_config.exclusive=false` only with a reduced, tested CPU,
@@ -2410,8 +2440,8 @@ mock provider and browser automation job.
         "trt-eai-oldlab-4",
         "trt-eai-oldlab-5"
       ],
-      "env_file": "/shared_work/qianyi/loom-worker-capacity/public-beta-remote-worker.env",
-      "repo_dir": "/shared_work/qianyi/loom-remote-worker",
+      "env_file": "/shared_work/qianyi/loom-worker-capacity/public-beta-oldlab-worker-${IMAGE_TAG}.env",
+      "repo_dir": "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}",
       "requested_cpus": 2,
       "requested_memory_mib": 8192,
       "requested_concurrency": 1,
@@ -2476,7 +2506,8 @@ mock provider and browser automation job.
     --environment public-beta \
     --file deploy/environment-state/public-beta.toml \
     --var IMAGE_TAG="$IMAGE_TAG" \
-    --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
+    --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+    --worker-token file:/secure/path/worker-token
   ```
 
   Then confirm the OLDLAB-1 `loom-remote-worker-tunnel-watchdog.timer` is
@@ -2514,11 +2545,12 @@ mock provider and browser automation job.
   `loom_slurm_worker_stale_slots` / `loom_slurm_worker_stale_jobs` metrics.
   `loom admin environment-state check` also fails when a running Slurm job's
   redacted `LOOM_REMOTE_WORKER_ENV_FILE` or
-  `LOOM_REMOTE_WORKER_REPO_DIR` differs from the profile, or when the
-  profile's external runner env file is absent, the repo checkout is on the
-  wrong release, the checkout is dirty, or a declared external Slurm autoscaler
-  supervisor has stale unit content, an unscoped command, a disabled timer, or
-  an inactive timer.
+  `LOOM_REMOTE_WORKER_REPO_DIR` differs from the profile, when its non-secret
+  `LOOM_WORKER_AUTH_FINGERPRINT` differs from the active `--worker-token`
+  fingerprint, or when the profile's external runner env file is absent, the
+  repo checkout is on the wrong release, the checkout is dirty, or a declared
+  external Slurm autoscaler supervisor has stale unit content, an unscoped
+  command, a disabled timer, or an inactive timer.
   Use `--format json` for release evidence or automation. If Loom backlog has
   drained but Slurm still has pending elastic jobs, cancel those Slurm job ids
   with `scancel`; the controller will record cancellation on its next

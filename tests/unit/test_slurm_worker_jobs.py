@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from uuid import uuid4
 
 from loom_control_plane.slurm_worker_jobs import (
@@ -20,6 +21,10 @@ def test_redact_env_removes_secret_like_values() -> None:
 
     assert redacted == {
         "LOOM_WORKER_TOKEN": "<redacted>",
+        "LOOM_WORKER_AUTH_FINGERPRINT": (
+            f"sha256:{hashlib.sha256(b'loom_w_secret').hexdigest()[:12]} "
+            "len=13"
+        ),
         "LOOM_WORKER_MINIO_SECRET_KEY": "<redacted>",
         "LOOM_WORKER_MAX_CONCURRENT": "12",
         "PATH": "/usr/bin",
