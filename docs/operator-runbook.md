@@ -2420,7 +2420,10 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    runs: it uses aggregate LLM-call counts and omits heavyweight
    `debug_evidence` and `diagnosis`. Use
    `GET /api/v1/batches/{id}?include_debug=true` or the dedicated
-   `/debug` and `/diagnosis` endpoints when investigating one batch.
+   `/debug` and `/diagnosis` endpoints when investigating one batch. Those
+   batch diagnostic paths still use bounded trial projections and must not
+   fetch full trial `trajectory_index` rows; full trajectory and artifact
+   listings stay on per-trial detail/download routes.
    For multi-benchmark batches, `GET /api/v1/batches/{id}` also
    returns `benchmark_summary`; verify the SPA Batch Detail page shows
    each benchmark's score, completed/expected trial count, and platform

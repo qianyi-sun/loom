@@ -105,6 +105,7 @@ class _BatchTrialProjection:
     combination_idx: int
     provider_connection_id: UUID | None
     provider_model_id: str | None
+    worker_id: UUID | None
 
 
 class _CreateBatch(BaseModel):
@@ -868,7 +869,7 @@ async def _usage_totals_for_trials(
 
 async def _llm_calls_for_trials(
     session: Any,
-    trials: Sequence[Trial],
+    trials: Sequence[Any],
 ) -> list[LlmCall]:
     trial_ids = [trial.id for trial in trials]
     if not trial_ids:
@@ -888,7 +889,7 @@ async def _llm_calls_for_trials(
 
 async def _worker_pool_names_for_trials(
     session: Any,
-    trials: Sequence[Trial],
+    trials: Sequence[Any],
 ) -> dict[UUID, str]:
     worker_ids = sorted(
         {trial.worker_id for trial in trials if trial.worker_id is not None},
@@ -941,6 +942,7 @@ async def _trial_projections_for_batch_ids(
                 Trial.combination_idx,
                 Trial.provider_connection_id,
                 Trial.provider_model_id,
+                Trial.worker_id,
             ).where(Trial.batch_id.in_(list(batch_ids))),
         )
     ).all()
@@ -959,6 +961,7 @@ async def _trial_projections_for_batch_ids(
             combination_idx=row.combination_idx,
             provider_connection_id=row.provider_connection_id,
             provider_model_id=row.provider_model_id,
+            worker_id=row.worker_id,
         )
         for row in rows
     ]
@@ -1109,7 +1112,7 @@ async def _benchmark_summary_from_trials(
         for row in rows
     }
 
-    grouped: dict[str, list[Trial]] = defaultdict(list)
+    grouped: dict[str, list[Any]] = defaultdict(list)
     labels: dict[str, tuple[str | None, str]] = {}
     for trial in trials:
         meta = task_lookup.get(str(trial.task_id), {})
@@ -1154,7 +1157,7 @@ async def _benchmark_summary_from_trials(
     )
 
 
-def _trial_key(trial: Trial) -> tuple[str, int, int]:
+def _trial_key(trial: Any) -> tuple[str, int, int]:
     return (trial.task_id, int(trial.sample_idx), int(trial.combination_idx))
 
 
@@ -1236,21 +1239,7 @@ async def get_batch(
             )
         ).scalar_one_or_none()
 
-    original_trials: list[Any] = []
-    debug_trials: list[Trial] | None = None
-    if include_debug:
-        debug_trials = list(
-            (
-                await s.execute(
-                    select(Trial).where(Trial.batch_id == batch_id),
-                )
-            )
-            .scalars()
-            .all()
-        )
-        original_trials = list(debug_trials)
-    else:
-        original_trials = list(await _trial_projections_for_batch(s, batch_id))
+    original_trials: list[Any] = list(await _trial_projections_for_batch(s, batch_id))
     summary = _summary_from_trials(original_trials)
     avg_reward = _rollup_from_trials(original_trials)
     usage = await _usage_totals_for_trials(s, original_trials)
@@ -1351,19 +1340,18 @@ async def get_batch(
         "benchmark_summary": benchmark_summary,
     }
     if include_debug:
-        debug_trials = debug_trials or []
-        llm_calls = await _llm_calls_for_trials(s, debug_trials)
-        worker_pool_names = await _worker_pool_names_for_trials(s, debug_trials)
+        llm_calls = await _llm_calls_for_trials(s, original_trials)
+        worker_pool_names = await _worker_pool_names_for_trials(s, original_trials)
         debug_evidence = build_batch_debug_evidence(
             b,
-            trials=debug_trials,
+            trials=original_trials,
             llm_calls=llm_calls,
             worker_pool_names_by_id=worker_pool_names,
         )
         extra["debug_evidence"] = debug_evidence
         extra["diagnosis"] = build_batch_diagnosis(
             debug_evidence,
-            trial_failures=trial_failure_records(debug_trials),
+            trial_failures=trial_failure_records(original_trials),
         )
 
     return _serialize(
@@ -1395,15 +1383,7 @@ async def get_batch_debug(
             detail="batch not found",
         )
     require_team_or_admin(ctx, b.team_id)
-    trials = list(
-        (
-            await s.execute(
-                select(Trial).where(Trial.batch_id == batch_id),
-            )
-        )
-        .scalars()
-        .all()
-    )
+    trials = await _trial_projections_for_batch(s, batch_id)
     llm_calls = await _llm_calls_for_trials(s, trials)
     worker_pool_names = await _worker_pool_names_for_trials(s, trials)
     return build_batch_debug_evidence(
@@ -1432,15 +1412,7 @@ async def get_batch_diagnosis(
             detail="batch not found",
         )
     require_team_or_admin(ctx, b.team_id)
-    trials = list(
-        (
-            await s.execute(
-                select(Trial).where(Trial.batch_id == batch_id),
-            )
-        )
-        .scalars()
-        .all()
-    )
+    trials = await _trial_projections_for_batch(s, batch_id)
     llm_calls = await _llm_calls_for_trials(s, trials)
     worker_pool_names = await _worker_pool_names_for_trials(s, trials)
     debug_evidence = build_batch_debug_evidence(

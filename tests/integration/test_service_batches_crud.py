@@ -2291,6 +2291,119 @@ async def test_batch_detail_default_does_not_select_trajectory_index(
     assert response.status_code == 200, response.text
 
 
+@pytest.mark.parametrize(
+    "debug_path",
+    [
+        "/api/v1/batches/{batch_id}?include_debug=true",
+        "/api/v1/batches/{batch_id}/debug",
+        "/api/v1/batches/{batch_id}/diagnosis",
+    ],
+)
+async def test_batch_debug_surfaces_do_not_select_trajectory_index(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    debug_path: str,
+) -> None:
+    from loom_service.routes import batches as batch_routes
+
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+    now = datetime.now(UTC)
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="bounded-debug-detail",
+                task_filter={"task_ids": ["local/mit-0", "local/mit-1", "local/mit-2"]},
+                trial_config={
+                    "agent_name": "codex",
+                    "agent_model": {"provider": "openai", "name": "gpt-4o-mini"},
+                },
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=3,
+                result_status="partial_failed",
+                finished_at=now,
+            )
+        )
+        for idx in range(3):
+            conn.execute(
+                insert(Trial).values(
+                    id=uuid4(),
+                    batch_id=batch_id,
+                    team_id=team_id,
+                    task_id=f"local/mit-{idx}",
+                    state="failed" if idx == 1 else "succeeded",
+                    config={
+                        "agent_name": "codex",
+                        "agent_model": {
+                            "provider": "openai",
+                            "name": "gpt-4o-mini",
+                        },
+                    },
+                    requires_caps={},
+                    submitted_at=now,
+                    started_at=now,
+                    finished_at=now,
+                    sample_idx=idx,
+                    combination_idx=0,
+                    provider_model_id="gpt-4o-mini",
+                    failure_reason="gateway_error" if idx == 1 else None,
+                    failure_message="provider disconnected" if idx == 1 else None,
+                    result={"aggregate_reward": 1.0 if idx != 1 else 0.0},
+                    trajectory_index={
+                        "trajectory_uri": "s3://trajectories/large.jsonl",
+                        "artifacts": [
+                            {
+                                "key": f"trial-{idx}/artifact-{i}.json",
+                                "size": 1024,
+                                "share_status": "shared",
+                            }
+                            for i in range(500)
+                        ],
+                    },
+                )
+            )
+    sync_engine.dispose()
+
+    original_select = batch_routes.select
+
+    def fail_on_full_trial_row_select(*entities: object, **kwargs: object) -> object:
+        if any(entity is Trial for entity in entities):
+            raise AssertionError("batch debug surfaces should not load full Trial rows")
+        return original_select(*entities, **kwargs)
+
+    monkeypatch.setattr(batch_routes, "select", fail_on_full_trial_row_select)
+
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=True)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        response = await ac.get(
+            debug_path.format(batch_id=batch_id),
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert "large.jsonl" not in response.text
+    assert "artifact-499" not in response.text
+    body = response.json()
+    if debug_path.endswith("/debug"):
+        assert body["entity"]["type"] == "batch"
+        assert body["trials"]["summary"]["failed"] == 1
+    elif debug_path.endswith("/diagnosis"):
+        assert body["entity"]["type"] == "batch"
+        assert body["primary_cause"]["reason_code"]
+    else:
+        assert body["debug_evidence"]["trials"]["summary"]["failed"] == 1
+        assert body["diagnosis"]["primary_cause"]["reason_code"]
+
+
 async def test_rerun_failed_batch_creates_linked_exact_targets(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
