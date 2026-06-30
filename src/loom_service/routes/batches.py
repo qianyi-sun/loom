@@ -33,6 +33,7 @@ from loom.db.schema import (
     Team,
     Trial,
     User,
+    Worker,
 )
 from loom.models.batch import Combination
 from loom.models.types import ModelSpec
@@ -842,6 +843,22 @@ async def _llm_calls_for_trials(
     )
 
 
+async def _worker_pool_names_for_trials(
+    session: Any,
+    trials: Sequence[Trial],
+) -> dict[UUID, str]:
+    worker_ids = sorted(
+        {trial.worker_id for trial in trials if trial.worker_id is not None},
+        key=str,
+    )
+    if not worker_ids:
+        return {}
+    result = await session.execute(
+        select(Worker.id, Worker.pool_name).where(Worker.id.in_(worker_ids)),
+    )
+    return {worker_id: pool_name for worker_id, pool_name in result.all()}
+
+
 async def _llm_call_counts_for_trials(
     session: Any,
     trials: Sequence[Any],
@@ -1293,10 +1310,12 @@ async def get_batch(
     if include_debug:
         debug_trials = debug_trials or []
         llm_calls = await _llm_calls_for_trials(s, debug_trials)
+        worker_pool_names = await _worker_pool_names_for_trials(s, debug_trials)
         debug_evidence = build_batch_debug_evidence(
             b,
             trials=debug_trials,
             llm_calls=llm_calls,
+            worker_pool_names_by_id=worker_pool_names,
         )
         extra["debug_evidence"] = debug_evidence
         extra["diagnosis"] = build_batch_diagnosis(
@@ -1343,10 +1362,12 @@ async def get_batch_debug(
         .all()
     )
     llm_calls = await _llm_calls_for_trials(s, trials)
+    worker_pool_names = await _worker_pool_names_for_trials(s, trials)
     return build_batch_debug_evidence(
         b,
         trials=trials,
         llm_calls=llm_calls,
+        worker_pool_names_by_id=worker_pool_names,
     )
 
 
@@ -1378,10 +1399,12 @@ async def get_batch_diagnosis(
         .all()
     )
     llm_calls = await _llm_calls_for_trials(s, trials)
+    worker_pool_names = await _worker_pool_names_for_trials(s, trials)
     debug_evidence = build_batch_debug_evidence(
         b,
         trials=trials,
         llm_calls=llm_calls,
+        worker_pool_names_by_id=worker_pool_names,
     )
     return build_batch_diagnosis(
         debug_evidence,
