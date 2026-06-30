@@ -312,6 +312,91 @@ def test_convert_wraps_reference_solution_as_best_effort(
     assert (out / "reference-output.txt").read_text() == "before-exit\n"
 
 
+def test_solve_sh_runs_reference_from_task_root_even_when_invoked_from_solution_dir(
+    fixtures_dir: Path, tmp_path: Path,
+) -> None:
+    """Regression for the cwd-mismatch bug observed against the
+    public-beta cluster: `OracleAgent` invokes
+    `<workdir>/solution/solve.sh` with cwd=`<workdir>/solution`, but the
+    TB-2 verifier (`run-tests.sh`) checks files relative to the task
+    workdir itself (e.g. hello-world expects `hello.txt` at the task
+    root, not in `solution/`). The earlier wrapper anchored at
+    `$(pwd)/solution/...` and produced the broken path
+    `solution/solution/reference.sh`; `exit 0` masked the bash error
+    and trials shipped as state=succeeded with reward=0.
+
+    This test reproduces oracle's exact invocation pattern (cwd =
+    `<out>/solution`) and asserts the reference solution's output lands
+    at the TASK ROOT (`<out>/hello.txt`), not under
+    `solution/solution/`.
+    """
+    staged = tmp_path / "tasks" / "cwd-regression"
+    shutil.copytree(fixtures_dir / "tb2-task-hello-world", staged)
+    (only,) = list(
+        TerminalBench2Adapter().list_instances(
+            source_dir=tmp_path, split="test",
+        ),
+    )
+    out = tmp_path / "out"
+    TerminalBench2Adapter().convert_instance(only, out_dir=out)
+
+    completed = subprocess.run(
+        ["bash", str(out / "solution" / "solve.sh")],
+        cwd=str(out / "solution"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (out / "hello.txt").exists(), (
+        f"reference solution did not write hello.txt at the task root; "
+        f"stderr={completed.stderr!r} cwd_listing="
+        f"{sorted(p.name for p in out.iterdir())}"
+    )
+    assert (out / "hello.txt").read_text() == "Hello, world!\n"
+    # The pre-fix bug would have created `solution/solution/`, so guard
+    # against the broken path coming back.
+    assert not (out / "solution" / "solution").exists()
+    assert not (out / "solution" / "hello.txt").exists()
+
+
+def test_solve_yaml_runs_commands_from_task_root_when_invoked_from_solution_dir(
+    fixtures_dir: Path, tmp_path: Path,
+) -> None:
+    """Same regression as the .sh wrapper, for the solution.yaml path.
+    OracleAgent invokes solve.sh from `solution/`; the yaml-generated
+    commands must execute with cwd=task_root so files written with
+    relative paths land where the verifier expects them."""
+    staged = tmp_path / "tasks" / "yaml-cwd-regression"
+    shutil.copytree(fixtures_dir / "tb2-task-hello-world", staged)
+    (staged / "solution.sh").unlink()
+    (staged / "solution.yaml").write_text(
+        "- command: \"printf 'yaml\\\\n' > marker.txt\"\n"
+        "  block: true\n"
+        "  append_enter: true\n",
+    )
+    (only,) = list(
+        TerminalBench2Adapter().list_instances(
+            source_dir=tmp_path, split="test",
+        ),
+    )
+    out = tmp_path / "out"
+    TerminalBench2Adapter().convert_instance(only, out_dir=out)
+
+    completed = subprocess.run(
+        ["bash", str(out / "solution" / "solve.sh")],
+        cwd=str(out / "solution"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (out / "marker.txt").read_text() == "yaml\n"
+    assert not (out / "solution" / "marker.txt").exists()
+
+
 def test_convert_renders_solution_yaml_for_oracle_smoke(
     fixtures_dir: Path, tmp_path: Path,
 ) -> None:
