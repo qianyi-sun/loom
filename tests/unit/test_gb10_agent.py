@@ -193,6 +193,68 @@ def test_apply_dry_run_uses_every_compose_file(
     assert "minio-secret" not in out
 
 
+def test_apply_dry_run_detects_worker_token_drift(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    env_file = tmp_path / ".env.remote-worker"
+    env_file.write_text(
+        "LOOM_IMAGE_TAG=current-image\n"
+        "LOOM_WORKER_TOKEN=loom_w_old_secret\n"
+        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_MAX_CONCURRENT=10\n"
+        "LOOM_WORKER_ENV_CONFIG_VERSION=current-env\n",
+        encoding="utf-8",
+    )
+    compose_file = tmp_path / "docker-compose.remote-worker.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    worker_token_file = tmp_path / "worker-token"
+    worker_token_file.write_text("loom_w_new_secret\n", encoding="utf-8")
+    desired = DesiredState(
+        environment="production",
+        pool_name="gb10-arm64",
+        image_tag="current-image",
+        max_concurrent=10,
+        env_config_version="current-env",
+        rollout_policy={"mode": "all"},
+        env={},
+    )
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(gb10_agent, "_fetch_desired_state", lambda _args: desired)
+    monkeypatch.setattr(gb10_agent, "_report_node", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        gb10_agent,
+        "_run",
+        lambda argv, *, dry_run: commands.append(list(argv)),
+    )
+
+    rc = gb10_agent._apply(SimpleNamespace(
+        cp_url="http://cp:8080",
+        admin_token="env:LOOM_ADMIN_TOKEN",
+        worker_token=f"file:{worker_token_file}",
+        environment="production",
+        pool_name="gb10-arm64",
+        hostname="trt-gb10-1",
+        env_file=env_file,
+        compose_file=[compose_file],
+        service="worker",
+        drain_timeout_sec=600,
+        dry_run=True,
+        rollback=False,
+        force=False,
+        format="text",
+    ))
+
+    assert rc == 0
+    assert len(commands) == 3
+    out = capsys.readouterr().out
+    assert "LOOM_WORKER_TOKEN=<redacted>" in out
+    assert "loom_w_old_secret" not in out
+    assert "loom_w_new_secret" not in out
+
+
 def test_apply_stopped_intent_stops_without_restart(
     tmp_path: Path,
     monkeypatch,

@@ -13,7 +13,8 @@ import socket
 import subprocess
 import sys
 import tempfile
-from dataclasses import asdict, dataclass
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,11 @@ from loom_cli.admin_cmd import (
     _DEFAULT_ADMIN_TOKEN_SOURCE,
     _DEFAULT_CP_URL,
     _resolve_admin_token,
+)
+from loom_cli.secret_source import (
+    SecretSourceError,
+    resolve_secret_source,
+    secret_source_argparse_type,
 )
 
 AGENT_VERSION = "gb10-agent-v1"
@@ -117,6 +123,7 @@ class LocalWorkerState:
     max_concurrent: int
     env_config_version: str
     capacity_intent: str = "active"
+    env: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -131,7 +138,7 @@ class AgentPlan:
     current: dict[str, Any]
 
 
-def _env_int(values: dict[str, str | None], key: str, default: int) -> int:
+def _env_int(values: Mapping[str, str | None], key: str, default: int) -> int:
     raw = values.get(key)
     if raw is None or str(raw).strip() == "":
         return default
@@ -142,7 +149,8 @@ def _env_int(values: dict[str, str | None], key: str, default: int) -> int:
 
 
 def load_local_state(env_file: Path, *, hostname: str | None = None) -> LocalWorkerState:
-    values = dotenv_values(env_file)
+    raw_values = dotenv_values(env_file)
+    values = {str(key): str(value) for key, value in raw_values.items() if value is not None}
     raw_intent = str(values.get("LOOM_GB10_CAPACITY_INTENT") or "").strip()
     if not raw_intent:
         raw_intent = (
@@ -157,6 +165,7 @@ def load_local_state(env_file: Path, *, hostname: str | None = None) -> LocalWor
         max_concurrent=_env_int(values, "LOOM_WORKER_MAX_CONCURRENT", 5),
         env_config_version=str(values.get("LOOM_WORKER_ENV_CONFIG_VERSION") or ""),
         capacity_intent=raw_intent,
+        env=values,
     )
 
 
@@ -195,6 +204,9 @@ def build_plan(
         changes.append("env_config_version")
     if local.capacity_intent != desired_intent:
         changes.append("capacity_intent")
+    for key, desired_value in sorted(desired.env.items()):
+        if local.env.get(key) != desired_value:
+            changes.append(f"env:{key}")
     blocked_reason = None
     if changes:
         blocked_reason = _can_apply_to_host(desired, local, force=force)
@@ -293,6 +305,25 @@ def _fetch_desired_state(args: argparse.Namespace) -> DesiredState:
     return DesiredState.from_api(response.json())
 
 
+def _with_local_secret_updates(
+    desired: DesiredState,
+    args: argparse.Namespace,
+) -> DesiredState:
+    worker_token_source = getattr(args, "worker_token", None)
+    if not worker_token_source:
+        return desired
+    try:
+        worker_token = resolve_secret_source(
+            worker_token_source,
+            flag_name="--worker-token",
+        )
+    except SecretSourceError as exc:
+        raise RuntimeError(str(exc)) from exc
+    env = dict(desired.env)
+    env["LOOM_WORKER_TOKEN"] = worker_token
+    return replace(desired, env=env)
+
+
 def _publish_desired_state(args: argparse.Namespace, desired: DesiredState) -> None:
     try:
         admin_token = _resolve_admin_token(args.admin_token)
@@ -383,6 +414,7 @@ def _plan(args: argparse.Namespace) -> int:
         desired = _fetch_desired_state(args)
         if args.rollback:
             desired = desired.rollback_target()
+        desired = _with_local_secret_updates(desired, args)
         local = load_local_state(args.env_file, hostname=args.hostname)
         plan = build_plan(desired, local, force=args.force)
     except (RuntimeError, ValueError) as exc:
@@ -433,6 +465,7 @@ def _apply(args: argparse.Namespace) -> int:
                 print("dry-run: would publish rollback target to Control Plane")
             else:
                 _publish_desired_state(args, desired)
+        desired = _with_local_secret_updates(desired, args)
         local = load_local_state(args.env_file, hostname=args.hostname)
         plan = build_plan(desired, local, force=args.force)
     except (RuntimeError, ValueError) as exc:
@@ -523,7 +556,11 @@ def _apply(args: argparse.Namespace) -> int:
         apply_state=apply_state,
         last_apply_result=result,
     )
-    return _plan(args)
+    _print_plan(
+        build_plan(desired, refreshed, force=args.force),
+        json_output=args.format == "json",
+    )
+    return 0
 
 
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -541,6 +578,16 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--rollback", action="store_true")
     parser.add_argument("--format", choices=("text", "json"), default="text")
+    parser.add_argument(
+        "--worker-token",
+        type=secret_source_argparse_type("--worker-token"),
+        default=None,
+        help=(
+            "Optional current environment worker token source for local "
+            "host env parity. ONE of env:VAR, file:PATH, or -. The token is "
+            "written only to the host-local env file and is not published to CP."
+        ),
+    )
 
 
 def dispatch(argv: list[str]) -> int:
