@@ -38,11 +38,12 @@ class _StubS3:
 
 def _expire_rule(bucket: str, days: int) -> dict:
     """Convenience: the dict our renderer would emit for an
-    expire-after-days rule."""
+    expire-after-days rule. ID is the consolidated bucket-scoped form
+    used by `render_bucket_lifecycle` (one merged rule per bucket)."""
     return {
-        "ID": f"loom-expire_after_days-{bucket}-{days}d",
+        "ID": f"loom-{bucket}",
         "Status": "Enabled",
-        "Filter": {},
+        "Filter": {"Prefix": ""},
         "Expiration": {"Days": days},
     }
 
@@ -108,22 +109,22 @@ def test_missing_live_rules_is_flagged() -> None:
 
 def test_content_drift_when_days_changed_in_config() -> None:
     """The operator edited storage-lifecycle.toml (e.g., shortened the
-    window) but never re-ran the bootstrap. Same rule ID, different
-    `Expiration.Days`."""
+    window) but never re-ran the bootstrap. Same rule ID
+    (bucket-scoped under the merged renderer), different
+    `Expiration.Days`. This is the classic 'forgot to re-apply'
+    case."""
     cfg = RetentionConfig(backend="minio", rules=(
         RetentionRule(
             bucket="trajectories", strategy="expire_after_days", days=14,
         ),
     ))
-    # Live still has the OLD 14-day rule under the SAME ID since the ID
-    # incorporates days. So the IDs differ, not the content. The check
-    # should catch this as "missing on storage."
+    # Live still has the OLD 30-day rule under the same `loom-trajectories`
+    # ID. ID matches; content differs.
     s3 = _StubS3({"trajectories": {"Rules": [_expire_rule("trajectories", 30)]}})
 
     drifts = check_lifecycle_drift(s3, cfg)
     assert drifts[0].is_drift
-    # Days changed → rule ID changed → missing+extra branch
-    assert "missing on storage" in drifts[0].detail
+    assert "content drift" in drifts[0].detail
 
 
 def test_extra_live_rule_is_flagged_informationally() -> None:
