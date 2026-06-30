@@ -249,6 +249,54 @@ def test_run_with_anthropic_provider_maps_type_to_provider(
     assert body["config"]["agent_model"]["name"] == "claude-opus-4-7"
 
 
+def test_batch_create_team_id_filters_provider_lookup_and_payload(
+    mock_server: MockServer,
+) -> None:
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "name": "admin-on-behalf",
+            "expected_trial_count": 1,
+            "state": "submitted",
+        },
+    )
+
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--team-id",
+            "team-b",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o-mini",
+            "--agent",
+            "litellm",
+            "--benchmark",
+            "skilllearnbench",
+            "--name",
+            "admin-on-behalf",
+        ]
+    )
+
+    assert rc == 0
+    lookup_req = mock_server[0]
+    assert lookup_req.method == "GET"
+    assert lookup_req.url.path == "/api/v1/provider-connections"
+    assert lookup_req.url.params.get("team_id") == "team-b"
+
+    create_req = mock_server[1]
+    assert create_req.method == "POST"
+    assert create_req.url.path == "/api/v1/batches"
+    body = json.loads(create_req.content)
+    assert body["team_id"] == "team-b"
+    assert body["provider_connection_id"] == _CONN_ID
+
+
 def test_run_agent_provider_override_wins_over_type_mapping(
     mock_server: MockServer,
 ) -> None:

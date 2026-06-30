@@ -24,9 +24,10 @@ Trust boundary:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Annotated
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -568,6 +569,7 @@ async def create_connection(
 )
 async def list_connections(
     sc: SessionAndCtx,
+    team_id: Annotated[UUID | None, Query()] = None,
 ) -> ProviderConnectionListResponse:
     session, ctx = sc
     if ctx.team_id is None and not is_admin(ctx):
@@ -578,8 +580,17 @@ async def list_connections(
     stmt = select(ProviderConnection).where(
         ProviderConnection.deleted_at.is_(None),
     )
-    # Admins see all teams' connections; team tokens see only their own.
-    if not is_admin(ctx):
+    # Admins see all teams' connections, or can explicitly scope the
+    # listing when resolving an on-behalf-of submission. Team tokens
+    # only see their own rows and cannot probe another team's names.
+    if team_id is not None:
+        if not is_admin(ctx) and team_id != ctx.team_id:
+            raise HTTPException(
+                status_code=403,
+                detail="cross-team provider listing requires admin scope",
+            )
+        stmt = stmt.where(ProviderConnection.team_id == team_id)
+    elif not is_admin(ctx):
         stmt = stmt.where(ProviderConnection.team_id == ctx.team_id)
     stmt = stmt.order_by(ProviderConnection.created_at.desc())
 

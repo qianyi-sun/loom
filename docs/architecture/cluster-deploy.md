@@ -333,7 +333,7 @@ loom eval batch create --agent oracle [--name N | --name-suffix S]
     [--benchmark B | --task-filter JSON]
 loom eval batch create --provider N --model M --agent A
     [--name N | --name-suffix S] [--benchmark B | --task-filter JSON]
-    [--n-per-task N] [--backend B]
+    [--n-per-task N] [--backend B] [--team-id UUID]
 loom eval batch {list,show,cancel}
 loom eval usage --start YYYY-MM-DD --end YYYY-MM-DD [--group-by day|week|month] [--include-batches]
     [--team-id UUID] [--user-id UUID] [--provider-connection-id UUID]

@@ -272,6 +272,22 @@ name and description from the benchmark/subset, combinations, provider/model,
 and backend. Use `--name-suffix` only when you need an extra human label after
 the generated prefix.
 
+Provider connections are team-scoped. A platform admin using a user-owned API
+token can submit on behalf of a different team by passing `--team-id`; this
+also scopes provider-name lookup so the selected provider must belong to the
+target team:
+
+```bash
+loom eval batch create \
+  --team-id <target-team-id> \
+  --name-suffix admin-provider-smoke \
+  --agent litellm \
+  --provider smoke-openai \
+  --model gpt-4o-mini \
+  --benchmark humaneval \
+  --n-per-task 1
+```
+
 Auth and permission errors use the same remediation hint across CLI subcommands.
 Text and JSON output redact raw bearer tokens, provider keys, internal service
 hosts, and signed object-store URLs. `loom eval trial show` prints copyable
