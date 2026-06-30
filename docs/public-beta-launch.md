@@ -114,10 +114,11 @@ Attach these to the release issue or release PR:
   `oldlab_worker_records` entry per OLDLAB worker with node name, Slurm job id,
   Loom worker id, configured concurrency, and claimed trial count.
 - `scripts/public_beta_smoke_gate.py` Markdown evidence with `--fail-on-skip`
-  and `--allow-mutating-checks` against disposable staging data. When
-  `--batch-id` is provided, the `runs.claimed_without_started` row must be
-  `PASS`; a nonzero value means the source run still has orphaned claimed work
-  and cannot be used as release evidence.
+  and `--allow-mutating-checks` against disposable staging data. The report
+  must include the service restart/OOM row by passing `--k8s-namespace`.
+  When `--batch-id` is provided, the `runs.claimed_without_started` row must
+  be `PASS`; a nonzero value means the source run still has orphaned claimed
+  work and cannot be used as release evidence.
 - For IP-address staging hosts, note the hostless Ingress rendering, attach
   evidence that the TLS Secret certificate includes the staging IP as a Subject
   Alternative Name, and verify the ingress controller serves that Secret as its
@@ -182,6 +183,7 @@ python scripts/public_beta_smoke_gate.py \
   --object-store-write-check-bucket trajectories \
   --object-store-write-check-count 64 \
   --object-store-write-check-concurrency 16 \
+  --k8s-namespace loom-public-beta \
   --secret-needle seeded-public-beta-secret \
   --internal-url-needle loom-minio.loom.svc.cluster.local \
   --allow-mutating-checks \
@@ -200,6 +202,8 @@ The script checks:
 - a concurrent MinIO write/delete probe against the runtime trajectory bucket,
   so `XMinioStorageFull`, connection-pool pressure, and other object-store
   write failures are caught before submitting canary or release-trial work;
+- current `loom-service` pod restart/OOM status when `--k8s-namespace` is
+  provided;
 - batch/trial detail and service-proxied ATIF/trajectory downloads;
 - Run Library My team and All teams visibility;
 - owner-team label;
@@ -375,6 +379,8 @@ The public beta launch gate passes only when:
 - `scripts/public_beta_smoke_gate.py` exits 0 with `--fail-on-skip`;
 - the smoke report's `runs.claimed_without_started` row is `PASS` for the
   source batch used as launch evidence;
+- the smoke report's `service.no_oom_restarts` row is `PASS` for the deployed
+  `loom-service` pods;
 - no response, audit excerpt, log excerpt, or safe downloaded artifact contains
   seeded fake secrets or internal URLs;
 - unsafe artifacts are blocked and cannot be downloaded by another team;

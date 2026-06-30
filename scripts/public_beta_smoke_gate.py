@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
@@ -37,6 +38,7 @@ REQUIRED_CHECK_IDS: tuple[str, ...] = (
     "benchmarks.runnable_catalog",
     "benchmarks.ready_bundle_objects",
     "object_store.minio_write_probe",
+    "service.no_oom_restarts",
     "runs.batch_detail",
     "runs.claimed_without_started",
     "runs.trial_detail",
@@ -734,6 +736,7 @@ def run_smoke(args: argparse.Namespace) -> SmokeReport:
     _append_agent_catalog_checks(client, args, results)
     _append_benchmark_catalog_checks(client, args, results)
     _append_object_store_write_probe(args, results)
+    _append_service_pod_restart_check(args, results)
 
     if args.batch_id:
         batch = client.request("GET", f"/api/v1/batches/{args.batch_id}", token=args.team_a_token)
@@ -1189,6 +1192,183 @@ def _append_object_store_write_probe(
     ))
 
 
+def _append_service_pod_restart_check(
+    args: argparse.Namespace,
+    results: list[CheckResult],
+) -> None:
+    if not args.k8s_namespace:
+        results.append(CheckResult(
+            "service.no_oom_restarts",
+            "public-api",
+            "skip",
+            "--k8s-namespace was not provided.",
+            (
+                "Pass --k8s-namespace during release/full100 gates so service "
+                "pod restarts and OOMKills are captured in evidence."
+            ),
+        ))
+        return
+
+    cmd = [
+        args.kubectl_bin,
+        "-n",
+        args.k8s_namespace,
+        "get",
+        "pods",
+        "-l",
+        args.service_pod_selector,
+        "-o",
+        "json",
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=args.k8s_command_timeout_sec,
+        )
+    except subprocess.TimeoutExpired:
+        results.append(CheckResult(
+            "service.no_oom_restarts",
+            "public-api",
+            "fail",
+            f"kubectl timed out checking service pods in namespace {args.k8s_namespace}.",
+            "Verify kubeconfig access and inspect loom-service pod status manually.",
+        ))
+        return
+    except OSError as exc:
+        results.append(CheckResult(
+            "service.no_oom_restarts",
+            "public-api",
+            "fail",
+            f"kubectl failed to run: {type(exc).__name__}: {exc}",
+            "Install kubectl or provide --kubectl-bin for release smoke evidence.",
+        ))
+        return
+
+    if proc.returncode != 0:
+        results.append(CheckResult(
+            "service.no_oom_restarts",
+            "public-api",
+            "fail",
+            (
+                f"kubectl returned {proc.returncode} checking service pods: "
+                f"{proc.stderr[:300] or proc.stdout[:300]}"
+            ),
+            "Verify kubeconfig context, namespace, and service pod selector.",
+        ))
+        return
+
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        results.append(CheckResult(
+            "service.no_oom_restarts",
+            "public-api",
+            "fail",
+            f"kubectl returned non-JSON pod status: {exc}",
+            "Rerun kubectl get pods -o json and inspect release gate tooling.",
+        ))
+        return
+
+    items = payload.get("items") if isinstance(payload, dict) else None
+    pods = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+    if not pods:
+        results.append(CheckResult(
+            "service.no_oom_restarts",
+            "public-api",
+            "fail",
+            (
+                "No service pods matched selector "
+                f"{args.service_pod_selector!r} in namespace {args.k8s_namespace}."
+            ),
+            "Check the service Deployment label selector before accepting release evidence.",
+        ))
+        return
+
+    offenders: list[str] = []
+    checked = 0
+    for pod in pods:
+        metadata = pod.get("metadata") if isinstance(pod.get("metadata"), dict) else {}
+        pod_name = str(metadata.get("name") or "<unknown-pod>")
+        status = pod.get("status") if isinstance(pod.get("status"), dict) else {}
+        raw_statuses = status.get("containerStatuses")
+        statuses = (
+            [item for item in raw_statuses if isinstance(item, dict)]
+            if isinstance(raw_statuses, list)
+            else []
+        )
+        for container in statuses:
+            container_name = str(container.get("name") or "<unknown-container>")
+            if (
+                args.service_container_name
+                and container_name != args.service_container_name
+            ):
+                continue
+            checked += 1
+            try:
+                restart_count = int(container.get("restartCount") or 0)
+            except (TypeError, ValueError):
+                restart_count = 0
+            last_state = (
+                container.get("lastState")
+                if isinstance(container.get("lastState"), dict)
+                else {}
+            )
+            terminated = (
+                last_state.get("terminated")
+                if isinstance(last_state.get("terminated"), dict)
+                else {}
+            )
+            last_reason = str(terminated.get("reason") or "")
+            exit_code = terminated.get("exitCode")
+            if last_reason == "OOMKilled" or restart_count > args.service_restart_max_count:
+                detail = (
+                    f"{pod_name}/{container_name} restartCount={restart_count} "
+                    f"lastReason={last_reason or 'none'}"
+                )
+                if exit_code is not None:
+                    detail += f" exitCode={exit_code}"
+                offenders.append(detail)
+
+    if checked == 0:
+        results.append(CheckResult(
+            "service.no_oom_restarts",
+            "public-api",
+            "fail",
+            (
+                f"No container named {args.service_container_name!r} was found "
+                f"under selector {args.service_pod_selector!r}."
+            ),
+            "Check --service-container-name or the service pod template.",
+        ))
+        return
+
+    if offenders:
+        results.append(CheckResult(
+            "service.no_oom_restarts",
+            "public-api",
+            "fail",
+            "Service pod restart/OOM evidence: " + "; ".join(offenders[:10]),
+            (
+                "Inspect loom-service memory, batch detail/cancel request load, "
+                "and previous pod logs before accepting the full100 gate."
+            ),
+        ))
+        return
+
+    results.append(CheckResult(
+        "service.no_oom_restarts",
+        "public-api",
+        "pass",
+        (
+            f"Checked {checked} service container(s); no OOMKilled lastState "
+            f"and restartCount <= {args.service_restart_max_count}."
+        ),
+    ))
+
+
 def _append_artifact_checks(
     client: SmokeClient,
     args: argparse.Namespace,
@@ -1486,6 +1666,29 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Maximum concurrent object-store write/delete probes.",
+    )
+    parser.add_argument(
+        "--k8s-namespace",
+        default=None,
+        help=(
+            "Kubernetes namespace to inspect for loom-service pod restarts. "
+            "When omitted, service.no_oom_restarts is skipped."
+        ),
+    )
+    parser.add_argument("--kubectl-bin", default="kubectl")
+    parser.add_argument("--service-pod-selector", default="app=loom-service")
+    parser.add_argument("--service-container-name", default="loom-service")
+    parser.add_argument(
+        "--service-restart-max-count",
+        type=int,
+        default=0,
+        help="Maximum allowed current service container restartCount.",
+    )
+    parser.add_argument(
+        "--k8s-command-timeout-sec",
+        type=float,
+        default=10.0,
+        help="Timeout for kubectl pod-status diagnostics.",
     )
     parser.add_argument("--max-response-scan-bytes", type=int, default=1_000_000)
     parser.add_argument("--fail-on-skip", action="store_true")

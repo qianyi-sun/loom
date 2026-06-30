@@ -53,6 +53,7 @@ def test_gate_declares_required_public_beta_checks() -> None:
         "benchmarks.runnable_catalog",
         "benchmarks.ready_bundle_objects",
         "object_store.minio_write_probe",
+        "service.no_oom_restarts",
         "runs.batch_detail",
         "runs.claimed_without_started",
         "runs.trial_detail",
@@ -264,6 +265,65 @@ def test_run_smoke_fails_when_batch_debug_reports_claimed_without_started(
     assert "2" in result.detail
     assert "claimed_without_started" in result.detail
     assert "reclaim" in result.remediation.lower()
+
+
+def test_run_smoke_fails_when_service_pod_reports_oom_restart(monkeypatch) -> None:
+    gate = _load_gate_module()
+
+    class FakeClient:
+        def __init__(self, server_url: str, *, max_scan_bytes: int) -> None:
+            self.server_url = server_url
+            self.evidence_chunks: list[str] = []
+            self.response_bytes_scanned = 0
+
+        def request(self, method: str, path: str, **kwargs):
+            if path in {"/api/v1/health", "/", "/api/v1/auth/whoami"}:
+                body = b'{"status":"ok"}'
+            elif path == "/api/v1/provider-connections":
+                body = b'{"items":[{"name":"mz_tn_canada_qianyi"}]}'
+            elif path == "/api/v1/models":
+                body = b'{"items":[{"provider":"openai","name":"gpt-4o-mini"}]}'
+            elif path == "/api/v1/agents":
+                body = b'{"items":[{"name":"oracle","service_mode_ready":true}]}'
+            elif path == "/api/v1/benchmarks":
+                body = (
+                    b'{"items":[{"id":"skilllearnbench","task_count":100,'
+                    b'"readiness_state":"runnable"}]}'
+                )
+            else:
+                body = b'{"items":[]}'
+            return gate.HttpResponse(status_code=200, headers={}, body=body)
+
+    class FakeCompleted:
+        returncode = 0
+        stderr = ""
+        stdout = (
+            '{"items":[{"metadata":{"name":"loom-service-abc"},'
+            '"status":{"containerStatuses":[{"name":"loom-service",'
+            '"restartCount":1,"lastState":{"terminated":{'
+            '"reason":"OOMKilled","exitCode":137}}}]}}]}'
+        )
+
+    class FakeSubprocess:
+        @staticmethod
+        def run(*_args, **_kwargs):
+            return FakeCompleted()
+
+    monkeypatch.setattr(gate, "SmokeClient", FakeClient)
+    monkeypatch.setattr(gate, "subprocess", FakeSubprocess, raising=False)
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+        "--k8s-namespace", "loom-public-beta",
+    ])
+
+    report = gate.run_smoke(args)
+    result = next(r for r in report.results if r.check_id == "service.no_oom_restarts")
+
+    assert result.status == "fail"
+    assert "OOMKilled" in result.detail
+    assert "loom-service-abc" in result.detail
 
 
 def test_run_smoke_fails_when_provider_connection_catalog_is_empty(monkeypatch) -> None:

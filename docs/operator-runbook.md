@@ -2230,6 +2230,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
       --object-store-write-check-bucket trajectories \
       --object-store-write-check-count 64 \
       --object-store-write-check-concurrency 16 \
+      --k8s-namespace loom-public-beta \
       --secret-needle seeded-public-beta-secret \
       --internal-url-needle loom-minio.loom.svc.cluster.local \
       --allow-mutating-checks \
@@ -2245,7 +2246,11 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     row must pass before submitting canary or release-trial work; if it reports
     `XMinioStorageFull`, connection failures, or timeouts, reclaim/provision
     MinIO-backed storage or reduce worker concurrency first instead of
-    discovering the failure during worker trajectory or artifact upload.
+    discovering the failure during worker trajectory or artifact upload. The
+    `service.no_oom_restarts` row must pass for full100/release evidence; if it
+    reports an `OOMKilled` last state or unexpected current restart count,
+    inspect `loom-service` memory, previous pod logs, and large batch
+    detail/cancel traffic before accepting the gate.
 19. **Teardown clean.** `loom cluster down --yes` removes every applied
     object; PVCs survive (verify via `kubectl get pvc -n loom`). For
     public-beta or staging, pass `--with-volumes` or `--delete-namespace` only
@@ -2271,10 +2276,11 @@ checklist:
 - **`scripts/public_beta_smoke_gate.py`** — covers public health, logged-out SPA
   reachability, two-team API-token auth, provider/model discovery, runnable
   benchmark catalog presence, sampled ready benchmark bundle objects,
-  concurrent object-store write/delete probing, batch/trial detail,
-  `claimed_without_started=0` from batch debug evidence, service-proxied
-  ATIF/trajectory downloads, My team and All teams Run Library visibility,
-  owner-team label, cross-team safe artifact download, direct-route denial,
+  concurrent object-store write/delete probing, service pod restart/OOM status,
+  batch/trial detail, `claimed_without_started=0` from batch debug evidence,
+  service-proxied ATIF/trajectory downloads, My team and All teams Run Library
+  visibility, owner-team label, cross-team safe artifact download,
+  direct-route denial,
   clone config, reuse artifact, provenance, blocked artifact denial, private
   artifact denial, cross-team mutation denial, and response leak scanning.
 - **`scripts/ops/worker_service_tunnels.py`** — covers the private
