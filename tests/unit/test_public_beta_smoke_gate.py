@@ -182,6 +182,150 @@ def test_run_smoke_uses_parser_max_response_scan_bytes(monkeypatch) -> None:
     assert observed["max_scan_bytes"] == 12345
 
 
+def test_run_smoke_fails_when_provider_connection_catalog_is_empty(monkeypatch) -> None:
+    gate = _load_gate_module()
+
+    class FakeClient:
+        def __init__(self, server_url: str, *, max_scan_bytes: int) -> None:
+            self.server_url = server_url
+            self.evidence_chunks: list[str] = []
+            self.response_bytes_scanned = 0
+
+        def request(self, method: str, path: str, **kwargs):
+            if path == "/api/v1/models":
+                body = b'{"items":[{"provider":"yibuapi","name":"qwen3.6-35b-a3b"}]}'
+            else:
+                body = b'{"items":[]}'
+            return gate.HttpResponse(status_code=200, headers={}, body=body)
+
+    monkeypatch.setattr(gate, "SmokeClient", FakeClient)
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+    ])
+
+    report = gate.run_smoke(args)
+    result = next(r for r in report.results if r.check_id == "providers.list")
+
+    assert result.status == "fail"
+    assert "no provider connections" in result.detail.lower()
+    assert "provider connection" in result.remediation.lower()
+
+
+def test_run_smoke_requires_exact_named_provider_connection(monkeypatch) -> None:
+    gate = _load_gate_module()
+
+    class FakeClient:
+        def __init__(self, server_url: str, *, max_scan_bytes: int) -> None:
+            self.server_url = server_url
+            self.evidence_chunks: list[str] = []
+            self.response_bytes_scanned = 0
+
+        def request(self, method: str, path: str, **kwargs):
+            if path == "/api/v1/provider-connections":
+                body = (
+                    b'{"items":[{"name":"different-provider",'
+                    b'"description":"mentions mz_tn_canada_qianyi"}]}'
+                )
+            elif path == "/api/v1/models":
+                body = b'{"items":[{"provider":"yibuapi","name":"qwen3.6-35b-a3b"}]}'
+            else:
+                body = b'{"items":[]}'
+            return gate.HttpResponse(status_code=200, headers={}, body=body)
+
+    monkeypatch.setattr(gate, "SmokeClient", FakeClient)
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+        "--provider-connection-name", "mz_tn_canada_qianyi",
+    ])
+
+    report = gate.run_smoke(args)
+    result = next(r for r in report.results if r.check_id == "providers.list")
+
+    assert result.status == "fail"
+    assert "mz_tn_canada_qianyi" in result.detail
+    assert "different-provider" in result.detail
+
+
+def test_run_smoke_requires_expected_provider_model_when_configured(monkeypatch) -> None:
+    gate = _load_gate_module()
+
+    class FakeClient:
+        def __init__(self, server_url: str, *, max_scan_bytes: int) -> None:
+            self.server_url = server_url
+            self.evidence_chunks: list[str] = []
+            self.response_bytes_scanned = 0
+
+        def request(self, method: str, path: str, **kwargs):
+            if path == "/api/v1/provider-connections":
+                body = b'{"items":[{"name":"mz_tn_canada_qianyi"}]}'
+            elif path == "/api/v1/models":
+                body = b'{"items":[{"provider":"openai","name":"gpt-4o-mini"}]}'
+            else:
+                body = b'{"items":[]}'
+            return gate.HttpResponse(status_code=200, headers={}, body=body)
+
+    monkeypatch.setattr(gate, "SmokeClient", FakeClient)
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+        "--provider-connection-name", "mz_tn_canada_qianyi",
+        "--provider-model-provider", "yibuapi",
+        "--provider-model-name", "qwen3.6-35b-a3b",
+    ])
+
+    report = gate.run_smoke(args)
+    result = next(r for r in report.results if r.check_id == "providers.models")
+
+    assert result.status == "fail"
+    assert "qwen3.6-35b-a3b" in result.detail
+    assert "gpt-4o-mini" in result.detail
+
+
+def test_run_smoke_reports_expected_provider_model_match(monkeypatch) -> None:
+    gate = _load_gate_module()
+
+    class FakeClient:
+        def __init__(self, server_url: str, *, max_scan_bytes: int) -> None:
+            self.server_url = server_url
+            self.evidence_chunks: list[str] = []
+            self.response_bytes_scanned = 0
+
+        def request(self, method: str, path: str, **kwargs):
+            if path == "/api/v1/provider-connections":
+                body = b'{"items":[{"name":"mz_tn_canada_qianyi"}]}'
+            elif path == "/api/v1/models":
+                body = (
+                    b'{"items":['
+                    b'{"provider":"openai","name":"gpt-4o-mini"},'
+                    b'{"provider":"yibuapi","name":"gpt-4o-mini"}'
+                    b']}'
+                )
+            else:
+                body = b'{"items":[]}'
+            return gate.HttpResponse(status_code=200, headers={}, body=body)
+
+    monkeypatch.setattr(gate, "SmokeClient", FakeClient)
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+        "--provider-connection-name", "mz_tn_canada_qianyi",
+        "--provider-model-provider", "yibuapi",
+        "--provider-model-name", "gpt-4o-mini",
+    ])
+
+    report = gate.run_smoke(args)
+    result = next(r for r in report.results if r.check_id == "providers.models")
+
+    assert result.status == "pass"
+    assert "expected yibuapi/gpt-4o-mini" in result.detail
+
+
 def test_run_smoke_fails_when_runnable_benchmark_catalog_is_empty(monkeypatch) -> None:
     gate = _load_gate_module()
 
