@@ -190,9 +190,13 @@ def render_s3_lifecycle(rule: RetentionRule) -> dict[str, Any] | None:
     out: dict[str, Any] = {
         "ID": rule_id,
         "Status": "Enabled",
-        # An empty prefix matches all objects in the bucket. S3 requires
-        # a filter clause; the simplest is Prefix="".
-        "Filter": {"Prefix": ""},
+        # An empty Filter matches all objects in the bucket. AWS S3
+        # documents `Filter: {"Prefix": ""}` as the canonical "match
+        # all" form, but MinIO rejects empty Prefix as malformed XML
+        # (InvalidArgument from PutBucketLifecycleConfiguration). An
+        # empty Filter element (`<Filter/>`) is what `mc ilm rule add`
+        # itself emits and is accepted by both AWS S3 and MinIO.
+        "Filter": {},
     }
 
     if rule.strategy == "expire_after_days":

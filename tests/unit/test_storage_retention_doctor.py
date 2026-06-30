@@ -42,7 +42,7 @@ def _expire_rule(bucket: str, days: int) -> dict:
     return {
         "ID": f"loom-expire_after_days-{bucket}-{days}d",
         "Status": "Enabled",
-        "Filter": {"Prefix": ""},
+        "Filter": {},
         "Expiration": {"Days": days},
     }
 

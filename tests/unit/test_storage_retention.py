@@ -121,7 +121,7 @@ def test_expire_after_days_renders_with_stable_id() -> None:
     assert out == {
         "ID": "loom-expire_after_days-trajectories-30d",
         "Status": "Enabled",
-        "Filter": {"Prefix": ""},
+        "Filter": {},
         "Expiration": {"Days": 30},
     }
 
