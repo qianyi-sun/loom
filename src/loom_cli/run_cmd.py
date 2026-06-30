@@ -216,15 +216,20 @@ async def _run_one_model(
     async def _one(loaded: LoadedTask) -> int:
         async with sem:
             patched = _patch_agent(loaded.task_config, args.agent, model)
+            driver_factory = await _driver_factory(
+                args.backend,
+                patched,
+                task_dir=loaded.task_dir,
+                task_checksum=loaded.checksum,
+                gpu=getattr(args, "gpu", None),
+            )
             runner = LocalRunner(
                 trial_id=uuid4(),
                 team_id=uuid4(),
                 task_config=patched,
                 task_checksum=loaded.checksum,
                 task_dir=loaded.task_dir,
-                driver_factory=_driver_factory(
-                    args.backend, patched, gpu=getattr(args, "gpu", None),
-                ),
+                driver_factory=driver_factory,
                 output_dir=output_dir,
                 object_store=store,
                 upstream_gateway_tokens=tokens,
@@ -462,10 +467,12 @@ def build_driver(*, backend: str, image: str, gpu: str | None = None) -> Driver:
     return ModalDriver(image=image, gpu=gpu, config=ModalConfig.from_env())
 
 
-def _driver_factory(
+async def _driver_factory(
     backend: str,
     cfg: TaskConfig,
     *,
+    task_dir: Path,
+    task_checksum: str,
     gpu: str | None = None,
 ) -> Callable[[], Driver]:
     """Return a zero-arg factory for the chosen backend.
@@ -473,18 +480,43 @@ def _driver_factory(
     Each call to the returned factory constructs a fresh Driver instance.
     Heavy SDK config (e.g. ``DaytonaConfig`` / ``ModalConfig``) is captured
     in the closure so env vars are read once per ``loom run`` invocation.
+
+    Resolves the task image up front via
+    `loom.driver.task_image.resolve_task_image` — same path the worker
+    uses (#232). When a task ships a Dockerfile (no `docker_image`), the
+    image is built from the materialized bundle and cached under a
+    deterministic tag; subsequent driver instantiations within the same
+    `loom run` hit the docker daemon's cached tag.
     """
-    image = cfg.environment.docker_image or "alpine"
     if backend not in _VALID_BACKENDS:
         raise SystemExit(f"unknown backend: {backend!r}")
-    if backend in {"docker", "fake"}:
+    if backend == "fake":
         if gpu is not None:
             raise UnsupportedFlagError(
                 f"--gpu is not supported by --backend {backend}. "
                 "Use --backend modal for GPU trials.",
             )
-        if backend == "fake":
-            return FakeDriver
+        return FakeDriver
+
+    # Real backends need a concrete image. Build from the task's
+    # Dockerfile when present; otherwise fall back to docker_image or
+    # the alpine default. resolve_task_image performs the cached build
+    # via docker-py, so we only pay the build cost once per task per
+    # `loom run` invocation.
+    from loom.driver.task_image import resolve_task_image
+
+    image = await resolve_task_image(
+        task_config=cfg,
+        task_dir=task_dir,
+        task_checksum=task_checksum,
+    )
+
+    if backend == "docker":
+        if gpu is not None:
+            raise UnsupportedFlagError(
+                f"--gpu is not supported by --backend {backend}. "
+                "Use --backend modal for GPU trials.",
+            )
         return lambda: DockerDriver(image=image, workspace=cfg.environment.workdir)
     if backend == "daytona":
         if gpu is not None:
