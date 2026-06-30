@@ -17,13 +17,23 @@ from typing import Any, Protocol, TypeVar, cast
 import boto3
 import botocore.handlers
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ConnectionError, HTTPClientError
 
 _DEFAULT_S3_MAX_POOL_CONNECTIONS = 64
 _DEFAULT_S3_CONNECT_TIMEOUT_SECONDS = 5.0
 _DEFAULT_S3_READ_TIMEOUT_SECONDS = 30.0
 _DEFAULT_S3_OPERATION_TIMEOUT_SECONDS = 30.0
 _DEFAULT_S3_OPERATION_ATTEMPTS = 2
+_RETRYABLE_S3_ERROR_CODES = frozenset(
+    {
+        "InternalError",
+        "RequestTimeout",
+        "RequestTimeoutException",
+        "SlowDown",
+        "Throttling",
+        "ThrottlingException",
+    }
+)
 _T = TypeVar("_T")
 
 
@@ -47,6 +57,21 @@ def _has_traversal(rel: str) -> bool:
     return ".." in parts
 
 
+def _is_retryable_client_error(exc: ClientError) -> bool:
+    response = exc.response or {}
+    metadata = response.get("ResponseMetadata") or {}
+    status = metadata.get("HTTPStatusCode")
+    try:
+        status_int = int("" if status is None else str(status))
+    except (TypeError, ValueError):
+        status_int = 0
+    if status_int in {500, 502, 503, 504}:
+        return True
+    error = response.get("Error") or {}
+    code = str(error.get("Code") or "")
+    return code in _RETRYABLE_S3_ERROR_CODES
+
+
 @dataclass
 class MultipartUpload:
     bucket: str
@@ -62,7 +87,10 @@ class ObjectStore(Protocol):
     """
 
     async def create_multipart_upload(
-        self, *, bucket: str, key: str,
+        self,
+        *,
+        bucket: str,
+        key: str,
     ) -> MultipartUpload: ...
 
     async def ensure_bucket(self, bucket: str) -> None:
@@ -70,7 +98,11 @@ class ObjectStore(Protocol):
         ...
 
     async def upload_part(
-        self, upload: MultipartUpload, *, part_number: int, body: bytes,
+        self,
+        upload: MultipartUpload,
+        *,
+        part_number: int,
+        body: bytes,
     ) -> None: ...
 
     async def complete_multipart_upload(self, upload: MultipartUpload) -> str:
@@ -84,11 +116,19 @@ class ObjectStore(Protocol):
     async def get_object(self, *, bucket: str, key: str) -> bytes: ...
 
     async def presign_put(
-        self, *, bucket: str, key: str, expires_sec: int,
+        self,
+        *,
+        bucket: str,
+        key: str,
+        expires_sec: int,
     ) -> str: ...
 
     async def download_prefix(
-        self, *, bucket: str, prefix: str, out_dir: Path,
+        self,
+        *,
+        bucket: str,
+        prefix: str,
+        out_dir: Path,
     ) -> int:
         """List every object under `prefix` in `bucket` and stream each to
         `out_dir` preserving the relative path. Returns the count of
@@ -108,7 +148,10 @@ class ObjectStore(Protocol):
         ...
 
     async def list_task_prefixes(
-        self, *, bucket: str, benchmark: str,
+        self,
+        *,
+        bucket: str,
+        benchmark: str,
     ) -> list[str]:
         """List per-task prefixes under `<bucket>/<benchmark>/`. Returns
         sorted strings ending in `/`, e.g. `["humaneval/HumanEval/0/",
@@ -132,7 +175,10 @@ class FakeObjectStore:
         self.buckets.add(bucket)
 
     async def create_multipart_upload(
-        self, *, bucket: str, key: str,
+        self,
+        *,
+        bucket: str,
+        key: str,
     ) -> MultipartUpload:
         self._next_upload_id += 1
         upload_id = f"upload-{self._next_upload_id}"
@@ -140,7 +186,11 @@ class FakeObjectStore:
         return MultipartUpload(bucket=bucket, key=key, upload_id=upload_id)
 
     async def upload_part(
-        self, upload: MultipartUpload, *, part_number: int, body: bytes,
+        self,
+        upload: MultipartUpload,
+        *,
+        part_number: int,
+        body: bytes,
     ) -> None:
         self._multiparts[upload.upload_id].append((part_number, body))
         upload.parts.append((part_number, f"etag-{part_number}"))
@@ -163,12 +213,19 @@ class FakeObjectStore:
         return self.objects[(bucket, key)]
 
     async def presign_put(
-        self, *, bucket: str, key: str, expires_sec: int,
+        self,
+        *,
+        bucket: str,
+        key: str,
+        expires_sec: int,
     ) -> str:
         return f"https://fake/{bucket}/{key}?expires_sec={expires_sec}"
 
     async def list_task_prefixes(
-        self, *, bucket: str, benchmark: str,
+        self,
+        *,
+        bucket: str,
+        benchmark: str,
     ) -> list[str]:
         """Find every `<benchmark>/.../task.toml` key and return its
         parent prefix. One prefix per converted task. Matches the
@@ -176,7 +233,7 @@ class FakeObjectStore:
         instance_ids (HumanEval is `HumanEval/0`) round-trip correctly."""
         base = f"{benchmark}/"
         seen: set[str] = set()
-        for (b, k) in self.objects:
+        for b, k in self.objects:
             if b != bucket or not k.startswith(base):
                 continue
             if not k.endswith("/task.toml"):
@@ -185,22 +242,25 @@ class FakeObjectStore:
         return sorted(seen)
 
     async def download_prefix(
-        self, *, bucket: str, prefix: str, out_dir: Path,
+        self,
+        *,
+        bucket: str,
+        prefix: str,
+        out_dir: Path,
     ) -> int:
         """Stream every (bucket, key) where key startswith `prefix` into
         `out_dir`, preserving the suffix path. Used by the worker's
         materialize_task_dir test path."""
         if not prefix:
             raise ValueError(
-                "download_prefix requires a non-empty prefix; refusing "
-                "to drain entire bucket",
+                "download_prefix requires a non-empty prefix; refusing to drain entire bucket",
             )
         count = 0
         out_dir.mkdir(parents=True, exist_ok=True)
         for (b, k), body in self.objects.items():
             if b != bucket or not k.startswith(prefix):
                 continue
-            rel = k[len(prefix):].lstrip("/")
+            rel = k[len(prefix) :].lstrip("/")
             if not rel or _has_traversal(rel):
                 continue
             dest = out_dir / rel
@@ -259,7 +319,8 @@ class MinioObjectStore:
     @staticmethod
     def _configure_client_events(client: Any) -> None:
         client.meta.events.unregister(
-            "before-call.s3", botocore.handlers.add_expect_header,
+            "before-call.s3",
+            botocore.handlers.add_expect_header,
         )
         client.meta.events.register_last("before-call.s3", _remove_expect_header)
 
@@ -275,7 +336,7 @@ class MinioObjectStore:
         operation: str,
         call: Callable[[Any], _T],
     ) -> _T:
-        last_timeout: TimeoutError | None = None
+        last_retryable: BaseException | None = None
         for attempt in range(self._operation_attempts):
             client = self._client
             try:
@@ -284,15 +345,32 @@ class MinioObjectStore:
                     timeout=self._operation_timeout,
                 )
             except TimeoutError as exc:
-                last_timeout = exc
+                last_retryable = exc
                 self._replace_client(client)
                 if attempt + 1 == self._operation_attempts:
                     break
+            except (HTTPClientError, ConnectionError) as exc:
+                last_retryable = exc
+                self._replace_client(client)
+                if attempt + 1 == self._operation_attempts:
+                    break
+            except ClientError as exc:
+                if not _is_retryable_client_error(exc):
+                    raise
+                last_retryable = exc
+                self._replace_client(client)
+                if attempt + 1 == self._operation_attempts:
+                    break
+        detail = (
+            f": {type(last_retryable).__name__}: {last_retryable}"
+            if last_retryable is not None
+            else ""
+        )
         raise TimeoutError(
-            f"S3 {operation} timed out after "
-            f"{self._operation_timeout:g}s "
-            f"and {self._operation_attempts} attempt(s)",
-        ) from last_timeout
+            f"S3 {operation} failed after {self._operation_attempts} "
+            f"attempt(s) with per-attempt timeout "
+            f"{self._operation_timeout:g}s{detail}",
+        ) from last_retryable
 
     @property
     def _client_config(self) -> Config:
@@ -327,32 +405,48 @@ class MinioObjectStore:
         await self._run_client_call("ensure_bucket", _do)
 
     async def create_multipart_upload(
-        self, *, bucket: str, key: str,
+        self,
+        *,
+        bucket: str,
+        key: str,
     ) -> MultipartUpload:
         def _do(client: Any) -> str:
-            return cast(str, client.create_multipart_upload(
-                Bucket=bucket, Key=key,
-            )["UploadId"])
+            return cast(
+                str,
+                client.create_multipart_upload(
+                    Bucket=bucket,
+                    Key=key,
+                )["UploadId"],
+            )
+
         upload_id = await self._run_client_call("create_multipart_upload", _do)
         return MultipartUpload(bucket=bucket, key=key, upload_id=upload_id)
 
     async def upload_part(
-        self, upload: MultipartUpload, *, part_number: int, body: bytes,
+        self,
+        upload: MultipartUpload,
+        *,
+        part_number: int,
+        body: bytes,
     ) -> None:
         def _do(client: Any) -> str:
             resp = client.upload_part(
-                Bucket=upload.bucket, Key=upload.key,
-                PartNumber=part_number, UploadId=upload.upload_id,
+                Bucket=upload.bucket,
+                Key=upload.key,
+                PartNumber=part_number,
+                UploadId=upload.upload_id,
                 Body=body,
             )
             return cast(str, resp["ETag"])
+
         etag = await self._run_client_call("upload_part", _do)
         upload.parts.append((part_number, etag))
 
     async def complete_multipart_upload(self, upload: MultipartUpload) -> str:
         def _do(client: Any) -> None:
             client.complete_multipart_upload(
-                Bucket=upload.bucket, Key=upload.key,
+                Bucket=upload.bucket,
+                Key=upload.key,
                 UploadId=upload.upload_id,
                 MultipartUpload={
                     "Parts": [
@@ -361,19 +455,24 @@ class MinioObjectStore:
                     ],
                 },
             )
+
         await self._run_client_call("complete_multipart_upload", _do)
         return f"s3://{upload.bucket}/{upload.key}"
 
     async def abort_multipart_upload(self, upload: MultipartUpload) -> None:
         def _do(client: Any) -> None:
             client.abort_multipart_upload(
-                Bucket=upload.bucket, Key=upload.key, UploadId=upload.upload_id,
+                Bucket=upload.bucket,
+                Key=upload.key,
+                UploadId=upload.upload_id,
             )
+
         await self._run_client_call("abort_multipart_upload", _do)
 
     async def put_object(self, *, bucket: str, key: str, body: bytes) -> str:
         def _do(client: Any) -> None:
             client.put_object(Bucket=bucket, Key=key, Body=body)
+
         await self._run_client_call("put_object", _do)
         return f"s3://{bucket}/{key}"
 
@@ -381,27 +480,40 @@ class MinioObjectStore:
         def _do(client: Any) -> bytes:
             resp = client.get_object(Bucket=bucket, Key=key)
             return cast(bytes, resp["Body"].read())
+
         return await self._run_client_call("get_object", _do)
 
     async def presign_put(
-        self, *, bucket: str, key: str, expires_sec: int,
+        self,
+        *,
+        bucket: str,
+        key: str,
+        expires_sec: int,
     ) -> str:
         def _do(client: Any) -> str:
-            return cast(str, client.generate_presigned_url(
-                "put_object",
-                Params={"Bucket": bucket, "Key": key},
-                ExpiresIn=expires_sec,
-            ))
+            return cast(
+                str,
+                client.generate_presigned_url(
+                    "put_object",
+                    Params={"Bucket": bucket, "Key": key},
+                    ExpiresIn=expires_sec,
+                ),
+            )
+
         return await self._run_client_call("presign_put", _do)
 
     async def list_task_prefixes(
-        self, *, bucket: str, benchmark: str,
+        self,
+        *,
+        bucket: str,
+        benchmark: str,
     ) -> list[str]:
         """Walk `<benchmark>/` keys and infer per-task prefixes — each
         prefix maps to one converted task bundle. We can't use S3's
         Delimiter listing because some benchmarks have multi-segment
         instance_ids (HumanEval is `HumanEval/0`); we walk all keys
         and group by `task.toml`'s parent prefix."""
+
         def _do(client: Any) -> list[str]:
             paginator = client.get_paginator("list_objects_v2")
             base = f"{benchmark}/"
@@ -413,10 +525,15 @@ class MinioObjectStore:
                         continue
                     seen.add(key[: -len("task.toml")])
             return sorted(seen)
+
         return await self._run_client_call("list_task_prefixes", _do)
 
     async def download_prefix(
-        self, *, bucket: str, prefix: str, out_dir: Path,
+        self,
+        *,
+        bucket: str,
+        prefix: str,
+        out_dir: Path,
     ) -> int:
         """List + download every object under `prefix`. Uses S3's paginator
         because large benchmarks (SWE-Bench Verified is ~500 instances)
@@ -424,9 +541,9 @@ class MinioObjectStore:
         returns 1000-key pages."""
         if not prefix:
             raise ValueError(
-                "download_prefix requires a non-empty prefix; refusing "
-                "to drain entire bucket",
+                "download_prefix requires a non-empty prefix; refusing to drain entire bucket",
             )
+
         def _do(client: Any) -> int:
             paginator = client.get_paginator("list_objects_v2")
             count = 0
@@ -434,7 +551,7 @@ class MinioObjectStore:
             for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
                 for obj in page.get("Contents", []):
                     key = obj["Key"]
-                    rel = key[len(prefix):].lstrip("/")
+                    rel = key[len(prefix) :].lstrip("/")
                     if not rel or _has_traversal(rel):
                         continue
                     dest = out_dir / rel
@@ -442,4 +559,5 @@ class MinioObjectStore:
                     client.download_file(bucket, key, str(dest))
                     count += 1
             return count
+
         return await self._run_client_call("download_prefix", _do)

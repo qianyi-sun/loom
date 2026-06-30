@@ -33,15 +33,47 @@ UPDATE trials
  RETURNING id;
 """)
 
+_STALE_CLAIM_SQL = text("""
+UPDATE trials
+   SET state = 'queued',
+       worker_id = NULL,
+       next_attempt_at = NOW() + INTERVAL '1 second' * 30
+ WHERE state = 'claimed'
+   AND started_at IS NULL
+   AND claimed_at IS NOT NULL
+   AND claimed_at < NOW() - INTERVAL '1 second' * (:expiry_sec)::int
+ RETURNING id;
+""")
+
 
 async def reclaim_expired_workers(
-    session: AsyncSession, *, expiry_sec: int,
+    session: AsyncSession,
+    *,
+    expiry_sec: int,
+    claimed_without_start_expiry_sec: int | None = None,
 ) -> int:
     """Run a single sweep. Returns the number of trials reclaimed."""
-    rows = (await session.execute(_RECLAIM_SQL, {
-        "expiry_sec": expiry_sec,
-    })).all()
-    return len(rows)
+    expired_rows = (
+        await session.execute(
+            _RECLAIM_SQL,
+            {
+                "expiry_sec": expiry_sec,
+            },
+        )
+    ).all()
+    stale_count = 0
+    if claimed_without_start_expiry_sec is not None:
+        stale_count = len(
+            (
+                await session.execute(
+                    _STALE_CLAIM_SQL,
+                    {
+                        "expiry_sec": claimed_without_start_expiry_sec,
+                    },
+                )
+            ).all()
+        )
+    return len(expired_rows) + stale_count
 
 
 async def run_crash_detector_loop(
@@ -49,6 +81,7 @@ async def run_crash_detector_loop(
     session_factory: Any,
     expiry_sec: int,
     interval_sec: int,
+    claimed_without_start_expiry_sec: int | None = None,
 ) -> None:
     """Long-running task — sweeps every `interval_sec` seconds. Cancellation
     is the only way to stop it; lifespan teardown awaits the cancellation."""
@@ -56,7 +89,9 @@ async def run_crash_detector_loop(
         try:
             async with session_factory() as session:
                 count = await reclaim_expired_workers(
-                    session, expiry_sec=expiry_sec,
+                    session,
+                    expiry_sec=expiry_sec,
+                    claimed_without_start_expiry_sec=(claimed_without_start_expiry_sec),
                 )
                 await session.commit()
             if count:

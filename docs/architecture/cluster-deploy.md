@@ -46,6 +46,9 @@ for Postgres, MinIO, and worker trajectories, and binds the matching PVCs with
 exist yet, it accepts the static-host-path render config for first apply. If
 critical PVCs already exist, the live PV bindings win and must be Retain, not
 local-path provisioned, and hostPath volumes must sit under `/data/`.
+The same `--config` also gives schema-doctor the target rendered Deployments:
+preflight validates live Secrets, but it checks env-var drift against the
+manifest that will be applied rather than stale pods from the previous rollout.
 
 The SPA (`loom-web`) ships in the manifest set with `replicas: 0`; operators scale up when SPA work resumes.
 
@@ -624,8 +627,9 @@ loom cluster preflight \
 
 `loom cluster up` accepts the same environment and backup-manifest flags and
 threads them through preflight before apply. Pass the same `--config` so the
-preflight and rendered manifest prove the same storage boundary. `loom cluster
-down --with-volumes` and `--delete-namespace` refuse protected environments
+preflight and rendered manifest prove the same storage boundary and target
+schema surface. `loom cluster down --with-volumes` and `--delete-namespace`
+refuse protected environments
 unless the manifest is recent and the operator passes `--acknowledge-data-loss
 <environment>`. This guard distinguishes ordinary pod or service restarts from
 destructive state removal.

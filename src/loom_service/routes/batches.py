@@ -67,7 +67,6 @@ from loom_service.task_config_validation import (
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
 from loom_service.usage_accounting import (
     empty_usage_projection,
-    llm_call_counts_by_trial_id,
     price_snapshots_for_trials,
     summarize_llm_evidence_for_trials,
     summarize_usage_counts,
@@ -825,6 +824,23 @@ async def _llm_calls_for_trials(
     )
 
 
+async def _llm_call_counts_for_trials(
+    session: Any,
+    trials: Sequence[Trial],
+) -> dict[UUID, int]:
+    trial_ids = [trial.id for trial in trials]
+    if not trial_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(LlmCall.trial_id, func.count(LlmCall.id))
+            .where(LlmCall.trial_id.in_(trial_ids))
+            .group_by(LlmCall.trial_id),
+        )
+    ).all()
+    return {trial_id: int(count or 0) for trial_id, count in rows if trial_id is not None}
+
+
 async def _usage_by_batch_ids(
     session: Any,
     batch_ids: Sequence[UUID],
@@ -1053,6 +1069,16 @@ async def get_batch(
     request: Request,
     sc: SessionAndCtx,
     batch_id: UUID,
+    include_debug: Annotated[
+        bool,
+        Query(
+            description=(
+                "Include heavyweight debug_evidence and diagnosis payloads. "
+                "Defaults to false so large batch detail reads stay bounded; "
+                "use /debug or /diagnosis for targeted diagnostics."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     s, ctx = sc
     require_scope(ctx, "read:own")
@@ -1096,10 +1122,10 @@ async def get_batch(
         s,
         {trial.id for trial in original_trials},
     )
-    llm_calls = await _llm_calls_for_trials(s, original_trials)
+    llm_call_counts = await _llm_call_counts_for_trials(s, original_trials)
     llm_evidence = summarize_llm_evidence_for_trials(
         original_trials,
-        llm_call_counts=llm_call_counts_by_trial_id(llm_calls),
+        llm_call_counts=llm_call_counts,
     )
     benchmark_summary = await _benchmark_summary_from_trials(
         s,
@@ -1133,21 +1159,19 @@ async def get_batch(
     effective_summary = _summary_from_trials(effective_trials)
     effective_reward = _rollup_from_trials(effective_trials)
     effective_usage = await _usage_totals_for_trials(s, effective_trials)
-    effective_llm_calls = await _llm_calls_for_trials(s, effective_trials)
+    effective_llm_call_counts = await _llm_call_counts_for_trials(
+        s,
+        effective_trials,
+    )
     effective_llm_evidence = summarize_llm_evidence_for_trials(
         effective_trials,
-        llm_call_counts=llm_call_counts_by_trial_id(effective_llm_calls),
+        llm_call_counts=effective_llm_call_counts,
     )
     effective_price_snapshots = await price_snapshots_for_trials(
         s,
         {trial.id for trial in effective_trials},
     )
     rerunnable_failed_count = sum(1 for trial in original_trials if _is_rerunnable_failure(trial))
-    debug_evidence = build_batch_debug_evidence(
-        b,
-        trials=original_trials,
-        llm_calls=llm_calls,
-    )
     extra = {
         "rerun_batches": [
             {
@@ -1194,12 +1218,19 @@ async def get_batch(
         "price_snapshots": price_snapshots,
         "effective_price_snapshots": effective_price_snapshots,
         "benchmark_summary": benchmark_summary,
-        "debug_evidence": debug_evidence,
-        "diagnosis": build_batch_diagnosis(
+    }
+    if include_debug:
+        llm_calls = await _llm_calls_for_trials(s, original_trials)
+        debug_evidence = build_batch_debug_evidence(
+            b,
+            trials=original_trials,
+            llm_calls=llm_calls,
+        )
+        extra["debug_evidence"] = debug_evidence
+        extra["diagnosis"] = build_batch_diagnosis(
             debug_evidence,
             trial_failures=trial_failure_records(original_trials),
-        ),
-    }
+        )
 
     return _serialize(
         b,

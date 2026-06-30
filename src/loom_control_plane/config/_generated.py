@@ -20,6 +20,7 @@ class ControlPlaneSettings(BaseSettings):
     admin_secret_file: Path | None = None
     bind_host: str = "0.0.0.0"
     bind_port: int = 8080
+    claimed_without_start_expiry_sec: int = 300
     db_max_overflow: int = 40
     db_pool_size: int = 20
     db_pool_timeout_sec: float = 30.0

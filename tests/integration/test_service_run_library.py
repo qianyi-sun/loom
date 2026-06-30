@@ -31,6 +31,7 @@ from loom.db.schema import (
 )
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from loom_service.routes import run_library as run_library_routes
 
 
 @pytest.fixture
@@ -56,7 +57,8 @@ async def run_library_setup(
     engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
-        engine, expire_on_commit=False,
+        engine,
+        expire_on_commit=False,
     )
     app.state.minio_client = boto3.client(
         "s3",
@@ -102,64 +104,76 @@ async def run_library_setup(
     with sl() as s:
         s.execute(insert(Team).values(id=team_a, name="Alpha Research"))
         s.execute(insert(Team).values(id=team_b, name="Beta Apps"))
-        s.execute(insert(User).values(
-            id=user_a,
-            username="AlphaOwner",
-            username_normalized="alphaowner",
-            status="active",
-            is_platform_admin=False,
-        ))
-        s.execute(insert(User).values(
-            id=user_b,
-            username="BetaOwner",
-            username_normalized="betaowner",
-            status="active",
-            is_platform_admin=False,
-        ))
+        s.execute(
+            insert(User).values(
+                id=user_a,
+                username="AlphaOwner",
+                username_normalized="alphaowner",
+                status="active",
+                is_platform_admin=False,
+            )
+        )
+        s.execute(
+            insert(User).values(
+                id=user_b,
+                username="BetaOwner",
+                username_normalized="betaowner",
+                status="active",
+                is_platform_admin=False,
+            )
+        )
         s.execute(insert(TeamQuota).values(team_id=team_a))
         s.execute(insert(TeamQuota).values(team_id=team_b))
         for raw, team_id, user_id in (
             (raw_a, team_a, user_a),
             (raw_b, team_b, user_b),
         ):
-            s.execute(insert(Token).values(
-                token_hash=hashlib.sha256(raw.encode()).digest(),
+            s.execute(
+                insert(Token).values(
+                    token_hash=hashlib.sha256(raw.encode()).digest(),
+                    type="team",
+                    scopes=["read:own", "submit", "providers:manage"],
+                    team_id=team_id,
+                    created_by_user_id=user_id,
+                    issued_at=now,
+                    expires_at=None,
+                )
+            )
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(legacy_raw_b.encode()).digest(),
                 type="team",
                 scopes=["read:own", "submit", "providers:manage"],
-                team_id=team_id,
-                created_by_user_id=user_id,
+                team_id=team_b,
                 issued_at=now,
                 expires_at=None,
-            ))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(legacy_raw_b.encode()).digest(),
-            type="team",
-            scopes=["read:own", "submit", "providers:manage"],
-            team_id=team_b,
-            issued_at=now,
-            expires_at=None,
-        ))
-        s.execute(insert(Task).values(
-            id=task_id,
-            checksum="1" * 64,
-            config={"benchmark_id": "humaneval"},
-            source="local",
-        ))
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="1" * 64,
+                config={"benchmark_id": "humaneval"},
+                source="local",
+            )
+        )
         for conn_id, team_id, name in (
             (conn_a, team_a, "alpha-provider"),
             (conn_b, team_b, "beta-provider"),
         ):
-            s.execute(insert(ProviderConnection).values(
-                id=conn_id,
-                team_id=team_id,
-                provider_type="openai-compatible",
-                display_name=name,
-                base_url="https://api.example.test/v1",
-                upstream_host="api.example.test",
-                encrypted_api_key_ref=f"env:{name.upper().replace('-', '_')}",
-                created_by="test",
-                status="valid",
-            ))
+            s.execute(
+                insert(ProviderConnection).values(
+                    id=conn_id,
+                    team_id=team_id,
+                    provider_type="openai-compatible",
+                    display_name=name,
+                    base_url="https://api.example.test/v1",
+                    upstream_host="api.example.test",
+                    encrypted_api_key_ref=f"env:{name.upper().replace('-', '_')}",
+                    created_by="test",
+                    status="valid",
+                )
+            )
         common_config = {
             "agent_name": "litellm",
             "agent_model": {
@@ -173,217 +187,230 @@ async def run_library_setup(
             (batch_running, team_a, "running alpha run", "running", "org", "shared"),
             (batch_b, team_b, "beta team run", "finished", "team", "pending_scan"),
         ):
-            s.execute(insert(Batch).values(
-                id=batch_id,
-                team_id=team_id,
-                name=name,
+            s.execute(
+                insert(Batch).values(
+                    id=batch_id,
+                    team_id=team_id,
+                    name=name,
+                    description=None,
+                    task_filter={"subset_kind": "explicit", "task_ids": [task_id]},
+                    trial_config=common_config,
+                    state=state,
+                    result_status="succeeded" if state == "finished" else None,
+                    created_at=now,
+                    finished_at=now if state == "finished" else None,
+                    created_by_token_prefix="test:web",
+                    expected_trial_count=1,
+                    n_per_task=1,
+                    backend="docker",
+                    combinations=[],
+                    provider_connection_id=conn_a if team_id == team_a else conn_b,
+                    provider_model_id="gpt-4o-mini",
+                    visibility=visibility,
+                    share_status=share_status,
+                )
+            )
+        s.execute(
+            insert(Batch).values(
+                id=batch_default,
+                team_id=team_a,
+                name="default shared alpha run",
                 description=None,
                 task_filter={"subset_kind": "explicit", "task_ids": [task_id]},
                 trial_config=common_config,
-                state=state,
-                result_status="succeeded" if state == "finished" else None,
+                state="finished",
+                result_status="succeeded",
                 created_at=now,
-                finished_at=now if state == "finished" else None,
+                finished_at=now,
                 created_by_token_prefix="test:web",
                 expected_trial_count=1,
                 n_per_task=1,
                 backend="docker",
                 combinations=[],
-                provider_connection_id=conn_a if team_id == team_a else conn_b,
+                provider_connection_id=conn_a,
                 provider_model_id="gpt-4o-mini",
-                visibility=visibility,
-                share_status=share_status,
-            ))
-        s.execute(insert(Batch).values(
-            id=batch_default,
-            team_id=team_a,
-            name="default shared alpha run",
-            description=None,
-            task_filter={"subset_kind": "explicit", "task_ids": [task_id]},
-            trial_config=common_config,
-            state="finished",
-            result_status="succeeded",
-            created_at=now,
-            finished_at=now,
-            created_by_token_prefix="test:web",
-            expected_trial_count=1,
-            n_per_task=1,
-            backend="docker",
-            combinations=[],
-            provider_connection_id=conn_a,
-            provider_model_id="gpt-4o-mini",
-        ))
-        s.execute(insert(Trial).values(
-            id=trial_shared,
-            task_id=task_id,
-            team_id=team_a,
-            batch_id=batch_shared,
-            state="succeeded",
-            config=common_config,
-            requires_caps={},
-            submitted_at=now,
-            started_at=now,
-            finished_at=now,
-            result={"aggregate_reward": 1.0, "cost_usd": 0.02},
-            visibility="org",
-            share_status="shared",
-            trajectory_index={
-                "artifacts": [
-                    {
-                        "step_name": "main",
-                        "bucket": settings.artifacts_bucket,
-                        "key": safe_key,
-                        "size": 17,
-                        "role": "report",
-                        "share_status": "shared",
-                    },
-                    {
-                        "step_name": "main",
-                        "bucket": settings.artifacts_bucket,
-                        "key": blocked_key,
-                        "size": 21,
-                        "role": "raw_diagnostics",
-                        "share_status": "shared",
-                        "blocked_reason": "legacy field is stale",
-                    },
-                ],
-            },
-        ))
-        s.execute(insert(Trial).values(
-            id=trial_private,
-            task_id=task_id,
-            team_id=team_a,
-            batch_id=batch_private,
-            state="succeeded",
-            config=common_config,
-            requires_caps={},
-            submitted_at=now,
-            started_at=now,
-            finished_at=now,
-            result={"aggregate_reward": 0.5, "cost_usd": 0.01},
-            visibility="org",
-            share_status="shared",
-            trajectory_index={
-                "artifacts": [
-                    {
-                        "step_name": "main",
-                        "bucket": settings.artifacts_bucket,
-                        "key": private_key,
-                        "size": 17,
-                        "role": "report",
-                        "share_status": "shared",
-                    },
-                ],
-            },
-        ))
-        s.execute(insert(Artifact).values(
-            id=safe_artifact_id,
-            artifact_type="metric_table",
-            artifact_schema_version="1.0",
-            name="Alpha aggregate metrics",
-            team_id=team_a,
-            batch_id=batch_shared,
-            trial_id=trial_shared,
-            created_by={
-                "kind": "trial",
-                "batch_id": str(batch_shared),
-                "trial_id": str(trial_shared),
-            },
-            content_hash="sha256:" + ("a" * 64),
-            storage={
-                "backend": "object_store",
-                "bucket": settings.artifacts_bucket,
-                "key": safe_key,
-                "media_type": "application/json",
-                "size_bytes": 17,
-            },
-            visibility="org",
-            share_status="shared",
-            redaction_state="redacted",
-            safety_state="safe",
-            blocked_reason=None,
-            retention={"class": "shared_reusable", "expires_at": None},
-            provenance={
-                "batch_id": str(batch_shared),
-                "trial_id": str(trial_shared),
-                "source_trial_ids": [str(trial_shared)],
-                "agent": "litellm",
-                "model": "gpt-4o-mini",
-                "relation": "produced_from",
-            },
-            artifact_metadata={"metric_name": "aggregate_reward"},
-        ))
-        s.execute(insert(Artifact).values(
-            id=parent_artifact_id,
-            artifact_type="task_set",
-            artifact_schema_version="1.0",
-            name="Parent task set",
-            team_id=team_a,
-            created_by={"kind": "manual_import"},
-            content_hash="sha256:" + ("d" * 64),
-            storage={
-                "backend": "object_store",
-                "bucket": settings.artifacts_bucket,
-                "key": f"{team_a}/parents/task-set.json",
-                "media_type": "application/json",
-                "size_bytes": 12,
-            },
-            visibility="org",
-            share_status="shared",
-            redaction_state="redacted",
-            safety_state="safe",
-            blocked_reason=None,
-            retention={"class": "shared_reusable", "expires_at": None},
-            provenance={},
-            artifact_metadata={"task_count": 1},
-        ))
-        s.execute(insert(ArtifactLineageEdge).values(
-            child_artifact_id=safe_artifact_id,
-            parent_artifact_id=parent_artifact_id,
-            relation="produced_from",
-            edge_metadata={"source": "test"},
-        ))
-        s.execute(insert(Artifact).values(
-            id=blocked_artifact_id,
-            artifact_type="debug_bundle",
-            artifact_schema_version="1.0",
-            name="Unsafe debug bundle",
-            team_id=team_a,
-            batch_id=batch_shared,
-            trial_id=trial_shared,
-            created_by={
-                "kind": "trial",
-                "batch_id": str(batch_shared),
-                "trial_id": str(trial_shared),
-            },
-            content_hash="sha256:" + ("b" * 64),
-            storage={
-                "backend": "object_store",
-                "bucket": settings.artifacts_bucket,
-                "key": blocked_key,
-                "media_type": "text/plain",
-                "size_bytes": 21,
-            },
-            visibility="org",
-            share_status="shared",
-            redaction_state="blocked",
-            safety_state="unsafe",
-            blocked_reason="secret-like content detected",
-            retention={"class": "owner_only_debug", "expires_at": None},
-            provenance={
-                "batch_id": str(batch_shared),
-                "trial_id": str(trial_shared),
-                "source_trial_ids": [str(trial_shared)],
-                "relation": "produced_from",
-            },
-            artifact_metadata={"debug_kind": "raw_log"},
-        ))
+            )
+        )
+        s.execute(
+            insert(Trial).values(
+                id=trial_shared,
+                task_id=task_id,
+                team_id=team_a,
+                batch_id=batch_shared,
+                state="succeeded",
+                config=common_config,
+                requires_caps={},
+                submitted_at=now,
+                started_at=now,
+                finished_at=now,
+                result={"aggregate_reward": 1.0, "cost_usd": 0.02},
+                visibility="org",
+                share_status="shared",
+                trajectory_index={
+                    "artifacts": [
+                        {
+                            "step_name": "main",
+                            "bucket": settings.artifacts_bucket,
+                            "key": safe_key,
+                            "size": 17,
+                            "role": "report",
+                            "share_status": "shared",
+                        },
+                        {
+                            "step_name": "main",
+                            "bucket": settings.artifacts_bucket,
+                            "key": blocked_key,
+                            "size": 21,
+                            "role": "raw_diagnostics",
+                            "share_status": "shared",
+                            "blocked_reason": "legacy field is stale",
+                        },
+                    ],
+                },
+            )
+        )
+        s.execute(
+            insert(Trial).values(
+                id=trial_private,
+                task_id=task_id,
+                team_id=team_a,
+                batch_id=batch_private,
+                state="succeeded",
+                config=common_config,
+                requires_caps={},
+                submitted_at=now,
+                started_at=now,
+                finished_at=now,
+                result={"aggregate_reward": 0.5, "cost_usd": 0.01},
+                visibility="org",
+                share_status="shared",
+                trajectory_index={
+                    "artifacts": [
+                        {
+                            "step_name": "main",
+                            "bucket": settings.artifacts_bucket,
+                            "key": private_key,
+                            "size": 17,
+                            "role": "report",
+                            "share_status": "shared",
+                        },
+                    ],
+                },
+            )
+        )
+        s.execute(
+            insert(Artifact).values(
+                id=safe_artifact_id,
+                artifact_type="metric_table",
+                artifact_schema_version="1.0",
+                name="Alpha aggregate metrics",
+                team_id=team_a,
+                batch_id=batch_shared,
+                trial_id=trial_shared,
+                created_by={
+                    "kind": "trial",
+                    "batch_id": str(batch_shared),
+                    "trial_id": str(trial_shared),
+                },
+                content_hash="sha256:" + ("a" * 64),
+                storage={
+                    "backend": "object_store",
+                    "bucket": settings.artifacts_bucket,
+                    "key": safe_key,
+                    "media_type": "application/json",
+                    "size_bytes": 17,
+                },
+                visibility="org",
+                share_status="shared",
+                redaction_state="redacted",
+                safety_state="safe",
+                blocked_reason=None,
+                retention={"class": "shared_reusable", "expires_at": None},
+                provenance={
+                    "batch_id": str(batch_shared),
+                    "trial_id": str(trial_shared),
+                    "source_trial_ids": [str(trial_shared)],
+                    "agent": "litellm",
+                    "model": "gpt-4o-mini",
+                    "relation": "produced_from",
+                },
+                artifact_metadata={"metric_name": "aggregate_reward"},
+            )
+        )
+        s.execute(
+            insert(Artifact).values(
+                id=parent_artifact_id,
+                artifact_type="task_set",
+                artifact_schema_version="1.0",
+                name="Parent task set",
+                team_id=team_a,
+                created_by={"kind": "manual_import"},
+                content_hash="sha256:" + ("d" * 64),
+                storage={
+                    "backend": "object_store",
+                    "bucket": settings.artifacts_bucket,
+                    "key": f"{team_a}/parents/task-set.json",
+                    "media_type": "application/json",
+                    "size_bytes": 12,
+                },
+                visibility="org",
+                share_status="shared",
+                redaction_state="redacted",
+                safety_state="safe",
+                blocked_reason=None,
+                retention={"class": "shared_reusable", "expires_at": None},
+                provenance={},
+                artifact_metadata={"task_count": 1},
+            )
+        )
+        s.execute(
+            insert(ArtifactLineageEdge).values(
+                child_artifact_id=safe_artifact_id,
+                parent_artifact_id=parent_artifact_id,
+                relation="produced_from",
+                edge_metadata={"source": "test"},
+            )
+        )
+        s.execute(
+            insert(Artifact).values(
+                id=blocked_artifact_id,
+                artifact_type="debug_bundle",
+                artifact_schema_version="1.0",
+                name="Unsafe debug bundle",
+                team_id=team_a,
+                batch_id=batch_shared,
+                trial_id=trial_shared,
+                created_by={
+                    "kind": "trial",
+                    "batch_id": str(batch_shared),
+                    "trial_id": str(trial_shared),
+                },
+                content_hash="sha256:" + ("b" * 64),
+                storage={
+                    "backend": "object_store",
+                    "bucket": settings.artifacts_bucket,
+                    "key": blocked_key,
+                    "media_type": "text/plain",
+                    "size_bytes": 21,
+                },
+                visibility="org",
+                share_status="shared",
+                redaction_state="blocked",
+                safety_state="unsafe",
+                blocked_reason="secret-like content detected",
+                retention={"class": "owner_only_debug", "expires_at": None},
+                provenance={
+                    "batch_id": str(batch_shared),
+                    "trial_id": str(trial_shared),
+                    "source_trial_ids": [str(trial_shared)],
+                    "relation": "produced_from",
+                },
+                artifact_metadata={"debug_kind": "raw_log"},
+            )
+        )
         s.commit()
 
-    existing = {
-        bucket["Name"]
-        for bucket in app.state.minio_client.list_buckets()["Buckets"]
-    }
+    existing = {bucket["Name"] for bucket in app.state.minio_client.list_buckets()["Buckets"]}
     if settings.artifacts_bucket not in existing:
         app.state.minio_client.create_bucket(Bucket=settings.artifacts_bucket)
     app.state.minio_client.put_object(
@@ -456,7 +483,8 @@ async def test_run_library_defaults_to_my_team_and_all_teams_shows_shared_owner(
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         mine = await ac.get(
             "/api/v1/run-library/batches",
@@ -478,10 +506,7 @@ async def test_run_library_defaults_to_my_team_and_all_teams_shows_shared_owner(
     assert str(batch_private) not in ids
     assert str(batch_running) not in ids
 
-    shared = next(
-        item for item in all_teams.json()["items"]
-        if item["id"] == str(batch_shared)
-    )
+    shared = next(item for item in all_teams.json()["items"] if item["id"] == str(batch_shared))
     assert shared["owner_team"] == {
         "id": str(team_a),
         "name": "Alpha Research",
@@ -492,11 +517,47 @@ async def test_run_library_defaults_to_my_team_and_all_teams_shows_shared_owner(
     assert shared["artifact_summary"]["raw_diagnostics"] == 1
 
     default_shared = next(
-        item for item in all_teams.json()["items"]
-        if item["id"] == str(batch_default)
+        item for item in all_teams.json()["items"] if item["id"] == str(batch_default)
     )
     assert default_shared["visibility"] == "org"
     assert default_shared["share_status"] == "shared"
+
+
+async def test_run_library_batch_list_does_not_load_trials_without_artifact_filters(
+    run_library_setup: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = run_library_setup["app"]
+    raw_b = run_library_setup["raw_b"]
+    batch_shared = run_library_setup["batch_shared"]
+
+    original_batch_trials = run_library_routes._batch_trials
+    calls: list[UUID] = []
+
+    async def counting_batch_trials(session: object, batch_id: UUID) -> list[Trial]:
+        calls.append(batch_id)
+        return await original_batch_trials(session, batch_id)
+
+    monkeypatch.setattr(
+        run_library_routes,
+        "_batch_trials",
+        counting_batch_trials,
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        all_teams = await ac.get(
+            "/api/v1/run-library/batches?scope=all",
+            headers={"Authorization": f"Bearer {raw_b}"},
+        )
+
+    assert all_teams.status_code == 200, all_teams.text
+    ids = {item["id"] for item in all_teams.json()["items"]}
+    assert str(batch_shared) in ids
+    assert calls == []
 
 
 async def test_run_library_filters_by_structured_batch_fields(
@@ -593,7 +654,8 @@ async def test_run_library_filters_by_structured_batch_fields(
     )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             f"/api/v1/run-library/batches?{params}",
@@ -617,7 +679,8 @@ async def test_cross_team_shared_artifact_downloads_and_blocked_denials(
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
         follow_redirects=False,
     ) as ac:
         direct = await ac.get(
@@ -666,7 +729,8 @@ async def test_typed_registry_filters_detail_inventory_and_metadata_export(
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         batches = await ac.get(
             "/api/v1/run-library/batches",
@@ -733,11 +797,13 @@ async def test_typed_registry_filters_detail_inventory_and_metadata_export(
     assert artifact["redaction_state"] == "redacted"
     assert artifact["content_hash"] == "sha256:" + ("a" * 64)
     assert artifact["metadata"] == {"metric_name": "aggregate_reward"}
-    assert artifact["parents"] == [{
-        "artifact_id": str(parent_artifact_id),
-        "relation": "produced_from",
-        "metadata": {"source": "test"},
-    }]
+    assert artifact["parents"] == [
+        {
+            "artifact_id": str(parent_artifact_id),
+            "relation": "produced_from",
+            "metadata": {"source": "test"},
+        }
+    ]
     assert artifact["download_url"].endswith(
         f"/api/v1/run-library/trials/{trial_id}/artifacts/download?key="
         f"{safe_key.replace('/', '%2F')}",
@@ -750,17 +816,13 @@ async def test_typed_registry_filters_detail_inventory_and_metadata_export(
         "name": "Alpha Research",
     }
     inventory = detail_json["artifact_inventory"]
-    metric = next(
-        item for item in inventory["reports"]
-        if item["id"] == str(safe_artifact_id)
-    )
+    metric = next(item for item in inventory["reports"] if item["id"] == str(safe_artifact_id))
     assert metric["artifact_type_label"] == "Metric table"
     assert metric["owner_team"]["name"] == "Alpha Research"
     assert metric["source"]["trial_id"] == str(trial_id)
     assert metric["safety_state"] == "safe"
     unsafe = next(
-        item for item in inventory["raw_diagnostics"]
-        if item["id"] == str(blocked_artifact_id)
+        item for item in inventory["raw_diagnostics"] if item["id"] == str(blocked_artifact_id)
     )
     assert unsafe["artifact_type"] == "debug_bundle"
     assert unsafe["safety_state"] == "unsafe"
@@ -774,7 +836,8 @@ async def test_typed_registry_filters_detail_inventory_and_metadata_export(
 
     assert owner_detail.status_code == 200, owner_detail.text
     owner_unsafe = next(
-        item for item in owner_detail.json()["artifact_inventory"]["raw_diagnostics"]
+        item
+        for item in owner_detail.json()["artifact_inventory"]["raw_diagnostics"]
         if item["id"] == str(blocked_artifact_id)
     )
     assert owner_unsafe["storage"]["key"].endswith("/debug.log")
@@ -789,6 +852,42 @@ async def test_typed_registry_filters_detail_inventory_and_metadata_export(
     assert [item["id"] for item in lines] == [str(safe_artifact_id)]
     assert str(blocked_artifact_id) not in exported.text
     assert "sk-test-should-not-leak" not in exported.text
+
+
+async def test_run_library_batch_detail_default_does_not_materialize_llm_calls(
+    run_library_setup: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_service.routes import run_library as run_library_routes
+
+    app = run_library_setup["app"]
+    raw_b = run_library_setup["raw_b"]
+    batch_shared = run_library_setup["batch_shared"]
+
+    async def fail_if_full_rows_are_loaded(*_args: object, **_kwargs: object) -> list:
+        raise AssertionError("default Run Library detail should not load LlmCall rows")
+
+    monkeypatch.setattr(
+        run_library_routes,
+        "_llm_calls_for_trials",
+        fail_if_full_rows_are_loaded,
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        detail = await ac.get(
+            f"/api/v1/run-library/batches/{batch_shared}",
+            headers={"Authorization": f"Bearer {raw_b}"},
+        )
+
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert "artifact_inventory" in body
+    assert "debug_evidence" not in body
+    assert "diagnosis" not in body
 
 
 async def test_artifact_filter_is_applied_before_batch_limit(
@@ -814,76 +913,83 @@ async def test_artifact_filter_is_applied_before_batch_limit(
             (newer_batch, newer_trial, 1, "newer nonmatching batch"),
         ):
             created = now.replace(microsecond=created_offset)
-            conn.execute(insert(Batch).values(
-                id=batch_id,
+            conn.execute(
+                insert(Batch).values(
+                    id=batch_id,
+                    team_id=team_a,
+                    name=name,
+                    description=None,
+                    task_filter={"subset_kind": "explicit", "task_ids": ["t"]},
+                    trial_config={},
+                    state="finished",
+                    result_status="succeeded",
+                    created_at=created,
+                    finished_at=created,
+                    created_by_token_prefix="test:web",
+                    expected_trial_count=1,
+                    backend="docker",
+                    combinations=[],
+                    provider_connection_id=conn_a,
+                    provider_model_id="gpt-4o-mini",
+                    visibility="org",
+                    share_status="shared",
+                )
+            )
+            conn.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_a,
+                    batch_id=batch_id,
+                    task_id=task_id,
+                    config={},
+                    requires_caps={},
+                    state="succeeded",
+                    submitted_at=created,
+                    started_at=created,
+                    finished_at=created,
+                    result={"aggregate_reward": 1.0},
+                    visibility="org",
+                    share_status="shared",
+                )
+            )
+        conn.execute(
+            insert(Artifact).values(
+                id=metric_artifact,
+                artifact_type="training_data_export",
+                artifact_schema_version="1.0",
+                name="older export",
                 team_id=team_a,
-                name=name,
-                description=None,
-                task_filter={"subset_kind": "explicit", "task_ids": ["t"]},
-                trial_config={},
-                state="finished",
-                result_status="succeeded",
-                created_at=created,
-                finished_at=created,
-                created_by_token_prefix="test:web",
-                expected_trial_count=1,
-                backend="docker",
-                combinations=[],
-                provider_connection_id=conn_a,
-                provider_model_id="gpt-4o-mini",
+                batch_id=older_batch,
+                trial_id=older_trial,
+                created_by={"kind": "trial", "trial_id": str(older_trial)},
+                content_hash="sha256:" + ("c" * 64),
+                storage={
+                    "backend": "object_store",
+                    "bucket": "artifacts",
+                    "key": f"{team_a}/{older_trial}/main/export.jsonl",
+                    "media_type": "application/json",
+                    "size_bytes": 2,
+                },
                 visibility="org",
                 share_status="shared",
-            ))
-            conn.execute(insert(Trial).values(
-                id=trial_id,
-                team_id=team_a,
-                batch_id=batch_id,
-                task_id=task_id,
-                config={},
-                requires_caps={},
-                state="succeeded",
-                submitted_at=created,
-                started_at=created,
-                finished_at=created,
-                result={"aggregate_reward": 1.0},
-                visibility="org",
-                share_status="shared",
-            ))
-        conn.execute(insert(Artifact).values(
-            id=metric_artifact,
-            artifact_type="training_data_export",
-            artifact_schema_version="1.0",
-            name="older export",
-            team_id=team_a,
-            batch_id=older_batch,
-            trial_id=older_trial,
-            created_by={"kind": "trial", "trial_id": str(older_trial)},
-            content_hash="sha256:" + ("c" * 64),
-            storage={
-                "backend": "object_store",
-                "bucket": "artifacts",
-                "key": f"{team_a}/{older_trial}/main/export.jsonl",
-                "media_type": "application/json",
-                "size_bytes": 2,
-            },
-            visibility="org",
-            share_status="shared",
-            redaction_state="redacted",
-            safety_state="safe",
-            retention={"class": "shared_reusable"},
-            provenance={
-                "batch_id": str(older_batch),
-                "trial_id": str(older_trial),
-                "relation": "produced_from",
-            },
-            artifact_metadata={},
-            created_at=now,
-        ))
+                redaction_state="redacted",
+                safety_state="safe",
+                retention={"class": "shared_reusable"},
+                provenance={
+                    "batch_id": str(older_batch),
+                    "trial_id": str(older_trial),
+                    "relation": "produced_from",
+                },
+                artifact_metadata={},
+                created_at=now,
+            )
+        )
     sync_engine.dispose()
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/run-library/batches",
@@ -914,7 +1020,8 @@ async def test_typed_registry_policy_controls_reuse_and_records_provenance(
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         reused = await ac.post(
             f"/api/v1/run-library/trials/{trial_id}/artifacts/reuse",
@@ -972,7 +1079,8 @@ async def test_clone_config_uses_destination_provider_and_records_provenance(
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         cloned = await ac.post(
             f"/api/v1/run-library/batches/{batch_shared}/clone-config",
@@ -1019,7 +1127,8 @@ async def test_legacy_team_token_cannot_clone_run_library_batch(
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         cloned = await ac.post(
             f"/api/v1/run-library/batches/{batch_shared}/clone-config",
@@ -1044,7 +1153,8 @@ async def test_legacy_team_token_cannot_reuse_run_library_artifact(
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         reused = await ac.post(
             f"/api/v1/run-library/trials/{trial_id}/artifacts/reuse",
@@ -1067,7 +1177,8 @@ async def test_reuse_shared_artifact_creates_provenance_and_blocks_raw(
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         reused = await ac.post(
             f"/api/v1/run-library/trials/{trial_id}/artifacts/reuse",

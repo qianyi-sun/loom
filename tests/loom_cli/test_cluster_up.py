@@ -241,6 +241,7 @@ def _all_ready_status(ns: str = "loom") -> ClusterStatus:
 def _patch_full_up_path(
     monkeypatch: pytest.MonkeyPatch, *,
     preflight_any_fail: bool = False,
+    target_doctor_fail: bool = False,
     apply_returncode: int = 0,
     final_ready: bool = True,
 ) -> dict[str, Any]:
@@ -273,6 +274,28 @@ def _patch_full_up_path(
 
     monkeypatch.setattr(
         "loom_cli.cluster_cmd.collect_preflight", _collect_preflight,
+    )
+
+    def _append_target_schema_doctor_check(report, **kwargs):  # type: ignore[no-untyped-def]
+        captures["target_doctor_called"] = True
+        from loom_cli.cluster_cmd import PreflightCheck
+
+        report.checks.append(PreflightCheck(
+            name="schema-doctor",
+            outcome="fail" if target_doctor_fail else "pass",
+            detail=(
+                "1 schema violation(s)"
+                if target_doctor_fail else "schema reconciliation clean"
+            ),
+            remediation=(
+                "  - missing_env: LOOM_CP_EXAMPLE: Rendered Deployment missing env"
+                if target_doctor_fail else None
+            ),
+        ))
+
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._append_target_schema_doctor_check",
+        _append_target_schema_doctor_check,
     )
 
     def _apply(yaml_text, ns, *, context, extra_args=()):  # type: ignore[no-untyped-def]
@@ -319,6 +342,7 @@ def test_cli_up_happy_path(
     rc = main(["cluster", "up"])
     assert rc == 0
     assert captures.get("preflight_called") is True
+    assert captures.get("target_doctor_called") is True
     assert captures.get("waited") is True
     out = capsys.readouterr().out
     assert "Preflight" in out
@@ -338,6 +362,22 @@ def test_cli_up_preflight_fail_blocks_apply(
     err = capsys.readouterr().err
     assert "preflight checks failed" in err
     # Apply MUST NOT have been called.
+    assert "apply_ns" not in captures
+
+
+def test_cli_up_target_schema_doctor_fail_blocks_apply(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captures = _patch_full_up_path(monkeypatch, target_doctor_fail=True)
+
+    rc = main(["cluster", "up"])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "preflight checks failed" in err
+    assert "schema-doctor" in err
+    assert captures.get("target_doctor_called") is True
     assert "apply_ns" not in captures
 
 

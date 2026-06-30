@@ -258,14 +258,16 @@ async def test_legacy_team_token_cannot_create_batch(
     legacy_raw = f"loom_team_{uuid4().hex}"
     sync_engine = create_engine(postgres_url)
     with sync_engine.begin() as conn:
-        conn.execute(insert(Token).values(
-            token_hash=hashlib.sha256(legacy_raw.encode()).digest(),
-            type="team",
-            scopes=["read:own", "submit"],
-            team_id=team_id,
-            issued_at=datetime.now(UTC),
-            expires_at=None,
-        ))
+        conn.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(legacy_raw.encode()).digest(),
+                type="team",
+                scopes=["read:own", "submit"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
+            )
+        )
     sync_engine.dispose()
 
     transport = httpx.ASGITransport(app=app)
@@ -1681,7 +1683,7 @@ async def test_get_batch_detail_marks_real_provider_zero_call_evidence_invalid(
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
         r = await ac.get(
-            f"/api/v1/batches/{batch_id}",
+            f"/api/v1/batches/{batch_id}?include_debug=true",
             headers={"Authorization": f"Bearer {raw}"},
         )
 
@@ -1801,9 +1803,7 @@ async def test_get_batch_detail_includes_per_benchmark_rollup(
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["aggregate_reward"] == pytest.approx(0.5)
-    summary_by_id = {
-        row["benchmark_id"]: row for row in body["benchmark_summary"]
-    }
+    summary_by_id = {row["benchmark_id"]: row for row in body["benchmark_summary"]}
     assert set(summary_by_id) == {"humaneval-420", "mbpp-420"}
 
     humaneval = summary_by_id["humaneval-420"]
@@ -1889,7 +1889,7 @@ async def test_get_batch_detail_exposes_fanout_failure(
     assert "X-Amz-Signature=secret" not in body["failure_message"]
     assert body["fanout_errors"][0]["task_id"] == "local/mit-0"
     assert "loom_api_supersecret" not in json.dumps(body["fanout_errors"])
-    assert "debug_evidence" in body
+    assert "debug_evidence" not in body
 
     assert debug.status_code == 200, debug.text
     evidence = debug.json()
@@ -1902,9 +1902,7 @@ async def test_get_batch_detail_exposes_fanout_failure(
     assert evidence["failure"]["attribution"] == "platform"
     assert evidence["lifecycle"]["state"] == "finished"
     assert evidence["task_selection"]["expected_trial_count"] == 0
-    assert evidence["task_selection"]["fanout_errors"][0]["task_id"] == (
-        "local/mit-0"
-    )
+    assert evidence["task_selection"]["fanout_errors"][0]["task_id"] == ("local/mit-0")
     rendered = json.dumps(evidence)
     assert "loom_api_supersecret" not in rendered
     assert "loom-control-plane" not in rendered
@@ -2025,8 +2023,7 @@ async def test_batch_diagnosis_clusters_failed_trials(
                     finished_at=now,
                     failure_reason=reason,
                     failure_message=(
-                        "provider returned error with "
-                        "Authorization: Bearer loom_api_supersecret"
+                        "provider returned error with Authorization: Bearer loom_api_supersecret"
                     ),
                 )
             )
@@ -2059,18 +2056,155 @@ async def test_batch_diagnosis_clusters_failed_trials(
     assert body["primary_cause"]["affected_ratio"] == pytest.approx(0.75)
     assert body["reason_clusters"][0]["reason_code"] == "trial.gateway_error"
     assert body["reason_clusters"][0]["count"] == 3
-    assert body["reason_clusters"][0]["representative_trial_id"] == (
-        str(trial_ids[0])
-    )
+    assert body["reason_clusters"][0]["representative_trial_id"] == (str(trial_ids[0]))
     assert "not reliable" in body["impact"]
-    assert any(
-        action.get("action") == "rerun_failed"
-        for action in body["next_actions"]
-    )
+    assert any(action.get("action") == "rerun_failed" for action in body["next_actions"])
     assert "loom_api_supersecret" not in json.dumps(body)
 
     assert detail.status_code == 200, detail.text
-    assert detail.json()["diagnosis"]["primary_cause"] == body["primary_cause"]
+    assert "diagnosis" not in detail.json()
+
+
+async def test_batch_detail_omits_heavy_debug_by_default_and_includes_on_request(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+    now = datetime.now(UTC)
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="debug-opt-in",
+                task_filter={"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+                trial_config={},
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=1,
+                result_status="all_failed",
+                finished_at=now,
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=uuid4(),
+                batch_id=batch_id,
+                team_id=team_id,
+                task_id="local/mit-0",
+                state="failed",
+                config={},
+                requires_caps={},
+                submitted_at=now,
+                started_at=now,
+                finished_at=now,
+                failure_reason="gateway_error",
+                failure_message="provider disconnected",
+            )
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        default = await ac.get(
+            f"/api/v1/batches/{batch_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        opt_in = await ac.get(
+            f"/api/v1/batches/{batch_id}?include_debug=true",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert default.status_code == 200, default.text
+    default_body = default.json()
+    assert "debug_evidence" not in default_body
+    assert "diagnosis" not in default_body
+
+    assert opt_in.status_code == 200, opt_in.text
+    opt_in_body = opt_in.json()
+    assert opt_in_body["debug_evidence"]["entity"]["id"] == str(batch_id)
+    assert opt_in_body["diagnosis"]["primary_cause"]["reason_code"] == ("trial.gateway_error")
+
+
+async def test_batch_detail_default_does_not_materialize_llm_call_rows(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_service.routes import batches as batch_routes
+
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+    now = datetime.now(UTC)
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="lightweight-detail",
+                task_filter={"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+                trial_config={
+                    "agent_name": "codex",
+                    "agent_model": {"provider": "openai", "name": "qwen"},
+                },
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=1,
+                result_status="succeeded",
+                finished_at=now,
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=uuid4(),
+                batch_id=batch_id,
+                team_id=team_id,
+                task_id="local/mit-0",
+                state="succeeded",
+                config={
+                    "agent_name": "codex",
+                    "agent_model": {"provider": "openai", "name": "qwen"},
+                },
+                requires_caps={},
+                submitted_at=now,
+                started_at=now,
+                finished_at=now,
+                result={"aggregate_reward": 1.0},
+            )
+        )
+    sync_engine.dispose()
+
+    async def fail_if_full_rows_are_loaded(*_args: object, **_kwargs: object) -> list:
+        raise AssertionError("default batch detail should not load LlmCall rows")
+
+    monkeypatch.setattr(
+        batch_routes,
+        "_llm_calls_for_trials",
+        fail_if_full_rows_are_loaded,
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        response = await ac.get(
+            f"/api/v1/batches/{batch_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["llm_calls_count"] == 0
+    assert body["llm_evidence_status"] == "no_calls_invalid"
 
 
 async def test_rerun_failed_batch_creates_linked_exact_targets(
@@ -2178,14 +2312,16 @@ async def test_legacy_team_token_cannot_rerun_failed_batch(
 
     sync_engine = create_engine(postgres_url)
     with sync_engine.begin() as conn:
-        conn.execute(insert(Token).values(
-            token_hash=hashlib.sha256(legacy_raw.encode()).digest(),
-            type="team",
-            scopes=["read:own", "submit"],
-            team_id=team_id,
-            issued_at=datetime.now(UTC),
-            expires_at=None,
-        ))
+        conn.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(legacy_raw.encode()).digest(),
+                type="team",
+                scopes=["read:own", "submit"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
+            )
+        )
         conn.execute(
             insert(Batch).values(
                 id=batch_id,
@@ -2526,7 +2662,8 @@ async def test_post_batch_rejects_oracle_against_non_pytest_tasks(
 
     transport = httpx.ASGITransport(app=_app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/batches",
@@ -2576,7 +2713,8 @@ async def test_post_batch_allows_oracle_against_terminal_bench_tasks(
 
     transport = httpx.ASGITransport(app=_app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/batches",
@@ -2605,7 +2743,8 @@ async def test_post_batch_allows_oracle_against_pytest_tasks(
     _app, raw, _team_id = camp_setup
     transport = httpx.ASGITransport(app=_app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/batches",
@@ -2648,7 +2787,8 @@ async def test_post_batch_does_not_filter_when_agent_has_no_requirements(
 
     transport = httpx.ASGITransport(app=_app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/batches",
@@ -2662,7 +2802,8 @@ async def test_post_batch_does_not_filter_when_agent_has_no_requirements(
                 "trial_config": {
                     "agent_name": "litellm",
                     "agent_model": {
-                        "provider": "openai", "name": "gpt-4o-mini",
+                        "provider": "openai",
+                        "name": "gpt-4o-mini",
                     },
                 },
             },

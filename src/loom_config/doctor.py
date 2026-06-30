@@ -40,27 +40,10 @@ def reconcile(schema: Schema, core_v1_api: Any, namespace: str) -> DoctorReport:
     `core_v1_api` is a `kubernetes.client.CoreV1Api` instance.
     """
     violations: list[DoctorViolation] = []
-    secret = core_v1_api.read_namespaced_secret(
-        name="loom-secrets", namespace=namespace,
-    )
-    secret_keys = set((secret.data or {}).keys())
+    secret_keys = _read_secret_keys(core_v1_api, namespace)
 
     # 1) every required secret key exists
-    expected_secret_keys: dict[str, str] = {}  # key → entry name
-    for name in schema.service_config:
-        entry = schema.service_config[name]
-        if entry.secret is None or not entry.required:
-            continue
-        for svc in entry.used_by:
-            k = entry.secret_key_for(svc)
-            expected_secret_keys[k] = name
-    for k, entry_name in expected_secret_keys.items():
-        if k not in secret_keys:
-            violations.append(DoctorViolation(
-                entry=entry_name,
-                kind="missing_secret",
-                detail=f"Secret key {k!r} not in loom-secrets/{namespace}",
-            ))
+    violations.extend(_secret_violations(schema, secret_keys, namespace))
 
     # 2) every declared env var present in each pod
     pods = core_v1_api.list_namespaced_pod(namespace=namespace).items
@@ -79,22 +62,47 @@ def reconcile(schema: Schema, core_v1_api: Any, namespace: str) -> DoctorReport:
                 ))
 
     # 3) orphan secrets (key in loom-secrets but no schema entry refs it)
-    # Collect all keys declared in schema (required + optional service_config,
-    # and infra_secrets for 3rd-party containers like postgres).
-    referenced_keys: set[str] = set()
-    for name in schema.service_config:
-        entry = schema.service_config[name]
-        if entry.secret is None:
-            continue
-        for svc in entry.used_by:
-            referenced_keys.add(entry.secret_key_for(svc))
-    referenced_keys.update(schema.infra_secrets)
-    for k in secret_keys - referenced_keys:
-        violations.append(DoctorViolation(
-            entry=k, kind="orphan_secret",
-            detail=f"Secret key {k!r} present but unreferenced by schema",
-        ))
+    violations.extend(_orphan_secret_violations(schema, secret_keys))
 
+    return DoctorReport(violations=violations)
+
+
+def reconcile_rendered(
+    schema: Schema,
+    core_v1_api: Any,
+    namespace: str,
+    rendered_manifests: str,
+) -> DoctorReport:
+    """Reconcile schema against the target rendered manifests.
+
+    `loom cluster preflight --config` runs before the new Deployment is
+    applied. Checking live pods for newly-added env vars would block every
+    legitimate rollout that introduces a schema-backed env. This variant keeps
+    live Secret validation but checks Deployment container env against the
+    target manifests that `loom cluster up` is about to apply.
+    """
+    violations: list[DoctorViolation] = []
+    secret_keys = _read_secret_keys(core_v1_api, namespace)
+    violations.extend(_secret_violations(schema, secret_keys, namespace))
+
+    for deployment_name, service_envs in _rendered_deployment_envs(
+        schema,
+        rendered_manifests,
+    ).items():
+        for svc, container_envs in service_envs.items():
+            expected = _expected_env_vars_for_service(schema, svc)
+            for container_name, present in container_envs.items():
+                for missing in expected - present:
+                    violations.append(DoctorViolation(
+                        entry=missing,
+                        kind="missing_env",
+                        detail=(
+                            f"Rendered Deployment {deployment_name} container "
+                            f"{container_name} missing env {missing}"
+                        ),
+                    ))
+
+    violations.extend(_orphan_secret_violations(schema, secret_keys))
     return DoctorReport(violations=violations)
 
 
@@ -117,11 +125,119 @@ def _entry_emits_env_by_default(entry: ServiceConfigEntry) -> bool:
     )
 
 
+def _read_secret_keys(core_v1_api: Any, namespace: str) -> set[str]:
+    secret = core_v1_api.read_namespaced_secret(
+        name="loom-secrets", namespace=namespace,
+    )
+    return set((secret.data or {}).keys())
+
+
+def _secret_violations(
+    schema: Schema,
+    secret_keys: set[str],
+    namespace: str,
+) -> list[DoctorViolation]:
+    expected_secret_keys: dict[str, str] = {}  # key -> entry name
+    for name in schema.service_config:
+        entry = schema.service_config[name]
+        if entry.secret is None or not entry.required:
+            continue
+        for svc in entry.used_by:
+            expected_secret_keys[entry.secret_key_for(svc)] = name
+
+    violations: list[DoctorViolation] = []
+    for key, entry_name in expected_secret_keys.items():
+        if key not in secret_keys:
+            violations.append(DoctorViolation(
+                entry=entry_name,
+                kind="missing_secret",
+                detail=f"Secret key {key!r} not in loom-secrets/{namespace}",
+            ))
+    return violations
+
+
+def _orphan_secret_violations(
+    schema: Schema,
+    secret_keys: set[str],
+) -> list[DoctorViolation]:
+    referenced_keys: set[str] = set()
+    for name in schema.service_config:
+        entry = schema.service_config[name]
+        if entry.secret is None:
+            continue
+        for svc in entry.used_by:
+            referenced_keys.add(entry.secret_key_for(svc))
+    referenced_keys.update(schema.infra_secrets)
+    return [
+        DoctorViolation(
+            entry=key,
+            kind="orphan_secret",
+            detail=f"Secret key {key!r} present but unreferenced by schema",
+        )
+        for key in secret_keys - referenced_keys
+    ]
+
+
+def _rendered_deployment_envs(
+    schema: Schema,
+    rendered_manifests: str,
+) -> dict[str, dict[str, dict[str, set[str]]]]:
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ModuleNotFoundError as exc:  # pragma: no cover - cluster extra provides it
+        raise RuntimeError(
+            "the 'yaml' package is required for rendered schema reconciliation",
+        ) from exc
+
+    deployments: dict[str, dict[str, dict[str, set[str]]]] = {}
+    for doc in yaml.safe_load_all(rendered_manifests):
+        if not isinstance(doc, dict) or doc.get("kind") != "Deployment":
+            continue
+        metadata = doc.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        deployment_name = metadata.get("name")
+        if not isinstance(deployment_name, str):
+            continue
+        svc = _service_from_workload_name(deployment_name, schema.service_prefix)
+        if svc is None:
+            continue
+        containers = (
+            doc.get("spec", {})
+            .get("template", {})
+            .get("spec", {})
+            .get("containers", [])
+        )
+        if not isinstance(containers, list):
+            continue
+        service_envs: dict[str, set[str]] = {}
+        for index, container in enumerate(containers):
+            if not isinstance(container, dict):
+                continue
+            container_name = container.get("name")
+            if not isinstance(container_name, str):
+                container_name = f"container-{index}"
+            env = container.get("env", [])
+            names = {
+                entry.get("name")
+                for entry in env
+                if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+            }
+            service_envs[container_name] = names
+        deployments[deployment_name] = {svc: service_envs}
+    return deployments
+
+
 def _service_from_pod_name(name: str | None, prefix: Mapping[str, str]) -> str | None:
     """Pods are named `loom-<service>-...`. Find which service this is."""
     if name is None:
         return None
+    return _service_from_workload_name(name, prefix)
+
+
+def _service_from_workload_name(name: str, prefix: Mapping[str, str]) -> str | None:
     for svc in prefix:
-        if name.startswith(f"loom-{svc}-") or name == f"loom-{svc}":
+        workload_name = svc if svc.startswith("loom-") else f"loom-{svc}"
+        if name.startswith(f"{workload_name}-") or name == workload_name:
             return svc
     return None

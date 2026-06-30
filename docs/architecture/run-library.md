@@ -59,7 +59,11 @@ legacy artifact JSON still says `share_status = "shared"`.
   caller's team. `scope=all` shows the caller's team plus org-shared completed
   runs from other teams; platform admins can inspect all rows. Artifact-level
   filters include `artifact_type`, `owner_team_id`, `source_batch_id`,
-  `source_trial_id`, `safety_state`, and `provenance_relation`.
+  `source_trial_id`, `safety_state`, and `provenance_relation`. The default
+  list path returns lightweight batch metadata plus bulk-computed trial,
+  reward, cost, and typed-artifact summaries for the current page; it does not
+  materialize every trial trajectory or the full artifact inventory for large
+  historical batches.
 - `GET /api/v1/run-library/batches/{batch_id}`: detail view with owner-team
   label, task/config summary data, deterministic diagnosis, redacted batch
   debug evidence, provenance, trial rollup, and grouped typed artifact

@@ -226,7 +226,7 @@ Each verb:
 
 | Command | What it does | Exit codes |
 |---|---|---|
-| `loom cluster preflight` | API-side checks: namespace exists, required Secrets present, IngressClass installed, default StorageClass available, PSS labels OK, and schema-doctor reconciliation for rendered env/Secret drift. Protected environments also check the live critical PVC/PV storage boundary and a recent backup manifest; pass `--config cluster-config.toml` so first deploys can prove static host-path Retain PVs before the PVCs exist. Optional runtime-derived worker env such as hostname, idle-exit, fixtures root, benchmark cache, and blocking-I/O executor override may stay unset. | 0 pass / 1 fail / 2 cluster unreachable |
+| `loom cluster preflight` | API-side checks: namespace exists, required Secrets present, IngressClass installed, default StorageClass available, PSS labels OK, and schema-doctor reconciliation for rendered env/Secret drift. With `--config`, preflight validates live `loom-secrets` but checks env vars against the target rendered Deployments so rollouts that add schema-backed env vars are not blocked by old live pods. Protected environments also check the live critical PVC/PV storage boundary and a recent backup manifest; pass `--config cluster-config.toml` so first deploys can prove static host-path Retain PVs before the PVCs exist. Optional runtime-derived worker env such as hostname, idle-exit, fixtures root, benchmark cache, and blocking-I/O executor override may stay unset. | 0 pass / 1 fail / 2 cluster unreachable |
 | `loom cluster backup manifest/check` | Write or verify metadata-only backup manifests for public-beta/staging destructive-operation guards | 0 verified / 1 invalid manifest / 2 bad input |
 | `loom cluster render` | Print the rendered YAML to stdout (no cluster contact) | 0 / 2 on bad config |
 | `loom cluster audit` | Static public/internal boundary check on rendered manifests: TLS ingress, only `/api/v1` → `loom-service` and `/` → `loom-web`, no LoadBalancer/NodePort, no unsafe hostPort, required NetworkPolicies present | 0 clean / 1 violation / 2 bad config |
@@ -825,6 +825,7 @@ increase queued connections without removing the token-row write hotspot.
 | `db_pool_size` | `20` | Control Plane SQLAlchemy DB connection pool size. Size with concurrent worker heartbeats, claims, state patches, and trajectory index writes. |
 | `db_max_overflow` | `40` | Control Plane SQLAlchemy overflow connections above `db_pool_size` for short writeback bursts. |
 | `db_pool_timeout_sec` | `30.0` | Timeout while a Control Plane request waits for a DB connection from the pool. Pool timeouts show up as HTTP 500s on claim/state/writeback paths and can leave worker trials stuck before `running`. |
+| `claimed_without_start_expiry_sec` | `300` | Control Plane crash-detector threshold for reclaiming a trial stuck in `claimed` with `started_at IS NULL`, even when the owning worker heartbeat is still fresh. Keep above normal claim-to-start latency, including task materialization and image/cache setup. |
 | `trial_cache_registry_repo` | `""` (unset) | Registry path to share layered images across workers (Docker Hub / GHCR / ECR / self-hosted). When unset, each worker caches locally. |
 | `trial_cache_registry_pull_timeout_sec` | `15.0` | Per-attempt timeout for the registry pull. |
 | `trial_cache_base_image_pull_timeout_sec` | `1800.0` | Per-attempt timeout for the underlying task-image pull (SWE-Bench instance images are 1–2 GB). |
@@ -837,7 +838,7 @@ increase queued connections without removing the token-row write hotspot.
 | `minio_connect_timeout_sec` | `5.0` | S3 connect timeout for worker object-store calls. |
 | `minio_read_timeout_sec` | `120.0` | S3 socket read timeout for worker object-store calls. |
 | `minio_operation_timeout_sec` | `300.0` | Wall-clock timeout for each worker S3 wrapper call such as `download_prefix`, `put_object`, multipart part upload, and presign. |
-| `minio_operation_attempts` | `3` | Number of worker S3 operation attempts after timeout/reconnect. Each attempt gets the full operation timeout. |
+| `minio_operation_attempts` | `3` | Number of worker S3 operation attempts after timeouts, socket/client disconnects, or retryable S3 5xx/throttle responses. Each attempt gets the full operation timeout and reconnects the boto3 client before retrying. |
 | `task_materialize_timeout_sec` | `300.0` | Wall-clock timeout for pre-start task bundle materialization. If an `hf://`, `fixture://`, or `s3://` materializer hangs before `started_at`, the worker fails the claimed trial through setup failure writeback instead of leaving it stuck `claimed`. |
 
 ### Setting up the optional shared registry (Docker Hub example)
@@ -890,13 +891,15 @@ but each worker pays the build cost once).
   and verify the worker has Docker Hub/registry auth mounted. The
   task-level `build_timeout_sec` still bounds Dockerfile builds; this
   knob prevents docker-py itself from timing out first.
-- **Trial setup fails with `S3 download_prefix timed out` or trajectory /
-  artifact upload timeouts under high concurrency** → first confirm
-  MinIO health and network reachability, then raise
-  `minio_operation_timeout_sec` or `minio_operation_attempts`. If errors
-  coincide with high worker concurrency and connection starvation, raise
-  `minio_max_pool_connections`; if Python setup threads are saturated,
-  tune `LOOM_WORKER_BLOCKING_IO_MAX_WORKERS` separately.
+- **Trial setup fails with `S3 download_prefix timed out`, retryable S3
+  5xx/throttle responses, socket disconnects, or trajectory/artifact upload
+  timeouts under high concurrency** → first confirm MinIO health and network
+  reachability, then raise `minio_operation_timeout_sec` or
+  `minio_operation_attempts`. If errors coincide with high worker concurrency
+  and connection starvation, raise `minio_max_pool_connections`; if Python
+  setup threads are saturated, tune `LOOM_WORKER_BLOCKING_IO_MAX_WORKERS`
+  separately. Exhausted retries leave the final exception type/message in the
+  trial failure message for diagnosis.
 - **Trial setup fails with `task materialization timed out` before
   `started_at`** → inspect the source scheme in the failure message and worker
   logs. For `hf://`, verify whether the benchmark should already have been
@@ -1543,7 +1546,7 @@ workload shape. Halve the `for:` durations for staging.
 
 | Symptom | Likely cause | First check |
 |---|---|---|
-| `loom_trials_inflight{state="claimed"}` rising, no `running` | Workers can't reach gateway/MinIO | `kubectl logs deploy/loom-worker --tail=200` for connect errors |
+| `loom_trials_inflight{state="claimed"}` rising, no `running` | Workers can't reach gateway/MinIO, task setup is hanging before `started_at`, or stale claimed rows are waiting for crash-detector reclaim | `kubectl logs deploy/loom-worker --tail=200` for connect/setup errors; inspect batch debug evidence for `claimed_without_started`; confirm `claimed_without_start_expiry_sec` is above normal setup latency |
 | `loom_worker_reclaim_total` spiking | Workers crashing or heartbeat thread blocked | Check worker memory pressure + `state_patch_error` log lines |
 | 502 from Control Plane | Postgres unreachable | `kubectl exec deploy/loom-control-plane -- pg_isready -h loom-postgres` |
 | Trials stuck queued | No worker matches `requires_caps` | Inspect `trials.requires_caps` vs registered `workers.capabilities`, including `cpu_arch`; legacy missing `cpu_arch` means x86_64-only |
@@ -1614,6 +1617,11 @@ following bounds:
   regardless of `worker_id`. The reclaim sweep gets the trial back to
   a healthy worker and the JSONL serves as the forensic record for
   the prior attempt.
+- **Claimed without start:** the crash detector also requeues stale
+  `claimed` trials with `started_at IS NULL` after
+  `claimed_without_start_expiry_sec` (default 300s), even if the worker
+  heartbeat is fresh. This covers setup/materialization paths that claim a
+  trial but never reach the worker's started writeback.
 
 **Operator smoke for the in-flight-trial-across-restart path:**
 
@@ -1718,7 +1726,8 @@ loom cluster preflight \
 
 Use the same `--environment`, `--config`, and `--backup-manifest` flags on
 `loom cluster up` when rolling a protected environment so its preflight
-evaluates the same backup and storage checks before apply.
+evaluates the same backup, storage, and target-render schema checks before
+apply.
 
 ```bash
 loom cluster up \
@@ -1732,6 +1741,12 @@ For a new protected namespace, this `--config` path lets preflight accept the
 static Retain PV plan before the PVCs exist. For an existing namespace, live
 critical PVC/PV bindings are audited first and must already be on the durable
 boundary.
+
+`loom cluster doctor` remains the live-cluster reconciliation command. During a
+rollout, use `loom cluster preflight --config ...` or `loom cluster up
+--config ...` for the apply gate: those commands validate existing Secrets but
+compare env vars against the target rendered Deployments, not the old pods that
+are about to be replaced.
 
 For protected destructive operations, pass both the manifest and an exact
 environment acknowledgement:
@@ -2134,6 +2149,11 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    gateway call records. `loom eval batch show <id>` prints
    `no_call_trials` and an invalid-evidence warning for this case, and
    diagnosis uses `batch.no_llm_calls` when a finished batch has zero calls.
+   Default `GET /api/v1/batches/{id}` is intentionally lightweight for large
+   runs: it uses aggregate LLM-call counts and omits heavyweight
+   `debug_evidence` and `diagnosis`. Use
+   `GET /api/v1/batches/{id}?include_debug=true` or the dedicated
+   `/debug` and `/diagnosis` endpoints when investigating one batch.
    For multi-benchmark batches, `GET /api/v1/batches/{id}` also
    returns `benchmark_summary`; verify the SPA Batch Detail page shows
    each benchmark's score, completed/expected trial count, and platform
@@ -2145,9 +2165,10 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    `loom eval diagnose batch <id>` return the same primary cause,
    reason clusters, score reliability text, and next actions without
    printing provider secrets, bearer tokens, internal service URLs, or
-   signed object-store URLs. The SPA Trial Detail, Batch Detail, and Run
-   Library Batch Detail pages should show the diagnosis before the raw
-   debug evidence disclosure.
+   signed object-store URLs. The SPA Trial Detail page should show the
+   diagnosis before the raw debug evidence disclosure. The SPA Batch Detail and
+   Run Library Batch Detail pages keep the default read lightweight; click
+   **Load diagnostics** before checking the same diagnosis/debug order.
 13. **Trajectory + artifact download.** `GET /api/v1/trials/{id}/trajectory`
     streams event pages; `GET /api/v1/trials/{id}/trajectory/download`
     returns raw JSONL; `GET /api/v1/trials/{id}/atif` returns the ATIF JSON;

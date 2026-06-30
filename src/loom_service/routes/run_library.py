@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 
 from loom.db.schema import Artifact, ArtifactLineageEdge, Batch, LlmCall, Team, Trial
 from loom.security.redaction import redact_mapping, redact_text
@@ -55,6 +55,14 @@ _ARTIFACT_TYPE_GROUPS = {
     "training_data_export": "reusable_outputs",
 }
 _DOWNLOAD_REDACTION_STATES = frozenset({"not_required", "redacted"})
+_TRIAL_SUMMARY_STATES = (
+    "queued",
+    "claimed",
+    "running",
+    "succeeded",
+    "failed",
+    "cancelled",
+)
 
 
 class _CloneConfigRequest(BaseModel):
@@ -114,7 +122,8 @@ def _can_read_trial(
     batch: Batch | None = None,
 ) -> bool:
     return _is_owner_or_admin(ctx, trial.team_id) or _trial_is_org_visible(
-        trial, batch,
+        trial,
+        batch,
     )
 
 
@@ -260,13 +269,10 @@ def _artifact_metadata_visible(
     batch: Batch | None = None,
     trial: Trial | None = None,
 ) -> bool:
-    return (
-        _is_owner_or_admin(ctx, artifact.team_id)
-        or (
-            artifact.visibility == "org"
-            and artifact.share_status == "shared"
-            and _artifact_parent_visible(artifact, batch=batch, trial=trial)
-        )
+    return _is_owner_or_admin(ctx, artifact.team_id) or (
+        artifact.visibility == "org"
+        and artifact.share_status == "shared"
+        and _artifact_parent_visible(artifact, batch=batch, trial=trial)
     )
 
 
@@ -312,11 +318,17 @@ async def _typed_artifacts_for_trials(
     trial_ids = [trial.id for trial in trials]
     if not trial_ids:
         return {}
-    rows = list((await session.execute(
-        select(Artifact)
-        .where(Artifact.trial_id.in_(trial_ids))
-        .order_by(Artifact.created_at.asc(), Artifact.id.asc()),
-    )).scalars().all())
+    rows = list(
+        (
+            await session.execute(
+                select(Artifact)
+                .where(Artifact.trial_id.in_(trial_ids))
+                .order_by(Artifact.created_at.asc(), Artifact.id.asc()),
+            )
+        )
+        .scalars()
+        .all()
+    )
     out: dict[UUID, list[Artifact]] = {trial.id: [] for trial in trials}
     for artifact in rows:
         if artifact.trial_id is not None:
@@ -331,27 +343,31 @@ async def _parents_for_artifacts(
     artifact_ids = [artifact.id for artifact in artifacts]
     if not artifact_ids:
         return {}
-    rows = list((await session.execute(
-        select(ArtifactLineageEdge)
-        .where(ArtifactLineageEdge.child_artifact_id.in_(artifact_ids))
-        .order_by(
-            ArtifactLineageEdge.created_at.asc(),
-            ArtifactLineageEdge.id.asc(),
-        ),
-    )).scalars().all())
-    out: dict[UUID, list[dict[str, Any]]] = {
-        artifact.id: [] for artifact in artifacts
-    }
+    rows = list(
+        (
+            await session.execute(
+                select(ArtifactLineageEdge)
+                .where(ArtifactLineageEdge.child_artifact_id.in_(artifact_ids))
+                .order_by(
+                    ArtifactLineageEdge.created_at.asc(),
+                    ArtifactLineageEdge.id.asc(),
+                ),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    out: dict[UUID, list[dict[str, Any]]] = {artifact.id: [] for artifact in artifacts}
     for edge in rows:
-        out.setdefault(edge.child_artifact_id, []).append({
-            "artifact_id": (
-                str(edge.parent_artifact_id)
-                if edge.parent_artifact_id is not None
-                else None
-            ),
-            "relation": edge.relation,
-            "metadata": edge.edge_metadata,
-        })
+        out.setdefault(edge.child_artifact_id, []).append(
+            {
+                "artifact_id": (
+                    str(edge.parent_artifact_id) if edge.parent_artifact_id is not None else None
+                ),
+                "relation": edge.relation,
+                "metadata": edge.edge_metadata,
+            }
+        )
     return out
 
 
@@ -486,9 +502,7 @@ def _serialize_legacy_artifact(
         "share_status": status,
         "safety_state": _legacy_safety_state(item),
         "redaction_state": _legacy_redaction_state(item),
-        "blocked_reason": (
-            _blocked_reason(item) if status == "blocked" else None
-        ),
+        "blocked_reason": (_blocked_reason(item) if status == "blocked" else None),
         "content_hash": item.get("content_hash") or "pending:legacy-unhashed",
         "storage": {
             "backend": "object_store",
@@ -521,7 +535,7 @@ def _artifact_summary(
     trials: Sequence[Trial],
     typed_by_trial: dict[UUID, list[Artifact]],
 ) -> dict[str, int]:
-    summary = {role: 0 for role in _ARTIFACT_GROUPS}
+    summary = _empty_artifact_summary()
     for trial in trials:
         typed = typed_by_trial.get(trial.id) or []
         if typed:
@@ -533,6 +547,10 @@ def _artifact_summary(
     return summary
 
 
+def _empty_artifact_summary() -> dict[str, int]:
+    return {role: 0 for role in _ARTIFACT_GROUPS}
+
+
 def _artifact_inventory(
     request: Request,
     ctx: Any,
@@ -542,9 +560,7 @@ def _artifact_inventory(
     typed_by_trial: dict[UUID, list[Artifact]],
     parents_by_artifact: dict[UUID, list[dict[str, Any]]],
 ) -> dict[str, list[dict[str, Any]]]:
-    grouped: dict[str, list[dict[str, Any]]] = {
-        role: [] for role in _ARTIFACT_GROUPS
-    }
+    grouped: dict[str, list[dict[str, Any]]] = {role: [] for role in _ARTIFACT_GROUPS}
     for trial in trials:
         typed = typed_by_trial.get(trial.id) or []
         if typed:
@@ -569,20 +585,15 @@ def _artifact_inventory(
 
 
 def _trial_summary(trials: Sequence[Trial]) -> dict[str, int]:
-    summary = {
-        k: 0 for k in (
-            "queued",
-            "claimed",
-            "running",
-            "succeeded",
-            "failed",
-            "cancelled",
-        )
-    }
+    summary = _empty_trial_summary()
     for trial in trials:
         state = str(trial.state)
         summary[state] = summary.get(state, 0) + 1
     return summary
+
+
+def _empty_trial_summary() -> dict[str, int]:
+    return {state: 0 for state in _TRIAL_SUMMARY_STATES}
 
 
 def _rollup_result(result: dict[str, Any] | None) -> tuple[float | None, float]:
@@ -648,16 +659,15 @@ def _typed_artifact_matches_filters(
             return False
     source_batch_id = filters.get("source_batch_id")
     if source_batch_id is not None:
-        if artifact.batch_id != source_batch_id and str(provenance.get("batch_id")) != str(source_batch_id):
+        if artifact.batch_id != source_batch_id and str(provenance.get("batch_id")) != str(
+            source_batch_id
+        ):
             return False
     safety_state = filters.get("safety_state")
     if safety_state is not None and artifact.safety_state != safety_state:
         return False
     provenance_relation = filters.get("provenance_relation")
-    if (
-        provenance_relation is not None
-        and provenance.get("relation") != provenance_relation
-    ):
+    if provenance_relation is not None and provenance.get("relation") != provenance_relation:
         return False
     return True
 
@@ -715,9 +725,15 @@ async def _batch_has_matching_artifact(
 
 
 async def _batch_trials(session: Any, batch_id: UUID) -> list[Trial]:
-    return list((await session.execute(
-        select(Trial).where(Trial.batch_id == batch_id),
-    )).scalars().all())
+    return list(
+        (
+            await session.execute(
+                select(Trial).where(Trial.batch_id == batch_id),
+            )
+        )
+        .scalars()
+        .all()
+    )
 
 
 async def _llm_calls_for_trials(
@@ -727,38 +743,21 @@ async def _llm_calls_for_trials(
     trial_ids = [trial.id for trial in trials]
     if not trial_ids:
         return []
-    return list((await session.execute(
-        select(LlmCall)
-        .where(LlmCall.trial_id.in_(trial_ids))
-        .order_by(LlmCall.captured_at.asc(), LlmCall.id.asc()),
-    )).scalars().all())
-
-
-async def _serialize_batch(
-    request: Request,
-    session: Any,
-    ctx: Any,
-    batch: Batch,
-    owner_team: Team,
-    *,
-    include_inventory: bool = False,
-) -> dict[str, Any]:
-    trials = await _batch_trials(session, batch.id)
-    typed_by_trial = await _typed_artifacts_for_trials(session, trials)
-    typed_artifacts = [
-        artifact
-        for artifacts in typed_by_trial.values()
-        for artifact in artifacts
-    ]
-    parents_by_artifact = await _parents_for_artifacts(session, typed_artifacts)
-    llm_calls = await _llm_calls_for_trials(session, trials)
-    reward, cost = _trial_rollup(trials)
-    debug_evidence = build_batch_debug_evidence(
-        batch,
-        trials=trials,
-        llm_calls=llm_calls,
+    return list(
+        (
+            await session.execute(
+                select(LlmCall)
+                .where(LlmCall.trial_id.in_(trial_ids))
+                .order_by(LlmCall.captured_at.asc(), LlmCall.id.asc()),
+            )
+        )
+        .scalars()
+        .all()
     )
-    out: dict[str, Any] = {
+
+
+def _serialize_batch_base(batch: Batch, owner_team: Team) -> dict[str, Any]:
+    return {
         "id": str(batch.id),
         "team_id": str(batch.team_id),
         "owner_team": {
@@ -772,8 +771,7 @@ async def _serialize_batch(
         "backend": batch.backend,
         "combinations": batch.combinations,
         "provider_connection_id": (
-            str(batch.provider_connection_id)
-            if batch.provider_connection_id else None
+            str(batch.provider_connection_id) if batch.provider_connection_id else None
         ),
         "provider_model_id": batch.provider_model_id,
         "state": batch.state,
@@ -785,16 +783,43 @@ async def _serialize_batch(
         "created_by_token_prefix": batch.created_by_token_prefix,
         "created_at": batch.created_at.isoformat(),
         "finished_at": batch.finished_at.isoformat() if batch.finished_at else None,
+    }
+
+
+async def _serialize_batch(
+    request: Request,
+    session: Any,
+    ctx: Any,
+    batch: Batch,
+    owner_team: Team,
+    *,
+    include_inventory: bool = False,
+    include_debug: bool = False,
+) -> dict[str, Any]:
+    trials = await _batch_trials(session, batch.id)
+    typed_by_trial = await _typed_artifacts_for_trials(session, trials)
+    typed_artifacts = [artifact for artifacts in typed_by_trial.values() for artifact in artifacts]
+    parents_by_artifact = await _parents_for_artifacts(session, typed_artifacts)
+    reward, cost = _trial_rollup(trials)
+    out = {
+        **_serialize_batch_base(batch, owner_team),
         "trial_summary": _trial_summary(trials),
         "aggregate_reward": reward,
         "total_cost_usd": cost,
         "artifact_summary": _artifact_summary(trials, typed_by_trial),
-        "debug_evidence": debug_evidence,
-        "diagnosis": build_batch_diagnosis(
+    }
+    if include_debug:
+        llm_calls = await _llm_calls_for_trials(session, trials)
+        debug_evidence = build_batch_debug_evidence(
+            batch,
+            trials=trials,
+            llm_calls=llm_calls,
+        )
+        out["debug_evidence"] = debug_evidence
+        out["diagnosis"] = build_batch_diagnosis(
             debug_evidence,
             trial_failures=trial_failure_records(trials),
-        ),
-    }
+        )
     if include_inventory:
         out["artifact_inventory"] = _artifact_inventory(
             request,
@@ -808,15 +833,100 @@ async def _serialize_batch(
     return out
 
 
+async def _batch_list_trial_rollups(
+    session: Any,
+    batch_ids: Sequence[UUID],
+) -> dict[UUID, tuple[dict[str, int], float | None, float]]:
+    summaries = {batch_id: _empty_trial_summary() for batch_id in batch_ids}
+    reward_sums = {batch_id: 0.0 for batch_id in batch_ids}
+    reward_counts = {batch_id: 0 for batch_id in batch_ids}
+    cost_totals = {batch_id: 0.0 for batch_id in batch_ids}
+    if not batch_ids:
+        return {}
+
+    rows = (
+        await session.execute(
+            select(Trial.batch_id, Trial.state, Trial.result).where(
+                Trial.batch_id.in_(batch_ids),
+            ),
+        )
+    ).all()
+    for batch_id, state, result in rows:
+        if batch_id is None:
+            continue
+        summary = summaries.setdefault(batch_id, _empty_trial_summary())
+        state_text = str(state)
+        summary[state_text] = summary.get(state_text, 0) + 1
+        if state_text not in _ORG_VISIBLE_TRIAL_STATES:
+            continue
+        reward, cost = _rollup_result(result)
+        cost_totals[batch_id] = cost_totals.get(batch_id, 0.0) + cost
+        if reward is not None:
+            reward_sums[batch_id] = reward_sums.get(batch_id, 0.0) + reward
+            reward_counts[batch_id] = reward_counts.get(batch_id, 0) + 1
+
+    return {
+        batch_id: (
+            summaries.get(batch_id, _empty_trial_summary()),
+            (
+                reward_sums.get(batch_id, 0.0) / reward_counts[batch_id]
+                if reward_counts.get(batch_id, 0)
+                else None
+            ),
+            cost_totals.get(batch_id, 0.0),
+        )
+        for batch_id in batch_ids
+    }
+
+
+async def _batch_list_artifact_summaries(
+    session: Any,
+    batch_ids: Sequence[UUID],
+) -> dict[UUID, dict[str, int]]:
+    summaries = {batch_id: _empty_artifact_summary() for batch_id in batch_ids}
+    if not batch_ids:
+        return {}
+
+    rows = (
+        await session.execute(
+            select(Artifact.batch_id, Artifact.artifact_type, func.count(Artifact.id))
+            .where(Artifact.batch_id.in_(batch_ids))
+            .group_by(Artifact.batch_id, Artifact.artifact_type),
+        )
+    ).all()
+    for batch_id, artifact_type, count in rows:
+        if batch_id is None:
+            continue
+        summary = summaries.setdefault(batch_id, _empty_artifact_summary())
+        summary[_artifact_group_for_type(str(artifact_type))] += int(count)
+    return summaries
+
+
+def _serialize_batch_list_item(
+    batch: Batch,
+    owner_team: Team,
+    trial_rollup: tuple[dict[str, int], float | None, float],
+    artifact_summary: dict[str, int],
+) -> dict[str, Any]:
+    trial_summary, reward, cost = trial_rollup
+    return {
+        **_serialize_batch_base(batch, owner_team),
+        "trial_summary": trial_summary,
+        "aggregate_reward": reward,
+        "total_cost_usd": cost,
+        "artifact_summary": artifact_summary,
+    }
+
+
 async def _load_batch_with_team(
     session: Any,
     batch_id: UUID,
 ) -> tuple[Batch, Team]:
-    row = (await session.execute(
-        select(Batch, Team)
-        .join(Team, Team.id == Batch.team_id)
-        .where(Batch.id == batch_id),
-    )).one_or_none()
+    row = (
+        await session.execute(
+            select(Batch, Team).join(Team, Team.id == Batch.team_id).where(Batch.id == batch_id),
+        )
+    ).one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="batch not found")
     batch, team = row
@@ -827,16 +937,20 @@ async def _load_trial_with_batch(
     session: Any,
     trial_id: UUID,
 ) -> tuple[Trial, Batch | None]:
-    trial = (await session.execute(
-        select(Trial).where(Trial.id == trial_id),
-    )).scalar_one_or_none()
+    trial = (
+        await session.execute(
+            select(Trial).where(Trial.id == trial_id),
+        )
+    ).scalar_one_or_none()
     if trial is None:
         raise HTTPException(status_code=404, detail="trial not found")
     batch: Batch | None = None
     if trial.batch_id is not None:
-        batch = (await session.execute(
-            select(Batch).where(Batch.id == trial.batch_id),
-        )).scalar_one_or_none()
+        batch = (
+            await session.execute(
+                select(Batch).where(Batch.id == trial.batch_id),
+            )
+        ).scalar_one_or_none()
     return trial, batch
 
 
@@ -845,11 +959,20 @@ async def _typed_artifact_for_trial_key(
     trial_id: UUID,
     key: str,
 ) -> Artifact | None:
-    rows = cast(list[Artifact], list((await session.execute(
-        select(Artifact)
-        .where(Artifact.trial_id == trial_id)
-        .order_by(Artifact.created_at.asc(), Artifact.id.asc()),
-    )).scalars().all()))
+    rows = cast(
+        list[Artifact],
+        list(
+            (
+                await session.execute(
+                    select(Artifact)
+                    .where(Artifact.trial_id == trial_id)
+                    .order_by(Artifact.created_at.asc(), Artifact.id.asc()),
+                )
+            )
+            .scalars()
+            .all()
+        ),
+    )
     for artifact in rows:
         if _artifact_storage_key(artifact) == key:
             return artifact
@@ -968,24 +1091,38 @@ async def list_run_library_batches(
     rows = list((await session.execute(stmt)).all())
 
     serialized: list[dict[str, Any]] = []
-    for batch, team in rows:
-        trials = await _batch_trials(session, batch.id)
-        if not await _batch_has_matching_artifact(
-            session,
-            trials,
-            artifact_filters,
-        ):
-            continue
-        item = await _serialize_batch(request, session, ctx, batch, team)
-        serialized.append(item)
+    if not artifact_filtering:
+        batch_ids = [batch.id for batch, _team in rows]
+        trial_rollups = await _batch_list_trial_rollups(session, batch_ids)
+        artifact_summaries = await _batch_list_artifact_summaries(session, batch_ids)
+        for batch, team in rows:
+            item = _serialize_batch_list_item(
+                batch,
+                team,
+                trial_rollups.get(
+                    batch.id,
+                    (_empty_trial_summary(), None, 0.0),
+                ),
+                artifact_summaries.get(batch.id, _empty_artifact_summary()),
+            )
+            serialized.append(item)
+    else:
+        for batch, team in rows:
+            trials = await _batch_trials(session, batch.id)
+            if not await _batch_has_matching_artifact(
+                session,
+                trials,
+                artifact_filters,
+            ):
+                continue
+            item = await _serialize_batch(request, session, ctx, batch, team)
+            serialized.append(item)
 
     next_cursor: str | None = None
     if len(serialized) > limit:
         serialized = serialized[:limit]
         last_id = UUID(serialized[-1]["id"])
-        last_created = next(
-            batch.created_at for batch, _team in rows if batch.id == last_id
-        )
+        last_created = next(batch.created_at for batch, _team in rows if batch.id == last_id)
         next_cursor = encode_cursor(
             Cursor(submitted_at=last_created, id=last_id),
         )
@@ -1158,10 +1295,7 @@ async def export_run_library_artifacts(
             content=json.dumps({"items": items}, separators=(",", ":")),
             media_type="application/json",
         )
-    content = "".join(
-        json.dumps(item, separators=(",", ":")) + "\n"
-        for item in items
-    )
+    content = "".join(json.dumps(item, separators=(",", ":")) + "\n" for item in items)
     return Response(content=content, media_type="application/x-ndjson")
 
 
@@ -1170,6 +1304,15 @@ async def get_run_library_batch(
     request: Request,
     sc: SessionAndCtx,
     batch_id: UUID,
+    include_debug: Annotated[
+        bool,
+        Query(
+            description=(
+                "Include heavyweight debug_evidence and diagnosis payloads. "
+                "Defaults to false so Run Library detail stays bounded."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     session, ctx = sc
     require_scope(ctx, "read:own")
@@ -1177,7 +1320,13 @@ async def get_run_library_batch(
     if not _can_read_batch(ctx, batch):
         raise HTTPException(status_code=403, detail="batch is not shared")
     return await _serialize_batch(
-        request, session, ctx, batch, team, include_inventory=True,
+        request,
+        session,
+        ctx,
+        batch,
+        team,
+        include_inventory=True,
+        include_debug=include_debug,
     )
 
 
@@ -1227,22 +1376,24 @@ async def clone_run_library_batch_config(
         )
     if payload.provider_connection_id is not None:
         await validate_provider_connection(
-            session, payload.provider_connection_id, team_id=ctx.team_id,
+            session,
+            payload.provider_connection_id,
+            team_id=ctx.team_id,
         )
 
     token_prefix = ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
-    provenance = [{
-        "kind": "cloned_batch_config",
-        "source_batch_id": str(source.id),
-        "source_team_id": str(source.team_id),
-        "source_visibility": source.visibility,
-    }]
+    provenance = [
+        {
+            "kind": "cloned_batch_config",
+            "source_batch_id": str(source.id),
+            "source_team_id": str(source.team_id),
+            "source_visibility": source.visibility,
+        }
+    ]
     clone = Batch(
         team_id=ctx.team_id,
         name=payload.name,
-        description=payload.description or (
-            f"Cloned config from shared batch {source.id}."
-        ),
+        description=payload.description or (f"Cloned config from shared batch {source.id}."),
         task_filter=dict(source.task_filter),
         trial_config=dict(source.trial_config),
         state="submitted",
@@ -1263,8 +1414,7 @@ async def clone_run_library_batch_config(
         "batch_id": str(clone.id),
         "cloned_from_batch_id": str(source.id),
         "provider_connection_id": (
-            str(clone.provider_connection_id)
-            if clone.provider_connection_id else None
+            str(clone.provider_connection_id) if clone.provider_connection_id else None
         ),
         "provider_model_id": clone.provider_model_id,
         "source_provenance": clone.source_provenance,
@@ -1359,7 +1509,9 @@ async def reuse_run_library_artifact(
         raise HTTPException(status_code=403, detail=_blocked_reason(artifact))
     if payload.provider_connection_id is not None:
         await validate_provider_connection(
-            session, payload.provider_connection_id, team_id=ctx.team_id,
+            session,
+            payload.provider_connection_id,
+            team_id=ctx.team_id,
         )
 
     token_prefix = ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
@@ -1379,18 +1531,18 @@ async def reuse_run_library_artifact(
         "source_artifact_role": role,
     }
     if typed_artifact is not None:
-        provenance_item.update({
-            "source_artifact_id": str(typed_artifact.id),
-            "source_artifact_type": typed_artifact.artifact_type,
-            "source_artifact_schema_version": (
-                typed_artifact.artifact_schema_version
-            ),
-            "source_content_hash": typed_artifact.content_hash,
-            "source_visibility": typed_artifact.visibility,
-            "source_share_status": typed_artifact.share_status,
-            "source_safety_state": typed_artifact.safety_state,
-            "source_redaction_state": typed_artifact.redaction_state,
-        })
+        provenance_item.update(
+            {
+                "source_artifact_id": str(typed_artifact.id),
+                "source_artifact_type": typed_artifact.artifact_type,
+                "source_artifact_schema_version": (typed_artifact.artifact_schema_version),
+                "source_content_hash": typed_artifact.content_hash,
+                "source_visibility": typed_artifact.visibility,
+                "source_share_status": typed_artifact.share_status,
+                "source_safety_state": typed_artifact.safety_state,
+                "source_redaction_state": typed_artifact.redaction_state,
+            }
+        )
     provenance = [provenance_item]
     task_filter = (
         dict(batch.task_filter)
@@ -1401,9 +1553,8 @@ async def reuse_run_library_artifact(
     derived = Batch(
         team_id=ctx.team_id,
         name=payload.name,
-        description=payload.description or (
-            f"Reuses shared artifact {payload.key} from trial {trial.id}."
-        ),
+        description=payload.description
+        or (f"Reuses shared artifact {payload.key} from trial {trial.id}."),
         task_filter=task_filter,
         trial_config=trial_config,
         state="submitted",
@@ -1427,12 +1578,16 @@ async def reuse_run_library_artifact(
     return {
         "batch_id": str(derived.id),
         "source_artifact": {
-            **({
-                "id": str(typed_artifact.id),
-                "artifact_type": typed_artifact.artifact_type,
-                "artifact_schema_version": typed_artifact.artifact_schema_version,
-                "content_hash": typed_artifact.content_hash,
-            } if typed_artifact is not None else {}),
+            **(
+                {
+                    "id": str(typed_artifact.id),
+                    "artifact_type": typed_artifact.artifact_type,
+                    "artifact_schema_version": typed_artifact.artifact_schema_version,
+                    "content_hash": typed_artifact.content_hash,
+                }
+                if typed_artifact is not None
+                else {}
+            ),
             "trial_id": str(trial.id),
             "key": payload.key,
             "role": role,

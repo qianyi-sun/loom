@@ -156,6 +156,12 @@ used_by     = ["control-plane"]
 python_type = "int"
 default     = 30
 
+[service_config.claimed_without_start_expiry_sec]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 300
+description = "Seconds before the crash detector reclaims a trial stuck in claimed with no started_at while the owning worker is still fresh."
+
 [service_config.signed_url_expiry_sec]
 used_by     = ["control-plane", "loom-service"]
 python_type = "int"

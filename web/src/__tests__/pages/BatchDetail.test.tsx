@@ -126,11 +126,37 @@ const BATCH_DIAGNOSIS = {
 function mockBatch(
   body: BatchBody = BATCH_BODY,
   rerunBody: Record<string, unknown> | null = null,
+  diagnostics: {
+    debugEvidence?: components["schemas"]["DebugEvidence"];
+    diagnosis?: typeof BATCH_DIAGNOSIS;
+  } = {},
 ): ReturnType<typeof vi.spyOn> {
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : String(input);
+      if (
+        url.endsWith(`/api/v1/batches/${BATCH_ID}/debug`) &&
+        diagnostics.debugEvidence
+      ) {
+        return Promise.resolve(
+          new Response(JSON.stringify(diagnostics.debugEvidence), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      if (
+        url.endsWith(`/api/v1/batches/${BATCH_ID}/diagnosis`) &&
+        diagnostics.diagnosis
+      ) {
+        return Promise.resolve(
+          new Response(JSON.stringify(diagnostics.diagnosis), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
       if (
         url.endsWith(`/api/v1/batches/${BATCH_ID}/rerun-failed`) &&
         init?.method === "POST" &&
@@ -264,17 +290,24 @@ describe("BatchDetail run plan", () => {
     expect(screen.getByText(/invalid benchmark evidence/i)).toBeInTheDocument();
   });
 
-  it("shows structured debug evidence without exposing raw JSON by default", async () => {
+  it("loads structured diagnostics on demand without exposing raw JSON by default", async () => {
+    const user = userEvent.setup();
     mockBatch({
       ...BATCH_BODY,
       state: "finished",
       result_status: "all_failed",
       failure_reason: "fanout_submit_failed",
       failure_message: "task local/mit-0 submit failed: HTTP 403",
-      debug_evidence: BATCH_DEBUG,
+    }, null, {
+      debugEvidence: BATCH_DEBUG,
       diagnosis: BATCH_DIAGNOSIS,
     });
     renderBatchDetail();
+
+    expect(await screen.findByText("Load diagnostics")).toBeInTheDocument();
+    expect(screen.queryByText("Diagnosis")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Load diagnostics" }));
 
     expect(await screen.findByText("Diagnosis")).toBeInTheDocument();
     expect(screen.getByText(BATCH_DIAGNOSIS.summary)).toBeInTheDocument();
