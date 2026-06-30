@@ -12,6 +12,11 @@ from sqlalchemy import Select, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import SlurmWorkerJob, Worker
+from loom.worker_token import (
+    DEFAULT_WORKER_TOKEN_ENV_KEY,
+    WORKER_AUTH_FINGERPRINT_ENV_KEY,
+    worker_token_fingerprint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,12 +105,17 @@ def redact_env(env: dict[str, str] | None) -> dict[str, str]:
     if not env:
         return {}
     redacted: dict[str, str] = {}
+    worker_token = env.get(DEFAULT_WORKER_TOKEN_ENV_KEY)
     for key, value in env.items():
         upper_key = key.upper()
         if any(part in upper_key for part in _SECRET_KEY_PARTS):
             redacted[key] = "<redacted>"
         else:
             redacted[key] = str(value)
+    if worker_token:
+        redacted[WORKER_AUTH_FINGERPRINT_ENV_KEY] = worker_token_fingerprint(
+            str(worker_token),
+        )
     return redacted
 
 

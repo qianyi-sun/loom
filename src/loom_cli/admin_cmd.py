@@ -28,6 +28,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
+from loom_cli.secret_source import (
+    SecretSourceError,
+    resolve_secret_source,
+    secret_source_argparse_type,
+)
 from loom_cli.server_client import (
     HttpStatusError,
     NotLoggedInError,
@@ -293,10 +298,13 @@ def _rotate_worker_token(args: argparse.Namespace) -> int:
         sys.stdout.write(
             "\nRotation checklist:\n"
             + install_step
-            + "  2. Restart workers:\n"
+            + "  2. Distribute the same token to attached remote-worker env files\n"
+            + "     (GB10/OLDLAB) without printing it, then restart those pools.\n"
+            + "  3. Restart in-cluster workers:\n"
             + "       kubectl rollout restart deploy/loom-worker\n"
-            + "  3. Verify workers re-register (no 401s in worker logs).\n"
-            + "  4. Revoke the OLD token by its hash prefix:\n"
+            + "  4. Verify in-cluster and remote workers re-register (no 401s),\n"
+            + "     then run environment-state check with --worker-token.\n"
+            + "  5. Revoke the OLD token by its hash prefix:\n"
             + "       loom admin tokens worker revoke <OLD_PREFIX>\n",
         )
     return 0
@@ -733,8 +741,28 @@ def _environment_state_check(args: argparse.Namespace) -> int:
     if rc != 0 or live is None:
         return rc
 
-    drift = diff_environment_state(profile, live)
-    drift.extend(diff_external_slurm_runner_prerequisites(profile))
+    expected_worker_token: str | None = None
+    if getattr(args, "worker_token", None):
+        try:
+            expected_worker_token = resolve_secret_source(
+                args.worker_token,
+                flag_name="--worker-token",
+            )
+        except SecretSourceError as e:
+            sys.stderr.write(f"error: {e}\n")
+            return 2
+
+    drift = diff_environment_state(
+        profile,
+        live,
+        expected_worker_token=expected_worker_token,
+    )
+    drift.extend(
+        diff_external_slurm_runner_prerequisites(
+            profile,
+            expected_worker_token=expected_worker_token,
+        )
+    )
     drift.extend(diff_external_slurm_autoscaler_supervisors(profile))
     if args.format == "json":
         json.dump(
@@ -1409,6 +1437,16 @@ def dispatch(argv: list[str]) -> int:
         help="Fail if live CP-backed environment state drifts from a desired profile.",
     )
     _add_environment_state_args(p_env_state_check)
+    p_env_state_check.add_argument(
+        "--worker-token",
+        type=secret_source_argparse_type("--worker-token"),
+        default=None,
+        help=(
+            "Current environment worker token source for remote-worker parity "
+            "checks. Must be env:VAR, file:PATH, or -; only redacted "
+            "fingerprints are emitted."
+        ),
+    )
     p_env_state_check.set_defaults(handler=_environment_state_check)
 
     p_team = tok_sub.add_parser(

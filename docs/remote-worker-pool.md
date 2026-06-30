@@ -489,7 +489,9 @@ renamed in a coordinated rollout. Run this from the Slurm submit host when the
 profile declares an external Slurm autoscaler supervisor; public-beta uses that
 path to install and check the OLDLAB user timer, and the rendered service must
 call the repo one-shot with `--pool-name oldlab` so it cannot reconcile GB10 as
-a side effect:
+a side effect. The check also compares the active environment worker token to
+remote-worker env files and active Slurm job fingerprints using only redacted
+sha256-prefix output, so pass the token through `env:` or `file:` indirection:
 
 ```bash
 loom admin environment-state apply \
@@ -506,7 +508,8 @@ loom admin environment-state check \
   --environment public-beta \
   --file deploy/environment-state/public-beta.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
-  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
+  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+  --worker-token env:LOOM_WORKER_TOKEN
 ```
 
 For a one-off node-agent canary experiment, write desired state through the CP
@@ -969,8 +972,8 @@ available only on the OLDLAB submit host, mark the policy as externally run:
       "trt-eai-oldlab-4",
       "trt-eai-oldlab-5"
     ],
-    "env_file": "/shared_work/qianyi/loom-worker-capacity/public-beta-remote-worker.env",
-    "repo_dir": "/shared_work/qianyi/loom-remote-worker",
+    "env_file": "/shared_work/qianyi/loom-worker-capacity/public-beta-oldlab-worker-${IMAGE_TAG}.env",
+    "repo_dir": "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}",
     "requested_cpus": 2,
     "requested_memory_mib": 8192,
     "requested_concurrency": 1,
@@ -1031,8 +1034,8 @@ per node policy has a theoretical ceiling of 150 slots:
       "trt-gb10-14",
       "trt-gb10-15"
     ],
-    "env_file": "/shared_work/qianyi/loom-worker-capacity/gb10-remote-worker.env",
-    "repo_dir": "/shared_work/qianyi/loom-remote-worker",
+    "env_file": "/shared_work/qianyi/loom-worker-capacity/public-beta-gb10-worker-${IMAGE_TAG}.env",
+    "repo_dir": "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}",
     "requested_cpus": 20,
     "requested_memory_mib": 115000,
     "requested_concurrency": 10,

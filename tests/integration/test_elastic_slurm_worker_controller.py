@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -9,6 +10,7 @@ from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import SlurmWorkerJob, Task, Team, TeamQuota, Trial, Worker
+from loom.worker_token import WORKER_AUTH_FINGERPRINT_ENV_KEY, worker_token_fingerprint
 from loom_control_plane.elastic_slurm_worker_controller import (
     ElasticSlurmWorkerControllerConfig,
     SlurmWorkerCommandRunner,
@@ -142,9 +144,13 @@ async def _seed_team_task(
 
 async def test_controller_submits_records_for_queued_backlog(
     postgres_url: str,
+    tmp_path: Path,
 ) -> None:
     engine = create_async_engine(postgres_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    worker_token = "loom_w_current_environment_token"
+    env_file = tmp_path / ".env.remote-worker"
+    env_file.write_text(f"LOOM_WORKER_TOKEN={worker_token}\n", encoding="utf-8")
     try:
         await _seed_team_task_trials(session_factory, queued=13)
         runner = FakeSlurmRunner(submit_results={
@@ -156,7 +162,7 @@ async def test_controller_submits_records_for_queued_backlog(
         async with session_factory() as s:
             result = await run_elastic_slurm_worker_controller_once(
                 s,
-                config=_config(),
+                config=_config(env_file=str(env_file)),
                 runner=runner,
             )
             await s.commit()
@@ -171,7 +177,11 @@ async def test_controller_submits_records_for_queued_backlog(
 
         assert [row.job_id for row in rows] == ["501", "502", "503"]
         assert {row.state for row in rows} == {"pending"}
-        assert rows[0].redacted_env["LOOM_REMOTE_WORKER_ENV_FILE"] == "/secure/.env.remote-worker"
+        assert rows[0].redacted_env["LOOM_REMOTE_WORKER_ENV_FILE"] == str(env_file)
+        assert rows[0].redacted_env[WORKER_AUTH_FINGERPRINT_ENV_KEY] == (
+            worker_token_fingerprint(worker_token)
+        )
+        assert "LOOM_WORKER_TOKEN" not in rows[0].redacted_env
     finally:
         await engine.dispose()
 

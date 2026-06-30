@@ -7,6 +7,7 @@ import logging
 import math
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import or_, select, update
@@ -19,6 +20,10 @@ from loom.db.schema import (
     Trial,
     Worker,
     WorkerPoolAutoscalerPolicy,
+)
+from loom.worker_token import (
+    WORKER_AUTH_FINGERPRINT_ENV_KEY,
+    worker_token_fingerprint_from_env_file,
 )
 from loom_control_plane.elastic_slurm_worker_controller import (
     ElasticSlurmWorkerControllerConfig,
@@ -817,12 +822,28 @@ def _slurm_config_from_policy(
 def _worker_env_from_slurm_config(
     config: ElasticSlurmWorkerControllerConfig,
 ) -> dict[str, str]:
-    return {
+    env = {
         "LOOM_WORKER_MAX_CONCURRENT": str(config.requested_concurrency),
         "LOOM_WORKER_POOL_NAME": config.pool_name,
         "LOOM_REMOTE_WORKER_ENV_FILE": config.env_file,
         "LOOM_REMOTE_WORKER_REPO_DIR": config.repo_dir,
     }
+    try:
+        fingerprint = worker_token_fingerprint_from_env_file(Path(config.env_file))
+    except OSError as exc:
+        logger.warning(
+            "slurm_worker_token_fingerprint_unavailable",
+            extra={
+                "environment": config.environment,
+                "pool_name": config.pool_name,
+                "env_file": config.env_file,
+                "err": str(exc),
+            },
+        )
+    else:
+        if fingerprint:
+            env[WORKER_AUTH_FINGERPRINT_ENV_KEY] = fingerprint
+    return env
 
 
 async def _apply_slurm_scale_up(

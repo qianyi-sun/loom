@@ -245,6 +245,23 @@ def _load_clients(
     )
 
 
+def _effective_kube_context(context: str | None) -> str | None:
+    if context:
+        return context
+    try:
+        from kubernetes import config
+    except ModuleNotFoundError:
+        return None
+    try:
+        _contexts, active_context = config.list_kube_config_contexts()
+    except Exception:
+        return None
+    if not isinstance(active_context, dict):
+        return None
+    name = active_context.get("name")
+    return str(name) if name else None
+
+
 def _collect_workload(
     api: Any,
     namespace: str,
@@ -1260,6 +1277,128 @@ def _check_configured_static_host_path_storage(
     )
 
 
+def _is_kind_context(context: str | None) -> bool:
+    return bool(context and context.startswith("kind-"))
+
+
+def _read_kind_node_mounts(context: str | None) -> list[dict[str, Any]] | None:
+    if not _is_kind_context(context):
+        return None
+    assert context is not None
+    cluster_name = context.removeprefix("kind-")
+    node_name = f"{cluster_name}-control-plane"
+    import subprocess
+
+    proc = subprocess.run(
+        ["docker", "inspect", "--format", "{{json .Mounts}}", node_name],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        mounts = json.loads(proc.stdout.strip())
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(mounts, list):
+        return None
+    return [mount for mount in mounts if isinstance(mount, dict)]
+
+
+def _normalise_mount_path(value: object) -> str:
+    return str(value or "").rstrip("/") or "/"
+
+
+def _kind_bind_mount_covers_static_root(
+    mount: dict[str, Any],
+    *,
+    root: str,
+) -> bool:
+    if str(mount.get("Type") or mount.get("type") or "").lower() != "bind":
+        return False
+    source = _normalise_mount_path(mount.get("Source") or mount.get("source"))
+    destination = _normalise_mount_path(
+        mount.get("Destination") or mount.get("destination"),
+    )
+    if not source or source == "/":
+        return False
+    if destination == "/data":
+        return root == "/data" or root.startswith("/data/")
+    return destination == root or root.startswith(f"{destination}/")
+
+
+def _check_kind_static_host_path_mount(
+    *,
+    context: str | None,
+    cluster_config: ClusterConfig | None,
+    environment: str,
+    kind_node_mounts: list[dict[str, Any]] | None,
+) -> PreflightCheck | None:
+    if not _is_kind_context(context) or cluster_config is None:
+        return None
+    try:
+        root = _normalise_static_host_path_root(cluster_config)
+    except ValueError as exc:
+        return PreflightCheck(
+            name="kind-host-storage-mount",
+            outcome="fail",
+            detail=(
+                f"protected kind environment {environment!r} has invalid "
+                f"persistent storage config: {exc}"
+            ),
+        )
+    if root is None:
+        return None
+    if kind_node_mounts is None:
+        return PreflightCheck(
+            name="kind-host-storage-mount",
+            outcome="fail",
+            detail=(
+                f"protected kind environment {environment!r} uses "
+                f"static-host-path root {root}, but the kind node Docker "
+                "mounts could not be inspected"
+            ),
+            remediation=(
+                "Run preflight from a host with Docker access, or rebuild the "
+                "kind cluster with an extraMount that binds host /data or "
+                f"{root} into the control-plane node."
+            ),
+        )
+    if any(
+        _kind_bind_mount_covers_static_root(mount, root=root)
+        for mount in kind_node_mounts
+        if isinstance(mount, dict)
+    ):
+        return PreflightCheck(
+            name="kind-host-storage-mount",
+            outcome="pass",
+            detail=(
+                f"protected kind environment {environment!r} has a host bind "
+                f"mount covering static-host-path root {root}"
+            ),
+        )
+    destinations = [
+        _normalise_mount_path(mount.get("Destination") or mount.get("destination"))
+        for mount in kind_node_mounts
+        if isinstance(mount, dict)
+    ]
+    return PreflightCheck(
+        name="kind-host-storage-mount",
+        outcome="fail",
+        detail=(
+            f"protected kind environment {environment!r} uses static-host-path "
+            f"root {root}, but the kind node has no Docker bind mount to /data "
+            f"or {root}; mounted destinations={destinations or 'none'}"
+        ),
+        remediation=(
+            "Rebuild the kind cluster with extraMounts mapping host /data "
+            f"or {root} into the control-plane node, then restore from a "
+            "verified backup before trusting static hostPath PV durability."
+        ),
+    )
+
+
 def _check_protected_storage_boundary(
     core_v1: Any,
     storage_v1: Any,
@@ -1432,6 +1571,7 @@ def collect_preflight(
     backup_manifest: Path | None = None,
     backup_max_age_hours: int = DEFAULT_BACKUP_MAX_AGE_HOURS,
     cluster_config: ClusterConfig | None = None,
+    kind_node_mounts: list[dict[str, Any]] | None = None,
 ) -> PreflightReport:
     """Pure-collection function — every API client passed in so tests
     can inject fakes. If `namespace-exists` fails, the namespace-
@@ -1456,6 +1596,14 @@ def collect_preflight(
                 cluster_config=cluster_config,
             )
         )
+        kind_mount_check = _check_kind_static_host_path_mount(
+            context=context,
+            cluster_config=cluster_config,
+            environment=env_name,
+            kind_node_mounts=kind_node_mounts,
+        )
+        if kind_mount_check is not None:
+            checks.append(kind_mount_check)
         checks.append(
             _check_backup_manifest(
                 backup_manifest,
@@ -1581,12 +1729,14 @@ def _preflight(args: argparse.Namespace) -> int:
         sys.stderr.write(f"error: config invalid: {exc}\n")
         return 2
     try:
+        effective_context = _effective_kube_context(args.context)
+        kind_node_mounts = _read_kind_node_mounts(effective_context)
         report = collect_preflight(
             core_v1,
             net_v1,
             storage_v1,
             args.namespace,
-            context=args.context,
+            context=effective_context,
             environment=args.environment,
             backup_manifest=(
                 Path(args.backup_manifest).resolve()
@@ -1594,6 +1744,7 @@ def _preflight(args: argparse.Namespace) -> int:
             ),
             backup_max_age_hours=args.backup_max_age_hours,
             cluster_config=cluster_config,
+            kind_node_mounts=kind_node_mounts,
         )
     except Exception as exc:
         sys.stderr.write(
@@ -1809,12 +1960,14 @@ def _up(args: argparse.Namespace) -> int:
     # 1. Preflight
     if not args.skip_preflight:
         try:
+            effective_context = _effective_kube_context(args.context)
+            kind_node_mounts = _read_kind_node_mounts(effective_context)
             report = collect_preflight(
                 core_v1,
                 net_v1,
                 storage_v1,
                 args.namespace,
-                context=args.context,
+                context=effective_context,
                 environment=args.environment,
                 backup_manifest=(
                     Path(args.backup_manifest).resolve()
@@ -1822,6 +1975,7 @@ def _up(args: argparse.Namespace) -> int:
                 ),
                 backup_max_age_hours=args.backup_max_age_hours,
                 cluster_config=config,
+                kind_node_mounts=kind_node_mounts,
             )
             _append_target_schema_doctor_check(
                 report,

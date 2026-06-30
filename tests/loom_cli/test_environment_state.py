@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -296,6 +297,78 @@ external_runner = true
     assert drift[0].live.endswith("issue45-oldlab-4-warm-1608b05.env")
 
 
+def test_diff_environment_state_reports_active_slurm_job_worker_token_fingerprint_drift(
+    tmp_path: Path,
+) -> None:
+    active_token = "loom_w_current_environment_token"
+    stale_token = "loom_w_stale_slurm_job_token"
+    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path.write_text(
+        """
+environment = "public-beta"
+control_plane_environment = "production"
+
+[[worker_pool_autoscaler_policies]]
+pool_name = "oldlab"
+actuator = "slurm"
+enabled = true
+min_slots = 1
+max_slots = 40
+
+[worker_pool_autoscaler_policies.actuator_config]
+env_file = "/shared_work/qianyi/loom-worker-capacity/public-beta-oldlab-worker.env"
+repo_dir = "/shared_work/qianyi/loom-remote-worker"
+requested_concurrency = 1
+external_runner = true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    profile = load_environment_state_profile(profile_path)
+
+    drift = diff_environment_state(
+        profile,
+        {
+            "autoscaler_status": {"policies": []},
+            "gb10_status": {"desired_states": []},
+            "slurm_status": {
+                "jobs": [
+                    {
+                        "environment": "production",
+                        "pool_name": "oldlab",
+                        "job_id": "14893",
+                        "state": "running",
+                        "redacted_env": {
+                            "LOOM_REMOTE_WORKER_ENV_FILE": "/shared_work/qianyi/loom-worker-capacity/public-beta-oldlab-worker.env",
+                            "LOOM_REMOTE_WORKER_REPO_DIR": "/shared_work/qianyi/loom-remote-worker",
+                            "LOOM_WORKER_AUTH_FINGERPRINT": (
+                                f"sha256:{hashlib.sha256(stale_token.encode()).hexdigest()[:12]} "
+                                f"len={len(stale_token)}"
+                            ),
+                        },
+                    },
+                ],
+            },
+        },
+        expected_worker_token=active_token,
+    )
+
+    assert any(
+        item.path
+        == "slurm_worker_jobs[production/oldlab/14893].LOOM_WORKER_AUTH_FINGERPRINT"
+        for item in drift
+    )
+    token_drift = next(
+        item for item in drift if item.path.endswith("LOOM_WORKER_AUTH_FINGERPRINT")
+    )
+    assert token_drift.desired == (
+        f"sha256:{hashlib.sha256(active_token.encode()).hexdigest()[:12]} "
+        f"len={len(active_token)}"
+    )
+    assert stale_token not in str(token_drift)
+    assert active_token not in str(token_drift)
+
+
 def test_external_slurm_runner_prerequisite_check_reports_missing_env_and_dirty_repo(
     tmp_path: Path,
 ) -> None:
@@ -353,6 +426,206 @@ require_clean_repo = true
     assert drift[1].live.startswith("62eb0a6")
     assert drift[2].desired == "clean"
     assert "step_runner.py" in drift[2].live
+
+
+def test_external_slurm_runner_prerequisite_check_reports_worker_token_fingerprint_drift(
+    tmp_path: Path,
+) -> None:
+    stale_token = "loom_w_stale_remote_worker_token"
+    active_token = "loom_w_current_environment_token"
+    env_file = tmp_path / "remote-worker.env"
+    env_file.write_text(
+        f"LOOM_WORKER_TOKEN={stale_token}\n",
+        encoding="utf-8",
+    )
+    repo_dir = tmp_path / "loom-remote-worker"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path.write_text(
+        f"""
+environment = "public-beta"
+control_plane_environment = "production"
+
+[[worker_pool_autoscaler_policies]]
+pool_name = "oldlab"
+actuator = "slurm"
+enabled = true
+min_slots = 1
+max_slots = 40
+
+[worker_pool_autoscaler_policies.actuator_config]
+env_file = "{env_file}"
+repo_dir = "{repo_dir}"
+requested_concurrency = 1
+external_runner = true
+
+[external_slurm_runner_prerequisites]
+pools = ["oldlab"]
+require_worker_token_parity = true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    profile = load_environment_state_profile(profile_path)
+
+    drift = diff_external_slurm_runner_prerequisites(
+        profile,
+        expected_worker_token=active_token,
+    )
+
+    assert [item.path for item in drift] == [
+        "external_slurm_runner_prerequisites[production/oldlab].worker_token_fingerprint",
+    ]
+    assert drift[0].desired == (
+        f"sha256:{hashlib.sha256(active_token.encode()).hexdigest()[:12]} "
+        f"len={len(active_token)}"
+    )
+    assert drift[0].live == (
+        f"sha256:{hashlib.sha256(stale_token.encode()).hexdigest()[:12]} "
+        f"len={len(stale_token)}"
+    )
+    assert stale_token not in str(drift[0])
+    assert active_token not in str(drift[0])
+
+
+def test_external_slurm_runner_prerequisite_requires_worker_token_when_parity_enabled(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "remote-worker.env"
+    env_file.write_text("LOOM_WORKER_TOKEN=loom_w_remote\n", encoding="utf-8")
+    repo_dir = tmp_path / "loom-remote-worker"
+    repo_dir.mkdir()
+    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path.write_text(
+        f"""
+environment = "public-beta"
+control_plane_environment = "production"
+
+[[worker_pool_autoscaler_policies]]
+pool_name = "oldlab"
+actuator = "slurm"
+enabled = true
+min_slots = 1
+max_slots = 40
+
+[worker_pool_autoscaler_policies.actuator_config]
+env_file = "{env_file}"
+repo_dir = "{repo_dir}"
+requested_concurrency = 1
+external_runner = true
+
+[external_slurm_runner_prerequisites]
+pools = ["oldlab"]
+require_worker_token_parity = true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    profile = load_environment_state_profile(profile_path)
+
+    drift = diff_external_slurm_runner_prerequisites(profile)
+
+    assert [item.path for item in drift] == [
+        "external_slurm_runner_prerequisites[production/oldlab].worker_token_fingerprint",
+    ]
+    assert drift[0].desired == "active worker token fingerprint"
+    assert drift[0].live == "missing --worker-token"
+
+
+def test_external_slurm_runner_prerequisite_reports_missing_worker_token_key(
+    tmp_path: Path,
+) -> None:
+    active_token = "loom_w_current_environment_token"
+    env_file = tmp_path / "remote-worker.env"
+    env_file.write_text("LOOM_WORKER_POOL_NAME=oldlab\n", encoding="utf-8")
+    repo_dir = tmp_path / "loom-remote-worker"
+    repo_dir.mkdir()
+    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path.write_text(
+        f"""
+environment = "public-beta"
+control_plane_environment = "production"
+
+[[worker_pool_autoscaler_policies]]
+pool_name = "oldlab"
+actuator = "slurm"
+enabled = true
+min_slots = 1
+max_slots = 40
+
+[worker_pool_autoscaler_policies.actuator_config]
+env_file = "{env_file}"
+repo_dir = "{repo_dir}"
+requested_concurrency = 1
+external_runner = true
+
+[external_slurm_runner_prerequisites]
+pools = ["oldlab"]
+require_worker_token_parity = true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    profile = load_environment_state_profile(profile_path)
+
+    drift = diff_external_slurm_runner_prerequisites(
+        profile,
+        expected_worker_token=active_token,
+    )
+
+    assert [item.path for item in drift] == [
+        "external_slurm_runner_prerequisites[production/oldlab].worker_token_fingerprint",
+    ]
+    assert drift[0].live == "missing LOOM_WORKER_TOKEN"
+    assert active_token not in str(drift[0])
+
+
+def test_external_slurm_runner_prerequisite_reads_exported_quoted_worker_token(
+    tmp_path: Path,
+) -> None:
+    active_token = "loom_w_current_environment_token"
+    env_file = tmp_path / "remote-worker.env"
+    env_file.write_text(
+        f'export LOOM_WORKER_TOKEN="{active_token}"\n',
+        encoding="utf-8",
+    )
+    repo_dir = tmp_path / "loom-remote-worker"
+    repo_dir.mkdir()
+    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path.write_text(
+        f"""
+environment = "public-beta"
+control_plane_environment = "production"
+
+[[worker_pool_autoscaler_policies]]
+pool_name = "oldlab"
+actuator = "slurm"
+enabled = true
+min_slots = 1
+max_slots = 40
+
+[worker_pool_autoscaler_policies.actuator_config]
+env_file = "{env_file}"
+repo_dir = "{repo_dir}"
+requested_concurrency = 1
+external_runner = true
+
+[external_slurm_runner_prerequisites]
+pools = ["oldlab"]
+require_worker_token_parity = true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    profile = load_environment_state_profile(profile_path)
+
+    drift = diff_external_slurm_runner_prerequisites(
+        profile,
+        expected_worker_token=active_token,
+    )
+
+    assert drift == []
 
 
 def test_external_slurm_autoscaler_supervisor_profile_is_normalized(
@@ -591,6 +864,16 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert gb10_policy["actuator_config"]["cpu_arch"] == "arm64"
     assert gb10_policy["actuator_config"]["partition"] == "gb10"
     assert len(gb10_policy["actuator_config"]["allowed_nodes"]) == 15
+    assert (
+        gb10_policy["actuator_config"]["env_file"]
+        == f"/shared_work/qianyi/loom-worker-capacity/{environment}-gb10-worker-public-beta-test.env"
+    )
+    suffix = (
+        "loom-remote-worker-public-beta-test"
+        if environment == "public-beta"
+        else "loom-remote-worker-staging-public-beta-test"
+    )
+    assert gb10_policy["actuator_config"]["repo_dir"].endswith(suffix)
 
     gb10_state = next(
         state
@@ -615,6 +898,14 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
         "LOOM_SVC_MINIO_ACCESS_KEY",
         "LOOM_SVC_MINIO_SECRET_KEY",
     ]
+    assert set(profile.external_slurm_runner_prerequisites["pools"]) == {
+        "oldlab",
+        "gb10-arm64",
+    }
+    assert (
+        profile.external_slurm_runner_prerequisites["require_worker_token_parity"]
+        is True
+    )
 
 
 def test_public_beta_oldlab_policy_allows_all_five_oldlab_submit_nodes() -> None:

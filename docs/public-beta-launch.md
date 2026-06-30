@@ -323,13 +323,15 @@ For GB10 and OLDLAB public-beta rollouts, gate the Slurm-managed capacity first
 and then gate node-agent convergence only for compose rollout compatibility.
 Run `environment-state check` from the Slurm submit/shared-storage host so it
 can validate external runner env files, shared worker checkouts, and local
-systemd user timers in addition to CP-backed state. The Slurm check catches
-pending/stale capacity requests, active jobs launched from stale
-`LOOM_REMOTE_WORKER_*` paths, inactive OLDLAB autoscaler timers, unscoped
-external autoscaler commands that omit `--pool-name oldlab`, and the active
-`gb10-arm64`/`oldlab` pool shapes; the node-agent check catches stale
-host-local checkouts, local-build fallback using an old tree, and env files
-that did not apply even when the pool still has healthy heartbeats.
+systemd user timers in addition to CP-backed state. Pass the active worker
+token through `--worker-token env:...` or `file:...`; the gate emits only
+redacted sha256-prefix fingerprints. The Slurm check catches pending/stale
+capacity requests, active jobs launched from stale `LOOM_REMOTE_WORKER_*`
+paths, stale remote env worker-token fingerprints, inactive OLDLAB autoscaler
+timers, unscoped external autoscaler commands that omit `--pool-name oldlab`,
+and the active `gb10-arm64`/`oldlab` pool shapes; the node-agent check catches
+stale host-local checkouts, local-build fallback using an old tree, and env
+files that did not apply even when the pool still has healthy heartbeats.
 
 ```bash
 loom admin environment-state apply \
@@ -346,7 +348,8 @@ loom admin environment-state check \
   --environment public-beta \
   --file deploy/environment-state/public-beta.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
-  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
+  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+  --worker-token file:/secure/path/worker-token
 
 loom admin slurm-workers status \
   --cp-url http://control-node.lan:18081 \

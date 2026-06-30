@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from uuid import uuid4
@@ -8,6 +9,7 @@ from uuid import uuid4
 import pytest
 
 from loom.db.schema import WorkerPoolAutoscalerPolicy
+from loom.worker_token import WORKER_AUTH_FINGERPRINT_ENV_KEY, worker_token_fingerprint
 from loom_control_plane.elastic_slurm_worker_controller import (
     SlurmNodeResource,
     build_sbatch_request,
@@ -797,8 +799,12 @@ async def test_request_worker_drain_skips_empty_and_executes_update() -> None:
 
 async def test_apply_slurm_scale_up_records_success_and_failure(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    worker_token = "loom_w_current_environment_token"
+    env_file = tmp_path / ".env.remote-worker"
+    env_file.write_text(f'export LOOM_WORKER_TOKEN="{worker_token}"\n', encoding="utf-8")
     recorded_jobs: list[dict[str, Any]] = []
 
     async def fake_record_slurm_worker_job(*args: Any, **kwargs: Any) -> None:
@@ -819,7 +825,7 @@ async def test_apply_slurm_scale_up_records_success_and_failure(
             max_slots=12,
             actuator_config={
                 "allowed_nodes": ["oldlab-1", "oldlab-2"],
-                "env_file": "/secure/.env.remote-worker",
+                "env_file": str(env_file),
                 "repo_dir": "/opt/loom",
                 "requested_concurrency": 6,
                 "requested_cpus": 12,
@@ -848,6 +854,13 @@ async def test_apply_slurm_scale_up_records_success_and_failure(
     assert recorded_jobs[0]["job_id"] == "job-oldlab-1"
     assert recorded_jobs[1]["job_id"] is None
     assert recorded_jobs[1]["submission_error"] == "sbatch failed for oldlab-2"
+    assert recorded_jobs[0]["env"][WORKER_AUTH_FINGERPRINT_ENV_KEY] == (
+        worker_token_fingerprint(worker_token)
+    )
+    assert recorded_jobs[1]["env"][WORKER_AUTH_FINGERPRINT_ENV_KEY] == (
+        worker_token_fingerprint(worker_token)
+    )
+    assert "LOOM_WORKER_TOKEN" not in recorded_jobs[0]["env"]
 
 
 async def test_apply_slurm_scale_up_respects_pending_job_cap() -> None:

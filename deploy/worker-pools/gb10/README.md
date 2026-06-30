@@ -219,6 +219,26 @@ LOOM_WORKER_MINIO_OPERATION_ATTEMPTS=3
 
 The same file must also contain the environment's worker token and MinIO
 credentials. Do not print those values in issue comments, logs, or PRs.
+After worker-token rotation, update this file on every host before restarting
+workers. The release gate checks the shared GB10 Slurm runner env file and
+active Slurm job `LOOM_WORKER_AUTH_FINGERPRINT` values with:
+
+```bash
+loom admin environment-state check \
+  --cp-url http://127.0.0.1:18081 \
+  --admin-token env:LOOM_ADMIN_TOKEN \
+  --environment public-beta \
+  --file deploy/environment-state/public-beta.toml \
+  --var IMAGE_TAG="$IMAGE_TAG" \
+  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+  --worker-token file:/secure/path/worker-token
+```
+
+For the host-local node-agent path, `LOOM_WORKER_ENV_CONFIG_VERSION` must change
+with the token rollout so `loom admin gb10-workers status
+--release-env-config-version "$ENV_CONFIG_VERSION"` proves the updated
+`.env.remote-worker` was applied on each GB10 host without storing the raw token
+in the Control Plane.
 
 `LOOM_WORKER_ENV_CONFIG_VERSION` is a host-local lifecycle marker for the
 GB10 node-agent. It is read from the env file by Docker Compose and the
@@ -350,7 +370,8 @@ loom admin environment-state check \
   --environment public-beta \
   --file deploy/environment-state/public-beta.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
-  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
+  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+  --worker-token file:/secure/path/worker-token
 ```
 
 For manual canary experiments, set desired state through the CP admin API.
