@@ -41,6 +41,7 @@ REQUIRED_CHECK_IDS: tuple[str, ...] = (
     "service.no_oom_restarts",
     "runs.batch_detail",
     "runs.claimed_without_started",
+    "runs.worker_pool_coverage",
     "runs.trial_detail",
     "artifacts.owner_atif_download",
     "artifacts.owner_trajectory_download",
@@ -439,6 +440,107 @@ def _claimed_without_started_count(response: HttpResponse) -> int | None:
     return None
 
 
+def _terminal_worker_pool_counts(response: HttpResponse) -> dict[str, int] | None:
+    try:
+        body = response.json()
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    debug_evidence = body.get("debug_evidence")
+    if not isinstance(debug_evidence, dict):
+        return None
+    trials = debug_evidence.get("trials")
+    if not isinstance(trials, dict):
+        return None
+    worker_pools = trials.get("worker_pools")
+    if not isinstance(worker_pools, dict):
+        return None
+    terminal = worker_pools.get("terminal")
+    if not isinstance(terminal, dict):
+        return None
+    counts: dict[str, int] = {}
+    for raw_pool, raw_count in terminal.items():
+        if not isinstance(raw_pool, str) or not raw_pool.strip():
+            return None
+        if isinstance(raw_count, bool):
+            return None
+        if isinstance(raw_count, int):
+            count = raw_count
+        elif isinstance(raw_count, str):
+            try:
+                count = int(raw_count)
+            except ValueError:
+                return None
+        else:
+            return None
+        counts[raw_pool.strip()] = count
+    return counts
+
+
+def _worker_pool_coverage_result(
+    response: HttpResponse,
+    required_worker_pools: list[str],
+) -> CheckResult:
+    required = [pool.strip() for pool in required_worker_pools if pool.strip()]
+    if not required:
+        return _skip(
+            "runs.worker_pool_coverage",
+            "runs",
+            "--required-worker-pool was not provided.",
+        )
+    if response.status_code != 200:
+        return CheckResult(
+            "runs.worker_pool_coverage",
+            "runs",
+            "fail",
+            (
+                "Could not inspect worker-pool coverage; got "
+                f"HTTP {response.status_code}: {response.text[:300]}"
+            ),
+            "Fix batch debug evidence loading before accepting release-gate coverage.",
+        )
+    terminal_counts = _terminal_worker_pool_counts(response)
+    if terminal_counts is None:
+        return CheckResult(
+            "runs.worker_pool_coverage",
+            "runs",
+            "fail",
+            "Batch debug evidence did not include trials.worker_pools.terminal.",
+            (
+                "Return terminal trial counts by worker pool so release gates "
+                "can assert OLDLAB/GB10/k8s coverage without direct DB joins."
+            ),
+        )
+    missing = [pool for pool in required if terminal_counts.get(pool, 0) <= 0]
+    counts_detail = ", ".join(
+        f"{pool}={terminal_counts[pool]}" for pool in sorted(terminal_counts)
+    ) or "none"
+    if missing:
+        return CheckResult(
+            "runs.worker_pool_coverage",
+            "runs",
+            "fail",
+            (
+                "Missing terminal trials for required worker pool(s): "
+                f"{', '.join(missing)}. Observed terminal coverage: {counts_detail}."
+            ),
+            (
+                "Rerun with enough compatible work or a deterministic coverage "
+                "constraint until the required worker pools all have terminal trials."
+            ),
+        )
+    return CheckResult(
+        "runs.worker_pool_coverage",
+        "runs",
+        "pass",
+        (
+            "Required worker-pool coverage satisfied. "
+            f"Observed terminal coverage: {counts_detail}."
+        ),
+    )
+
+
 def _json_has_provenance(response: HttpResponse, *, batch_id: str | None = None) -> bool:
     try:
         body = response.json()
@@ -800,10 +902,18 @@ def run_smoke(args: argparse.Namespace) -> SmokeReport:
                     "inspect worker logs and rerun the smoke gate before release."
                 ),
             ))
+        results.append(
+            _worker_pool_coverage_result(batch_debug, args.required_worker_pool),
+        )
     else:
         results.append(_skip("runs.batch_detail", "runs", "--batch-id was not provided."))
         results.append(_skip(
             "runs.claimed_without_started",
+            "runs",
+            "--batch-id was not provided.",
+        ))
+        results.append(_skip(
+            "runs.worker_pool_coverage",
             "runs",
             "--batch-id was not provided.",
         ))
@@ -1620,6 +1730,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Expected model id in /api/v1/models, for example `gpt-4o-mini`.",
     )
     parser.add_argument("--batch-id", default=None, help="Completed Team A batch id.")
+    parser.add_argument(
+        "--required-worker-pool",
+        action="append",
+        default=[],
+        help=(
+            "Require at least one terminal trial in this worker pool for the "
+            "batch debug-evidence coverage gate. May be passed more than once."
+        ),
+    )
     parser.add_argument("--trial-id", default=None, help="Succeeded Team A trial id.")
     parser.add_argument("--safe-artifact-key", default=None)
     parser.add_argument("--blocked-artifact-key", default=None)

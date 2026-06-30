@@ -184,6 +184,7 @@ python scripts/public_beta_smoke_gate.py \
   --object-store-write-check-count 64 \
   --object-store-write-check-concurrency 16 \
   --k8s-namespace loom-public-beta \
+  --required-worker-pool oldlab \
   --secret-needle seeded-public-beta-secret \
   --internal-url-needle loom-minio.loom.svc.cluster.local \
   --allow-mutating-checks \
@@ -204,6 +205,8 @@ The script checks:
   write failures are caught before submitting canary or release-trial work;
 - current `loom-service` pod restart/OOM status when `--k8s-namespace` is
   provided;
+- terminal trial coverage for required worker pools such as `oldlab` when
+  `--required-worker-pool` is provided;
 - batch/trial detail and service-proxied ATIF/trajectory downloads;
 - Run Library My team and All teams visibility;
 - owner-team label;
@@ -384,6 +387,8 @@ The public beta launch gate passes only when:
   source batch used as launch evidence;
 - the smoke report's `service.no_oom_restarts` row is `PASS` for the deployed
   `loom-service` pods;
+- the smoke report's `runs.worker_pool_coverage` row is `PASS` for any
+  release-required worker pool such as `oldlab`;
 - no response, audit excerpt, log excerpt, or safe downloaded artifact contains
   seeded fake secrets or internal URLs;
 - unsafe artifacts are blocked and cannot be downloaded by another team;

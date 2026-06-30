@@ -2261,6 +2261,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
       --object-store-write-check-count 64 \
       --object-store-write-check-concurrency 16 \
       --k8s-namespace loom-public-beta \
+      --required-worker-pool oldlab \
       --secret-needle seeded-public-beta-secret \
       --internal-url-needle loom-minio.loom.svc.cluster.local \
       --allow-mutating-checks \
@@ -2280,7 +2281,10 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     `service.no_oom_restarts` row must pass for full100/release evidence; if it
     reports an `OOMKilled` last state or unexpected current restart count,
     inspect `loom-service` memory, previous pod logs, and large batch
-    detail/cancel traffic before accepting the gate.
+    detail/cancel traffic before accepting the gate. For OLDLAB-required
+    full100/release evidence, the `runs.worker_pool_coverage` row must pass
+    with `--required-worker-pool oldlab`; a missing pool means the batch did
+    not produce deterministic terminal evidence on that worker pool.
 19. **Teardown clean.** `loom cluster down --yes` removes every applied
     object; PVCs survive (verify via `kubectl get pvc -n loom`). For
     public-beta or staging, pass `--with-volumes` or `--delete-namespace` only
@@ -2308,6 +2312,7 @@ checklist:
   benchmark catalog presence, sampled ready benchmark bundle objects,
   concurrent object-store write/delete probing, service pod restart/OOM status,
   batch/trial detail, `claimed_without_started=0` from batch debug evidence,
+  required terminal worker-pool coverage from batch debug evidence,
   service-proxied ATIF/trajectory downloads, My team and All teams Run Library
   visibility, owner-team label, cross-team safe artifact download,
   direct-route denial,

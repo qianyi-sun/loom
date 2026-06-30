@@ -9,7 +9,7 @@ signed object-store URLs, provider secrets, or private cross-team data.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, cast
@@ -478,6 +478,43 @@ def _summary_from_trials(trials: Sequence[Trial]) -> dict[str, int]:
     }
 
 
+def _worker_pool_coverage(
+    trials: Sequence[Trial],
+    worker_pool_names_by_id: Mapping[Any, str] | None,
+) -> dict[str, Any]:
+    worker_pool_names_by_id = worker_pool_names_by_id or {}
+    terminal = Counter[str]()
+    active = Counter[str]()
+    unknown_terminal = 0
+    unknown_active = 0
+    for trial in trials:
+        state = str(trial.state)
+        if state not in {"succeeded", "failed", "cancelled", *_ACTIVE_STATES}:
+            continue
+        worker_id = getattr(trial, "worker_id", None)
+        pool_name = None
+        if worker_id is not None:
+            pool_name = worker_pool_names_by_id.get(worker_id)
+            if pool_name is None:
+                pool_name = worker_pool_names_by_id.get(str(worker_id))
+        if state in {"succeeded", "failed", "cancelled"}:
+            if pool_name:
+                terminal[str(pool_name)] += 1
+            else:
+                unknown_terminal += 1
+        elif state in _ACTIVE_STATES:
+            if pool_name:
+                active[str(pool_name)] += 1
+            else:
+                unknown_active += 1
+    return {
+        "terminal": dict(sorted(terminal.items())),
+        "active": dict(sorted(active.items())),
+        "unknown_terminal": unknown_terminal,
+        "unknown_active": unknown_active,
+    }
+
+
 def _failure_for_batch(batch: Batch) -> dict[str, Any]:
     if batch.failure_reason == "fanout_submit_failed":
         return {
@@ -551,6 +588,7 @@ def build_batch_debug_evidence(
     *,
     trials: Sequence[Trial],
     llm_calls: Sequence[LlmCall],
+    worker_pool_names_by_id: Mapping[Any, str] | None = None,
 ) -> dict[str, Any]:
     llm_call_counts = llm_call_counts_by_trial_id(llm_calls)
     llm_evidence = summarize_llm_evidence_for_trials(
@@ -630,6 +668,7 @@ def build_batch_debug_evidence(
         },
         "trials": {
             "summary": _summary_from_trials(trials),
+            "worker_pools": _worker_pool_coverage(trials, worker_pool_names_by_id),
             "failed": failed_trials[:50],
             "failed_count": len(failed_trials),
         },
