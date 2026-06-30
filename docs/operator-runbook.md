@@ -981,6 +981,60 @@ curl -X DELETE http://localhost:8080/admin/worker-tokens/$OLD_PREFIX \
   -H "Authorization: Bearer $LOOM_ADMIN_TOKEN"
 ```
 
+### Worker-token staleness
+
+The Control Plane's metrics refresher publishes
+`loom_worker_tokens_stale_count{reason}` every 30 seconds, and
+`LoomWorkerTokenStaleness` fires after either label has been non-zero
+for 1 hour:
+
+- `reason="unused_30d"` — a live (non-revoked, non-expired) worker
+  token whose `last_seen_at` (or `issued_at`, if never used) is
+  older than 30 days. Most common cause is a worker pool that was
+  decommissioned without revoking its token.
+- `reason="aged_90d"` — a live worker token whose `issued_at` is
+  older than 90 days. Rotation is overdue per the SOC2-equivalent
+  service-credential rotation cadence.
+
+The audit never auto-revokes. Pulling a live pool's token 401s
+in-flight claims and pages on-call — humans decide.
+
+List the candidate tokens without exposing any raw value:
+
+```sql
+SELECT encode(token_hash, 'hex') AS hash_prefix,
+       name,
+       issued_at,
+       last_seen_at,
+       expires_at
+  FROM tokens
+ WHERE type = 'worker'
+   AND revoked_at IS NULL
+   AND (expires_at IS NULL OR expires_at > NOW())
+   AND (COALESCE(last_seen_at, issued_at)
+          < NOW() - INTERVAL '30 days'
+        OR issued_at < NOW() - INTERVAL '90 days')
+ ORDER BY COALESCE(last_seen_at, issued_at) ASC;
+```
+
+Response per case:
+
+1. **Pool is genuinely retired** → revoke it.
+   ```bash
+   loom admin tokens worker revoke <PREFIX>
+   ```
+2. **Pool is alive but long-cycle (e.g., a Slurm pool that batches
+   monthly)** → add an alertmanager silence keyed by the token's
+   hash prefix until the next scheduled batch. The 30d threshold
+   is tight for SOC2-equivalent hygiene; long-cycle pools are
+   the known false-positive case.
+3. **Aged 90d, pool is alive** → rotate per the procedure above
+   (mint new, install via stdin pipe, restart workers, revoke
+   old).
+
+The query is also useful as a quarterly hygiene check independent
+of the alert.
+
 ### Legacy team-token compatibility — `loom admin tokens team`
 
 Normal automation should use a user-owned API token created from a browser or
@@ -1480,6 +1534,7 @@ the `groups` block into your `prometheus.yml`.
 | `LoomWorkerHeartbeatFailing` | warning | `rate(loom_worker_heartbeat_failures_total[5m]) > 0` for 10m | Worker heartbeats to CP are failing; CP will eventually reclaim that worker's trials. | Verify worker-to-CP reachability; check `loom_worker_claim_loop_iterations_total{result="error"}` for related connectivity failures. |
 | `LoomWorkerTrialFailureRateHigh` | warning | worker `loom_worker_trials_completed_total{result!="succeeded"}` ratio > 20% for 15m | Many worker-run trials are failing, cancelling, or crashing. | Inspect `sum by (result) (rate(loom_worker_trials_completed_total[5m]))`; compare recent trajectories for common failure reasons. |
 | `LoomRetryExhaustedSpiking` | warning | `rate(loom_retry_exhausted_total[5m]) > 0.1` for 10m | CP's retry-exhausted sweeper is transitioning > 6 trials/min to `failed/retry_exhausted`. Indicates workloads are exhausting their retry budget or a flaky upstream is causing real failures across many trials. | Inspect `sum by (team_id, task_id) (rate(loom_trials_state_total{to_state="failed"}[15m]))`; correlate with `LoomWorkerTrialFailureRateHigh` + recent provider/sandbox failures; inspect `max_attempts` only if the workload is genuinely retry-heavy. |
+| `LoomWorkerTokenStaleness` | warning | `loom_worker_tokens_stale_count > 0` for 1h | Live worker tokens are flagged as either unused for 30+ days (`reason="unused_30d"` — usually a decommissioned pool whose token was never revoked) or older than 90 days since mint (`reason="aged_90d"` — rotation overdue). Soft signal; never auto-revokes (would 401 in-flight claims). | See [Worker-token staleness](#worker-token-staleness) below. |
 
 Thresholds are starting points — tune per team's trial volume +
 workload shape. Halve the `for:` durations for staging.

@@ -123,6 +123,7 @@ def test_metrics_refresher_imports_slurm_worker_metrics() -> None:
     assert hasattr(refresher_module, "WORKER_POOL_DRAINING_SLOTS")
     assert hasattr(refresher_module, "WORKER_POOL_AUTOSCALER_DECISION")
     assert hasattr(refresher_module, "WORKER_POOL_AUTOSCALER_IDLE_SECONDS")
+    assert hasattr(refresher_module, "WORKER_TOKENS_STALE_COUNT")
 
 
 def test_control_plane_app_imports_elastic_slurm_controller_loop() -> None:

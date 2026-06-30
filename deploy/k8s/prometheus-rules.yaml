@@ -138,6 +138,52 @@ spec:
                   switching to a healthy provider connection.
             runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/operator-runbook.md#production-alerts"
 
+        # Worker tokens that have either been unused for 30+ days (likely
+        # belong to a decommissioned worker pool) or are 90+ days old
+        # since mint (rotation overdue per SOC2-equivalent cadence).
+        # Soft signal — never auto-revokes, because pulling a live
+        # pool's token 401s in-flight claims.
+        - alert: LoomWorkerTokenStaleness
+          expr: loom_worker_tokens_stale_count > 0
+          for: 1h
+          labels:
+            severity: warning
+            component: control-plane
+          annotations:
+            summary: "Worker tokens flagged by the staleness audit ({{ $labels.reason }})"
+            description: |
+              One or more live worker tokens are flagged as stale.
+
+              reason="unused_30d": last_seen_at (or issued_at, for
+                tokens that were never presented) is older than 30 days.
+                Most common cause: a worker pool was decommissioned but
+                its token was never revoked. Slurm pools that batch
+                infrequently can also trip this — silence the alert via
+                alertmanager once you've confirmed the pool is intended.
+
+              reason="aged_90d": issued_at is older than 90 days.
+                Rotation is overdue. Rotate per the operator runbook.
+
+              Triage:
+                - List candidate tokens (no raw value exposed):
+                    SELECT encode(token_hash, 'hex') AS hash_prefix,
+                           name, issued_at, last_seen_at, expires_at
+                      FROM tokens
+                     WHERE type = 'worker'
+                       AND revoked_at IS NULL
+                       AND (expires_at IS NULL OR expires_at > NOW())
+                       AND (COALESCE(last_seen_at, issued_at)
+                              < NOW() - INTERVAL '30 days'
+                            OR issued_at < NOW() - INTERVAL '90 days')
+                     ORDER BY COALESCE(last_seen_at, issued_at) ASC;
+                - If a pool is genuinely retired: `loom admin tokens
+                  worker revoke <prefix>`.
+                - If a pool is alive but long-cycle (Slurm batch): add
+                  an alertmanager silence keyed by that prefix.
+                - If overdue for rotation: see the rotation section in
+                  the operator runbook.
+            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/operator-runbook.md#worker-token-staleness"
+
     - name: loom.platform.latency
       interval: 30s
       rules:
