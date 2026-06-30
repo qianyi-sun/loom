@@ -211,6 +211,10 @@ _ADAPTER_OVERRIDES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "opencode": (("*",), ("api", "local-server", "hf")),
     "swe-agent": (("*",), ("api", "local-server", "hf")),
     "mini-swe-agent": (("*",), ("api", "local-server", "hf")),
+    # Upstream Terminus from terminal-bench-core, wrapped by a tiny CLI
+    # in loom_launcher.terminus_2_runner. LiteLLM-backed so it can call
+    # any provider via the gateway's openai-compatible facade.
+    "terminus-2": (("*",), ("api", "local-server", "hf")),
     # "hello" is a canary that doesn't actually need an LLM in practice,
     # but adapters self-declare needs_model — keep permissive.
     "hello": (("*",), ("api", "local-server", "hf")),
@@ -234,6 +238,7 @@ _ADAPTER_CAPTURE: dict[str, str] = {
     "openhands-sdk": "stdout_jsonl",
     "qwen-cli": "pty",
     "swe-agent": "log_file",
+    "terminus-2": "stdout_jsonl",
 }
 
 
@@ -254,6 +259,10 @@ _ADAPTER_REQUIRED_PYTHON_MODULES: dict[str, tuple[str, ...]] = {
     "openhands": ("loom_launcher.openhands_sdk_runner", "openhands.sdk"),
     "openhands-sdk": ("loom_launcher.openhands_sdk_runner", "openhands.sdk"),
     "swe-agent": ("sweagent.run.run_single",),
+    "terminus-2": (
+        "loom_launcher.terminus_2_runner",
+        "terminal_bench.agents.terminus",
+    ),
 }
 
 
@@ -269,6 +278,7 @@ _ADAPTER_REQUIRED_PACKAGES: dict[str, tuple[str, ...]] = {
     "openhands-sdk": ("openhands-sdk",),
     "qwen-cli": ("@qwen-code/qwen-code",),
     "swe-agent": ("git+https://github.com/SWE-agent/SWE-agent",),
+    "terminus-2": ("terminal-bench-core",),
 }
 
 
@@ -285,6 +295,7 @@ _ADAPTER_RUNTIME_READY: dict[str, bool] = {
     "openhands-sdk": True,
     "qwen-cli": True,
     "swe-agent": True,
+    "terminus-2": True,
 }
 
 

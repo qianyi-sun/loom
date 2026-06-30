@@ -118,14 +118,14 @@ def test_displayed_agent_catalog_returns_expected_count() -> None:
     assert {"oracle", "litellm"}.issubset(names)
     # Retired (catalog cleanup PR #355).
     assert "claude-code-inbox" not in names
-    # Launcher adapters (12 production + hello fixture).
+    # Launcher adapters (13 production + hello fixture).
     assert {
         "aider", "claude-code", "codex", "gemini-cli", "hello",
         "kimi-cli", "mini-swe-agent", "opencode", "openhands",
-        "openhands-sdk", "qwen-cli", "swe-agent",
+        "openhands-sdk", "qwen-cli", "swe-agent", "terminus-2",
     }.issubset(names)
     # Total catalog cardinality — bump intentionally when adding agents.
-    assert len(agents) == 14, sorted(names)
+    assert len(agents) == 15, sorted(names)
 
 
 def test_every_displayed_agent_is_service_mode_ready() -> None:
