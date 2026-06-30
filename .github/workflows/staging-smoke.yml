@@ -214,10 +214,65 @@ jobs:
           uv run python -m loom_cli cluster audit \
             --config /tmp/cluster-config.toml
 
-      - name: loom cluster up (with wait)
-        # Unlike the basic kind smoke, we wait for every component
-        # to reach Ready. Real images on kind take ~3-5 min cold-start
-        # (image extraction + Python startup + DB migration).
+      - name: loom cluster up (apply, no-wait)
+        # Apply manifests but return immediately. Postgres needs to
+        # be Ready before we can apply migrations, and the long-
+        # running services (CP, gateway, service) refuse to start
+        # until Alembic head is reached. We orchestrate the sequence
+        # explicitly below.
+        run: |
+          uv run python -m loom_cli cluster up \
+            --context kind-loom-staging --namespace loom \
+            --config /tmp/cluster-config.toml \
+            --skip-preflight --no-wait
+
+      - name: Wait for Postgres + MinIO Ready
+        # Infrastructure StatefulSets with no DB dependency of their
+        # own; reach Ready within 1-2 min of cold-start.
+        run: |
+          set -euo pipefail
+          kubectl --context kind-loom-staging -n loom wait \
+            --for=condition=Ready pod/loom-postgres-0 --timeout=180s
+          kubectl --context kind-loom-staging -n loom wait \
+            --for=condition=Ready pod/loom-minio-0 --timeout=180s
+
+      - name: Apply Alembic migrations
+        # Services validate `schema at head` and refuse to start
+        # otherwise (`loom.db.schema_startup`). `loom service up`
+        # does dev auto-migration; `loom cluster up` doesn't because
+        # production migration is an explicit operator action. We
+        # run alembic against the live Postgres via port-forward;
+        # each role-scoped DB URL (cp-db-url, gw-db-url, svc-db-url)
+        # points at the same Postgres + a different database name
+        # set by the smoke-defaults secrets.
+        run: |
+          set -euo pipefail
+          kubectl --context kind-loom-staging -n loom port-forward \
+            svc/loom-postgres 15432:5432 &
+          PF_PID=$!
+          trap "kill ${PF_PID} 2>/dev/null || true" EXIT
+          sleep 3
+
+          for key in cp-db-url gw-db-url svc-db-url; do
+            DB_URL=$(kubectl --context kind-loom-staging -n loom \
+              get secret loom-secrets \
+              -o jsonpath="{.data.${key}}" | base64 -d)
+            # Rewrite host:port to localhost:15432 so local alembic
+            # can reach the cluster Postgres via the port-forward.
+            LOCAL_DB_URL=$(echo "${DB_URL}" \
+              | sed -E 's#@[^/]+/#@localhost:15432/#')
+            echo "::add-mask::${LOCAL_DB_URL}"
+            echo "::group::alembic upgrade head for ${key}"
+            LOOM_DB_URL="${LOCAL_DB_URL}" uv run alembic \
+              -c migrations/alembic.ini upgrade head
+            echo "::endgroup::"
+          done
+
+      - name: loom cluster up (wait for components Ready)
+        # Now that migrations are applied, the services come up
+        # cleanly. Re-invoke `loom cluster up` to use its
+        # wait-for-ready loop (apply is idempotent — kubectl apply
+        # is a no-op when manifests are unchanged).
         run: |
           uv run python -m loom_cli cluster up \
             --context kind-loom-staging --namespace loom \
