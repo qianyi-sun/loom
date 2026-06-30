@@ -2549,6 +2549,16 @@ mock provider and browser automation job.
     --pool-name gb10-arm64 \
     --release-image-tag "$IMAGE_TAG" \
     --release-env-config-version "$ENV_CONFIG_VERSION"
+  # On each GB10 host during worker-token rotation:
+  loom worker gb10-agent apply \
+    --cp-url http://127.0.0.1:18081 \
+    --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
+    --environment production \
+    --pool-name gb10-arm64 \
+    --env-file /home/trt/loom-remote-worker/.env.remote-worker \
+    --compose-file deploy/docker-compose.remote-worker.yml \
+    --compose-file /home/trt/loom-remote-worker/docker-compose.gb10-hostnet.yml \
+    --worker-token file:/secure/path/worker-token
   loom resources status --json
   ```
 - For elastic Slurm pools, the Control Plane records submitted worker jobs in

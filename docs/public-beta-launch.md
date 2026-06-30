@@ -373,6 +373,14 @@ loom admin gb10-workers status \
   --release-env-config-version "$ENV_CONFIG_VERSION"
 ```
 
+For GB10 node-agent compatibility workers, `gb10-workers status` proves the
+non-secret desired image/env-config state only. During worker-token rotation,
+also run `loom worker gb10-agent plan/apply --worker-token file:/...` on each
+GB10 host, then verify `loom resources status --json` shows fresh
+`gb10-arm64` active workers and the Control Plane logs no new
+`/workers/register` 401s. The `--worker-token` value is read locally on the
+host and is never stored in the Control Plane desired state.
+
 For OLDLAB 1-5, use the committed staged files in
 `deploy/worker-pools/oldlab/` as the source of truth for included nodes,
 requested Slurm slice, and controller env overrides. OLDLAB 4/5 must not be

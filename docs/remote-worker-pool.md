@@ -578,6 +578,32 @@ loom worker gb10-agent apply \
   --compose-file /home/trt/loom-remote-worker/docker-compose.gb10-hostnet.yml
 ```
 
+For worker-token rotation, run the same host-local plan/apply with the active
+environment token supplied through `env:`, `file:`, or stdin. The token is not
+published to the Control Plane; it is compared against and, on apply, written
+only to the host-local `.env.remote-worker` file before restarting the worker.
+Output shows only changed key names and redacted values.
+
+```bash
+loom worker gb10-agent plan \
+  --cp-url http://127.0.0.1:18081 \
+  --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
+  --environment production \
+  --pool-name gb10-arm64 \
+  --env-file /home/trt/loom-remote-worker/.env.remote-worker \
+  --worker-token file:/secure/path/current-worker-token
+
+loom worker gb10-agent apply \
+  --cp-url http://127.0.0.1:18081 \
+  --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
+  --environment production \
+  --pool-name gb10-arm64 \
+  --env-file /home/trt/loom-remote-worker/.env.remote-worker \
+  --compose-file deploy/docker-compose.remote-worker.yml \
+  --compose-file /home/trt/loom-remote-worker/docker-compose.gb10-hostnet.yml \
+  --worker-token file:/secure/path/current-worker-token
+```
+
 `apply --dry-run` prints only the non-secret env keys that would be changed and
 the Docker Compose commands that would run. Rollback apply publishes the
 previous desired image/concurrency/env version back to the Control Plane before
