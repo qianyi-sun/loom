@@ -413,8 +413,8 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_provision_public_beta_catalog_args(sub.add_parser(
         "provision-public-beta-catalog",
         help=(
-            "Copy runnable benchmark/task rows and their S3 bundles from a "
-            "source environment into public beta."
+            "Copy runnable benchmark/task rows, supported agent rows, and "
+            "their S3 bundles from a source environment into public beta."
         ),
     ))
 
@@ -931,6 +931,7 @@ def _cmd_provision_public_beta_catalog(args: argparse.Namespace) -> int:
     ))
     print(
         "public-beta-catalog: "
+        f"ready_agents={stats.ready_agents} "
         f"ready_benchmarks={stats.ready_benchmarks} "
         f"ready_tasks={stats.ready_tasks} "
         f"source_objects={stats.source_objects} "

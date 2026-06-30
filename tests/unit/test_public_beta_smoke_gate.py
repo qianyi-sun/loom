@@ -49,6 +49,7 @@ def test_gate_declares_required_public_beta_checks() -> None:
         "auth.team_b_whoami",
         "providers.list",
         "providers.models",
+        "agents.ready_catalog",
         "benchmarks.runnable_catalog",
         "benchmarks.ready_bundle_objects",
         "object_store.minio_write_probe",
@@ -193,6 +194,8 @@ def test_run_smoke_fails_when_runnable_benchmark_catalog_is_empty(monkeypatch) -
         def request(self, method: str, path: str, **kwargs):
             if path == "/api/v1/models":
                 body = b'{"items":[{"provider":"openai","name":"gpt-4o-mini"}]}'
+            elif path == "/api/v1/agents":
+                body = b'{"items":[{"name":"oracle","service_mode_ready":true}]}'
             elif path == "/api/v1/benchmarks":
                 body = b'{"items":[]}'
             else:
@@ -214,6 +217,44 @@ def test_run_smoke_fails_when_runnable_benchmark_catalog_is_empty(monkeypatch) -
     assert "provision" in result.remediation.lower()
 
 
+def test_run_smoke_fails_when_ready_agent_catalog_is_empty(monkeypatch) -> None:
+    gate = _load_gate_module()
+
+    class FakeClient:
+        def __init__(self, server_url: str, *, max_scan_bytes: int) -> None:
+            self.server_url = server_url
+            self.evidence_chunks: list[str] = []
+            self.response_bytes_scanned = 0
+
+        def request(self, method: str, path: str, **kwargs):
+            if path == "/api/v1/models":
+                body = b'{"items":[{"provider":"openai","name":"gpt-4o-mini"}]}'
+            elif path == "/api/v1/agents":
+                body = b'{"items":[]}'
+            elif path == "/api/v1/benchmarks":
+                body = (
+                    b'{"items":[{"id":"humaneval","task_count":1,'
+                    b'"readiness_state":"runnable"}]}'
+                )
+            else:
+                body = b'{"items":[]}'
+            return gate.HttpResponse(status_code=200, headers={}, body=body)
+
+    monkeypatch.setattr(gate, "SmokeClient", FakeClient)
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+    ])
+
+    report = gate.run_smoke(args)
+    result = next(r for r in report.results if r.check_id == "agents.ready_catalog")
+
+    assert result.status == "fail"
+    assert "no ready agents" in result.detail.lower()
+    assert "agent catalog" in result.remediation.lower()
+
+
 def test_run_smoke_fails_when_ready_task_bundle_prefix_is_missing(monkeypatch) -> None:
     gate = _load_gate_module()
 
@@ -226,6 +267,8 @@ def test_run_smoke_fails_when_ready_task_bundle_prefix_is_missing(monkeypatch) -
         def request(self, method: str, path: str, **kwargs):
             if path == "/api/v1/models":
                 body = b'{"items":[{"provider":"openai","name":"gpt-4o-mini"}]}'
+            elif path == "/api/v1/agents":
+                body = b'{"items":[{"name":"oracle","service_mode_ready":true}]}'
             elif path == "/api/v1/benchmarks":
                 body = (
                     b'{"items":[{"id":"humaneval","task_count":1,'
