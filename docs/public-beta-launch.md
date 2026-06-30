@@ -155,7 +155,9 @@ python scripts/public_beta_smoke_gate.py \
   --server-url https://loom.example.com \
   --team-a-token "$TEAM_A_TOKEN" \
   --team-b-token "$TEAM_B_TOKEN" \
-  --provider-connection-name smoke-openai \
+  --provider-connection-name mz_tn_canada_qianyi \
+  --provider-model-provider yibuapi \
+  --provider-model-name gpt-4o-mini \
   --batch-id "$TEAM_A_BATCH_ID" \
   --trial-id "$TEAM_A_TRIAL_ID" \
   --safe-artifact-key "$SAFE_ARTIFACT_KEY" \

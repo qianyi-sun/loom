@@ -1959,21 +1959,31 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    Repeat with Team B's user. Evidence should show usernames, teams, roles, and
    scopes, never raw passwords. Team-owner API token creation remains a separate
    automation smoke if the release touches token lifecycle.
-7. **Provider connection create + test.** As Team A, create a connection through
-   the CLI (or `POST /api/v1/provider-connections`), then probe:
+7. **Provider connection create + test.** As Team A, create the public-beta
+   smoke provider through the CLI (or `POST /api/v1/provider-connections`),
+   then probe. The release fixture uses YibuAPI through Loom's
+   OpenAI-compatible provider path so the same connection can run the Codex
+   SkillLearnBench smoke:
    ```bash
-   loom providers create --name smoke-openai --type openai-compatible \
-     --base-url https://api.openai.com/v1 --api-key env:OPENAI_API_KEY
-   loom providers test smoke-openai
+   export YIBUAPI_API_KEY=...
+   loom providers create \
+     --name mz_tn_canada_qianyi \
+     --type openai-compatible \
+     --base-url https://yibuapi.com/v1 \
+     --api-key env:YIBUAPI_API_KEY \
+     --rate-card-provider yibuapi
+   loom providers test mz_tn_canada_qianyi
    ```
    `test` must return `status=valid`; `http_status` shows the upstream
    HTTP response code. Exit code is 0 for valid, 1 for invalid.
-8. **Model discovery.** `loom providers models smoke-openai --refresh`
-   followed by `loom providers models smoke-openai` returns a
-   non-empty catalog. `curl /api/v1/models` from a user-owned API token shows
-   the agent-capable view.
+8. **Model discovery.** `loom providers models mz_tn_canada_qianyi --refresh`
+   followed by `loom providers models mz_tn_canada_qianyi` returns a
+   non-empty catalog, including `gpt-4o-mini`. `curl /api/v1/models` from a
+   user-owned API token shows the agent-capable view with provider namespace
+   `yibuapi`.
 9. **Model preflight.** Run
-   `loom providers models smoke-openai --preflight gpt-4o-mini`. The model row
+   `loom providers models mz_tn_canada_qianyi --preflight gpt-4o-mini`.
+   The model row
    should show `preflight=valid`. A 401/403 should show `access-denied` without
    raw provider keys.
 10. **Submit small batches from SPA and CLI.** Pick `hello-world` (or another
@@ -2004,12 +2014,16 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
      --agent oracle \
      --n-per-task 1
 
-   # Model-backed path through the provider gateway.
+   # Model-backed path through the provider gateway. This is the release
+   # provider smoke because it exercises codex + YibuAPI OpenAI-compatible.
    loom eval batch create \
-     --name-suffix provider-smoke \
-     --task-filter '{"task_ids":["hello-world"]}' \
-     --provider smoke-openai --model gpt-4o-mini --agent litellm \
-     --n-per-task 1
+     --name-suffix codex-yibuapi-smoke \
+     --task-filter '{"task_ids":["skilllearnbench/anthropic-poster-design/anthropic-poster-design-1"]}' \
+     --provider mz_tn_canada_qianyi \
+     --model gpt-4o-mini \
+     --agent codex \
+     --n-per-task 1 \
+     --backend docker
    # then tail it:
    loom eval batch show <batch-id>
    ```
@@ -2091,7 +2105,9 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
       --server-url https://loom.example.com \
       --team-a-token "$TEAM_A_TOKEN" \
       --team-b-token "$TEAM_B_TOKEN" \
-      --provider-connection-name smoke-openai \
+      --provider-connection-name mz_tn_canada_qianyi \
+      --provider-model-provider yibuapi \
+      --provider-model-name gpt-4o-mini \
       --batch-id "$TEAM_A_BATCH_ID" \
       --trial-id "$TEAM_A_TRIAL_ID" \
       --safe-artifact-key "$SAFE_ARTIFACT_KEY" \

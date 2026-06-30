@@ -348,18 +348,58 @@ def _json_has_provenance(response: HttpResponse, *, batch_id: str | None = None)
 
 
 def _json_models_nonempty(response: HttpResponse) -> bool:
+    return bool(_json_model_items(response))
+
+
+def _json_model_items(response: HttpResponse) -> list[dict[str, Any]]:
     try:
         body = response.json()
     except json.JSONDecodeError:
-        return False
+        return []
     if isinstance(body, list):
-        return len(body) > 0
+        return [item for item in body if isinstance(item, dict)]
     if isinstance(body, dict):
         for key in ("items", "models"):
             value = body.get(key)
             if isinstance(value, list):
-                return len(value) > 0
+                return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _json_provider_connection_names(response: HttpResponse) -> list[str]:
+    names: list[str] = []
+    for item in _json_items(response):
+        name = item.get("name")
+        if isinstance(name, str) and name:
+            names.append(name)
+    return sorted(names)
+
+
+def _model_catalog_contains(
+    models: list[dict[str, Any]],
+    *,
+    provider: str | None,
+    name: str,
+) -> bool:
+    for item in models:
+        if item.get("name") != name:
+            continue
+        if provider is not None and item.get("provider") != provider:
+            continue
+        return True
     return False
+
+
+def _sample_model_catalog(models: list[dict[str, Any]], *, limit: int = 5) -> str:
+    sample: list[str] = []
+    for item in models[:limit]:
+        provider = item.get("provider")
+        name = item.get("name")
+        if isinstance(provider, str) and isinstance(name, str):
+            sample.append(f"{provider}/{name}")
+        elif isinstance(name, str):
+            sample.append(name)
+    return ", ".join(sample) if sample else "(none)"
 
 
 def _json_items(response: HttpResponse) -> list[dict[str, Any]]:
@@ -504,31 +544,62 @@ def run_smoke(args: argparse.Namespace) -> SmokeReport:
         ))
 
     providers = client.request("GET", "/api/v1/provider-connections", token=args.team_a_token)
-    provider_ok = providers.status_code == 200
+    provider_names = _json_provider_connection_names(providers)
+    provider_ok = providers.status_code == 200 and bool(provider_names)
     if provider_ok and args.provider_connection_name:
-        provider_ok = args.provider_connection_name in providers.text
+        provider_ok = args.provider_connection_name in provider_names
+    provider_sample = ", ".join(provider_names[:5]) if provider_names else "(none)"
     results.append(CheckResult(
         "providers.list",
         "providers",
         "pass" if provider_ok else "fail",
         (
-            "Team A can list provider connections."
+            f"Team A can list provider connections: {provider_sample}."
             if provider_ok
-            else f"Provider list failed or missing named provider; got HTTP {providers.status_code}."
+            else (
+                f"Provider list returned HTTP {providers.status_code} but "
+                f"{'no provider connections' if not provider_names else 'missing named provider ' + repr(args.provider_connection_name)}; "
+                f"available: {provider_sample}."
+            )
         ),
         "" if provider_ok else "Create/test the staging provider connection before the gate.",
     ))
 
     models = client.request("GET", "/api/v1/models", token=args.team_a_token)
-    models_ok = models.status_code == 200 and _json_models_nonempty(models)
+    model_items = _json_model_items(models)
+    models_ok = models.status_code == 200 and bool(model_items)
+    if models_ok and args.provider_model_name:
+        models_ok = _model_catalog_contains(
+            model_items,
+            provider=args.provider_model_provider,
+            name=args.provider_model_name,
+        )
+    model_sample = _sample_model_catalog(model_items)
+    expected_model_detail = ""
+    if args.provider_model_name:
+        expected = (
+            f"{args.provider_model_provider}/{args.provider_model_name}"
+            if args.provider_model_provider
+            else args.provider_model_name
+        )
+        expected_model_detail = f" including expected {expected}"
     results.append(CheckResult(
         "providers.models",
         "providers",
         "pass" if models_ok else "fail",
         (
-            "Team A model discovery surface returned at least one model."
+            (
+                f"Team A model discovery surface returned {len(model_items)} models"
+                f"{expected_model_detail}; "
+                f"sample: {model_sample}."
+            )
             if models_ok
-            else f"Model discovery returned HTTP {models.status_code} or an empty catalog."
+            else (
+                f"Model discovery returned HTTP {models.status_code}, "
+                f"{len(model_items)} models, sample: {model_sample}; "
+                f"expected provider={args.provider_model_provider!r} "
+                f"model={args.provider_model_name!r}."
+            )
         ),
         "" if models_ok else "Refresh provider models or resolve upstream provider entitlement.",
     ))
@@ -1164,6 +1235,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--team-a-token", required=True, help="Owner/source team API token.")
     parser.add_argument("--team-b-token", required=True, help="Second team API token.")
     parser.add_argument("--provider-connection-name", default=None)
+    parser.add_argument(
+        "--provider-model-provider",
+        default=None,
+        help=(
+            "Expected provider namespace in /api/v1/models, for example "
+            "`yibuapi`. Requires --provider-model-name."
+        ),
+    )
+    parser.add_argument(
+        "--provider-model-name",
+        default=None,
+        help="Expected model id in /api/v1/models, for example `gpt-4o-mini`.",
+    )
     parser.add_argument("--batch-id", default=None, help="Completed Team A batch id.")
     parser.add_argument("--trial-id", default=None, help="Succeeded Team A trial id.")
     parser.add_argument("--safe-artifact-key", default=None)
