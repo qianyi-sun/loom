@@ -114,7 +114,10 @@ Attach these to the release issue or release PR:
   `oldlab_worker_records` entry per OLDLAB worker with node name, Slurm job id,
   Loom worker id, configured concurrency, and claimed trial count.
 - `scripts/public_beta_smoke_gate.py` Markdown evidence with `--fail-on-skip`
-  and `--allow-mutating-checks` against disposable staging data.
+  and `--allow-mutating-checks` against disposable staging data. When
+  `--batch-id` is provided, the `runs.claimed_without_started` row must be
+  `PASS`; a nonzero value means the source run still has orphaned claimed work
+  and cannot be used as release evidence.
 - For IP-address staging hosts, note the hostless Ingress rendering, attach
   evidence that the TLS Secret certificate includes the staging IP as a Subject
   Alternative Name, and verify the ingress controller serves that Secret as its
@@ -362,6 +365,8 @@ The public beta launch gate passes only when:
   the control node and a worker-host context;
 - the ready benchmark catalog has been provisioned with `missing=0`;
 - `scripts/public_beta_smoke_gate.py` exits 0 with `--fail-on-skip`;
+- the smoke report's `runs.claimed_without_started` row is `PASS` for the
+  source batch used as launch evidence;
 - no response, audit excerpt, log excerpt, or safe downloaded artifact contains
   seeded fake secrets or internal URLs;
 - unsafe artifacts are blocked and cannot be downloaded by another team;

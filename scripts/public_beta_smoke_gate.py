@@ -37,6 +37,7 @@ REQUIRED_CHECK_IDS: tuple[str, ...] = (
     "benchmarks.ready_bundle_objects",
     "object_store.minio_write_probe",
     "runs.batch_detail",
+    "runs.claimed_without_started",
     "runs.trial_detail",
     "artifacts.owner_atif_download",
     "artifacts.owner_trajectory_download",
@@ -406,6 +407,35 @@ def _json_has_owner_team(response: HttpResponse) -> bool:
     return isinstance(owner, dict) and bool(owner.get("id") or owner.get("name"))
 
 
+def _claimed_without_started_count(response: HttpResponse) -> int | None:
+    try:
+        body = response.json()
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    debug_evidence = body.get("debug_evidence")
+    if not isinstance(debug_evidence, dict):
+        return None
+    trials = debug_evidence.get("trials")
+    if not isinstance(trials, dict):
+        return None
+    summary = trials.get("summary")
+    if not isinstance(summary, dict):
+        return None
+    raw = summary.get("claimed_without_started")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+    return None
+
+
 def _json_has_provenance(response: HttpResponse, *, batch_id: str | None = None) -> bool:
     try:
         body = response.json()
@@ -691,8 +721,64 @@ def run_smoke(args: argparse.Namespace) -> SmokeReport:
             fail_detail="Owner team cannot read the completed batch detail",
             remediation="Verify the batch id belongs to team A and has not been deleted.",
         ))
+        batch_debug = client.request(
+            "GET",
+            f"/api/v1/batches/{args.batch_id}",
+            token=args.team_a_token,
+            params={"include_debug": "true"},
+        )
+        claimed_without_started = _claimed_without_started_count(batch_debug)
+        if batch_debug.status_code != 200:
+            results.append(CheckResult(
+                "runs.claimed_without_started",
+                "runs",
+                "fail",
+                (
+                    "Could not inspect batch debug evidence for "
+                    f"claimed_without_started; got HTTP {batch_debug.status_code}: "
+                    f"{batch_debug.text[:300]}"
+                ),
+                "Fix batch debug evidence loading before accepting public-beta stress runs.",
+            ))
+        elif claimed_without_started is None:
+            results.append(CheckResult(
+                "runs.claimed_without_started",
+                "runs",
+                "fail",
+                "Batch debug evidence did not include trials.summary.claimed_without_started.",
+                (
+                    "Return claimed_without_started in batch debug evidence so "
+                    "release gates can distinguish active work from orphaned claims."
+                ),
+            ))
+        elif claimed_without_started == 0:
+            results.append(CheckResult(
+                "runs.claimed_without_started",
+                "runs",
+                "pass",
+                "Batch debug evidence reports claimed_without_started=0.",
+            ))
+        else:
+            results.append(CheckResult(
+                "runs.claimed_without_started",
+                "runs",
+                "fail",
+                (
+                    "Batch debug evidence reports "
+                    f"claimed_without_started={claimed_without_started}."
+                ),
+                (
+                    "Wait for crash-detector reclaim to drain stale claims, then "
+                    "inspect worker logs and rerun the smoke gate before release."
+                ),
+            ))
     else:
         results.append(_skip("runs.batch_detail", "runs", "--batch-id was not provided."))
+        results.append(_skip(
+            "runs.claimed_without_started",
+            "runs",
+            "--batch-id was not provided.",
+        ))
 
     if args.trial_id:
         trial = client.request("GET", f"/api/v1/trials/{args.trial_id}", token=args.team_a_token)
