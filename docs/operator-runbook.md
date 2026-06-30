@@ -2347,6 +2347,199 @@ Browser-only invite acceptance, SPA visual submission, and provider-error UI
 screenshots remain manual release evidence unless the staging environment adds a
 mock provider and browser automation job.
 
+## Terminal-Bench 2.0 public-beta readiness
+
+The TB-2 adapter (`packages/loom-benchmark-terminal-bench-2`) and its 86-task
+pinned bundle (`terminal-bench-core` v0.1.1, commit
+`91e10457b5410f16c44364da1a34cb6de8c488a5`) ship with the public-beta
+catalog. The exercises in this section are the cluster-side acceptance gates
+for issue #217 that cannot be covered by unit CI: real worker image builds,
+provider trials, MinIO mirroring, sidecar plumbing, and resource-budget
+profiling all need a deployed environment.
+
+Run them against `development` first; promote to `staging` and `production`
+by changing the target environment block at the top of each subsection.
+
+Prerequisites:
+
+- `kubectl` configured against the target cluster (use the env-scoped
+  kubeconfig from `LOOM_KUBECONFIG_B64`, not your personal one).
+- `loom` CLI on PATH (`uv pip install -e .` from the repo root, or the
+  release tarball).
+- A team API token with permission to launch batches.
+- The MinIO endpoint, access key, and secret key for the target environment.
+- A Hugging Face token if publishing the bundle from outside the cluster.
+
+### G5 — Mirror the TB-2 bundle into the object store
+
+The bundle is large enough that pulling it from Hugging Face at trial-time
+saturates the worker setup budget. Publish once, register, mirror, and audit:
+
+```bash
+# Replace the env vars below with the target environment's values.
+export LOOM_HF_ORG=loom-public-beta
+export LOOM_DB_URL="postgresql+psycopg://loom:$LOOM_DB_PASS@dev-db.yylx.world:5432/loom_dev"
+export LOOM_MINIO_ENDPOINT=https://minio.dev.yylx.world
+export LOOM_MINIO_ACCESS_KEY=...
+export LOOM_MINIO_SECRET_KEY=...
+
+loom datasets publish terminal-bench-2 --hf-org "$LOOM_HF_ORG"
+loom datasets register terminal-bench-2 --hf-org "$LOOM_HF_ORG" \
+  --db-url "$LOOM_DB_URL" \
+  --mirror-to-object-store \
+  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
+  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
+  --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
+loom datasets audit terminal-bench-2 --db-url "$LOOM_DB_URL" \
+  --verify-bundles \
+  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
+  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
+  --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
+```
+
+Acceptance:
+
+- `loom datasets audit` exits 0 and reports `valid_bundles=86`,
+  `missing_bundles=0`, `mismatched_bundles=0`.
+- The object store path `<bucket>/benchmarks/terminal-bench-2/<sha>/` exists
+  for each of the 86 tasks.
+
+### G3 — Live cluster end-to-end (easy + hard task)
+
+Pick one short task and one long task. `hello-world` is the canonical short
+case; `simple-web-scraper` is a representative long case (it pulls a sidecar).
+A successful trial must land verifier output with a numeric reward plus the
+ATIF and trajectory in object storage.
+
+```bash
+export LOOM_API_URL=https://api.dev.yylx.world
+export LOOM_TEAM_TOKEN=...
+
+for task in terminal-bench-2/hello-world terminal-bench-2/simple-web-scraper; do
+  loom run \
+    --api "$LOOM_API_URL" --token "$LOOM_TEAM_TOKEN" \
+    --benchmark terminal-bench-2 --task "$task" \
+    --agent oracle \
+    --tb2-report "./tb2-evidence/${task//\//_}.json"
+done
+```
+
+Acceptance:
+
+- Both trials end with `state=completed` and `reward>=0`.
+- ATIF JSON and trajectory blobs are downloadable through the Run Library SPA.
+- The `--tb2-report` JSON validates against
+  `terminal_bench.harness_models.BenchmarkResults` (Python: `python -c
+  "import json; import terminal_bench.harness_models as m;
+  m.BenchmarkResults.model_validate_json(open('./tb2-evidence/...').read())"`).
+
+Archive both `--tb2-report` outputs under `docs/evidence/issue-217/` and link
+them in the closing comment on #217.
+
+### G4 — Sidecar tasks against the public-beta sandbox
+
+Three pinned tasks declare compose sidecars (`security-vulhub-minio`,
+`simple-sheets-put`, `simple-web-scraper`). Run each individually so the
+worker exercises the per-trial network, DNS propagation, and `extra_hosts`
+plumbing.
+
+```bash
+for task in \
+  terminal-bench-2/security-vulhub-minio \
+  terminal-bench-2/simple-sheets-put \
+  terminal-bench-2/simple-web-scraper; do
+  loom run \
+    --api "$LOOM_API_URL" --token "$LOOM_TEAM_TOKEN" \
+    --benchmark terminal-bench-2 --task "$task" \
+    --agent oracle \
+    --tb2-report "./tb2-sidecars/${task//\//_}.json"
+done
+```
+
+Acceptance:
+
+- Each trial logs `started sidecar <name>` for every non-`client` service.
+- No trial fails with `sandbox: service <name> not reachable`.
+- The sidecar containers terminate when the trial ends (verify via
+  `kubectl -n loom-dev get pods -l loom.role=sidecar -w` until the trial
+  finishes, then assert the list is empty).
+
+### G6 — Provider × Terminal-Bench-2 matrix
+
+The public-beta agent catalog (PR #177) ships Claude Opus 4.7, Sonnet 4.6,
+and Haiku 4.5. Run one TB-2 task per provider to confirm tool-loop reach to
+verifier output. Use `hello-world` for cost discipline.
+
+```bash
+for agent in claude-opus-4-7 claude-sonnet-4-6 claude-haiku-4-5; do
+  loom run \
+    --api "$LOOM_API_URL" --token "$LOOM_TEAM_TOKEN" \
+    --benchmark terminal-bench-2 --task terminal-bench-2/hello-world \
+    --agent "$agent" \
+    --tb2-report "./tb2-provider-matrix/${agent}.json"
+done
+```
+
+Acceptance:
+
+- Each trial reaches `verifier_output_emitted=true` with a numeric reward
+  (pass or fail is fine — provider×TB2 reachability is what we are
+  verifying, not the score).
+- No trial fails with `provider tool-loop incompatibility` or
+  `unsupported tool-use schema`.
+- Link the run IDs into #35's evidence comment.
+
+### G9 — Resource-budget profiling
+
+TB-2 inherits `max_agent_timeout_sec` and `max_test_timeout_sec` from
+upstream task YAML. Some tasks reserve 30-minute agent budgets, which
+collide with the default per-trial wall-clock on the public-beta sandbox
+class.
+
+Profile a representative slice (one short, one medium, one long task):
+
+```bash
+for task in \
+  terminal-bench-2/hello-world \
+  terminal-bench-2/chess-best-move \
+  terminal-bench-2/security-vulhub-minio; do
+  loom run \
+    --api "$LOOM_API_URL" --token "$LOOM_TEAM_TOKEN" \
+    --benchmark terminal-bench-2 --task "$task" \
+    --agent oracle \
+    --observe \
+    > "./tb2-profile/${task//\//_}.observe.jsonl"
+done
+```
+
+Then for each `.observe.jsonl`:
+
+```bash
+python -m scripts.ops.summarize_observe \
+  --observe ./tb2-profile/<task>.observe.jsonl \
+  --emit-budget-table
+```
+
+Acceptance:
+
+- For each profiled task, the observed `agent_wall_seconds` and
+  `verifier_wall_seconds` are within the upstream-declared budgets.
+- If any task exceeds the sandbox per-trial wall-clock, record the override
+  in `deploy/environments/<env>.profile` under `[task_budget_overrides]` and
+  re-run.
+
+### Closing #217
+
+When all five exercises above produce green evidence:
+
+- Comment on #217 with the artifact links (`--tb2-report` outputs, run IDs,
+  audit logs).
+- Drop the `[WIP]` prefix from the title.
+- Close the issue.
+
+If any exercise blocks, open a focused sub-issue with the failure mode and
+link it from #217; do not merge incomplete evidence.
+
 ## Capacity planning
 
 - 1 vCPU + 256 MiB per Control Plane replica handles ~200 RPS for

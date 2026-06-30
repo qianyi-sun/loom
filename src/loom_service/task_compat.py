@@ -40,10 +40,13 @@ def task_provides_capability(
     the named agent capability?
 
     `solution_solve_sh` is granted when (a) the task's verifier is `pytest`,
-    (b) a known adapter emits `solution/solve.sh` under a different verifier
-    contract, or (c) the per-task `oracle_eligible` tag is `"true"` —
-    used by adapters whose benchmarks have a heterogeneous oracle slate
-    (e.g. SkillLearnBench: 73 of 100 upstream tasks ship `solve.sh`).
+    (b) the per-task `oracle_eligible` tag is `"true"`, or (c) the task id
+    matches a known adapter prefix whose adapter unconditionally emits
+    `solution/solve.sh`. An explicit `oracle_eligible="false"` tag wins
+    over the prefix fallback so a heterogeneous oracle slate (e.g.
+    SkillLearnBench: 73 of 100 upstream tasks ship `solve.sh`, or
+    Terminal-Bench-2 tasks that lack upstream `solution.sh`/
+    `solution.yaml`) is honored once the adapter starts emitting tags.
     A future adapter that breaks the convention should add an explicit
     capability marker instead of broadening every script verifier task.
 
@@ -56,13 +59,17 @@ def task_provides_capability(
         if isinstance(verifier, Mapping):
             if verifier.get("name") == _PYTEST_VERIFIER:
                 return True
+        if tags is not None:
+            tag_value = tags.get(_ORACLE_ELIGIBLE_TAG)
+            if tag_value == "true":
+                return True
+            if tag_value == "false":
+                return False
         task = task_config.get("task") or {}
         task_id = task.get("id") if isinstance(task, Mapping) else None
         if isinstance(task_id, str) and task_id.startswith(
             _TASK_ID_SOLUTION_SOLVE_SH_PREFIXES,
         ):
-            return True
-        if tags is not None and tags.get(_ORACLE_ELIGIBLE_TAG) == "true":
             return True
         return False
     return False

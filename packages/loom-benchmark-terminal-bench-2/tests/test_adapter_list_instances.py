@@ -56,3 +56,65 @@ def test_list_instances_skips_files_at_tasks_root(source_root: Path) -> None:
     adapter = TerminalBench2Adapter()
     found = list(adapter.list_instances(source_dir=source_root, split="test"))
     assert [i.instance_id for i in found] == ["hello-world"]
+
+
+def _copy_fixture(fixture_root: Path, dest: Path) -> None:
+    for child in fixture_root.rglob("*"):
+        target = dest / child.relative_to(fixture_root)
+        if child.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(child.read_bytes())
+
+
+def test_list_instances_emits_oracle_eligible_true_when_solution_sh_present(
+    tmp_path: Path, fixtures_dir: Path,
+) -> None:
+    """The hello-world fixture ships an upstream `solution.sh`, so the
+    adapter must tag it `oracle_eligible="true"` — the precise marker
+    the cap check at `src/loom_service/task_compat.py` consults instead
+    of the legacy `terminal-bench-2/` prefix backstop."""
+    src = tmp_path / "repo"
+    target = src / "tasks" / "hello-world"
+    target.mkdir(parents=True)
+    _copy_fixture(fixtures_dir / "tb2-task-hello-world", target)
+    found = list(TerminalBench2Adapter().list_instances(
+        source_dir=src, split="test",
+    ))
+    assert found[0].tags["oracle_eligible"] == "true"
+
+
+def test_list_instances_emits_oracle_eligible_false_when_no_solution(
+    tmp_path: Path, fixtures_dir: Path,
+) -> None:
+    """The chess-best-move fixture ships no `solution.sh`/`solution.yaml`,
+    so the adapter must tag it `oracle_eligible="false"`. Without this
+    explicit tag the legacy task-id prefix would over-grant oracle
+    capability and the oracle agent would fail at runtime for tasks
+    lacking an upstream reference solution."""
+    src = tmp_path / "repo"
+    target = src / "tasks" / "chess-best-move"
+    target.mkdir(parents=True)
+    _copy_fixture(fixtures_dir / "tb2-task-chess-best-move", target)
+    found = list(TerminalBench2Adapter().list_instances(
+        source_dir=src, split="test",
+    ))
+    assert found[0].tags["oracle_eligible"] == "false"
+
+
+def test_list_instances_emits_oracle_eligible_true_when_solution_yaml_present(
+    tmp_path: Path, fixtures_dir: Path,
+) -> None:
+    """`solution.yaml` is the other upstream solution shape; the
+    adapter wraps both into `solution/solve.sh`, so either should
+    produce `oracle_eligible="true"`."""
+    src = tmp_path / "repo"
+    target = src / "tasks" / "yaml-only"
+    target.mkdir(parents=True)
+    _copy_fixture(fixtures_dir / "tb2-task-chess-best-move", target)
+    (target / "solution.yaml").write_text("- command: echo done\n")
+    found = list(TerminalBench2Adapter().list_instances(
+        source_dir=src, split="test",
+    ))
+    assert found[0].tags["oracle_eligible"] == "true"
