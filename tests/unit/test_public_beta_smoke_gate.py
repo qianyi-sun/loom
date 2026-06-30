@@ -653,12 +653,52 @@ def test_run_smoke_can_run_only_minio_write_probe(monkeypatch) -> None:
     assert s3.objects == {}
 
 
+def test_run_smoke_minio_write_probe_can_exercise_concurrent_objects(
+    monkeypatch,
+) -> None:
+    gate = _load_gate_module()
+    s3 = _RecordingS3()
+
+    monkeypatch.setattr(gate, "SmokeClient", _empty_catalog_client(gate))
+    monkeypatch.setattr(gate.boto3, "client", lambda *_args, **_kwargs: s3)
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+        "--catalog-minio-endpoint",
+        "http://minio:9000",
+        "--catalog-minio-access-key",
+        "access",
+        "--catalog-minio-secret-key",
+        "secret",
+        "--object-store-write-check-only",
+        "--object-store-write-check-count",
+        "5",
+        "--object-store-write-check-concurrency",
+        "3",
+    ])
+
+    report = gate.run_smoke(args)
+
+    assert [r.check_id for r in report.results] == ["object_store.minio_write_probe"]
+    assert report.results[0].status == "pass"
+    assert "5 probe object" in report.results[0].detail
+    assert "concurrency=3" in report.results[0].detail
+    assert len(s3.put_keys) == 5
+    assert sorted(s3.delete_keys) == sorted(s3.put_keys)
+    assert s3.objects == {}
+
+
 class _RecordingS3:
     def __init__(self) -> None:
         self.objects: dict[tuple[str, str], bytes] = {}
+        self.put_keys: list[tuple[str, str]] = []
+        self.delete_keys: list[tuple[str, str]] = []
 
     def put_object(self, *, Bucket: str, Key: str, Body: bytes) -> None:  # noqa: N803
         self.objects[(Bucket, Key)] = Body
+        self.put_keys.append((Bucket, Key))
 
     def delete_object(self, *, Bucket: str, Key: str) -> None:  # noqa: N803
+        self.delete_keys.append((Bucket, Key))
         del self.objects[(Bucket, Key)]

@@ -13,6 +13,7 @@ import argparse
 import json
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -554,6 +555,7 @@ def _s3_client(
     access_key: str,
     secret_key: str,
     region: str,
+    max_pool_connections: int = 10,
 ) -> Any:
     return boto3.client(
         "s3",
@@ -561,11 +563,14 @@ def _s3_client(
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,
         region_name=region,
-        config=Config(signature_version="s3v4"),
+        config=Config(
+            signature_version="s3v4",
+            max_pool_connections=max_pool_connections,
+        ),
     )
 
 
-def _s3_put_delete_probe(
+def _s3_put_delete_probes(
     *,
     endpoint_url: str,
     access_key: str,
@@ -573,18 +578,38 @@ def _s3_put_delete_probe(
     region: str,
     bucket: str,
     prefix: str,
-) -> str:
+    count: int,
+    concurrency: int,
+) -> list[str]:
+    count = max(1, count)
+    concurrency = max(1, min(concurrency, count))
     key_prefix = prefix.strip("/")
-    key = f"{key_prefix}/probe-{uuid4().hex}.txt" if key_prefix else f"probe-{uuid4().hex}.txt"
+    keys = [
+        f"{key_prefix}/probe-{uuid4().hex}.txt"
+        if key_prefix
+        else f"probe-{uuid4().hex}.txt"
+        for _ in range(count)
+    ]
     client = _s3_client(
         endpoint_url=endpoint_url,
         access_key=access_key,
         secret_key=secret_key,
         region=region,
+        max_pool_connections=max(10, concurrency),
     )
-    client.put_object(Bucket=bucket, Key=key, Body=b"loom public beta minio write probe\n")
-    client.delete_object(Bucket=bucket, Key=key)
-    return key
+
+    def _put_delete(key: str) -> str:
+        client.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=b"loom public beta minio write probe\n",
+        )
+        client.delete_object(Bucket=bucket, Key=key)
+        return key
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = [pool.submit(_put_delete, key) for key in keys]
+        return [future.result() for future in as_completed(futures)]
 
 
 def _s3_error_summary(exc: Exception) -> str:
@@ -1125,14 +1150,18 @@ def _append_object_store_write_probe(
         return
 
     bucket = args.object_store_write_check_bucket
+    count = args.object_store_write_check_count
+    concurrency = args.object_store_write_check_concurrency
     try:
-        key = _s3_put_delete_probe(
+        keys = _s3_put_delete_probes(
             endpoint_url=args.catalog_minio_endpoint,
             access_key=args.catalog_minio_access_key,
             secret_key=args.catalog_minio_secret_key,
             region=args.catalog_minio_region,
             bucket=bucket,
             prefix=args.object_store_write_check_prefix,
+            count=count,
+            concurrency=concurrency,
         )
     except Exception as exc:  # pragma: no cover - live gate covers real MinIO failures
         results.append(CheckResult(
@@ -1152,7 +1181,11 @@ def _append_object_store_write_probe(
         "object_store.minio_write_probe",
         "object-store",
         "pass",
-        f"Wrote and deleted probe object {bucket}/{key} before trial execution.",
+        (
+            f"Wrote and deleted {len(keys)} probe object(s) in bucket {bucket} "
+            f"with concurrency={max(1, min(concurrency, count))}; "
+            f"sample={bucket}/{keys[0]}."
+        ),
     ))
 
 
@@ -1442,6 +1475,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--object-store-write-check-bucket", default="trajectories")
     parser.add_argument("--object-store-write-check-prefix", default="_ops/public-beta-smoke")
+    parser.add_argument(
+        "--object-store-write-check-count",
+        type=int,
+        default=1,
+        help="Number of probe objects to write/delete for object-store release smoke.",
+    )
+    parser.add_argument(
+        "--object-store-write-check-concurrency",
+        type=int,
+        default=1,
+        help="Maximum concurrent object-store write/delete probes.",
+    )
     parser.add_argument("--max-response-scan-bytes", type=int, default=1_000_000)
     parser.add_argument("--fail-on-skip", action="store_true")
     parser.add_argument("--json-output", type=Path, default=None)
