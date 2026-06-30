@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 import tomllib
 from collections.abc import Callable
@@ -57,6 +58,16 @@ _GB10_COMPARE_FIELDS = (
     "force",
 )
 
+_EXTERNAL_AUTOSCALER_SUPERVISOR_DEFAULTS: dict[str, Any] = {
+    "args": [],
+    "requires": ["network-online.target"],
+    "timer_on_boot_sec": "45",
+    "timer_on_unit_active_sec": "30",
+    "timer_accuracy_sec": "5",
+    "enabled": True,
+    "active": True,
+}
+
 
 class EnvironmentStateProfileError(ValueError):
     """Raised when an environment desired-state profile is invalid."""
@@ -70,6 +81,7 @@ class EnvironmentStateProfile:
     gb10_desired_states: list[dict[str, Any]]
     catalog_provisioning: dict[str, Any]
     external_slurm_runner_prerequisites: dict[str, Any]
+    external_slurm_autoscaler_supervisors: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -147,6 +159,28 @@ def _as_list(value: object, field: str) -> list[dict[str, Any]]:
     return out
 
 
+def _as_string_list(value: object, field: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise EnvironmentStateProfileError(f"{field} must be an array")
+    out: list[str] = []
+    for idx, item in enumerate(value):
+        if not isinstance(item, str):
+            raise EnvironmentStateProfileError(f"{field}[{idx}] must be a string")
+        out.append(item)
+    return out
+
+
+def _args_include_pool_name(args: list[str], pool_name: str) -> bool:
+    for idx, arg in enumerate(args):
+        if arg == "--pool-name" and idx + 1 < len(args) and args[idx + 1] == pool_name:
+            return True
+        if arg == f"--pool-name={pool_name}":
+            return True
+    return False
+
+
 def _normalize_autoscaler_policy(
     item: dict[str, Any],
     *,
@@ -205,6 +239,66 @@ def _normalize_gb10_desired_state(
     return payload
 
 
+def _normalize_external_slurm_autoscaler_supervisor(
+    item: dict[str, Any],
+    *,
+    environment: str,
+    index: int,
+) -> dict[str, Any]:
+    field = f"external_slurm_autoscaler_supervisors[{index}]"
+    payload = dict(_EXTERNAL_AUTOSCALER_SUPERVISOR_DEFAULTS)
+    payload.update(item)
+    name = _clean_nonempty(payload.get("name"), f"{field}.name")
+    pool_name = _clean_nonempty(payload.get("pool_name"), f"{field}.pool_name")
+    args = _as_string_list(payload.get("args"), f"{field}.args")
+    if not _args_include_pool_name(args, pool_name):
+        raise EnvironmentStateProfileError(
+            f"{field}.args must include --pool-name {pool_name}",
+        )
+    normalized = {
+        "environment": environment,
+        "name": name,
+        "pool_name": pool_name,
+        "service_name": _clean_nonempty(
+            payload.get("service_name"),
+            f"{field}.service_name",
+        ),
+        "timer_name": _clean_nonempty(
+            payload.get("timer_name"),
+            f"{field}.timer_name",
+        ),
+        "working_directory": _clean_nonempty(
+            payload.get("working_directory"),
+            f"{field}.working_directory",
+        ),
+        "python_path": _clean_nonempty(
+            payload.get("python_path"),
+            f"{field}.python_path",
+        ),
+        "script_path": _clean_nonempty(
+            payload.get("script_path"),
+            f"{field}.script_path",
+        ),
+        "args": args,
+        "requires": _as_string_list(payload.get("requires"), f"{field}.requires"),
+        "timer_on_boot_sec": _clean_nonempty(
+            payload.get("timer_on_boot_sec"),
+            f"{field}.timer_on_boot_sec",
+        ),
+        "timer_on_unit_active_sec": _clean_nonempty(
+            payload.get("timer_on_unit_active_sec"),
+            f"{field}.timer_on_unit_active_sec",
+        ),
+        "timer_accuracy_sec": _clean_nonempty(
+            payload.get("timer_accuracy_sec"),
+            f"{field}.timer_accuracy_sec",
+        ),
+        "enabled": bool(payload.get("enabled", True)),
+        "active": bool(payload.get("active", True)),
+    }
+    return normalized
+
+
 def load_environment_state_profile(
     path: Path | str,
     *,
@@ -255,6 +349,19 @@ def load_environment_state_profile(
         "external_slurm_runner_prerequisites",
         {},
     )
+    external_slurm_autoscaler_supervisors = [
+        _normalize_external_slurm_autoscaler_supervisor(
+            item,
+            environment=environment,
+            index=idx,
+        )
+        for idx, item in enumerate(
+            _as_list(
+                raw.get("external_slurm_autoscaler_supervisors"),
+                "external_slurm_autoscaler_supervisors",
+            ),
+        )
+    ]
     return EnvironmentStateProfile(
         environment=environment,
         control_plane_environment=control_plane_environment,
@@ -264,6 +371,9 @@ def load_environment_state_profile(
         external_slurm_runner_prerequisites=_as_dict(
             external_slurm_runner_prerequisites,
             "external_slurm_runner_prerequisites",
+        ),
+        external_slurm_autoscaler_supervisors=(
+            external_slurm_autoscaler_supervisors
         ),
     )
 
@@ -529,6 +639,194 @@ def diff_external_slurm_runner_prerequisites(
                 )
 
     return drift
+
+
+def _quote_command(parts: list[str]) -> str:
+    return " ".join(shlex.quote(part) for part in parts)
+
+
+def render_external_slurm_autoscaler_service(supervisor: dict[str, Any]) -> str:
+    requires = supervisor.get("requires", [])
+    after = " ".join(requires)
+    command = [
+        str(supervisor["python_path"]),
+        str(supervisor["script_path"]),
+        *[str(arg) for arg in supervisor.get("args", [])],
+    ]
+    return "\n".join(
+        [
+            "[Unit]",
+            f"Description=Loom {supervisor['pool_name']} external worker-pool autoscaler reconcile",
+            f"After={after}",
+            f"Wants={after}",
+            "",
+            "[Service]",
+            "Type=oneshot",
+            f"WorkingDirectory={supervisor['working_directory']}",
+            f"Environment=PYTHONPATH={supervisor['working_directory']}/src",
+            f"ExecStart={_quote_command(command)}",
+        ],
+    )
+
+
+def render_external_slurm_autoscaler_timer(supervisor: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "[Unit]",
+            f"Description=Run Loom {supervisor['pool_name']} external autoscaler reconcile",
+            "",
+            "[Timer]",
+            f"OnBootSec={supervisor['timer_on_boot_sec']}",
+            f"OnUnitActiveSec={supervisor['timer_on_unit_active_sec']}",
+            f"AccuracySec={supervisor['timer_accuracy_sec']}",
+            f"Unit={supervisor['service_name']}",
+            "",
+            "[Install]",
+            "WantedBy=timers.target",
+        ],
+    )
+
+
+def _unit_payload(text: str) -> str:
+    lines = [
+        line.rstrip()
+        for line in text.splitlines()
+        if not line.startswith("# ")
+    ]
+    return "\n".join(lines).strip()
+
+
+def _append_unit_drift(
+    drift: list[StateDrift],
+    *,
+    path: str,
+    desired: str,
+    command: list[str],
+    runner: SubprocessRunner,
+) -> None:
+    rc, stdout, stderr = runner(command)
+    live = _unit_payload(stdout)
+    if rc != 0:
+        live = (stderr or stdout).strip() or "missing"
+    if _unit_payload(desired) != live:
+        drift.append(StateDrift(path=path, desired=desired, live=live))
+
+
+def diff_external_slurm_autoscaler_supervisors(
+    profile: EnvironmentStateProfile,
+    *,
+    runner: SubprocessRunner | None = None,
+) -> list[StateDrift]:
+    command_runner = runner or _default_subprocess_runner
+    drift: list[StateDrift] = []
+    for supervisor in profile.external_slurm_autoscaler_supervisors:
+        prefix = (
+            "external_slurm_autoscaler_supervisors"
+            f"[{supervisor['environment']}/{supervisor['pool_name']}]"
+        )
+        _append_unit_drift(
+            drift,
+            path=f"{prefix}.service_unit",
+            desired=render_external_slurm_autoscaler_service(supervisor),
+            command=["systemctl", "--user", "cat", supervisor["service_name"]],
+            runner=command_runner,
+        )
+        _append_unit_drift(
+            drift,
+            path=f"{prefix}.timer_unit",
+            desired=render_external_slurm_autoscaler_timer(supervisor),
+            command=["systemctl", "--user", "cat", supervisor["timer_name"]],
+            runner=command_runner,
+        )
+        if supervisor["enabled"]:
+            rc, stdout, stderr = command_runner(
+                ["systemctl", "--user", "is-enabled", supervisor["timer_name"]],
+            )
+            live = stdout.strip() if rc == 0 else (stderr or stdout).strip()
+            if live != "enabled":
+                drift.append(
+                    StateDrift(
+                        path=f"{prefix}.timer_enabled",
+                        desired="enabled",
+                        live=live or f"systemctl exited {rc}",
+                    ),
+                )
+        if supervisor["active"]:
+            rc, stdout, stderr = command_runner(
+                ["systemctl", "--user", "is-active", supervisor["timer_name"]],
+            )
+            live = stdout.strip() if rc == 0 else (stdout or stderr).strip()
+            if live != "active":
+                drift.append(
+                    StateDrift(
+                        path=f"{prefix}.timer_active",
+                        desired="active",
+                        live=live or f"systemctl exited {rc}",
+                    ),
+                )
+    return drift
+
+
+def _run_supervisor_command(
+    command: list[str],
+    *,
+    runner: SubprocessRunner,
+) -> None:
+    rc, stdout, stderr = runner(command)
+    if rc != 0:
+        message = (stderr or stdout).strip() or f"command exited {rc}"
+        raise EnvironmentStateProfileError(f"{' '.join(command)} failed: {message}")
+
+
+def apply_external_slurm_autoscaler_supervisors(
+    profile: EnvironmentStateProfile,
+    *,
+    unit_dir: Path | None = None,
+    runner: SubprocessRunner | None = None,
+) -> list[dict[str, str]]:
+    if not profile.external_slurm_autoscaler_supervisors:
+        return []
+
+    command_runner = runner or _default_subprocess_runner
+    target_dir = unit_dir or (Path.home() / ".config" / "systemd" / "user")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    applied: list[dict[str, str]] = []
+    for supervisor in profile.external_slurm_autoscaler_supervisors:
+        service_path = target_dir / supervisor["service_name"]
+        timer_path = target_dir / supervisor["timer_name"]
+        service_path.write_text(
+            render_external_slurm_autoscaler_service(supervisor) + "\n",
+            encoding="utf-8",
+        )
+        timer_path.write_text(
+            render_external_slurm_autoscaler_timer(supervisor) + "\n",
+            encoding="utf-8",
+        )
+        applied.append(
+            {
+                "kind": "external_slurm_autoscaler_supervisor",
+                "service": supervisor["service_name"],
+                "timer": supervisor["timer_name"],
+            },
+        )
+
+    _run_supervisor_command(
+        ["systemctl", "--user", "daemon-reload"],
+        runner=command_runner,
+    )
+    for supervisor in profile.external_slurm_autoscaler_supervisors:
+        timer_name = supervisor["timer_name"]
+        if supervisor["enabled"]:
+            _run_supervisor_command(
+                ["systemctl", "--user", "enable", "--now", timer_name],
+                runner=command_runner,
+            )
+        if supervisor["active"]:
+            _run_supervisor_command(
+                ["systemctl", "--user", "restart", timer_name],
+                runner=command_runner,
+            )
+    return applied
 
 
 def autoscaler_policy_payload(policy: dict[str, Any]) -> dict[str, Any]:

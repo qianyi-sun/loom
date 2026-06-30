@@ -615,6 +615,7 @@ def _fetch_environment_state(
 
 def _environment_state_apply(args: argparse.Namespace) -> int:
     from loom_cli.environment_state import (
+        apply_external_slurm_autoscaler_supervisors,
         autoscaler_policy_payload,
         gb10_desired_state_payload,
     )
@@ -671,6 +672,12 @@ def _environment_state_apply(args: argparse.Namespace) -> int:
         sys.stderr.write(f"error: could not reach CP at {base}: {e}\n")
         return 2
 
+    try:
+        applied.extend(apply_external_slurm_autoscaler_supervisors(profile))
+    except ValueError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 2
+
     if args.format == "json":
         json.dump(
             {
@@ -691,7 +698,10 @@ def _environment_state_apply(args: argparse.Namespace) -> int:
         f"{len(profile.autoscaler_policies)} autoscaler polic"
         f"{'y' if len(profile.autoscaler_policies) == 1 else 'ies'}, "
         f"{len(profile.gb10_desired_states)} GB10 desired state"
-        f"{'' if len(profile.gb10_desired_states) == 1 else 's'}.\n",
+        f"{'' if len(profile.gb10_desired_states) == 1 else 's'}, "
+        f"{len(profile.external_slurm_autoscaler_supervisors)} external autoscaler "
+        "supervisor"
+        f"{'' if len(profile.external_slurm_autoscaler_supervisors) == 1 else 's'}.\n",
     )
     if profile.catalog_provisioning.get("required"):
         command = profile.catalog_provisioning.get("command")
@@ -703,6 +713,7 @@ def _environment_state_apply(args: argparse.Namespace) -> int:
 def _environment_state_check(args: argparse.Namespace) -> int:
     from loom_cli.environment_state import (
         diff_environment_state,
+        diff_external_slurm_autoscaler_supervisors,
         diff_external_slurm_runner_prerequisites,
     )
 
@@ -724,6 +735,7 @@ def _environment_state_check(args: argparse.Namespace) -> int:
 
     drift = diff_environment_state(profile, live)
     drift.extend(diff_external_slurm_runner_prerequisites(profile))
+    drift.extend(diff_external_slurm_autoscaler_supervisors(profile))
     if args.format == "json":
         json.dump(
             {

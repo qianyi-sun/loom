@@ -141,3 +141,30 @@ required_env = [
 pools = ["oldlab"]
 expected_repo_ref = "${IMAGE_TAG}"
 require_clean_repo = true
+
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab"
+pool_name = "oldlab"
+service_name = "loom-oldlab-autoscaler.service"
+timer_name = "loom-oldlab-autoscaler.timer"
+working_directory = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}"
+python_path = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}/.venv/bin/python"
+script_path = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}/scripts/ops/worker_pool_autoscaler_external_once.py"
+args = [
+  "--pool-name",
+  "oldlab",
+  "--namespace",
+  "loom-public-beta",
+  "--kubeconfig",
+  "/home/qianyi/.kube/config",
+  "--db-local-host",
+  "127.0.0.1",
+  "--db-local-port",
+  "15447",
+]
+requires = ["network-online.target", "loom-public-beta-postgres-port-forward.service"]
+timer_on_boot_sec = "45"
+timer_on_unit_active_sec = "30"
+timer_accuracy_sec = "5"
+enabled = true
+active = true

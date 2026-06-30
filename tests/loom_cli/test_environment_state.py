@@ -7,7 +7,9 @@ import pytest
 
 from loom_cli.environment_state import (
     EnvironmentStateProfileError,
+    apply_external_slurm_autoscaler_supervisors,
     diff_environment_state,
+    diff_external_slurm_autoscaler_supervisors,
     diff_external_slurm_runner_prerequisites,
     load_environment_state_profile,
 )
@@ -351,6 +353,208 @@ require_clean_repo = true
     assert drift[1].live.startswith("62eb0a6")
     assert drift[2].desired == "clean"
     assert "step_runner.py" in drift[2].live
+
+
+def test_external_slurm_autoscaler_supervisor_profile_is_normalized(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path.write_text(
+        """
+environment = "public-beta"
+
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab"
+pool_name = "oldlab"
+service_name = "loom-oldlab-autoscaler.service"
+timer_name = "loom-oldlab-autoscaler.timer"
+working_directory = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}"
+python_path = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}/.venv/bin/python"
+script_path = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}/scripts/ops/worker_pool_autoscaler_external_once.py"
+args = ["--pool-name", "oldlab", "--namespace", "loom-public-beta"]
+requires = ["network-online.target", "loom-public-beta-postgres-port-forward.service"]
+timer_on_boot_sec = "45"
+timer_on_unit_active_sec = "30"
+timer_accuracy_sec = "5"
+enabled = true
+active = true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    profile = load_environment_state_profile(
+        profile_path,
+        variables={"IMAGE_TAG": "public-beta-052e420"},
+    )
+
+    assert profile.external_slurm_autoscaler_supervisors == [
+        {
+            "environment": "public-beta",
+            "name": "oldlab",
+            "pool_name": "oldlab",
+            "service_name": "loom-oldlab-autoscaler.service",
+            "timer_name": "loom-oldlab-autoscaler.timer",
+            "working_directory": "/home/qianyi/dev/loom-worktrees/public-beta-052e420",
+            "python_path": (
+                "/home/qianyi/dev/loom-worktrees/"
+                "public-beta-052e420/.venv/bin/python"
+            ),
+            "script_path": (
+                "/home/qianyi/dev/loom-worktrees/public-beta-052e420/"
+                "scripts/ops/worker_pool_autoscaler_external_once.py"
+            ),
+            "args": ["--pool-name", "oldlab", "--namespace", "loom-public-beta"],
+            "requires": [
+                "network-online.target",
+                "loom-public-beta-postgres-port-forward.service",
+            ],
+            "timer_on_boot_sec": "45",
+            "timer_on_unit_active_sec": "30",
+            "timer_accuracy_sec": "5",
+            "enabled": True,
+            "active": True,
+        },
+    ]
+
+
+def test_external_slurm_autoscaler_supervisor_check_reports_stale_inactive_unit(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path.write_text(
+        """
+environment = "public-beta"
+
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab"
+pool_name = "oldlab"
+service_name = "loom-oldlab-autoscaler.service"
+timer_name = "loom-oldlab-autoscaler.timer"
+working_directory = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}"
+python_path = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}/.venv/bin/python"
+script_path = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}/scripts/ops/worker_pool_autoscaler_external_once.py"
+args = ["--pool-name", "oldlab", "--namespace", "loom-public-beta"]
+requires = ["network-online.target", "loom-public-beta-postgres-port-forward.service"]
+timer_on_boot_sec = "45"
+timer_on_unit_active_sec = "30"
+timer_accuracy_sec = "5"
+enabled = true
+active = true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    profile = load_environment_state_profile(
+        profile_path,
+        variables={"IMAGE_TAG": "public-beta-052e420"},
+    )
+    stale_service_unit = """
+[Service]
+Type=oneshot
+WorkingDirectory=/home/qianyi/dev/loom-worktrees/public-beta-b453057
+Environment=PYTHONPATH=/home/qianyi/dev/loom-worktrees/public-beta-b453057/src
+ExecStart=/home/qianyi/dev/loom-worktrees/public-beta-b453057/.venv/bin/python /home/qianyi/dev/loom-ops/oldlab_autoscaler_external_once.py
+""".strip()
+    desired_timer_unit = """
+[Unit]
+Description=Run Loom oldlab external autoscaler reconcile
+
+[Timer]
+OnBootSec=45
+OnUnitActiveSec=30
+AccuracySec=5
+Unit=loom-oldlab-autoscaler.service
+
+[Install]
+WantedBy=timers.target
+""".strip()
+
+    def _runner(command: list[str]) -> tuple[int, str, str]:
+        if command == ["systemctl", "--user", "cat", "loom-oldlab-autoscaler.service"]:
+            return 0, stale_service_unit, ""
+        if command == ["systemctl", "--user", "cat", "loom-oldlab-autoscaler.timer"]:
+            return 0, desired_timer_unit, ""
+        if command == ["systemctl", "--user", "is-enabled", "loom-oldlab-autoscaler.timer"]:
+            return 0, "enabled\n", ""
+        if command == ["systemctl", "--user", "is-active", "loom-oldlab-autoscaler.timer"]:
+            return 3, "inactive\n", ""
+        raise AssertionError(command)
+
+    drift = diff_external_slurm_autoscaler_supervisors(profile, runner=_runner)
+
+    assert [item.path for item in drift] == [
+        "external_slurm_autoscaler_supervisors[public-beta/oldlab].service_unit",
+        "external_slurm_autoscaler_supervisors[public-beta/oldlab].timer_active",
+    ]
+    assert "--pool-name oldlab" in drift[0].desired
+    assert "public-beta-b453057" in drift[0].live
+    assert drift[1].desired == "active"
+    assert drift[1].live == "inactive"
+
+
+def test_external_slurm_autoscaler_supervisor_apply_writes_units_and_starts_timer(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path.write_text(
+        """
+environment = "public-beta"
+
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab"
+pool_name = "oldlab"
+service_name = "loom-oldlab-autoscaler.service"
+timer_name = "loom-oldlab-autoscaler.timer"
+working_directory = "/srv/loom/public-beta-052e420"
+python_path = "/srv/loom/public-beta-052e420/.venv/bin/python"
+script_path = "/srv/loom/public-beta-052e420/scripts/ops/worker_pool_autoscaler_external_once.py"
+args = ["--pool-name", "oldlab"]
+requires = ["network-online.target"]
+timer_on_boot_sec = "45"
+timer_on_unit_active_sec = "30"
+timer_accuracy_sec = "5"
+enabled = true
+active = true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    profile = load_environment_state_profile(profile_path)
+    unit_dir = tmp_path / "systemd-user"
+    commands: list[list[str]] = []
+
+    def _runner(command: list[str]) -> tuple[int, str, str]:
+        commands.append(command)
+        return 0, "", ""
+
+    applied = apply_external_slurm_autoscaler_supervisors(
+        profile,
+        unit_dir=unit_dir,
+        runner=_runner,
+    )
+
+    service_unit = (unit_dir / "loom-oldlab-autoscaler.service").read_text(
+        encoding="utf-8",
+    )
+    timer_unit = (unit_dir / "loom-oldlab-autoscaler.timer").read_text(
+        encoding="utf-8",
+    )
+    assert "WorkingDirectory=/srv/loom/public-beta-052e420" in service_unit
+    assert "--pool-name oldlab" in service_unit
+    assert "Unit=loom-oldlab-autoscaler.service" in timer_unit
+    assert commands == [
+        ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "enable", "--now", "loom-oldlab-autoscaler.timer"],
+        ["systemctl", "--user", "restart", "loom-oldlab-autoscaler.timer"],
+    ]
+    assert applied == [
+        {
+            "kind": "external_slurm_autoscaler_supervisor",
+            "service": "loom-oldlab-autoscaler.service",
+            "timer": "loom-oldlab-autoscaler.timer",
+        },
+    ]
 
 
 @pytest.mark.parametrize(

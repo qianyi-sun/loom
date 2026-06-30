@@ -485,7 +485,11 @@ For public-beta and staging release rollouts, apply the repository
 environment-state profile so the Slurm autoscaler policy and GB10 compatibility
 desired state converge together. The public-beta profile writes the existing
 `production/gb10-arm64` CP key until GB10 node-agent environment names are
-renamed in a coordinated rollout:
+renamed in a coordinated rollout. Run this from the Slurm submit host when the
+profile declares an external Slurm autoscaler supervisor; public-beta uses that
+path to install and check the OLDLAB user timer, and the rendered service must
+call the repo one-shot with `--pool-name oldlab` so it cannot reconcile GB10 as
+a side effect:
 
 ```bash
 loom admin environment-state apply \
@@ -986,11 +990,13 @@ available only on the OLDLAB submit host, mark the policy as externally run:
 
 The in-pod Control Plane autoscaler loop skips `external_runner` policies, so
 it does not repeatedly fail on missing `sbatch`. Run the reconciler on the
-Slurm submit host with the same deployed code and `LOOM_CP_DB_URL`, passing
-`include_external_policies=True` and `external_only=True` to
-`reconcile_worker_pool_autoscaler_once` or `run_worker_pool_autoscaler_loop`.
-This keeps policy, status, and API visibility in the Control Plane while
-executing Slurm commands only where the cluster credentials exist.
+Slurm submit host with the same deployed code and a local Control Plane DB
+port-forward. The supported one-shot entrypoint is
+`scripts/ops/worker_pool_autoscaler_external_once.py --pool-name <pool>`, which
+passes `include_external_policies=True`, `external_only=True`, and a pool filter
+to `reconcile_worker_pool_autoscaler_once`. This keeps policy, status, and API
+visibility in the Control Plane while executing Slurm commands only where the
+cluster credentials exist and only for the intended pool.
 
 For GB10, use the same Slurm actuator rather than the legacy `gb10` actuator
 for normal capacity. The backend remains `docker` because each worker runs

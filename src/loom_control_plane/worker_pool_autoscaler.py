@@ -1172,14 +1172,22 @@ async def reconcile_worker_pool_autoscaler_once(
     slurm_runner: SlurmWorkerCommandRunner | None = None,
     include_external_policies: bool = False,
     external_only: bool = False,
+    pool_names: tuple[str, ...] | None = None,
 ) -> list[AutoscalerDecision]:
     now = now or datetime.now(UTC)
+    stmt = select(WorkerPoolAutoscalerPolicy).where(
+        WorkerPoolAutoscalerPolicy.enabled.is_(True),
+    )
+    if pool_names:
+        cleaned_pool_names = tuple(
+            dict.fromkeys(name.strip() for name in pool_names if name.strip()),
+        )
+        if cleaned_pool_names:
+            stmt = stmt.where(WorkerPoolAutoscalerPolicy.pool_name.in_(cleaned_pool_names))
     policies = (
         (
             await session.execute(
-                select(WorkerPoolAutoscalerPolicy)
-                .where(WorkerPoolAutoscalerPolicy.enabled.is_(True))
-                .order_by(
+                stmt.order_by(
                     WorkerPoolAutoscalerPolicy.environment,
                     WorkerPoolAutoscalerPolicy.pool_name,
                 ),
@@ -1297,6 +1305,7 @@ async def run_worker_pool_autoscaler_loop(
     freshness_sec: int = 120,
     include_external_policies: bool = False,
     external_only: bool = False,
+    pool_names: tuple[str, ...] | None = None,
 ) -> None:
     while True:
         try:
@@ -1306,6 +1315,7 @@ async def run_worker_pool_autoscaler_loop(
                     freshness_sec=freshness_sec,
                     include_external_policies=include_external_policies,
                     external_only=external_only,
+                    pool_names=pool_names,
                 )
                 await session.commit()
         except asyncio.CancelledError:
