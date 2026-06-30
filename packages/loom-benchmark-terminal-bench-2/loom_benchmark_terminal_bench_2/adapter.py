@@ -53,8 +53,27 @@ class TerminalBench2Adapter:
             parsed: dict[str, Any] = yaml.safe_load(task_yaml.read_text()) or {}
             parsed["__source_path"] = str(child)
             yield BenchmarkInstance(
-                instance_id=child.name, split=split, raw=parsed,
+                instance_id=child.name,
+                split=split,
+                raw=parsed,
+                tags={
+                    "oracle_eligible": (
+                        "true" if self._has_reference_solution(child) else "false"
+                    ),
+                },
             )
+
+    @staticmethod
+    def _has_reference_solution(task_dir: Path) -> bool:
+        """A TB-2 task is oracle-eligible iff upstream ships either
+        `solution.sh` or `solution.yaml`. Matches `_copy_solution`'s
+        precondition — without one of these the adapter cannot stage
+        `solution/solve.sh` and the oracle agent fails at runtime."""
+        for name in ("solution.sh", "solution.yaml"):
+            candidate = task_dir / name
+            if candidate.is_file() and not candidate.is_symlink():
+                return True
+        return False
 
     @staticmethod
     def _resolve_tasks_root(source_dir: Path) -> Path | None:

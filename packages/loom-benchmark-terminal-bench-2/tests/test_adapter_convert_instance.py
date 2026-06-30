@@ -125,6 +125,116 @@ def test_convert_rewrites_dockerfile_heredoc_copy_for_legacy_builder(
     assert heredocs[0].read_text() == '{"answer": 42}\n'
 
 
+def test_convert_rewrites_sidecar_dockerfile_heredoc_copy(
+    tmp_path: Path,
+) -> None:
+    """`src/loom_worker/task_image.py:185` uses `docker-py`'s
+    `client.images.build` — the legacy builder — for sidecar images
+    just as for the client image. A sidecar Dockerfile with a BuildKit
+    `COPY <<EOF` heredoc would fail at build time on the public-beta
+    worker; the adapter must rewrite sidecar Dockerfiles into ordinary
+    `COPY` form too. Existing tests only cover the client Dockerfile,
+    so this case is the explicit guard for the sidecar build path."""
+    staged = tmp_path / "tasks" / "heredoc-sidecar"
+    (staged / "client").mkdir(parents=True)
+    (staged / "api").mkdir()
+    (staged / "client" / "Dockerfile").write_text("FROM python:3.11-slim\n")
+    (staged / "api" / "Dockerfile").write_text(
+        "FROM python:3.11-slim\n"
+        "WORKDIR /srv\n"
+        "COPY <<EOT /srv/config.json\n"
+        '{"mode": "sidecar"}\n'
+        "EOT\n",
+    )
+    (staged / "task.yaml").write_text(
+        "instruction: hit the api\n"
+        "parser_name: pytest\n"
+        "max_agent_timeout_sec: 10\n"
+        "max_test_timeout_sec: 10\n",
+    )
+    (staged / "docker-compose.yaml").write_text(
+        "services:\n"
+        "  client:\n"
+        "    build:\n"
+        "      context: client\n"
+        "      dockerfile: Dockerfile\n"
+        "  api:\n"
+        "    build: ./api\n",
+    )
+    (only,) = list(
+        TerminalBench2Adapter().list_instances(
+            source_dir=tmp_path, split="test",
+        ),
+    )
+    out = tmp_path / "out"
+
+    TerminalBench2Adapter().convert_instance(only, out_dir=out)
+
+    sidecar_context = out / ".loom-build" / "sidecars" / "api"
+    sidecar_dockerfile = (sidecar_context / "Dockerfile").read_text()
+    assert "COPY <<EOT" not in sidecar_dockerfile
+    assert "COPY .loom-heredocs/" in sidecar_dockerfile
+    heredocs = list((sidecar_context / ".loom-heredocs").iterdir())
+    assert len(heredocs) == 1
+    assert heredocs[0].read_text() == '{"mode": "sidecar"}\n'
+
+
+def test_no_materialized_dockerfile_carries_buildkit_heredoc(
+    fixtures_dir: Path, tmp_path: Path,
+) -> None:
+    """Contract test for the public-beta image-build path: every
+    Dockerfile materialized under `.loom-build/` must be consumable by
+    `client.images.build` (docker-py legacy builder). Any `COPY <<` or
+    `RUN <<` BuildKit heredoc that slips through `_rewrite_dockerfile_*`
+    would cause production task-image builds to fail with parse errors,
+    so we assert the whole materialized tree is heredoc-free.
+
+    This guards against future refactors that add a new build context
+    surface (additional sidecar, init-container, etc.) without wiring
+    the rewriter through."""
+    staged = tmp_path / "tasks" / "heredoc-everywhere"
+    shutil.copytree(fixtures_dir / "tb2-task-hello-world", staged)
+    (staged / "Dockerfile").write_text(
+        "FROM ghcr.io/laude-institute/t-bench/python-3-13:latest\n"
+        "WORKDIR /app\n"
+        "COPY <<EOT /app/answer.txt\n"
+        "42\n"
+        "EOT\n",
+    )
+    (only,) = list(
+        TerminalBench2Adapter().list_instances(
+            source_dir=tmp_path, split="test",
+        ),
+    )
+    out = tmp_path / "out"
+
+    TerminalBench2Adapter().convert_instance(only, out_dir=out)
+
+    build_root = out / ".loom-build"
+    assert build_root.is_dir()
+    offenders: list[str] = []
+    for path in build_root.rglob("Dockerfile*"):
+        if not path.is_file():
+            continue
+        text = path.read_text()
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            parts = stripped.split()
+            if parts[0].upper() not in {"COPY", "RUN", "ADD"}:
+                continue
+            if any(part.startswith("<<") for part in parts[1:]):
+                offenders.append(
+                    f"{path.relative_to(out)}: {stripped}",
+                )
+    assert offenders == [], (
+        "materialized Dockerfile retains BuildKit heredoc syntax "
+        "incompatible with docker-py legacy builder: "
+        + ", ".join(offenders)
+    )
+
+
 def test_convert_task_toml_id_escapes_special_chars(
     fixtures_dir: Path, tmp_path: Path,
 ) -> None:

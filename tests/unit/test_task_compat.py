@@ -65,7 +65,9 @@ def test_terminal_bench_script_task_provides_solve_sh_capability() -> None:
     """Terminal-Bench-2 uses the script verifier, but its adapter wraps
     upstream `solution.sh` / `solution.yaml` references as
     `solution/solve.sh`, so oracle compatibility must not be inferred from
-    verifier name alone."""
+    verifier name alone. Until every TB2 task is re-registered with the
+    per-instance `oracle_eligible` tag (post-#217 G7), the legacy task-id
+    prefix is the backstop for tagless rows."""
     assert task_provides_capability(
         _config(
             "script",
@@ -73,6 +75,22 @@ def test_terminal_bench_script_task_provides_solve_sh_capability() -> None:
         ),
         "solution_solve_sh",
     ) is True
+
+
+def test_terminal_bench_explicit_false_tag_overrides_prefix_backstop() -> None:
+    """Once the adapter emits per-instance `oracle_eligible` (G7 of #217),
+    a TB2 task without an upstream `solution.sh`/`solution.yaml` is tagged
+    `oracle_eligible="false"`. That explicit tag must beat the legacy
+    `terminal-bench-2/` prefix backstop so the matrix preflight stops
+    sending the oracle agent at tasks the runtime will reject."""
+    assert task_provides_capability(
+        _config(
+            "script",
+            task_id="terminal-bench-2/some-task-without-solution",
+        ),
+        "solution_solve_sh",
+        tags={"oracle_eligible": "false"},
+    ) is False
 
 
 def test_oracle_eligible_tag_grants_solve_sh_capability_for_script_verifier() -> None:
