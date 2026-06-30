@@ -1122,6 +1122,103 @@ Tuning:
   bucket — `trajectories` defaults to 14 days to cover SWE-Bench-class
   long trials.
 
+#### Verify retention is in effect
+
+`loom cluster doctor` accepts an optional storage-lifecycle config
+and compares live MinIO state to what the renderer would produce:
+
+```bash
+kubectl port-forward -n loom service/loom-minio 9000:9000 &
+loom cluster doctor \
+  --storage-lifecycle-config config/storage-lifecycle.toml \
+  --storage-lifecycle-endpoint http://localhost:9000
+```
+
+Exit 0 plus `[ok] storage lifecycle rules match config` means the
+operator's expected rules are live on every bucket. Exit 1 with a
+`Storage lifecycle drift detected:` block surfaces:
+
+- **`missing on storage`** — the rule isn't applied. Most common cause
+  is "operator never ran `bootstrap-storage-lifecycle`" (e.g. fresh
+  cluster) or "operator edited the config and forgot to re-apply."
+- **`present on storage but not in config`** — somebody added a rule
+  out-of-band via `mc ilm rule add`. Doctor doesn't manage it; the
+  detail line tells you the rule ID so you can decide whether to
+  fold it into `storage-lifecycle.toml` or remove it.
+- **`content drift on rule(s)`** — same rule ID, different parameters.
+  Re-running the bootstrap fixes it.
+
+Re-applying the bootstrap is always safe — the rendered XML is
+byte-stable, so re-runs are no-ops when nothing changed.
+
+#### Migrating an existing deployment to enable retention
+
+Deployments running before PR #226 landed have no retention rules
+applied. The mechanism is in the new release; the rules are not yet
+live until somebody runs the bootstrap. Procedure for picking it up
+on a running cluster:
+
+1. **Audit current bucket usage** so you know what you're working
+   with:
+   ```bash
+   mc du loom-minio/trajectories loom-minio/artifacts loom-minio/atif
+   ```
+2. **Decide whether to preserve historical data.** **Important:**
+   `Expiration.Days` in S3 lifecycle is computed against object age
+   (i.e., the object's creation time), not against when the rule was
+   set. So if your trajectory bucket already holds 60-day-old objects
+   and you set a 30-day expiry, **MinIO will delete those objects on
+   the next lifecycle sweep**. If anything in the bucket is worth
+   keeping permanently, mirror it to off-cluster cold storage first:
+   ```bash
+   mc mirror loom-minio/trajectories /backup/loom-trajectories-snapshot
+   ```
+3. **Copy the example config** to a stable location:
+   ```bash
+   cp config/storage-lifecycle.example.toml \
+      config/storage-lifecycle.toml
+   $EDITOR config/storage-lifecycle.toml   # tune days per workload
+   ```
+4. **Dry-run** to audit what will be applied before mutating live
+   state:
+   ```bash
+   kubectl port-forward -n loom service/loom-minio 9000:9000 &
+   loom cluster bootstrap-storage-lifecycle \
+     --config config/storage-lifecycle.toml \
+     --endpoint http://localhost:9000 --dry-run
+   ```
+5. **Apply** for real:
+   ```bash
+   loom cluster bootstrap-storage-lifecycle \
+     --config config/storage-lifecycle.toml \
+     --endpoint http://localhost:9000
+   ```
+6. **Verify** with `mc` and the doctor sub-check:
+   ```bash
+   mc ilm rule ls loom-minio/trajectories
+   mc ilm rule ls loom-minio/artifacts
+   mc ilm rule ls loom-minio/atif   # should be empty (keep_forever)
+   loom cluster doctor \
+     --storage-lifecycle-config config/storage-lifecycle.toml \
+     --storage-lifecycle-endpoint http://localhost:9000
+   ```
+7. **Watch the PVC trend for a week.** Expectation: trajectories
+   volume plateaus or shrinks; artifacts trend depends on workload
+   age distribution. If usage keeps climbing, the retention window
+   is longer than the disk can sustain at the current trial volume
+   — tune `days` down or expand the PVC (`kubectl patch pvc
+   data-loom-minio-0 -p '{"spec":{"resources":{"requests":
+   {"storage":"1Ti"}}}}'`).
+
+#### Re-applying after config changes
+
+The bootstrap is idempotent; the rendered XML is byte-stable. Edit
+`storage-lifecycle.toml`, re-run the same command, and the new rules
+take effect on the next MinIO lifecycle sweep. Use `--dry-run` to
+audit the diff before applying. `loom cluster doctor
+--storage-lifecycle-config <path>` is the cheap reverse check —
+"are my expected rules actually live?"
+
 ### MinIO PVC usage
 
 MinIO ships as a single-replica `StatefulSet` with a 500Gi PVC

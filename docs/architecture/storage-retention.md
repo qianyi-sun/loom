@@ -127,6 +127,41 @@ Re-applying the same config produces byte-identical lifecycle XML:
 Operators can re-run `bootstrap-storage-lifecycle` as part of any
 deploy or upgrade workflow without fear of churn.
 
+## Drift detection
+
+The realistic failure mode the unit tests cannot catch is "operator
+forgot to run `bootstrap-storage-lifecycle`," followed by "operator
+edited the config and forgot to re-apply," followed (rarely) by
+"someone removed the rules out-of-band via `mc ilm rule remove`."
+
+`loom cluster doctor --storage-lifecycle-config <path>` closes this:
+it calls `get_bucket_lifecycle_configuration` per bucket mentioned in
+the config, compares the live rule set against what
+`render_bucket_lifecycle` would produce, and reports drift by
+category (missing, extra, content). Re-running the bootstrap is
+always the fix.
+
+Doctor opt-in (not on by default) because it requires `boto3` + MinIO
+credentials, which the schema-reconciliation half of doctor doesn't.
+Operators with the storage config wired in pass the flag; everyone
+else gets unchanged behavior.
+
+The check is operator-driven, not continuous. A Prometheus metric
+would require the CP to grow a `boto3` client and poll periodically —
+meaningful expansion of CP's responsibilities for a low-frequency
+failure mode. The doctor command + the post-`up` reminder cover the
+realistic gaps without that complexity.
+
+## Operator nudge after `cluster up`
+
+After `loom cluster up` reaches `all_ready`, the CLI prints a
+"Next steps" block naming the canonical post-deploy commands
+(`bootstrap-storage-lifecycle` + `doctor --storage-lifecycle-config`).
+Visible. Discoverable. Closes the "I didn't know I had to run that"
+failure mode without taking on the brittleness of auto-applying
+lifecycle from inside the deploy flow (port-forward orchestration is
+not worth it for a once-per-deploy operator step).
+
 ## What happens when the disk fills
 
 Even with retention, growth can outpace it (large research bursts,

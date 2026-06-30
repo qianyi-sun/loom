@@ -1815,12 +1815,91 @@ def _doctor(args: argparse.Namespace) -> int:
         return 2
     schema = _load_schema(_REPO_ROOT / "config" / "loom-schema.toml")
     report = _doctor_reconcile(schema, core_v1, namespace=args.namespace)
-    if report.ok:
+    schema_ok = report.ok
+    if schema_ok:
         print("[ok] schema reconciliation clean")
-        return 0
-    for v in report.violations:
-        print(f"  [fail] [{v.kind}] {v.entry}: {v.detail}")
-    return 1
+    else:
+        for v in report.violations:
+            print(f"  [fail] [{v.kind}] {v.entry}: {v.detail}")
+
+    lifecycle_ok = _doctor_check_storage_lifecycle(args)
+    if lifecycle_ok is None:
+        # Operator did not opt in; doctor result unchanged.
+        return 0 if schema_ok else 1
+    return 0 if (schema_ok and lifecycle_ok) else 1
+
+
+def _doctor_check_storage_lifecycle(
+    args: argparse.Namespace,
+) -> bool | None:
+    """Optional sub-check: compare live bucket lifecycle against the
+    operator's storage-lifecycle.toml.
+
+    Returns ``None`` when the operator did not pass
+    ``--storage-lifecycle-config``; returns True/False once invoked.
+    Print output goes to stdout (clean) or stderr (drift detected).
+    """
+    config_path = getattr(args, "storage_lifecycle_config", None)
+    if config_path is None:
+        return None
+
+    import os
+
+    import boto3
+    from botocore.config import Config
+
+    from loom.storage_retention_doctor import (
+        check_lifecycle_drift,
+        format_drift_report,
+    )
+    from loom.storage_retention_loader import load_retention_config
+
+    try:
+        cfg = load_retention_config(Path(config_path))
+    except (FileNotFoundError, ValueError) as exc:
+        sys.stderr.write(f"  [fail] storage_lifecycle: {exc}\n")
+        return False
+
+    endpoint = (
+        getattr(args, "storage_lifecycle_endpoint", None)
+        or os.environ.get("LOOM_SVC_MINIO_ENDPOINT", "http://loom-minio:9000")
+    )
+    access_key = os.environ.get(
+        "LOOM_SVC_MINIO_ACCESS_KEY",
+    ) or os.environ.get("MINIO_ROOT_USER", "")
+    secret_key = os.environ.get(
+        "LOOM_SVC_MINIO_SECRET_KEY",
+    ) or os.environ.get("MINIO_ROOT_PASSWORD", "")
+    if not access_key or not secret_key:
+        sys.stderr.write(
+            "  [fail] storage_lifecycle: MinIO credentials not found "
+            "(set LOOM_SVC_MINIO_ACCESS_KEY + LOOM_SVC_MINIO_SECRET_KEY).\n",
+        )
+        return False
+
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        region_name=os.environ.get("LOOM_SVC_MINIO_REGION", "us-east-1"),
+        config=Config(signature_version="s3v4"),
+    )
+    try:
+        drifts = check_lifecycle_drift(s3, cfg)
+    except Exception as exc:
+        sys.stderr.write(
+            f"  [fail] storage_lifecycle: cannot reach object store: "
+            f"{type(exc).__name__}: {exc}\n",
+        )
+        return False
+
+    report = format_drift_report(drifts)
+    if not report:
+        print("[ok] storage lifecycle rules match config")
+        return True
+    sys.stderr.write(report + "\n")
+    return False
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -2041,11 +2120,36 @@ def _up(args: argparse.Namespace) -> int:
     )
     sys.stdout.write(_format_table(final))
     if final.all_ready:
+        _print_up_next_steps(args.namespace)
         return 0
     sys.stderr.write(
         f"error: components did not reach ready state within {args.timeout}s.\n",
     )
     return 1
+
+
+def _print_up_next_steps(namespace: str) -> None:
+    """Post-success guidance printed after `loom cluster up`.
+
+    Names operator-driven steps that are NOT part of the apply +
+    readiness flow but ARE required for the cluster to behave the way
+    operators expect. Today this is storage retention; future
+    additions belong here rather than buried in the runbook.
+    """
+    sys.stdout.write(
+        "\nNext steps:\n"
+        "  1. Apply object-store retention policy (idempotent; required\n"
+        "     to bound trajectory + artifact disk growth):\n"
+        f"       kubectl port-forward -n {namespace} \\\n"
+        "         service/loom-minio 9000:9000 &\n"
+        "       loom cluster bootstrap-storage-lifecycle \\\n"
+        "         --config config/storage-lifecycle.toml \\\n"
+        "         --endpoint http://localhost:9000\n"
+        "  2. Verify cluster + retention health:\n"
+        "       loom cluster doctor \\\n"
+        "         --storage-lifecycle-config config/storage-lifecycle.toml \\\n"
+        "         --storage-lifecycle-endpoint http://localhost:9000\n",
+    )
 
 
 @dataclass
@@ -2792,6 +2896,26 @@ def dispatch(argv: list[str]) -> int:
         "--context",
         default=None,
         help="kubeconfig context (default: current context).",
+    )
+    p_doctor.add_argument(
+        "--storage-lifecycle-config",
+        default=None,
+        help=(
+            "Optional. Path to storage-lifecycle.toml. When set, doctor "
+            "also compares live bucket lifecycle rules against the "
+            "rendered config and reports drift. Requires "
+            "LOOM_SVC_MINIO_ACCESS_KEY + LOOM_SVC_MINIO_SECRET_KEY in "
+            "the environment."
+        ),
+    )
+    p_doctor.add_argument(
+        "--storage-lifecycle-endpoint",
+        default=None,
+        help=(
+            "Object-store endpoint URL for the lifecycle check. "
+            "Defaults to $LOOM_SVC_MINIO_ENDPOINT or "
+            "http://loom-minio:9000."
+        ),
     )
     p_doctor.set_defaults(handler=_doctor)
 
