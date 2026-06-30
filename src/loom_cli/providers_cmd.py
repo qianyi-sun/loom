@@ -119,7 +119,12 @@ def _print_create_next_steps(name: str) -> None:
     )
 
 
-def _resolve_by_name(client: httpx.Client, name: str) -> dict[str, Any]:
+def _resolve_by_name(
+    client: httpx.Client,
+    name: str,
+    *,
+    team_id: str | None = None,
+) -> dict[str, Any]:
     """Look up a connection by display_name (the CLI's surface) and
     return its full row dict. Raises _NameNotFoundError if no/multiple
     matches; caller catches + returns exit code.
@@ -128,7 +133,8 @@ def _resolve_by_name(client: httpx.Client, name: str) -> dict[str, Any]:
     name filter (matches the spec). For typical team sizes (≤ few
     dozen connections) client-side scan is fine.
     """
-    list_resp = client.get("/api/v1/provider-connections")
+    params = {"team_id": team_id} if team_id is not None else None
+    list_resp = client.get("/api/v1/provider-connections", params=params)
     items = assert_2xx(list_resp, action="list provider connections")["items"]
     matches = [it for it in items if it["name"] == name]
     if not matches:

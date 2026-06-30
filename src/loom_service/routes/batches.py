@@ -24,6 +24,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select, update
 
+from loom.auth import AuthContext
 from loom.db.schema import (
     Batch,
     Benchmark,
@@ -45,6 +46,7 @@ from loom_service.agent_catalog import (
     validate_agent_model_compat,
 )
 from loom_service.auth_guards import (
+    is_admin,
     require_scope,
     require_submitting_user,
     require_team_or_admin,
@@ -129,6 +131,10 @@ class _CreateBatch(BaseModel):
     # before insertion.
     provider_connection_id: UUID | None = None
     provider_model_id: str | None = None
+    # Explicit on-behalf-of team for platform admins. Non-admin callers
+    # may omit this or pass their own team id; cross-team values require
+    # admin scope and are used for provider validation + Batch.team_id.
+    team_id: UUID | None = None
 
 
 def _sanitize_trial_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -160,6 +166,45 @@ async def _reject_if_team_paused(session: Any, team_id: UUID) -> None:
             status_code=403,
             detail="team submissions are paused",
         )
+
+
+async def _resolve_submission_team_id(
+    session: Any,
+    ctx: AuthContext,
+    requested_team_id: UUID | None,
+) -> UUID:
+    if requested_team_id is None:
+        if ctx.team_id is None:
+            _reject_submission(
+                reason="invalid_input",
+                status_code=400,
+                detail="admin tokens must scope batches to a team — "
+                "set team_id or use a team-scoped user token",
+            )
+        assert ctx.team_id is not None
+        return ctx.team_id
+
+    if not is_admin(ctx):
+        if ctx.team_id != requested_team_id:
+            _reject_submission(
+                reason="permission",
+                status_code=403,
+                detail="cross-team batch submission requires admin scope",
+            )
+        return requested_team_id
+
+    exists = (
+        await session.execute(
+            select(Team.id).where(Team.id == requested_team_id),
+        )
+    ).scalar_one_or_none()
+    if exists is None:
+        _reject_submission(
+            reason="invalid_input",
+            status_code=404,
+            detail="team not found",
+        )
+    return requested_team_id
 
 
 async def _reject_if_known_failed_provider_model(
@@ -353,14 +398,10 @@ async def create_batch(
     except HTTPException:
         SUBMISSION_REJECTS_TOTAL.labels(reason="permission").inc()
         raise
-    if ctx.team_id is None:
-        _reject_submission(
-            reason="invalid_input",
-            status_code=400,
-            detail="admin tokens must scope batches to a team — "
-            "use the service's per-team admin token",
-        )
-    await _reject_if_team_paused(s, ctx.team_id)
+    submission_team_id = await _resolve_submission_team_id(
+        s, ctx, payload.team_id,
+    )
+    await _reject_if_team_paused(s, submission_team_id)
 
     catalog = known_names()
     trial_config = _sanitize_trial_config(payload.trial_config)
@@ -482,12 +523,12 @@ async def create_batch(
 
     # Validate provider_connection_id before task materialization/fan-out
     # work so known bad provider/model input returns a direct actionable error.
-    if payload.provider_connection_id is not None and ctx.team_id is not None:
+    if payload.provider_connection_id is not None:
         try:
             await validate_provider_connection(
                 s,
                 payload.provider_connection_id,
-                team_id=ctx.team_id,
+                team_id=submission_team_id,
             )
         except HTTPException:
             SUBMISSION_REJECTS_TOTAL.labels(
@@ -574,7 +615,7 @@ async def create_batch(
     batch_description = explicit_description or generated_identity.description
 
     b = Batch(
-        team_id=ctx.team_id,
+        team_id=submission_team_id,
         name=batch_name,
         description=batch_description,
         task_filter=payload.task_filter,
@@ -594,6 +635,7 @@ async def create_batch(
     await s.refresh(b)
     return {
         "batch_id": str(b.id),
+        "team_id": str(b.team_id),
         "name": b.name,
         "description": b.description,
         "expected_trial_count": expected,

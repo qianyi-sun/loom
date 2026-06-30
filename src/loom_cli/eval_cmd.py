@@ -421,7 +421,11 @@ def _batch_create(args: argparse.Namespace) -> int:
             }
             conn: dict[str, Any] | None = None
             if needs_model:
-                conn = _resolve_by_name(c, args.provider)
+                conn = _resolve_by_name(
+                    c,
+                    args.provider,
+                    team_id=args.team_id,
+                )
                 trial_config["agent_model"] = _build_agent_model(
                     conn["type"],
                     args.model,
@@ -456,6 +460,8 @@ def _batch_create(args: argparse.Namespace) -> int:
                 payload["name"] = args.name
             if args.name_suffix is not None:
                 payload["name_suffix"] = args.name_suffix
+            if args.team_id is not None:
+                payload["team_id"] = args.team_id
             if conn is not None:
                 payload["provider_connection_id"] = conn["id"]
                 payload["provider_model_id"] = args.model
@@ -1030,6 +1036,14 @@ def dispatch(argv: list[str]) -> int:
         "--name-suffix",
         default=None,
         help="Optional suffix appended to the server-generated display name.",
+    )
+    p_bc.add_argument(
+        "--team-id",
+        default=None,
+        help=(
+            "Target team UUID for admin/platform-admin on-behalf-of "
+            "batch creation. Also scopes provider-name lookup."
+        ),
     )
     p_bc.add_argument("--description", default=None)
     p_bc.add_argument(

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import boto3
@@ -37,13 +37,28 @@ from loom.db.schema import (
     Secret,
     Task,
     Team,
+    TeamMembership,
     TeamQuota,
     Token,
     Trial,
+    User,
+    UserSession,
     Worker,
 )
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from loom_service.session_auth import hash_secret
+
+
+def _valid_task_config(task_id: str) -> dict[str, object]:
+    return {
+        "schema_version": "1",
+        "task": {"id": task_id, "name": task_id},
+        "environment": {"os": "linux", "docker_image": "alpine"},
+        "agent": {"name": "oracle"},
+        "verifier": {"name": "pytest"},
+        "steps": [{"name": "main"}],
+    }
 
 
 @pytest.fixture
@@ -102,28 +117,76 @@ async def app_setup(
     team_b = uuid4()
     raw_a = f"loom_team_{uuid4().hex}"
     raw_b = f"loom_team_{uuid4().hex}"
+    raw_admin_api = f"loom_team_{uuid4().hex}"
+    raw_admin_session = f"loom_session_{uuid4().hex}"
+    raw_admin_csrf = f"loom_csrf_{uuid4().hex}"
     task_id = f"task-{uuid4().hex[:8]}"
     conn_a = uuid4()
     conn_a_deleted = uuid4()
     conn_b = uuid4()
+    user_a = uuid4()
+    user_b = uuid4()
+    admin_user = uuid4()
+    now = datetime.now(UTC)
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
         for tid, name in ((team_a, "team-a"), (team_b, "team-b")):
             s.execute(insert(Team).values(id=tid, name=f"{name}-{tid}"))
             s.execute(insert(TeamQuota).values(team_id=tid))
+        for uid, username, is_platform_admin in (
+            (user_a, f"user-a-{user_a.hex[:8]}", False),
+            (user_b, f"user-b-{user_b.hex[:8]}", False),
+            (admin_user, f"admin-{admin_user.hex[:8]}", True),
+        ):
+            s.execute(insert(User).values(
+                id=uid,
+                username=username,
+                username_normalized=username,
+                is_platform_admin=is_platform_admin,
+                status="active",
+            ))
+        for tid, uid in (
+            (team_a, user_a),
+            (team_b, user_b),
+            (team_a, admin_user),
+        ):
+            s.execute(insert(TeamMembership).values(
+                team_id=tid,
+                user_id=uid,
+                role="owner",
+            ))
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(raw_a.encode()).digest(),
             type="team", scopes=["submit"], team_id=team_a,
-            issued_at=datetime.now(UTC),
+            created_by_user_id=user_a,
+            issued_at=now,
         ))
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(raw_b.encode()).digest(),
             type="team", scopes=["submit"], team_id=team_b,
-            issued_at=datetime.now(UTC),
+            created_by_user_id=user_b,
+            issued_at=now,
+        ))
+        s.execute(insert(Token).values(
+            token_hash=hashlib.sha256(raw_admin_api.encode()).digest(),
+            type="team", scopes=["submit"], team_id=team_a,
+            created_by_user_id=admin_user,
+            issued_at=now,
+        ))
+        s.execute(insert(UserSession).values(
+            session_hash=hash_secret(raw_admin_session),
+            user_id=admin_user,
+            current_team_id=team_a,
+            csrf_hash=hash_secret(raw_admin_csrf),
+            issued_at=now,
+            expires_at=now + timedelta(hours=1),
         ))
         s.execute(insert(Task).values(
-            id=task_id, checksum="x" * 64, config={}, source="local",
+            id=task_id,
+            checksum="x" * 64,
+            config=_valid_task_config(task_id),
+            source="local",
         ))
         for cid, t, name in (
             (conn_a, team_a, "active-a"),
@@ -141,7 +204,7 @@ async def app_setup(
         s.execute(
             ProviderConnection.__table__.update()
             .where(ProviderConnection.id == conn_a_deleted)
-            .values(deleted_at=datetime.now(UTC)),
+            .values(deleted_at=now),
         )
         # Live worker advertising every backend Loom ships drivers for —
         # required by the POST /batches reject-when-no-worker check.
@@ -151,13 +214,19 @@ async def app_setup(
                 {"backend": "docker"}, {"backend": "fake"},
                 {"backend": "daytona"}, {"backend": "modal"},
             ],
-            registered_at=datetime.now(UTC),
-            last_seen_at=datetime.now(UTC),
+            registered_at=now,
+            last_seen_at=now,
             status="active",
         ))
         s.commit()
 
-    tokens = {"a": raw_a, "b": raw_b}
+    tokens = {
+        "a": raw_a,
+        "b": raw_b,
+        "admin_api": raw_admin_api,
+        "admin_session": raw_admin_session,
+        "admin_csrf": raw_admin_csrf,
+    }
     ids = {
         "team_a": team_a, "team_b": team_b,
         "conn_a": conn_a, "conn_a_deleted": conn_a_deleted, "conn_b": conn_b,
@@ -175,6 +244,9 @@ async def app_setup(
             s.execute(delete(ProviderConnection))
             s.execute(delete(Secret))
             s.execute(delete(Token))
+            s.execute(delete(UserSession))
+            s.execute(delete(TeamMembership))
+            s.execute(delete(User))
             s.execute(delete(Task))
             s.execute(delete(Worker))
             s.execute(delete(TeamQuota))
@@ -189,6 +261,10 @@ def _client(app: FastAPI) -> TestClient:
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def _session_headers(app: FastAPI, csrf: str) -> dict[str, str]:
+    return {app.state.settings.auth_csrf_header_name: csrf}
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -293,7 +369,7 @@ def test_batch_create_with_valid_provider_succeeds(app_setup) -> None:
         json={
             "name": "batch-with-provider",
             "task_filter": {"task_ids": [ids["task_id"]]},
-            "trial_config": {"agent_name": "oracle"},
+            "trial_config": {"agent_name": "oracle", "agent_model": None},
             "provider_connection_id": str(ids["conn_a"]),
             "provider_model_id": "gpt-4o",
         },
@@ -355,6 +431,77 @@ def test_batch_create_with_known_failed_preflight_model_returns_400(
     assert "sk-" not in detail
 
 
+def test_platform_admin_batch_create_with_explicit_team_uses_target_team_provider(
+    app_setup,
+) -> None:
+    app, tokens, ids = app_setup
+    c = _client(app)
+    c.cookies.set(
+        app.state.settings.auth_session_cookie_name,
+        tokens["admin_session"],
+    )
+
+    r = c.post(
+        "/api/v1/batches",
+        headers=_session_headers(app, tokens["admin_csrf"]),
+        json={
+            "team_id": str(ids["team_b"]),
+            "name": "admin-on-behalf",
+            "task_filter": {"task_ids": [ids["task_id"]]},
+            "trial_config": {"agent_name": "oracle", "agent_model": None},
+            "provider_connection_id": str(ids["conn_b"]),
+            "provider_model_id": "gpt-4o-mini",
+        },
+    )
+
+    assert r.status_code == 201, r.text
+    sync_engine = create_engine(str(app.state.settings.db_url))
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        row = s.execute(
+            Batch.__table__.select().where(
+                Batch.id == UUID(r.json()["batch_id"]),
+            ),
+        ).one()
+    sync_engine.dispose()
+    assert row.team_id == ids["team_b"]
+    assert row.provider_connection_id == ids["conn_b"]
+    assert row.submitted_by_user_id is not None
+
+
+def test_platform_admin_api_token_batch_create_with_explicit_team(
+    app_setup,
+) -> None:
+    app, tokens, ids = app_setup
+    c = _client(app)
+
+    r = c.post(
+        "/api/v1/batches",
+        headers=_auth(tokens["admin_api"]),
+        json={
+            "team_id": str(ids["team_b"]),
+            "name": "admin-api-token-on-behalf",
+            "task_filter": {"task_ids": [ids["task_id"]]},
+            "trial_config": {"agent_name": "oracle", "agent_model": None},
+            "provider_connection_id": str(ids["conn_b"]),
+            "provider_model_id": "gpt-4o-mini",
+        },
+    )
+
+    assert r.status_code == 201, r.text
+    sync_engine = create_engine(str(app.state.settings.db_url))
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        row = s.execute(
+            Batch.__table__.select().where(
+                Batch.id == UUID(r.json()["batch_id"]),
+            ),
+        ).one()
+    sync_engine.dispose()
+    assert row.team_id == ids["team_b"]
+    assert row.provider_connection_id == ids["conn_b"]
+
+
 def test_batch_create_without_provider_succeeds(app_setup) -> None:
     app, tokens, ids = app_setup
     c = _client(app)
@@ -364,7 +511,7 @@ def test_batch_create_without_provider_succeeds(app_setup) -> None:
         json={
             "name": "no-provider",
             "task_filter": {"task_ids": [ids["task_id"]]},
-            "trial_config": {"agent_name": "oracle"},
+            "trial_config": {"agent_name": "oracle", "agent_model": None},
         },
     )
     assert r.status_code == 201
@@ -379,7 +526,7 @@ def test_batch_create_with_cross_team_provider_returns_404(app_setup) -> None:
         json={
             "name": "cross-team",
             "task_filter": {"task_ids": [ids["task_id"]]},
-            "trial_config": {"agent_name": "oracle"},
+            "trial_config": {"agent_name": "oracle", "agent_model": None},
             "provider_connection_id": str(ids["conn_b"]),
         },
     )
@@ -396,7 +543,7 @@ def test_batch_create_with_nonexistent_provider_returns_400(app_setup) -> None:
         json={
             "name": "nope",
             "task_filter": {"task_ids": [ids["task_id"]]},
-            "trial_config": {"agent_name": "oracle"},
+            "trial_config": {"agent_name": "oracle", "agent_model": None},
             "provider_connection_id": str(uuid4()),
         },
     )
@@ -413,7 +560,7 @@ def test_batch_create_with_deleted_provider_returns_400(app_setup) -> None:
         json={
             "name": "deleted",
             "task_filter": {"task_ids": [ids["task_id"]]},
-            "trial_config": {"agent_name": "oracle"},
+            "trial_config": {"agent_name": "oracle", "agent_model": None},
             "provider_connection_id": str(ids["conn_a_deleted"]),
         },
     )

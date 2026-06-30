@@ -240,6 +240,7 @@ export interface paths {
       requestBody: {
         content: {
           "application/json": {
+            team_id?: string;
             name?: string;
             name_suffix?: string;
             description?: string;
@@ -258,6 +259,7 @@ export interface paths {
           content: {
             "application/json": {
               batch_id: string;
+              team_id: string;
               expected_trial_count: number;
               state: string;
               created_at: string;

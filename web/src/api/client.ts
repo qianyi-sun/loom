@@ -187,6 +187,7 @@ export interface BenchmarkTagsResponse {
 }
 
 export interface CreateBatchBody {
+  team_id?: string;
   name?: string;
   name_suffix?: string;
   description?: string;

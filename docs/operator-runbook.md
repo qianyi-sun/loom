@@ -2156,7 +2156,10 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
 
    # Model-backed path through the provider gateway. This is the release
    # provider smoke because it exercises codex + YibuAPI OpenAI-compatible.
+   # Platform admins must pass the provider owner's team id explicitly;
+   # provider-name lookup is scoped to that team.
    loom eval batch create \
+     --team-id <agentic-rl-team-id> \
      --name-suffix codex-yibuapi-smoke \
      --task-filter '{"task_ids":["skilllearnbench/anthropic-poster-design/anthropic-poster-design-1"]}' \
      --provider mz_tn_canada_qianyi \

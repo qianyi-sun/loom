@@ -27,7 +27,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.admin_secret import AdminSecretVerifier
-from loom.db.schema import Token
+from loom.db.schema import Token, User
 
 _STEP_JWT_PREFIX = "loom_step_"
 _TOKEN_TOUCH_DEBOUNCE = timedelta(seconds=60)
@@ -216,6 +216,13 @@ async def verify_bearer_token(
     scopes = list(row.scopes)
     team_id = row.team_id
     user_id = row.created_by_user_id
+    role = None
+    if user_id is not None:
+        is_platform_admin = (await session.execute(
+            select(User.is_platform_admin).where(User.id == user_id),
+        )).scalar_one_or_none()
+        if is_platform_admin:
+            role = "platform_admin"
     expires_at = row.expires_at
     now = datetime.now(UTC)
     touch_cutoff = now - _TOKEN_TOUCH_DEBOUNCE
@@ -237,5 +244,6 @@ async def verify_bearer_token(
         scopes=scopes,
         team_id=team_id,
         user_id=user_id,
+        role=role,
         expires_at=expires_at,
     )

@@ -478,6 +478,28 @@ def test_list_admin_sees_all_teams(app_setup) -> None:
     assert names == {"a-conn", "b-conn"}
 
 
+def test_list_admin_can_filter_by_team_id(app_setup) -> None:
+    app, tokens, team_ids = app_setup
+    c = _client(app)
+    c.post("/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
+           json={"name": "a-conn", "type": "openai-compatible",
+                 "base_url": "https://api.openai.com/", "api_key": "k"})
+    c.post("/api/v1/provider-connections", headers=_auth(tokens["team_b"]),
+           json={"name": "b-conn", "type": "openai-compatible",
+                 "base_url": "https://api.openai.com/", "api_key": "k"})
+
+    r = c.get(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["admin"]),
+        params={"team_id": str(team_ids["b"])},
+    )
+
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert [item["name"] for item in items] == ["b-conn"]
+    assert {item["team_id"] for item in items} == {str(team_ids["b"])}
+
+
 def test_get_cross_team_returns_404_not_403(app_setup) -> None:
     """Existence-leak prevention: team_a probing for team_b's row
     gets the same 404 as a nonexistent ID."""
