@@ -192,6 +192,62 @@ async def test_run_step_retries_retryable_gateway_failure(context: TrialContext)
     assert EventKind.AGENT_RETRY in kinds
 
 
+async def test_run_step_retries_textual_provider_transport_disconnect(
+    context: TrialContext,
+):
+    """Subprocess agents can only surface some provider/gateway transport
+    disconnects as text. These should consume retry budget like typed gateway
+    transport exceptions instead of becoming immediate agent failures."""
+    from loom.errors import AgentError
+
+    class _FlakySubprocessAgent:
+        mode = "out-of-box"
+        name = "codex"
+        version = "1.0"
+        supports_os = frozenset({"linux"})
+        model = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, **_):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            if self.calls == 1:
+                raise AgentError(
+                    "codex exited rc=1 on step main; stderr: "
+                    "Server disconnected without sending a response."
+                )
+
+    agent = _FlakySubprocessAgent()
+    context.agent = agent  # type: ignore[assignment]
+    context.trial_config = stub_trial_config(
+        retry=RetryPolicy(
+            max_attempts=2,
+            backoff=BackoffSpec(base_sec=0.001, max_sec=0.001, jitter=0),
+        )
+    )
+
+    writer = TrajectoryWriter(
+        local_path=context.local_trajectory_path,
+        store=context.object_store,
+        bucket=context.trajectory_bucket,
+        key=context.trajectory_key,
+        min_part_bytes=0,
+    )
+    async with writer:
+        sr = await run_step(
+            ctx=context, step=context.task_config.steps[0],
+            trajectory=writer, baseline_policy=Public(),
+        )
+
+    assert sr.error is None
+    assert agent.calls == 2
+    reader = TrajectoryReader(context.local_trajectory_path)
+    retry_events = [e for e in reader.iter_all() if e.kind == EventKind.AGENT_RETRY]
+    assert len(retry_events) == 1
+    assert retry_events[0].failure_reason == "provider_transport_disconnect"
+
+
 async def test_run_step_records_verifier_exception(context: TrialContext):
     """Regression for Bug 3: previously only TimeoutError was caught around
     the verifier. A VerifierError used to escape step_runner entirely,

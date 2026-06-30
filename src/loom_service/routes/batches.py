@@ -83,6 +83,7 @@ router = APIRouter()
 _RERUNNABLE_FAILURE_REASONS: frozenset[str] = frozenset(
     {
         "gateway_error",
+        "provider_transport_disconnect",
         "retry_exhausted",
         "exhausted_retries",
     }

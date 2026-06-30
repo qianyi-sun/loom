@@ -1634,8 +1634,10 @@ following bounds:
   `llm_retry_max_attempts=5` attempts and an `llm_retry_max_backoff_sec=8`
   ceiling on each. This covers a typical k8s `maxUnavailable=1,
   maxSurge=1` rollout on a 2-replica gateway (~10-30s of transient
-  502s); longer outages exhaust the budget and the trial fails with
-  `gateway_error`.
+  502s). Subprocess agents also retry text-only transport disconnects such as
+  "server disconnected without sending a response"; longer outages exhaust
+  the budget and the trial fails with `gateway_error` or
+  `provider_transport_disconnect`.
 - **Orphan trajectory cleanup** (post-#416 Slice 1) no longer deletes
   JSONLs for trials whose CP state is still `running`/`claimed`/`queued`,
   regardless of `worker_id`. The reclaim sweep gets the trial back to
@@ -1657,7 +1659,8 @@ following bounds:
    `worker_heartbeat_expiry_sec + worker_reclaim_sweep_interval_sec`
    (default 120+30=150s).
 4. Confirm no trials enter terminal state with `failure_reason IN
-   ('trajectory_flush_failed', 'gateway_error')`. Reclaimed trials
+   ('trajectory_flush_failed', 'gateway_error',
+   'provider_transport_disconnect')`. Reclaimed trials
    should complete normally on the new worker.
 5. Inspect the new worker's startup logs for
    `orphan_trajectory_preserved` (the slice-1 happy path) rather
@@ -2246,6 +2249,9 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     surface a clear `provider_error` reason rather than a generic 500. Confirm
     diagnostic text does not contain raw provider keys, bearer tokens, signed
     URL query parameters, or internal service hostnames.
+    For transient provider/gateway transport drops, confirm diagnostics use
+    `provider_transport_disconnect` rather than `internal_error` and that the
+    trial retry budget is consumed before a terminal failure is recorded.
 18. **Automated evidence script.** After steps 4-16, run the repeatable API
     gate. Use disposable staging data because clone/reuse checks create Team B
     records:

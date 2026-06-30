@@ -143,6 +143,58 @@ def test_batch_diagnosis_clusters_dominant_failure_reason() -> None:
     } in report["next_actions"]
 
 
+def test_batch_diagnosis_clusters_provider_transport_disconnects() -> None:
+    evidence = {
+        "schema_version": "1",
+        "entity": {"type": "batch", "id": "batch-1", "team_id": "team-a"},
+        "lifecycle": {"state": "finished", "terminal_status": "partial_failed"},
+        "failure": {
+            "reason_code": "batch.partial_failed",
+            "category": "aggregate",
+            "attribution": "mixed",
+            "message": "Some child trials failed.",
+        },
+        "provider": {"provider_model_id": "gpt-4o-mini"},
+        "task_selection": {"expected_trial_count": 3},
+        "trials": {
+            "summary": {"succeeded": 1, "failed": 2},
+            "failed_count": 2,
+        },
+        "reward": {"aggregate_reward": 0.3, "scored_trial_count": 1},
+        "next_actions": ["Open failed child trials and inspect their debug evidence."],
+    }
+    failures = [
+        {
+            "id": "trial-transport-1",
+            "task_id": "task-1",
+            "reason_code": "trial.provider_transport_disconnect",
+            "failure_reason": "provider_transport_disconnect",
+        },
+        {
+            "id": "trial-transport-2",
+            "task_id": "task-2",
+            "reason_code": "trial.provider_transport_disconnect",
+            "failure_reason": "provider_transport_disconnect",
+        },
+    ]
+
+    report = build_batch_diagnosis(evidence, trial_failures=failures)
+
+    assert report["summary"] == (
+        "The batch has provider transport disconnects before benchmark scoring."
+    )
+    assert report["primary_cause"]["reason_code"] == (
+        "trial.provider_transport_disconnect"
+    )
+    assert report["primary_cause"]["category"] == "gateway"
+    assert report["primary_cause"]["attribution"] == "provider"
+    assert {
+        "label": "Run provider preflight",
+        "kind": "cli_command",
+        "command": "loom providers models --preflight gpt-4o-mini",
+    } in report["next_actions"]
+
+
 def test_batch_diagnosis_handles_fanout_failure_without_child_trials() -> None:
     evidence = {
         "schema_version": "1",

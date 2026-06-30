@@ -218,7 +218,11 @@ was observed. This makes debug evidence distinguish "no request
 attempted" from "request attempted and failed upstream" while keeping
 prompt bodies, messages, headers, bearer tokens, API keys, and
 credentials out of persistence. Pre-upstream failures (auth, rate-card,
-license) leave no row.
+license) leave no row. Subprocess agents may surface some transport drops only
+as stderr text after the SDK exits; the worker classifies those terminal
+messages as `provider_transport_disconnect`, applies the trial retry policy,
+and exposes that distinct reason in debug evidence instead of grouping them
+with generic `internal_error` or agent logic failures.
 
 ## Persistence schema
 

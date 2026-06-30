@@ -88,6 +88,23 @@ _REASON_META: dict[str, _ReasonMeta] = {
         ),
         actions=("provider_preflight", "rerun_failed"),
     ),
+    "trial.provider_transport_disconnect": _ReasonMeta(
+        label="Provider transport disconnect",
+        category="gateway",
+        attribution="provider",
+        trial_summary=(
+            "The trial failed before scoring because the provider transport "
+            "disconnected before returning a response."
+        ),
+        batch_summary=(
+            "The batch has provider transport disconnects before benchmark scoring."
+        ),
+        impact=(
+            "The aggregate score is not reliable for model-quality comparison "
+            "because affected trials did not receive model responses."
+        ),
+        actions=("provider_preflight", "rerun_failed"),
+    ),
     "trial.verifier_error": _ReasonMeta(
         label="Benchmark verifier failure",
         category="verifier",

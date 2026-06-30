@@ -25,6 +25,13 @@ def test_failure_reason_includes_task_image_build_timeout():
     assert FailureReason.TASK_IMAGE_BUILD_TIMEOUT.value == "task_image_build_timeout"
 
 
+def test_failure_reason_includes_provider_transport_disconnect():
+    assert (
+        FailureReason.PROVIDER_TRANSPORT_DISCONNECT.value
+        == "provider_transport_disconnect"
+    )
+
+
 def test_agent_info():
     info = AgentInfo(
         name="claude-code-agent", version="1.4.0", mode="in-box",
