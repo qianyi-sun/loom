@@ -4,7 +4,12 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
-from loom_service.debug_evidence import build_batch_debug_evidence
+from loom_service.debug_evidence import build_batch_debug_evidence, build_trial_debug_evidence
+
+
+class _Request:
+    def url_for(self, name: str, **values: object) -> str:
+        return f"http://test/{name}/{values.get('trial_id', '')}"
 
 
 def test_batch_debug_evidence_counts_claimed_without_started_trials() -> None:
@@ -139,3 +144,43 @@ def test_batch_debug_evidence_reports_terminal_worker_pool_coverage() -> None:
         "oldlab": 1,
     }
     assert evidence["trials"]["worker_pools"]["unknown_terminal"] == 0
+
+
+def test_trial_debug_evidence_classifies_provider_transport_disconnect() -> None:
+    now = datetime.now(UTC)
+    trial = SimpleNamespace(
+        id=uuid4(),
+        team_id=uuid4(),
+        batch_id=None,
+        task_id="skilllearnbench/fix-security-bug/fix-security-bug-2",
+        state="failed",
+        failure_reason="provider_transport_disconnect",
+        failure_message="Server disconnected without sending a response.",
+        result=None,
+        config={},
+        trajectory_index={},
+        provider_connection_id=None,
+        provider_model_id=None,
+        submitted_at=now - timedelta(minutes=2),
+        claimed_at=now - timedelta(minutes=2),
+        started_at=now - timedelta(minutes=1),
+        finished_at=now,
+        cancellation_requested_at=None,
+        cancellation_observed_at=None,
+        attempt_count=2,
+        next_attempt_at=None,
+        worker_id=None,
+        requires_caps={},
+    )
+
+    evidence = build_trial_debug_evidence(
+        _Request(),  # type: ignore[arg-type]
+        trial,  # type: ignore[arg-type]
+        task=None,
+        llm_calls=[],
+    )
+
+    assert evidence["failure"]["reason_code"] == "trial.provider_transport_disconnect"
+    assert evidence["failure"]["category"] == "gateway"
+    assert evidence["failure"]["attribution"] == "provider"
+    assert "provider preflight" in " ".join(evidence["next_actions"]).lower()

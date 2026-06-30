@@ -38,6 +38,7 @@ class FailureReason(StrEnum):
     INTERNAL_ERROR = "internal_error"
     PROVIDER_ERROR = "provider_error"   # upstream provider returned 4xx
     GATEWAY_ERROR = "gateway_error"     # loom gateway itself returned 5xx
+    PROVIDER_TRANSPORT_DISCONNECT = "provider_transport_disconnect"
 
 
 class AgentInfo(BaseModel):

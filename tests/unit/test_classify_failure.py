@@ -62,6 +62,34 @@ def test_generic_exception_is_internal():
     assert msg is None
 
 
+def test_textual_provider_transport_disconnect_is_classified_and_redacted():
+    reason, msg = classify_failure(
+        RuntimeError(
+            "Server disconnected without sending a response. "
+            "Authorization: Bearer loom_api_supersecret sk-hidden123"
+        )
+    )
+    assert reason == FailureReason.PROVIDER_TRANSPORT_DISCONNECT
+    assert msg is not None
+    assert "Server disconnected without sending a response" in msg
+    assert "loom_api_supersecret" not in msg
+    assert "sk-hidden123" not in msg
+
+
+def test_provider_transport_disconnect_message_classification_is_idempotent():
+    prefix = "Provider transport disconnected before returning a response."
+    reason, msg = classify_failure(
+        RuntimeError(
+            f"{prefix} codex exited rc=1; stderr: "
+            "Server disconnected without sending a response."
+        )
+    )
+
+    assert reason == FailureReason.PROVIDER_TRANSPORT_DISCONNECT
+    assert msg is not None
+    assert msg.count(prefix) == 1
+
+
 def test_timeout_error_classification_is_phase_dependent():
     """Per spec §5.2: TimeoutError at trial-level → AGENT_TIMEOUT is the
     fallback. Phase-local handlers catch first and shouldn't reach this."""

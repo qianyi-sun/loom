@@ -21,6 +21,7 @@ class RetryReason(StrEnum):
     VERIFIER_TIMEOUT = "verifier_timeout"
     TRAJECTORY_FLUSH_FAILED = "trajectory_flush_failed"
     GATEWAY_ERROR = "gateway_error"
+    PROVIDER_TRANSPORT_DISCONNECT = "provider_transport_disconnect"
 
 
 class BackoffSpec(BaseModel):
@@ -34,7 +35,10 @@ class BackoffSpec(BaseModel):
 class RetryPolicy(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     max_attempts: int = Field(default=3, ge=1)
-    retry_on: frozenset[RetryReason] = frozenset({RetryReason.GATEWAY_ERROR})
+    retry_on: frozenset[RetryReason] = frozenset({
+        RetryReason.GATEWAY_ERROR,
+        RetryReason.PROVIDER_TRANSPORT_DISCONNECT,
+    })
     backoff: BackoffSpec = BackoffSpec()
 
 

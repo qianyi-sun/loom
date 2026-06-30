@@ -14,7 +14,7 @@ from uuid import UUID
 
 from loom.agent.base import AgentRuntime, InBoxAgentRuntime
 from loom.driver.base import Driver, StartOptions
-from loom.errors import classify_failure
+from loom.errors import classify_failure, classify_failure_message
 from loom.models.networking import NetworkPolicy
 from loom.models.result import (
     AgentInfo,
@@ -535,6 +535,10 @@ def _first_terminal_step_failure(result: TrialResult) -> tuple[FailureReason, st
 
 def _failure_from_step_error(error: StepError) -> tuple[FailureReason, str | None]:
     if error.phase == "agent":
+        if error.reason == "exception":
+            text_result = classify_failure_message(error.message)
+            if text_result is not None:
+                return text_result
         reason = (
             FailureReason.AGENT_TIMEOUT if error.reason == "timeout" else FailureReason.AGENT_ERROR
         )

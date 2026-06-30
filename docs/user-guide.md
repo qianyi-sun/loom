@@ -850,11 +850,11 @@ terminal defense-in-depth instead of leaving the batch `submitted`; open Batch
 Detail or run `loom eval batch show <id>` to inspect `failure_reason`,
 `failure_message`, and `fanout_errors`.
 
-If a model gateway returns transient `502`, `503`, `504`, timeout, or
-connection-reset failures, Loom retries the agent call within the trial
-before marking the trial failed. If retry budget is exhausted, rerun the
-remaining failed cases from Batch Detail instead of launching the whole
-batch again.
+If a model gateway returns transient `502`, `503`, `504`, timeout, connection
+reset, remote-protocol, or provider transport-disconnect failures, Loom retries
+the agent call within the trial before marking the trial failed. If retry
+budget is exhausted, rerun the remaining failed cases from Batch Detail instead
+of launching the whole batch again.
 
 ## `loom config` reference
 

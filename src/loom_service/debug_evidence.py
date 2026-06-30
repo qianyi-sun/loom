@@ -104,6 +104,11 @@ _TRIAL_FAILURE_META: dict[str, tuple[str, str, list[str]]] = {
         "provider",
         ["Retry the run and run provider preflight if the error repeats."],
     ),
+    "provider_transport_disconnect": (
+        "gateway",
+        "provider",
+        ["Retry the run and run provider preflight if transport disconnects repeat."],
+    ),
 }
 
 

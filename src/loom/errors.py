@@ -98,6 +98,7 @@ class CapabilityMismatchError(ConfigError):
 import re  # noqa: E402
 
 from loom.models.result import FailureReason  # noqa: E402
+from loom.security.redaction import redact_text  # noqa: E402
 
 # Patterns for internal URLs that must NOT appear in user-facing messages.
 _INTERNAL_URL_RE = re.compile(
@@ -106,6 +107,16 @@ _INTERNAL_URL_RE = re.compile(
     re.IGNORECASE,
 )
 _MAX_MSG_LEN = 200
+_TEXTUAL_PROVIDER_TRANSPORT_RE = re.compile(
+    r"server disconnected without sending a response"
+    r"|remoteprotocolerror"
+    r"|remote protocol error"
+    r"|connection closed without (?:a )?response",
+    re.IGNORECASE,
+)
+_PROVIDER_TRANSPORT_DISCONNECT_MESSAGE = (
+    "Provider transport disconnected before returning a response."
+)
 
 
 def _redact_body(raw: str) -> str:
@@ -117,6 +128,33 @@ def _redact_body(raw: str) -> str:
     if len(cleaned) > _MAX_MSG_LEN:
         cleaned = cleaned[:_MAX_MSG_LEN]
     return cleaned
+
+
+def _redact_failure_excerpt(raw: str) -> str:
+    cleaned = redact_text(raw, limit=_MAX_MSG_LEN)
+    cleaned = cleaned.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    return cleaned.strip()
+
+
+def classify_failure_message(message: str) -> tuple[FailureReason, str | None] | None:
+    """Classify text-only transport failures from subprocess agent adapters.
+
+    Some SDK/CLI agents collapse HTTP transport exceptions into stderr text,
+    for example ``Server disconnected without sending a response.``. By the
+    time Loom sees the failure it is no longer an ``httpx`` exception, but it is
+    still a provider/gateway transport boundary failure and should not be
+    grouped with model/agent logic errors.
+    """
+
+    if not _TEXTUAL_PROVIDER_TRANSPORT_RE.search(message):
+        return None
+    excerpt = _redact_failure_excerpt(message)
+    if excerpt.startswith(_PROVIDER_TRANSPORT_DISCONNECT_MESSAGE):
+        return FailureReason.PROVIDER_TRANSPORT_DISCONNECT, excerpt
+    detail = _PROVIDER_TRANSPORT_DISCONNECT_MESSAGE
+    if excerpt:
+        detail = f"{detail} {excerpt}"
+    return FailureReason.PROVIDER_TRANSPORT_DISCONNECT, detail
 
 
 def _classify_http_status_error(exc: BaseException) -> tuple[FailureReason, str | None] | None:
@@ -256,4 +294,7 @@ def classify_failure(exc: BaseException) -> tuple[FailureReason, str | None]:
         return FailureReason.TRAJECTORY_FLUSH_FAILED, None
     if isinstance(exc, TimeoutError):
         return FailureReason.AGENT_TIMEOUT, None
+    message_result = classify_failure_message(str(exc))
+    if message_result is not None:
+        return message_result
     return FailureReason.INTERNAL_ERROR, None

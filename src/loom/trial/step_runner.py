@@ -18,7 +18,7 @@ import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from loom.errors import AgentError, classify_failure
+from loom.errors import AgentError, classify_failure, classify_failure_message
 from loom.models.networking import NetworkPolicy
 from loom.models.result import ArtifactRef, FailureReason, StepError, StepResult
 from loom.models.task import StepConfig
@@ -247,6 +247,27 @@ async def _run_agent_with_retry(
                 occurred_at=datetime.now(UTC),
             )
         except AgentError as exc:
+            text_result = classify_failure_message(str(exc))
+            if text_result is not None:
+                failure_reason, failure_message = text_result
+                retry_reason = _retry_reason_for_failure(failure_reason)
+                if retry_reason is not None and await _maybe_retry_agent_failure(
+                    policy=policy,
+                    retry_reason=retry_reason,
+                    failure_message=failure_message,
+                    attempt=attempt,
+                    trajectory=trajectory,
+                    ctx=ctx,
+                    step=step,
+                    seq=seq,
+                ):
+                    attempt += 1
+                    continue
+                return StepError(
+                    phase="agent", reason="exception",
+                    message=failure_message or str(exc),
+                    occurred_at=datetime.now(UTC),
+                )
             return StepError(
                 phase="agent", reason="exception", message=str(exc),
                 occurred_at=datetime.now(UTC),
@@ -272,6 +293,8 @@ async def _run_agent_with_retry(
 def _retry_reason_for_failure(reason: FailureReason) -> RetryReason | None:
     if reason == FailureReason.GATEWAY_ERROR:
         return RetryReason.GATEWAY_ERROR
+    if reason == FailureReason.PROVIDER_TRANSPORT_DISCONNECT:
+        return RetryReason.PROVIDER_TRANSPORT_DISCONNECT
     if reason == FailureReason.ENV_START_FAILURE:
         return RetryReason.ENV_START_FAILURE
     if reason == FailureReason.AGENT_TIMEOUT:

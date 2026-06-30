@@ -44,6 +44,29 @@ def test_step_agent_error_promotes_to_agent_error() -> None:
     assert failure == (FailureReason.AGENT_ERROR, "solve.sh missing")
 
 
+def test_step_agent_transport_disconnect_promotes_to_provider_transport_disconnect() -> None:
+    failure = _first_terminal_step_failure(
+        _trial_result(
+            StepResult(
+                step_name="main",
+                error=StepError(
+                    phase="agent",
+                    reason="exception",
+                    message=(
+                        "codex exited rc=1 on step main; stderr: "
+                        "Server disconnected without sending a response."
+                    ),
+                    occurred_at=datetime.now(UTC),
+                ),
+            )
+        )
+    )
+
+    assert failure is not None
+    assert failure[0].value == "provider_transport_disconnect"
+    assert "Server disconnected without sending a response" in str(failure[1])
+
+
 def test_scored_verifier_result_suppresses_agent_error_terminal_failure() -> None:
     failure = _first_terminal_step_failure(
         _trial_result(
