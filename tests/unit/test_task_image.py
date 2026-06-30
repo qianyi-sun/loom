@@ -6,6 +6,12 @@ from typing import Any
 import pytest
 from docker.errors import ImageNotFound
 
+from loom.driver import task_image
+from loom.driver.task_image import (
+    TaskImageBuildError,
+    resolve_task_image,
+    task_image_tag,
+)
 from loom.models.task import (
     AgentDefaults,
     EnvironmentConfig,
@@ -13,8 +19,6 @@ from loom.models.task import (
     TaskMetadata,
     VerifierDefaults,
 )
-from loom_worker import task_image
-from loom_worker.task_image import TaskImageBuildError, resolve_task_image, task_image_tag
 
 
 def _task_config(
