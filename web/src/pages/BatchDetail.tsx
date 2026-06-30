@@ -155,6 +155,11 @@ export default function BatchDetail(): JSX.Element {
   const showNoCallWarning =
     c.llm_evidence_status === "no_calls_invalid" ||
     c.llm_evidence_status === "partial_no_calls";
+  const noCallWarningTitle =
+    c.llm_evidence_status === "partial_no_calls" ||
+    (c.llm_calls_count ?? 0) > 0
+      ? "Some terminal trials made no LLM calls"
+      : "No LLM calls recorded";
   const diagnosis = c.diagnosis ?? diagnosticsQuery.data?.diagnosis ?? null;
   const debugEvidence =
     c.debug_evidence ?? diagnosticsQuery.data?.debugEvidence ?? null;
@@ -241,7 +246,7 @@ export default function BatchDetail(): JSX.Element {
 
           {showNoCallWarning ? (
             <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">
-              <div className="font-semibold">No LLM calls recorded</div>
+              <div className="font-semibold">{noCallWarningTitle}</div>
               <div className="mt-1 text-red-800">
                 {noCallTrialCount} terminal model-backed trials finished
                 without reaching the gateway; this is invalid benchmark

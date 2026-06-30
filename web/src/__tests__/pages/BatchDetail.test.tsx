@@ -290,6 +290,27 @@ describe("BatchDetail run plan", () => {
     expect(screen.getByText(/invalid benchmark evidence/i)).toBeInTheDocument();
   });
 
+  it("labels partial no-call evidence without saying the whole batch had no calls", async () => {
+    mockBatch({
+      ...BATCH_BODY,
+      state: "running",
+      result_status: "partial_failed",
+      aggregate_reward: 0,
+      llm_calls_count: 1153,
+      no_call_trial_count: 3,
+      llm_evidence_status: "partial_no_calls",
+    });
+    renderBatchDetail();
+
+    expect(
+      await screen.findByText("Some terminal trials made no LLM calls"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No LLM calls recorded")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/3 terminal model-backed trials finished without reaching the gateway/i),
+    ).toBeInTheDocument();
+  });
+
   it("loads structured diagnostics on demand without exposing raw JSON by default", async () => {
     const user = userEvent.setup();
     mockBatch({
