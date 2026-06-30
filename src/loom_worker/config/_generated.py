@@ -49,6 +49,8 @@ class WorkerSettings(BaseSettings):
     sandbox_singleton_secrets_dir: str = "/var/lib/loom/sandbox-secrets"
     sandbox_step_jwt_ttl_sec: int = 600
     sandbox_worker_index: int = 0
+    storage_auth_kind: str = "static_keys"
+    storage_backend: str = "minio"
     subprocess_gateway_url: HttpUrl | None = None
     task_image_build_max_bytes: int = Field(default=536870912, validation_alias="LOOM_TASK_IMAGE_BUILD_MAX_BYTES")
     task_image_build_max_files: int = Field(default=2000, validation_alias="LOOM_TASK_IMAGE_BUILD_MAX_FILES")

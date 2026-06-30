@@ -41,6 +41,18 @@ required    = true
 secret      = { key = "step-jwt-signing-key", generate = "openssl rand -hex 64" }
 description = "HS256 step-JWT key. CP mints, gateway verifies; mismatch → 401 on every facade call."
 
+[service_config.storage_backend]
+used_by     = ["control-plane", "loom-service", "worker"]
+python_type = "str"
+default     = "minio"
+description = "Object-store backend. S3-compatible: minio (default), s3, r2, b2, wasabi. Non-S3 (renderers TBD): gcs (#254). Drives `bootstrap-storage-lifecycle` renderer selection and informs the credentials provider chain."
+
+[service_config.storage_auth_kind]
+used_by     = ["control-plane", "loom-service", "worker"]
+python_type = "str"
+default     = "static_keys"
+description = "Credentials resolution strategy. static_keys (default): read minio-access-key + minio-secret-key from loom-secrets — works for MinIO + every S3-compatible provider. irsa: boto3 discovers the AWS IAM role from the pod's projected serviceAccountToken (EKS); no static keys needed. workload_identity / sa_json: GCS analogues, available once #254 lands."
+
 [service_config.minio_endpoint]
 used_by     = ["control-plane", "loom-service", "worker"]
 python_type = "str"

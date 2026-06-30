@@ -55,6 +55,8 @@ class ControlPlaneSettings(BaseSettings):
     slurm_worker_controller_stale_after_seconds: int = 300
     slurm_worker_controller_time_limit: str = "7-00:00:00"
     step_jwt_signing_key: SecretStr
+    storage_auth_kind: str = "static_keys"
+    storage_backend: str = "minio"
     worker_heartbeat_expiry_sec: int = 120
     worker_reclaim_sweep_interval_sec: int = 30
 
