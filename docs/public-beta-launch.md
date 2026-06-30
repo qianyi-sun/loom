@@ -85,10 +85,12 @@ Attach these to the release issue or release PR:
   `deploy/environment-state/public-beta.toml` or
   `deploy/environment-state/staging.toml`, with the rollout `IMAGE_TAG` and
   `ENV_CONFIG_VERSION` variables supplied. This must converge worker-pool
-  autoscaler policies and GB10 desired state before Monitor/resource-pool
-  screenshots are used as evidence. The public-beta profile targets the
-  existing CP desired-state environment `production` until GB10 node agents are
-  renamed in a coordinated rollout.
+  autoscaler policies, GB10 desired state, and any external Slurm autoscaler
+  supervisor before Monitor/resource-pool screenshots are used as evidence. For
+  public-beta, the OLDLAB supervisor unit must point at the current rollout
+  checkout, include `--pool-name oldlab`, and have its user timer active. The
+  public-beta profile targets the existing CP desired-state environment
+  `production` until GB10 node agents are renamed in a coordinated rollout.
 - Benchmark reward acceptance transcript from
   `scripts/benchmark_reward_gate.py`: the readiness gate must pass against the
   user-visible catalog, and the supported-benchmark sweep gate must prove every
@@ -305,9 +307,11 @@ scripts/ops/worker_service_tunnels.py install-systemd \
 For GB10 and OLDLAB public-beta rollouts, gate the Slurm-managed capacity first
 and then gate node-agent convergence only for compose rollout compatibility.
 Run `environment-state check` from the Slurm submit/shared-storage host so it
-can validate external runner env files and shared worker checkouts in addition
-to CP-backed state. The Slurm check catches pending/stale capacity requests,
-active jobs launched from stale `LOOM_REMOTE_WORKER_*` paths, and the active
+can validate external runner env files, shared worker checkouts, and local
+systemd user timers in addition to CP-backed state. The Slurm check catches
+pending/stale capacity requests, active jobs launched from stale
+`LOOM_REMOTE_WORKER_*` paths, inactive OLDLAB autoscaler timers, unscoped
+external autoscaler commands that omit `--pool-name oldlab`, and the active
 `gb10-arm64`/`oldlab` pool shapes; the node-agent check catches stale
 host-local checkouts, local-build fallback using an old tree, and env files
 that did not apply even when the pool still has healthy heartbeats.

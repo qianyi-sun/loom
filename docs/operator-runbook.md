@@ -2500,7 +2500,9 @@ mock provider and browser automation job.
   redacted `LOOM_REMOTE_WORKER_ENV_FILE` or
   `LOOM_REMOTE_WORKER_REPO_DIR` differs from the profile, or when the
   profile's external runner env file is absent, the repo checkout is on the
-  wrong release, or the checkout is dirty.
+  wrong release, the checkout is dirty, or a declared external Slurm autoscaler
+  supervisor has stale unit content, an unscoped command, a disabled timer, or
+  an inactive timer.
   Use `--format json` for release evidence or automation. If Loom backlog has
   drained but Slurm still has pending elastic jobs, cancel those Slurm job ids
   with `scancel`; the controller will record cancellation on its next

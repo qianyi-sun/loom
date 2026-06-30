@@ -53,6 +53,15 @@ load is already near the CPU count or free memory is low, the expected behavior
 is to keep the warm minimum and record the exclusion reason instead of forcing
 more Slurm jobs.
 
+For public-beta release gates, supervise OLDLAB through the
+`external_slurm_autoscaler_supervisors` section in
+`deploy/environment-state/public-beta.toml`. `loom admin environment-state
+apply` writes the user systemd service/timer on the Slurm submit host and
+`check` fails if the timer is inactive, the unit points at a stale rollout
+checkout, or the ExecStart command omits `--pool-name oldlab`. Do not leave a
+free-floating ops script as the timer target; use the repo entrypoint
+`scripts/ops/worker_pool_autoscaler_external_once.py --pool-name oldlab`.
+
 The remote-worker env file and Loom checkout path must be readable from every
 included Slurm node. For OLDLAB 4/5, do not use a control-node-local checkout
 such as `/home/qianyi/dev/loom` unless a Slurm job on that node has verified it
