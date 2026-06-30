@@ -54,6 +54,7 @@ def test_gate_declares_required_public_beta_checks() -> None:
         "benchmarks.ready_bundle_objects",
         "object_store.minio_write_probe",
         "runs.batch_detail",
+        "runs.claimed_without_started",
         "runs.trial_detail",
         "artifacts.owner_atif_download",
         "artifacts.owner_trajectory_download",
@@ -205,6 +206,64 @@ def test_owner_team_label_check_rejects_nested_artifact_owner_when_truncated() -
     response = gate.HttpResponse(status_code=200, headers={}, body=body)
 
     assert not gate._json_has_owner_team(response)
+
+
+def test_run_smoke_fails_when_batch_debug_reports_claimed_without_started(
+    monkeypatch,
+) -> None:
+    gate = _load_gate_module()
+
+    class FakeClient:
+        def __init__(self, server_url: str, *, max_scan_bytes: int) -> None:
+            self.server_url = server_url
+            self.evidence_chunks: list[str] = []
+            self.response_bytes_scanned = 0
+
+        def request(self, method: str, path: str, **kwargs):
+            if path in {"/api/v1/health", "/", "/api/v1/auth/whoami"}:
+                body = b'{"status":"ok"}'
+            elif path == "/api/v1/provider-connections":
+                body = b'{"items":[{"name":"mz_tn_canada_qianyi"}]}'
+            elif path == "/api/v1/models":
+                body = b'{"items":[{"provider":"openai","name":"gpt-4o-mini"}]}'
+            elif path == "/api/v1/agents":
+                body = b'{"items":[{"name":"oracle","service_mode_ready":true}]}'
+            elif path == "/api/v1/benchmarks":
+                body = (
+                    b'{"items":[{"id":"skilllearnbench","task_count":100,'
+                    b'"readiness_state":"runnable"}]}'
+                )
+            elif path == "/api/v1/batches/batch-1":
+                body = (
+                    b'{"id":"batch-1","debug_evidence":{"trials":{"summary":{'
+                    b'"claimed_without_started":2}}}}'
+                )
+            elif path == "/api/v1/run-library/batches":
+                body = b'{"items":[{"id":"batch-1"}]}'
+            elif path == "/api/v1/run-library/batches/batch-1":
+                body = (
+                    b'{"id":"batch-1","owner_team":'
+                    b'{"id":"team-1","name":"Agentic RL"}}'
+                )
+            else:
+                body = b'{"items":[]}'
+            return gate.HttpResponse(status_code=200, headers={}, body=body)
+
+    monkeypatch.setattr(gate, "SmokeClient", FakeClient)
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+        "--batch-id", "batch-1",
+    ])
+
+    report = gate.run_smoke(args)
+    result = next(r for r in report.results if r.check_id == "runs.claimed_without_started")
+
+    assert result.status == "fail"
+    assert "2" in result.detail
+    assert "claimed_without_started" in result.detail
+    assert "reclaim" in result.remediation.lower()
 
 
 def test_run_smoke_fails_when_provider_connection_catalog_is_empty(monkeypatch) -> None:

@@ -1792,7 +1792,8 @@ PR. The gate has two parts:
   session.
 - **Repeatable API evidence** from `scripts/public_beta_smoke_gate.py`, which
   verifies public API auth, provider discovery, service-proxied downloads, Run
-  Library sharing, cross-team denials, provenance, and leak scanning.
+  Library sharing, cross-team denials, provenance, claimed-without-started
+  batch diagnostics, and leak scanning.
 
 Quota and rate-limit enforcement are intentionally not part of this beta gate.
 Team remains the execution, cost, provider credential, member, and API-token
@@ -2262,11 +2263,12 @@ checklist:
 - **`scripts/public_beta_smoke_gate.py`** — covers public health, logged-out SPA
   reachability, two-team API-token auth, provider/model discovery, runnable
   benchmark catalog presence, sampled ready benchmark bundle objects,
-  batch/trial detail, service-proxied ATIF/trajectory downloads, My team and
-  All teams Run Library visibility, owner-team label, cross-team safe artifact
-  download, direct-route denial, clone config, reuse artifact, provenance,
-  blocked artifact denial, private artifact denial, cross-team mutation denial,
-  and response leak scanning.
+  batch/trial detail, `claimed_without_started=0` from batch debug evidence,
+  service-proxied ATIF/trajectory downloads, My team and All teams Run Library
+  visibility, owner-team label, cross-team safe artifact download, direct-route
+  denial, clone config, reuse artifact, provenance, blocked artifact denial,
+  private artifact denial, cross-team mutation denial, and response leak
+  scanning.
 - **`scripts/ops/worker_service_tunnels.py`** — covers the private
   remote-worker tunnel gate when out-of-cluster workers are attached. It renders
   durable systemd user units, installs the watchdog timer that restarts stale
