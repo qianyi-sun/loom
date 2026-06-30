@@ -182,6 +182,31 @@ def test_run_smoke_uses_parser_max_response_scan_bytes(monkeypatch) -> None:
     assert observed["max_scan_bytes"] == 12345
 
 
+def test_owner_team_label_check_accepts_truncated_large_detail_prefix() -> None:
+    gate = _load_gate_module()
+    body = (
+        b'{"id":"batch-1","team_id":"team-1",'
+        b'"owner_team":{"id":"team-1","name":"Alpha Research"},'
+        b'"name":"large run","artifact_inventory":{"reports":['
+        + (b'{"id":"artifact","key":"object"},' * 5000)
+    )
+    response = gate.HttpResponse(status_code=200, headers={}, body=body)
+
+    assert gate._json_has_owner_team(response)
+
+
+def test_owner_team_label_check_rejects_nested_artifact_owner_when_truncated() -> None:
+    gate = _load_gate_module()
+    body = (
+        b'{"id":"batch-1","team_id":"team-1",'
+        b'"artifact_inventory":{"reports":[{"id":"artifact",'
+        b'"owner_team":{"id":"team-1","name":"Alpha Research"}}'
+    )
+    response = gate.HttpResponse(status_code=200, headers={}, body=body)
+
+    assert not gate._json_has_owner_team(response)
+
+
 def test_run_smoke_fails_when_provider_connection_catalog_is_empty(monkeypatch) -> None:
     gate = _load_gate_module()
 

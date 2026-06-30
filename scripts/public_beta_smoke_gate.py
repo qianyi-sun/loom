@@ -326,11 +326,83 @@ def _json_contains_id(response: HttpResponse, expected_id: str) -> bool:
         return False
 
 
+def _top_level_object_fragment(text: str, field: str) -> str | None:
+    target = json.dumps(field)
+    depth = 0
+    in_string = False
+    escaped = False
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            i += 1
+            continue
+
+        if char == '"':
+            if depth == 1 and text.startswith(target, i):
+                j = i + len(target)
+                while j < len(text) and text[j].isspace():
+                    j += 1
+                if j >= len(text) or text[j] != ":":
+                    in_string = True
+                    i += 1
+                    continue
+                j += 1
+                while j < len(text) and text[j].isspace():
+                    j += 1
+                if j < len(text) and text[j] == "{":
+                    return _balanced_json_object(text, j)
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        i += 1
+    return None
+
+
+def _balanced_json_object(text: str, start: int) -> str | None:
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        char = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
 def _json_has_owner_team(response: HttpResponse) -> bool:
     try:
         owner = response.json().get("owner_team")
     except (AttributeError, json.JSONDecodeError):
-        return False
+        fragment = _top_level_object_fragment(response.text, "owner_team")
+        if fragment is None:
+            return False
+        try:
+            owner = json.loads(fragment)
+        except json.JSONDecodeError:
+            return False
     return isinstance(owner, dict) and bool(owner.get("id") or owner.get("name"))
 
 
