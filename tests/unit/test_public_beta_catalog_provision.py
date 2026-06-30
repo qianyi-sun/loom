@@ -7,11 +7,11 @@ import pytest
 import loom_cli.public_beta_catalog as public_beta_catalog
 from loom_cli.public_beta_catalog import (
     POSTGRES_CATALOG_UPSERT_BATCH_SIZE,
+    AgentRow,
     BenchmarkRow,
     CatalogRows,
     ObjectInfo,
     PostgresCatalogStore,
-    ProvisionStats,
     TaskRow,
     provision_ready_benchmark_catalog,
 )
@@ -38,11 +38,17 @@ class FakeCatalog:
 
     async def upsert_rows(self, rows: CatalogRows) -> None:
         self.upserts.append(rows)
+        agents = {
+            (row.name, row.version): row
+            for row in self.rows.agents
+        }
         benchmarks = {row.id: row for row in self.rows.benchmarks}
         tasks = {row.id: row for row in self.rows.tasks}
+        agents.update({(row.name, row.version): row for row in rows.agents})
         benchmarks.update({row.id: row for row in rows.benchmarks})
         tasks.update({row.id: row for row in rows.tasks})
         self.rows = CatalogRows(
+            agents=list(agents.values()),
             benchmarks=list(benchmarks.values()),
             tasks=list(tasks.values()),
         )
@@ -140,6 +146,27 @@ async def test_postgres_catalog_store_batches_large_task_upserts(monkeypatch: py
     assert engine.disposed is True
 
 
+def test_agent_rows_from_service_catalog_include_contract_and_provenance() -> None:
+    rows = public_beta_catalog.agent_rows_from_service_catalog(
+        imported_by="release:public-beta",
+    )
+
+    by_name = {row.name: row for row in rows}
+    assert {"oracle", "litellm"}.issubset(by_name)
+
+    oracle = by_name["oracle"]
+    assert oracle.version == "service-catalog-v1"
+    assert oracle.mode == "builtin"
+    assert oracle.spec["name"] == "oracle"
+    assert oracle.spec["needs_model"] is False
+    assert oracle.spec["runtime_contract"]["execution"] == "builtin-oracle"
+    assert oracle.spec["catalog_provenance"] == {
+        "source": "loom_service.agent_catalog",
+        "schema_version": 1,
+        "provisioned_by": "release:public-beta",
+    }
+
+
 @pytest.mark.asyncio
 async def test_provision_ready_catalog_filters_blocked_rows_and_copies_missing_objects() -> None:
     source = FakeCatalog(
@@ -223,17 +250,18 @@ async def test_provision_ready_catalog_filters_blocked_rows_and_copies_missing_o
         imported_by="public-beta-provision",
     )
 
-    assert stats == ProvisionStats(
-        ready_benchmarks=1,
-        ready_tasks=1,
-        source_objects=2,
-        target_objects_uploaded=1,
-        target_objects_skipped=1,
-        target_objects_missing=0,
-        bytes_uploaded=5,
-        bytes_skipped=4,
-    )
+    assert stats.ready_agents >= 2
+    assert stats.ready_benchmarks == 1
+    assert stats.ready_tasks == 1
+    assert stats.source_objects == 2
+    assert stats.target_objects_uploaded == 1
+    assert stats.target_objects_skipped == 1
+    assert stats.target_objects_missing == 0
+    assert stats.bytes_uploaded == 5
+    assert stats.bytes_skipped == 4
     assert target_objects.buckets == {"loom-benchmarks"}
+    assert {"oracle", "litellm"}.issubset({row.name for row in target.rows.agents})
+    assert all(row.version == "service-catalog-v1" for row in target.rows.agents)
     assert target.rows.benchmarks == [
         replace(source.rows.benchmarks[0], imported_by="public-beta-provision"),
     ]
@@ -301,3 +329,78 @@ async def test_provision_ready_catalog_reports_missing_source_bundles() -> None:
     assert stats.target_objects_missing == 1
     assert stats.source_objects == 0
     assert target.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_provision_ready_catalog_preserves_existing_agent_rows_on_second_run() -> None:
+    source = FakeCatalog(
+        CatalogRows(
+            benchmarks=[
+                BenchmarkRow(
+                    id="humaneval",
+                    display_name="HumanEval",
+                    upstream_kind="huggingface",
+                    upstream_locator="openai/openai_humaneval",
+                    upstream_revision="main",
+                    license_spdx="MIT",
+                    license_url="https://example/humaneval",
+                    splits=["test"],
+                    series=None,
+                    imported_by="dev",
+                ),
+            ],
+            tasks=[
+                TaskRow(
+                    id="humaneval/HumanEval/0",
+                    checksum="a" * 64,
+                    config=_valid_task_config("humaneval/HumanEval/0"),
+                    source="s3://loom-benchmarks/humaneval/HumanEval/0/",
+                    license="MIT",
+                    benchmark_id="humaneval",
+                    tags={"split": "test"},
+                ),
+            ],
+        ),
+    )
+    target = FakeCatalog(CatalogRows(
+        agents=[
+            AgentRow(
+                name="oracle",
+                version="service-catalog-v1",
+                mode="builtin",
+                spec={"stale": True},
+            ),
+        ],
+        benchmarks=[],
+        tasks=[],
+    ))
+    source_objects = FakeObjects({
+        ("loom-benchmarks", "humaneval/HumanEval/0/task.toml"): b"task",
+    })
+
+    first = await provision_ready_benchmark_catalog(
+        source_catalog=source,
+        target_catalog=target,
+        source_objects=source_objects,
+        target_objects=FakeObjects(),
+        target_bucket="loom-benchmarks",
+        imported_by="public-beta-provision",
+    )
+    second = await provision_ready_benchmark_catalog(
+        source_catalog=source,
+        target_catalog=target,
+        source_objects=source_objects,
+        target_objects=FakeObjects({
+            ("loom-benchmarks", "humaneval/HumanEval/0/task.toml"): b"task",
+        }),
+        target_bucket="loom-benchmarks",
+        imported_by="public-beta-provision",
+    )
+
+    assert first.ready_agents >= 2
+    assert second.ready_agents == first.ready_agents
+    by_name = {row.name: row for row in target.rows.agents}
+    assert "stale" not in by_name["oracle"].spec
+    assert by_name["oracle"].spec["catalog_provenance"]["provisioned_by"] == (
+        "public-beta-provision"
+    )

@@ -32,6 +32,7 @@ REQUIRED_CHECK_IDS: tuple[str, ...] = (
     "auth.team_b_whoami",
     "providers.list",
     "providers.models",
+    "agents.ready_catalog",
     "benchmarks.runnable_catalog",
     "benchmarks.ready_bundle_objects",
     "object_store.minio_write_probe",
@@ -532,6 +533,7 @@ def run_smoke(args: argparse.Namespace) -> SmokeReport:
         "" if models_ok else "Refresh provider models or resolve upstream provider entitlement.",
     ))
 
+    _append_agent_catalog_checks(client, args, results)
     _append_benchmark_catalog_checks(client, args, results)
     _append_object_store_write_probe(args, results)
 
@@ -667,6 +669,42 @@ def run_smoke(args: argparse.Namespace) -> SmokeReport:
         results=results,
         response_bytes_scanned=client.response_bytes_scanned,
     )
+
+
+def _append_agent_catalog_checks(
+    client: SmokeClient,
+    args: argparse.Namespace,
+    results: list[CheckResult],
+) -> None:
+    agents = client.request("GET", "/api/v1/agents", token=args.team_a_token)
+    items = _json_items(agents)
+    ready = [
+        item for item in items
+        if item.get("service_mode_ready", True) is not False
+    ]
+    if agents.status_code == 200 and ready:
+        names = sorted(str(item.get("name", "<unnamed>")) for item in ready)
+        results.append(CheckResult(
+            "agents.ready_catalog",
+            "agents",
+            "pass",
+            f"{len(ready)} ready agent(s) returned by /api/v1/agents: {', '.join(names[:10])}.",
+        ))
+    else:
+        results.append(CheckResult(
+            "agents.ready_catalog",
+            "agents",
+            "fail",
+            (
+                "No ready agents were returned by /api/v1/agents."
+                if agents.status_code == 200
+                else f"/api/v1/agents returned HTTP {agents.status_code}."
+            ),
+            (
+                "Run the public beta agent catalog provisioning step, then "
+                "rerun the smoke gate before New Batch/manual canary testing."
+            ),
+        ))
 
 
 def _append_benchmark_catalog_checks(

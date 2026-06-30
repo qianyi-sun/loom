@@ -1,9 +1,11 @@
-"""Public-beta benchmark catalog provisioning.
+"""Public-beta benchmark and agent catalog provisioning.
 
 Copies the production-ready benchmark/task catalog from a known-good source
 environment into the public-beta target and reconciles the S3 task bundles the
-worker needs at runtime. This is intentionally separate from seed_test_data:
-it does not create teams, invites, tokens, runs, or fixture artifacts.
+worker needs at runtime. It also materializes the service-mode agent catalog
+into the target `agents` table as an auditable restore snapshot. This is
+intentionally separate from seed_test_data: it does not create teams, invites,
+tokens, runs, or fixture artifacts.
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, TypeVar
 
 import boto3
@@ -27,12 +29,16 @@ from loom.benchmark_readiness import (
     TaskAuditSource,
     build_readiness_item,
 )
+from loom.db.schema import Agent as AgentModel
 from loom.db.schema import Benchmark
 from loom.db.schema import Task as TaskModel
 from loom.models.task import TaskConfig
 from loom_benchmark_tool.db_url import normalize_db_url
+from loom_service.agent_catalog import AgentEntry, list_agents
 
 POSTGRES_CATALOG_UPSERT_BATCH_SIZE = 1000
+AGENT_CATALOG_VERSION = "service-catalog-v1"
+AGENT_CATALOG_SPEC_SCHEMA_VERSION = 1
 T = TypeVar("T")
 
 
@@ -41,6 +47,14 @@ def _batched(items: list[T], size: int) -> Iterable[list[T]]:
         raise ValueError("batch size must be positive")
     for start in range(0, len(items), size):
         yield items[start:start + size]
+
+
+@dataclass(frozen=True)
+class AgentRow:
+    name: str
+    version: str
+    mode: str
+    spec: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -72,6 +86,7 @@ class TaskRow:
 class CatalogRows:
     benchmarks: list[BenchmarkRow]
     tasks: list[TaskRow]
+    agents: list[AgentRow] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -84,6 +99,7 @@ class ObjectInfo:
 
 @dataclass(frozen=True)
 class ProvisionStats:
+    ready_agents: int
     ready_benchmarks: int
     ready_tasks: int
     source_objects: int
@@ -121,6 +137,7 @@ class PostgresCatalogStore:
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with session_factory() as session:
+                agent_rows = list((await session.scalars(select(AgentModel))).all())
                 benchmark_rows = list((await session.scalars(select(Benchmark))).all())
                 task_rows = list(
                     (
@@ -133,6 +150,15 @@ class PostgresCatalogStore:
             await engine.dispose()
 
         return CatalogRows(
+            agents=[
+                AgentRow(
+                    name=row.name,
+                    version=row.version,
+                    mode=row.mode,
+                    spec=dict(row.spec),
+                )
+                for row in agent_rows
+            ],
             benchmarks=[
                 BenchmarkRow(
                     id=row.id,
@@ -163,7 +189,7 @@ class PostgresCatalogStore:
         )
 
     async def upsert_rows(self, rows: CatalogRows) -> None:
-        if not rows.benchmarks and not rows.tasks:
+        if not rows.agents and not rows.benchmarks and not rows.tasks:
             return
 
         engine = create_async_engine(self.db_url)
@@ -214,6 +240,31 @@ class PostgresCatalogStore:
                                     "splits": bench_insert.excluded.splits,
                                     "series": bench_insert.excluded.series,
                                     "imported_by": bench_insert.excluded.imported_by,
+                                },
+                            ),
+                        )
+
+                if rows.agents:
+                    for agent_batch in _batched(
+                        rows.agents,
+                        POSTGRES_CATALOG_UPSERT_BATCH_SIZE,
+                    ):
+                        agent_values = [
+                            {
+                                "name": row.name,
+                                "version": row.version,
+                                "mode": row.mode,
+                                "spec": row.spec,
+                            }
+                            for row in agent_batch
+                        ]
+                        agent_insert = pg_insert(AgentModel).values(agent_values)
+                        await session.execute(
+                            agent_insert.on_conflict_do_update(
+                                index_elements=["name", "version"],
+                                set_={
+                                    "mode": agent_insert.excluded.mode,
+                                    "spec": agent_insert.excluded.spec,
                                 },
                             ),
                         )
@@ -353,6 +404,8 @@ async def provision_ready_benchmark_catalog(
 ) -> ProvisionStats:
     source_rows = await source_catalog.load_rows()
     ready_rows = _ready_catalog_rows(source_rows, target_bucket=target_bucket)
+    ready_agents = agent_rows_from_service_catalog(imported_by=imported_by)
+    ready_rows = replace(ready_rows, agents=ready_agents)
     if imported_by is not None:
         ready_rows = replace(
             ready_rows,
@@ -408,6 +461,35 @@ def _ready_catalog_rows(rows: CatalogRows, *, target_bucket: str) -> CatalogRows
     return CatalogRows(benchmarks=ready_benchmarks, tasks=ready_tasks)
 
 
+def agent_rows_from_service_catalog(
+    *,
+    imported_by: str | None = None,
+    entries: Iterable[AgentEntry] | None = None,
+) -> list[AgentRow]:
+    """Materialize the service-mode agent catalog into DB rows.
+
+    `loom_service.agent_catalog` remains the source of truth for supported
+    agents. Public-beta/staging provisioning writes an auditable DB snapshot so
+    restore drills can prove benchmarks, tasks, and agents were restored
+    through the same official operator path.
+    """
+    out: list[AgentRow] = []
+    for entry in entries if entries is not None else list_agents():
+        spec = dict(entry.to_dict())
+        spec["catalog_provenance"] = {
+            "source": "loom_service.agent_catalog",
+            "schema_version": AGENT_CATALOG_SPEC_SCHEMA_VERSION,
+            "provisioned_by": imported_by,
+        }
+        out.append(AgentRow(
+            name=entry.name,
+            version=AGENT_CATALOG_VERSION,
+            mode=entry.kind,
+            spec=spec,
+        ))
+    return out
+
+
 async def _copy_s3_bundle_objects(
     *,
     rows: CatalogRows,
@@ -445,6 +527,7 @@ async def _copy_s3_bundle_objects(
         bytes_uploaded += len(body)
 
     return ProvisionStats(
+        ready_agents=len(rows.agents),
         ready_benchmarks=len(rows.benchmarks),
         ready_tasks=len(rows.tasks),
         source_objects=len(source_infos),

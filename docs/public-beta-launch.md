@@ -67,12 +67,14 @@ Attach these to the release issue or release PR:
   `loom eval trial download`.
 - Benchmark catalog provisioning transcript showing either
   `loom datasets provision-public-beta-catalog` with non-zero
-  `ready_benchmarks`, non-zero `ready_tasks`, and `missing=0`, or
+  `ready_agents`, non-zero `ready_benchmarks`, non-zero `ready_tasks`, and
+  `missing=0`, or
   `loom datasets register <benchmark>` against the published HF manifest with
   `--mirror-to-object-store`, non-zero `registered`, non-zero `mirrored`, zero
   unexpected `legacy_placeholders`, and `loom datasets audit --verify-bundles`
-  showing `missing=0`. Include `/api/v1/benchmarks` evidence with at least one
-  runnable entry. For private or gated HF manifests, confirm the operator
+  showing `missing=0`. Include `/api/v1/agents` evidence with at least one
+  ready entry and `/api/v1/benchmarks` evidence with at least one runnable
+  entry. For private or gated HF manifests, confirm the operator
   context has `HF_TOKEN` and target `LOOM_SVC_MINIO_*` credentials. Workers may
   still receive optional `loom-secrets/huggingface-api-key` as legacy `hf://`
   compatibility, but mirrored release evidence should not depend on worker

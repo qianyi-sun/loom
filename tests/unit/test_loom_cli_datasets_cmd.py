@@ -173,6 +173,7 @@ def test_provision_public_beta_catalog_invokes_provisioner(
 
         captured.update(kwargs)
         return ProvisionStats(
+            ready_agents=2,
             ready_benchmarks=2,
             ready_tasks=3,
             source_objects=5,
@@ -228,6 +229,7 @@ def test_provision_public_beta_catalog_invokes_provisioner(
     assert captured["target_bucket"] == "loom-benchmarks"
     assert captured["imported_by"] == "release:public-beta"
     out = capsys.readouterr().out
+    assert "ready_agents=2" in out
     assert "ready_benchmarks=2" in out
     assert "ready_tasks=3" in out
     assert "source_objects=5" in out
@@ -268,6 +270,7 @@ def test_provision_public_beta_catalog_uses_service_target_env(
 
         captured.update(kwargs)
         return ProvisionStats(
+            ready_agents=2,
             ready_benchmarks=1,
             ready_tasks=100,
             source_objects=200,

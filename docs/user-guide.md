@@ -641,8 +641,10 @@ loom datasets show <slug>           # full detail for one adapter
 loom datasets install <slug>        # pip-install a catalog entry
 loom datasets refresh-catalog      # drop the 24h catalog HTTP cache
 loom datasets provision-public-beta-catalog
-                                    # copy ready catalog rows + S3 bundles
-                                    # into a public-beta/release target
+                                    # copy ready benchmark/task rows,
+                                    # materialize supported agent rows,
+                                    # and copy S3 bundles into a
+                                    # public-beta/release target
 ```
 
 Discovery sources, in precedence order (builtin wins on slug
@@ -816,12 +818,14 @@ arguments.
 
 For public-beta or release deployments, operators should provision the ready
 catalog before inviting users. Use `loom datasets provision-public-beta-catalog`
-when copying runnable benchmark/task rows and referenced `s3://` bundles from a
-known-good source environment into the target database/object store. For
+when copying runnable benchmark/task rows, materializing supported service-mode
+agent rows, and copying referenced `s3://` bundles from a known-good source
+environment into the target database/object store. For
 HF-published first-party benchmarks in protected environments, use
 `loom datasets register --mirror-to-object-store` so runtime rows point at
 internal object storage while preserving HF repo/revision/checksum provenance.
-Follow either path with `loom datasets audit --all --verify-bundles`. These
+Follow either path with `/api/v1/agents` discovery evidence and
+`loom datasets audit --all --verify-bundles`. These
 commands are separate from `scripts/seed_test_data.py`, which is only for
 disposable auth/run fixtures.
 

@@ -1766,10 +1766,14 @@ loom datasets provision-public-beta-catalog \
 ```
 
 The command is idempotent. It upserts only benchmarks whose stored task rows are
-fully runnable, creates the target bucket when needed, copies missing
+fully runnable, materializes the service-mode agent catalog into the target
+`agents` table, creates the target bucket when needed, copies missing
 `s3://...` bundle objects, skips matching target objects, and exits non-zero if
-any source task bundle prefix has no objects. A healthy run reports non-zero
-`ready_benchmarks`, non-zero `ready_tasks`, and `missing=0`.
+any source task bundle prefix has no objects. The service code catalog remains
+the agent source of truth; the DB rows are an auditable restore/provision
+snapshot with runtime contracts and compatibility metadata. A healthy run
+reports non-zero `ready_agents`, non-zero `ready_benchmarks`, non-zero
+`ready_tasks`, and `missing=0`.
 
 **Path B: rebuild rows from the published Hugging Face manifest and mirror
 runtime bundles internally.** Use this when the published dataset repo is the
