@@ -145,13 +145,17 @@ python scripts/public_beta_smoke_gate.py \
   --catalog-minio-secret-key "$PUBLIC_BETA_MINIO_SECRET_KEY" \
   --object-store-write-check-only \
   --object-store-write-check-bucket trajectories \
+  --object-store-write-check-count 64 \
+  --object-store-write-check-concurrency 16 \
   --fail-on-skip \
   --markdown-output public-beta-object-store-preflight.md \
   --json-output public-beta-object-store-preflight.json
 ```
 
 The preflight must show `object_store.minio_write_probe` as `PASS` before any
-trial execution starts.
+trial execution starts. For full100 or remote-worker acceptance, keep the probe
+at a nontrivial count/concurrency so the gate exercises object-store connection
+pooling before workers start artifact and trajectory uploads.
 
 After browser setup and a completed Team A source run, run:
 
@@ -176,6 +180,8 @@ python scripts/public_beta_smoke_gate.py \
   --catalog-minio-secret-key "$PUBLIC_BETA_MINIO_SECRET_KEY" \
   --object-store-write-check \
   --object-store-write-check-bucket trajectories \
+  --object-store-write-check-count 64 \
+  --object-store-write-check-concurrency 16 \
   --secret-needle seeded-public-beta-secret \
   --internal-url-needle loom-minio.loom.svc.cluster.local \
   --allow-mutating-checks \
@@ -191,9 +197,9 @@ The script checks:
 - provider connection and model-discovery surfaces;
 - runnable benchmark catalog presence;
 - sampled ready benchmark task bundle prefixes in object storage;
-- a MinIO write/delete probe against the runtime trajectory bucket, so
-  `XMinioStorageFull` and other object-store write failures are caught before
-  submitting canary or release-trial work;
+- a concurrent MinIO write/delete probe against the runtime trajectory bucket,
+  so `XMinioStorageFull`, connection-pool pressure, and other object-store
+  write failures are caught before submitting canary or release-trial work;
 - batch/trial detail and service-proxied ATIF/trajectory downloads;
 - Run Library My team and All teams visibility;
 - owner-team label;
@@ -213,7 +219,9 @@ Before submitting a public-beta canary or supported-benchmark acceptance run,
 the `object_store.minio_write_probe` row must pass. If it fails with
 `XMinioStorageFull`, reclaim or provision storage for the MinIO-backed
 filesystem first; do not start the trial and wait for worker artifact upload to
-discover the same failure later.
+discover the same failure later. For release/full100 gates, do not reduce the
+object count/concurrency below the documented values without recording why the
+environment cannot sustain the probe.
 
 Run the benchmark reward gate after catalog provisioning and again after the
 supported-benchmark acceptance batch or batches reach a terminal state:

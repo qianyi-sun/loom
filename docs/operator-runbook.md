@@ -2096,12 +2096,17 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
       --catalog-minio-secret-key "$PUBLIC_BETA_MINIO_SECRET_KEY" \
       --object-store-write-check-only \
       --object-store-write-check-bucket trajectories \
+      --object-store-write-check-count 64 \
+      --object-store-write-check-concurrency 16 \
       --fail-on-skip \
       --markdown-output public-beta-object-store-preflight.md \
       --json-output public-beta-object-store-preflight.json
     ```
-    The `object_store.minio_write_probe` row must be `PASS`. The CLI commands
-    below keep the no-model canary separate from the provider-backed path:
+    The `object_store.minio_write_probe` row must be `PASS`. Keep the probe at
+    a nontrivial count/concurrency for full100 or remote-worker acceptance so
+    object-store connection pooling is exercised before worker artifact and
+    trajectory uploads start. The CLI commands below keep the no-model canary
+    separate from the provider-backed path:
    ```bash
    # No-model oracle canary; no provider/model flags are needed.
    loom eval batch create \
@@ -2223,6 +2228,8 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
       --catalog-minio-secret-key "$PUBLIC_BETA_MINIO_SECRET_KEY" \
       --object-store-write-check \
       --object-store-write-check-bucket trajectories \
+      --object-store-write-check-count 64 \
+      --object-store-write-check-concurrency 16 \
       --secret-needle seeded-public-beta-secret \
       --internal-url-needle loom-minio.loom.svc.cluster.local \
       --allow-mutating-checks \
@@ -2236,7 +2243,8 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     secrets, provider-key-like values, signed object-store URLs, and internal
     service URLs before writing evidence. The `object_store.minio_write_probe`
     row must pass before submitting canary or release-trial work; if it reports
-    `XMinioStorageFull`, reclaim/provision MinIO-backed storage first instead of
+    `XMinioStorageFull`, connection failures, or timeouts, reclaim/provision
+    MinIO-backed storage or reduce worker concurrency first instead of
     discovering the failure during worker trajectory or artifact upload.
 19. **Teardown clean.** `loom cluster down --yes` removes every applied
     object; PVCs survive (verify via `kubectl get pvc -n loom`). For
@@ -2263,12 +2271,12 @@ checklist:
 - **`scripts/public_beta_smoke_gate.py`** — covers public health, logged-out SPA
   reachability, two-team API-token auth, provider/model discovery, runnable
   benchmark catalog presence, sampled ready benchmark bundle objects,
-  batch/trial detail, `claimed_without_started=0` from batch debug evidence,
-  service-proxied ATIF/trajectory downloads, My team and All teams Run Library
-  visibility, owner-team label, cross-team safe artifact download, direct-route
-  denial, clone config, reuse artifact, provenance, blocked artifact denial,
-  private artifact denial, cross-team mutation denial, and response leak
-  scanning.
+  concurrent object-store write/delete probing, batch/trial detail,
+  `claimed_without_started=0` from batch debug evidence, service-proxied
+  ATIF/trajectory downloads, My team and All teams Run Library visibility,
+  owner-team label, cross-team safe artifact download, direct-route denial,
+  clone config, reuse artifact, provenance, blocked artifact denial, private
+  artifact denial, cross-team mutation denial, and response leak scanning.
 - **`scripts/ops/worker_service_tunnels.py`** — covers the private
   remote-worker tunnel gate when out-of-cluster workers are attached. It renders
   durable systemd user units, installs the watchdog timer that restarts stale
