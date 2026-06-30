@@ -62,7 +62,9 @@ def _reward(value: Any) -> float | None:
 
 def load_official(output_dir: Path) -> dict[str, dict[str, Any]]:
     """Read per-task `result.json` files from the official runner's
-    output dir."""
+    raw output dir. Use for unadjusted comparisons only — for the
+    Layer 3 baseline the issue chain uses, prefer
+    `load_official_adjusted`."""
     rows: dict[str, dict[str, Any]] = {}
     for path in sorted(output_dir.rglob("result.json")):
         try:
@@ -81,6 +83,29 @@ def load_official(output_dir: Path) -> dict[str, dict[str, Any]]:
             "official_verifier_exit": data.get("verifier_exit"),
             "official_result_path": str(path),
         }
+    return rows
+
+
+def load_official_adjusted(csv_path: Path) -> dict[str, dict[str, Any]]:
+    """Load the runtime-clean adjusted official baseline from the
+    `runtime_clean_42_adjusted_full100_vs_loom_secret_safe.csv`
+    artifact published by #106. That CSV stitches the 37 non-GH
+    runtime-clean reruns from #83 + the 5 GH-token reruns from #106
+    into the original full100 baseline, replacing the raw
+    `agent_transport_failure` / `agent_timeout` zeros that mixed live
+    model variance with infra failure in the raw run."""
+    rows: dict[str, dict[str, Any]] = {}
+    with csv_path.open() as fh:
+        for record in csv.DictReader(fh):
+            key = _task_key(str(record.get("task_id") or ""))
+            if not key:
+                continue
+            rows[key] = {
+                "task_id": key,
+                "official_reward": _reward(record.get("adjusted_official_reward")),
+                "official_raw_reward": _reward(record.get("original_official_reward")),
+                "official_baseline_source": record.get("baseline_source"),
+            }
     return rows
 
 
@@ -110,16 +135,24 @@ def load_loom_arm_from_csv(csv_path: Path) -> dict[str, dict[str, Any]]:
 
 
 def load_loom_x86_from_local(batch_id: str) -> dict[str, dict[str, Any]]:
-    """Query the local Loom Postgres directly for one batch's trials.
-    `loom eval trial list` doesn't filter by batch_id; going through
-    docker exec + psql keeps the join trivially scoped."""
+    """Query the local Loom Postgres directly for the latest successful
+    trial per task_id across one or more comma-separated batch ids.
+    Picking by `DISTINCT ON (task_id) ... ORDER BY task_id, started_at
+    DESC` so a recovery batch's successful retry wins over the original
+    batch's failed first attempt for the same task."""
+    batch_ids = [b.strip() for b in batch_id.split(",") if b.strip()]
+    batch_list = ", ".join(f"'{b}'::uuid" for b in batch_ids)
     sql = (
-        "SELECT id::text, task_id, state, failure_reason, "
+        "SELECT DISTINCT ON (task_id) "
+        "id::text, task_id, state, failure_reason, "
         "(result->>'aggregate_reward')::float AS aggregate_reward, "
         "result->'capabilities_snapshot' AS capabilities, "
         "(result->>'total_prompt_tokens')::int AS prompt_tokens, "
         "(result->>'total_completion_tokens')::int AS completion_tokens "
-        "FROM trials WHERE batch_id = '" + batch_id + "'::uuid"
+        f"FROM trials WHERE batch_id IN ({batch_list}) "
+        "ORDER BY task_id, "
+        "  (state='succeeded') DESC, "  # succeeded trials beat failed
+        "  started_at DESC NULLS LAST"  # most recent attempt wins
     )
     result = subprocess.run(
         [
@@ -346,17 +379,30 @@ def write_report(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--official-output-dir", required=True, type=Path,
-                        help="Directory of upstream `result.json` files.")
+    src = parser.add_mutually_exclusive_group(required=True)
+    src.add_argument("--official-output-dir", type=Path,
+                     help="Directory of upstream raw `result.json` files. "
+                          "Includes transport-failure zeros — use only when "
+                          "you explicitly want the raw baseline.")
+    src.add_argument("--official-adjusted-csv", type=Path,
+                     help="Path to `runtime_clean_42_adjusted_full100_*"
+                          "_secret_safe.csv` — the runtime-clean baseline "
+                          "the issue chain (#83/#100/#106) settled on.")
     parser.add_argument("--arm-comparison-csv", required=True, type=Path,
                         help="Existing two-way comparison CSV with `loom_*` columns.")
     parser.add_argument("--x86-loom-batch-id", required=True,
-                        help="Local Loom batch id (UUID).")
+                        help="Local Loom batch id (UUID). Pass a "
+                             "comma-separated list to merge multiple batches "
+                             "(e.g. original + recovery); the latest "
+                             "successful trial per task wins.")
     parser.add_argument("--out-csv", required=True, type=Path)
     parser.add_argument("--out-md", required=True, type=Path)
     args = parser.parse_args()
 
-    official = load_official(args.official_output_dir)
+    if args.official_adjusted_csv is not None:
+        official = load_official_adjusted(args.official_adjusted_csv)
+    else:
+        official = load_official(args.official_output_dir)
     loom_arm = load_loom_arm_from_csv(args.arm_comparison_csv)
     loom_x86 = load_loom_x86_from_local(args.x86_loom_batch_id)
 
