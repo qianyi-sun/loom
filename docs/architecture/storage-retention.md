@@ -82,12 +82,46 @@ deployment artifact).
 |---|---|---|
 | `expire_after_days` | Trajectories, raw artifacts (95% case) | S3 lifecycle `Expiration.Days` |
 | `keep_forever` | ATIF, evidence bundles | Sentinel; no rule emitted |
-| `cleanup_incomplete_uploads_after_hours` | Stuck multipart uploads | `AbortIncompleteMultipartUpload.DaysAfterInitiation` (hours rounded up to days) |
+| `cleanup_incomplete_uploads_after_hours` | Stuck multipart uploads | Currently unrendered on the S3-compatible backend — see "MinIO multipart-cleanup gap" below |
 
-Multiple strategies per bucket are valid (e.g. expiry + multipart
-cleanup). Two of the *same* strategy on one bucket is rejected at
-config-load time — the last would silently win, which is rarely the
-operator's intent.
+Multiple strategies per bucket are valid in config; the renderer
+consolidates them into a single S3 LifecycleRule per bucket because
+MinIO rejects multi-rule policies. Two of the *same* strategy on one
+bucket is rejected at config-load time — the last would silently
+win, which is rarely the operator's intent.
+
+### Single-rule-per-bucket consolidation
+
+The renderer emits exactly one S3 `LifecycleRule` per bucket, with
+all applicable actions merged in:
+
+- AWS S3 accepts both multi-rule and single-rule-with-merged-actions
+  forms — it semantically merges multi-rule policies anyway.
+- MinIO accepts only the single-rule-with-merged-actions form.
+- The rule ID is `loom-<bucket>` (stable, deterministic) so re-apply
+  produces byte-identical XML.
+
+### MinIO multipart-cleanup gap
+
+`cleanup_incomplete_uploads_after_hours` parses cleanly but does NOT
+render to a lifecycle rule on the S3-compatible backend right now:
+
+- MinIO's `PutBucketLifecycleConfiguration` accepts requests
+  containing `AbortIncompleteMultipartUpload` without rejecting
+  them, but `GetBucketLifecycleConfiguration` silently omits the
+  field from the persisted state — the action is dropped on the
+  server side.
+- Emitting it anyway would make `doctor` report perpetual drift
+  (rendered config has the action; live state does not).
+- AWS S3 honors `AbortIncompleteMultipartUpload` properly. When the
+  AWS-S3-specific renderer ships (per #221's roadmap), it should
+  emit the field; the S3-compatible renderer used here for MinIO
+  should not.
+
+For now, operators of MinIO deployments who care about stuck
+multipart uploads run `mc rb --force` periodically. Not a blocker
+since Loom's actual workload (trajectory + ATIF + artifact bundles)
+rarely uses multipart uploads.
 
 ### Not shipped (build only when concretely needed)
 

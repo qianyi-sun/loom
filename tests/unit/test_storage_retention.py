@@ -17,7 +17,6 @@ from loom.storage_retention import (
     RetentionRule,
     apply_lifecycle_to_s3,
     render_bucket_lifecycle,
-    render_s3_lifecycle,
 )
 from loom.storage_retention_loader import load_retention_config
 
@@ -109,70 +108,59 @@ def test_two_different_strategies_for_one_bucket_are_allowed() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# S3 lifecycle rendering
+# Bucket lifecycle rendering (consolidated single-rule-per-bucket)
 # ──────────────────────────────────────────────────────────────────────
 
 
-def test_expire_after_days_renders_with_stable_id() -> None:
-    rule = RetentionRule(
-        bucket="trajectories", strategy="expire_after_days", days=30,
-    )
-    out = render_s3_lifecycle(rule)
-    assert out == {
-        "ID": "loom-expire_after_days-trajectories-30d",
+def test_expire_after_days_renders_single_consolidated_rule() -> None:
+    """One expire_after_days rule renders to one S3 LifecycleRule
+    with stable bucket-scoped ID."""
+    cfg = RetentionConfig(backend="minio", rules=(
+        RetentionRule(
+            bucket="trajectories", strategy="expire_after_days", days=30,
+        ),
+    ))
+    out = render_bucket_lifecycle(cfg, bucket="trajectories")
+    assert out == {"Rules": [{
+        "ID": "loom-trajectories",
         "Status": "Enabled",
         "Filter": {"Prefix": ""},
         "Expiration": {"Days": 30},
-    }
+    }]}
 
 
-def test_keep_forever_renders_to_none() -> None:
-    rule = RetentionRule(bucket="atif", strategy="keep_forever")
-    assert render_s3_lifecycle(rule) is None
+def test_keep_forever_only_renders_empty_rules() -> None:
+    """A bucket whose ONLY config is keep_forever produces no rule —
+    the caller skips the bucket. (Multipart cleanup paired with
+    keep_forever is covered by a separate test below.)"""
+    cfg = RetentionConfig(backend="minio", rules=(
+        RetentionRule(bucket="atif", strategy="keep_forever"),
+    ))
+    out = render_bucket_lifecycle(cfg, bucket="atif")
+    assert out == {"Rules": []}
 
 
-def test_cleanup_incomplete_uploads_hours_rounds_up_to_days() -> None:
-    """S3 lifecycle expresses multipart cleanup in days. 25h must
-    round to 2d so we don't silently truncate."""
-    rule = RetentionRule(
-        bucket="trajectories",
-        strategy="cleanup_incomplete_uploads_after_hours",
-        hours=25,
-    )
-    out = render_s3_lifecycle(rule)
-    assert out is not None
-    assert out["AbortIncompleteMultipartUpload"] == {
-        "DaysAfterInitiation": 2,
-    }
+def test_cleanup_strategy_is_currently_unrendered_on_s3() -> None:
+    """`cleanup_incomplete_uploads_after_hours` parses but does NOT
+    render for the S3 backend. MinIO accepts the apply but silently
+    drops `AbortIncompleteMultipartUpload` from the persisted state,
+    which would make doctor report perpetual drift. AWS-S3-specific
+    renderer can honor the strategy when it ships."""
+    cfg = RetentionConfig(backend="minio", rules=(
+        RetentionRule(
+            bucket="trajectories",
+            strategy="cleanup_incomplete_uploads_after_hours",
+            hours=336,
+        ),
+    ))
+    out = render_bucket_lifecycle(cfg, bucket="trajectories")
+    # Cleanup-only bucket → no rule emitted at all.
+    assert out == {"Rules": []}
 
 
-def test_cleanup_incomplete_under_one_day_floors_at_one_day() -> None:
-    """S3 minimum is 1 day; sub-day requests floor there."""
-    rule = RetentionRule(
-        bucket="trajectories",
-        strategy="cleanup_incomplete_uploads_after_hours",
-        hours=12,
-    )
-    out = render_s3_lifecycle(rule)
-    assert out is not None
-    assert out["AbortIncompleteMultipartUpload"] == {
-        "DaysAfterInitiation": 1,
-    }
-
-
-def test_explicit_rule_id_overrides_default() -> None:
-    rule = RetentionRule(
-        bucket="trajectories",
-        strategy="expire_after_days",
-        days=30,
-        rule_id="my-custom-id",
-    )
-    out = render_s3_lifecycle(rule)
-    assert out is not None
-    assert out["ID"] == "my-custom-id"
-
-
-def test_render_bucket_lifecycle_collects_all_matching_rules() -> None:
+def test_cleanup_paired_with_expire_renders_only_expire() -> None:
+    """A bucket with both expire_after_days and cleanup_incomplete
+    renders just the expire action; cleanup is dropped (see above)."""
     cfg = RetentionConfig(backend="minio", rules=(
         RetentionRule(
             bucket="trajectories", strategy="expire_after_days", days=30,
@@ -182,22 +170,27 @@ def test_render_bucket_lifecycle_collects_all_matching_rules() -> None:
             strategy="cleanup_incomplete_uploads_after_hours",
             hours=336,
         ),
-        RetentionRule(
-            bucket="artifacts", strategy="expire_after_days", days=180,
-        ),
     ))
     out = render_bucket_lifecycle(cfg, bucket="trajectories")
-    assert len(out["Rules"]) == 2
-    ids = sorted(r["ID"] for r in out["Rules"])
-    assert ids == [
-        "loom-cleanup_incomplete_uploads_after_hours-trajectories-336h",
-        "loom-expire_after_days-trajectories-30d",
-    ]
+    assert len(out["Rules"]) == 1
+    rule = out["Rules"][0]
+    assert rule["ID"] == "loom-trajectories"
+    assert rule["Expiration"] == {"Days": 30}
+    assert "AbortIncompleteMultipartUpload" not in rule
 
 
-def test_keep_forever_bucket_renders_empty_rules() -> None:
+def test_keep_forever_paired_with_cleanup_renders_no_rule() -> None:
+    """A bucket configured keep_forever + multipart cleanup renders
+    nothing on the S3 backend (cleanup is unrendered; keep_forever
+    contributes no action). This is what we want for atif-class
+    workloads."""
     cfg = RetentionConfig(backend="minio", rules=(
         RetentionRule(bucket="atif", strategy="keep_forever"),
+        RetentionRule(
+            bucket="atif",
+            strategy="cleanup_incomplete_uploads_after_hours",
+            hours=168,
+        ),
     ))
     out = render_bucket_lifecycle(cfg, bucket="atif")
     assert out == {"Rules": []}

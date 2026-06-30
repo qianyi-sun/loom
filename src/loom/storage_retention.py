@@ -172,56 +172,6 @@ class RetentionConfig:
             seen.add(key)
 
 
-def render_s3_lifecycle(rule: RetentionRule) -> dict[str, Any] | None:
-    """Render one rule as an S3 ``LifecycleConfiguration.Rule`` dict.
-
-    Returns ``None`` for ``keep_forever`` (the rule is intentionally
-    no-op; the caller filters Nones out before sending to the API).
-
-    Returned dicts match the boto3
-    ``put_bucket_lifecycle_configuration`` schema, which is the same
-    shape MinIO's ``mc ilm`` and AWS S3 accept. Boto3 handles XML
-    serialization downstream.
-    """
-    if rule.strategy == "keep_forever":
-        return None
-
-    rule_id = rule.rule_id or _default_rule_id(rule)
-    out: dict[str, Any] = {
-        "ID": rule_id,
-        "Status": "Enabled",
-        # An empty prefix matches all objects in the bucket. S3 requires
-        # a filter clause; the simplest is Prefix="".
-        "Filter": {"Prefix": ""},
-    }
-
-    if rule.strategy == "expire_after_days":
-        assert rule.days is not None  # narrowed by __post_init__
-        out["Expiration"] = {"Days": rule.days}
-    elif rule.strategy == "cleanup_incomplete_uploads_after_hours":
-        assert rule.hours is not None
-        # S3 lifecycle expresses this in days. We accept hours in the
-        # config (operators reason about partial-day cleanup windows)
-        # and round up to the next whole day. AWS supports a minimum
-        # of 1 day.
-        days = max(1, (rule.hours + 23) // 24)
-        out["AbortIncompleteMultipartUpload"] = {
-            "DaysAfterInitiation": days,
-        }
-    return out
-
-
-def _default_rule_id(rule: RetentionRule) -> str:
-    """Stable rule id so re-applying the same config produces
-    byte-identical XML (true idempotency)."""
-    base = f"loom-{rule.strategy}-{rule.bucket}"
-    if rule.strategy == "expire_after_days":
-        return f"{base}-{rule.days}d"
-    if rule.strategy == "cleanup_incomplete_uploads_after_hours":
-        return f"{base}-{rule.hours}h"
-    return base
-
-
 def render_bucket_lifecycle(
     config: RetentionConfig,
     *,
@@ -233,15 +183,52 @@ def render_bucket_lifecycle(
     ``put_bucket_lifecycle_configuration`` call. If no rule targets
     this bucket, returns an empty ``{"Rules": []}`` so the caller can
     decide whether to issue the API call or skip.
+
+    All RetentionRules targeting the same bucket get merged into a
+    single S3 LifecycleRule. AWS S3 accepts multiple rules per bucket
+    and merges actions itself; MinIO is stricter and rejects rules that
+    contain only AbortIncompleteMultipartUpload without a paired
+    Expiration. Producing a single consolidated rule per bucket is
+    accepted by both backends and is also what `mc ilm rule add`
+    emits when you stack multiple ILM actions.
+
+    `keep_forever` rules contribute nothing (no S3 action) but do not
+    suppress merging — a bucket configured `keep_forever` with a
+    sibling multipart-cleanup rule renders just the cleanup action,
+    which is the right behavior (preserve forever but don't accumulate
+    stuck uploads).
     """
-    rendered: list[dict[str, Any]] = []
-    for rule in config.rules:
-        if rule.bucket != bucket:
-            continue
-        out = render_s3_lifecycle(rule)
-        if out is not None:
-            rendered.append(out)
-    return {"Rules": rendered}
+    matching = [r for r in config.rules if r.bucket == bucket]
+    if not matching:
+        return {"Rules": []}
+
+    merged: dict[str, Any] = {
+        "ID": f"loom-{bucket}",
+        "Status": "Enabled",
+        "Filter": {"Prefix": ""},
+    }
+    has_expiration = False
+    for rule in matching:
+        if rule.strategy == "expire_after_days":
+            assert rule.days is not None  # narrowed by __post_init__
+            merged["Expiration"] = {"Days": rule.days}
+            has_expiration = True
+        # cleanup_incomplete_uploads_after_hours: kept in the config
+        # schema for forward compatibility but NOT rendered for
+        # S3-compatible backends. MinIO accepts the apply but silently
+        # drops `AbortIncompleteMultipartUpload` from the persisted
+        # config, which would make doctor report perpetual drift. An
+        # AWS-S3-specific renderer can honor the strategy when it
+        # ships (#221's roadmap).
+        # keep_forever: contributes nothing; absence of Expiration on
+        # the merged rule means objects never auto-expire.
+
+    if not has_expiration:
+        # Bucket is keep_forever (or has only non-rendered strategies).
+        # Emit no rule; the caller skips the bucket entirely.
+        return {"Rules": []}
+
+    return {"Rules": [merged]}
 
 
 def apply_lifecycle_to_s3(
