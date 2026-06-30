@@ -744,7 +744,12 @@ async def test_typed_registry_filters_detail_inventory_and_metadata_export(
     )
 
     assert detail.status_code == 200, detail.text
-    inventory = detail.json()["artifact_inventory"]
+    detail_json = detail.json()
+    assert detail_json["owner_team"] == {
+        "id": str(team_a),
+        "name": "Alpha Research",
+    }
+    inventory = detail_json["artifact_inventory"]
     metric = next(
         item for item in inventory["reports"]
         if item["id"] == str(safe_artifact_id)
