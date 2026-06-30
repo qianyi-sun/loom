@@ -4,13 +4,14 @@ Status: design (no implementation). Extends [`benchmark-adapter.md`](benchmark-a
 
 ## Goal
 
-Let an authenticated Loom user submit their own benchmark — without writing a Python `BenchmarkAdapter` subclass, without operator file-system access, and without a separate publish-and-register dance — and run trials against it the same way they would against any first-party benchmark.
+Let a Loom team submit its own benchmark — without writing a Python `BenchmarkAdapter` subclass, without operator file-system access, and without a separate publish-and-register dance — and run trials against it the same way they would against any first-party benchmark.
 
-v1 is **owner-private**: the submitter is the only consumer. Cluster-wide and per-user-list sharing are explicitly deferred to a follow-up; the data model leaves the slot for that future without committing to a UI for it now.
+v1 is **team-private**: the owning team is the only consumer. Loom's existing auth unit is the team (tokens scope to `team_id`, batches and runs are team-scoped); user-brought benchmarks follow the same pattern. Cluster-wide sharing and per-user-or-team ACLs are explicitly deferred to a follow-up; the data model leaves the slot for that future without committing to a UI for it now.
 
 ## Non-goals (v1)
 
-- Cross-user sharing of any kind (private only).
+- Cross-team sharing of any kind (team-private only).
+- Per-individual-user scoping inside a team. Within an owning team, every member can see and run the benchmark — the same way teams see batches and runs today.
 - Browser zip-upload as the normal evaluation path for first-party benchmarks — first-party intake remains the entry-point + catalog flow in [`benchmark-adapter.md`](benchmark-adapter.md).
 - Letting users ship a full `BenchmarkAdapter` Python package. Conversion is declarative + an optional sandboxed `transform()`.
 - VM-backed task shapes (OSWorld, WebArena). These remain first-party-only until the cluster has a provisioned VM substrate.
@@ -19,7 +20,7 @@ v1 is **owner-private**: the submitter is the only consumer. Cluster-wide and pe
 ## Design principles
 
 - **Divergence stops at the catalog.** A user benchmark must materialise into the same `task.toml` bundle layout as first-party. The trial worker has no idea — and no reason to care — whether a bundle came from a user or a first-party adapter.
-- **One consumption surface.** First-party and user benchmarks live in the same `benchmarks` table, are listed by the same API, and render on the same SPA page. The distinguisher is an `owner_id` column plus an `u/<owner>/<slug>` name namespace, not a parallel system.
+- **One consumption surface.** First-party and user benchmarks live in the same `benchmarks` table, are listed by the same API, and render on the same SPA page. The distinguisher is an `owning_team_id` column plus a `u/<team_handle>/<slug>` id namespace, not a parallel system.
 - **Trust boundary = the existing trial sandbox.** Verifier scripts ride the same isolation primitives first-party verifiers already use. The only new sandboxed surface is the optional `transform()`, executed during materialisation.
 - **Forward-compat for sharing without building it.** A `visibility` column ships in v1 with the single value `private`. Promoting a benchmark later is `UPDATE visibility = 'cluster'` plus the filter rule already in place.
 
@@ -32,11 +33,11 @@ Three tables; names are illustrative and will be reconciled with the actual Loom
 | Column | Type | Notes |
 |---|---|---|
 | `id` | text PK | unchanged |
-| `name` | text | unchanged; first-party is bare (`humaneval`), user-brought is `u/<owner_handle>/<slug>` |
+| `id` | text PK | unchanged; first-party is bare (`humaneval`), user-brought is `u/<team_handle>/<slug>` |
 | `series` | text | unchanged; user benchmarks default to `user` |
 | existing columns | | unchanged |
-| `owner_id` | uuid NULL | NEW. `NULL` = first-party / system. NOT NULL = user-brought. |
-| `kind` | text NOT NULL DEFAULT `'system'` | NEW. `'system'` or `'user'`. Redundant with `owner_id IS NULL` but explicit for indexed filters, badges, and audit. |
+| `owning_team_id` | uuid NULL FK → `teams(id)` | NEW. `NULL` = first-party / system. NOT NULL = user-brought. ON DELETE: see Migration. |
+| `kind` | text NOT NULL DEFAULT `'system'` | NEW. `'system'` or `'user'`. Redundant with `owning_team_id IS NULL` but explicit for indexed filters, badges, and audit. |
 | `visibility` | text NOT NULL DEFAULT `'private'` | NEW. v1 ships only `'private'`. `'cluster'` and `'public'` reserved. CHECK constraint enforces the allowed set. |
 | `manifest_blob_uri` | text NULL | NEW. Object-store URI of the user manifest (NULL for first-party). |
 | `status` | text NOT NULL | NEW. `materialising` \| `ready` \| `partial` \| `failed`. First-party rows are seeded as `ready`. |
@@ -44,8 +45,8 @@ Three tables; names are illustrative and will be reconciled with the actual Loom
 
 **Namespace rule** (DB CHECK constraint, mirrored in the application layer):
 
-- `kind = 'system'` ⇒ `name NOT LIKE 'u/%'` AND `owner_id IS NULL`
-- `kind = 'user'` ⇒ `name LIKE 'u/%'` AND `owner_id IS NOT NULL`
+- `kind = 'system'` ⇒ `id NOT LIKE 'u/%'` AND `owning_team_id IS NULL`
+- `kind = 'user'` ⇒ `id LIKE 'u/%'` AND `owning_team_id IS NOT NULL`
 
 The namespace gives free visual distinction in every CLI list, log line, and search box without any UI work.
 
@@ -71,29 +72,33 @@ User benchmarks materialise to the canonical bundle format. The trial worker cod
 A single helper enforces who can see what:
 
 ```python
-def visible_benchmarks(user: User) -> Query:
-    return (
-        Benchmark.query
-        .where(or_(
-            Benchmark.owner_id.is_(None),
-            and_(Benchmark.owner_id == user.id, Benchmark.visibility == 'private'),
-        ))
+def visible_benchmarks(*, team_id: UUID | None) -> Select:
+    if team_id is None:
+        return select(Benchmark).where(Benchmark.owning_team_id.is_(None))
+    return select(Benchmark).where(
+        or_(
+            Benchmark.owning_team_id.is_(None),
+            and_(
+                Benchmark.owning_team_id == team_id,
+                Benchmark.visibility == 'private',
+            ),
+        )
     )
 ```
 
-Every read site (REST, CLI, SPA backend) routes through this helper. A repo-level lint rule rejects bare `select … from benchmarks` outside the helper module, to prevent accidental leakage when adding new endpoints.
+Every read site (REST, CLI) routes through this helper. A repo-level lint test rejects bare `select(Benchmark)` outside the helper module, to prevent accidental leakage when adding new endpoints.
 
 ### Object-storage layout
 
 ```
 benchmarks/system/<slug>/...                              # unchanged
-benchmarks/user/<owner_id>/<slug>/manifest.json
-benchmarks/user/<owner_id>/<slug>/verifier.{py,sh}
-benchmarks/user/<owner_id>/<slug>/transform.py           # optional
-benchmarks/user/<owner_id>/<slug>/tasks/<task_id>/...    # materialised bundles
+benchmarks/user/<owning_team_id>/<slug>/manifest.json
+benchmarks/user/<owning_team_id>/<slug>/verifier.{py,sh}
+benchmarks/user/<owning_team_id>/<slug>/transform.py           # optional
+benchmarks/user/<owning_team_id>/<slug>/tasks/<task_id>/...    # materialised bundles
 ```
 
-Per-owner prefix means a future bucket policy can enforce owner isolation at the storage layer; v1 enforces it at the application layer via the helper above.
+Per-team prefix means a future bucket policy can enforce team isolation at the storage layer; v1 enforces it at the application layer via the helper above.
 
 ## Manifest schema (`loom.benchmark/v1`)
 
@@ -102,7 +107,7 @@ apiVersion: loom.benchmark/v1
 kind: UserBenchmark
 
 metadata:
-  name: my-coding-eval               # slug; server stores as u/<owner>/my-coding-eval
+  name: my-coding-eval               # slug; server stores as u/<team_handle>/my-coding-eval
   display_name: My Coding Eval
 
 source:
@@ -201,7 +206,7 @@ If the platform cannot guarantee the no-network constraint for in-process subpro
 
 Extend the existing SPA Benchmarks page:
 
-- Render `u/<owner>/<slug>` benchmarks alongside system ones, with an "owned by you" badge derived from `owner_id == me`.
+- Render `u/<team_handle>/<slug>` benchmarks alongside system ones, with an "owned by your team" badge derived from `owning_team_id == current_team_id`.
 - Add a "My benchmarks" filter toggle.
 - Status indicator (`materialising` / `ready` / `partial` / `failed`) with a detail panel showing the first 50 per-instance errors.
 - "Submit benchmark" CTA: drag-and-drop directory upload, or paste a manifest with separate file pickers for verifier and transform.
@@ -214,8 +219,8 @@ Extend the existing SPA Benchmarks page:
 CLI/UI → build multipart (manifest + verifier + [transform])
        → POST /api/v1/user-benchmarks
 API    → validate manifest (pydantic, extra=forbid)
-       → upload blobs to benchmarks/user/<owner>/<slug>/
-       → INSERT benchmarks (kind=user, status=materialising, owner_id=me, name=u/<owner>/<slug>)
+       → upload blobs to benchmarks/user/<owning_team_id>/<slug>/
+       → INSERT benchmarks (kind=user, status=materialising, owning_team_id=caller_team, id=u/<team_handle>/<slug>)
        → INSERT benchmark_manifests
        → enqueue materialise(benchmark_id)
        → 202 + benchmark_id
@@ -257,7 +262,7 @@ agent runs → verifier runs in trial sandbox
 | More than 50% of rows skipped | benchmark goes `failed` (`majority_skipped`) |
 | Verifier crash at trial time | existing `verifier_error` path; no new code |
 | Bundle storage exceeds 5 GiB | abort, `failed` (`size_exceeded`) |
-| Owner over quota (50 benchmarks or 20 GiB) | API 429 at submit |
+| Team over quota (50 benchmarks or 20 GiB) | API 429 at submit |
 | Delete | soft-delete row; blobs retained 7 days for undo, GC purges thereafter; trial history continues to reference the soft-deleted row |
 
 Defaults (5 GiB / 50 benchmarks / 20 GiB / 500 instances) are operator-configurable via `config/byob.toml`; defaults aim for "reasonable individual user" not "team."
@@ -266,11 +271,11 @@ Defaults (5 GiB / 50 benchmarks / 20 GiB / 500 instances) are operator-configura
 
 Single Alembic revision:
 
-1. Add `owner_id`, `kind`, `visibility`, `manifest_blob_uri`, `status`, `status_reason` to `benchmarks`.
-2. Backfill `kind='system'`, `visibility='private'`, `status='ready'` for all existing rows. `owner_id` stays NULL.
+1. Add `owning_team_id`, `kind`, `visibility`, `manifest_blob_uri`, `status`, `status_reason` to `benchmarks`.
+2. Backfill `kind='system'`, `visibility='private'`, `status='ready'` for all existing rows. `owning_team_id` stays NULL.
 3. Add CHECK constraints for the namespace rule and the `visibility` allowed set.
 4. Create `benchmark_manifests`.
-5. Create indices on `(owner_id, kind)` and on `name`.
+5. Create indices on `(owning_team_id, kind)` and on `name`.
 
 The migration is idempotent against the seeded first-party rows: no `system` row should mutate beyond column defaults. An integration test asserts row-for-row equality on a snapshot of the pre-migration first-party table.
 
@@ -281,15 +286,15 @@ The migration is idempotent against the seeded first-party rows: no `system` row
 - Manifest schema: positive cases per source type; negative cases per required field; `extra="forbid"` rejection.
 - Template renderer: placeholder coverage, missing-field error messages.
 - Instance-mapping DSL: dotted paths, defaults, type coercion.
-- `visible_benchmarks` helper: every (owner, visibility, viewer) combination.
-- Namespace enforcement: insert system row with `u/` rejected; insert user row without `u/` rejected; insert user row with NULL `owner_id` rejected.
+- `visible_benchmarks` helper: every (owning_team, visibility, viewer_team) combination.
+- Namespace enforcement: insert system row with `u/` rejected; insert user row without `u/` rejected; insert user row with NULL `owning_team_id` rejected.
 - Quota and size enforcement at the helper layer.
 
 ### Integration (testcontainers Postgres + MinIO + worker)
 
 - End-to-end submit → materialise → list tasks → run a single trial against a stub agent and verifier.
 - One real fetch per source type (`hf`, `git`, `https`, `jsonl-inline`); the rest mocked.
-- Cross-user isolation: user A cannot list, get, rebuild, delete, or trial-start user B's benchmark.
+- Cross-team isolation: team A cannot list, get, rebuild, delete, or trial-start team B's benchmark.
 - Partial-failure materialisation: a source with 30% malformed rows produces `partial` with the expected skip count.
 - Soft-delete + GC: 7-day timer respected; delete during GC window is reversible; afterwards is not.
 
