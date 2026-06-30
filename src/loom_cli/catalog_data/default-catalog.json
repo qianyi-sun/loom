@@ -1,8 +1,6 @@
 {
   "catalog_version": 1,
   "generated_at": "2026-06-08T00:00:00Z",
-  "_note": "Catalog of pip-installable benchmark/task adapters NOT shipped as builtin entry-points. Adapters already in packages/loom-benchmarks are discovered via the loom.benchmarks entry-point group; listing them here would be silently masked by union_entries(builtin > catalog) and is therefore omitted.",
-  "entries": [
-    {"slug": "terminal-bench-2", "display_name": "Terminal-Bench 2.0", "license_spdx": "Apache-2.0", "license_url": "https://github.com/laude-institute/terminal-bench/blob/main/LICENSE", "task_count": 86, "available": "loom-benchmark-terminal-bench-2"}
-  ]
+  "_note": "Catalog of pip-installable benchmark/task adapters NOT shipped as builtin entry-points. Adapters discovered via the `loom.benchmarks` entry-point group MUST NOT be listed here — `union_entries(builtin > catalog)` silently masks duplicate slugs. terminal-bench-2 previously lived here but is now an entry-point in `packages/loom-benchmark-terminal-bench-2`; metadata (task_count, license_url) is declared on `TerminalBench2Adapter` and surfaced via `src/loom_cli/builtin.py:load_builtin_entries`.",
+  "entries": []
 }

@@ -37,6 +37,11 @@ class TerminalBench2Adapter:
     license_spdx = "Apache-2.0"
     license_url = "https://github.com/laude-institute/terminal-bench/blob/main/LICENSE"
     splits = ("test",)
+    # Pinned upstream `terminal-bench-core` v0.1.1 ships exactly 86 official
+    # tasks. `src/loom_cli/builtin.py:load_builtin_entries` surfaces this on
+    # `loom datasets list` so users see real metadata instead of `-`. Bump
+    # when the pin moves; `test_upstream_pin.py` will force co-review.
+    task_count = 86
 
     def list_instances(
         self, *, source_dir: Path, split: str,

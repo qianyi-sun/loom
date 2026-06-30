@@ -2620,6 +2620,24 @@ Acceptance:
 - The object store path `<bucket>/benchmarks/terminal-bench-2/<sha>/` exists
   for each of the 86 tasks.
 
+### Service vs. local CLI — IMPORTANT
+
+These exercises submit trials to the deployed Loom service (control plane
++ worker), NOT the standalone `loom run` CLI. `loom run` runs locally on
+DockerDriver and does NOT build task Dockerfiles — it silently falls back
+to `alpine` when a task ships a `dockerfile` (every TB-2 task does), so an
+oracle smoke against `loom run` fails with
+`env: can't execute 'bash': No such file or directory`. Tracked as #232.
+Service-mode trials route through
+`src/loom_worker/task_image.py:resolve_task_image`, which builds the
+upstream Dockerfile and runs the bundle in the correct image.
+
+Authenticate first:
+
+```bash
+loom auth login --server "$LOOM_API_URL"
+```
+
 ### G3 — Live cluster end-to-end (easy + hard task)
 
 Pick one short task and one long task. `hello-world` is the canonical short
@@ -2628,29 +2646,26 @@ A successful trial must land verifier output with a numeric reward plus the
 ATIF and trajectory in object storage.
 
 ```bash
-export LOOM_API_URL=https://api.dev.yylx.world
-export LOOM_TEAM_TOKEN=...
+mkdir -p ./tb2-evidence
 
 for task in terminal-bench-2/hello-world terminal-bench-2/simple-web-scraper; do
-  loom run \
-    --api "$LOOM_API_URL" --token "$LOOM_TEAM_TOKEN" \
-    --benchmark terminal-bench-2 --task "$task" \
-    --agent oracle \
-    --tb2-report "./tb2-evidence/${task//\//_}.json"
+  loom eval run --agent oracle --task "$task"
+  # `loom eval run` prints the trial_id; wait for terminal state, then:
+  #   loom eval trial show <trial_id> --json > "./tb2-evidence/${task//\//_}.json"
+  #   loom eval artifact get <trial_id> atif > "./tb2-evidence/${task//\//_}.atif.json"
 done
 ```
 
 Acceptance:
 
-- Both trials end with `state=completed` and `reward>=0`.
+- Both trials end with `state=succeeded` and `reward >= 0`.
 - ATIF JSON and trajectory blobs are downloadable through the Run Library SPA.
-- The `--tb2-report` JSON validates against
-  `terminal_bench.harness_models.BenchmarkResults` (Python: `python -c
-  "import json; import terminal_bench.harness_models as m;
-  m.BenchmarkResults.model_validate_json(open('./tb2-evidence/...').read())"`).
+- The trial's `verifier.rewards` JSON validates against the
+  `loom.models.verifier.VerifierResult` shape — `to_tb2_report()` consumes
+  it to produce the canonical TB-2 `BenchmarkResults` shape.
 
-Archive both `--tb2-report` outputs under `docs/evidence/issue-217/` and link
-them in the closing comment on #217.
+Archive the ATIFs under `docs/evidence/issue-217/` and link them in the
+closing comment on #217.
 
 ### G4 — Sidecar tasks against the public-beta sandbox
 
@@ -2664,11 +2679,7 @@ for task in \
   terminal-bench-2/security-vulhub-minio \
   terminal-bench-2/simple-sheets-put \
   terminal-bench-2/simple-web-scraper; do
-  loom run \
-    --api "$LOOM_API_URL" --token "$LOOM_TEAM_TOKEN" \
-    --benchmark terminal-bench-2 --task "$task" \
-    --agent oracle \
-    --tb2-report "./tb2-sidecars/${task//\//_}.json"
+  loom eval run --agent oracle --task "$task"
 done
 ```
 
@@ -2687,12 +2698,18 @@ and Haiku 4.5. Run one TB-2 task per provider to confirm tool-loop reach to
 verifier output. Use `hello-world` for cost discipline.
 
 ```bash
-for agent in claude-opus-4-7 claude-sonnet-4-6 claude-haiku-4-5; do
-  loom run \
-    --api "$LOOM_API_URL" --token "$LOOM_TEAM_TOKEN" \
-    --benchmark terminal-bench-2 --task terminal-bench-2/hello-world \
+# Replace --provider/--model with the public-beta connection name for each
+# Claude SKU; `loom providers list` shows what's configured.
+for agent_model in \
+  "claude-code|anthropic|claude-opus-4-7-20260101" \
+  "claude-code|anthropic|claude-sonnet-4-6-20251202" \
+  "claude-code|anthropic|claude-haiku-4-5-20251001"; do
+  IFS='|' read -r agent provider model <<< "$agent_model"
+  loom eval run \
     --agent "$agent" \
-    --tb2-report "./tb2-provider-matrix/${agent}.json"
+    --provider "$provider" \
+    --model "$model" \
+    --task terminal-bench-2/hello-world
 done
 ```
 
@@ -2719,12 +2736,10 @@ for task in \
   terminal-bench-2/hello-world \
   terminal-bench-2/chess-best-move \
   terminal-bench-2/security-vulhub-minio; do
-  loom run \
-    --api "$LOOM_API_URL" --token "$LOOM_TEAM_TOKEN" \
-    --benchmark terminal-bench-2 --task "$task" \
-    --agent oracle \
-    --observe \
-    > "./tb2-profile/${task//\//_}.observe.jsonl"
+  trial_id=$(loom eval run --agent oracle --task "$task" --json \
+    | jq -r .trial_id)
+  loom eval trial show "$trial_id" --json \
+    > "./tb2-profile/${task//\//_}.trial.json"
 done
 ```
 
