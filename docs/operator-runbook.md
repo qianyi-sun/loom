@@ -892,6 +892,15 @@ but each worker pays the build cost once).
   and verify the worker has Docker Hub/registry auth mounted. The
   task-level `build_timeout_sec` still bounds Dockerfile builds; this
   knob prevents docker-py itself from timing out first.
+- **Trial fails with `failure_reason=task_image_build_timeout` or a message
+  like `building Docker image ... exceeded 1800s`** → treat it as a platform
+  setup failure, not benchmark/model evidence. For GB10/ARM64 or mixed-arch
+  full100 gates, warm the task image on each required architecture first:
+  keep the shared trial-cache registry enabled, run a small architecture-targeted
+  canary for the representative task image, and confirm subsequent trials pull
+  or reuse the cache before launching the high-concurrency batch. Only raise
+  task `build_timeout_sec` after confirming the Docker daemon, registry auth,
+  disk, and CPU pressure are healthy enough that the longer build is expected.
 - **Trial setup fails with `S3 download_prefix timed out`, retryable S3
   5xx/throttle responses, socket disconnects, or trajectory/artifact upload
   timeouts under high concurrency** → first confirm MinIO health and network

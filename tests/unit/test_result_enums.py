@@ -21,6 +21,10 @@ def test_failure_reason_includes_exhausted_retries():
     assert FailureReason.EXHAUSTED_RETRIES.value == "exhausted_retries"
 
 
+def test_failure_reason_includes_task_image_build_timeout():
+    assert FailureReason.TASK_IMAGE_BUILD_TIMEOUT.value == "task_image_build_timeout"
+
+
 def test_agent_info():
     info = AgentInfo(
         name="claude-code-agent", version="1.4.0", mode="in-box",
