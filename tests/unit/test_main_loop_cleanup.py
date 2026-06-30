@@ -23,6 +23,44 @@ from loom_worker import main_loop as ml
 from loom_worker.runner_pool import RunnerPool
 
 
+def test_setup_failure_classifier_recognizes_task_image_build_timeout() -> None:
+    detail = (
+        "building Docker image 'loom-task:405adf85aa0c5227b5fdf74f916f6b9c' "
+        "from 'environment/Dockerfile' exceeded 1800s"
+    )
+
+    assert ml._classify_setup_failure(detail) == FailureReason.TASK_IMAGE_BUILD_TIMEOUT
+
+
+async def test_setup_failure_patch_uses_task_image_build_timeout_reason() -> None:
+    cp = _FakeCPClient()
+    trial_id = uuid4()
+    worker_id = uuid4()
+
+    await ml._mark_setup_failed(
+        cp_client=cp,  # type: ignore[arg-type]
+        trial_id=trial_id,
+        worker_id=worker_id,
+        detail=(
+            "building Docker image 'loom-task:405adf85aa0c5227b5fdf74f916f6b9c' "
+            "from 'environment/Dockerfile' exceeded 1800s"
+        ),
+    )
+
+    assert cp.patch_calls == [
+        {
+            "trial_id": trial_id,
+            "worker_id": worker_id,
+            "state": "failed",
+            "failure_reason": FailureReason.TASK_IMAGE_BUILD_TIMEOUT.value,
+            "failure_message": (
+                "building Docker image 'loom-task:405adf85aa0c5227b5fdf74f916f6b9c' "
+                "from 'environment/Dockerfile' exceeded 1800s"
+            ),
+        }
+    ]
+
+
 class _FakeCPClient:
     def __init__(self) -> None:
         self.patch_calls: list[dict[str, object]] = []

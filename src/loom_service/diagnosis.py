@@ -154,6 +154,23 @@ _REASON_META: dict[str, _ReasonMeta] = {
         ),
         actions=("inspect_sandbox",),
     ),
+    "trial.task_image_build_timeout": _ReasonMeta(
+        label="Task image build timeout",
+        category="sandbox",
+        attribution="platform",
+        trial_summary=(
+            "The trial timed out while building the task Docker image before "
+            "agent execution."
+        ),
+        batch_summary=(
+            "The batch has task-image build timeouts before model execution."
+        ),
+        impact=(
+            "The score is not model-quality evidence for affected tasks "
+            "because the runtime environment was not ready."
+        ),
+        actions=("inspect_sandbox", "rerun_failed"),
+    ),
     "trial.agent_error": _ReasonMeta(
         label="Agent execution failure",
         category="agent",

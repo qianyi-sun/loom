@@ -230,6 +230,12 @@ discover the same failure later. For release/full100 gates, do not reduce the
 object count/concurrency below the documented values without recording why the
 environment cannot sustain the probe.
 
+For mixed-architecture full100 gates, warm task images before the large batch.
+Run a small architecture-targeted canary on every required worker pool, confirm
+the shared trial-cache registry or worker-local cache is reused, and treat any
+`task_image_build_timeout` / `building Docker image ... exceeded ...s` failure
+as a platform setup blocker rather than model-quality evidence.
+
 Run the benchmark reward gate after catalog provisioning and again after the
 supported-benchmark acceptance batch or batches reach a terminal state:
 

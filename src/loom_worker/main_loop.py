@@ -781,6 +781,7 @@ async def _mark_setup_failed(
     detail: str,
 ) -> None:
     safe_detail = redact_text(detail, limit=1000).strip()
+    failure_reason = _classify_setup_failure(safe_detail)
     logger.warning(
         "trial_setup_failed trial_id=%s worker_id=%s detail=%s",
         trial_id,
@@ -792,7 +793,7 @@ async def _mark_setup_failed(
             trial_id=trial_id,
             worker_id=worker_id,
             state="failed",
-            failure_reason=FailureReason.INTERNAL_ERROR.value,
+            failure_reason=failure_reason.value,
             failure_message=safe_detail,
         )
     except Exception:
@@ -807,6 +808,16 @@ async def _mark_setup_failed(
             trial_id,
             worker_id,
         )
+
+
+def _classify_setup_failure(detail: str) -> FailureReason:
+    if (
+        "building Docker image" in detail
+        and " from " in detail
+        and " exceeded " in detail
+    ):
+        return FailureReason.TASK_IMAGE_BUILD_TIMEOUT
+    return FailureReason.INTERNAL_ERROR
 
 
 async def _materialize_task_dir(

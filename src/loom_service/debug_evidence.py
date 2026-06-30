@@ -49,6 +49,11 @@ _TRIAL_FAILURE_META: dict[str, tuple[str, str, list[str]]] = {
         "platform",
         ["Check the task image healthcheck and sandbox startup logs."],
     ),
+    "task_image_build_timeout": (
+        "sandbox",
+        "platform",
+        ["Prebuild or warm the task image for this architecture before rerun."],
+    ),
     "verifier_error": (
         "verifier",
         "benchmark",
