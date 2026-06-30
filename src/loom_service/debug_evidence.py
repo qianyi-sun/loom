@@ -472,7 +472,7 @@ def build_trial_debug_evidence(
     return cast(dict[str, Any], redact_mapping(evidence))
 
 
-def _summary_from_trials(trials: Sequence[Trial]) -> dict[str, int]:
+def _summary_from_trials(trials: Sequence[Any]) -> dict[str, int]:
     counts = Counter(str(trial.state) for trial in trials)
     claimed_without_started = sum(
         1 for trial in trials if trial.state == "claimed" and trial.started_at is None
@@ -489,7 +489,7 @@ def _summary_from_trials(trials: Sequence[Trial]) -> dict[str, int]:
 
 
 def _worker_pool_coverage(
-    trials: Sequence[Trial],
+    trials: Sequence[Any],
     worker_pool_names_by_id: Mapping[Any, str] | None,
 ) -> dict[str, Any]:
     worker_pool_names_by_id = worker_pool_names_by_id or {}
@@ -596,7 +596,7 @@ def _next_actions_for_batch(batch: Batch) -> list[str]:
 def build_batch_debug_evidence(
     batch: Batch,
     *,
-    trials: Sequence[Trial],
+    trials: Sequence[Any],
     llm_calls: Sequence[LlmCall],
     worker_pool_names_by_id: Mapping[Any, str] | None = None,
 ) -> dict[str, Any]:

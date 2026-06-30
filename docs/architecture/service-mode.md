@@ -292,14 +292,17 @@ The same detail API also exposes user-facing diagnosis and debug evidence:
   `failure_category_counts`, so a terminal model-backed trial with an
   upstream provider failure is distinguishable from a trial where no
   provider request was attempted.
-- `GET /api/v1/batches/{batch_id}` includes `debug_evidence`;
-  `GET /api/v1/batches/{batch_id}/debug` returns that object directly.
-  Batch debug evidence carries the same provider summary fields across
-  its child calls.
-- Run Library batch detail includes the same batch `debug_evidence` after the
-  Run Library read policy allows access.
-- `GET /api/v1/trials/{trial_id}` and
-  `GET /api/v1/batches/{batch_id}` also include `diagnosis`.
+- `GET /api/v1/batches/{batch_id}` is lightweight by default for large
+  batches and omits `debug_evidence`; pass `include_debug=true` or call
+  `GET /api/v1/batches/{batch_id}/debug` to load that object. Batch debug
+  evidence carries the same provider summary fields across its child calls and
+  is built from bounded trial projections instead of full `trajectory_index`
+  rows.
+- Run Library batch detail loads the same batch `debug_evidence` on demand
+  after the Run Library read policy allows access.
+- `GET /api/v1/trials/{trial_id}` includes `diagnosis`;
+  `GET /api/v1/batches/{batch_id}` includes batch `diagnosis` only when
+  `include_debug=true`.
   `GET /api/v1/trials/{trial_id}/diagnosis` and
   `GET /api/v1/batches/{batch_id}/diagnosis` return that deterministic
   `DiagnosisReport` directly.
