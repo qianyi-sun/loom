@@ -30,6 +30,12 @@ Patterns we look for:
 | `nvapi-`       | NVIDIA                                  |
 | `tgp_v1_`      | Together (legacy)                       |
 | `r8_`          | Replicate                               |
+| `loom_w_`      | Loom worker token (own credential)      |
+| `loom_br_`     | Loom batch-runner token (own credential)|
+
+The Loom-own families guard against a worker process accidentally
+serializing its own `Authorization: Bearer …` header into a trial
+artifact bundle.
 
 The script is regex-based; we accept some false positives (the
 fix is to NOT have substrings that LOOK like keys in our docs or
@@ -58,6 +64,8 @@ _PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     ("nvidia", re.compile(rb"nvapi-[A-Za-z0-9_-]{20,}")),
     ("together_legacy", re.compile(rb"tgp_v1_[A-Za-z0-9_-]{20,}")),
     ("replicate", re.compile(rb"r8_[A-Za-z0-9]{32,}")),
+    ("loom_worker", re.compile(rb"loom_w_[0-9a-f]{64}")),
+    ("loom_batch_runner", re.compile(rb"loom_br_[A-Za-z0-9_-]{20,}")),
 )
 
 

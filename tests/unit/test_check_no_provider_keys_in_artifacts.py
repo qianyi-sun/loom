@@ -70,6 +70,26 @@ def test_replicate_token_detected(audit_module) -> None:
     assert any(h.provider == "replicate" for h in hits)
 
 
+def test_loom_worker_token_detected(audit_module) -> None:
+    payload = b"Authorization: Bearer loom_w_" + (b"a" * 64) + b"\n"
+    hits = list(audit_module.scan_bytes(payload, source="trajectory.jsonl"))
+    assert any(h.provider == "loom_worker" for h in hits)
+
+
+def test_loom_worker_token_short_lookalike_not_detected(audit_module) -> None:
+    # Prefix without 64 hex chars must not fire — narrow shape because
+    # the runtime always mints exactly 64-hex tokens.
+    payload = b"loom_w_short and loom_w_" + (b"a" * 63) + b" placeholder"
+    hits = list(audit_module.scan_bytes(payload, source="t"))
+    assert hits == []
+
+
+def test_loom_batch_runner_token_detected(audit_module) -> None:
+    payload = b"x-batch-runner-cp-token: loom_br_abcDEF0123-456789_xyz\n"
+    hits = list(audit_module.scan_bytes(payload, source="env"))
+    assert any(h.provider == "loom_batch_runner" for h in hits)
+
+
 def test_short_lookalike_not_detected(audit_module) -> None:
     # `sk-ant-` is the prefix; without ≥20 trailing chars it shouldn't
     # fire. False positive rate matters because the script runs on

@@ -69,8 +69,12 @@ def test_mint_posts_to_cp_with_bearer(
 
     out = capsys.readouterr().out
     assert "ab12cd34" in out
-    assert "loom_w_deadbeef" in out
-    assert "loom-secrets" in out  # rollout hint
+    # Default text mode must NOT print the raw token — terminal
+    # scrollback risk. Operator opts in via --show-secret or pipes
+    # --format json into a secret store.
+    assert "loom_w_deadbeef" not in out
+    assert "--show-secret" in out  # capture hint
+    assert "--from-file=worker-token=/dev/stdin" in out  # safe-install hint
 
 
 def test_mint_strips_trailing_slash_on_cp_url(
@@ -128,6 +132,34 @@ def test_mint_json_format_emits_raw_json(
     assert parsed == {"token": "t", "token_hash_prefix": "p"}
     # Rollout-hint text MUST NOT be present in JSON mode.
     assert "loom-secrets" not in out
+
+
+def test_mint_show_secret_prints_raw_token(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--show-secret is the explicit opt-in to print the raw token in
+    text mode. Operator takes responsibility for terminal scrollback."""
+
+    def _fake_post(url, **kwargs):  # type: ignore[no-untyped-def]
+        return _StubResponse(
+            201,
+            json_data={
+                "token": "loom_w_explicitlyshown",
+                "token_hash_prefix": "shown",
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", _fake_post)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "t")
+    rc = main(
+        ["admin", "tokens", "worker", "mint", "--show-secret"],
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "loom_w_explicitlyshown" in out
+    assert "shown" in out
+    assert "loom-secrets" in out  # rollout hint
 
 
 def test_mint_admin_token_env_missing_returns_2(
@@ -381,9 +413,46 @@ def test_rotate_mints_then_prints_checklist(
     assert not delete_called  # rotate doesn't auto-revoke
     out = capsys.readouterr().out
     assert "newpref" in out
+    # Default text mode must NOT print the raw token (same as mint).
+    assert "loom_w_new" not in out
     assert "Rotation checklist" in out
     assert "rollout restart" in out
     assert "loom admin tokens worker revoke" in out
+    # Without --show-secret the checklist must point at the safe
+    # capture path (pipe-stdin), not at `kubectl patch` with the
+    # raw token in argv.
+    assert "--from-file=worker-token=/dev/stdin" in out
+
+
+def test_rotate_show_secret_prints_token_and_kubectl_install(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--show-secret on rotate prints the raw token and the install
+    step uses the literal-from-stdin form, not a raw `kubectl patch -p`
+    that would put the token on argv."""
+
+    def _fake_post(url, **kwargs):  # type: ignore[no-untyped-def]
+        return _StubResponse(
+            201,
+            json_data={
+                "token": "loom_w_rotated",
+                "token_hash_prefix": "rotpref",
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", _fake_post)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "t")
+    rc = main(["admin", "tokens", "worker", "rotate", "--show-secret"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "loom_w_rotated" in out
+    assert "rotpref" in out
+    # The install step in the checklist must NOT use `kubectl patch -p`
+    # with the raw token in argv. The safe pattern uses
+    # --from-literal or --from-file via apply.
+    assert "kubectl create secret generic loom-secrets" in out
+    assert "kubectl rollout restart" in out
 
 
 def test_rotate_mint_failure_propagates_exit_code(
