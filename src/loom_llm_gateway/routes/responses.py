@@ -9,13 +9,18 @@ output_tokens_details.reasoning_tokens counter.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
+from sqlalchemy import update
 from starlette.responses import StreamingResponse
 
+from loom.db.schema import ProviderConnection as ProviderConnectionRow
 from loom.models.types import ModelSpec
 from loom_llm_gateway.dialect import DIALECTS, TokenUsage
 from loom_llm_gateway.llm_calls import record_call, record_failed_call
@@ -27,6 +32,10 @@ from loom_llm_gateway.rate_card import (
 from loom_llm_gateway.request_params import (
     normalize_request_params,
     sanitize_request_extras,
+)
+from loom_llm_gateway.responses_probe import (
+    ProbeOutcome,
+    probe_responses_api,
 )
 from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
@@ -46,7 +55,168 @@ from loom_llm_gateway.routes.responses_chat_compat import (
     synthetic_responses_http_response,
 )
 
+logger = logging.getLogger(__name__)
+
+# Cached Responses-API support beyond this age is treated as unknown
+# and re-probed on the next incoming request. Prevents a stale TRUE
+# from silently reintroducing the 40-min hang after upstream config
+# drift (#277 / responses-api-support-probe.md).
+_PROBE_STALENESS_TTL = timedelta(hours=24)
+
 router = APIRouter()
+
+
+def _probe_result_is_fresh(probed_at: datetime | None) -> bool:
+    if probed_at is None:
+        return False
+    return datetime.now(UTC) - probed_at < _PROBE_STALENESS_TTL
+
+
+async def _persist_probe_outcome(
+    session_factory: Any,
+    connection_id: UUID,
+    outcome: ProbeOutcome,
+) -> None:
+    """Write the probe result to `provider_connections`. Best-effort:
+    a failure to persist doesn't break the request — the probe will
+    just re-run on the next call."""
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                update(ProviderConnectionRow)
+                .where(ProviderConnectionRow.id == connection_id)
+                .values(
+                    responses_api_supported=outcome.supported,
+                    responses_api_probed_at=datetime.now(UTC),
+                    responses_api_probe_error=outcome.error_detail,
+                )
+            )
+            await session.commit()
+    except Exception:
+        logger.exception(
+            "failed to persist responses_probe outcome for %s", connection_id,
+        )
+
+
+async def _resolve_responses_support(
+    *,
+    session_factory: Any,
+    row: ProviderConnectionRow,
+    api_key: str,
+    upstream: httpx.AsyncClient,
+) -> bool:
+    """Return True iff we should dispatch the incoming Responses request
+    through the native passthrough; False if we should go straight into
+    `responses_chat_compat`. Consults the cached probe first; probes
+    inline when the value is missing or stale.
+
+    Ambiguous probe outcomes (4xx that isn't 400/401/404) default to
+    True — the existing native path still has the 400-signature
+    fallback as its second line of defence.
+
+    The probe shares the caller's `httpx.AsyncClient` so it flows
+    through the same egress proxy and DNS resolution set as real
+    upstream traffic, and so test MockTransport rigs intercept it too.
+    """
+    if row.responses_api_supported is not None and _probe_result_is_fresh(
+        row.responses_api_probed_at,
+    ):
+        return row.responses_api_supported
+    outcome = await probe_responses_api(
+        upstream_url=f"{row.base_url.rstrip('/')}/responses",
+        api_key=api_key,
+        client=upstream,
+    )
+    await _persist_probe_outcome(session_factory, row.id, outcome)
+    if outcome.supported is None:
+        return True  # ambiguous — leave native path in play
+    return outcome.supported
+
+
+async def _dispatch_via_chat_translator(
+    *,
+    request: Request,
+    upstream: httpx.AsyncClient,
+    row: ProviderConnectionRow,
+    payload: dict[str, Any],
+    api_key: str,
+    model_name: str,
+    team_id: UUID,
+    trial_id: UUID,
+    step_id: str,
+    settings: Any,
+    failure_recorder: Callable[[str, str], Awaitable[None]],
+) -> dict[str, Any] | StreamingResponse:
+    """Translate the incoming Responses payload through the existing
+    `responses_chat_compat` helpers, forward to the upstream's Chat
+    Completions endpoint, and repackage the result as a Responses body.
+
+    Called from two sites:
+    - `responses_api_supported` cached FALSE — skip the doomed native
+      call entirely.
+    - The existing 400-signature-triggered fallback path.
+    """
+    chat_payload = responses_payload_to_chat_completion(payload)
+    chat_response, attempt = await _post_upstream_chat_completion(
+        upstream=upstream,
+        upstream_url=f"{row.base_url.rstrip('/')}/chat/completions",
+        payload=chat_payload,
+        api_key=api_key,
+        request=request,
+        settings=settings,
+        failure_recorder=failure_recorder,
+    )
+    if chat_response.status_code >= 400:
+        excerpt = redact_api_key(chat_response.text, api_key)
+        await _record_failed_responses_call(
+            request=request,
+            team_id=team_id,
+            trial_id=trial_id,
+            step_id=step_id,
+            model_name=model_name,
+            provider=row.provider_type,
+            request_payload=payload,
+            failure_category=http_failure_category(chat_response.status_code),
+            failure_status_code=chat_response.status_code,
+            attempt=attempt,
+        )
+        raise HTTPException(
+            status_code=chat_response.status_code,
+            detail=(
+                "chat-completions fallback upstream returned "
+                f"{chat_response.status_code}: {excerpt}"
+            ),
+        )
+    chat_body = decode_chat_completion_body(chat_response)
+    body_or_stream = chat_completion_to_responses(
+        chat_body,
+        model_name=model_name,
+        stream=bool(payload.get("stream")),
+    )
+    usage = _extract_responses_usage(body_or_stream)
+    cost, rate_card_hash = await compute_facade_cost_usd(
+        row,
+        model_name,
+        usage,
+        rate_card_cache=request.app.state.rate_card_cache,
+    )
+    await _record_responses_call(
+        request=request,
+        team_id=team_id,
+        trial_id=trial_id,
+        step_id=step_id,
+        model_name=model_name,
+        usage=usage,
+        cost_usd=cost,
+        rate_card_hash=rate_card_hash,
+        provider=row.provider_type,
+        attempt=attempt,
+        request_payload=payload,
+    )
+    return _responses_result(
+        synthetic_responses_http_response(body_or_stream),
+        body_or_stream,
+    )
 
 OPENAI_BASE_URL = "https://api.openai.com"
 _OPENAI_SHAPED_TYPES = frozenset({"openai-compatible", "custom"})
@@ -120,6 +290,31 @@ async def responses(
                 failure_error_type=error_type,
             )
 
+        # #277 / responses-api-support-probe: proactively decide whether
+        # to attempt the native /v1/responses call at all. On providers
+        # like yibuapi that 504 the endpoint, this preempts a doomed
+        # native call and dispatches straight into the translator.
+        supported = await _resolve_responses_support(
+            session_factory=request.app.state.session_factory,
+            row=row,
+            api_key=api_key,
+            upstream=upstream,
+        )
+        if not supported:
+            return await _dispatch_via_chat_translator(
+                request=request,
+                upstream=upstream,
+                row=row,
+                payload=payload,
+                api_key=api_key,
+                model_name=model_name,
+                team_id=team_id,
+                trial_id=trial_id,
+                step_id=step_id,
+                settings=settings,
+                failure_recorder=_record_responses_transport_failure,
+            )
+
         upstream_response, attempt = await _post_upstream_responses(
             upstream=upstream,
             upstream_url=upstream_url,
@@ -135,68 +330,18 @@ async def responses(
                 upstream_response,
                 payload,
             ):
-                chat_payload = responses_payload_to_chat_completion(payload)
-                chat_response, attempt = await _post_upstream_chat_completion(
+                return await _dispatch_via_chat_translator(
+                    request=request,
                     upstream=upstream,
-                    upstream_url=f"{row.base_url.rstrip('/')}/chat/completions",
-                    payload=chat_payload,
+                    row=row,
+                    payload=payload,
                     api_key=api_key,
-                    request=request,
-                    settings=settings,
-                    failure_recorder=_record_responses_transport_failure,
-                )
-                if chat_response.status_code >= 400:
-                    excerpt = redact_api_key(chat_response.text, api_key)
-                    await _record_failed_responses_call(
-                        request=request,
-                        team_id=team_id,
-                        trial_id=trial_id,
-                        step_id=step_id,
-                        model_name=model_name,
-                        provider=row.provider_type,
-                        request_payload=payload,
-                        failure_category=http_failure_category(
-                            chat_response.status_code,
-                        ),
-                        failure_status_code=chat_response.status_code,
-                        attempt=attempt,
-                    )
-                    raise HTTPException(
-                        status_code=chat_response.status_code,
-                        detail=(
-                            "chat-completions fallback upstream returned "
-                            f"{chat_response.status_code}: {excerpt}"
-                        ),
-                    )
-                chat_body = decode_chat_completion_body(chat_response)
-                body_or_stream = chat_completion_to_responses(
-                    chat_body,
                     model_name=model_name,
-                    stream=bool(payload.get("stream")),
-                )
-                usage = _extract_responses_usage(body_or_stream)
-                cost, rate_card_hash = await compute_facade_cost_usd(
-                    row,
-                    model_name,
-                    usage,
-                    rate_card_cache=request.app.state.rate_card_cache,
-                )
-                await _record_responses_call(
-                    request=request,
                     team_id=team_id,
                     trial_id=trial_id,
                     step_id=step_id,
-                    model_name=model_name,
-                    usage=usage,
-                    cost_usd=cost,
-                    rate_card_hash=rate_card_hash,
-                    provider=row.provider_type,
-                    attempt=attempt,
-                    request_payload=payload,
-                )
-                return _responses_result(
-                    synthetic_responses_http_response(body_or_stream),
-                    body_or_stream,
+                    settings=settings,
+                    failure_recorder=_record_responses_transport_failure,
                 )
             excerpt = redact_api_key(upstream_response.text, api_key)
             await _record_failed_responses_call(

@@ -273,6 +273,16 @@ async def gateway_with_provider_connection(
                 encrypted_api_key_ref=ref,
                 pricing_source="tokens-only",
                 created_by="test",
+                # #277 / responses-api-support-probe: these tests
+                # exercise the NATIVE /v1/responses path and its 400-
+                # signature fallback. Pre-seeding the probe-cached
+                # bool to TRUE skips the inline probe (which would
+                # otherwise send {} to the mock and get interpreted as
+                # a rejected-body signal, dispatching straight to the
+                # translator and short-circuiting the native path this
+                # suite is here to test).
+                responses_api_supported=True,
+                responses_api_probed_at=datetime.now(UTC),
             )
         )
         s.commit()

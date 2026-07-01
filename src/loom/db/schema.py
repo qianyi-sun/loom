@@ -1399,6 +1399,19 @@ class ProviderConnection(Base):
         TIMESTAMP(timezone=True), nullable=True,
     )
     last_validation_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # #277 / responses-api-support-probe: cache whether this upstream
+    # implements POST /v1/responses. NULL means "never probed" — the
+    # gateway probes at first use and refreshes on a TTL. TRUE routes
+    # native pass-through; FALSE dispatches into responses_chat_compat.
+    responses_api_supported: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True,
+    )
+    responses_api_probed_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    responses_api_probe_error: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+    )
     pricing_source: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'tokens-only'"),
     )
