@@ -241,7 +241,11 @@ def test_control_plane_lifespan_validates_schema_before_background_tasks(
         "create_async_engine",
         lambda _db_url, **_kwargs: _FakeEngine(),
     )
-    monkeypatch.setattr(control_plane_app.boto3, "client", lambda *_, **__: object())
+    monkeypatch.setattr(
+        control_plane_app,
+        "build_s3_client",
+        lambda **_: object(),
+    )
     monkeypatch.setattr(
         control_plane_app,
         "run_crash_detector_loop",

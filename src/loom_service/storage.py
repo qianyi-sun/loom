@@ -5,23 +5,26 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
-import boto3
-from botocore.config import Config
-
+from loom.storage_credentials import build_s3_client
 from loom_service.config import LoomServiceSettings
 
 
 def create_minio_client(
     settings: LoomServiceSettings, *, endpoint_url: str,
 ) -> Any:
-    """Create a boto3 S3 client for the configured MinIO-compatible store."""
-    return boto3.client(
-        "s3",
+    """Create a boto3 S3 client for the configured MinIO-compatible store.
+
+    Dispatches on ``settings.storage_auth_kind`` via the central
+    factory. ``static_keys`` (default) is byte-identical to the
+    previous behavior; ``irsa`` lights up automatically on EKS without
+    further code changes.
+    """
+    return build_s3_client(
         endpoint_url=endpoint_url,
-        aws_access_key_id=settings.minio_access_key.get_secret_value(),
-        aws_secret_access_key=settings.minio_secret_key.get_secret_value(),
-        region_name=settings.minio_region,
-        config=Config(signature_version="s3v4"),
+        auth_kind=settings.storage_auth_kind,
+        access_key=settings.minio_access_key.get_secret_value(),
+        secret_key=settings.minio_secret_key.get_secret_value(),
+        region=settings.minio_region,
     )
 
 
