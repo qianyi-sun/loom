@@ -711,12 +711,17 @@ jobs:
           "
 
       - name: Heal - re-apply, drift check must clear
+        # AWS S3 lifecycle GETs have brief eventual consistency
+        # immediately after a delete-then-put sequence (unlike the
+        # object-level GET which is strongly consistent). We retry
+        # for up to 30s. Not a bug in our diff logic — a bug in
+        # trying to observe AWS mid-consistency-window.
         run: |
           uv run loom cluster bootstrap-storage-lifecycle \
             --config /tmp/storage-lifecycle.ci.toml \
             --endpoint "${LOOM_SVC_MINIO_ENDPOINT}"
           uv run python -c "
-          import os, sys
+          import os, sys, time
           from pathlib import Path
           from loom.storage_credentials import build_s3_client
           from loom.storage_retention_doctor import (
@@ -731,10 +736,20 @@ jobs:
               secret_key=os.environ['LOOM_SVC_MINIO_SECRET_KEY'],
               region=os.environ['LOOM_SVC_MINIO_REGION'],
           )
-          drifts = check_lifecycle_drift(s3, cfg)
-          if format_drift_report(drifts):
-              sys.exit('heal failed — drift persists')
-          print('OK — heal restored lifecycle')
+          last_report = ''
+          for attempt in range(1, 16):
+              drifts = check_lifecycle_drift(s3, cfg)
+              last_report = format_drift_report(drifts)
+              if not last_report:
+                  print(f'OK — heal restored lifecycle (attempt {attempt})')
+                  sys.exit(0)
+              print(f'attempt {attempt}: drift still visible, retrying in 2s')
+              time.sleep(2)
+          sys.stderr.write(
+              'heal failed — drift persists after 30s of retries.\n'
+              f'last drift report:\n{last_report}\n',
+          )
+          sys.exit(1)
           "
 
       - name: Reset bucket lifecycle on exit (always)
