@@ -16,10 +16,14 @@ trial against the layered image. The build is shared:
 - BUILD COORDINATION: cluster-wide. Workers claim a builder slot via
   the `active_trial_cache_builds` table (4 CP HTTP routes); only the
   claimer builds, others wait. Crash-safe via TTL + heartbeat refresh.
+  Builders also claim a daemon-wide synthetic slot before starting
+  Docker build/push work so different cold cache keys cannot overload
+  the same host Docker daemon concurrently.
 
 See `.claude/plans/2026-06-22-issue-317-agent-runtime-install.md` for
 the full design including the v3 self-review log.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -47,6 +51,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 LOCAL_TAG_PREFIX = "loom-trial-cache"
+DAEMON_BUILD_SLOT_PREFIX = "daemon-build"
 HEARTBEAT_INTERVAL_SEC = 60.0
 
 
@@ -79,7 +84,10 @@ def _cache_key(*, task_image_digest: str, install_script: str) -> str:
 
 
 async def _pull_or_get_digest(
-    client: Any, image_ref: str, *, timeout_sec: float,
+    client: Any,
+    image_ref: str,
+    *,
+    timeout_sec: float,
 ) -> str:
     """Return the local content digest for an image reference.
 
@@ -148,11 +156,13 @@ def _build_layered_image_sync(
     with TemporaryDirectory(prefix="loom-trial-build-") as ctx:
         ctx_path = Path(ctx)
         (ctx_path / "install.sh").write_text(install_script)
-        (ctx_path / "Dockerfile").write_text(textwrap.dedent(f"""\
+        (ctx_path / "Dockerfile").write_text(
+            textwrap.dedent(f"""\
             FROM {base_digest}
             COPY install.sh /tmp/install.sh
             RUN bash /tmp/install.sh && rm /tmp/install.sh
-        """))
+        """)
+        )
         try:
             client.images.build(
                 path=str(ctx_path),
@@ -239,7 +249,9 @@ async def _builder_with_heartbeat(
             except TimeoutError:
                 try:
                     refreshed = await cp_client.refresh_trial_cache_slot(
-                        cache_key, worker_id, ttl_sec=ttl_sec,
+                        cache_key,
+                        worker_id,
+                        ttl_sec=ttl_sec,
                     )
                     if not refreshed:
                         logger.warning(
@@ -249,7 +261,8 @@ async def _builder_with_heartbeat(
                         )
                 except Exception:
                     logger.exception(
-                        "trial_cache heartbeat failed cache_key=%s", cache_key,
+                        "trial_cache heartbeat failed cache_key=%s",
+                        cache_key,
                     )
 
     task = asyncio.create_task(_beat())
@@ -259,6 +272,92 @@ async def _builder_with_heartbeat(
         stop.set()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+def _daemon_build_slot_keys(settings: WorkerSettings) -> list[str]:
+    max_concurrent = getattr(settings, "trial_cache_build_max_concurrent", 1)
+    if max_concurrent < 1:
+        raise TrialCacheError("trial_cache_build_max_concurrent must be >= 1")
+    daemon_id_material = "\x00".join(
+        (
+            str(getattr(settings, "pool_name", "") or "default"),
+            str(getattr(settings, "hostname", "") or "unconfigured-host"),
+            str(getattr(settings, "docker_socket", "") or "/var/run/docker.sock"),
+        )
+    )
+    daemon_id = sha256(daemon_id_material.encode("utf-8")).hexdigest()[:24]
+    return [f"{DAEMON_BUILD_SLOT_PREFIX}:{daemon_id}:{slot}" for slot in range(max_concurrent)]
+
+
+async def _claim_any_trial_cache_slot(
+    cp_client: HttpControlPlaneClient,
+    slot_keys: list[str],
+    worker_id: UUID,
+    *,
+    ttl_sec: float,
+) -> str | None:
+    for slot_key in slot_keys:
+        if await cp_client.claim_trial_cache_slot(
+            slot_key,
+            worker_id,
+            ttl_sec=ttl_sec,
+        ):
+            return slot_key
+    return None
+
+
+@contextlib.asynccontextmanager
+async def _daemon_build_slot(
+    cp_client: HttpControlPlaneClient,
+    settings: WorkerSettings,
+    worker_id: UUID,
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> AsyncIterator[str]:
+    """Limit concurrent docker builds against a shared host daemon.
+
+    The cache-specific slot prevents duplicate builds of the same
+    `(task_image_digest, install_script)` image. This broader slot
+    prevents different cold cache keys from hammering the same Docker
+    daemon with concurrent apt/build setup containers.
+    """
+    slot_keys = _daemon_build_slot_keys(settings)
+    ttl_sec = settings.trial_cache_build_lock_timeout_sec
+    slot_key = await _claim_any_trial_cache_slot(
+        cp_client,
+        slot_keys,
+        worker_id,
+        ttl_sec=ttl_sec,
+    )
+    while slot_key is None:
+        await sleep(random.uniform(2.0, 5.0))
+        for candidate in slot_keys:
+            if await cp_client.trial_cache_slot_exists(candidate):
+                continue
+            if await cp_client.claim_trial_cache_slot(
+                candidate,
+                worker_id,
+                ttl_sec=ttl_sec,
+            ):
+                slot_key = candidate
+                break
+
+    logger.info(
+        "trial_cache daemon build slot acquired slot=%s max_concurrent=%d",
+        slot_key,
+        len(slot_keys),
+    )
+    async with _builder_with_heartbeat(
+        cp_client,
+        slot_key,
+        worker_id,
+        ttl_sec=ttl_sec,
+    ):
+        try:
+            yield slot_key
+        finally:
+            with contextlib.suppress(Exception):
+                await cp_client.release_trial_cache_slot(slot_key, worker_id)
 
 
 async def resolve_trial_image(
@@ -315,13 +414,12 @@ async def resolve_trial_image(
 
     # Step 3: cache key + tag names.
     cache_key = _cache_key(
-        task_image_digest=task_image_digest, install_script=install_script,
+        task_image_digest=task_image_digest,
+        install_script=install_script,
     )
     local_tag = f"{LOCAL_TAG_PREFIX}:{cache_key}"
     registry_repo = settings.trial_cache_registry_repo
-    registry_tag: str | None = (
-        f"{registry_repo}:{cache_key}" if registry_repo else None
-    )
+    registry_tag: str | None = f"{registry_repo}:{cache_key}" if registry_repo else None
 
     # Step 4: local hit?
     if await asyncio.to_thread(_image_exists_locally, client, local_tag):
@@ -329,7 +427,8 @@ async def resolve_trial_image(
 
     # Step 5: claim or wait for a builder slot.
     i_am_builder = await cp_client.claim_trial_cache_slot(
-        cache_key, worker_id,
+        cache_key,
+        worker_id,
         ttl_sec=settings.trial_cache_build_lock_timeout_sec,
     )
     while not i_am_builder:
@@ -339,7 +438,10 @@ async def resolve_trial_image(
         if await asyncio.to_thread(_image_exists_locally, client, local_tag):
             return local_tag
         if registry_tag and await _try_registry_pull(
-            client, registry_tag, local_tag, settings,
+            client,
+            registry_tag,
+            local_tag,
+            settings,
         ):
             return local_tag
 
@@ -348,7 +450,8 @@ async def resolve_trial_image(
             continue
         # Slot is gone (builder finished or crashed). Race to claim.
         i_am_builder = await cp_client.claim_trial_cache_slot(
-            cache_key, worker_id,
+            cache_key,
+            worker_id,
             ttl_sec=settings.trial_cache_build_lock_timeout_sec,
         )
 
@@ -356,7 +459,9 @@ async def resolve_trial_image(
     # heartbeat-refreshed context manager. Long pulls/builds extend
     # the TTL every 60s; on crash, slot expires within ~60s.
     async with _builder_with_heartbeat(
-        cp_client, cache_key, worker_id,
+        cp_client,
+        cache_key,
+        worker_id,
         ttl_sec=settings.trial_cache_build_lock_timeout_sec,
     ):
         try:
@@ -366,32 +471,44 @@ async def resolve_trial_image(
             # had completed by the time we acquired). Returning here
             # still runs the `finally` clause that releases the slot.
             if registry_tag and await _try_registry_pull(
-                client, registry_tag, local_tag, settings,
+                client,
+                registry_tag,
+                local_tag,
+                settings,
             ):
                 return local_tag
 
-            await asyncio.to_thread(
-                _build_layered_image_sync,
-                client=client,
-                tag=local_tag,
-                base_digest=task_image_digest,
-                install_script=install_script,
-            )
+            async with _daemon_build_slot(
+                cp_client,
+                settings,
+                worker_id,
+                sleep=sleep,
+            ):
+                await asyncio.to_thread(
+                    _build_layered_image_sync,
+                    client=client,
+                    tag=local_tag,
+                    base_digest=task_image_digest,
+                    install_script=install_script,
+                )
 
-            # AWAITED push under the slot — prevents the v3 race
-            # where async push lets the next worker pull-miss and
-            # build redundantly.
-            if registry_tag:
-                try:
-                    await asyncio.to_thread(
-                        _push_image, client, local_tag, registry_tag,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "trial_cache push failed cache_key=%s "
-                        "(next worker will rebuild): %s",
-                        cache_key, exc,
-                    )
+                # AWAITED push under the slot — prevents the v3 race
+                # where async push lets the next worker pull-miss and
+                # build redundantly.
+                if registry_tag:
+                    try:
+                        await asyncio.to_thread(
+                            _push_image,
+                            client,
+                            local_tag,
+                            registry_tag,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "trial_cache push failed cache_key=%s (next worker will rebuild): %s",
+                            cache_key,
+                            exc,
+                        )
         finally:
             with contextlib.suppress(Exception):
                 await cp_client.release_trial_cache_slot(cache_key, worker_id)
@@ -415,7 +532,9 @@ async def _try_registry_pull(
         )
     except (TimeoutError, ImageNotFound, NotFound, APIError) as exc:
         logger.debug(
-            "trial_cache registry pull miss %s: %s", registry_tag, exc,
+            "trial_cache registry pull miss %s: %s",
+            registry_tag,
+            exc,
         )
         return False
     try:
@@ -423,7 +542,9 @@ async def _try_registry_pull(
     except APIError as exc:
         logger.warning(
             "trial_cache pulled %s but failed to alias as %s: %s",
-            registry_tag, local_tag, exc,
+            registry_tag,
+            local_tag,
+            exc,
         )
         return False
     return True
@@ -461,11 +582,13 @@ def evict_stale_cache(client: Any, settings: WorkerSettings) -> None:
 
     # Pass 1: TTL prune
     try:
-        client.images.prune(filters={
-            "label": "loom.trial-cache=true",
-            "until": f"{settings.trial_cache_ttl_hours}h",
-            "dangling": False,
-        })
+        client.images.prune(
+            filters={
+                "label": "loom.trial-cache=true",
+                "until": f"{settings.trial_cache_ttl_hours}h",
+                "dangling": False,
+            }
+        )
     except APIError as exc:
         logger.warning("trial_cache TTL prune failed: %s", exc)
 
@@ -507,15 +630,25 @@ class _SupportsCacheSlots(Protocol):
     full HTTP client."""
 
     async def claim_trial_cache_slot(
-        self, cache_key: str, worker_id: UUID, *, ttl_sec: float,
+        self,
+        cache_key: str,
+        worker_id: UUID,
+        *,
+        ttl_sec: float,
     ) -> bool: ...
 
     async def trial_cache_slot_exists(self, cache_key: str) -> bool: ...
 
     async def release_trial_cache_slot(
-        self, cache_key: str, worker_id: UUID,
+        self,
+        cache_key: str,
+        worker_id: UUID,
     ) -> None: ...
 
     async def refresh_trial_cache_slot(
-        self, cache_key: str, worker_id: UUID, *, ttl_sec: float,
+        self,
+        cache_key: str,
+        worker_id: UUID,
+        *,
+        ttl_sec: float,
     ) -> bool: ...

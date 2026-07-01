@@ -672,6 +672,12 @@ python_type = "float"
 default     = 1800.0
 description = "TTL on the builder slot in active_trial_cache_builds (30-min default). Sized for worst-case base-image-pull + install + push budget. Builder refreshes TTL every 60s during long operations; on crash, the heartbeat dies and the slot expires within ~60s."
 
+[service_config.trial_cache_build_max_concurrent]
+used_by     = ["worker"]
+python_type = "int"
+default     = 1
+description = "Maximum concurrent layered trial-cache image builds allowed for the same worker daemon group. Workers coordinate daemon-wide synthetic slots through active_trial_cache_builds using pool_name, hostname, and docker_socket as the daemon fingerprint. Keep 1 for shared OLDLAB/k8s Docker daemons; raise only for isolated daemon hosts."
+
 # ─── non-codegen secrets: keys mounted from loom-secrets without Settings fields ───
 # Not Pydantic fields — bootstrap-secrets covers them, doctor verifies them,
 # but no codegen Settings field is emitted. Use this for third-party containers

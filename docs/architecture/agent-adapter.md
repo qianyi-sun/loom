@@ -244,7 +244,11 @@ The worker's `resolve_trial_image()` runs this flow:
 3. With the slot held, try the optional shared registry
    (`{trial_cache_registry_repo}:<cache_key>`). On hit, pull, tag
    locally, release the slot, done.
-4. On miss, synthesize a tiny Dockerfile:
+4. On miss, claim a daemon-wide synthetic build slot. The slot key is
+   derived from the worker pool, worker hostname, and Docker socket path, and
+   the number of slots is controlled by `trial_cache_build_max_concurrent`
+   (default `1`).
+5. Synthesize a tiny Dockerfile:
    ```dockerfile
    FROM <task_image>
    COPY install.sh /tmp/install.sh
@@ -259,6 +263,14 @@ worker crashes, the slot expires and any subsequent claimant takes
 over. The CP route uses `INSERT ... ON CONFLICT` against the
 `active_trial_cache_builds` table — no Postgres advisory locks (which
 would tie up CP connection-pool slots for the whole build).
+
+The cache-key slot prevents duplicate builds of the same
+`(task_image_digest, install_script)` pair. The daemon-wide synthetic slot is a
+second guard for shared Docker daemons: it serializes or caps different cold
+cache keys before they start apt/npm/pip setup containers on the same
+containerd snapshotter. Keep `trial_cache_build_max_concurrent=1` for shared
+OLDLAB/k8s daemons; raise it only when each worker host has an isolated daemon
+and measured build headroom.
 
 ### Optional shared registry
 

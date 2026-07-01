@@ -24,6 +24,9 @@ The initial capacity slice is intentionally conservative: one Slurm job per
 node, `12 CPU`, `58000M`, and `LOOM_WORKER_MAX_CONCURRENT=6`. Raise concurrency
 only after a separate load-test issue records CPU, RAM, Docker cleanup, MinIO,
 Gateway/provider, and Control Plane state-patch health.
+Keep `LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT=1` for OLDLAB shared Docker
+daemons unless a focused load-test issue proves concurrent layered image builds
+do not saturate Docker/containerd or node disk I/O.
 
 For the worker-pool autoscaler, prefer the resource-aware policy rather than
 raising the fixed slice. Use `min_slots=1`, `max_slots=40`, `max_jobs=5`, and

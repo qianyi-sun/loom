@@ -159,6 +159,16 @@
     "default": "0",
     "required": false
   },
+  "storage_auth_kind": {
+    "annotation": "<class 'str'>",
+    "default": "'static_keys'",
+    "required": false
+  },
+  "storage_backend": {
+    "annotation": "<class 'str'>",
+    "default": "'minio'",
+    "required": false
+  },
   "subprocess_gateway_url": {
     "annotation": "pydantic.networks.HttpUrl | None",
     "default": "None",
@@ -197,6 +207,11 @@
   "trial_cache_build_lock_timeout_sec": {
     "annotation": "<class 'float'>",
     "default": "1800.0",
+    "required": false
+  },
+  "trial_cache_build_max_concurrent": {
+    "annotation": "<class 'int'>",
+    "default": "1",
     "required": false
   },
   "trial_cache_min_free_gb": {

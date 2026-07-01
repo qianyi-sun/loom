@@ -654,6 +654,7 @@ LOOM_WORKER_MINIO_READ_TIMEOUT_SEC=120
 LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC=300
 LOOM_WORKER_MINIO_OPERATION_ATTEMPTS=3
 LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC=300
+LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT=1
 # Fixed workers should leave this unset. Elastic Slurm workers should opt in.
 # LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS=600
 # Optional: leave unset unless a capacity sweep says blocking I/O is the bottleneck.
@@ -799,6 +800,14 @@ Use `LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC` only when pre-start bundle
 materialization is reachable but legitimately slow; `hf://` sources that need
 private internet access should normally be mirrored into internal object
 storage before runtime.
+
+Layered trial-cache image builds also have a daemon-wide concurrency cap:
+`LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT`. Keep the default `1` on shared
+OLDLAB, shared k8s node, or host-network remote-worker daemons so different
+cold cache keys serialize their setup containers. Raise it only for isolated
+Docker daemons after a load-test issue records CPU, memory, disk I/O,
+containerd, and cleanup headroom. This cap does not reduce warm trial
+concurrency controlled by `LOOM_WORKER_MAX_CONCURRENT`.
 
 Service-mode tasks that carry `environment.dockerfile` are built on the worker
 host from the materialized task bundle, or from

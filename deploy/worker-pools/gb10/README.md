@@ -210,6 +210,7 @@ LOOM_WORKER_SANDBOX_WORKER_INDEX=N
 LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS=31536000
 LOOM_WORKER_LOG_LEVEL=info
 LOOM_WORKER_DOCKER_API_TIMEOUT_SEC=1800
+LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT=1
 LOOM_WORKER_MINIO_MAX_POOL_CONNECTIONS=256
 LOOM_WORKER_MINIO_CONNECT_TIMEOUT_SEC=5
 LOOM_WORKER_MINIO_READ_TIMEOUT_SEC=120
@@ -582,3 +583,6 @@ that host's worker, and record the observed bottleneck before raising capacity
 again. Use `loom resources status` to confirm the GB10 row reports the expected
 occupied/total slot count plus autoscaler desired, pending, draining, idle, and
 decision state before starting another sweep.
+If instability happens during cold layered-image setup, keep
+`LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT=1` so each host serializes
+trial-cache Docker builds even when normal warm-trial concurrency is higher.
