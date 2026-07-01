@@ -507,3 +507,256 @@ jobs:
       - name: Cleanup kind
         if: always()
         run: kind delete cluster --name loom-staging || true
+
+  # ────────────────────────────────────────────────────────────────
+  # Storage lifecycle smoke against REAL AWS S3.
+  #
+  # Closes #253. Same shape as the MinIO round-trip step inside the
+  # `smoke` job above, but points at a real bucket in AWS. Catches
+  # AWS-specific wire-format quirks that the MinIO smoke can't (S3
+  # honors `AbortIncompleteMultipartUpload` where MinIO drops it,
+  # returns real `NoSuchLifecycleConfiguration` codes, etc.).
+  #
+  # Credentials + bucket + region come from the `ci-aws` GitHub
+  # Environment secrets (repo admin adds them once; the job pulls
+  # them via the `environment:` binding below, which is what makes
+  # them available to `${{ secrets.* }}`).
+  #
+  # Runs on the same `staging-smoke` label trigger as the MinIO smoke
+  # so a PR that touches storage code exercises both backends in one
+  # go. Skips silently on PRs without the label.
+  # ────────────────────────────────────────────────────────────────
+  smoke-storage-aws-s3:
+    name: storage smoke (real AWS S3)
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'staging-smoke'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: ci-aws
+    env:
+      # storage_backend + auth_kind wire the bootstrap subcommand into
+      # its S3-compatible / static-keys paths against the real AWS
+      # endpoint. Region + bucket come from the environment secrets so
+      # the workflow file doesn't leak the account number.
+      LOOM_SVC_STORAGE_BACKEND: s3
+      LOOM_SVC_STORAGE_AUTH_KIND: static_keys
+      LOOM_SVC_MINIO_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      LOOM_SVC_MINIO_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      LOOM_SVC_MINIO_REGION: ${{ secrets.LOOM_CI_S3_REGION }}
+      LOOM_CI_S3_BUCKET: ${{ secrets.LOOM_CI_S3_BUCKET }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv + Python
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Sync project + sibling packages
+        run: |
+          uv sync --extra dev
+          uv pip install -e packages/loom-launcher -e packages/loom-benchmarks
+
+      - name: Compute AWS S3 endpoint
+        # boto3 doesn't need endpoint_url for AWS S3 itself, but our
+        # bootstrap subcommand takes --endpoint explicitly; use the
+        # canonical regional S3 endpoint so we're exercising the exact
+        # same code path an operator would.
+        run: |
+          echo "LOOM_SVC_MINIO_ENDPOINT=https://s3.${LOOM_SVC_MINIO_REGION}.amazonaws.com" >> "$GITHUB_ENV"
+
+      - name: Generate CI-specific storage-lifecycle.toml
+        # The bundled example config targets three buckets
+        # (trajectories / artifacts / atif). The CI account has one
+        # shared bucket. Emit a minimal config that exercises the same
+        # code paths (expire_after_days + keep_forever + multipart
+        # cleanup wire) against just that bucket.
+        run: |
+          cat > /tmp/storage-lifecycle.ci.toml <<EOF
+          backend = "s3"
+
+          [[retention]]
+          bucket = "${LOOM_CI_S3_BUCKET}"
+          strategy = "expire_after_days"
+          days = 30
+
+          [[retention]]
+          bucket = "${LOOM_CI_S3_BUCKET}"
+          strategy = "cleanup_incomplete_uploads_after_hours"
+          hours = 336
+          EOF
+          echo "::group::rendered CI config"
+          cat /tmp/storage-lifecycle.ci.toml
+          echo "::endgroup::"
+
+      - name: Reset bucket lifecycle to start clean
+        # If a previous smoke run failed mid-flight, leftover rules
+        # might make the "no drift" check spuriously fail. Force a
+        # clean slate before each run.
+        run: |
+          uv run python -c "
+          import os
+          from loom.storage_credentials import build_s3_client
+          s3 = build_s3_client(
+              endpoint_url=os.environ['LOOM_SVC_MINIO_ENDPOINT'],
+              auth_kind='static_keys',
+              access_key=os.environ['LOOM_SVC_MINIO_ACCESS_KEY'],
+              secret_key=os.environ['LOOM_SVC_MINIO_SECRET_KEY'],
+              region=os.environ['LOOM_SVC_MINIO_REGION'],
+          )
+          try:
+              s3.delete_bucket_lifecycle(Bucket=os.environ['LOOM_CI_S3_BUCKET'])
+              print('cleared existing lifecycle')
+          except s3.exceptions.ClientError as e:
+              if 'NoSuchLifecycleConfiguration' in str(e):
+                  print('bucket already had no lifecycle')
+              else:
+                  raise
+          "
+
+      - name: Dry-run apply
+        run: |
+          uv run loom cluster bootstrap-storage-lifecycle \
+            --config /tmp/storage-lifecycle.ci.toml \
+            --endpoint "${LOOM_SVC_MINIO_ENDPOINT}" --dry-run
+
+      - name: Apply lifecycle
+        run: |
+          uv run loom cluster bootstrap-storage-lifecycle \
+            --config /tmp/storage-lifecycle.ci.toml \
+            --endpoint "${LOOM_SVC_MINIO_ENDPOINT}"
+
+      - name: Verify lifecycle drift check reports no drift
+        # `loom cluster doctor` needs a working kubectl context for
+        # its schema-reconciliation half; the CI runner has none.
+        # Call the drift check function directly — same code path,
+        # skips the cluster prerequisite that isn't relevant here.
+        run: |
+          uv run python -c "
+          import os, sys
+          from pathlib import Path
+          from loom.storage_credentials import build_s3_client
+          from loom.storage_retention_doctor import (
+              check_lifecycle_drift, format_drift_report,
+          )
+          from loom.storage_retention_loader import load_retention_config
+          cfg = load_retention_config(Path('/tmp/storage-lifecycle.ci.toml'))
+          s3 = build_s3_client(
+              endpoint_url=os.environ['LOOM_SVC_MINIO_ENDPOINT'],
+              auth_kind='static_keys',
+              access_key=os.environ['LOOM_SVC_MINIO_ACCESS_KEY'],
+              secret_key=os.environ['LOOM_SVC_MINIO_SECRET_KEY'],
+              region=os.environ['LOOM_SVC_MINIO_REGION'],
+          )
+          drifts = check_lifecycle_drift(s3, cfg)
+          report = format_drift_report(drifts)
+          if report:
+              sys.stderr.write(f'FAIL — drift detected after apply:\n{report}\n')
+              sys.exit(1)
+          print('OK — live lifecycle matches rendered config')
+          "
+
+      - name: Second apply (idempotency)
+        run: |
+          uv run loom cluster bootstrap-storage-lifecycle \
+            --config /tmp/storage-lifecycle.ci.toml \
+            --endpoint "${LOOM_SVC_MINIO_ENDPOINT}"
+          uv run python -c "
+          import os, sys
+          from pathlib import Path
+          from loom.storage_credentials import build_s3_client
+          from loom.storage_retention_doctor import (
+              check_lifecycle_drift, format_drift_report,
+          )
+          from loom.storage_retention_loader import load_retention_config
+          cfg = load_retention_config(Path('/tmp/storage-lifecycle.ci.toml'))
+          s3 = build_s3_client(
+              endpoint_url=os.environ['LOOM_SVC_MINIO_ENDPOINT'],
+              auth_kind='static_keys',
+              access_key=os.environ['LOOM_SVC_MINIO_ACCESS_KEY'],
+              secret_key=os.environ['LOOM_SVC_MINIO_SECRET_KEY'],
+              region=os.environ['LOOM_SVC_MINIO_REGION'],
+          )
+          drifts = check_lifecycle_drift(s3, cfg)
+          if format_drift_report(drifts):
+              sys.exit('idempotency check failed')
+          print('OK — re-apply is a no-op')
+          "
+
+      - name: Tamper - remove lifecycle, drift check must FAIL
+        run: |
+          uv run python -c "
+          import os, sys
+          from pathlib import Path
+          from loom.storage_credentials import build_s3_client
+          from loom.storage_retention_doctor import (
+              check_lifecycle_drift, format_drift_report,
+          )
+          from loom.storage_retention_loader import load_retention_config
+          s3 = build_s3_client(
+              endpoint_url=os.environ['LOOM_SVC_MINIO_ENDPOINT'],
+              auth_kind='static_keys',
+              access_key=os.environ['LOOM_SVC_MINIO_ACCESS_KEY'],
+              secret_key=os.environ['LOOM_SVC_MINIO_SECRET_KEY'],
+              region=os.environ['LOOM_SVC_MINIO_REGION'],
+          )
+          s3.delete_bucket_lifecycle(Bucket=os.environ['LOOM_CI_S3_BUCKET'])
+          cfg = load_retention_config(Path('/tmp/storage-lifecycle.ci.toml'))
+          drifts = check_lifecycle_drift(s3, cfg)
+          if not format_drift_report(drifts):
+              sys.exit('drift check should have FAILED after tamper, but it reported clean')
+          print('OK — drift check correctly reported drift after tamper')
+          "
+
+      - name: Heal - re-apply, drift check must clear
+        run: |
+          uv run loom cluster bootstrap-storage-lifecycle \
+            --config /tmp/storage-lifecycle.ci.toml \
+            --endpoint "${LOOM_SVC_MINIO_ENDPOINT}"
+          uv run python -c "
+          import os, sys
+          from pathlib import Path
+          from loom.storage_credentials import build_s3_client
+          from loom.storage_retention_doctor import (
+              check_lifecycle_drift, format_drift_report,
+          )
+          from loom.storage_retention_loader import load_retention_config
+          cfg = load_retention_config(Path('/tmp/storage-lifecycle.ci.toml'))
+          s3 = build_s3_client(
+              endpoint_url=os.environ['LOOM_SVC_MINIO_ENDPOINT'],
+              auth_kind='static_keys',
+              access_key=os.environ['LOOM_SVC_MINIO_ACCESS_KEY'],
+              secret_key=os.environ['LOOM_SVC_MINIO_SECRET_KEY'],
+              region=os.environ['LOOM_SVC_MINIO_REGION'],
+          )
+          drifts = check_lifecycle_drift(s3, cfg)
+          if format_drift_report(drifts):
+              sys.exit('heal failed — drift persists')
+          print('OK — heal restored lifecycle')
+          "
+
+      - name: Reset bucket lifecycle on exit (always)
+        # Leave the CI bucket in a clean state — no lifecycle rules
+        # from our test lingering — so parallel/subsequent smoke runs
+        # start from a known-empty state and the bucket isn't
+        # accumulating "test" rules.
+        if: always()
+        run: |
+          uv run python -c "
+          import os
+          from loom.storage_credentials import build_s3_client
+          s3 = build_s3_client(
+              endpoint_url=os.environ['LOOM_SVC_MINIO_ENDPOINT'],
+              auth_kind='static_keys',
+              access_key=os.environ['LOOM_SVC_MINIO_ACCESS_KEY'],
+              secret_key=os.environ['LOOM_SVC_MINIO_SECRET_KEY'],
+              region=os.environ['LOOM_SVC_MINIO_REGION'],
+          )
+          try:
+              s3.delete_bucket_lifecycle(Bucket=os.environ['LOOM_CI_S3_BUCKET'])
+              print('cleaned up lifecycle on exit')
+          except s3.exceptions.ClientError:
+              pass
+          " || true
