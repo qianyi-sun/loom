@@ -341,8 +341,10 @@ debug evidence, provenance, and artifact groups. Safe shared artifacts expose
 Download, Copy URL, and Reuse actions. Blocked artifacts show only a safe reason
 and cannot be downloaded or reused by another team. Typed artifact rows also
 show the artifact type, owner team, source trial/batch, safety/redaction state,
-and content-hash prefix. Use **Export artifact metadata** on the detail page to
-download safe typed artifact metadata for that run as JSONL.
+and content-hash prefix. Large-run detail views use the typed artifact registry
+instead of loading full legacy trial trajectory indexes. Use **Export artifact
+metadata** on the detail page to download safe typed artifact metadata for that
+run as JSONL.
 
 Clone config and reuse artifact both create new records in your current team and
 record `source_provenance`. They do not copy the source team's provider

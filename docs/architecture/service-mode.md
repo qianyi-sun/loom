@@ -298,8 +298,10 @@ The same detail API also exposes user-facing diagnosis and debug evidence:
   evidence carries the same provider summary fields across its child calls and
   is built from bounded trial projections instead of full `trajectory_index`
   rows.
-- Run Library batch detail loads the same batch `debug_evidence` on demand
-  after the Run Library read policy allows access.
+- Run Library batch detail stays lightweight on the default path: it uses
+  bounded trial projections plus typed artifact rows and does not select full
+  trial `trajectory_index` payloads. It loads the same batch `debug_evidence`
+  on demand after the Run Library read policy allows access.
 - `GET /api/v1/trials/{trial_id}` includes `diagnosis`;
   `GET /api/v1/batches/{batch_id}` includes batch `diagnosis` only when
   `include_debug=true`.
