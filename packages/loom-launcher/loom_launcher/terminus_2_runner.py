@@ -166,11 +166,11 @@ def _setup_tmux_session() -> Any:
 def _patch_asciinema_timestamp(tmux_mod: Any, now: Any) -> None:
     """Replace `TmuxSession.get_asciinema_timestamp` with a wall-clock
     time stub. Idempotent via `_loom_asciinema_patched` sentinel."""
-    TmuxSessionCls: Any = tmux_mod.TmuxSession
-    if getattr(TmuxSessionCls, "_loom_asciinema_patched", False):
+    tmux_session_cls: Any = tmux_mod.TmuxSession
+    if getattr(tmux_session_cls, "_loom_asciinema_patched", False):
         return
-    TmuxSessionCls.get_asciinema_timestamp = lambda self: float(now())
-    TmuxSessionCls._loom_asciinema_patched = True
+    tmux_session_cls.get_asciinema_timestamp = lambda self: float(now())
+    tmux_session_cls._loom_asciinema_patched = True
 
 
 def _build_agent(model: str, max_episodes: int) -> Any:
@@ -249,11 +249,11 @@ def _patch_litellm_response_extraction(litellm_mod: Any) -> None:
 
     Idempotent: sets `_loom_patched = True` on the class after the first
     call so re-imports don't wrap twice."""
-    LiteLLMCls: Any = litellm_mod.LiteLLM
-    if getattr(LiteLLMCls, "_loom_patched", False):
+    litellm_cls: Any = litellm_mod.LiteLLM
+    if getattr(litellm_cls, "_loom_patched", False):
         return
 
-    _original_call = LiteLLMCls.call
+    _original_call = litellm_cls.call
 
     def _patched_call(self: Any, prompt: str, *args: Any, **kwargs: Any) -> str:
         # Run the original wrapper, catching AttributeError / TypeError
@@ -317,7 +317,7 @@ def _patch_litellm_response_extraction(litellm_mod: Any) -> None:
                 "content_len": len(content) if content else 0,
                 "has_tool_calls": has_tool_calls,
             })
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
         if content:
@@ -369,8 +369,8 @@ def _patch_litellm_response_extraction(litellm_mod: Any) -> None:
             return _json.dumps(arguments)
         return content
 
-    LiteLLMCls.call = _patched_call
-    LiteLLMCls._loom_patched = True
+    litellm_cls.call = _patched_call
+    litellm_cls._loom_patched = True
 
 
 def main(argv: list[str] | None = None) -> int:
