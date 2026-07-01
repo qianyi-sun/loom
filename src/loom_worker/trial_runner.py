@@ -61,7 +61,7 @@ def _apply_step_token_ttl(agent: object, task_config: TaskConfig) -> None:
     """
     if not hasattr(agent, "step_token_ttl_sec"):
         return
-    agent.step_token_ttl_sec = (  # type: ignore[attr-defined]
+    agent.step_token_ttl_sec = (
         int(task_config.agent.timeout_sec) + _STEP_JWT_TTL_BUFFER_SEC
     )
 
