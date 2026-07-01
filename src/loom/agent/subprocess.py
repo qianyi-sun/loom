@@ -13,6 +13,7 @@ invocation; multi-turn sessions across steps are v1.5.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
@@ -29,6 +30,7 @@ from loom_launcher.adapter import AgentAdapter, SandboxAccess
 from loom_launcher.adapter import ExecHandle as LauncherExecHandle
 from loom_launcher.adapter import ModelSpec as LauncherModelSpec
 
+from loom.agent.endpoint_probe import responses_api_supported
 from loom.driver.base import Driver
 from loom.driver.base import ExecHandle as DriverExecHandle
 from loom.errors import AgentError
@@ -211,6 +213,44 @@ class SubprocessAgent:
         # structurally identical at runtime.
         self.supports_os = cast(frozenset[OS], self.adapter.supports_os)
 
+    async def _select_active_adapter(
+        self, *, base_url: str, step_token: str,
+    ) -> AgentAdapter:
+        """Return the adapter to actually run for this step. For codex
+        against a BYO OpenAI-compatible gateway that lacks
+        `/v1/responses`, this returns a copy with `wire_api="chat"` so
+        codex targets `/v1/chat/completions` instead (#277).
+
+        Non-codex adapters are returned unchanged. Codex adapters that
+        don't carry a `wire_api` field (older builds) are also returned
+        unchanged — the probe never runs for those.
+        """
+        if self.adapter.name != "codex":
+            return self.adapter
+        if not hasattr(self.adapter, "wire_api"):
+            return self.adapter
+        supported = await responses_api_supported(
+            base_url=base_url,
+            token=step_token,
+            model=self.model.name,
+        )
+        if supported:
+            return self.adapter
+        logger.info(
+            "codex_wire_api_fallback base_url=%s from=responses to=chat "
+            "reason=probe_unsupported",
+            base_url,
+        )
+        # AgentAdapter is a Protocol; CodexAdapter is a frozen dataclass
+        # at runtime. mypy can't reconcile Protocol with the dataclass
+        # type-var required by `dataclasses.replace`, so cast to Any.
+        # Runtime safety comes from the `name == "codex"` and
+        # `hasattr(..., "wire_api")` guards above.
+        return cast(
+            AgentAdapter,
+            dataclasses.replace(cast(Any, self.adapter), wire_api="chat"),
+        )
+
     async def run(
         self,
         *,
@@ -240,27 +280,30 @@ class SubprocessAgent:
             self.agent_gateway_url or self.gateway_url,
             self.adapter,
         )
+        active_adapter = await self._select_active_adapter(
+            base_url=base_url, step_token=step_token,
+        )
         logger.info(
             "subprocess_agent_gateway_config adapter=%s dialect=%s base_url=%s",
-            self.adapter.name,
-            self.adapter.endpoint_dialect,
+            active_adapter.name,
+            active_adapter.endpoint_dialect,
             base_url,
         )
         env_vars: dict[str, str] = {
-            self.adapter.api_key_env: step_token,
-            self.adapter.base_url_env: base_url,
+            active_adapter.api_key_env: step_token,
+            active_adapter.base_url_env: base_url,
         }
         for name in _SUBPROCESS_AGENT_ENV_PASSTHROUGH:
             value = os.environ.get(name)
             if value:
                 env_vars[name] = value
-        if self.adapter.name == "codex" and self.request_params:
+        if active_adapter.name == "codex" and self.request_params:
             env_vars["LOOM_CODEX_SETTINGS_JSON"] = json.dumps(
                 sanitize_request_extras(self.request_params),
                 separators=(",", ":"),
             )
         cwd = self.workdir
-        argv = self.adapter.build_invocation(
+        argv = active_adapter.build_invocation(
             instruction=instruction,
             workdir=cwd,
             model=_bridge_model(self.model),

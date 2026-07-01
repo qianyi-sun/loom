@@ -196,6 +196,14 @@ class CodexAdapter:
     supports_multi_turn: bool = False
     additional_egress: frozenset[str] = frozenset()
     install_script: str | None = _CODEX_INSTALL_SCRIPT
+    # Codex CLI's `wire_api` provider option. "responses" targets
+    # OpenAI's Responses API (`POST /v1/responses`); "chat" targets
+    # OpenAI Chat Completions (`POST /v1/chat/completions`). Kept as
+    # "responses" by default for compatibility with OpenAI-direct
+    # deployments. SubprocessAgent flips to "chat" when a probe at
+    # trial start finds the configured provider does not implement
+    # the Responses endpoint (see #277 — yibuapi et al.).
+    wire_api: str = "responses"
 
     def build_invocation(
         self,
@@ -224,7 +232,7 @@ class CodexAdapter:
         provider_config = (
             'model_providers.loom={ name = "Loom", '
             f"base_url = {json.dumps(base_url)}, "
-            f'env_key = "{self.api_key_env}", wire_api = "responses"'
+            f'env_key = "{self.api_key_env}", wire_api = "{self.wire_api}"'
             f"{query_params} }}"
         )
         script = (
