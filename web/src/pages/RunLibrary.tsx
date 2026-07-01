@@ -69,7 +69,13 @@ function formatDate(value: string | null): string {
   return formatLocalDateTime(value, { fallback: "--" });
 }
 
-function ArtifactBadges({ summary }: { summary: ArtifactSummary }): JSX.Element {
+function ArtifactBadges({
+  summary,
+  truncated = false,
+}: {
+  summary: ArtifactSummary;
+  truncated?: boolean;
+}): JSX.Element {
   const visible = ARTIFACT_LABELS.filter(([key]) => summary[key] > 0);
   if (visible.length === 0) return <span className="text-xs text-slate-400">None</span>;
   return (
@@ -80,6 +86,7 @@ function ArtifactBadges({ summary }: { summary: ArtifactSummary }): JSX.Element 
           className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-xs text-slate-600"
         >
           {label} {summary[key]}
+          {truncated ? "+" : ""}
         </span>
       ))}
     </div>
@@ -444,7 +451,10 @@ export default function RunLibrary(): JSX.Element {
                           {formatDate(batch.created_at)}
                         </td>
                         <td className="px-4 py-3">
-                          <ArtifactBadges summary={batch.artifact_summary} />
+                          <ArtifactBadges
+                            summary={batch.artifact_summary}
+                            truncated={batch.artifact_summary_truncated}
+                          />
                         </td>
                         <td className="px-4 py-3 text-xs text-slate-600">
                           {batch.visibility} / {batch.share_status}

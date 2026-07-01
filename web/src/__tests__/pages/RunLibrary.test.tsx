@@ -199,7 +199,11 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 function mockRunLibrary({
   platformAdmin = false,
-}: { platformAdmin?: boolean } = {}): ReturnType<typeof vi.spyOn> {
+  truncatedSummary = false,
+}: {
+  platformAdmin?: boolean;
+  truncatedSummary?: boolean;
+} = {}): ReturnType<typeof vi.spyOn> {
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
@@ -263,7 +267,10 @@ function mockRunLibrary({
         return Promise.resolve(
           jsonResponse({
             items: [
-              sharedBatch,
+              {
+                ...sharedBatch,
+                artifact_summary_truncated: truncatedSummary,
+              },
               {
                 ...sharedBatch,
                 id: "batch-beta",
@@ -399,6 +406,15 @@ describe("RunLibrary", () => {
     expect(
       screen.getByRole("button", { name: "All teams" }),
     ).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("marks truncated list artifact summaries", async () => {
+    mockRunLibrary({ truncatedSummary: true });
+    renderWithProviders(<RunLibrary />, { route: "/library?scope=all" });
+
+    expect(await screen.findByText("shared alpha run")).toBeInTheDocument();
+    expect(screen.getAllByText("Reports 1+").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Raw/internal 1+").length).toBeGreaterThan(0);
   });
 
   it("defaults to my-team scope", async () => {

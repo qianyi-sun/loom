@@ -61,9 +61,11 @@ legacy artifact JSON still says `share_status = "shared"`.
   filters include `artifact_type`, `owner_team_id`, `source_batch_id`,
   `source_trial_id`, `safety_state`, and `provenance_relation`. The default
   list path returns lightweight batch metadata plus bulk-computed trial,
-  reward, cost, and typed-artifact summaries for the current page; it does not
-  materialize every trial trajectory or the full artifact inventory for large
-  historical batches.
+  reward, cost, and typed-artifact summary previews for the current page. The
+  list artifact summary is capped per batch and includes
+  `artifact_summary_truncated=true` when more typed artifacts exist; it does
+  not materialize every trial trajectory or count the full artifact inventory
+  for large historical batches.
 - `GET /api/v1/run-library/batches/{batch_id}`: detail view with owner-team
   label, task/config summary data, provenance, trial rollup, and grouped typed
   artifact inventory. The default detail path reads bounded trial projections
@@ -143,6 +145,8 @@ Run Library changes should cover these cases:
   artifact JSON still says `share_status=shared`.
 - Run Library batch detail does not select full `Trial` rows or materialize
   `trajectory_index` on the default path.
+- Run Library batch list keeps typed-artifact summaries bounded per batch and
+  marks truncated summaries instead of issuing unbounded artifact count scans.
 - Artifact list/export filters cover type, owner team, source batch/trial,
   safety state, and provenance relation.
 - Blocked artifacts return a safe denial and cannot be reused.

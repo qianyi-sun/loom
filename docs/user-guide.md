@@ -333,6 +333,9 @@ Use the SPA top-level **Run Library** page:
 - State, team, artifact-type, search, benchmark, agent, model provider/name,
   provider connection, and provider model filters narrow the table without
   parsing display names or showing raw JSON payloads.
+- Artifact badges on the list are bounded previews; a `+` means the run has
+  more typed artifacts than the list page counted. Open the row or export
+  artifact metadata for the complete set.
 - Platform admins can use the team filter with internal team names across the
   whole platform; ordinary users see only their joined teams.
 
