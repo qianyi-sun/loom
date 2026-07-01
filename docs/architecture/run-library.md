@@ -67,12 +67,14 @@ legacy artifact JSON still says `share_status = "shared"`.
   not materialize every trial trajectory or count the full artifact inventory
   for large historical batches.
 - `GET /api/v1/run-library/batches/{batch_id}`: detail view with owner-team
-  label, task/config summary data, provenance, trial rollup, and grouped typed
-  artifact inventory. The default detail path reads bounded trial projections
-  and typed artifact rows only; it does not select full trial
-  `trajectory_index` payloads for large historical batches. Legacy
-  `trajectory_index["artifacts"]` metadata remains available through the
-  per-trial artifact download/reuse compatibility routes.
+  label, task/config summary data, provenance, trial rollup, and a grouped typed
+  artifact inventory preview. The default detail path reads bounded trial
+  projections and a capped typed-artifact preview; it sets
+  `artifact_inventory_truncated=true` and `artifact_summary_truncated=true` when
+  more typed artifacts exist. It does not select full trial `trajectory_index`
+  payloads or materialize the full typed-artifact table for large historical
+  batches. Legacy `trajectory_index["artifacts"]` metadata remains available
+  through the per-trial artifact download/reuse compatibility routes.
 - `GET /api/v1/run-library/artifacts`: list typed artifact metadata under the
   same Run Library read policy and artifact filters.
 - `GET /api/v1/run-library/artifacts/export`: export safe typed artifact
@@ -113,18 +115,19 @@ For platform-admin sessions, the team filter is populated from the fixed
 internal-team registry so admins can filter by any team name. Non-admin users
 only see teams returned by their session membership.
 
-The Run Library detail page groups artifacts into reports, trajectories,
+The Run Library detail page groups preview artifacts into reports, trajectories,
 reusable outputs, logs/diagnostics, and raw/internal diagnostics. Each typed
 artifact row shows a human-readable artifact type, owner team, source, safety /
 redaction state, and content-hash prefix. Shared safe artifacts expose Download,
 Copy URL, and Reuse actions. Blocked artifacts show only a safe blocked reason
-and do not expose cross-team actions. The default detail payload is backed by
-typed artifact rows and does not materialize full legacy `trajectory_index`
-JSON. The page can export safe typed artifact metadata for the run. The same
-Diagnosis and Debug evidence cards used by Batch Detail appear on Run Library
-detail when the API includes `diagnosis` and `debug_evidence`; diagnosis shows
-the human-readable summary, primary cause, impact, reason clusters, and next
-actions first, while the exact redacted debug JSON remains collapsed.
+and do not expose cross-team actions. The default detail payload is backed by a
+capped typed-artifact preview and does not materialize full legacy
+`trajectory_index` JSON or the complete typed-artifact inventory. The page can
+export safe typed artifact metadata for the run. The same Diagnosis and Debug
+evidence cards used by Batch Detail appear on Run Library detail when the API
+includes `diagnosis` and `debug_evidence`; diagnosis shows the human-readable
+summary, primary cause, impact, reason clusters, and next actions first, while
+the exact redacted debug JSON remains collapsed.
 
 Existing Batch Detail and Trial Detail pages also show owner team, visibility,
 share status, and provenance when those fields are present, so cloned/reused
@@ -143,8 +146,9 @@ Run Library changes should cover these cases:
   artifacts.
 - Typed `safety_state=unsafe` blocks cross-team download/reuse even when legacy
   artifact JSON still says `share_status=shared`.
-- Run Library batch detail does not select full `Trial` rows or materialize
-  `trajectory_index` on the default path.
+- Run Library batch detail does not select full `Trial` rows, materialize
+  `trajectory_index`, or enumerate the full typed-artifact inventory on the
+  default path.
 - Run Library batch list keeps typed-artifact summaries bounded per batch and
   marks truncated summaries instead of issuing unbounded artifact count scans.
 - Artifact list/export filters cover type, owner team, source batch/trial,

@@ -66,6 +66,7 @@ _TRIAL_SUMMARY_STATES = (
     "cancelled",
 )
 _BATCH_LIST_ARTIFACT_SUMMARY_PER_BATCH_LIMIT = 100
+_BATCH_DETAIL_ARTIFACT_PREVIEW_LIMIT = 200
 
 
 class _CloneConfigRequest(BaseModel):
@@ -551,24 +552,39 @@ def _serialize_legacy_artifact(
     }
 
 
-def _artifact_summary(
-    trials: Sequence[Any],
-    typed_by_trial: dict[UUID, list[Artifact]],
-) -> dict[str, int]:
-    summary = _empty_artifact_summary()
-    for trial in trials:
-        typed = typed_by_trial.get(trial.id) or []
-        if typed:
-            for artifact in typed:
-                summary[_artifact_group_for_type(artifact.artifact_type)] += 1
-            continue
-        for item in _artifact_items(getattr(trial, "trajectory_index", None)):
-            summary[_artifact_role(item)] += 1
-    return summary
-
-
 def _empty_artifact_summary() -> dict[str, int]:
     return {role: 0 for role in _ARTIFACT_GROUPS}
+
+
+async def _batch_detail_artifact_preview(
+    session: Any,
+    batch_id: UUID,
+    trials: Sequence[Any],
+) -> tuple[dict[UUID, list[Artifact]], dict[str, int], bool]:
+    typed_by_trial: dict[UUID, list[Artifact]] = {trial.id: [] for trial in trials}
+    summary = _empty_artifact_summary()
+    per_batch_limit = max(int(_BATCH_DETAIL_ARTIFACT_PREVIEW_LIMIT), 0)
+    if per_batch_limit == 0:
+        return typed_by_trial, summary, True
+
+    rows = list(
+        (
+            await session.execute(
+                select(Artifact)
+                .where(Artifact.batch_id == batch_id)
+                .order_by(Artifact.created_at.asc(), Artifact.id.asc())
+                .limit(per_batch_limit + 1),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    truncated = len(rows) > per_batch_limit
+    for artifact in rows[:per_batch_limit]:
+        summary[_artifact_group_for_type(artifact.artifact_type)] += 1
+        if artifact.trial_id is not None:
+            typed_by_trial.setdefault(artifact.trial_id, []).append(artifact)
+    return typed_by_trial, summary, truncated
 
 
 def _artifact_inventory(
@@ -860,17 +876,17 @@ async def _serialize_batch(
     include_debug: bool = False,
 ) -> dict[str, Any]:
     trials = await _batch_trial_projections(session, batch.id)
-    typed_by_trial = await _typed_artifacts_for_trials(session, trials)
-    typed_artifacts = [artifact for artifacts in typed_by_trial.values() for artifact in artifacts]
-    parents_by_artifact = await _parents_for_artifacts(session, typed_artifacts)
+    typed_by_trial, artifact_summary, artifact_summary_truncated = (
+        await _batch_detail_artifact_preview(session, batch.id, trials)
+    )
     reward, cost = _trial_rollup(trials)
     out = {
         **_serialize_batch_base(batch, owner_team),
         "trial_summary": _trial_summary(trials),
         "aggregate_reward": reward,
         "total_cost_usd": cost,
-        "artifact_summary": _artifact_summary(trials, typed_by_trial),
-        "artifact_summary_truncated": False,
+        "artifact_summary": artifact_summary,
+        "artifact_summary_truncated": artifact_summary_truncated,
     }
     if include_debug:
         llm_calls = await _llm_calls_for_trials(session, trials)
@@ -885,6 +901,10 @@ async def _serialize_batch(
             trial_failures=trial_failure_records(trials),
         )
     if include_inventory:
+        typed_artifacts = [
+            artifact for artifacts in typed_by_trial.values() for artifact in artifacts
+        ]
+        parents_by_artifact = await _parents_for_artifacts(session, typed_artifacts)
         out["artifact_inventory"] = _artifact_inventory(
             request,
             ctx,
@@ -894,6 +914,7 @@ async def _serialize_batch(
             typed_by_trial,
             parents_by_artifact,
         )
+        out["artifact_inventory_truncated"] = artifact_summary_truncated
     return out
 
 

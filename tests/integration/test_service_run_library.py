@@ -1001,6 +1001,47 @@ async def test_run_library_batch_detail_default_does_not_select_trajectory_index
     assert "artifact_inventory" in body
 
 
+async def test_run_library_batch_detail_default_uses_bounded_artifact_preview(
+    run_library_setup: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = run_library_setup["app"]
+    raw_b = run_library_setup["raw_b"]
+    batch_shared = run_library_setup["batch_shared"]
+
+    monkeypatch.setattr(
+        run_library_routes,
+        "_BATCH_DETAIL_ARTIFACT_PREVIEW_LIMIT",
+        1,
+        raising=False,
+    )
+
+    async def fail_if_full_artifacts_are_loaded(*_args: object, **_kwargs: object) -> dict:
+        raise AssertionError("default Run Library detail should not load all typed artifacts")
+
+    monkeypatch.setattr(
+        run_library_routes,
+        "_typed_artifacts_for_trials",
+        fail_if_full_artifacts_are_loaded,
+    )
+
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        detail = await ac.get(
+            f"/api/v1/run-library/batches/{batch_shared}",
+            headers={"Authorization": f"Bearer {raw_b}"},
+        )
+
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert body["artifact_summary_truncated"] is True
+    assert body["artifact_inventory_truncated"] is True
+    assert sum(len(items) for items in body["artifact_inventory"].values()) == 1
+
+
 async def test_artifact_filter_is_applied_before_batch_limit(
     run_library_setup: dict[str, object],
 ) -> None:

@@ -340,14 +340,14 @@ Use the SPA top-level **Run Library** page:
   whole platform; ordinary users see only their joined teams.
 
 Open a Library row to inspect task selection, agent/model config, trial rollup,
-debug evidence, provenance, and artifact groups. Safe shared artifacts expose
-Download, Copy URL, and Reuse actions. Blocked artifacts show only a safe reason
-and cannot be downloaded or reused by another team. Typed artifact rows also
-show the artifact type, owner team, source trial/batch, safety/redaction state,
-and content-hash prefix. Large-run detail views use the typed artifact registry
-instead of loading full legacy trial trajectory indexes. Use **Export artifact
-metadata** on the detail page to download safe typed artifact metadata for that
-run as JSONL.
+debug evidence, provenance, and artifact group previews. Safe shared artifacts
+expose Download, Copy URL, and Reuse actions. Blocked artifacts show only a safe
+reason and cannot be downloaded or reused by another team. Typed artifact rows
+also show the artifact type, owner team, source trial/batch, safety/redaction
+state, and content-hash prefix. Large-run detail views use a capped typed
+artifact preview instead of loading full legacy trial trajectory indexes or the
+complete typed artifact inventory. Use **Export artifact metadata** on the
+detail page to download safe typed artifact metadata for that run as JSONL.
 
 Clone config and reuse artifact both create new records in your current team and
 record `source_provenance`. They do not copy the source team's provider

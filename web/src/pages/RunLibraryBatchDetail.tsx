@@ -265,6 +265,7 @@ export default function RunLibraryBatchDetail(): JSX.Element {
   const debugEvidence =
     batch.debug_evidence ?? diagnosticsQuery.data?.debug_evidence ?? null;
   const hasDiagnostics = Boolean(diagnosis || debugEvidence);
+  const artifactInventoryTruncated = batch.artifact_inventory_truncated === true;
 
   return (
     <div className="space-y-6">
@@ -452,6 +453,12 @@ export default function RunLibraryBatchDetail(): JSX.Element {
               Export artifact metadata
             </Button>
           </div>
+          {artifactInventoryTruncated ? (
+            <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              Artifact preview truncated for this large run. Exported metadata
+              contains the complete safe typed set.
+            </p>
+          ) : null}
           {firstSharedArtifact ? (
             <DocsCallout title="Library CLI downloads" tone="info">
               <CommandSnippet

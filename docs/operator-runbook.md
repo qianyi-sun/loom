@@ -2588,8 +2588,9 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    signed object-store URLs. The SPA Trial Detail page should show the
    diagnosis before the raw debug evidence disclosure. The SPA Batch Detail and
    Run Library Batch Detail pages keep the default read lightweight; Run
-   Library detail must use typed artifact rows and bounded trial projections
-   instead of fetching full trial `trajectory_index` rows. Click
+   Library detail must use a capped typed-artifact preview and bounded trial
+   projections instead of fetching full trial `trajectory_index` rows or
+   enumerating complete artifact inventories. Click
    **Load diagnostics** before checking the same diagnosis/debug order.
 13. **Trajectory + artifact download.** `GET /api/v1/trials/{id}/trajectory`
     streams event pages; `GET /api/v1/trials/{id}/trajectory/download`

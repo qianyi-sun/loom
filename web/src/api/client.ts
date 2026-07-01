@@ -538,6 +538,7 @@ export interface RunLibraryBatch {
 
 export interface RunLibraryBatchDetail extends RunLibraryBatch {
   artifact_inventory: ArtifactInventory;
+  artifact_inventory_truncated?: boolean;
 }
 
 export interface RunLibraryBatchList {
