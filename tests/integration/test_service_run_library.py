@@ -560,6 +560,85 @@ async def test_run_library_batch_list_does_not_load_trials_without_artifact_filt
     assert calls == []
 
 
+async def test_run_library_batch_list_caps_artifact_summary_per_batch(
+    run_library_setup: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = run_library_setup["app"]
+    raw_b = run_library_setup["raw_b"]
+    batch_shared = run_library_setup["batch_shared"]
+    trial_shared = run_library_setup["trial_shared"]
+    team_a = run_library_setup["team_a"]
+    postgres_url = run_library_setup["postgres_url"]
+
+    monkeypatch.setattr(
+        run_library_routes,
+        "_BATCH_LIST_ARTIFACT_SUMMARY_PER_BATCH_LIMIT",
+        3,
+        raising=False,
+    )
+
+    now = datetime.now(UTC)
+    sync_engine = create_engine(str(postgres_url))
+    with sync_engine.begin() as conn:
+        for idx in range(5):
+            conn.execute(
+                insert(Artifact).values(
+                    id=uuid4(),
+                    artifact_type="training_data_export",
+                    artifact_schema_version="1.0",
+                    name=f"Large export shard {idx}",
+                    team_id=team_a,
+                    batch_id=batch_shared,
+                    trial_id=trial_shared,
+                    created_by={
+                        "kind": "trial",
+                        "batch_id": str(batch_shared),
+                        "trial_id": str(trial_shared),
+                    },
+                    content_hash="sha256:" + (f"{idx:x}" * 64)[:64],
+                    storage={
+                        "backend": "object_store",
+                        "bucket": "artifacts",
+                        "key": f"large/{idx}.jsonl",
+                        "media_type": "application/jsonl",
+                        "size_bytes": 1024,
+                    },
+                    visibility="org",
+                    share_status="shared",
+                    redaction_state="redacted",
+                    safety_state="safe",
+                    retention={"class": "shared_reusable", "expires_at": None},
+                    provenance={
+                        "batch_id": str(batch_shared),
+                        "trial_id": str(trial_shared),
+                        "source_trial_ids": [str(trial_shared)],
+                        "relation": "produced_from",
+                    },
+                    artifact_metadata={"shard": idx},
+                    created_at=now,
+                )
+            )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        all_teams = await ac.get(
+            "/api/v1/run-library/batches?scope=all",
+            headers={"Authorization": f"Bearer {raw_b}"},
+        )
+
+    assert all_teams.status_code == 200, all_teams.text
+    shared = next(
+        item for item in all_teams.json()["items"] if item["id"] == str(batch_shared)
+    )
+    assert shared["artifact_summary_truncated"] is True
+    assert sum(shared["artifact_summary"].values()) <= 3
+
+
 async def test_run_library_filters_by_structured_batch_fields(
     run_library_setup: dict[str, object],
 ) -> None:

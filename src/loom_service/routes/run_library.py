@@ -12,7 +12,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, or_, select
 
 from loom.db.schema import Artifact, ArtifactLineageEdge, Batch, LlmCall, Team, Trial
 from loom.security.redaction import redact_mapping, redact_text
@@ -65,6 +65,7 @@ _TRIAL_SUMMARY_STATES = (
     "failed",
     "cancelled",
 )
+_BATCH_LIST_ARTIFACT_SUMMARY_PER_BATCH_LIMIT = 100
 
 
 class _CloneConfigRequest(BaseModel):
@@ -869,6 +870,7 @@ async def _serialize_batch(
         "aggregate_reward": reward,
         "total_cost_usd": cost,
         "artifact_summary": _artifact_summary(trials, typed_by_trial),
+        "artifact_summary_truncated": False,
     }
     if include_debug:
         llm_calls = await _llm_calls_for_trials(session, trials)
@@ -944,24 +946,34 @@ async def _batch_list_trial_rollups(
 async def _batch_list_artifact_summaries(
     session: Any,
     batch_ids: Sequence[UUID],
-) -> dict[UUID, dict[str, int]]:
+) -> tuple[dict[UUID, dict[str, int]], set[UUID]]:
     summaries = {batch_id: _empty_artifact_summary() for batch_id in batch_ids}
+    truncated: set[UUID] = set()
     if not batch_ids:
-        return {}
+        return summaries, truncated
 
-    rows = (
-        await session.execute(
-            select(Artifact.batch_id, Artifact.artifact_type, func.count(Artifact.id))
-            .where(Artifact.batch_id.in_(batch_ids))
-            .group_by(Artifact.batch_id, Artifact.artifact_type),
+    per_batch_limit = max(int(_BATCH_LIST_ARTIFACT_SUMMARY_PER_BATCH_LIMIT), 0)
+    if per_batch_limit == 0:
+        return summaries, set(batch_ids)
+
+    for batch_id in batch_ids:
+        artifact_types = (
+            (
+                await session.execute(
+                    select(Artifact.artifact_type)
+                    .where(Artifact.batch_id == batch_id)
+                    .limit(per_batch_limit + 1),
+                )
+            )
+            .scalars()
+            .all()
         )
-    ).all()
-    for batch_id, artifact_type, count in rows:
-        if batch_id is None:
-            continue
+        if len(artifact_types) > per_batch_limit:
+            truncated.add(batch_id)
         summary = summaries.setdefault(batch_id, _empty_artifact_summary())
-        summary[_artifact_group_for_type(str(artifact_type))] += int(count)
-    return summaries
+        for artifact_type in artifact_types[:per_batch_limit]:
+            summary[_artifact_group_for_type(str(artifact_type))] += 1
+    return summaries, truncated
 
 
 def _serialize_batch_list_item(
@@ -969,6 +981,7 @@ def _serialize_batch_list_item(
     owner_team: Team,
     trial_rollup: tuple[dict[str, int], float | None, float],
     artifact_summary: dict[str, int],
+    artifact_summary_truncated: bool = False,
 ) -> dict[str, Any]:
     trial_summary, reward, cost = trial_rollup
     return {
@@ -977,6 +990,7 @@ def _serialize_batch_list_item(
         "aggregate_reward": reward,
         "total_cost_usd": cost,
         "artifact_summary": artifact_summary,
+        "artifact_summary_truncated": artifact_summary_truncated,
     }
 
 
@@ -1156,7 +1170,9 @@ async def list_run_library_batches(
     if not artifact_filtering:
         batch_ids = [batch.id for batch, _team in rows]
         trial_rollups = await _batch_list_trial_rollups(session, batch_ids)
-        artifact_summaries = await _batch_list_artifact_summaries(session, batch_ids)
+        artifact_summaries, truncated_artifact_summaries = await (
+            _batch_list_artifact_summaries(session, batch_ids)
+        )
         for batch, team in rows:
             item = _serialize_batch_list_item(
                 batch,
@@ -1166,6 +1182,7 @@ async def list_run_library_batches(
                     (_empty_trial_summary(), None, 0.0),
                 ),
                 artifact_summaries.get(batch.id, _empty_artifact_summary()),
+                batch.id in truncated_artifact_summaries,
             )
             serialized.append(item)
     else:

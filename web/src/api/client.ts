@@ -531,6 +531,7 @@ export interface RunLibraryBatch {
   trial_summary: Record<string, number>;
   aggregate_reward: number | null;
   artifact_summary: ArtifactSummary;
+  artifact_summary_truncated?: boolean;
   debug_evidence?: DebugEvidence;
   diagnosis?: DiagnosisReport;
 }

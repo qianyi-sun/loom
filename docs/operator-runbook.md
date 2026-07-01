@@ -2602,9 +2602,9 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
 14. **Run Library sharing.** Confirm the completed source run appears in Run
     Library -> My team for Team A and Run Library -> All teams for Team B.
     Evidence must include the owner-team label, completed state, score/cost
-    summary, task/agent/model summary, diagnosis, debug evidence, and
-    artifact groups. Team B must be able to download a safe artifact only
-    through the Run Library service URL.
+    summary, task/agent/model summary, bounded artifact badges, diagnosis,
+    debug evidence, and artifact groups. Team B must be able to download a safe
+    artifact only through the Run Library service URL.
 15. **Clone and reuse.** From Team B, clone config from Team A's completed run.
     If the source run used a provider connection, select a Team B-owned
     provider connection before cloning. Then reuse a safe artifact from the
