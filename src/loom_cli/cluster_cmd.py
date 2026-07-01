@@ -101,6 +101,7 @@ class ComponentStatus:
     generation: int | None = None
     observed_generation: int | None = None
     updated: int | None = None
+    pod_health_ok: bool = True
     last_restart_reason: str | None = None
     note: str | None = None
 
@@ -118,6 +119,8 @@ class ComponentStatus:
         replica check is dropped for desired=0 since available
         only makes sense when there's something to be available.
         """
+        if not self.pod_health_ok:
+            return False
         if not self.rollout_converged:
             return False
         if self.desired == 0:
@@ -251,6 +254,7 @@ def _format_json(status: ClusterStatus) -> str:
                 "generation": c.generation,
                 "observed_generation": c.observed_generation,
                 "updated": c.updated,
+                "pod_health_ok": c.pod_health_ok,
             }
             for c in status.components
         ],
@@ -330,6 +334,123 @@ def _deployment_convergence_note(
     return None
 
 
+def _combine_notes(*notes: str | None) -> str | None:
+    present = [note for note in notes if note]
+    if not present:
+        return None
+    return "; ".join(present)
+
+
+_BLOCKING_POD_WAITING_REASONS = frozenset({
+    "CrashLoopBackOff",
+    "CreateContainerConfigError",
+    "CreateContainerError",
+    "ErrImagePull",
+    "ImagePullBackOff",
+    "InvalidImageName",
+    "RunContainerError",
+})
+
+_BLOCKING_POD_TERMINATED_REASONS = frozenset({
+    "Error",
+    "OOMKilled",
+    "StartError",
+})
+
+
+def _get_field(obj: Any, name: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _labels(obj: Any) -> dict[str, str]:
+    raw = _get_field(obj, "labels", {}) or {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): str(value) for key, value in raw.items()}
+
+
+def _deployment_selector_labels(deployment: Any, *, k8s_name: str) -> dict[str, str]:
+    spec = _get_field(deployment, "spec")
+    selector = _get_field(spec, "selector")
+    match_labels = _get_field(selector, "match_labels")
+    if isinstance(match_labels, dict) and match_labels:
+        return {str(key): str(value) for key, value in match_labels.items()}
+    return {"app": k8s_name}
+
+
+def _pod_matches_selector(pod: Any, selector: dict[str, str]) -> bool:
+    pod_labels = _labels(_get_field(pod, "metadata"))
+    return all(pod_labels.get(key) == value for key, value in selector.items())
+
+
+def _container_images(pod_spec: Any) -> frozenset[str]:
+    images: set[str] = set()
+    for container in _get_field(pod_spec, "containers", []) or []:
+        image = _get_field(container, "image")
+        if image:
+            images.add(str(image))
+    return frozenset(images)
+
+
+def _deployment_template_images(deployment: Any) -> frozenset[str]:
+    template = _get_field(_get_field(deployment, "spec"), "template")
+    return _container_images(_get_field(template, "spec"))
+
+
+def _pod_template_matches_deployment(pod: Any, deployment_images: frozenset[str]) -> bool:
+    if not deployment_images:
+        return True
+    pod_images = _container_images(_get_field(pod, "spec"))
+    return deployment_images.issubset(pod_images)
+
+
+def _pod_container_failure_reasons(pod: Any) -> list[str]:
+    reasons: list[str] = []
+    statuses = _get_field(_get_field(pod, "status"), "container_statuses", []) or []
+    for container_status in statuses:
+        state = _get_field(container_status, "state")
+        waiting = _get_field(state, "waiting")
+        waiting_reason = _get_field(waiting, "reason")
+        if waiting_reason in _BLOCKING_POD_WAITING_REASONS:
+            reasons.append(str(waiting_reason))
+            continue
+        terminated = _get_field(state, "terminated")
+        terminated_reason = _get_field(terminated, "reason")
+        if terminated_reason in _BLOCKING_POD_TERMINATED_REASONS:
+            reasons.append(str(terminated_reason))
+            continue
+    phase = _get_field(_get_field(pod, "status"), "phase")
+    if phase == "Failed":
+        reasons.append("Failed")
+    return sorted(set(reasons))
+
+
+def _deployment_pod_health_note(
+    deployment: Any,
+    *,
+    k8s_name: str,
+    pods: list[Any],
+) -> str | None:
+    selector = _deployment_selector_labels(deployment, k8s_name=k8s_name)
+    deployment_images = _deployment_template_images(deployment)
+    failures: list[str] = []
+    for pod in pods:
+        if not _pod_matches_selector(pod, selector):
+            continue
+        if not _pod_template_matches_deployment(pod, deployment_images):
+            continue
+        reasons = _pod_container_failure_reasons(pod)
+        if not reasons:
+            continue
+        pod_name = str(_get_field(_get_field(pod, "metadata"), "name", "<unknown>"))
+        failures.append(f"{pod_name} {', '.join(reasons)}")
+    if not failures:
+        return None
+    return f"pod-health: {'; '.join(sorted(failures))}"
+
+
 def _effective_kube_context(context: str | None) -> str | None:
     if context:
         return context
@@ -353,6 +474,8 @@ def _collect_workload(
     deployments: tuple[tuple[str, str], ...],
     daemonsets: tuple[tuple[str, str], ...],
     statefulsets: tuple[tuple[str, str], ...],
+    *,
+    pods: list[Any] | None = None,
 ) -> list[ComponentStatus]:
     """Read each workload's ready/desired counts. A workload that
     isn't deployed at all surfaces as ready=0/desired=0 with a
@@ -374,6 +497,17 @@ def _collect_workload(
             generation = _int_or_none(getattr(metadata, "generation", None))
             observed_generation = _int_or_none(getattr(stat, "observed_generation", None))
             updated = _int_or_none(getattr(stat, "updated_replicas", None))
+            convergence_note = _deployment_convergence_note(
+                generation=generation,
+                observed_generation=observed_generation,
+                updated=updated,
+                desired=desired,
+            )
+            pod_health_note = _deployment_pod_health_note(
+                d,
+                k8s_name=k8s_name,
+                pods=pods or [],
+            ) if desired > 0 else None
             out.append(
                 ComponentStatus(
                     name=display_name,
@@ -384,12 +518,8 @@ def _collect_workload(
                     generation=generation,
                     observed_generation=observed_generation,
                     updated=updated,
-                    note=_deployment_convergence_note(
-                        generation=generation,
-                        observed_generation=observed_generation,
-                        updated=updated,
-                        desired=desired,
-                    ),
+                    pod_health_ok=pod_health_note is None,
+                    note=_combine_notes(convergence_note, pod_health_note),
                 )
             )
         except Exception as exc:  # ApiException 404 most commonly
@@ -522,16 +652,20 @@ def collect_status(
     """Pure-collection function — the api clients are passed in so
     tests can inject fakes. Keeps the network-touching glue
     (`_load_clients`) out of the assertion surface."""
+    namespace_pods, pod_list_error = _list_namespace_pods(core_v1, namespace)
     components = _collect_workload(
         apps_v1,
         namespace,
         _COMPONENT_DEPLOYMENTS,
         _COMPONENT_DAEMONSETS,
         _COMPONENT_STATEFULSETS,
+        pods=namespace_pods,
     )
     ingresses = _collect_ingresses(networking_v1, namespace)
     warnings: list[str] = []
     blocking_warnings: list[str] = _collect_kube_system_rollout_blockers(core_v1)
+    if pod_list_error is not None:
+        blocking_warnings.append(pod_list_error)
     warnings.extend(blocking_warnings)
     # Surface common missing-secret cases without poking each
     # component's pod-level events (that's preflight's job; this is
@@ -551,6 +685,16 @@ def collect_status(
         warnings=warnings,
         blocking_warnings=blocking_warnings,
     )
+
+
+def _list_namespace_pods(core_v1: Any, namespace: str) -> tuple[list[Any], str | None]:
+    try:
+        return list(core_v1.list_namespaced_pod(namespace=namespace).items), None
+    except Exception as exc:
+        return [], (
+            f"cannot inspect managed pods in namespace {namespace}: "
+            f"{_exception_to_note(exc)}"
+        )
 
 
 def _secret_present(api: Any, namespace: str, name: str) -> bool:
