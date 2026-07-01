@@ -18,6 +18,7 @@ _LOOM_WORKER_ENVS = [
     "LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC",
     "LOOM_WORKER_MINIO_OPERATION_ATTEMPTS",
     "LOOM_WORKER_DOCKER_API_TIMEOUT_SEC",
+    "LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT",
     "LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC",
     "LOOM_WORKER_MAX_CONCURRENT",
     "LOOM_WORKER_POOL_NAME",
@@ -55,6 +56,7 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     monkeypatch.setenv("LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC", "600")
     monkeypatch.setenv("LOOM_WORKER_MINIO_OPERATION_ATTEMPTS", "4")
     monkeypatch.setenv("LOOM_WORKER_DOCKER_API_TIMEOUT_SEC", "900")
+    monkeypatch.setenv("LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT", "2")
     monkeypatch.setenv("LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC", "12.5")
     monkeypatch.setenv("LOOM_WORKER_MAX_CONCURRENT", "10")
     monkeypatch.setenv("LOOM_WORKER_POOL_NAME", "gb10-arm64")
@@ -75,6 +77,7 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     assert s.minio_operation_timeout_sec == 600
     assert s.minio_operation_attempts == 4
     assert s.docker_api_timeout_sec == 900
+    assert s.trial_cache_build_max_concurrent == 2
     assert s.task_materialize_timeout_sec == 12.5
     assert s.blocking_io_max_workers == 40
     assert s.idle_exit_after_seconds == 300
@@ -83,9 +86,7 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     assert s.heartbeat_interval_sec == 5.0
     assert s.trajectory_cache_dir == tmp_path
     assert s.hostname == "trt-gb10-7"
-    assert str(s.subprocess_gateway_url) == (
-        "http://host.docker.internal:30443/openai/v1"
-    )
+    assert str(s.subprocess_gateway_url) == ("http://host.docker.internal:30443/openai/v1")
     assert s.token.get_secret_value() == "loom_w_test"
 
 
@@ -100,6 +101,7 @@ def test_idle_exit_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> No
     s = WorkerSettings(_env_file=None)
 
     assert s.idle_exit_after_seconds is None
+    assert s.trial_cache_build_max_concurrent == 1
 
 
 def test_token_is_secret(monkeypatch: pytest.MonkeyPatch) -> None:

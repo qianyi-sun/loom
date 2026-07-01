@@ -129,6 +129,16 @@
     "default": "3600",
     "required": false
   },
+  "storage_auth_kind": {
+    "annotation": "<class 'str'>",
+    "default": "'static_keys'",
+    "required": false
+  },
+  "storage_backend": {
+    "annotation": "<class 'str'>",
+    "default": "'minio'",
+    "required": false
+  },
   "team_registration_open": {
     "annotation": "<class 'bool'>",
     "default": "False",

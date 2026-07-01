@@ -542,6 +542,12 @@ Workers also size their Python blocking-I/O executor from concurrency as
 covers blocking Docker, S3/MinIO, Hugging Face, and filesystem calls and
 must not be counted as extra trial capacity.
 
+Layered trial-cache image builds are gated separately by
+`LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT` (default `1`). The rendered
+k8s Deployment keeps shared-node Docker builds serialized even when
+`LOOM_WORKER_MAX_CONCURRENT` is higher, because different cold cache keys can
+still contend on the same host Docker/containerd path.
+
 Docker SDK and S3 object-store behavior are separately tunable. The worker
 passes `LOOM_WORKER_DOCKER_API_TIMEOUT_SEC` into every worker-created
 docker-py client so large image pulls, task Dockerfile builds, and task

@@ -833,6 +833,7 @@ increase queued connections without removing the token-row write hotspot.
 | `trial_cache_ttl_hours` | `168` (7d) | Layered images older than this are pruned on the next eviction sweep. |
 | `trial_cache_min_free_gb` | `20` | Capacity backstop — when free disk drops below this, oldest-by-creation entries are evicted first. |
 | `trial_cache_build_lock_timeout_sec` | `1800.0` | Cluster-wide builder-slot TTL. The slot's owner refreshes every 60 s while building. |
+| `trial_cache_build_max_concurrent` | `1` | Daemon-wide cap for concurrent layered trial-cache Docker builds across different cache keys. Keep `1` on shared OLDLAB/k8s Docker daemons; raise only for isolated daemon hosts after load testing. |
 | `subprocess_gateway_url` | unset; k8s render injects `worker_subprocess_gateway_url` | Sandbox-facing gateway URL for subprocess agents. It may be the OpenAI facade default or a bare gateway-router URL; the worker normalizes it to the adapter's facade dialect before injecting SDK env vars. |
 | `docker_api_timeout_sec` | `1800` | Docker SDK API timeout for worker-created clients. Keep this near the largest expected pull/build budget so docker-py does not fail long pulls, Dockerfile builds, or sidecar startup at its shorter default. |
 | `minio_max_pool_connections` | `256` | Worker-side boto3 S3 connection pool size. Size with `max_concurrent` because task materialization, artifacts, and trajectory upload overlap during sweeps. |
@@ -892,6 +893,13 @@ but each worker pays the build cost once).
   and verify the worker has Docker Hub/registry auth mounted. The
   task-level `build_timeout_sec` still bounds Dockerfile builds; this
   knob prevents docker-py itself from timing out first.
+- **Concurrent layered image builds fail with apt/dpkg/containerd errors or
+  killed setup containers on a shared worker host** → keep
+  `trial_cache_build_max_concurrent=1` for that daemon group and check
+  Docker/containerd disk and I/O pressure before raising it. This knob limits
+  different cold `(task_image, agent)` cache keys that would otherwise build at
+  the same time against one host daemon; it does not reduce already-warm trial
+  concurrency.
 - **Trial fails with `failure_reason=task_image_build_timeout` or a message
   like `building Docker image ... exceeded 1800s`** → treat it as a platform
   setup failure, not benchmark/model evidence. For GB10/ARM64 or mixed-arch
@@ -2956,6 +2964,11 @@ link it from #217; do not merge incomplete evidence.
   as `max(32, min(LOOM_WORKER_MAX_CONCURRENT * 4, 256))` when unset.
   This is the thread pool for blocking Docker, S3/MinIO, Hugging Face,
   and filesystem calls; it is not additional trial capacity.
+- Layered trial-cache image builds have their own daemon-wide cap:
+  `LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT`. Leave it at `1` for shared
+  OLDLAB/k8s Docker daemons so cold cache-key setup containers serialize even
+  when `LOOM_WORKER_MAX_CONCURRENT` admits many warm trials. Raise it only for
+  isolated Docker daemons with measured disk/containerd headroom.
 - Docker and S3 have separate worker-side timeout/pool knobs. Use
   `LOOM_WORKER_DOCKER_API_TIMEOUT_SEC` for docker-py read timeouts during
   large pulls/builds/sidecars, and the `LOOM_WORKER_MINIO_*` timeout and
