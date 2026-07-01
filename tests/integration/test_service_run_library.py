@@ -890,6 +890,38 @@ async def test_run_library_batch_detail_default_does_not_materialize_llm_calls(
     assert "diagnosis" not in body
 
 
+async def test_run_library_batch_detail_default_does_not_select_trajectory_index(
+    run_library_setup: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = run_library_setup["app"]
+    raw_b = run_library_setup["raw_b"]
+    batch_shared = run_library_setup["batch_shared"]
+    original_select = run_library_routes.select
+
+    def fail_on_full_trial_row_select(*entities: object, **kwargs: object) -> object:
+        if any(entity is Trial for entity in entities):
+            raise AssertionError("default Run Library detail should not load full Trial rows")
+        return original_select(*entities, **kwargs)
+
+    monkeypatch.setattr(run_library_routes, "select", fail_on_full_trial_row_select)
+
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        detail = await ac.get(
+            f"/api/v1/run-library/batches/{batch_shared}",
+            headers={"Authorization": f"Bearer {raw_b}"},
+        )
+
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert body["owner_team"]["name"] == "Alpha Research"
+    assert "artifact_inventory" in body
+
+
 async def test_artifact_filter_is_applied_before_batch_limit(
     run_library_setup: dict[str, object],
 ) -> None:

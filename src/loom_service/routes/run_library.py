@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Annotated, Any, cast
 from uuid import UUID
 
@@ -83,6 +85,23 @@ class _ReuseArtifactRequest(BaseModel):
 class _VisibilityPatch(BaseModel):
     visibility: str
     share_status: str
+
+
+@dataclass(frozen=True)
+class _RunLibraryTrialProjection:
+    id: UUID
+    team_id: UUID
+    batch_id: UUID | None
+    task_id: str
+    config: dict[str, Any]
+    state: str
+    failure_reason: str | None
+    failure_message: str | None
+    result: dict[str, Any] | None
+    started_at: datetime | None
+    provider_connection_id: UUID | None
+    provider_model_id: str | None
+    worker_id: UUID | None
 
 
 def _is_owner_or_admin(ctx: Any, team_id: UUID) -> bool:
@@ -313,7 +332,7 @@ def _blocked_reason(item: dict[str, Any]) -> str:
 
 async def _typed_artifacts_for_trials(
     session: Any,
-    trials: Sequence[Trial],
+    trials: Sequence[Any],
 ) -> dict[UUID, list[Artifact]]:
     trial_ids = [trial.id for trial in trials]
     if not trial_ids:
@@ -532,7 +551,7 @@ def _serialize_legacy_artifact(
 
 
 def _artifact_summary(
-    trials: Sequence[Trial],
+    trials: Sequence[Any],
     typed_by_trial: dict[UUID, list[Artifact]],
 ) -> dict[str, int]:
     summary = _empty_artifact_summary()
@@ -542,7 +561,7 @@ def _artifact_summary(
             for artifact in typed:
                 summary[_artifact_group_for_type(artifact.artifact_type)] += 1
             continue
-        for item in _artifact_items(trial.trajectory_index):
+        for item in _artifact_items(getattr(trial, "trajectory_index", None)):
             summary[_artifact_role(item)] += 1
     return summary
 
@@ -554,7 +573,7 @@ def _empty_artifact_summary() -> dict[str, int]:
 def _artifact_inventory(
     request: Request,
     ctx: Any,
-    trials: Sequence[Trial],
+    trials: Sequence[Any],
     batch: Batch,
     owner_team: Team,
     typed_by_trial: dict[UUID, list[Artifact]],
@@ -577,14 +596,14 @@ def _artifact_inventory(
                 if entry is not None:
                     grouped[entry["role"]].append(entry)
             continue
-        for item in _artifact_items(trial.trajectory_index):
+        for item in _artifact_items(getattr(trial, "trajectory_index", None)):
             entry = _serialize_legacy_artifact(request, trial, owner_team, item)
             if entry is not None:
                 grouped[entry["role"]].append(entry)
     return grouped
 
 
-def _trial_summary(trials: Sequence[Trial]) -> dict[str, int]:
+def _trial_summary(trials: Sequence[Any]) -> dict[str, int]:
     summary = _empty_trial_summary()
     for trial in trials:
         state = str(trial.state)
@@ -613,7 +632,7 @@ def _rollup_result(result: dict[str, Any] | None) -> tuple[float | None, float]:
     return reward_f, cost_f
 
 
-def _trial_rollup(trials: Sequence[Trial]) -> tuple[float | None, float]:
+def _trial_rollup(trials: Sequence[Any]) -> tuple[float | None, float]:
     reward_sum = 0.0
     reward_count = 0
     cost_total = 0.0
@@ -736,9 +755,52 @@ async def _batch_trials(session: Any, batch_id: UUID) -> list[Trial]:
     )
 
 
+async def _batch_trial_projections(
+    session: Any,
+    batch_id: UUID,
+) -> list[_RunLibraryTrialProjection]:
+    rows = (
+        await session.execute(
+            select(
+                Trial.id,
+                Trial.team_id,
+                Trial.batch_id,
+                Trial.task_id,
+                Trial.config,
+                Trial.state,
+                Trial.failure_reason,
+                Trial.failure_message,
+                Trial.result,
+                Trial.started_at,
+                Trial.provider_connection_id,
+                Trial.provider_model_id,
+                Trial.worker_id,
+            ).where(Trial.batch_id == batch_id),
+        )
+    ).all()
+    return [
+        _RunLibraryTrialProjection(
+            id=row.id,
+            team_id=row.team_id,
+            batch_id=row.batch_id,
+            task_id=row.task_id,
+            config=row.config,
+            state=row.state,
+            failure_reason=row.failure_reason,
+            failure_message=row.failure_message,
+            result=row.result,
+            started_at=row.started_at,
+            provider_connection_id=row.provider_connection_id,
+            provider_model_id=row.provider_model_id,
+            worker_id=row.worker_id,
+        )
+        for row in rows
+    ]
+
+
 async def _llm_calls_for_trials(
     session: Any,
-    trials: Sequence[Trial],
+    trials: Sequence[Any],
 ) -> list[LlmCall]:
     trial_ids = [trial.id for trial in trials]
     if not trial_ids:
@@ -796,7 +858,7 @@ async def _serialize_batch(
     include_inventory: bool = False,
     include_debug: bool = False,
 ) -> dict[str, Any]:
-    trials = await _batch_trials(session, batch.id)
+    trials = await _batch_trial_projections(session, batch.id)
     typed_by_trial = await _typed_artifacts_for_trials(session, trials)
     typed_artifacts = [artifact for artifacts in typed_by_trial.values() for artifact in artifacts]
     parents_by_artifact = await _parents_for_artifacts(session, typed_artifacts)
