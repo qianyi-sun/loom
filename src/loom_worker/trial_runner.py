@@ -41,6 +41,31 @@ from loom_worker.vllm_registry import WorkerVLLMRegistry
 logger = logging.getLogger(__name__)
 
 
+# Buffer added on top of the task's declared `[agent].timeout_sec`
+# when we override SubprocessAgent.step_token_ttl_sec. Covers exec /
+# cleanup / clock-skew overhead so a step that runs right up to its
+# declared timeout still sees a valid JWT for any retry mid-flight.
+_STEP_JWT_TTL_BUFFER_SEC = 300
+
+
+def _apply_step_token_ttl(agent: object, task_config: TaskConfig) -> None:
+    """Extend the agent's step-JWT TTL so it outlives the task's declared
+    agent timeout. Duck-typed so agents without `step_token_ttl_sec`
+    (oracle, litellm) are unaffected.
+
+    Root cause: SubprocessAgent snapshots the step-JWT into the child's
+    OPENAI_API_KEY / ANTHROPIC_API_KEY / … env at exec time and never
+    re-reads `/run/loom/step-jwt`. If the JWT's TTL is shorter than the
+    effective agent timeout, retries mid-step (e.g. after an upstream
+    502/504) outlive the token and get 401 from the gateway.
+    """
+    if not hasattr(agent, "step_token_ttl_sec"):
+        return
+    agent.step_token_ttl_sec = (
+        int(task_config.agent.timeout_sec) + _STEP_JWT_TTL_BUFFER_SEC
+    )
+
+
 # (state, failure_reason, failure_message) → bool: True if the Control Plane
 # accepted the transition, False if the worker has lost its claim (fenced).
 StatePatchCallback = Callable[[str, str | None, str | None], Awaitable[bool]]
@@ -225,6 +250,7 @@ class LocalTrialRunner:
             ]
         if hasattr(agent, "request_params"):
             agent.request_params = dict(self.trial_config.request_params)
+        _apply_step_token_ttl(agent, self.task_config)
         verifier = self.verifier_factory()
 
         ctx = TrialContext(

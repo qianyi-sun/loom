@@ -2,4 +2,10 @@
 # Keep this list in sync with runtime_contract.required_packages.
 aider-chat==0.86.2
 mini-swe-agent==2.4.2
-terminal-bench-core==0.1.1
+# terminal-bench: upstream pyproject at pinned commit 91e10457 declares
+# version 0.1.0, which was never published to PyPI. The terminus-2
+# adapter installs from the git ref at trial time via
+# `packages/loom-launcher/loom_launcher/adapters/_terminus_2_runtime.py`.
+# Declared here (not consumed by Dockerfile's grep-based venv setup)
+# so the catalog manifest test stays green.
+terminal-bench@git+https://github.com/laude-institute/terminal-bench.git@91e10457b5410f16c44364da1a34cb6de8c488a5
