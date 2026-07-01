@@ -273,17 +273,20 @@ loom cluster status [--context NAME] [--namespace NS] [--format table|json]
 map above:
 
 - Deployments: `loom-service`, `loom-control-plane`, `loom-llm-gateway`,
-  `loom-web`.
-- DaemonSet: `loom-worker`.
+  `loom-web`, `loom-worker`.
 - StatefulSets: `postgres`, `minio`.
 - Ingress host/path/TLS visibility.
 - Warning when the `loom-secrets` Secret is absent.
+- Deployment rollout convergence: `observedGeneration >= generation` and
+  `updatedReplicas >= spec.replicas`.
+- Visible kube-system rollout-controller failures for `kube-apiserver`,
+  `kube-controller-manager`, `kube-scheduler`, or `etcd`.
 
 Exit codes:
 
 | Code | Meaning |
 |---|---|
-| `0` | Cluster is reachable and every expected component is ready. |
+| `0` | Cluster is reachable and every expected component is ready, all Deployment generations are observed, updated replicas have converged, and visible kube-system rollout-controller pods are healthy. |
 | `1` | Cluster is reachable but at least one expected component is not ready. |
 | `2` | Cluster is unreachable, kubeconfig/context is invalid, or the optional `kubernetes` package is not installed. |
 
@@ -628,8 +631,12 @@ loom cluster preflight \
 `loom cluster up` accepts the same environment and backup-manifest flags and
 threads them through preflight before apply. Pass the same `--config` so the
 preflight and rendered manifest prove the same storage boundary and target
-schema surface. `loom cluster down --with-volumes` and `--delete-namespace`
-refuse protected environments
+schema surface. After readiness passes, `up` compares rendered Deployment
+container images with the live Deployment specs and fails if a concurrent
+operator mutation drifted the live image away from the release manifest. On
+success, `up` prints the rendered and live image for each managed
+Deployment/container so the rollout log captures image-convergence evidence.
+`loom cluster down --with-volumes` and `--delete-namespace` refuse protected environments
 unless the manifest is recent and the operator passes `--acknowledge-data-loss
 <environment>`. This guard distinguishes ordinary pod or service restarts from
 destructive state removal.

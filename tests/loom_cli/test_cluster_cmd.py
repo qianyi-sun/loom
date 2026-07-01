@@ -18,10 +18,13 @@ from loom_cli.__main__ import main
 from loom_cli.cluster_cmd import (
     ClusterStatus,
     ComponentStatus,
+    DeploymentImageCheck,
     IngressEndpoint,
     _format_json,
     _format_table,
     collect_status,
+    rendered_image_checks,
+    rendered_image_drifts,
 )
 
 # ──────────────────────────────────────────────────────────────────────
@@ -50,8 +53,12 @@ class _Spec:
 
 class _Workload:
     def __init__(
-        self, *, spec: object | None = None, status: object | None = None,
+        self, *,
+        metadata: object | None = None,
+        spec: object | None = None,
+        status: object | None = None,
     ) -> None:
+        self.metadata = metadata
         self.spec = spec
         self.status = status
 
@@ -104,11 +111,15 @@ class _FakeNetworkingV1:
 class _FakeCoreV1:
     def __init__(self, secrets: set[str] | None = None) -> None:
         self.secrets = secrets or set()
+        self.pods_by_namespace: dict[str, list[Any]] = {}
 
     def read_namespaced_secret(self, *, name: str, namespace: str) -> object:
         if name not in self.secrets:
             raise _FakeApiException(404)
         return _Spec(name=name)
+
+    def list_namespaced_pod(self, *, namespace: str) -> object:
+        return _Spec(items=self.pods_by_namespace.get(namespace, []))
 
 
 class _FakeStorageV1:
@@ -124,12 +135,29 @@ class _FakeStorageV1:
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _make_deployment(ready: int, desired: int, available: int | None = None) -> _Workload:
+def _make_deployment(
+    ready: int,
+    desired: int,
+    available: int | None = None,
+    *,
+    generation: int = 1,
+    observed_generation: int = 1,
+    updated: int | None = None,
+    image: str = "loom-service:current",
+) -> _Workload:
     return _Workload(
-        spec=_Spec(replicas=desired),
+        metadata=_Spec(generation=generation),
+        spec=_Spec(
+            replicas=desired,
+            template=_Spec(
+                spec=_Spec(containers=[_Spec(name="app", image=image)]),
+            ),
+        ),
         status=_Spec(
             ready_replicas=ready,
             available_replicas=available if available is not None else ready,
+            observed_generation=observed_generation,
+            updated_replicas=updated if updated is not None else ready,
         ),
     )
 
@@ -217,6 +245,157 @@ def test_collect_status_with_web_partially_up_is_not_ready() -> None:
     assert not status.all_ready
 
 
+def test_collect_status_stale_deployment_generation_is_not_ready() -> None:
+    apps = _fully_ready_apps()
+    apps.deployments["loom-service"] = _make_deployment(
+        2,
+        2,
+        generation=12,
+        observed_generation=11,
+        updated=2,
+    )
+
+    status = collect_status(
+        apps,
+        _FakeNetworkingV1(),
+        _FakeCoreV1(secrets={"loom-secrets"}),
+        "loom",
+        context=None,
+    )
+
+    svc = next(c for c in status.components if c.name == "loom-service")
+    assert not svc.healthy
+    assert svc.note == "stale-generation: observed 11 < generation 12"
+    assert not status.all_ready
+
+
+def test_collect_status_missing_updated_replicas_is_not_ready() -> None:
+    apps = _fully_ready_apps()
+    apps.deployments["loom-service"] = _Workload(
+        metadata=_Spec(generation=12),
+        spec=_Spec(
+            replicas=2,
+            template=_Spec(
+                spec=_Spec(
+                    containers=[_Spec(name="app", image="loom-service:expected")],
+                ),
+            ),
+        ),
+        status=_Spec(
+            ready_replicas=2,
+            available_replicas=2,
+            observed_generation=12,
+        ),
+    )
+
+    status = collect_status(
+        apps,
+        _FakeNetworkingV1(),
+        _FakeCoreV1(secrets={"loom-secrets"}),
+        "loom",
+        context=None,
+    )
+
+    svc = next(c for c in status.components if c.name == "loom-service")
+    assert not svc.healthy
+    assert svc.note == "updated-replicas: unknown/2"
+    assert not status.all_ready
+
+
+def test_collect_status_visible_kube_system_crashloop_blocks_ready() -> None:
+    apps = _fully_ready_apps()
+    core = _FakeCoreV1(secrets={"loom-secrets"})
+    core.pods_by_namespace["kube-system"] = [
+        _Spec(
+            metadata=_Spec(name="kube-controller-manager-kind-control-plane"),
+            status=_Spec(
+                conditions=[
+                    _Spec(type="Ready", status="False"),
+                ],
+                container_statuses=[
+                    _Spec(
+                        state=_Spec(
+                            waiting=_Spec(reason="CrashLoopBackOff"),
+                        ),
+                    ),
+                ],
+            ),
+        ),
+    ]
+
+    status = collect_status(apps, _FakeNetworkingV1(), core, "loom", context=None)
+
+    assert not status.all_ready
+    assert any("kube-controller-manager" in warning for warning in status.warnings)
+    assert any("CrashLoopBackOff" in warning for warning in status.warnings)
+
+
+def test_rendered_image_checks_capture_live_release_evidence() -> None:
+    apps = _FakeAppsV1()
+    apps.deployments["loom-worker"] = _make_deployment(
+        3,
+        3,
+        image="loom-worker:public-beta-expected",
+    )
+    rendered = """
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-worker
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          image: loom-worker:public-beta-expected
+"""
+
+    checks = rendered_image_checks(apps, "loom", rendered)
+
+    assert checks == [
+        DeploymentImageCheck(
+            deployment="loom-worker",
+            container="app",
+            expected_image="loom-worker:public-beta-expected",
+            live_image="loom-worker:public-beta-expected",
+        ),
+    ]
+    assert not checks[0].drifted
+    assert checks[0].evidence_line() == (
+        "  - loom-worker/app: "
+        "rendered=loom-worker:public-beta-expected "
+        "live=loom-worker:public-beta-expected"
+    )
+
+
+def test_rendered_image_drifts_report_rendered_and_live_tags() -> None:
+    apps = _FakeAppsV1()
+    apps.deployments["loom-worker"] = _make_deployment(
+        3,
+        3,
+        image="loom-worker:debug-tip",
+    )
+    rendered = """
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-worker
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          image: loom-worker:public-beta-expected
+"""
+
+    drifts = rendered_image_drifts(apps, "loom", rendered)
+
+    assert drifts == [
+        "Deployment loom-worker container app image drift: "
+        "rendered loom-worker:public-beta-expected, live loom-worker:debug-tip",
+    ]
+
+
 def test_collect_status_missing_component_surfaces_as_not_found() -> None:
     """A deployment that hasn't been applied yet appears in the
     output with ready=0/desired=0 and a 'not-found' note. Operators
@@ -297,6 +476,7 @@ def test_format_json_is_stable_and_parseable() -> None:
         components=[ComponentStatus(
             name="loom-service", kind="Deployment",
             ready=2, desired=2, available=True,
+            generation=1, observed_generation=1, updated=2,
         )],
         ingresses=[IngressEndpoint(
             host="loom.example.com", paths=["/"], tls=True,
@@ -308,8 +488,12 @@ def test_format_json_is_stable_and_parseable() -> None:
     assert parsed["namespace"] == "loom"
     assert parsed["all_ready"] is True
     assert parsed["components"][0]["healthy"] is True
+    assert parsed["components"][0]["generation"] == 1
+    assert parsed["components"][0]["observed_generation"] == 1
+    assert parsed["components"][0]["updated"] == 2
     assert parsed["ingresses"][0]["tls"] is True
     assert parsed["warnings"] == ["sample warning"]
+    assert parsed["blocking_warnings"] == []
 
 
 # ──────────────────────────────────────────────────────────────────────

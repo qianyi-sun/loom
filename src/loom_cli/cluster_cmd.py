@@ -98,6 +98,9 @@ class ComponentStatus:
     ready: int
     desired: int
     available: bool
+    generation: int | None = None
+    observed_generation: int | None = None
+    updated: int | None = None
     last_restart_reason: str | None = None
     note: str | None = None
 
@@ -115,9 +118,22 @@ class ComponentStatus:
         replica check is dropped for desired=0 since available
         only makes sense when there's something to be available.
         """
+        if not self.rollout_converged:
+            return False
         if self.desired == 0:
             return self.ready == 0
         return self.available and self.ready == self.desired
+
+    @property
+    def rollout_converged(self) -> bool:
+        if self.generation is not None and self.observed_generation is not None:
+            if self.observed_generation < self.generation:
+                return False
+        if self.kind == "Deployment" and self.updated is None and self.desired > 0:
+            return False
+        if self.updated is not None and self.updated < self.desired:
+            return False
+        return True
 
 
 @dataclass
@@ -129,6 +145,37 @@ class IngressEndpoint:
     tls: bool = False
 
 
+@dataclass(frozen=True)
+class DeploymentImageCheck:
+    deployment: str
+    container: str
+    expected_image: str
+    live_image: str | None
+    error: str | None = None
+
+    @property
+    def drifted(self) -> bool:
+        return self.error is not None or self.live_image != self.expected_image
+
+    def drift_message(self) -> str:
+        if self.error is not None:
+            return (
+                f"Deployment {self.deployment} container {self.container} "
+                f"image convergence check failed: {self.error}"
+            )
+        return (
+            f"Deployment {self.deployment} container {self.container} "
+            "image drift: "
+            f"rendered {self.expected_image}, live {self.live_image or '<missing>'}"
+        )
+
+    def evidence_line(self) -> str:
+        return (
+            f"  - {self.deployment}/{self.container}: "
+            f"rendered={self.expected_image} live={self.live_image or '<missing>'}"
+        )
+
+
 @dataclass
 class ClusterStatus:
     namespace: str
@@ -136,10 +183,15 @@ class ClusterStatus:
     components: list[ComponentStatus]
     ingresses: list[IngressEndpoint]
     warnings: list[str]
+    blocking_warnings: list[str] = field(default_factory=list)
 
     @property
     def all_ready(self) -> bool:
-        return bool(self.components) and all(c.healthy for c in self.components)
+        return (
+            bool(self.components)
+            and all(c.healthy for c in self.components)
+            and not self.blocking_warnings
+        )
 
 
 def _format_table(status: ClusterStatus) -> str:
@@ -196,11 +248,15 @@ def _format_json(status: ClusterStatus) -> str:
                 "healthy": c.healthy,
                 "last_restart_reason": c.last_restart_reason,
                 "note": c.note,
+                "generation": c.generation,
+                "observed_generation": c.observed_generation,
+                "updated": c.updated,
             }
             for c in status.components
         ],
         "ingresses": [{"host": i.host, "paths": i.paths, "tls": i.tls} for i in status.ingresses],
         "warnings": status.warnings,
+        "blocking_warnings": status.blocking_warnings,
     }
     return json.dumps(obj, indent=2) + "\n"
 
@@ -245,6 +301,35 @@ def _load_clients(
     )
 
 
+def _int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _deployment_convergence_note(
+    *,
+    generation: int | None,
+    observed_generation: int | None,
+    updated: int | None,
+    desired: int,
+) -> str | None:
+    if generation is not None and observed_generation is not None:
+        if observed_generation < generation:
+            return (
+                "stale-generation: "
+                f"observed {observed_generation} < generation {generation}"
+            )
+    if updated is None and desired > 0:
+        return f"updated-replicas: unknown/{desired}"
+    if updated is not None and updated < desired:
+        return f"updated-replicas: {updated}/{desired}"
+    return None
+
+
 def _effective_kube_context(context: str | None) -> str | None:
     if context:
         return context
@@ -284,13 +369,27 @@ def _collect_workload(
             d = apps.read_namespaced_deployment(name=k8s_name, namespace=namespace)
             spec = d.spec
             stat = d.status
+            metadata = getattr(d, "metadata", None)
+            desired = int(spec.replicas or 0)
+            generation = _int_or_none(getattr(metadata, "generation", None))
+            observed_generation = _int_or_none(getattr(stat, "observed_generation", None))
+            updated = _int_or_none(getattr(stat, "updated_replicas", None))
             out.append(
                 ComponentStatus(
                     name=display_name,
                     kind="Deployment",
                     ready=int(stat.ready_replicas or 0),
-                    desired=int(spec.replicas or 0),
+                    desired=desired,
                     available=(stat.available_replicas or 0) > 0,
+                    generation=generation,
+                    observed_generation=observed_generation,
+                    updated=updated,
+                    note=_deployment_convergence_note(
+                        generation=generation,
+                        observed_generation=observed_generation,
+                        updated=updated,
+                        desired=desired,
+                    ),
                 )
             )
         except Exception as exc:  # ApiException 404 most commonly
@@ -432,6 +531,8 @@ def collect_status(
     )
     ingresses = _collect_ingresses(networking_v1, namespace)
     warnings: list[str] = []
+    blocking_warnings: list[str] = _collect_kube_system_rollout_blockers(core_v1)
+    warnings.extend(blocking_warnings)
     # Surface common missing-secret cases without poking each
     # component's pod-level events (that's preflight's job; this is
     # status). list_namespaced_secret with a name filter is cheap.
@@ -448,6 +549,7 @@ def collect_status(
         components=components,
         ingresses=ingresses,
         warnings=warnings,
+        blocking_warnings=blocking_warnings,
     )
 
 
@@ -460,6 +562,55 @@ def _secret_present(api: Any, namespace: str, name: str) -> bool:
         return True
     except Exception:
         return False
+
+
+_ROLLOUT_CONTROL_PLANE_POD_PREFIXES: tuple[str, ...] = (
+    "kube-apiserver",
+    "kube-controller-manager",
+    "kube-scheduler",
+    "etcd",
+)
+
+
+def _collect_kube_system_rollout_blockers(core_v1: Any) -> list[str]:
+    try:
+        pods = core_v1.list_namespaced_pod(namespace="kube-system").items
+    except Exception:
+        return []
+    blockers: list[str] = []
+    for pod in pods:
+        name = str(getattr(getattr(pod, "metadata", None), "name", ""))
+        if not name.startswith(_ROLLOUT_CONTROL_PLANE_POD_PREFIXES):
+            continue
+        if _pod_ready(pod):
+            continue
+        reason = _pod_unready_reason(pod)
+        blockers.append(f"kube-system pod {name} is not Ready ({reason})")
+    return blockers
+
+
+def _pod_ready(pod: Any) -> bool:
+    for condition in getattr(getattr(pod, "status", None), "conditions", None) or []:
+        if getattr(condition, "type", None) == "Ready":
+            return str(getattr(condition, "status", "")).lower() == "true"
+    return False
+
+
+def _pod_unready_reason(pod: Any) -> str:
+    reasons: list[str] = []
+    statuses = getattr(getattr(pod, "status", None), "container_statuses", None) or []
+    for container_status in statuses:
+        state = getattr(container_status, "state", None)
+        waiting = getattr(state, "waiting", None)
+        reason = getattr(waiting, "reason", None)
+        if reason:
+            reasons.append(str(reason))
+    if reasons:
+        return ", ".join(sorted(set(reasons)))
+    for condition in getattr(getattr(pod, "status", None), "conditions", None) or []:
+        if getattr(condition, "type", None) == "Ready":
+            return f"Ready={getattr(condition, 'status', 'unknown')}"
+    return "Ready condition missing"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -762,6 +913,106 @@ def render_manifests(config: ClusterConfig) -> str:
         # double-blank-line drift.
         chunks.append(rendered.rstrip() + "\n")
     return "\n---\n".join(chunks)
+
+
+def _rendered_deployment_images(yaml_text: str) -> dict[str, dict[str, str]]:
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "the 'PyYAML' package is required for deployment image drift checks.",
+        ) from exc
+
+    images: dict[str, dict[str, str]] = {}
+    for doc in yaml.safe_load_all(yaml_text):
+        if not isinstance(doc, dict) or doc.get("kind") != "Deployment":
+            continue
+        metadata = doc.get("metadata")
+        spec = doc.get("spec")
+        if not isinstance(metadata, dict) or not isinstance(spec, dict):
+            continue
+        name = metadata.get("name")
+        if not name:
+            continue
+        template = spec.get("template")
+        if not isinstance(template, dict):
+            continue
+        pod_spec = template.get("spec")
+        if not isinstance(pod_spec, dict):
+            continue
+        containers = pod_spec.get("containers")
+        if not isinstance(containers, list):
+            continue
+        by_container: dict[str, str] = {}
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            container_name = container.get("name")
+            image = container.get("image")
+            if container_name and image:
+                by_container[str(container_name)] = str(image)
+        if by_container:
+            images[str(name)] = by_container
+    return images
+
+
+def rendered_image_checks(
+    apps_v1: Any,
+    namespace: str,
+    rendered_manifests: str,
+) -> list[DeploymentImageCheck]:
+    checks: list[DeploymentImageCheck] = []
+    for deployment_name, expected_images in _rendered_deployment_images(
+        rendered_manifests,
+    ).items():
+        try:
+            deployment = apps_v1.read_namespaced_deployment(
+                name=deployment_name,
+                namespace=namespace,
+            )
+        except Exception as exc:
+            for container_name, expected_image in expected_images.items():
+                checks.append(
+                    DeploymentImageCheck(
+                        deployment=deployment_name,
+                        container=container_name,
+                        expected_image=expected_image,
+                        live_image=None,
+                        error=_exception_to_note(exc),
+                    ),
+                )
+            continue
+        pod_template = getattr(getattr(deployment, "spec", None), "template", None)
+        pod_spec = getattr(pod_template, "spec", None)
+        live_containers: dict[str, str] = {}
+        for container in getattr(pod_spec, "containers", None) or []:
+            container_name = container.name
+            image = container.image
+            if container_name and image:
+                live_containers[str(container_name)] = str(image)
+        for container_name, expected_image in expected_images.items():
+            live_image = live_containers.get(container_name)
+            checks.append(
+                DeploymentImageCheck(
+                    deployment=deployment_name,
+                    container=container_name,
+                    expected_image=expected_image,
+                    live_image=live_image,
+                )
+            )
+    return checks
+
+
+def rendered_image_drifts(
+    apps_v1: Any,
+    namespace: str,
+    rendered_manifests: str,
+) -> list[str]:
+    return [
+        check.drift_message()
+        for check in rendered_image_checks(apps_v1, namespace, rendered_manifests)
+        if check.drifted
+    ]
 
 
 def _render(args: argparse.Namespace) -> int:
@@ -2124,6 +2375,17 @@ def _up(args: argparse.Namespace) -> int:
     )
     sys.stdout.write(_format_table(final))
     if final.all_ready:
+        image_checks = rendered_image_checks(apps_v1, args.namespace, manifests)
+        image_drifts = [check.drift_message() for check in image_checks if check.drifted]
+        if image_drifts:
+            sys.stderr.write("error: deployment image drift detected after rollout:\n")
+            for drift in image_drifts:
+                sys.stderr.write(f"  - {drift}\n")
+            return 1
+        if image_checks:
+            sys.stdout.write("\nDeployment image convergence verified:\n")
+            for check in image_checks:
+                sys.stdout.write(f"{check.evidence_line()}\n")
         _print_up_next_steps(args.namespace)
         return 0
     sys.stderr.write(

@@ -18,6 +18,7 @@ from loom_cli.cluster_cmd import (
     ApplyResult,
     ClusterStatus,
     ComponentStatus,
+    DeploymentImageCheck,
     apply_manifests,
     wait_for_ready,
 )
@@ -136,6 +137,7 @@ def test_wait_for_ready_returns_on_first_pass_when_already_ready(
             components=[ComponentStatus(
                 name="loom-service", kind="Deployment",
                 ready=2, desired=2, available=True,
+                generation=1, observed_generation=1, updated=2,
             )],
             ingresses=[], warnings=[],
         )
@@ -170,6 +172,9 @@ def test_wait_for_ready_polls_until_ready(
                 name="loom-service", kind="Deployment",
                 ready=ready_replicas, desired=2,
                 available=ready_replicas > 0,
+                generation=1,
+                observed_generation=1,
+                updated=2 if ready_replicas == 2 else 0,
             )],
             ingresses=[], warnings=[],
         )
@@ -203,6 +208,7 @@ def test_wait_for_ready_returns_unready_status_on_timeout(
             components=[ComponentStatus(
                 name="loom-service", kind="Deployment",
                 ready=0, desired=2, available=False,
+                generation=1, observed_generation=1, updated=0,
             )],
             ingresses=[], warnings=[],
         )
@@ -233,6 +239,7 @@ def _all_ready_status(ns: str = "loom") -> ClusterStatus:
         components=[ComponentStatus(
             name="loom-service", kind="Deployment",
             ready=2, desired=2, available=True,
+            generation=1, observed_generation=1, updated=2,
         )],
         ingresses=[], warnings=[],
     )
@@ -320,6 +327,7 @@ def _patch_full_up_path(
             components=[ComponentStatus(
                 name="loom-service", kind="Deployment",
                 ready=0, desired=2, available=False,
+                generation=1, observed_generation=1, updated=0,
             )],
             ingresses=[], warnings=[],
         )
@@ -330,6 +338,10 @@ def _patch_full_up_path(
         return final_status
 
     monkeypatch.setattr("loom_cli.cluster_cmd.wait_for_ready", _wait)
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd.rendered_image_checks",
+        lambda *_args, **_kwargs: [],
+    )
     return captures
 
 
@@ -347,6 +359,35 @@ def test_cli_up_happy_path(
     out = capsys.readouterr().out
     assert "Preflight" in out
     assert "loom-service configured" in out
+
+
+def test_cli_up_prints_deployment_image_convergence_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _patch_full_up_path(monkeypatch)
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd.rendered_image_checks",
+        lambda *_args, **_kwargs: [
+            DeploymentImageCheck(
+                deployment="loom-worker",
+                container="worker",
+                expected_image="loom-worker:public-beta-expected",
+                live_image="loom-worker:public-beta-expected",
+            ),
+        ],
+    )
+
+    rc = main(["cluster", "up"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Deployment image convergence verified" in out
+    assert (
+        "loom-worker/worker: "
+        "rendered=loom-worker:public-beta-expected "
+        "live=loom-worker:public-beta-expected"
+    ) in out
 
 
 def test_cli_up_preflight_fail_blocks_apply(
@@ -429,6 +470,55 @@ def test_cli_up_timeout_returns_1_when_not_ready(
     assert rc == 1
     err = capsys.readouterr().err
     assert "did not reach ready state" in err
+
+
+def test_cli_up_fails_when_live_deployment_image_drifts_after_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captures = _patch_full_up_path(monkeypatch)
+    rendered = """
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-worker
+spec:
+  template:
+    spec:
+      containers:
+        - name: worker
+          image: loom-worker:public-beta-expected
+"""
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd.render_manifests",
+        lambda _config: rendered,
+    )
+
+    def _image_checks(apps, namespace, rendered_manifests):  # type: ignore[no-untyped-def]
+        assert namespace == "loom"
+        assert rendered_manifests == rendered
+        return [
+            DeploymentImageCheck(
+                deployment="loom-worker",
+                container="worker",
+                expected_image="loom-worker:public-beta-expected",
+                live_image="loom-worker:debug-tip",
+            ),
+        ]
+
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd.rendered_image_checks",
+        _image_checks,
+        raising=False,
+    )
+
+    rc = main(["cluster", "up"])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "deployment image drift" in err
+    assert "loom-worker:debug-tip" in err
+    assert captures.get("waited") is True
 
 
 def test_cli_up_cluster_unreachable_returns_2(
