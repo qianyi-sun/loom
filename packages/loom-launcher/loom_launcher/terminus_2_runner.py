@@ -124,15 +124,19 @@ def _json_default(value: object) -> object:
 
 
 def _propagate_dialect_env() -> None:
-    """The subprocess agent only sets `OPENAI_API_KEY` /
-    `OPENAI_BASE_URL` (the adapter's configured api_key_env /
-    base_url_env). Upstream `LiteLLM` reads its key from `OPENAI_API_KEY`
-    natively, but the LiteLLM lookup for the base URL key prefers
-    `OPENAI_API_BASE`. Mirror the value across so both names point at
-    the gateway."""
-    base = os.environ.get("OPENAI_BASE_URL")
-    if base and not os.environ.get("OPENAI_API_BASE"):
-        os.environ["OPENAI_API_BASE"] = base
+    """The subprocess agent only sets the adapter's configured
+    `api_key_env` / `base_url_env`. LiteLLM's model-family clients
+    read their base URL from a slightly different env var:
+    `OPENAI_API_BASE` (openai family) and `ANTHROPIC_API_BASE`
+    (anthropic family). Mirror both so LiteLLM finds the gateway
+    regardless of which dialect the adapter is wired for."""
+    for base_env, mirror_env in (
+        ("OPENAI_BASE_URL", "OPENAI_API_BASE"),
+        ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_BASE"),
+    ):
+        base = os.environ.get(base_env)
+        if base and not os.environ.get(mirror_env):
+            os.environ[mirror_env] = base
 
 
 def _setup_tmux_session() -> Any:

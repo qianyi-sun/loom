@@ -20,16 +20,16 @@ def test_terminus_2_is_registered() -> None:
     adapter = get_adapter("terminus-2")
     assert adapter is not None
     assert adapter.name == "terminus-2"
-    assert adapter.endpoint_dialect == "openai_chat"
-    assert adapter.api_key_env == "OPENAI_API_KEY"
-    assert adapter.base_url_env == "OPENAI_BASE_URL"
+    assert adapter.endpoint_dialect == "anthropic"
+    assert adapter.api_key_env == "ANTHROPIC_API_KEY"
+    assert adapter.base_url_env == "ANTHROPIC_BASE_URL"
     assert adapter.supports_multi_turn is False
 
 
 def test_build_invocation_argv() -> None:
     adapter = get_adapter("terminus-2")
     assert adapter is not None
-    env: dict[str, str] = {"OPENAI_BASE_URL": "http://gateway"}
+    env: dict[str, str] = {"ANTHROPIC_BASE_URL": "http://gateway"}
     argv = adapter.build_invocation(
         instruction="Create hello.txt with 'hi'",
         workdir=PurePosixPath("/app"),
@@ -47,7 +47,7 @@ def test_build_invocation_argv() -> None:
         # LiteLLM dispatches `openai/<id>` through its openai-compatible
         # client → OPENAI_BASE_URL → Loom gateway. The model_id is the
         # bare upstream id, NOT the team-scoped slug.
-        "openai/claude-haiku-4-5",
+        "anthropic/claude-haiku-4-5",
         "--workdir",
         "/app",
         "--task",
