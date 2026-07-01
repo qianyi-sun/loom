@@ -279,6 +279,11 @@ map above:
 - Warning when the `loom-secrets` Secret is absent.
 - Deployment rollout convergence: `observedGeneration >= generation` and
   `updatedReplicas >= spec.replicas`.
+- Managed Deployment pod health: selected pods in blocking CrashLoop, image
+  pull, config, start, OOM, or failed states keep the component not-ready even
+  when old ready pods still satisfy Deployment-level ready counts. Failure to
+  inspect pods is also not-ready; the rollout gate does not pass open when this
+  required query fails.
 - Visible kube-system rollout-controller failures for `kube-apiserver`,
   `kube-controller-manager`, `kube-scheduler`, or `etcd`.
 
@@ -286,7 +291,7 @@ Exit codes:
 
 | Code | Meaning |
 |---|---|
-| `0` | Cluster is reachable and every expected component is ready, all Deployment generations are observed, updated replicas have converged, and visible kube-system rollout-controller pods are healthy. |
+| `0` | Cluster is reachable and every expected component is ready, all Deployment generations are observed, updated replicas have converged, selected managed pods are inspectable and have no blocking failure states, and visible kube-system rollout-controller pods are healthy. |
 | `1` | Cluster is reachable but at least one expected component is not ready. |
 | `2` | Cluster is unreachable, kubeconfig/context is invalid, or the optional `kubernetes` package is not installed. |
 
@@ -640,8 +645,10 @@ preflight and rendered manifest prove the same storage boundary and target
 schema surface. After readiness passes, `up` compares rendered Deployment
 container images with the live Deployment specs and fails if a concurrent
 operator mutation drifted the live image away from the release manifest. On
-success, `up` prints the rendered and live image for each managed
-Deployment/container so the rollout log captures image-convergence evidence.
+success, `up` has also rejected managed Deployment pods stuck in blocking
+CrashLoop/image/config/start/OOM/failed states, then prints the rendered and
+live image for each managed Deployment/container so the rollout log captures
+image-convergence evidence.
 `loom cluster down --with-volumes` and `--delete-namespace` refuse protected environments
 unless the manifest is recent and the operator passes `--acknowledge-data-loss
 <environment>`. This guard distinguishes ordinary pod or service restarts from

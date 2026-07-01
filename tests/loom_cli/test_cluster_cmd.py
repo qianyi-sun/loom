@@ -330,6 +330,158 @@ def test_collect_status_visible_kube_system_crashloop_blocks_ready() -> None:
     assert any("CrashLoopBackOff" in warning for warning in status.warnings)
 
 
+def test_collect_status_managed_pod_crashloop_blocks_ready() -> None:
+    apps = _fully_ready_apps()
+    apps.deployments["loom-service"] = _make_deployment(
+        2,
+        2,
+        generation=13,
+        observed_generation=13,
+        updated=2,
+    )
+    core = _FakeCoreV1(secrets={"loom-secrets"})
+    core.pods_by_namespace["loom"] = [
+        _Spec(
+            metadata=_Spec(
+                name="loom-service-abc123",
+                labels={"app": "loom-service"},
+            ),
+            spec=_Spec(
+                containers=[
+                    _Spec(name="loom-service", image="loom-service:current"),
+                ],
+            ),
+            status=_Spec(
+                conditions=[_Spec(type="Ready", status="False")],
+                container_statuses=[
+                    _Spec(
+                        name="loom-service",
+                        state=_Spec(
+                            waiting=_Spec(reason="CrashLoopBackOff"),
+                        ),
+                        last_state=_Spec(
+                            terminated=_Spec(
+                                reason="Error",
+                                message="SchemaNotAtHeadError",
+                            ),
+                        ),
+                    ),
+                ],
+            ),
+        ),
+    ]
+
+    status = collect_status(apps, _FakeNetworkingV1(), core, "loom", context=None)
+
+    svc = next(c for c in status.components if c.name == "loom-service")
+    assert not svc.healthy
+    assert svc.note == "pod-health: loom-service-abc123 CrashLoopBackOff"
+    assert not status.all_ready
+
+
+def test_collect_status_ignores_old_template_pod_failure() -> None:
+    apps = _fully_ready_apps()
+    apps.deployments["loom-service"] = _make_deployment(
+        2,
+        2,
+        generation=14,
+        observed_generation=14,
+        updated=2,
+        image="loom-service:target",
+    )
+    core = _FakeCoreV1(secrets={"loom-secrets"})
+    core.pods_by_namespace["loom"] = [
+        _Spec(
+            metadata=_Spec(
+                name="loom-service-old",
+                labels={"app": "loom-service"},
+            ),
+            spec=_Spec(
+                containers=[
+                    _Spec(name="loom-service", image="loom-service:previous"),
+                ],
+            ),
+            status=_Spec(
+                conditions=[_Spec(type="Ready", status="False")],
+                container_statuses=[
+                    _Spec(
+                        name="loom-service",
+                        state=_Spec(
+                            waiting=_Spec(reason="CrashLoopBackOff"),
+                        ),
+                    ),
+                ],
+            ),
+        ),
+    ]
+
+    status = collect_status(apps, _FakeNetworkingV1(), core, "loom", context=None)
+
+    svc = next(c for c in status.components if c.name == "loom-service")
+    assert svc.healthy
+    assert svc.note is None
+    assert status.all_ready
+
+
+def test_collect_status_recovered_pod_last_state_does_not_block_ready() -> None:
+    apps = _fully_ready_apps()
+    apps.deployments["loom-service"] = _make_deployment(
+        2,
+        2,
+        generation=15,
+        observed_generation=15,
+        updated=2,
+    )
+    core = _FakeCoreV1(secrets={"loom-secrets"})
+    core.pods_by_namespace["loom"] = [
+        _Spec(
+            metadata=_Spec(
+                name="loom-service-recovered",
+                labels={"app": "loom-service"},
+            ),
+            spec=_Spec(
+                containers=[
+                    _Spec(name="loom-service", image="loom-service:current"),
+                ],
+            ),
+            status=_Spec(
+                conditions=[_Spec(type="Ready", status="True")],
+                container_statuses=[
+                    _Spec(
+                        name="loom-service",
+                        state=_Spec(running=_Spec(started_at="now")),
+                        last_state=_Spec(
+                            terminated=_Spec(reason="Error"),
+                        ),
+                    ),
+                ],
+            ),
+        ),
+    ]
+
+    status = collect_status(apps, _FakeNetworkingV1(), core, "loom", context=None)
+
+    svc = next(c for c in status.components if c.name == "loom-service")
+    assert svc.healthy
+    assert svc.note is None
+    assert status.all_ready
+
+
+def test_collect_status_pod_list_failure_blocks_ready() -> None:
+    class _PodListForbiddenCore(_FakeCoreV1):
+        def list_namespaced_pod(self, *, namespace: str) -> object:
+            raise _FakeApiException(403, "forbidden")
+
+    apps = _fully_ready_apps()
+    core = _PodListForbiddenCore(secrets={"loom-secrets"})
+
+    status = collect_status(apps, _FakeNetworkingV1(), core, "loom", context=None)
+
+    assert not status.all_ready
+    assert any("cannot inspect managed pods" in warning for warning in status.warnings)
+    assert any("k8s 403" in warning for warning in status.warnings)
+
+
 def test_rendered_image_checks_capture_live_release_evidence() -> None:
     apps = _FakeAppsV1()
     apps.deployments["loom-worker"] = _make_deployment(
