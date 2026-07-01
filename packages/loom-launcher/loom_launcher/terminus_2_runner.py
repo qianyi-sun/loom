@@ -144,13 +144,33 @@ def _setup_tmux_session() -> Any:
     shim. Imports are deferred via importlib so loom-launcher's package
     isolation test (no `from terminal_bench import ...` at AST level)
     stays green — the dep is sandbox-only and provisioned by
-    install_script."""
+    install_script.
+
+    Also monkey-patches `TmuxSession.get_asciinema_timestamp` — upstream
+    reads a .cast file recorded by asciinema, which nothing in the Loom
+    sandbox produces. It's used only for `_timestamped_markers`
+    metadata (not the agent loop's correctness), so returning a
+    wall-clock float keeps the loop making progress without breaking
+    the AgentResult contract."""
+    import time as _time
+
     tmux_mod = importlib.import_module("terminal_bench.terminal.tmux_session")
+    _patch_asciinema_timestamp(tmux_mod, _time.time)
     container = LocalContainer()
     return tmux_mod.TmuxSession(
         session_name="loom-terminus-2",
         container=container,
     )
+
+
+def _patch_asciinema_timestamp(tmux_mod: Any, now: Any) -> None:
+    """Replace `TmuxSession.get_asciinema_timestamp` with a wall-clock
+    time stub. Idempotent via `_loom_asciinema_patched` sentinel."""
+    TmuxSessionCls: Any = tmux_mod.TmuxSession
+    if getattr(TmuxSessionCls, "_loom_asciinema_patched", False):
+        return
+    TmuxSessionCls.get_asciinema_timestamp = lambda self: float(now())
+    TmuxSessionCls._loom_asciinema_patched = True
 
 
 def _build_agent(model: str, max_episodes: int) -> Any:

@@ -48,6 +48,41 @@ def test_local_container_exec_run_string_cmd_uses_bash() -> None:
     assert b"LOOM-MARKER" in result.output
 
 
+def test_patch_asciinema_timestamp_replaces_method() -> None:
+    """Upstream `TmuxSession.get_asciinema_timestamp` reads from a
+    `.cast` file recorded by asciinema, which the Loom sandbox does
+    not produce. Patch replaces it with a wall-clock stub so
+    Terminus's marker-timestamping side-effect doesn't crash the
+    agent loop. Regression for trial 5548dfa7."""
+    class _FakeTmuxSession:
+        def get_asciinema_timestamp(self) -> float:
+            raise RuntimeError("real asciinema reader — should be replaced")
+
+    fake_module = type("_M", (), {})()
+    fake_module.TmuxSession = _FakeTmuxSession
+    terminus_2_runner._patch_asciinema_timestamp(fake_module, lambda: 12345.678)
+
+    session = _FakeTmuxSession()
+    assert session.get_asciinema_timestamp() == 12345.678
+
+
+def test_patch_asciinema_timestamp_is_idempotent() -> None:
+    class _FakeTmuxSession2:
+        def get_asciinema_timestamp(self) -> float:
+            return -1.0
+
+    fake_module = type("_M2", (), {})()
+    fake_module.TmuxSession = _FakeTmuxSession2
+
+    terminus_2_runner._patch_asciinema_timestamp(fake_module, lambda: 1.0)
+    once = _FakeTmuxSession2.get_asciinema_timestamp
+
+    terminus_2_runner._patch_asciinema_timestamp(fake_module, lambda: 2.0)
+    twice = _FakeTmuxSession2.get_asciinema_timestamp
+
+    assert once is twice
+
+
 def test_try_extract_json_object_returns_naked_json_unchanged() -> None:
     text = '{"commands": [], "is_task_complete": true}'
     assert terminus_2_runner._try_extract_json_object(text) == text
