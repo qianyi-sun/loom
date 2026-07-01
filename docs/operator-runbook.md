@@ -139,10 +139,13 @@ gh workflow run deploy-environment.yml \
 ```
 
 Use `dry_run=true` to render and audit with the environment secret config
-without applying. Production deploys from any ref other than `main` or a
-`release-*` tag are skipped by the workflow condition and still require the
-protected `production` environment approval when they do run. Production
-deploys also refuse to run without a successful release gate artifact for the
+without applying. Every deploy job writes `rollout-evidence/rendered.yaml` and
+`rollout-evidence/release-manifest-<image-tag>.json` before apply, then uploads
+that directory as a workflow artifact for the operator review trail. Production
+deploys from any ref other than `main` or a `release-*` tag are skipped by the
+workflow condition and still require the protected `production` environment
+approval when they do run. Production deploys also refuse to run without a
+successful release gate artifact for the
 candidate SHA and image tag being deployed.
 
 Inspect a live environment with its own kubeconfig:
@@ -229,6 +232,7 @@ Each verb:
 | `loom cluster preflight` | API-side checks: namespace exists, required Secrets present, IngressClass installed, default StorageClass available, PSS labels OK, and schema-doctor reconciliation for rendered env/Secret drift. With `--config`, preflight validates live `loom-secrets` but checks env vars against the target rendered Deployments so rollouts that add schema-backed env vars are not blocked by old live pods. Protected environments also check the live critical PVC/PV storage boundary and a recent backup manifest; pass `--config cluster-config.toml` so first deploys can prove static host-path Retain PVs before the PVCs exist. Optional runtime-derived worker env such as hostname, idle-exit, fixtures root, benchmark cache, and blocking-I/O executor override may stay unset. | 0 pass / 1 fail / 2 cluster unreachable |
 | `loom cluster backup manifest/check` | Write or verify metadata-only backup manifests for public-beta/staging destructive-operation guards | 0 verified / 1 invalid manifest / 2 bad input |
 | `loom cluster render` | Print the rendered YAML to stdout (no cluster contact) | 0 / 2 on bad config |
+| `loom cluster release-manifest` | Write a safe pre-apply rollout artifact with the candidate git SHA/image tag, CLI version, cluster-config and rendered-manifest hashes, intended Deployment images, Alembic heads, and environment-state worker desired-state fingerprints | 0 written / 2 bad input |
 | `loom cluster audit` | Static public/internal boundary check on rendered manifests: TLS ingress, only `/api/v1` → `loom-service` and `/` → `loom-web`, no LoadBalancer/NodePort, no unsafe hostPort, required NetworkPolicies present | 0 clean / 1 violation / 2 bad config |
 | `loom cluster up` | Preflight → render → `kubectl apply` → wait for components ready, Deployment generations observed, updated replicas converged, managed Deployment pods inspectable and free of blocking CrashLoop/image/config/start failures, kube-system rollout controllers healthy, and live Deployment images matching the rendered manifests; prints rendered/live image evidence for managed Deployments | 0 ready / 1 not-ready or image drift / 2 unreachable or kubectl missing |
 | `loom cluster status` | Live readiness snapshot with ingress endpoints; marks stale Deployment generations, incomplete updated replicas, failed managed-pod inspection, managed Deployment pod CrashLoop/image/config/start failures, and visible kube-system controller/scheduler/etcd/API pod failures as not-ready | 0 all-ready / 1 not-ready / 2 unreachable |

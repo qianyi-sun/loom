@@ -56,6 +56,7 @@ jobs:
       LOOM_DEPLOY_ENVIRONMENT: development
       LOOM_IMAGE_TAG: ${{ inputs.image_tag }}
       LOOM_DRY_RUN: ${{ inputs.dry_run }}
+      LOOM_ROLLOUT_EVIDENCE_DIR: rollout-evidence
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v8.2.0
@@ -66,6 +67,13 @@ jobs:
             uv.lock
       - name: Deploy development
         run: bash scripts/ops/deploy_environment.sh
+      - name: Upload rollout evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rollout-evidence-${{ inputs.environment }}-${{ inputs.image_tag }}
+          path: rollout-evidence/
+          if-no-files-found: warn
 
   deploy-staging:
     name: Deploy staging
@@ -85,6 +93,7 @@ jobs:
       LOOM_DEPLOY_ENVIRONMENT: staging
       LOOM_IMAGE_TAG: ${{ inputs.image_tag }}
       LOOM_DRY_RUN: ${{ inputs.dry_run }}
+      LOOM_ROLLOUT_EVIDENCE_DIR: rollout-evidence
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v8.2.0
@@ -95,6 +104,13 @@ jobs:
             uv.lock
       - name: Deploy staging
         run: bash scripts/ops/deploy_environment.sh
+      - name: Upload rollout evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rollout-evidence-${{ inputs.environment }}-${{ inputs.image_tag }}
+          path: rollout-evidence/
+          if-no-files-found: warn
 
   deploy-production:
     name: Deploy production
@@ -119,6 +135,7 @@ jobs:
       LOOM_DRY_RUN: ${{ inputs.dry_run }}
       LOOM_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
       LOOM_RELEASE_GATE_RUN_ID: ${{ inputs.release_gate_run_id }}
+      LOOM_ROLLOUT_EVIDENCE_DIR: rollout-evidence
     steps:
       - uses: actions/checkout@v5
         with:
@@ -135,3 +152,10 @@ jobs:
         run: bash scripts/ops/verify_production_release_gate.sh
       - name: Deploy production
         run: bash scripts/ops/deploy_environment.sh
+      - name: Upload rollout evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rollout-evidence-${{ inputs.environment }}-${{ inputs.image_tag }}
+          path: rollout-evidence/
+          if-no-files-found: warn

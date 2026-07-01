@@ -1176,6 +1176,51 @@ def _render(args: argparse.Namespace) -> int:
     return 0
 
 
+def _release_manifest(args: argparse.Namespace) -> int:
+    try:
+        cfg_path = Path(args.config).resolve() if args.config else None
+        config = load_cluster_config(cfg_path)
+    except (FileNotFoundError, ValueError) as exc:
+        sys.stderr.write(f"error: render failed: {exc}\n")
+        return 2
+
+    try:
+        manifests = render_manifests(config)
+    except (RuntimeError, ValueError) as exc:
+        sys.stderr.write(f"error: render failed: {exc}\n")
+        return 2
+
+    try:
+        from loom_cli.cluster_release_manifest import (
+            build_release_manifest,
+            render_release_manifest_json,
+            write_release_manifest,
+        )
+
+        manifest = build_release_manifest(
+            config=config,
+            config_path=cfg_path,
+            rendered_manifests=manifests,
+            environment=args.environment,
+            image_tag=args.image_tag,
+            git_sha=args.git_sha,
+            environment_state_path=(
+                Path(args.environment_state_file).resolve()
+                if args.environment_state_file else None
+            ),
+            env_config_version=args.env_config_version,
+            generated_at=args.generated_at,
+        )
+        if args.output:
+            write_release_manifest(Path(args.output), manifest)
+        else:
+            sys.stdout.write(render_release_manifest_json(manifest))
+    except (OSError, RuntimeError, ValueError) as exc:
+        sys.stderr.write(f"error: release manifest failed: {exc}\n")
+        return 2
+    return 0
+
+
 def _audit(args: argparse.Namespace) -> int:
     """`loom cluster audit` — render manifests and check the
     public/internal boundary (#77). Renders without touching the
@@ -3324,6 +3369,61 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_audit.set_defaults(handler=_audit)
+
+    p_release_manifest = sub.add_parser(
+        "release-manifest",
+        help=(
+            "Render a safe release manifest artifact before applying a "
+            "protected rollout."
+        ),
+    )
+    p_release_manifest.add_argument(
+        "--config",
+        default=None,
+        help="Path to cluster-config.toml. Omit for all defaults.",
+    )
+    p_release_manifest.add_argument(
+        "--environment",
+        required=True,
+        help="Logical rollout environment, for example public-beta or staging.",
+    )
+    p_release_manifest.add_argument(
+        "--image-tag",
+        required=True,
+        help="Immutable release image tag being rolled out.",
+    )
+    p_release_manifest.add_argument(
+        "--git-sha",
+        default=None,
+        help="Candidate git SHA. Defaults to `git rev-parse HEAD`.",
+    )
+    p_release_manifest.add_argument(
+        "--environment-state-file",
+        default=None,
+        help=(
+            "Optional environment-state TOML file. The manifest records safe "
+            "fingerprints and release-managed worker references only."
+        ),
+    )
+    p_release_manifest.add_argument(
+        "--env-config-version",
+        default=None,
+        help=(
+            "Environment desired-state config version used to resolve "
+            "${ENV_CONFIG_VERSION}; defaults to --image-tag."
+        ),
+    )
+    p_release_manifest.add_argument(
+        "--generated-at",
+        default=None,
+        help="Optional UTC timestamp override for deterministic tests.",
+    )
+    p_release_manifest.add_argument(
+        "--output",
+        default=None,
+        help="Output JSON path. Defaults to stdout.",
+    )
+    p_release_manifest.set_defaults(handler=_release_manifest)
 
     p_doctor = sub.add_parser(
         "doctor",

@@ -642,7 +642,12 @@ loom cluster preflight \
 `loom cluster up` accepts the same environment and backup-manifest flags and
 threads them through preflight before apply. Pass the same `--config` so the
 preflight and rendered manifest prove the same storage boundary and target
-schema surface. After readiness passes, `up` compares rendered Deployment
+schema surface. Protected rollouts should first run `loom cluster
+release-manifest` against that exact config and image tag, storing the artifact
+beside the rendered YAML. The artifact records the expected git SHA, image tag,
+CLI version, rendered Deployment images, cluster-config/rendered-manifest
+hashes, Alembic heads, and external-worker desired-state fingerprints before
+any apply starts. After readiness passes, `up` compares rendered Deployment
 container images with the live Deployment specs and fails if a concurrent
 operator mutation drifted the live image away from the release manifest. On
 success, `up` has also rejected managed Deployment pods stuck in blocking

@@ -38,6 +38,9 @@ uv run python scripts/validate_environment_isolation.py \
   --profiles-dir deploy/environments \
   --workflow .github/workflows/deploy-environment.yml
 
+evidence_dir="${LOOM_ROLLOUT_EVIDENCE_DIR:-rollout-evidence}"
+mkdir -p "${evidence_dir}"
+
 uv run python - "${cluster_config}" "${LOOM_IMAGE_TAG}" <<'PY'
 from __future__ import annotations
 
@@ -58,6 +61,25 @@ PY
 
 uv run loom cluster audit --config "${cluster_config}"
 uv run loom cluster render --config "${cluster_config}" > "${tmpdir}/rendered.yaml"
+cp "${tmpdir}/rendered.yaml" "${evidence_dir}/rendered.yaml"
+
+manifest_args=(
+  cluster
+  release-manifest
+  --config "${cluster_config}"
+  --environment "${LOOM_DEPLOY_ENVIRONMENT}"
+  --image-tag "${LOOM_IMAGE_TAG}"
+  --git-sha "${GITHUB_SHA:-$(git rev-parse HEAD)}"
+  --output "${evidence_dir}/release-manifest-${LOOM_IMAGE_TAG}.json"
+)
+environment_state_file="deploy/environment-state/${LOOM_DEPLOY_ENVIRONMENT}.toml"
+if [[ -f "${environment_state_file}" ]]; then
+  manifest_args+=(
+    --environment-state-file "${environment_state_file}"
+    --env-config-version "${LOOM_ENV_CONFIG_VERSION:-${LOOM_IMAGE_TAG}}"
+  )
+fi
+uv run loom "${manifest_args[@]}"
 
 if [[ "${LOOM_DRY_RUN:-false}" == "true" ]]; then
   echo "Dry run complete for ${LOOM_DEPLOY_ENVIRONMENT}; rendered manifests were not applied."
