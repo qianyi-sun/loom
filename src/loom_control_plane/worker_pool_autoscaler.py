@@ -73,6 +73,8 @@ class AutoscalerObservation:
     queued_slots: int
     idle_worker_ids: tuple[str, ...]
     drained_worker_ids: tuple[str, ...]
+    release_drift_slots: int = 0
+    release_drift_job_ids: tuple[str, ...] = ()
 
     @property
     def claimable_free_slots(self) -> int:
@@ -152,6 +154,19 @@ def compute_autoscaler_decision(
             observation=observation,
             desired_slots=policy.min_slots,
             idle_since_at=None,
+        )
+
+    if observation.release_drift_job_ids:
+        job_ids = ", ".join(observation.release_drift_job_ids)
+        return _base_decision(
+            action="blocked",
+            reason="release_state_drift",
+            policy=policy,
+            observation=observation,
+            desired_slots=max(policy.min_slots, observation.active_slots),
+            blocked_reason="release_state_drift",
+            idle_since_at=None,
+            error_message=f"release-state drift in Slurm job(s): {job_ids}",
         )
 
     active_plus_pending = observation.active_slots + observation.pending_slots
@@ -542,6 +557,47 @@ def _queued_trial_matches_policy(
     return True
 
 
+def _field(obj: Any, name: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _slurm_release_state_drift(
+    row: WorkerPoolAutoscalerPolicy,
+    job: Any,
+    *,
+    expected_worker_token_fingerprint: str | None,
+) -> bool:
+    actor_config = row.actuator_config or {}
+    redacted_env = _field(job, "redacted_env", {}) or {}
+    if not isinstance(redacted_env, dict):
+        return False
+
+    expected_env_file = actor_config.get("env_file")
+    if (
+        isinstance(expected_env_file, str)
+        and expected_env_file
+        and redacted_env.get("LOOM_REMOTE_WORKER_ENV_FILE") != expected_env_file
+    ):
+        return True
+
+    expected_repo_dir = actor_config.get("repo_dir")
+    if (
+        isinstance(expected_repo_dir, str)
+        and expected_repo_dir
+        and redacted_env.get("LOOM_REMOTE_WORKER_REPO_DIR") != expected_repo_dir
+    ):
+        return True
+
+    if expected_worker_token_fingerprint:
+        return (
+            redacted_env.get(WORKER_AUTH_FINGERPRINT_ENV_KEY)
+            != expected_worker_token_fingerprint
+        )
+    return False
+
+
 async def _load_observation(
     session: AsyncSession,
     row: WorkerPoolAutoscalerPolicy,
@@ -586,11 +642,66 @@ async def _load_observation(
                     + 1
                 )
 
+    pending_slots = int(row.last_pending_slots or 0)
+    release_drift_slots = 0
+    release_drift_job_ids: list[str] = []
+    release_drift_worker_ids: set[Any] = set()
+    release_drift_hostnames: set[str] = set()
+    if row.actuator == "slurm":
+        pending_slots = 0
+        actor_config = row.actuator_config or {}
+        expected_worker_token_fingerprint: str | None = None
+        env_file = actor_config.get("env_file")
+        if isinstance(env_file, str) and env_file:
+            try:
+                expected_worker_token_fingerprint = worker_token_fingerprint_from_env_file(
+                    Path(env_file),
+                )
+            except OSError:
+                expected_worker_token_fingerprint = None
+        slurm_jobs = (
+            (
+                await session.execute(
+                    select(SlurmWorkerJob).where(
+                        SlurmWorkerJob.environment == row.environment,
+                        SlurmWorkerJob.pool_name == row.pool_name,
+                        SlurmWorkerJob.state.in_(ACTIVE_STATES),
+                    ),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for job in slurm_jobs:
+            slots = max(0, int(_field(job, "requested_concurrency", 0) or 0))
+            if _slurm_release_state_drift(
+                row,
+                job,
+                expected_worker_token_fingerprint=expected_worker_token_fingerprint,
+            ):
+                release_drift_slots += slots
+                release_drift_job_ids.append(
+                    str(_field(job, "job_id") or _field(job, "id") or "unknown"),
+                )
+                worker_id = _field(job, "worker_id")
+                if worker_id is not None:
+                    release_drift_worker_ids.add(worker_id)
+                nodelist = _field(job, "nodelist")
+                if nodelist:
+                    release_drift_hostnames.add(str(nodelist))
+                continue
+            if str(_field(job, "state", "")).strip().lower() == "pending":
+                pending_slots += slots
+
     active_slots = 0
     draining_slots = 0
     active_idle: list[tuple[str, int]] = []
     drained_worker_ids: list[str] = []
     for worker in workers:
+        if worker.id in release_drift_worker_ids or str(
+            getattr(worker, "hostname", ""),
+        ) in release_drift_hostnames:
+            continue
         slots = max(1, int(worker.max_concurrent or 1))
         in_flight = in_flight_by_worker.get(worker.id, 0)
         if worker.drain_state == "active":
@@ -620,21 +731,6 @@ async def _load_observation(
         1 for (requires_caps,) in queued_rows if _queued_trial_matches_policy(requires_caps, row)
     )
 
-    pending_slots = int(row.last_pending_slots or 0)
-    if row.actuator == "slurm":
-        pending_slots = sum(
-            int(slots or 0)
-            for (slots,) in (
-                await session.execute(
-                    select(SlurmWorkerJob.requested_concurrency).where(
-                        SlurmWorkerJob.environment == row.environment,
-                        SlurmWorkerJob.pool_name == row.pool_name,
-                        SlurmWorkerJob.state == "pending",
-                    ),
-                )
-            ).all()
-        )
-
     return AutoscalerObservation(
         active_slots=active_slots,
         pending_slots=pending_slots,
@@ -643,6 +739,8 @@ async def _load_observation(
         queued_slots=queued_slots,
         idle_worker_ids=tuple(selected_idle),
         drained_worker_ids=tuple(drained_worker_ids),
+        release_drift_slots=release_drift_slots,
+        release_drift_job_ids=tuple(release_drift_job_ids),
     )
 
 

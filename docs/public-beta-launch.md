@@ -341,6 +341,12 @@ timers, unscoped external autoscaler commands that omit `--pool-name oldlab`,
 and the active `gb10-arm64`/`oldlab` pool shapes; the node-agent check catches
 stale host-local checkouts, local-build fallback using an old tree, and env
 files that did not apply even when the pool still has healthy heartbeats.
+The external Slurm autoscaler also treats release-state drift as a hard blocked
+decision: stale pending/running jobs are not counted as healthy warm capacity,
+and `loom admin worker-pools autoscaler status` reports
+`last_blocked_reason=release_state_drift` with the affected Slurm job ids in
+`last_error`. Do not submit public-beta canaries until those jobs are replaced
+or cancelled and `environment-state check` is clean.
 
 ```bash
 loom admin environment-state apply \

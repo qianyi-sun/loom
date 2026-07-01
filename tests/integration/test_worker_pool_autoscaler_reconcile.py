@@ -28,6 +28,11 @@ from loom_control_plane.worker_pool_autoscaler import (
     reconcile_worker_pool_autoscaler_once,
 )
 
+_MATCHING_SLURM_RELEASE_ENV = {
+    "LOOM_REMOTE_WORKER_ENV_FILE": "/secure/.env.remote-worker",
+    "LOOM_REMOTE_WORKER_REPO_DIR": "/opt/loom",
+}
+
 
 class FakeSlurmRunner(SlurmWorkerCommandRunner):
     def __init__(self) -> None:
@@ -584,7 +589,7 @@ async def test_external_slurm_runner_reconcile_refreshes_known_job_state(
                 job_id="9001",
                 slurm_state="PENDING",
                 state="pending",
-                redacted_env={},
+                redacted_env=dict(_MATCHING_SLURM_RELEASE_ENV),
                 submitted_at=now - timedelta(seconds=300),
             ))
             await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
@@ -693,7 +698,7 @@ async def test_reconcile_releases_drained_slurm_worker_job(
                 slurm_state="RUNNING",
                 state="running",
                 worker_id=worker_id,
-                redacted_env={},
+                redacted_env=dict(_MATCHING_SLURM_RELEASE_ENV),
                 submitted_at=now - timedelta(seconds=900),
                 started_at=now - timedelta(seconds=800),
             ))
@@ -791,7 +796,7 @@ async def test_reconcile_releases_drained_slurm_job_by_worker_hostname(
                 job_id="9001",
                 slurm_state="RUNNING",
                 state="running",
-                redacted_env={},
+                redacted_env=dict(_MATCHING_SLURM_RELEASE_ENV),
                 submitted_at=now - timedelta(seconds=900),
                 started_at=now - timedelta(seconds=800),
             ))
