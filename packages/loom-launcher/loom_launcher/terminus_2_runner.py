@@ -212,6 +212,36 @@ def _patch_litellm_response_extraction(litellm_mod: Any) -> None:
         finally:
             litellm_mod.completion = completion_fn
 
+        # Emit diagnostic so operators can see whether the patch fired
+        # for this call. Written to stdout as a JSONL line so the
+        # worker's `stream_stdout_jsonl` capture reads it into the
+        # trajectory. `content` here is what upstream returned; the
+        # value we ACTUALLY return may be substituted below.
+        try:
+            captured_val = captured_response.get("value")
+            has_tool_calls = False
+            if captured_val is not None:
+                choices_v = (
+                    captured_val.get("choices") if isinstance(captured_val, dict)
+                    else getattr(captured_val, "choices", None)
+                )
+                if choices_v and len(choices_v):
+                    msg_v = getattr(choices_v[0], "message", None)
+                    if msg_v is None and isinstance(choices_v[0], dict):
+                        msg_v = choices_v[0].get("message")
+                    tc_v = getattr(msg_v, "tool_calls", None) if msg_v is not None else None
+                    if tc_v is None and isinstance(msg_v, dict):
+                        tc_v = msg_v.get("tool_calls")
+                    has_tool_calls = bool(tc_v)
+            _emit({
+                "kind": "terminus2_litellm_patched_call",
+                "content_empty": not bool(content),
+                "content_len": len(content) if content else 0,
+                "has_tool_calls": has_tool_calls,
+            })
+        except Exception:  # noqa: BLE001
+            pass
+
         if content:
             return content
 
