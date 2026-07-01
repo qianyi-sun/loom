@@ -1,6 +1,6 @@
 """Terminus2Adapter contract: registration, build_invocation, capture.
 
-The runner module itself relies on `terminal-bench-core` being
+The runner module itself relies on `terminal-bench` being
 installed in the sandbox venv at trial time — not available in the
 loom_launcher unit test environment, so we don't import it here.
 The CLI-shape, install-script, and JSONL capture contract is what's
@@ -37,7 +37,7 @@ def test_build_invocation_argv() -> None:
         env=env,
     )
     # Runner is invoked via the dedicated /opt venv python — same
-    # pattern as openhands-sdk — to keep terminal-bench-core's
+    # pattern as openhands-sdk — to keep terminal-bench's
     # dependencies isolated from the task image's site-packages.
     assert argv[0] == "/opt/loom-agents/terminus-2/bin/python"
     assert argv[1] == "-m"
@@ -63,7 +63,8 @@ def test_install_script_pins_terminal_bench_core() -> None:
     # (packages/loom-benchmark-terminal-bench-2/.../upstream.py at
     # commit 91e10457). Bumping this requires moving both in lockstep
     # so the agent prompt + verifier semantics stay aligned.
-    assert "terminal-bench-core==0.1.1" in adapter.install_script
+    assert "91e10457b5410f16c44364da1a34cb6de8c488a5" in adapter.install_script
+    assert "terminal-bench@git+" in adapter.install_script
     # tmux is the only system dep beyond ca-certificates/curl/git
     # (upstream TmuxSession shells out to tmux).
     assert "tmux" in adapter.install_script

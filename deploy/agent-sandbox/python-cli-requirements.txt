@@ -2,4 +2,4 @@
 # Keep this list in sync with runtime_contract.required_packages.
 aider-chat==0.86.2
 mini-swe-agent==2.4.2
-terminal-bench-core==0.1.1
+# terminal-bench pinned via git commit in _terminus_2_runtime.py (never PyPI-released)

@@ -211,7 +211,7 @@ _ADAPTER_OVERRIDES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "opencode": (("*",), ("api", "local-server", "hf")),
     "swe-agent": (("*",), ("api", "local-server", "hf")),
     "mini-swe-agent": (("*",), ("api", "local-server", "hf")),
-    # Upstream Terminus from terminal-bench-core, wrapped by a tiny CLI
+    # Upstream Terminus from terminal-bench, wrapped by a tiny CLI
     # in loom_launcher.terminus_2_runner. LiteLLM-backed so it can call
     # any provider via the gateway's openai-compatible facade.
     "terminus-2": (("*",), ("api", "local-server", "hf")),
@@ -278,7 +278,7 @@ _ADAPTER_REQUIRED_PACKAGES: dict[str, tuple[str, ...]] = {
     "openhands-sdk": ("openhands-sdk",),
     "qwen-cli": ("@qwen-code/qwen-code",),
     "swe-agent": ("git+https://github.com/SWE-agent/SWE-agent",),
-    "terminus-2": ("terminal-bench-core",),
+    "terminus-2": ("terminal-bench",),
 }
 
 
