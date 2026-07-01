@@ -174,6 +174,51 @@ def _build_agent(model: str, max_episodes: int) -> Any:
     return terminus_mod.Terminus(llm=llm, max_episodes=max_episodes)
 
 
+def _try_extract_json_object(text: str) -> str | None:
+    """Return the first balanced JSON object substring inside `text`,
+    or None if no such object is found. Handles the common failure
+    modes for models under LiteLLM's prompt-based structured-output
+    fallback:
+
+    - Markdown fences: `\\`\\`\\`json\\n{...}\\n\\`\\`\\``.
+    - Prefix narration: `Sure! Here's the JSON:\\n{...}`.
+    - Trailing chatter after the JSON.
+
+    Falls back to naive brace-matching (bracket-count balance) because
+    Python's json module can't re-parse partial JSON. Ignores braces
+    that appear inside JSON string literals so quoted `{`/`}` don't
+    confuse the balance. Returns None (caller keeps the original text)
+    when no object is found — never raises."""
+    if not text:
+        return None
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:idx + 1]
+    return None
+
+
 def _patch_litellm_response_extraction(litellm_mod: Any) -> None:
     """Monkey-patch upstream `LiteLLM.call` so it extracts tool-use
     arguments when the assistant's `content` is empty. This makes
@@ -211,6 +256,19 @@ def _patch_litellm_response_extraction(litellm_mod: Any) -> None:
             content = _original_call(self, prompt, *args, **kwargs)
         finally:
             litellm_mod.completion = completion_fn
+
+        # Even when content is non-empty, Anthropic Haiku (and other
+        # models under LiteLLM's prompt-based structured-output
+        # fallback) sometimes wrap the JSON in markdown fences or
+        # prefix it with narration. Terminus calls
+        # `CommandBatchResponse.model_validate_json(response)` which
+        # requires the string to BEGIN at a `{` or `[`. Strip the
+        # obvious wrappers so the parse succeeds when the underlying
+        # JSON is actually present.
+        if content:
+            unwrapped = _try_extract_json_object(content)
+            if unwrapped is not None:
+                content = unwrapped
 
         # Emit diagnostic so operators can see whether the patch fired
         # for this call. Written to stdout as a JSONL line so the

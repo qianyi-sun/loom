@@ -48,6 +48,46 @@ def test_local_container_exec_run_string_cmd_uses_bash() -> None:
     assert b"LOOM-MARKER" in result.output
 
 
+def test_try_extract_json_object_returns_naked_json_unchanged() -> None:
+    text = '{"commands": [], "is_task_complete": true}'
+    assert terminus_2_runner._try_extract_json_object(text) == text
+
+
+def test_try_extract_json_object_strips_markdown_fence() -> None:
+    """Common Haiku / Sonnet failure mode under LiteLLM's prompt-based
+    structured output: wrap the JSON in ```json ... ```."""
+    text = "```json\n{\"commands\": [], \"is_task_complete\": true}\n```"
+    assert terminus_2_runner._try_extract_json_object(text) == (
+        '{"commands": [], "is_task_complete": true}'
+    )
+
+
+def test_try_extract_json_object_strips_prefix_narration() -> None:
+    text = "Sure! Here's the JSON response:\n{\"commands\": [\"ls\"]}\nHope that helps."
+    assert terminus_2_runner._try_extract_json_object(text) == (
+        '{"commands": ["ls"]}'
+    )
+
+
+def test_try_extract_json_object_handles_nested_objects() -> None:
+    """Real CommandBatchResponse has nested `commands: [{...}, {...}]`
+    with `Command` objects. Depth-balance must span nested braces."""
+    text = '{"commands": [{"keystrokes": "ls", "is_blocking": true}], "is_task_complete": false}'
+    assert terminus_2_runner._try_extract_json_object(text) == text
+
+
+def test_try_extract_json_object_ignores_braces_inside_strings() -> None:
+    """A `}` inside a JSON string literal must not close the outer
+    object early."""
+    text = '{"cmd": "echo }not-a-brace{"}'
+    assert terminus_2_runner._try_extract_json_object(text) == text
+
+
+def test_try_extract_json_object_returns_none_when_no_object() -> None:
+    assert terminus_2_runner._try_extract_json_object("just plain text") is None
+    assert terminus_2_runner._try_extract_json_object("") is None
+
+
 def test_patch_litellm_extracts_tool_use_when_content_empty() -> None:
     """Real cluster smoke of terminus-2 hit
     `terminal_bench.llms.base_llm.ParseError: Failed to parse LLM
