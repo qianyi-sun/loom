@@ -154,14 +154,115 @@ def _setup_tmux_session() -> Any:
 
 
 def _build_agent(model: str, max_episodes: int) -> Any:
-    """Lazy-importlib for the same reason as `_setup_tmux_session`."""
+    """Lazy-importlib for the same reason as `_setup_tmux_session`.
+
+    Also wraps upstream LiteLLM.call to fix the tool-use structured-output
+    extraction bug: for Anthropic response_format calls, LiteLLM stores
+    the parsed JSON in `message.tool_calls[0].function.arguments`, not
+    `message.content`. Upstream `LiteLLM.call` returns
+    `choices[0].message.content` unconditionally, which is empty for
+    Anthropic tool-use responses. Terminus then throws ParseError. See
+    `_patched_litellm_call` below."""
     terminus_mod = importlib.import_module(
         "terminal_bench.agents.terminus",
     )
     litellm_mod = importlib.import_module("terminal_bench.llms.lite_llm")
 
+    _patch_litellm_response_extraction(litellm_mod)
+
     llm = litellm_mod.LiteLLM(model_name=model)
     return terminus_mod.Terminus(llm=llm, max_episodes=max_episodes)
+
+
+def _patch_litellm_response_extraction(litellm_mod: Any) -> None:
+    """Monkey-patch upstream `LiteLLM.call` so it extracts tool-use
+    arguments when the assistant's `content` is empty. This makes
+    response_format=Pydantic actually work through the Anthropic dialect
+    (LiteLLM's translation layer routes structured output through
+    Anthropic's tool_use mechanism; upstream Terminus was written
+    against the OpenAI shape where `content` carries the JSON directly).
+
+    Idempotent: sets `_loom_patched = True` on the class after the first
+    call so re-imports don't wrap twice."""
+    LiteLLMCls: Any = litellm_mod.LiteLLM
+    if getattr(LiteLLMCls, "_loom_patched", False):
+        return
+
+    _original_call = LiteLLMCls.call
+
+    def _patched_call(self: Any, prompt: str, *args: Any, **kwargs: Any) -> str:
+        # Run the original wrapper, catching AttributeError / TypeError
+        # / IndexError raised by our own extraction fallback below is
+        # NOT the goal — we want the ORIGINAL error semantics for real
+        # failures, and only substitute the tool-use path when the
+        # returned string is empty (the classic Anthropic tool-use +
+        # structured-output symptom).
+        completion_fn: Any = litellm_mod.completion
+
+        captured_response: dict[str, Any] = {}
+
+        def _wrapper(**call_kwargs: Any) -> Any:
+            result = completion_fn(**call_kwargs)
+            captured_response["value"] = result
+            return result
+
+        litellm_mod.completion = _wrapper
+        try:
+            content = _original_call(self, prompt, *args, **kwargs)
+        finally:
+            litellm_mod.completion = completion_fn
+
+        if content:
+            return content
+
+        # Empty content — check for tool_use payload. LiteLLM's
+        # response objects support BOTH dict-style `["choices"]` and
+        # attribute-style `.choices` traversal — handle whichever
+        # actually works for the layer at hand (Choice objects have
+        # `.message` as an attribute, ModelResponse dicts have it as
+        # a key). Belt-and-braces because different LiteLLM versions
+        # return different shapes.
+        response = captured_response.get("value")
+        if response is None:
+            return content
+
+        def _get(container: Any, key: Any) -> Any:
+            if isinstance(container, dict):
+                return container.get(key)
+            try:
+                return container[key]
+            except (KeyError, IndexError, TypeError):
+                if isinstance(key, str):
+                    return getattr(container, key, None)
+                return None
+
+        choices = _get(response, "choices")
+        if not choices:
+            return content
+        choice = choices[0] if len(choices) else None
+        if choice is None:
+            return content
+        message = _get(choice, "message")
+        if message is None:
+            return content
+
+        tool_calls = _get(message, "tool_calls")
+        if not tool_calls:
+            return content
+
+        first = tool_calls[0]
+        function = _get(first, "function")
+        arguments = _get(function, "arguments") if function is not None else None
+
+        if isinstance(arguments, str) and arguments.strip():
+            return arguments
+        if arguments is not None:
+            import json as _json
+            return _json.dumps(arguments)
+        return content
+
+    LiteLLMCls.call = _patched_call
+    LiteLLMCls._loom_patched = True
 
 
 def main(argv: list[str] | None = None) -> int:

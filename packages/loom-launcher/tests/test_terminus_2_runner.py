@@ -48,6 +48,120 @@ def test_local_container_exec_run_string_cmd_uses_bash() -> None:
     assert b"LOOM-MARKER" in result.output
 
 
+def test_patch_litellm_extracts_tool_use_when_content_empty() -> None:
+    """Real cluster smoke of terminus-2 hit
+    `terminal_bench.llms.base_llm.ParseError: Failed to parse LLM
+    response` (trial 0d546c41). Root cause: LiteLLM's Anthropic dialect
+    routes `response_format=CommandBatchResponse` through Anthropic's
+    tool_use, which puts the JSON in
+    `message.tool_calls[0].function.arguments` — NOT `message.content`.
+    Upstream `LiteLLM.call` returns `content` unconditionally so
+    Terminus's `CommandBatchResponse.model_validate_json` receives an
+    empty string.
+
+    Our runner monkey-patches upstream `LiteLLM.call` to fall back to
+    the tool_use arguments when content is empty. This test simulates
+    the exact response shape LiteLLM produces for Anthropic tool_use +
+    asserts the patched call returns the arguments JSON."""
+
+    class _FakeMessage:
+        def __init__(self, content: str, tool_calls: list[object]) -> None:
+            self.content = content
+            self.tool_calls = tool_calls
+
+    class _FakeFunction:
+        def __init__(self, arguments: str) -> None:
+            self.arguments = arguments
+
+    class _FakeToolCall:
+        def __init__(self, arguments: str) -> None:
+            self.function = _FakeFunction(arguments)
+
+    class _FakeResponse:
+        def __init__(self, message: _FakeMessage) -> None:
+            self.choices = [type("_Choice", (), {"message": message, "finish_reason": "stop"})()]
+
+        def __getitem__(self, key: str) -> object:
+            if key == "choices":
+                return self.choices
+            raise KeyError(key)
+
+    # Build a fake `terminal_bench.llms.lite_llm` module with the
+    # symbols the patcher needs. Upstream `LiteLLM.call` calls
+    # `completion(...)` from its module namespace then returns
+    # `choices[0].message.content`. We mirror that (via a closure over
+    # `fake_module` so the patcher's completion-swap is what our fake
+    # `call` sees).
+    def _make_fake_module() -> Any:
+        fake_module = type("_M", (), {})()
+
+        class _FakeLiteLLM:
+            def call(self, prompt: str, *_args: object, **_kwargs: object) -> str:
+                # Look up completion dynamically from the module so the
+                # patcher's swap is what we see — mirrors upstream's
+                # `response = completion(...)` line.
+                response = fake_module.completion(prompt=prompt)
+                return response["choices"][0].message.content
+
+        def _fake_completion(**_kwargs: object) -> _FakeResponse:
+            return _FakeResponse(
+                _FakeMessage(
+                    content="",
+                    tool_calls=[
+                        _FakeToolCall(arguments='{"commands": [], "is_task_complete": true}'),
+                    ],
+                ),
+            )
+
+        fake_module.LiteLLM = _FakeLiteLLM
+        fake_module.completion = _fake_completion
+        return fake_module
+
+    fake_module = _make_fake_module()
+    terminus_2_runner._patch_litellm_response_extraction(fake_module)
+
+    result = fake_module.LiteLLM().call("some prompt")
+    assert result == '{"commands": [], "is_task_complete": true}'
+
+
+def test_patch_litellm_is_idempotent() -> None:
+    """Re-running the patcher (e.g. when the runner is imported twice
+    in the same process) must not stack-wrap `LiteLLM.call`. Uses the
+    `_loom_patched` sentinel."""
+
+    class _FakeLiteLLM2:
+        def call(self, *_a: object, **_k: object) -> str:
+            return "original"
+
+    fake_module = type("_M2", (), {})()
+    fake_module.LiteLLM = _FakeLiteLLM2
+    fake_module.completion = lambda **_: {"choices": []}
+
+    terminus_2_runner._patch_litellm_response_extraction(fake_module)
+    once = _FakeLiteLLM2.call
+
+    terminus_2_runner._patch_litellm_response_extraction(fake_module)
+    twice = _FakeLiteLLM2.call
+
+    assert once is twice
+
+
+def test_patch_litellm_preserves_content_when_nonempty() -> None:
+    """If upstream `content` is non-empty, the patch must not overwrite
+    it with tool_use arguments — the openai path stays working."""
+
+    class _FakeLiteLLM3:
+        def call(self, *_a: object, **_k: object) -> str:
+            return "real content"
+
+    fake_module = type("_M3", (), {})()
+    fake_module.LiteLLM = _FakeLiteLLM3
+    fake_module.completion = lambda **_: {"choices": []}
+
+    terminus_2_runner._patch_litellm_response_extraction(fake_module)
+    assert _FakeLiteLLM3().call("prompt") == "real content"
+
+
 def test_local_container_put_archive_extracts_to_dir(tmp_path) -> None:
     """Upstream `TmuxSession.__init__` calls
     `DockerComposeManager.copy_to_container` which in turn calls
