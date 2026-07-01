@@ -36,12 +36,12 @@ from loom_launcher.registry import register_adapter
 class Terminus2Adapter:
     name: str = "terminus-2"
     supports_os: frozenset[str] = frozenset({"linux"})
-    endpoint_dialect: str = "openai_chat"
-    api_key_env: str = "OPENAI_API_KEY"
-    base_url_env: str = "OPENAI_BASE_URL"
+    endpoint_dialect: str = "anthropic"
+    api_key_env: str = "ANTHROPIC_API_KEY"
+    base_url_env: str = "ANTHROPIC_BASE_URL"
     # LiteLLM dispatches `openai/<id>` via its openai-compatible client
     # to whatever `OPENAI_BASE_URL` points at — i.e. the Loom gateway.
-    model_name_template: str = "openai/{model_id}"
+    model_name_template: str = "anthropic/{model_id}"
     supports_multi_turn: bool = False
     additional_egress: frozenset[str] = frozenset()
     install_script: str | None = TERMINUS_2_INSTALL_SCRIPT
