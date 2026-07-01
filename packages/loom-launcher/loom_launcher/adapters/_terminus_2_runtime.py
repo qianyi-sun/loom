@@ -24,8 +24,8 @@ TERMINAL_BENCH_REQUIREMENT = "terminal-bench@git+https://github.com/laude-instit
 # when the Terminus-2 runner module (`loom_launcher.terminus_2_runner`)
 # changes meaningfully. Must be a full 40-char SHA on origin/dev so
 # `scripts/check_install_scripts_pinned.py` reads it as pinned.
-LOOM_LAUNCHER_REF = "95f878eed600239441fb2a2cfa9990c6f67ee745"
-LOOM_LAUNCHER_REQUIREMENT = "git+https://github.com/qianyi-sun/loom.git@95f878eed600239441fb2a2cfa9990c6f67ee745#subdirectory=packages/loom-launcher"
+LOOM_LAUNCHER_REF = "2ddfed7a91091cecab207cee740a118ca118bf71"
+LOOM_LAUNCHER_REQUIREMENT = "git+https://github.com/qianyi-sun/loom.git@2ddfed7a91091cecab207cee740a118ca118bf71#subdirectory=packages/loom-launcher"
 
 UV_VERSION = "0.11.21"
 TERMINUS_2_VENV = "/opt/loom-agents/terminus-2"
