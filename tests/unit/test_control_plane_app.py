@@ -41,7 +41,11 @@ def test_control_plane_lifespan_configures_db_pool(
         "create_async_engine",
         _create_async_engine,
     )
-    monkeypatch.setattr(control_plane_app.boto3, "client", lambda *_, **__: object())
+    monkeypatch.setattr(
+        control_plane_app,
+        "build_s3_client",
+        lambda **_: object(),
+    )
     monkeypatch.setattr(
         control_plane_app,
         "run_crash_detector_loop",

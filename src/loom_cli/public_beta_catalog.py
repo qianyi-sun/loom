@@ -16,8 +16,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, TypeVar
 
-import boto3
-from botocore.config import Config
 from botocore.exceptions import ClientError
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -315,14 +313,15 @@ class Boto3CatalogObjectStore:
         access_key: str,
         secret_key: str,
         region: str = "us-east-1",
+        auth_kind: str = "static_keys",
     ) -> None:
-        self._client = boto3.client(
-            "s3",
+        from loom.storage_credentials import build_s3_client
+        self._client = build_s3_client(
             endpoint_url=endpoint_url,
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-            region_name=region,
-            config=Config(signature_version="s3v4"),
+            auth_kind=auth_kind,
+            access_key=access_key,
+            secret_key=secret_key,
+            region=region,
         )
 
     async def ensure_bucket(self, bucket: str) -> None:

@@ -8,14 +8,13 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import boto3
-from botocore.config import Config
 from fastapi import FastAPI
 from prometheus_client import make_asgi_app
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from loom.admin_secret import AdminSecretVerifier, load_optional_admin_secret_verifier
 from loom.db.schema_startup import assert_schema_at_head
+from loom.storage_credentials import build_s3_client
 from loom_control_plane.config import ControlPlaneSettings
 from loom_control_plane.elastic_slurm_worker_controller import (
     SubprocessSlurmCommandRunner,
@@ -73,13 +72,12 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         admin_secret_verifier = _load_admin_secret_verifier(settings)
 
-        minio_client = boto3.client(
-            "s3",
+        minio_client = build_s3_client(
             endpoint_url=settings.minio_endpoint,
-            aws_access_key_id=settings.minio_access_key.get_secret_value(),
-            aws_secret_access_key=settings.minio_secret_key.get_secret_value(),
-            region_name=settings.minio_region,
-            config=Config(signature_version="s3v4"),
+            auth_kind=settings.storage_auth_kind,
+            access_key=settings.minio_access_key.get_secret_value(),
+            secret_key=settings.minio_secret_key.get_secret_value(),
+            region=settings.minio_region,
         )
 
         app.state.settings = settings

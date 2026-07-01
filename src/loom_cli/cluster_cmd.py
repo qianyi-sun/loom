@@ -1845,9 +1845,6 @@ def _doctor_check_storage_lifecycle(
 
     import os
 
-    import boto3
-    from botocore.config import Config
-
     from loom.storage_retention_doctor import (
         check_lifecycle_drift,
         format_drift_report,
@@ -1860,48 +1857,37 @@ def _doctor_check_storage_lifecycle(
         sys.stderr.write(f"  [fail] storage_lifecycle: {exc}\n")
         return False
 
+    from loom.storage_credentials import (
+        UnsupportedAuthKindError,
+        build_s3_client,
+    )
+
     auth_kind = os.environ.get("LOOM_SVC_STORAGE_AUTH_KIND", "static_keys")
     endpoint = (
         getattr(args, "storage_lifecycle_endpoint", None)
         or os.environ.get("LOOM_SVC_MINIO_ENDPOINT", "http://loom-minio:9000")
     )
     region = os.environ.get("LOOM_SVC_MINIO_REGION", "us-east-1")
+    access_key = os.environ.get(
+        "LOOM_SVC_MINIO_ACCESS_KEY",
+    ) or os.environ.get("MINIO_ROOT_USER", "")
+    secret_key = os.environ.get(
+        "LOOM_SVC_MINIO_SECRET_KEY",
+    ) or os.environ.get("MINIO_ROOT_PASSWORD", "")
 
-    if auth_kind == "static_keys":
-        access_key = os.environ.get(
-            "LOOM_SVC_MINIO_ACCESS_KEY",
-        ) or os.environ.get("MINIO_ROOT_USER", "")
-        secret_key = os.environ.get(
-            "LOOM_SVC_MINIO_SECRET_KEY",
-        ) or os.environ.get("MINIO_ROOT_PASSWORD", "")
-        if not access_key or not secret_key:
-            sys.stderr.write(
-                "  [fail] storage_lifecycle: MinIO credentials not found "
-                "(set LOOM_SVC_MINIO_ACCESS_KEY + LOOM_SVC_MINIO_SECRET_KEY).\n",
-            )
-            return False
-        s3 = boto3.client(
-            "s3",
+    try:
+        s3 = build_s3_client(
             endpoint_url=endpoint,
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-            region_name=region,
-            config=Config(signature_version="s3v4"),
+            auth_kind=auth_kind,
+            access_key=access_key,
+            secret_key=secret_key,
+            region=region,
         )
-    elif auth_kind == "irsa":
-        # boto3 discovers credentials via its standard provider chain.
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=endpoint,
-            region_name=region,
-            config=Config(signature_version="s3v4"),
-        )
-    else:
-        sys.stderr.write(
-            f"  [fail] storage_lifecycle: storage_auth_kind={auth_kind!r} "
-            "not yet supported. Tracked at #251 (boto3 credentials "
-            "abstraction). Supported today: static_keys, irsa.\n",
-        )
+    except UnsupportedAuthKindError as exc:
+        sys.stderr.write(f"  [fail] storage_lifecycle: {exc}\n")
+        return False
+    except ValueError as exc:
+        sys.stderr.write(f"  [fail] storage_lifecycle: {exc}\n")
         return False
     try:
         drifts = check_lifecycle_drift(s3, cfg)
@@ -2470,9 +2456,10 @@ def _bootstrap_storage_lifecycle(args: argparse.Namespace) -> int:
     import json
     import os
 
-    import boto3
-    from botocore.config import Config
-
+    from loom.storage_credentials import (
+        UnsupportedAuthKindError,
+        build_s3_client,
+    )
     from loom.storage_retention import (
         S3_COMPATIBLE_BACKENDS as _S3_COMPATIBLE_BACKENDS,
     )
@@ -2527,46 +2514,29 @@ def _bootstrap_storage_lifecycle(args: argparse.Namespace) -> int:
         "LOOM_SVC_MINIO_ENDPOINT", "http://loom-minio:9000",
     )
     region = os.environ.get("LOOM_SVC_MINIO_REGION", "us-east-1")
+    access_key = os.environ.get(
+        "LOOM_SVC_MINIO_ACCESS_KEY",
+    ) or os.environ.get("MINIO_ROOT_USER", "")
+    secret_key = os.environ.get(
+        "LOOM_SVC_MINIO_SECRET_KEY",
+    ) or os.environ.get("MINIO_ROOT_PASSWORD", "")
 
-    if auth_kind == "static_keys":
-        access_key = os.environ.get(
-            "LOOM_SVC_MINIO_ACCESS_KEY",
-        ) or os.environ.get("MINIO_ROOT_USER", "")
-        secret_key = os.environ.get(
-            "LOOM_SVC_MINIO_SECRET_KEY",
-        ) or os.environ.get("MINIO_ROOT_PASSWORD", "")
-        if not access_key or not secret_key:
-            sys.stderr.write(
-                "error: storage_auth_kind=static_keys but MinIO "
-                "credentials not found. Set LOOM_SVC_MINIO_ACCESS_KEY + "
-                "LOOM_SVC_MINIO_SECRET_KEY (or MINIO_ROOT_USER + "
-                "MINIO_ROOT_PASSWORD) in the env.\n",
-            )
-            return 2
-        s3 = boto3.client(
-            "s3",
+    try:
+        s3 = build_s3_client(
             endpoint_url=endpoint,
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-            region_name=region,
-            config=Config(signature_version="s3v4"),
+            auth_kind=auth_kind,
+            access_key=access_key,
+            secret_key=secret_key,
+            region=region,
         )
-    elif auth_kind == "irsa":
-        # boto3 walks its standard credential-provider chain
-        # (env → shared credentials → STS AssumeRoleWithWebIdentity
-        # via the projected serviceAccountToken). No explicit keys.
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=endpoint,
-            region_name=region,
-            config=Config(signature_version="s3v4"),
-        )
-    else:
+    except UnsupportedAuthKindError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    except ValueError as exc:
+        # static_keys path with missing creds → surface the helpful
+        # env-var hint.
         sys.stderr.write(
-            f"error: storage_auth_kind={auth_kind!r} not yet "
-            "supported by this subcommand. Tracked at #251 (boto3 "
-            "credentials abstraction). Supported today: "
-            "static_keys, irsa.\n",
+            f"error: {exc} (or set MINIO_ROOT_USER + MINIO_ROOT_PASSWORD).\n",
         )
         return 2
 
