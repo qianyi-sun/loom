@@ -103,7 +103,9 @@ async def test_probe_returns_none_on_ambiguous_4xx() -> None:
     assert outcome.error_detail == "ambiguous_403"
 
 
-async def test_probe_posts_empty_body_to_upstream() -> None:
+async def test_probe_posts_sentinel_model_body_to_upstream() -> None:
+    import json
+
     captured: dict[str, object] = {}
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -122,7 +124,12 @@ async def test_probe_posts_empty_body_to_upstream() -> None:
     assert captured["method"] == "POST"
     assert captured["url"] == "http://mock.example/v1/responses"
     assert captured["auth"] == "Bearer tok-xyz"
-    # Body is a well-formed JSON object with no model reference — the
-    # payload cannot be interpreted by the upstream, forcing a routing
-    # decision (400 = endpoint present, 404 = absent).
-    assert captured["body"] == b"{}"
+    # Body carries a sentinel model + minimal input. Not empty — an
+    # empty body would let reverse-proxied endpoints 400 at the edge
+    # without ever attempting to route (which is what we're trying to
+    # test with the probe).
+    body = json.loads(captured["body"])  # type: ignore[arg-type]
+    assert "model" in body
+    assert body["model"].startswith("loom-probe")
+    assert body.get("input") is not None
+    assert body.get("max_output_tokens") == 1

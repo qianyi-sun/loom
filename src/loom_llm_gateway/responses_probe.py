@@ -9,12 +9,16 @@ instead of hanging on a 40-min agent-timeout window. False negatives
 here just cost one config knob at startup; false positives would let
 codex hang.
 
-The probe uses an empty JSON body (`{}`) so it needs no reference to a
-specific model — a real Responses handler returns 400 (validation
-error, `model` required); a missing route returns 404. This decouples
-the probe from the `provider_models_cache` refresh schedule, so
-brand-new connections whose model cache is not yet populated can
-still be probed correctly.
+The probe uses a *minimal but complete* Responses payload —
+`{"model": "<sentinel>", "input": "loom-probe", "max_output_tokens": 1}` —
+so it exercises the full upstream routing path rather than short-circuiting
+on early validation. Empty-body probes were tried first and rejected
+because BYO providers that reverse-proxy /v1/responses (yibuapi) will
+happily 400 an empty body from their edge without ever attempting to
+route — the response looks like a real Responses handler, but the
+first live request hits an upstream timeout. A sentinel model name
+that isn't a real provider model forces the proxy to try to route,
+which is what actually matters.
 
 Spec: docs/architecture/responses-api-support-probe.md
 """
@@ -31,6 +35,13 @@ _PROBE_TIMEOUT_SEC = 5.0
 
 _SUPPORTED_STATUSES = frozenset({200, 400, 401})
 _UNSUPPORTED_STATUSES = frozenset({404, 501})
+
+# Sentinel model id in the probe body. Deliberately chosen to be one that
+# no real provider ships. Real Responses handlers return 400
+# ("model not found") quickly; reverse-proxied endpoints that only
+# forward valid requests will 4xx or 5xx depending on their edge policy,
+# which is the routing signal we care about.
+_PROBE_MODEL_SENTINEL = "loom-probe-nonexistent-model"
 
 
 @dataclass(frozen=True)
@@ -91,7 +102,11 @@ async def _run_probe(
     try:
         response = await client.post(
             upstream_url,
-            json={},
+            json={
+                "model": _PROBE_MODEL_SENTINEL,
+                "input": "loom-probe",
+                "max_output_tokens": 1,
+            },
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=_PROBE_TIMEOUT_SEC,
         )
