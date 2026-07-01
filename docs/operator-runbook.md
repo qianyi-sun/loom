@@ -3169,6 +3169,14 @@ link it from #217; do not merge incomplete evidence.
   repo checkout is on the wrong release, the checkout is dirty, or a declared
   external Slurm autoscaler supervisor has stale unit content, an unscoped
   command, a disabled timer, or an inactive timer.
+  The worker-pool autoscaler uses the same Slurm job release-state evidence
+  before computing healthy capacity. Pending or running jobs whose redacted
+  `LOOM_REMOTE_WORKER_ENV_FILE`, `LOOM_REMOTE_WORKER_REPO_DIR`, or worker-token
+  fingerprint does not match the active policy are excluded from
+  `actual_slots`; the autoscaler records a hard `release_state_drift` blocked
+  decision instead of treating the stale job as warm capacity. Replace or
+  cancel those jobs and rerun `environment-state check` before submitting
+  public-beta/full100 validation batches.
   Use `--format json` for release evidence or automation. If Loom backlog has
   drained but Slurm still has pending elastic jobs, cancel those Slurm job ids
   with `scancel`; the controller will record cancellation on its next

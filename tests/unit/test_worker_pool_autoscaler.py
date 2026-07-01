@@ -398,6 +398,26 @@ def test_decision_reports_at_min_capacity_when_no_excess_slots() -> None:
     assert decision.reason == "at_min_capacity"
 
 
+def test_decision_blocks_on_release_drift_slurm_capacity() -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+
+    decision = compute_autoscaler_decision(
+        _policy(min_slots=1),
+        _observation(
+            active_slots=0,
+            pending_slots=0,
+            release_drift_slots=1,
+            release_drift_job_ids=("17928",),
+        ),
+        now=now,
+    )
+
+    assert decision.action == "blocked"
+    assert decision.reason == "release_state_drift"
+    assert decision.blocked_reason == "release_state_drift"
+    assert decision.error_message == "release-state drift in Slurm job(s): 17928"
+
+
 def test_decision_waits_for_idle_window_before_scale_down() -> None:
     now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
     idle_since_at = now - timedelta(seconds=60)
@@ -747,19 +767,33 @@ async def test_load_observation_counts_slots_and_matching_queue() -> None:
             _FakeResult(scalars=workers),
             _FakeResult(rows=[(busy_worker_id,), (None,)]),
             _FakeResult(
+                scalars=[
+                    SimpleNamespace(
+                        job_id="pending-1",
+                        state="pending",
+                        requested_concurrency=6,
+                        worker_id=None,
+                        nodelist="oldlab-1",
+                        redacted_env={
+                            "LOOM_REMOTE_WORKER_ENV_FILE": "/secure/.env.remote-worker",
+                            "LOOM_REMOTE_WORKER_REPO_DIR": "/opt/loom",
+                        },
+                    ),
+                ],
+            ),
+            _FakeResult(
                 rows=[
                     ({"backend": "docker", "cpu_arch": "x86_64"},),
                     ({"backend": "docker", "cpu_arch": "arm64"},),
                     ({},),
-                ]
+                ],
             ),
-            _FakeResult(rows=[(6,), (None,)]),
         ]
     )
 
     observation = await _load_observation(
         cast(Any, session),
-        _policy_row(min_slots=6),
+        _policy_row(min_slots=6, last_pending_slots=42),
         now=now,
         freshness_sec=120,
     )
@@ -771,6 +805,141 @@ async def test_load_observation_counts_slots_and_matching_queue() -> None:
     assert observation.queued_slots == 2
     assert observation.idle_worker_ids == (str(idle_worker_id),)
     assert observation.drained_worker_ids == (str(drained_worker_id),)
+
+
+async def test_load_observation_excludes_release_drift_slurm_jobs() -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    worker_id = uuid4()
+    workers = [
+        SimpleNamespace(
+            id=worker_id,
+            hostname="TRT-EAI-OLDLAB-1",
+            max_concurrent=1,
+            drain_state="active",
+        ),
+    ]
+    session = _FakeSession(
+        [
+            _FakeResult(scalars=workers),
+            _FakeResult(rows=[]),
+            _FakeResult(
+                scalars=[
+                    SimpleNamespace(
+                        job_id="17928",
+                        state="running",
+                        requested_concurrency=1,
+                        worker_id=worker_id,
+                        nodelist="TRT-EAI-OLDLAB-1",
+                        redacted_env={
+                            "LOOM_REMOTE_WORKER_ENV_FILE": (
+                                "/shared_work/qianyi/loom-worker-capacity/"
+                                "public-beta-oldlab-worker-public-beta-a88e33a4.env"
+                            ),
+                            "LOOM_REMOTE_WORKER_REPO_DIR": (
+                                "/shared_work/qianyi/"
+                                "loom-remote-worker-public-beta-a88e33a4"
+                            ),
+                        },
+                    ),
+                ],
+            ),
+            _FakeResult(rows=[]),
+        ]
+    )
+
+    observation = await _load_observation(
+        cast(Any, session),
+        _policy_row(
+            min_slots=1,
+            actuator_config={
+                "allowed_nodes": ["TRT-EAI-OLDLAB-1"],
+                "env_file": (
+                    "/shared_work/qianyi/loom-worker-capacity/"
+                    "public-beta-oldlab-worker-public-beta-a232312f.env"
+                ),
+                "repo_dir": (
+                    "/shared_work/qianyi/"
+                    "loom-remote-worker-public-beta-a232312f"
+                ),
+                "requested_concurrency": 1,
+                "requested_cpus": 2,
+                "requested_memory_mib": 8192,
+                "external_runner": True,
+            },
+        ),
+        now=now,
+        freshness_sec=120,
+    )
+
+    assert observation.active_slots == 0
+    assert observation.pending_slots == 0
+    assert observation.release_drift_slots == 1
+    assert observation.release_drift_job_ids == ("17928",)
+    assert observation.idle_worker_ids == ()
+
+
+async def test_load_observation_excludes_worker_token_release_drift(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    env_file = tmp_path / "remote-worker.env"
+    env_file.write_text('LOOM_WORKER_TOKEN="current-token"\n', encoding="utf-8")
+    worker_id = uuid4()
+    workers = [
+        SimpleNamespace(
+            id=worker_id,
+            hostname="TRT-EAI-OLDLAB-1",
+            max_concurrent=1,
+            drain_state="active",
+        ),
+    ]
+    session = _FakeSession(
+        [
+            _FakeResult(scalars=workers),
+            _FakeResult(rows=[]),
+            _FakeResult(
+                scalars=[
+                    SimpleNamespace(
+                        job_id="17929",
+                        state="running",
+                        requested_concurrency=1,
+                        worker_id=worker_id,
+                        nodelist="TRT-EAI-OLDLAB-1",
+                        redacted_env={
+                            "LOOM_REMOTE_WORKER_ENV_FILE": str(env_file),
+                            "LOOM_REMOTE_WORKER_REPO_DIR": "/opt/loom",
+                            WORKER_AUTH_FINGERPRINT_ENV_KEY: worker_token_fingerprint(
+                                "stale-token",
+                            ),
+                        },
+                    ),
+                ],
+            ),
+            _FakeResult(rows=[]),
+        ]
+    )
+
+    observation = await _load_observation(
+        cast(Any, session),
+        _policy_row(
+            min_slots=1,
+            actuator_config={
+                "allowed_nodes": ["TRT-EAI-OLDLAB-1"],
+                "env_file": str(env_file),
+                "repo_dir": "/opt/loom",
+                "requested_concurrency": 1,
+                "requested_cpus": 2,
+                "requested_memory_mib": 8192,
+                "external_runner": True,
+            },
+        ),
+        now=now,
+        freshness_sec=120,
+    )
+
+    assert observation.active_slots == 0
+    assert observation.release_drift_slots == 1
+    assert observation.release_drift_job_ids == ("17929",)
 
 
 async def test_request_worker_drain_skips_empty_and_executes_update() -> None:
