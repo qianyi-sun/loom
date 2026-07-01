@@ -44,13 +44,22 @@ class _ExecResult:
 
 class LocalContainer:
     """Subset of docker.models.containers.Container that upstream
-    TmuxSession needs (`exec_run`). Runs commands locally because we're
-    already inside the sandbox.
+    TmuxSession needs. Runs commands locally because we're already
+    inside the sandbox.
 
-    Upstream calls `exec_run` with either a list (for explicit argv,
-    no shell) or a string (then it expects shell parsing). We respect
-    both. `kwargs` are tolerated and ignored — upstream passes a few
-    docker-specific ones (`stdout=`, `stderr=`, etc.) that don't apply.
+    Methods implemented:
+    - `exec_run(cmd, ...)` — always. Upstream calls with either a list
+      (explicit argv, no shell) or a string (shell parsing).
+    - `put_archive(container_dir, tar_bytes)` — used by upstream's
+      `DockerComposeManager.copy_to_container` (called from
+      `TmuxSession.copy_to_container`) to inject the
+      `get-asciinema-timestamp.sh` helper. Since we're already inside
+      the sandbox, extraction is just a local `tarfile.extractall`
+      into `container_dir`. Returns True to match docker-py's shape.
+
+    `**kwargs` on every method are tolerated and ignored — upstream
+    passes a few docker-specific ones (`stdout=`, `stderr=`, etc.)
+    that don't apply.
     """
 
     def exec_run(
@@ -75,6 +84,30 @@ class LocalContainer:
             exit_code=int(result.returncode),
             output=(result.stdout or b"") + (result.stderr or b""),
         )
+
+    @staticmethod
+    def put_archive(
+        container_dir: str,
+        data: bytes,
+        **_: Any,
+    ) -> bool:
+        """Extract the tar `data` into `container_dir` on the local
+        filesystem. docker-py's method uploads into the target
+        container; since we ARE the target container, this is just
+        local extraction. Returns True (docker-py convention) on
+        success, False on failure — never raises so upstream's
+        `DockerComposeManager` treats it as a docker-py Container."""
+        import io
+        import tarfile
+
+        try:
+            target = Path(container_dir)
+            target.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r|*") as tf:
+                tf.extractall(path=target)
+        except Exception:
+            return False
+        return True
 
 
 def _emit(payload: dict[str, object]) -> None:

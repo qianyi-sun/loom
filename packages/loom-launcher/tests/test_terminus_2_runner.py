@@ -48,6 +48,42 @@ def test_local_container_exec_run_string_cmd_uses_bash() -> None:
     assert b"LOOM-MARKER" in result.output
 
 
+def test_local_container_put_archive_extracts_to_dir(tmp_path) -> None:
+    """Upstream `TmuxSession.__init__` calls
+    `DockerComposeManager.copy_to_container` which in turn calls
+    `container.put_archive(container_dir, tar_bytes)` to inject the
+    `get-asciinema-timestamp.sh` helper. Our shim extracts the tar
+    locally because we ARE the target container. Regression for the
+    real cluster failure `'LocalContainer' object has no attribute
+    'put_archive'` (trial 63566218 pre-fix)."""
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        payload = b"echo timestamp\n"
+        info = tarfile.TarInfo(name="get-timestamp.sh")
+        info.size = len(payload)
+        tf.addfile(info, io.BytesIO(payload))
+    tar_bytes = buf.getvalue()
+
+    dest = tmp_path / "container-dir"
+    container = terminus_2_runner.LocalContainer()
+    assert container.put_archive(str(dest), tar_bytes) is True
+
+    extracted = dest / "get-timestamp.sh"
+    assert extracted.exists()
+    assert extracted.read_bytes() == b"echo timestamp\n"
+
+
+def test_local_container_put_archive_returns_false_on_bad_tar() -> None:
+    """docker-py's put_archive convention: return True/False, do not
+    raise. Upstream `DockerComposeManager.copy_to_container` checks the
+    return value in some code paths."""
+    container = terminus_2_runner.LocalContainer()
+    assert container.put_archive("/tmp/loom-test-put-archive-bad", b"not-a-tar") is False
+
+
 def test_local_container_exec_run_missing_binary_returns_127() -> None:
     """A missing executable should produce a docker-py-shaped
     `ExecResult` with exit_code=127 (POSIX "command not found"), NOT
