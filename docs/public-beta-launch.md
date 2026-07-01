@@ -126,10 +126,26 @@ Attach these to the release issue or release PR:
 - Leak-scan note showing seeded fake secrets and internal service URLs were not
   found in API responses, audit excerpts, or downloaded safe artifacts.
 
-The release gate manifest is the machine-readable index for those items. Keep
-it free of raw bearer tokens, provider keys, signed object-store URLs, internal
-service URLs, and secret refs; `scripts/ops/release_gate.py` fails the gate if
-any of those patterns appear.
+Generate a rollout release manifest before the protected apply. It is the
+machine-readable expected-state anchor for image/render convergence, DB revision
+checks, and per-component release evidence:
+
+```bash
+loom cluster release-manifest \
+  --config "$CLUSTER_CONFIG" \
+  --environment public-beta \
+  --image-tag "$IMAGE_TAG" \
+  --git-sha "$(git rev-parse HEAD)" \
+  --environment-state-file deploy/environment-state/public-beta.toml \
+  --env-config-version "${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+  --output "$ROLLOUT_DIR/release-manifest-$IMAGE_TAG.json"
+```
+
+Keep this artifact free of raw bearer tokens, provider keys, signed
+object-store URLs, internal service URLs, and secret refs; the production
+release gate rejects those patterns. The deploy workflow writes the same
+artifact, plus `rendered.yaml`, into `rollout-evidence/` before `loom cluster
+up` and uploads the directory as a workflow artifact.
 
 ## Automated Gate
 
