@@ -1005,7 +1005,20 @@ The conservative OLDLAB default is `cpu_per_slot=2`,
 at `5 * 8 = 40` slots, but only when all five nodes pass the live Slurm safety
 checks. If the nodes are already loaded near their CPU count or a node has only
 single-digit GiB free memory, the autoscaler should keep the warm minimum
-instead of submitting more jobs.
+instead of submitting more jobs. When every allowed node is excluded during a
+desired Slurm scale-up, the autoscaler records `last_decision=blocked`,
+`last_blocked_reason=no_safe_slurm_nodes`, and structured
+`last_blocked_details.node_exclusions` entries such as
+`oldlab-1:insufficient_memory`, `oldlab-2:cpu_load_high`, or
+`oldlab-5:unsafe_state`. The text status commands summarize those entries, and
+the JSON output includes the Slurm state, CPU load, idle CPU, free memory, and
+safe-slot count when live `sinfo` data was available.
+If the Slurm include list is empty or missing, scale-up is blocked with
+`last_blocked_reason=missing_slurm_allowed_nodes` and details showing the
+invalid `allowed_nodes` value.
+`loom admin environment-state check --format json` copies these hard blockers
+into `autoscaler_blockers`, and `loom cluster release-gate` fails the
+environment-state convergence row until they are resolved.
 
 If the Control Plane runs inside Kubernetes and the Slurm CLI/munge socket are
 available only on the OLDLAB submit host, mark the policy as externally run:
@@ -1128,6 +1141,6 @@ Rollback or disable:
 | Claims happen but trials fail immediately | Docker unavailable or sandbox image missing | `docker info`; worker logs around sandbox start. |
 | Trials upload no trajectory/artifacts | MinIO endpoint, credentials, or runtime bucket bootstrap failure | `curl $LOOM_WORKER_MINIO_ENDPOINT/minio/health/live`; worker logs for S3 errors; trial `failure_reason` should be `trajectory_flush_failed` or `artifact_upload_failed`. |
 | Queue grows while hosts look idle | Workers not matching task capabilities or provider limits throttling | Control Plane worker table, queue depth, gateway/provider errors. |
-| Autoscaler does not scale up | Policy disabled, cooldown active, max slots reached, pending cap reached, no safe Slurm nodes, external runner not active, release-state drift in an active Slurm job, or no compatible queued trials | `loom admin worker-pools autoscaler status --format json`; check `last_blocked_reason`, `last_error`, queued caps, Slurm job status, and `loom resources status --json`. For `release_state_drift`, replace/cancel the listed stale Slurm jobs and rerun `loom admin environment-state check` before release validation. |
+| Autoscaler does not scale up | Policy disabled, cooldown active, max slots reached, pending cap reached, missing Slurm include list, no safe Slurm nodes, external runner not active, release-state drift in an active Slurm job, or no compatible queued trials | `loom admin worker-pools autoscaler status --format json`; check `last_blocked_reason`, `last_blocked_details.node_exclusions`, `last_error`, queued caps, Slurm job status, and `loom resources status --json`. For `missing_slurm_allowed_nodes`, repair `actuator_config.allowed_nodes` before rerunning the external autoscaler. For `no_safe_slurm_nodes`, inspect each node exclusion reason before changing the allowlist or resource thresholds. For `release_state_drift`, replace/cancel the listed stale Slurm jobs and rerun `loom admin environment-state check` before release validation. |
 | Worker remains draining | In-flight trial still assigned or Slurm release has not converged | `loom resources status --json`; inspect claimed/running trials by worker id and `loom admin slurm-workers status`. |
 | Host becomes unstable | Concurrency too high or missing sandbox resource limits | Lower `LOOM_WORKER_MAX_CONCURRENT`; inspect memory, swap, and Docker container count. |

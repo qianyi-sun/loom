@@ -462,6 +462,15 @@ and `loom admin worker-pools autoscaler status` reports
 `last_blocked_reason=release_state_drift` with the affected Slurm job ids in
 `last_error`. Do not submit public-beta canaries until those jobs are replaced
 or cancelled and `environment-state check` is clean.
+If OLDLAB resource-aware scale-up has no safe allowed node, status reports
+`last_blocked_reason=no_safe_slurm_nodes` and
+`last_blocked_details.node_exclusions` with per-node reasons such as
+`insufficient_memory`, `cpu_load_high`, `unsafe_state`, `active_loom_job`, or
+`missing_resource_snapshot`; fix the capacity condition or adjust the allowed
+node/resource policy before treating OLDLAB as a validation pool.
+`environment-state check --format json` includes these hard blockers under
+`autoscaler_blockers`, and `loom cluster release-gate` fails the
+environment-state convergence row while the blocker is active.
 
 ```bash
 LIVE_ADMIN_TOKEN_FINGERPRINT="$(

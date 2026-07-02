@@ -113,6 +113,7 @@ def _policy_row(**overrides: object) -> WorkerPoolAutoscalerPolicy:
         "last_occupied_slots": 0,
         "last_queued_slots": 0,
         "last_blocked_reason": None,
+        "last_blocked_details": None,
         "last_error": None,
         "last_scale_up_at": now - timedelta(seconds=120),
         "last_scale_down_at": now - timedelta(seconds=800),
@@ -476,6 +477,7 @@ def test_policy_serialization_and_config_preserve_status_fields() -> None:
     assert body["idle_since_at"] == row.idle_since_at.isoformat()
     assert body["last_decision_at"] == (now - timedelta(seconds=5)).isoformat()
     assert body["updated_at"] == now.isoformat()
+    assert body["last_blocked_details"] is None
     assert config.environment == "production"
     assert config.pool_name == "oldlab"
     assert config.actuator_config == row.actuator_config
@@ -610,6 +612,40 @@ def test_persist_decision_updates_scale_up_and_scale_down_timestamps() -> None:
     assert row.last_decision == "release_drained"
     assert row.last_scale_down_at == now + timedelta(seconds=10)
     assert row.idle_since_at == now - timedelta(seconds=900)
+
+
+def test_persist_decision_and_serialization_include_blocked_details() -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    row = _policy_row(last_scale_up_at=None, last_blocked_details=None)
+    details = {
+        "reason": "no_safe_slurm_nodes",
+        "node_exclusions": [
+            {"hostname": "oldlab-1", "reason": "insufficient_memory"},
+        ],
+    }
+
+    _persist_decision(
+        row,
+        AutoscalerDecision(
+            action="blocked",
+            reason="no_safe_slurm_nodes",
+            desired_slots=1,
+            actual_slots=0,
+            pending_slots=0,
+            draining_slots=0,
+            occupied_slots=0,
+            queued_slots=1,
+            blocked_reason="no_safe_slurm_nodes",
+            blocked_details=details,
+        ),
+        now=now,
+    )
+
+    assert row.last_decision == "blocked"
+    assert row.last_blocked_reason == "no_safe_slurm_nodes"
+    assert row.last_blocked_details == details
+    assert row.last_scale_up_at is None
+    assert autoscaler_policy_to_dict(row)["last_blocked_details"] == details
 
 
 def test_slurm_config_from_policy_uses_actuator_config_defaults_and_overrides() -> None:
@@ -991,7 +1027,7 @@ async def test_apply_slurm_scale_up_records_success_and_failure(
     runner = _FakeSlurmRunner()
     runner.fail_submit_nodes.add("oldlab-2")
 
-    error = await _apply_slurm_scale_up(
+    result = await _apply_slurm_scale_up(
         cast(Any, session),
         _policy_row(
             min_slots=0,
@@ -1022,7 +1058,9 @@ async def test_apply_slurm_scale_up_records_success_and_failure(
     )
 
     assert runner.submitted_nodes == ["oldlab-1", "oldlab-2"]
-    assert error == "sbatch failed for oldlab-2"
+    assert result.error == "sbatch failed for oldlab-2"
+    assert result.blocked_reason is None
+    assert result.blocked_details is None
     assert [job["nodelist"] for job in recorded_jobs] == ["oldlab-1", "oldlab-2"]
     assert recorded_jobs[0]["job_id"] == "job-oldlab-1"
     assert recorded_jobs[1]["job_id"] is None
@@ -1048,7 +1086,7 @@ async def test_apply_slurm_scale_up_respects_pending_job_cap() -> None:
     )
     runner = _FakeSlurmRunner()
 
-    error = await _apply_slurm_scale_up(
+    result = await _apply_slurm_scale_up(
         cast(Any, session),
         _policy_row(
             min_slots=0,
@@ -1078,7 +1116,9 @@ async def test_apply_slurm_scale_up_respects_pending_job_cap() -> None:
         now=datetime(2026, 6, 27, 12, 0, tzinfo=UTC),
     )
 
-    assert error is None
+    assert result.error is None
+    assert result.blocked_reason is None
+    assert result.blocked_details is None
     assert runner.submitted_nodes == []
 
 
@@ -1110,7 +1150,7 @@ async def test_apply_slurm_scale_up_records_resource_aware_concurrency_per_node(
         "oldlab-3": SlurmNodeResource("oldlab-3", "mixed", 24, 8_000, 4.0),
     }
 
-    error = await _apply_slurm_scale_up(
+    result = await _apply_slurm_scale_up(
         cast(Any, session),
         _policy_row(
             min_slots=0,
@@ -1146,7 +1186,9 @@ async def test_apply_slurm_scale_up_records_resource_aware_concurrency_per_node(
         now=now,
     )
 
-    assert error is None
+    assert result.error is None
+    assert result.blocked_reason is None
+    assert result.blocked_details is None
     assert runner.submitted_nodes == ["oldlab-1", "oldlab-2"]
     assert [config.requested_concurrency for config in runner.submitted_configs] == [8, 4]
     assert [job["requested_concurrency"] for job in recorded_jobs] == [8, 4]
@@ -1156,6 +1198,142 @@ async def test_apply_slurm_scale_up_records_resource_aware_concurrency_per_node(
         "8",
         "4",
     ]
+
+
+async def test_apply_slurm_scale_up_reports_no_safe_node_details() -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    session = _FakeSession([_FakeResult(scalars=[])])
+    runner = _FakeSlurmRunner()
+    runner.node_resources = {
+        "oldlab-1": SlurmNodeResource("oldlab-1", "mixed", 24, 8_000, 4.0),
+        "oldlab-2": SlurmNodeResource("oldlab-2", "drain", 24, 120_000, 4.0),
+        "oldlab-3": SlurmNodeResource("oldlab-3", "mixed", 24, 120_000, 30.0),
+    }
+
+    result = await _apply_slurm_scale_up(
+        cast(Any, session),
+        _policy_row(
+            min_slots=0,
+            max_slots=12,
+            actuator_config={
+                "allowed_nodes": ["oldlab-1", "oldlab-2", "oldlab-3"],
+                "env_file": "/secure/.env.remote-worker",
+                "repo_dir": "/opt/loom",
+                "requested_concurrency": 1,
+                "requested_cpus": 2,
+                "requested_memory_mib": 8192,
+                "max_jobs": 3,
+                "pending_job_cap": 3,
+                "resource_aware": True,
+                "cpu_per_slot": 2,
+                "memory_mib_per_slot": 8192,
+                "reserved_cpus": 4,
+                "reserved_memory_mib": 24_576,
+                "max_concurrency_per_node": 8,
+            },
+        ),
+        AutoscalerDecision(
+            action="scale_up",
+            reason="min_warm_capacity",
+            desired_slots=6,
+            actual_slots=0,
+            pending_slots=0,
+            draining_slots=0,
+            occupied_slots=0,
+            queued_slots=0,
+        ),
+        runner=runner,
+        now=now,
+    )
+
+    assert runner.submitted_nodes == []
+    assert result.error is None
+    assert result.blocked_reason == "no_safe_slurm_nodes"
+    assert result.blocked_details == {
+        "reason": "no_safe_slurm_nodes",
+        "slurm_decision_reason": "no_safe_nodes",
+        "resource_aware": True,
+        "allowed_nodes": ["oldlab-1", "oldlab-2", "oldlab-3"],
+        "node_exclusions": [
+            {
+                "hostname": "oldlab-1",
+                "reason": "insufficient_memory",
+                "safe_slots": 0,
+                "state": "mixed",
+                "cpus_total": 24,
+                "idle_cpus": None,
+                "cpu_load": 4.0,
+                "free_memory_mib": 8000,
+            },
+            {
+                "hostname": "oldlab-2",
+                "reason": "unsafe_state",
+                "safe_slots": 0,
+                "state": "drain",
+                "cpus_total": 24,
+                "idle_cpus": None,
+                "cpu_load": 4.0,
+                "free_memory_mib": 120000,
+            },
+            {
+                "hostname": "oldlab-3",
+                "reason": "cpu_load_high",
+                "safe_slots": 0,
+                "state": "mixed",
+                "cpus_total": 24,
+                "idle_cpus": None,
+                "cpu_load": 30.0,
+                "free_memory_mib": 120000,
+            },
+        ],
+    }
+
+
+async def test_apply_slurm_scale_up_blocks_missing_allowed_nodes() -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    session = _FakeSession()
+    runner = _FakeSlurmRunner()
+
+    result = await _apply_slurm_scale_up(
+        cast(Any, session),
+        _policy_row(
+            actuator_config={
+                "allowed_nodes": [],
+                "env_file": "/secure/.env.remote-worker",
+                "repo_dir": "/opt/loom",
+                "requested_concurrency": 1,
+                "requested_cpus": 2,
+                "requested_memory_mib": 8192,
+                "max_jobs": 1,
+                "pending_job_cap": 1,
+                "resource_aware": True,
+            },
+        ),
+        AutoscalerDecision(
+            action="scale_up",
+            reason="min_warm_capacity",
+            desired_slots=1,
+            actual_slots=0,
+            pending_slots=0,
+            draining_slots=0,
+            occupied_slots=0,
+            queued_slots=0,
+        ),
+        runner=runner,
+        now=now,
+    )
+
+    assert runner.submitted_nodes == []
+    assert result.error == (
+        "allowed nodes are required when Slurm worker controller is enabled"
+    )
+    assert result.blocked_reason == "missing_slurm_allowed_nodes"
+    assert result.blocked_details == {
+        "reason": "missing_slurm_allowed_nodes",
+        "message": "allowed nodes are required when Slurm worker controller is enabled",
+        "resource_aware": True,
+        "allowed_nodes": [],
+    }
 
 
 async def test_apply_slurm_release_drained_cancels_jobs_after_drain() -> None:

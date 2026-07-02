@@ -95,7 +95,15 @@ class AutoscalerDecision:
     worker_ids_to_drain: tuple[str, ...] = ()
     worker_ids_to_release: tuple[str, ...] = ()
     blocked_reason: str | None = None
+    blocked_details: dict[str, Any] | None = None
     error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class SlurmScaleUpActuatorResult:
+    error: str | None = None
+    blocked_reason: str | None = None
+    blocked_details: dict[str, Any] | None = None
 
 
 def _cooldown_active(
@@ -120,6 +128,7 @@ def _base_decision(
     worker_ids_to_drain: tuple[str, ...] = (),
     worker_ids_to_release: tuple[str, ...] = (),
     blocked_reason: str | None = None,
+    blocked_details: dict[str, Any] | None = None,
     error_message: str | None = None,
 ) -> AutoscalerDecision:
     return AutoscalerDecision(
@@ -135,6 +144,7 @@ def _base_decision(
         worker_ids_to_drain=worker_ids_to_drain,
         worker_ids_to_release=worker_ids_to_release,
         blocked_reason=blocked_reason,
+        blocked_details=blocked_details,
         error_message=error_message,
     )
 
@@ -349,6 +359,7 @@ def autoscaler_policy_to_dict(
         "last_occupied_slots": row.last_occupied_slots,
         "last_queued_slots": row.last_queued_slots,
         "last_blocked_reason": row.last_blocked_reason,
+        "last_blocked_details": row.last_blocked_details,
         "last_error": row.last_error,
         "last_scale_up_at": _dt(row.last_scale_up_at),
         "last_scale_down_at": _dt(row.last_scale_down_at),
@@ -833,6 +844,7 @@ def _persist_decision(
     row.last_occupied_slots = decision.occupied_slots
     row.last_queued_slots = decision.queued_slots
     row.last_blocked_reason = decision.blocked_reason
+    row.last_blocked_details = decision.blocked_details
     row.last_error = decision.error_message
     row.last_decision_at = now
     row.updated_at = now
@@ -947,6 +959,75 @@ def _worker_env_from_slurm_config(
     return env
 
 
+def _slurm_node_exclusion_details(
+    slurm_decision: Any,
+    *,
+    node_resources: dict[str, Any] | None,
+) -> list[dict[str, object]]:
+    resources = node_resources or {}
+    details: list[dict[str, object]] = []
+    for node, plan in slurm_decision.node_capacity.items():
+        resource = resources.get(node)
+        row: dict[str, object] = {
+            "hostname": node,
+            "reason": plan.reason,
+            "safe_slots": plan.safe_slots,
+        }
+        if resource is not None:
+            row.update(
+                {
+                    "state": resource.state,
+                    "cpus_total": resource.cpus_total,
+                    "idle_cpus": resource.idle_cpus,
+                    "cpu_load": resource.cpu_load,
+                    "free_memory_mib": resource.free_memory_mib,
+                },
+            )
+        details.append(row)
+    return details
+
+
+def _no_safe_slurm_nodes_details(
+    config: ElasticSlurmWorkerControllerConfig,
+    slurm_decision: Any,
+    *,
+    node_resources: dict[str, Any] | None,
+) -> dict[str, object]:
+    return {
+        "reason": "no_safe_slurm_nodes",
+        "slurm_decision_reason": slurm_decision.reason,
+        "resource_aware": config.resource_aware,
+        "allowed_nodes": list(config.allowed_nodes),
+        "node_exclusions": _slurm_node_exclusion_details(
+            slurm_decision,
+            node_resources=node_resources,
+        ),
+    }
+
+
+def _slurm_config_blocker(row: WorkerPoolAutoscalerPolicy, exc: ValueError) -> tuple[str, dict[str, object]]:
+    message = str(exc)
+    actor_config = row.actuator_config or {}
+    allowed_nodes = actor_config.get("allowed_nodes")
+    if "allowed nodes are required" in message:
+        return (
+            "missing_slurm_allowed_nodes",
+            {
+                "reason": "missing_slurm_allowed_nodes",
+                "message": message,
+                "resource_aware": bool(actor_config.get("resource_aware")),
+                "allowed_nodes": [] if allowed_nodes is None else allowed_nodes,
+            },
+        )
+    return (
+        "slurm_autoscaler_config_invalid",
+        {
+            "reason": "slurm_autoscaler_config_invalid",
+            "message": message,
+        },
+    )
+
+
 async def _apply_slurm_scale_up(
     session: AsyncSession,
     row: WorkerPoolAutoscalerPolicy,
@@ -954,8 +1035,16 @@ async def _apply_slurm_scale_up(
     *,
     runner: SlurmWorkerCommandRunner | None,
     now: datetime,
-) -> str | None:
-    config = _slurm_config_from_policy(row)
+) -> SlurmScaleUpActuatorResult:
+    try:
+        config = _slurm_config_from_policy(row)
+    except ValueError as exc:
+        blocked_reason, blocked_details = _slurm_config_blocker(row, exc)
+        return SlurmScaleUpActuatorResult(
+            error=str(exc),
+            blocked_reason=blocked_reason,
+            blocked_details=blocked_details,
+        )
     runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
     active_jobs = (
         (
@@ -981,7 +1070,7 @@ async def _apply_slurm_scale_up(
         try:
             node_resources = await runner.query_node_resources(config.allowed_nodes)
         except Exception as exc:
-            return str(exc)
+            return SlurmScaleUpActuatorResult(error=str(exc))
 
     slurm_decision = compute_controller_decision(
         config,
@@ -998,6 +1087,19 @@ async def _apply_slurm_scale_up(
             node_resources=node_resources,
         ),
     )
+    if (
+        config.resource_aware
+        and slurm_decision.reason == "no_safe_nodes"
+        and not slurm_decision.submit_nodes
+    ):
+        return SlurmScaleUpActuatorResult(
+            blocked_reason="no_safe_slurm_nodes",
+            blocked_details=_no_safe_slurm_nodes_details(
+                config,
+                slurm_decision,
+                node_resources=node_resources,
+            ),
+        )
     actuator_error: str | None = None
     for node in slurm_decision.submit_nodes:
         node_config = slurm_submission_config_for_node(
@@ -1038,7 +1140,7 @@ async def _apply_slurm_scale_up(
                 submitted_at=now,
                 submission_error=str(exc),
             )
-    return actuator_error
+    return SlurmScaleUpActuatorResult(error=actuator_error)
 
 
 async def _apply_slurm_release_drained(
@@ -1326,6 +1428,8 @@ async def reconcile_worker_pool_autoscaler_once(
         if external_only and not uses_external_runner:
             continue
         actuator_error: str | None = None
+        actuator_blocked_reason: str | None = None
+        actuator_blocked_details: dict[str, Any] | None = None
         if row.actuator == "slurm":
             actuator_error = await _refresh_slurm_job_registry(
                 session,
@@ -1361,13 +1465,24 @@ async def reconcile_worker_pool_autoscaler_once(
                     now=now,
                 )
         elif decision.action == "scale_up" and row.actuator == "slurm":
-            actuator_error = await _apply_slurm_scale_up(
+            slurm_result = await _apply_slurm_scale_up(
                 session,
                 row,
                 decision,
                 runner=slurm_runner,
                 now=now,
             )
+            actuator_error = slurm_result.error
+            actuator_blocked_reason = slurm_result.blocked_reason
+            actuator_blocked_details = slurm_result.blocked_details
+            if actuator_blocked_reason is not None:
+                decision = replace(
+                    decision,
+                    action="blocked",
+                    reason=actuator_blocked_reason,
+                    blocked_reason=actuator_blocked_reason,
+                    blocked_details=actuator_blocked_details,
+                )
         elif decision.action == "scale_up" and row.actuator == "gb10":
             await _apply_gb10_scale_up(
                 session,

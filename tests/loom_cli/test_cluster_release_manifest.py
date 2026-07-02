@@ -113,8 +113,8 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
             },
         },
     }
-    assert manifest["alembic"]["expected_heads"] == ["0050"]
-    assert manifest["alembic"]["compatible_heads"] == ["0050"]
+    assert manifest["alembic"]["expected_heads"] == ["0051"]
+    assert manifest["alembic"]["compatible_heads"] == ["0051"]
     assert manifest["external_workers"]["environment_state_file"]["sha256"] == (
         hashlib.sha256(environment_state_path.read_bytes()).hexdigest()
     )

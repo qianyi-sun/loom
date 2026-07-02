@@ -53,6 +53,8 @@ class ResourcePoolSnapshot(TypedDict):
     decision_reason: str | None
     last_autoscaler_blocked_reason: str | None
     blocked_reason: str | None
+    last_autoscaler_blocked_details: dict[str, Any] | None
+    blocked_details: dict[str, Any] | None
     last_autoscaler_error: str | None
 
 
@@ -101,6 +103,7 @@ class _MutablePool:
     last_autoscaler_decision: str | None = None
     last_autoscaler_reason: str | None = None
     last_autoscaler_blocked_reason: str | None = None
+    last_autoscaler_blocked_details: dict[str, Any] | None = None
     last_autoscaler_error: str | None = None
 
     @property
@@ -145,6 +148,8 @@ class _MutablePool:
             "decision_reason": self.last_autoscaler_reason,
             "last_autoscaler_blocked_reason": self.last_autoscaler_blocked_reason,
             "blocked_reason": self.last_autoscaler_blocked_reason,
+            "last_autoscaler_blocked_details": self.last_autoscaler_blocked_details,
+            "blocked_details": self.last_autoscaler_blocked_details,
             "last_autoscaler_error": self.last_autoscaler_error,
         }
 
@@ -309,6 +314,7 @@ async def get_resource_pool_summary(
         pool.last_autoscaler_decision = policy.last_decision
         pool.last_autoscaler_reason = policy.last_decision_reason
         pool.last_autoscaler_blocked_reason = policy.last_blocked_reason
+        pool.last_autoscaler_blocked_details = policy.last_blocked_details
         pool.last_autoscaler_error = policy.last_error
 
     if trial_stmt is None:
