@@ -17,6 +17,11 @@ from loom.models.taskset import TaskSetVerifier, UserTaskSetManifest
 from loom.taskset.instance_mapping import MappingError, resolve_mapping
 from loom.taskset.status import cap_error_summary, compute_task_set_status
 from loom.taskset.template_render import render_task_template
+from loom.taskset.transform_sandbox import (
+    TransformSandboxConfig,
+    TransformSandboxError,
+    run_transform,
+)
 from loom.taskset.upstream_rows import UpstreamFetchError, iter_upstream_rows
 
 _NOOP_VERIFIER = b"#!/bin/sh\nexit 0\n"
@@ -109,13 +114,17 @@ def _put_object(
     )
 
 
-def _fetch_verifier_bytes(client: Any, verifier_blob_uri: str | None) -> bytes | None:
-    if verifier_blob_uri is None:
+def _fetch_blob_bytes(client: Any, blob_uri: str | None) -> bytes | None:
+    if blob_uri is None:
         return None
-    bucket, key = _parse_s3_uri(verifier_blob_uri)
+    bucket, key = _parse_s3_uri(blob_uri)
     resp = client.get_object(Bucket=bucket, Key=key)
     body: bytes = resp["Body"].read()
     return body
+
+
+def _fetch_verifier_bytes(client: Any, verifier_blob_uri: str | None) -> bytes | None:
+    return _fetch_blob_bytes(client, verifier_blob_uri)
 
 
 def _write_local_bundle(
@@ -175,23 +184,48 @@ def materialize_task_set(
     owning_team_id: str,
     intents: list[str],
     verifier_blob_uri: str | None,
+    transform_blob_uri: str | None = None,
+    transform_config: TransformSandboxConfig | None = None,
     minio_client: Any,
     artifacts_bucket: str,
     upstream_cache_root: Path,
 ) -> MaterializeOutput:
     """Materialize one TaskSet synchronously. Caller owns DB writes."""
-    if manifest.transform is not None:
-        return MaterializeOutput(
-            status="failed",
-            status_reason="transform_not_supported_yet",
-            job_failure_reason="transform_not_supported_yet",
-            job_failure_message="transform manifests require sub-plan 4 sandbox support",
-        )
-
     slug = manifest.slug
     prefix = _storage_prefix(team_id=owning_team_id, slug=slug)
     has_evaluation = "evaluation" in intents
     max_instances = (manifest.limits.max_instances if manifest.limits else 500)
+    manifest_timeout_s = manifest.limits.timeout_per_task_s if manifest.limits else None
+
+    transform_bytes: bytes | None = None
+    if manifest.transform is not None:
+        if transform_config is None or not transform_config.enabled or not transform_config.network_isolated:
+            return MaterializeOutput(
+                status="failed",
+                status_reason="transform_unsupported_on_host",
+                job_failure_reason="transform_unsupported_on_host",
+                job_failure_message=(
+                    "transform manifests require taskset_materializer_transforms_enabled "
+                    "and taskset_materializer_transform_network_isolated"
+                ),
+            )
+        try:
+            transform_bytes = _fetch_blob_bytes(minio_client, transform_blob_uri)
+        except Exception as exc:
+            return MaterializeOutput(
+                status="failed",
+                status_reason="transform_blob_missing",
+                job_failure_reason="transform_blob_missing",
+                job_failure_message=str(exc),
+            )
+        if not transform_bytes:
+            return MaterializeOutput(
+                status="failed",
+                status_reason="transform_blob_missing",
+                job_failure_reason="transform_blob_missing",
+                job_failure_message="transform blob uri missing or empty",
+            )
+
     verifier_bytes = _fetch_verifier_bytes(minio_client, verifier_blob_uri)
 
     try:
@@ -220,7 +254,16 @@ def materialize_task_set(
             attempted += 1
             row_index = attempted
             try:
-                instance = resolve_mapping(row, manifest.instance_mapping)
+                working_row = row
+                if manifest.transform is not None and transform_bytes is not None:
+                    assert transform_config is not None
+                    working_row = run_transform(
+                        transform_script=transform_bytes,
+                        row=row,
+                        config=transform_config,
+                        manifest_timeout_s=manifest_timeout_s,
+                    )
+                instance = resolve_mapping(working_row, manifest.instance_mapping)
                 rendered = render_task_template(
                     manifest.task_template,
                     instance=instance,
@@ -281,6 +324,13 @@ def materialize_task_set(
                     "row": str(row_index),
                     "code": "mapping_error",
                     "message": str(exc),
+                })
+            except TransformSandboxError as exc:
+                skipped += 1
+                errors.append({
+                    "row": str(row_index),
+                    "code": exc.code,
+                    "message": exc.message,
                 })
             except ValidationError as exc:
                 skipped += 1

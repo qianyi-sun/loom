@@ -482,6 +482,31 @@ used_by     = ["loom-service"]
 python_type = "Path"
 default     = "/tmp/loom-taskset-upstream"
 
+[service_config.taskset_materializer_transforms_enabled]
+used_by     = ["loom-service"]
+python_type = "bool"
+default     = false
+
+[service_config.taskset_materializer_transform_network_isolated]
+used_by     = ["loom-service"]
+python_type = "bool"
+default     = false
+
+[service_config.taskset_materializer_transform_wall_timeout_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 30
+
+[service_config.taskset_materializer_transform_cpu_limit_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 10
+
+[service_config.taskset_materializer_transform_memory_limit_mb]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 256
+
 [service_config.local_servers_json]
 used_by     = ["loom-service"]
 python_type = "str"

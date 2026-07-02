@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from loom.db.schema import Task, TaskSet, TaskSetManifest, TaskSetMaterializationJob
 from loom.models.taskset import UserTaskSetManifest
 from loom.taskset.materialize import MaterializeOutput, materialize_task_set
+from loom.taskset.transform_sandbox import TransformSandboxConfig
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +146,7 @@ async def _materialize_claimed_job(
     minio_client: Any,
     artifacts_bucket: str,
     upstream_cache_root: Path,
+    transform_config: TransformSandboxConfig,
 ) -> None:
     async with session_factory() as session:
         job = await session.get(TaskSetMaterializationJob, job_id)
@@ -183,6 +185,8 @@ async def _materialize_claimed_job(
             owning_team_id=str(task_set.owning_team_id),
             intents=list(task_set.intents),
             verifier_blob_uri=manifest_row.verifier_blob_uri,
+            transform_blob_uri=manifest_row.transform_blob_uri,
+            transform_config=transform_config,
             minio_client=minio_client,
             artifacts_bucket=artifacts_bucket,
             upstream_cache_root=upstream_cache_root,
@@ -212,6 +216,7 @@ async def run_once(
     upstream_cache_root: Path,
     batch_size: int,
     claim_ttl_sec: int,
+    transform_config: TransformSandboxConfig,
 ) -> None:
     async with session_factory() as session:
         await reclaim_stale_jobs(session, claim_ttl_sec=claim_ttl_sec)
@@ -231,6 +236,7 @@ async def run_once(
                 minio_client=minio_client,
                 artifacts_bucket=artifacts_bucket,
                 upstream_cache_root=upstream_cache_root,
+                transform_config=transform_config,
             )
         except Exception:
             logger.exception(
@@ -264,6 +270,7 @@ async def run_loop(
     batch_size: int,
     poll_interval_sec: int,
     claim_ttl_sec: int,
+    transform_config: TransformSandboxConfig,
 ) -> None:
     upstream_cache_root.mkdir(parents=True, exist_ok=True)
     while True:
@@ -275,6 +282,7 @@ async def run_loop(
                 upstream_cache_root=upstream_cache_root,
                 batch_size=batch_size,
                 claim_ttl_sec=claim_ttl_sec,
+                transform_config=transform_config,
             )
         except asyncio.CancelledError:
             raise

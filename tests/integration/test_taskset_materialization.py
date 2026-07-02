@@ -29,6 +29,7 @@ from loom.db.schema import (
     Token,
     User,
 )
+from loom.taskset.transform_sandbox import TransformSandboxConfig
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from loom_service.taskset_materializer import run_once
@@ -226,6 +227,13 @@ async def _run_materializer_once(app: FastAPI) -> None:
         upstream_cache_root=settings.taskset_materializer_upstream_cache_root,
         batch_size=settings.taskset_materializer_batch_size,
         claim_ttl_sec=settings.taskset_materializer_claim_ttl_sec,
+        transform_config=TransformSandboxConfig(
+            enabled=settings.taskset_materializer_transforms_enabled,
+            network_isolated=settings.taskset_materializer_transform_network_isolated,
+            wall_timeout_sec=settings.taskset_materializer_transform_wall_timeout_sec,
+            cpu_limit_sec=settings.taskset_materializer_transform_cpu_limit_sec,
+            memory_limit_mb=settings.taskset_materializer_transform_memory_limit_mb,
+        ),
     )
 
 
@@ -299,7 +307,7 @@ async def test_materialization_partial_status(materialization_setup) -> None:
 
 
 @pytest.mark.asyncio
-async def test_materialization_transform_fails(materialization_setup) -> None:
+async def test_materialization_transform_fails_when_gates_disabled(materialization_setup) -> None:
     app, tokens, _teams = materialization_setup
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -324,5 +332,41 @@ async def test_materialization_transform_fails(materialization_setup) -> None:
         )
     body = get_resp.json()
     assert body["status"] == "failed"
-    assert body["status_reason"] == "transform_not_supported_yet"
+    assert body["status_reason"] == "transform_unsupported_on_host"
     assert body["materialization_job_state"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_materialization_transform_succeeds_when_gates_enabled(
+    materialization_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORMS_ENABLED", "true")
+    monkeypatch.setenv("LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_NETWORK_ISOLATED", "true")
+    app, tokens, _teams = materialization_setup
+    app.state.settings = LoomServiceSettings(_env_file=None)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        post = await client.post(
+            "/api/v1/tasksets",
+            headers={"Authorization": f"Bearer {tokens['team_a']}"},
+            files={
+                "manifest": (
+                    "manifest.yaml",
+                    _MANIFEST_TRANSFORM.encode(),
+                    "application/x-yaml",
+                ),
+                "transform": ("transform.py", b"def transform(row): return row", "text/x-python"),
+            },
+        )
+        assert post.status_code == 202
+        task_set_id = post.json()["task_set_id"]
+        await _run_materializer_once(app)
+        get_resp = await client.get(
+            f"/api/v1/tasksets/{task_set_id}",
+            headers={"Authorization": f"Bearer {tokens['team_a']}"},
+        )
+    body = get_resp.json()
+    assert body["status"] == "ready"
+    assert body["task_count"] == 1
+    assert body["materialization_job_state"] == "succeeded"
