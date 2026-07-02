@@ -63,6 +63,7 @@ class CheckResult:
     passed: bool
     score: float | None = None
     message: str | None = None
+    detail: dict[str, Any] = {}
     duration_sec: float | None = None
 
 

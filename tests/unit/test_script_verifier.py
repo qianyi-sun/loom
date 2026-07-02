@@ -24,7 +24,13 @@ async def fake_with_script_output() -> FakeDriver:
         "rewards": {"score": 0.85},
         "checks": [
             {"name": "linter", "passed": True, "score": 1.0},
-            {"name": "format", "passed": False, "score": 0.0, "message": "bad indent"},
+            {
+                "name": "format",
+                "passed": False,
+                "score": 0.0,
+                "message": "bad indent",
+                "detail": {"exit_code": 1},
+            },
         ],
     }).encode()
     return fake
@@ -41,6 +47,7 @@ async def test_script_verifier_reads_output(fake_with_script_output: FakeDriver)
     assert result.rewards == {"score": 0.85}
     assert len(result.checks) == 2
     assert result.checks[1].name == "format"
+    assert result.checks[1].detail == {"exit_code": 1}
 
 
 async def test_script_verifier_missing_output_returns_error(tmp_path: Path):

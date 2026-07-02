@@ -30,6 +30,17 @@ def test_check_result():
     assert c.passed is True
 
 
+def test_check_result_preserves_detail():
+    c = CheckResult(
+        name="script_exit",
+        passed=False,
+        score=0.0,
+        message="verifier command failed",
+        detail={"exit_code": 1},
+    )
+    assert c.detail == {"exit_code": 1}
+
+
 def test_verifier_error_kinds():
     for kind in ("missing_tests", "parse_failure", "exec_failure", "timeout", "internal"):
         VerifierError(kind=kind, message="x")  # type: ignore[arg-type]
