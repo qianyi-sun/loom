@@ -172,9 +172,17 @@ loom cluster release-gate \
 ```
 
 This gate fails on rendered/config hash drift, unverifiable managed image
-digest or image ID convergence for Ready pods, and live DB Alembic revision
-mismatch. The DB probe runs inside `deploy/loom-control-plane` and reports
-`env:LOOM_CP_DB_URL` without printing the underlying connection string.
+identity convergence, and live DB Alembic revision mismatch. For normal runtime
+image IDs, it compares the Ready pod `imageID` against the manifest digest or
+image ID. For kind-loaded public-beta images, Kubernetes may report
+`docker.io/library/import-YYYY-MM-DD@sha256:...`; in that case the gate accepts
+the target-generation pod only when its pod spec and Deployment template image
+match the release manifest, and records the kind-import identity plus any stale
+`containerStatuses.image` tag as evidence. Managed Deployments intentionally
+scaled to zero pass on Deployment-template image convergence and record
+zero-replica evidence instead of requiring a Ready pod. The DB probe runs inside
+`deploy/loom-control-plane` and reports `env:LOOM_CP_DB_URL` without printing
+the underlying connection string.
 
 Keep this artifact free of raw bearer tokens, provider keys, signed
 object-store URLs, internal service URLs, and secret refs; the production

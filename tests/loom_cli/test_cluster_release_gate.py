@@ -41,11 +41,12 @@ def _deployment(
     image: str,
     generation: int = 7,
     observed_generation: int = 7,
+    replicas: int = 1,
 ) -> Any:
     return _Spec(
         metadata=_Spec(name=name, generation=generation),
         spec=_Spec(
-            replicas=1,
+            replicas=replicas,
             selector=_Spec(match_labels={"app": name}),
             template=_Spec(
                 metadata=_Spec(labels={"app": name}),
@@ -54,8 +55,8 @@ def _deployment(
         ),
         status=_Spec(
             observed_generation=observed_generation,
-            ready_replicas=1,
-            updated_replicas=1,
+            ready_replicas=replicas,
+            updated_replicas=replicas,
         ),
     )
 
@@ -65,16 +66,18 @@ def _ready_pod(
     name: str,
     app: str,
     image: str,
-    image_id: str,
+    image_id: str | None,
+    status_image: str | None = None,
 ) -> Any:
+    container_status = _Spec(name="app", image=status_image or image)
+    if image_id is not None:
+        container_status.image_id = image_id
     return _Spec(
         metadata=_Spec(name=name, labels={"app": app}),
         spec=_Spec(containers=[_Spec(name="app", image=image)]),
         status=_Spec(
             conditions=[_Spec(type="Ready", status="True")],
-            container_statuses=[
-                _Spec(name="app", image=image, image_id=image_id),
-            ],
+            container_statuses=[container_status],
         ),
     )
 
@@ -187,6 +190,185 @@ def test_release_gate_fails_when_ready_pod_image_id_does_not_match_manifest() ->
     assert check.outcome == "fail"
     assert check.evidence["expected_digest"] == "sha256:" + "1" * 64
     assert check.evidence["live_image_id"].endswith("sha256:" + "9" * 64)
+    assert check.evidence["identity_strategy"] == "runtime-image-id-or-repo-digest"
+    assert check.evidence["runtime_identity_kind"] == "runtime"
+    assert check.evidence["runtime_identity_mismatch"] is True
+
+
+def test_release_gate_accepts_kind_import_runtime_identity_when_template_matches() -> None:
+    manifest = _manifest(expected_digest="sha256:" + "1" * 64)
+    apps = _FakeAppsV1({
+        "loom-service": _deployment(
+            name="loom-service",
+            image="loom-service:public-beta-abc123",
+        ),
+    })
+    core = _FakeCoreV1([
+        _ready_pod(
+            name="loom-service-kind",
+            app="loom-service",
+            image="loom-service:public-beta-abc123",
+            image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
+        ),
+    ])
+
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=apps,
+        core_v1=core,
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+    )
+
+    assert report.all_pass
+    check = next(
+        check for check in report.checks
+        if check.name == "image-identity:loom-service/app"
+    )
+    assert check.outcome == "pass"
+    assert check.detail == "Ready pod uses kind-imported runtime identity for release template image"
+    assert check.evidence["identity_strategy"] == "kind-import-template-image"
+    assert check.evidence["runtime_identity_kind"] == "kind-import"
+    assert check.evidence["runtime_identity_mismatch"] is True
+
+
+def test_release_gate_ignores_stale_status_image_tag_when_template_matches() -> None:
+    manifest = _manifest(expected_digest="sha256:" + "1" * 64)
+    apps = _FakeAppsV1({
+        "loom-service": _deployment(
+            name="loom-service",
+            image="loom-service:public-beta-abc123",
+        ),
+    })
+    core = _FakeCoreV1([
+        _ready_pod(
+            name="loom-service-kind",
+            app="loom-service",
+            image="loom-service:public-beta-abc123",
+            status_image="loom-service:public-beta-old",
+            image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
+        ),
+    ])
+
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=apps,
+        core_v1=core,
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+    )
+
+    assert report.all_pass
+    check = next(
+        check for check in report.checks
+        if check.name == "image-identity:loom-service/app"
+    )
+    assert check.evidence["live_image"] == "loom-service:public-beta-old"
+    assert check.evidence["status_image_matches_template"] is False
+    assert check.evidence["status_image_stale"] is True
+
+
+def test_release_gate_does_not_mark_default_docker_prefix_status_image_stale() -> None:
+    manifest = _manifest(expected_digest="sha256:" + "1" * 64)
+    apps = _FakeAppsV1({
+        "loom-service": _deployment(
+            name="loom-service",
+            image="loom-service:public-beta-abc123",
+        ),
+    })
+    core = _FakeCoreV1([
+        _ready_pod(
+            name="loom-service-kind",
+            app="loom-service",
+            image="loom-service:public-beta-abc123",
+            status_image="docker.io/library/loom-service:public-beta-abc123",
+            image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
+        ),
+    ])
+
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=apps,
+        core_v1=core,
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+    )
+
+    assert report.all_pass
+    check = next(
+        check for check in report.checks
+        if check.name == "image-identity:loom-service/app"
+    )
+    assert check.evidence["live_image"] == "docker.io/library/loom-service:public-beta-abc123"
+    assert check.evidence["status_image_matches_template"] is True
+    assert check.evidence["status_image_stale"] is False
+
+
+def test_release_gate_passes_zero_replica_deployment_when_template_matches() -> None:
+    manifest = _manifest(expected_digest="sha256:" + "1" * 64)
+    deployment = _deployment(
+        name="loom-service",
+        image="loom-service:public-beta-abc123",
+        replicas=0,
+    )
+    apps = _FakeAppsV1({"loom-service": deployment})
+    core = _FakeCoreV1([])
+
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=apps,
+        core_v1=core,
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+    )
+
+    assert report.all_pass
+    check = next(
+        check for check in report.checks
+        if check.name == "image-identity:loom-service/app"
+    )
+    assert check.outcome == "pass"
+    assert check.detail == "zero-replica Deployment template image matches release manifest"
+    assert check.evidence["desired_replicas"] == 0
+    assert check.evidence["identity_strategy"] == "zero-replica-template-image"
+
+
+def test_release_gate_fails_zero_replica_deployment_when_template_drifts() -> None:
+    manifest = _manifest(expected_digest="sha256:" + "1" * 64)
+    deployment = _deployment(
+        name="loom-service",
+        image="loom-service:old-tag",
+        replicas=0,
+    )
+    apps = _FakeAppsV1({"loom-service": deployment})
+    core = _FakeCoreV1([])
+
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=apps,
+        core_v1=core,
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+    )
+
+    assert not report.all_pass
+    check = next(
+        check for check in report.checks
+        if check.name == "image-identity:loom-service/app"
+    )
+    assert check.outcome == "fail"
+    assert check.detail == "Deployment template image does not match release manifest"
+    assert check.evidence["desired_replicas"] == 0
 
 
 def test_release_gate_ignores_ready_pods_not_from_deployment_template() -> None:
@@ -203,6 +385,80 @@ def test_release_gate_ignores_ready_pods_not_from_deployment_template() -> None:
             app="loom-service",
             image="loom-service:old-tag",
             image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+        ),
+    ])
+
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=apps,
+        core_v1=core,
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+    )
+
+    assert not report.all_pass
+    check = next(
+        check for check in report.checks
+        if check.name == "image-identity:loom-service/app"
+    )
+    assert check.outcome == "fail"
+    assert check.detail == "no target-generation Ready pods found for managed Deployment"
+    assert check.evidence["pod_template_image"] == "loom-service:public-beta-abc123"
+
+
+def test_release_gate_fails_when_target_generation_pod_lacks_runtime_image_id() -> None:
+    manifest = _manifest(expected_digest="sha256:" + "1" * 64)
+    apps = _FakeAppsV1({
+        "loom-service": _deployment(
+            name="loom-service",
+            image="loom-service:public-beta-abc123",
+        ),
+    })
+    core = _FakeCoreV1([
+        _ready_pod(
+            name="loom-service-new",
+            app="loom-service",
+            image="loom-service:public-beta-abc123",
+            image_id=None,
+        ),
+    ])
+
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=apps,
+        core_v1=core,
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+    )
+
+    assert not report.all_pass
+    check = next(
+        check for check in report.checks
+        if check.name == "image-identity:loom-service/app"
+    )
+    assert check.outcome == "fail"
+    assert check.detail == "Ready pod is missing runtime image identity"
+    assert check.evidence["runtime_identity_kind"] == "missing"
+
+
+def test_release_gate_rejects_stale_kind_import_pod_from_old_template() -> None:
+    manifest = _manifest(expected_digest="sha256:" + "1" * 64)
+    apps = _FakeAppsV1({
+        "loom-service": _deployment(
+            name="loom-service",
+            image="loom-service:public-beta-abc123",
+        ),
+    })
+    core = _FakeCoreV1([
+        _ready_pod(
+            name="loom-service-old",
+            app="loom-service",
+            image="loom-service:public-beta-old",
+            image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
         ),
     ])
 
