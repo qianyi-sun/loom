@@ -52,6 +52,14 @@ _HEX_PREFIX_RE = re.compile(r"^[0-9a-f]{4,64}$")
 _DEFAULT_CP_URL = "http://localhost:8080"
 _DEFAULT_EXPIRES_DAYS = 365
 _DEFAULT_ADMIN_TOKEN_SOURCE = "env:LOOM_ADMIN_TOKEN"
+_RELEASE_TAG_SHA_RE = re.compile(r"(?:^|[-_])([0-9a-f]{7,40})$")
+
+
+def _release_source_prefix(release_image_tag: str | None) -> str | None:
+    if not release_image_tag:
+        return None
+    match = _RELEASE_TAG_SHA_RE.search(release_image_tag)
+    return match.group(1) if match else None
 
 
 def _gb10_release_target_mismatches(
@@ -98,12 +106,27 @@ def _gb10_release_target_mismatches(
             release_env_config_version is not None
             and env != release_env_config_version
         )
-        if image_bad or env_bad:
+        expected_source = _release_source_prefix(release_image_tag)
+        source_commit = node.get("source_git_commit")
+        source_dirty = node.get("source_git_dirty")
+        source_bad = (
+            expected_source is not None
+            and (
+                not isinstance(source_commit, str)
+                or not source_commit.startswith(expected_source)
+                or source_dirty is not False
+            )
+        )
+        if image_bad or env_bad or source_bad:
             mismatches.append(
                 "node "
                 f"{node.get('hostname', '-')} "
                 f"image={image or '-'}/{release_image_tag or '-'} "
                 f"env={env or '-'}/{release_env_config_version or '-'} "
+                f"source={source_commit or '-'}/"
+                f"expected_source={expected_source or '-'} "
+                f"dirty={source_dirty if source_dirty is not None else '-'} "
+                f"compose_project_dir={node.get('compose_project_dir') or '-'} "
                 f"apply_state={apply_state or '-'}"
             )
 
@@ -479,6 +502,9 @@ def _gb10_workers_status(args: argparse.Namespace) -> int:
     for node in nodes:
         result = node.get("last_apply_result") or "-"
         error = node.get("error_message") or "-"
+        source = node.get("source_git_commit")
+        source_short = source[:12] if isinstance(source, str) else "-"
+        source_dirty = node.get("source_git_dirty")
         sys.stdout.write(
             f"  {node['hostname']} {node['environment']}/{node['pool_name']} "
             f"{node['apply_state']} "
@@ -488,6 +514,9 @@ def _gb10_workers_status(args: argparse.Namespace) -> int:
             f"{node.get('desired_max_concurrent') or '-'} "
             f"env={node.get('current_env_config_version') or '-'}/"
             f"{node.get('desired_env_config_version') or '-'} "
+            f"source={source_short} "
+            f"dirty={source_dirty if source_dirty is not None else '-'} "
+            f"dir={node.get('compose_project_dir') or '-'} "
             f"result={result} error={error}\n",
         )
     _print_gb10_release_target_mismatches(

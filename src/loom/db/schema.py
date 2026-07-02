@@ -710,6 +710,8 @@ class GB10WorkerNodeStatus(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     agent_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     compose_project_dir: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_git_commit: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_git_dirty: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     last_heartbeat_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
     )

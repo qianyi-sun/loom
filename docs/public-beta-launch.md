@@ -411,12 +411,16 @@ loom admin gb10-workers status \
 ```
 
 For GB10 node-agent compatibility workers, `gb10-workers status` proves the
-non-secret desired image/env-config state only. During worker-token rotation,
-also run `loom worker gb10-agent plan/apply --worker-token file:/...` on each
-GB10 host, then verify `loom resources status --json` shows fresh
-`gb10-arm64` active workers and the Control Plane logs no new
-`/workers/register` 401s. The `--worker-token` value is read locally on the
-host and is never stored in the Control Plane desired state.
+non-secret desired image/env-config state and source-checkout provenance. With
+`--release-image-tag`, active nodes must report a clean git checkout whose
+commit starts with the release tag's trailing SHA, for example
+`public-beta-76875ac` -> `76875ac`; missing provenance or a stale
+`compose_project_dir` is a hard failure. During worker-token rotation, also run
+`loom worker gb10-agent plan/apply --worker-token file:/...` on each GB10 host,
+then verify `loom resources status --json` shows fresh `gb10-arm64` active
+workers and the Control Plane logs no new `/workers/register` 401s. The
+`--worker-token` value is read locally on the host and is never stored in the
+Control Plane desired state.
 
 For OLDLAB 1-5, use the committed staged files in
 `deploy/worker-pools/oldlab/` as the source of truth for included nodes,

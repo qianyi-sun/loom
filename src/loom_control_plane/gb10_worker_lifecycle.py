@@ -55,6 +55,8 @@ class GB10NodeReport:
     error_message: str | None = None
     agent_version: str | None = None
     compose_project_dir: str | None = None
+    source_git_commit: str | None = None
+    source_git_dirty: bool | None = None
     worker_id: UUID | None = None
     last_apply_at: datetime | None = None
 
@@ -165,6 +167,8 @@ def node_status_to_dict(row: GB10WorkerNodeStatus) -> dict[str, object]:
         "error_message": row.error_message,
         "agent_version": row.agent_version,
         "compose_project_dir": row.compose_project_dir,
+        "source_git_commit": row.source_git_commit,
+        "source_git_dirty": row.source_git_dirty,
         "last_heartbeat_at": _dt(row.last_heartbeat_at),
         "last_apply_at": _dt(row.last_apply_at),
         "created_at": _dt(row.created_at),
@@ -310,6 +314,8 @@ async def record_node_report(
     row.error_message = redact_status_text(report.error_message)
     row.agent_version = report.agent_version
     row.compose_project_dir = report.compose_project_dir
+    row.source_git_commit = report.source_git_commit
+    row.source_git_dirty = report.source_git_dirty
     row.last_heartbeat_at = now
     if report.last_apply_at is not None:
         row.last_apply_at = report.last_apply_at

@@ -3192,8 +3192,11 @@ link it from #217; do not merge incomplete evidence.
 
   Then confirm the OLDLAB-1 `loom-remote-worker-tunnel-watchdog.timer` is
   active, run the local plus GB10 `check-remote` tunnel gates, verify Slurm
-  worker status, then gate the node-agent release target only for compose
-  rollout compatibility before treating the pool as healthy:
+  worker status, then gate the node-agent release target before treating the
+  pool as healthy. The GB10 gate checks image tag, env-config version, and
+  clean source-checkout provenance; active nodes with missing provenance or a
+  git commit that does not match the trailing SHA in `--release-image-tag` must
+  be treated as stale even if their image/env fields look current.
 
   ```bash
   loom admin slurm-workers status \
