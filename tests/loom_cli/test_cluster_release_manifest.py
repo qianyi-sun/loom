@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
+from collections import Counter
 from pathlib import Path
 
 from loom_cli.__main__ import main
@@ -12,9 +14,42 @@ from loom_cli.cluster_release_manifest import (
     render_release_manifest_json,
 )
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _migration_revision(path: Path) -> str:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign):
+            if not any(
+                isinstance(target, ast.Name) and target.id == "revision"
+                for target in node.targets
+            ):
+                continue
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            if not isinstance(node.target, ast.Name) or node.target.id != "revision":
+                continue
+            value = node.value
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return value.value
+    raise AssertionError(f"{path} does not define a string revision")
+
+
+def test_alembic_migration_revisions_are_unique() -> None:
+    migrations = sorted((REPO_ROOT / "migrations" / "versions").glob("*.py"))
+    revisions = [_migration_revision(path) for path in migrations]
+    duplicates = {
+        revision: count
+        for revision, count in Counter(revisions).items()
+        if count > 1
+    }
+    assert duplicates == {}
 
 
 def test_build_release_manifest_records_expected_state_without_raw_secrets(
@@ -113,8 +148,8 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
             },
         },
     }
-    assert manifest["alembic"]["expected_heads"] == ["0051"]
-    assert manifest["alembic"]["compatible_heads"] == ["0051"]
+    assert manifest["alembic"]["expected_heads"] == ["0052"]
+    assert manifest["alembic"]["compatible_heads"] == ["0052"]
     assert manifest["external_workers"]["environment_state_file"]["sha256"] == (
         hashlib.sha256(environment_state_path.read_bytes()).hexdigest()
     )

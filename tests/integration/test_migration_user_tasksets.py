@@ -1,4 +1,4 @@
-"""Migration 0051 — user TaskSet foundation schema (#242 sub-plan 1).
+"""Migration 0052 — user TaskSet foundation schema (#242 sub-plan 1).
 
 Verifies upgrade/downgrade and that native ``benchmarks`` rows are
 unchanged by the migration.
@@ -92,25 +92,25 @@ def _snapshot_benchmarks(url: str) -> list[dict[str, object]]:
 
 
 @pytest.fixture(scope="module")
-def postgres_url_at_0050() -> Iterator[str]:
+def postgres_url_at_0051() -> Iterator[str]:
     with PostgresContainer("postgres:16") as pg:
         url = pg.get_connection_url().replace(
             "postgresql+psycopg2://", "postgresql+psycopg://",
         )
-        _alembic(url, "upgrade", "0050")
+        _alembic(url, "upgrade", "0051")
         yield url
 
 
 def test_upgrade_creates_task_set_tables_preserves_benchmarks(
-    postgres_url_at_0050: str,
+    postgres_url_at_0051: str,
 ) -> None:
-    seeded = _seed_benchmarks(postgres_url_at_0050)
-    before = _snapshot_benchmarks(postgres_url_at_0050)
+    seeded = _seed_benchmarks(postgres_url_at_0051)
+    before = _snapshot_benchmarks(postgres_url_at_0051)
     assert len(before) == len(seeded)
 
-    _alembic(postgres_url_at_0050, "upgrade", "0051")
+    _alembic(postgres_url_at_0051, "upgrade", "0052")
 
-    engine = create_engine(postgres_url_at_0050)
+    engine = create_engine(postgres_url_at_0051)
     with engine.begin() as conn:
         names = {
             row[0]
@@ -124,17 +124,17 @@ def test_upgrade_creates_task_set_tables_preserves_benchmarks(
     engine.dispose()
     assert {"task_sets", "task_set_manifests"}.issubset(names)
 
-    after = _snapshot_benchmarks(postgres_url_at_0050)
+    after = _snapshot_benchmarks(postgres_url_at_0051)
     assert after == before
 
-    _alembic(postgres_url_at_0050, "downgrade", "0050")
+    _alembic(postgres_url_at_0051, "downgrade", "0051")
 
 
-def test_downgrade_drops_task_set_tables(postgres_url_at_0050: str) -> None:
-    _alembic(postgres_url_at_0050, "upgrade", "0051")
-    _alembic(postgres_url_at_0050, "downgrade", "0050")
+def test_downgrade_drops_task_set_tables(postgres_url_at_0051: str) -> None:
+    _alembic(postgres_url_at_0051, "upgrade", "0052")
+    _alembic(postgres_url_at_0051, "downgrade", "0051")
 
-    engine = create_engine(postgres_url_at_0050)
+    engine = create_engine(postgres_url_at_0051)
     with engine.begin() as conn:
         names = {
             row[0]
@@ -150,13 +150,13 @@ def test_downgrade_drops_task_set_tables(postgres_url_at_0050: str) -> None:
     assert "task_set_manifests" not in names
 
 
-def test_manifest_fk_cascade_on_task_set_delete(postgres_url_at_0050: str) -> None:
-    _alembic(postgres_url_at_0050, "upgrade", "0051")
+def test_manifest_fk_cascade_on_task_set_delete(postgres_url_at_0051: str) -> None:
+    _alembic(postgres_url_at_0051, "upgrade", "0052")
     team_id = str(uuid4())
     slug = "cascade-test"
     task_set_id = f"ts/{team_id}/{slug}"
 
-    engine = create_engine(postgres_url_at_0050)
+    engine = create_engine(postgres_url_at_0051)
     with engine.begin() as conn:
         conn.execute(
             text("INSERT INTO teams (id, name) VALUES (:id, :name)"),
@@ -191,4 +191,4 @@ def test_manifest_fk_cascade_on_task_set_delete(postgres_url_at_0050: str) -> No
         ).scalar_one()
     engine.dispose()
     assert remaining == 0
-    _alembic(postgres_url_at_0050, "downgrade", "0050")
+    _alembic(postgres_url_at_0051, "downgrade", "0051")
