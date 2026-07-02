@@ -27,10 +27,17 @@ spec:
   policyTypes: [Ingress, Egress]
   ingress:
     # Postgres is reached by every component that touches state.
+    #
+    # #332: `app: loom-migration` is the sanctioned label for one-off
+    # Alembic migration Jobs (see `loom cluster render-migration`).
+    # Grants port 5432 without polluting Deployment/Service selectors.
+    # Migration Jobs are short-lived by construction (`ttlSecondsAfterFinished`
+    # in the Job template); this policy stays clean between rollouts.
     - from:
         - podSelector: { matchLabels: { app: loom-control-plane } }
         - podSelector: { matchLabels: { app: loom-llm-gateway } }
         - podSelector: { matchLabels: { app: loom-service } }
+        - podSelector: { matchLabels: { app: loom-migration } }
       ports:
         - { port: 5432, protocol: TCP }
   egress:

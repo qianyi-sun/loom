@@ -20,6 +20,9 @@ spec:
     - podSelector:
         matchLabels:
           app: loom-service
+    - podSelector:
+        matchLabels:
+          app: loom-migration
     ports:
     - port: 5432
       protocol: TCP
