@@ -363,6 +363,9 @@ Run a small architecture-targeted canary on every required worker pool, confirm
 the shared trial-cache registry or worker-local cache is reused, and treat any
 `task_image_build_timeout` / `building Docker image ... exceeded ...s` failure
 as a platform setup blocker rather than model-quality evidence.
+For Terminus 2 task bundles that inherit from `mictern2/terminus2-full:latest`,
+the first GB10/ARM64 canary also creates a worker-local compatibility base
+image before building the task image, because the upstream tag is amd64-only.
 Do not rely on theoretical max-slot saturation to prove worker-pool coverage:
 create the release/acceptance batch with repeated `--required-worker-pool`
 flags, for example `--required-worker-pool oldlab --required-worker-pool

@@ -1109,6 +1109,10 @@ but each worker pays the build cost once).
   or reuse the cache before launching the high-concurrency batch. Only raise
   task `build_timeout_sec` after confirming the Docker daemon, registry auth,
   disk, and CPU pressure are healthy enough that the longer build is expected.
+  Terminus 2 bundles based on `mictern2/terminus2-full:latest` create a
+  worker-local ARM64 compatibility base on first GB10 use; if that prewarm
+  fails, keep the run blocked as platform setup evidence rather than treating
+  the trial as model-quality evidence.
 - **Trial setup fails with `S3 download_prefix` list/download timeout,
   retryable S3 5xx/throttle responses, socket disconnects, or
   trajectory/artifact upload timeouts under high concurrency** → first confirm
