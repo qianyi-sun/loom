@@ -41,6 +41,8 @@ evidence needed before `dev` can be promoted to `main`.
 - Troubleshooting:
   [`docs/operator-runbook.md#alarm-response-troubleshooting-matrix`](operator-runbook.md#alarm-response-troubleshooting-matrix)
   plus the provider, sharing, and download checks in the staging smoke gate.
+- Full/max-slot three-cluster canary preparation:
+  [`docs/full-max-slot-canary-runbook.md`](full-max-slot-canary-runbook.md).
 
 ## Evidence Required
 
@@ -128,6 +130,13 @@ Attach these to the release issue or release PR:
   default certificate.
 - Leak-scan note showing seeded fake secrets and internal service URLs were not
   found in API responses, audit excerpts, or downloaded safe artifacts.
+- For the final #49/#129 full/max-slot three-cluster canary, use
+  [`docs/full-max-slot-canary-runbook.md`](full-max-slot-canary-runbook.md).
+  The canary must wait for a clean public-beta anchor, completed #190 targeted
+  durability validation, and an explicit coordinator `GO`. The batch must use
+  repeated `--required-worker-pool` flags for `oldlab`, `k8s-worker`, and
+  `gb10-arm64`; terminal evidence must include `runs.worker_pool_coverage`
+  and `runs.claimed_without_started` from the smoke gate.
 
 Generate a rollout release manifest before the protected apply. It is the
 machine-readable expected-state anchor for image/render convergence, DB revision
