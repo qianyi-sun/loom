@@ -426,6 +426,7 @@ def _auth_whoami_result(label: str, response: HttpResponse) -> CheckResult:
     team = str(body.get("team_name") or body.get("team_id") or "(none)")
     role = str(body.get("role") or "(none)")
     is_platform_admin = bool(body.get("is_platform_admin")) or role == "platform_admin"
+    has_user_identity = bool(body.get("user_id") or body.get("username"))
     principal_detail = (
         f"credential_type={credential_type}, principal_type={principal_type}, "
         f"user={username}, team={team}, role={role}, "
@@ -433,7 +434,8 @@ def _auth_whoami_result(label: str, response: HttpResponse) -> CheckResult:
     )
     if (
         credential_type == "user_owned_api_token"
-        and principal_type == "user"
+        and principal_type in {"team", "user"}
+        and has_user_identity
         and not is_platform_admin
     ):
         return CheckResult(
