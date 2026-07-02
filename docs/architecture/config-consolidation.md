@@ -1,5 +1,10 @@
 # Config consolidation
 
+> **Cross-repo issue/PR refs:** `#N` in this document points to the
+> pre-2026-06-26 `carinrc/loom` archive tracker (numbering was reset on
+> the new canonical repo `qianyi-sun/loom`). See
+> [`../repo-migration.md`](../repo-migration.md).
+
 > **Status**: shipped in #150 (closes #146). Single schema at
 > `config/loom-schema.toml` now drives Pydantic Settings codegen,
 > k8s template env blocks, Secret bootstrap, and operator

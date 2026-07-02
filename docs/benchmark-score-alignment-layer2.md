@@ -1,5 +1,12 @@
 # Benchmark Score Alignment — Layer 2 Reports
 
+> **Cross-repo issue/PR refs:** bare `#N` and `carinrc/loom#N` refer to
+> the pre-2026-06-26 archive tracker. Canonical follow-up work lives on
+> `qianyi-sun/loom` (see [`repo-migration.md`](repo-migration.md)); use
+> full-URL form when it matters which repo. Numbering is fresh on the
+> new tracker, so bare `#N` on the archive is likely a different issue
+> from `qianyi-sun/loom#N`.
+
 Layer 1 (see [`benchmark-score-alignment.md`](benchmark-score-alignment.md))
 declares the manifest: each v1.0 benchmark's canonical reference, score
 semantics, and replay-case definitions. Layer 2 records the actual

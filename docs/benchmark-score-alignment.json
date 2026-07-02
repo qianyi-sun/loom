@@ -66,7 +66,6 @@
             "asserts": "the extraction rule is 'last integer on the final line', documented behavior matches the AIME single-integer answer convention"
           }
         ],
-        "stage_b_issue": "https://github.com/carinrc/loom/issues/540",
         "stage_b_issue_status": "closed_historical_archive_issue",
         "paired_run": {
           "task_slate": {
@@ -123,7 +122,8 @@
             "note": "No parity_experiment.json published for adapters/aime at the pinned commit (gh api returns 404). This paired run is the only known terminus-2 + claude-haiku-4-5 reference at this Harbor commit."
           },
           "layer3_doc_section": "docs/benchmark-score-alignment-layer3.md#aime--paired-loom-aime-24--aime-25-vs-harbor-aime-on-claude-haiku-4-5"
-        }
+        },
+        "stage_b_archive_issue": "https://github.com/carinrc/loom/issues/540"
       }
     },
     {
@@ -176,7 +176,6 @@
             "asserts": "the shared integer-extraction routine handles the canonical AIME answer shape — used by both aime-24 and aime-25 since they share verifier infrastructure"
           }
         ],
-        "stage_b_issue": "https://github.com/carinrc/loom/issues/540",
         "stage_b_issue_status": "closed_historical_archive_issue",
         "paired_run": {
           "task_slate": {
@@ -233,7 +232,8 @@
             "note": "No parity_experiment.json published for adapters/aime at the pinned commit (gh api returns 404). This paired run is the only known terminus-2 + claude-haiku-4-5 reference at this Harbor commit."
           },
           "layer3_doc_section": "docs/benchmark-score-alignment-layer3.md#aime--paired-loom-aime-24--aime-25-vs-harbor-aime-on-claude-haiku-4-5"
-        }
+        },
+        "stage_b_archive_issue": "https://github.com/carinrc/loom/issues/540"
       }
     },
     {
@@ -281,7 +281,6 @@
             "asserts": "reward={'score': 1.0} when `final_answer.txt` ends with the canonical letter from `answer_key.json`"
           }
         ],
-        "stage_b_issue": "https://github.com/carinrc/loom/issues/541",
         "stage_b_issue_status": "closed_historical_archive_issue",
         "paired_run": {
           "task_slate": {
@@ -330,7 +329,8 @@
             "note": "Not the matched config for this paired run; reproducing it would require codex/gpt-5.2 access (yibuapi only serves anthropic dialect). Documented for reference."
           },
           "layer3_doc_section": "docs/benchmark-score-alignment-layer3.md#gpqa-diamond--paired-loom-vs-harbor-on-claude-haiku-4-5"
-        }
+        },
+        "stage_b_archive_issue": "https://github.com/carinrc/loom/issues/541"
       }
     },
     {
@@ -501,7 +501,7 @@
           }
         ],
         "pending_reason": "Original Layer 2 evidence (PRs #499 #513 #514 #517) claimed parity-by-construction against coder-harbor-cloud (Huawei platform, wrong Harbor). Real Harbor (harbor-framework/harbor at 2ead3f1f) ships an adapter for this benchmark; matched-config paired runs are required to validate score parity. Canonical Stage B child issue is qianyi-sun/loom#21; old carinrc/loom#542 is archive provenance only.",
-        "stage_b_issue": "https://github.com/qianyi-sun/loom/issues/21"
+        "stage_b_archive_issue": "https://github.com/qianyi-sun/loom/issues/21"
       }
     },
     {
@@ -781,7 +781,7 @@
           }
         ],
         "pending_reason": "Original Layer 2 evidence (PRs #499 #513 #514 #517) claimed parity-by-construction against coder-harbor-cloud (Huawei platform, wrong Harbor). Real Harbor (harbor-framework/harbor at 2ead3f1f) ships an adapter for this benchmark; matched-config paired runs are required to validate score parity. Canonical Stage B child issue is qianyi-sun/loom#20; old carinrc/loom#543 is archive provenance only.",
-        "stage_b_issue": "https://github.com/qianyi-sun/loom/issues/20"
+        "stage_b_archive_issue": "https://github.com/qianyi-sun/loom/issues/20"
       }
     },
     {

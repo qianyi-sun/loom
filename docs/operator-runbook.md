@@ -3,6 +3,11 @@
 For operators of a production Loom deployment. Local dev → see the
 top-level README + `deploy/docker-compose.dev.yml`.
 
+> **Cross-repo issue/PR refs:** bare `#N` in this document may point to
+> the pre-2026-06-26 `carinrc/loom` archive tracker (numbering was reset
+> on the new canonical repo `qianyi-sun/loom`). See
+> [`repo-migration.md`](repo-migration.md).
+
 ## Environment isolation
 
 Loom uses three logical deployment environments. Treat the names below as the
