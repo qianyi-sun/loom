@@ -728,6 +728,76 @@ knob you need.
     Delete short-lived remote secret files as soon as the run has performed its
     own post-run scan.
 
+## Release migrations against protected Postgres (#332)
+
+Public-beta and staging Postgres is fronted by a NetworkPolicy that only
+permits ingress from three service labels (`app=loom-control-plane`,
+`app=loom-service`, `app=loom-llm-gateway`) plus — as of #332 — the
+sanctioned migration label `app=loom-migration`. Any generic migration
+Job you launch without `app=loom-migration` will time out on port 5432,
+regardless of what the `cp-db-url` Secret says. This is by design: the
+standing NetworkPolicy is the release-critical gate against ad-hoc write
+access to the DB.
+
+**Do not label a migration Job with any of the standing service labels
+(`app=loom-control-plane`, `app=loom-service`, `app=loom-llm-gateway`).**
+Those labels are also the Service selectors, so the transient Job pod
+would receive real traffic during rollout.
+
+### Rendering the sanctioned migration Job
+
+```bash
+loom cluster render-migration \
+  --image-tag public-beta-05ab776 \
+  --namespace loom-public-beta \
+  | kubectl apply -f -
+```
+
+By default the Job name gets a UTC-timestamp suffix so re-runs against
+the same image tag don't collide with a still-lingering previous Job
+(the previous one lingers for the `ttlSecondsAfterFinished` window even
+if it succeeded). Pass `--job-suffix TOKEN` if you want a deterministic
+name — useful when scripting an idempotent re-apply from a rollout
+evidence directory.
+
+Watch it complete:
+
+```bash
+kubectl -n loom-public-beta wait \
+  --for=condition=complete \
+  --timeout=300s \
+  job -l app=loom-migration,loom.image-tag=public-beta-05ab776
+kubectl -n loom-public-beta logs -l app=loom-migration \
+  --tail=-1 --prefix=true
+```
+
+The Job carries three self-cleaning settings:
+
+| Setting | Value | Why |
+|---|---|---|
+| `activeDeadlineSeconds` | 600 | An Alembic upgrade shouldn't need more than 10 min. If it does, the operator sees the failure instead of a stuck pod. |
+| `ttlSecondsAfterFinished` | 600 | Automatic cleanup so the next rollout doesn't need `kubectl delete job` first. |
+| `backoffLimit` | 1 | A single retry, then the failure surfaces cleanly. |
+| `restartPolicy` | `Never` | Alembic isn't reentrant on partial state. |
+
+### If it fails
+
+The most common failure modes:
+
+- **Connection timeout on port 5432** — check that the Job carries the
+  `app=loom-migration` label. If someone renders this by hand without the
+  subcommand, they may drop the label. `kubectl get job -o yaml` shows both
+  the Job's `metadata.labels` and the pod template's `spec.template.metadata.labels`;
+  both must be present.
+- **`alembic upgrade head` fails** — check `kubectl logs`. Common causes:
+  missing migration in the release image (compare `alembic current` vs
+  `alembic history`), or a schema state the migration doesn't expect
+  (typically a partial prior migration). This is not a NetworkPolicy
+  issue; see the release plan for the migration.
+- **Job already exists** — the Job's `spec.template` is immutable. Either
+  wait for `ttlSecondsAfterFinished` or `kubectl delete job -n <ns>
+  loom-migrate-<image-tag>-<suffix>`. Then re-render + re-apply.
+
 ## Kind cluster: loading local images before rollout (#96)
 
 When a public-beta or staging cluster runs on top of `kind`, images built with

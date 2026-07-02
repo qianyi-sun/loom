@@ -22,6 +22,7 @@ import ipaddress
 import json
 import sys
 from dataclasses import dataclass, field
+from datetime import UTC
 from importlib import resources
 from pathlib import Path
 from typing import Any, cast
@@ -3280,6 +3281,28 @@ def _down(args: argparse.Namespace) -> int:
     return 0
 
 
+def _render_migration(args: argparse.Namespace) -> int:
+    """Handler for `loom cluster render-migration` (#332)."""
+    from datetime import datetime
+
+    from loom_cli.cluster_migration import render_migration_manifest
+
+    if args.job_suffix is None:
+        job_suffix = datetime.now(UTC).strftime("%Y%m%dt%H%M%Sz")
+    else:
+        job_suffix = args.job_suffix
+
+    manifest = render_migration_manifest(
+        image_tag=args.image_tag,
+        namespace=args.namespace,
+        job_suffix=job_suffix,
+    )
+    sys.stdout.write(manifest)
+    if not manifest.endswith("\n"):
+        sys.stdout.write("\n")
+    return 0
+
+
 def _load_images(args: argparse.Namespace) -> int:
     """Handler for `loom cluster load-images` (#96)."""
     from loom_cli.cluster_load_images import (
@@ -4230,6 +4253,37 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_load_images.set_defaults(handler=_load_images)
+
+    p_render_migration = sub.add_parser(
+        "render-migration",
+        help=(
+            "Render a one-off Alembic migration Job with the sanctioned "
+            "app=loom-migration label (#332). Pipe to kubectl apply -f -."
+        ),
+    )
+    p_render_migration.add_argument(
+        "--image-tag",
+        required=True,
+        help=(
+            "Release image tag. The Job runs "
+            "loom-control-plane:<image-tag> alembic upgrade head."
+        ),
+    )
+    p_render_migration.add_argument(
+        "--namespace",
+        default="loom",
+        help="Kubernetes namespace. Defaults to `loom`.",
+    )
+    p_render_migration.add_argument(
+        "--job-suffix",
+        default=None,
+        help=(
+            "Uniqueness token appended to the Job name so a re-run "
+            "against the same image tag doesn't collide. Defaults to a "
+            "UTC timestamp."
+        ),
+    )
+    p_render_migration.set_defaults(handler=_render_migration)
 
     args = parser.parse_args(argv)
     return cast(int, args.handler(args))

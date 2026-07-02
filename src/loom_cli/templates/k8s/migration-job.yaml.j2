@@ -1,0 +1,62 @@
+# One-off Alembic migration Job (#332).
+#
+# Rendered by `loom cluster render-migration --image-tag <tag>`; NOT
+# included in the main `loom cluster render` output because it's a
+# rollout-scoped operation, not part of the standing cluster manifest.
+#
+# The Job is labeled `app: loom-migration` so it gets Postgres ingress
+# via the sanctioned entry in the loom-postgres NetworkPolicy (see
+# network-policies.yaml.j2). Labeling the Job with any of the standing
+# service labels (loom-control-plane, loom-service, loom-llm-gateway)
+# would pollute the corresponding Service selector during rollout, which
+# is what forced the ad-hoc NetworkPolicy dance during the
+# public-beta-05ab776 rollout.
+#
+# The Job runs the release image's `alembic upgrade head` against the
+# release-configured DB URL. On success, `ttlSecondsAfterFinished`
+# cleans the Job pod up automatically after 10 minutes so the next
+# rollout doesn't have to `kubectl delete` first.
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: loom-migrate-{{ image_tag | replace('.', '-') | lower }}-{{ job_suffix }}
+  namespace: {{ namespace }}
+  labels:
+    app: loom-migration
+    loom.image-tag: {{ image_tag }}
+spec:
+  # Job scheduling metadata (backoffLimit=1 lets kubectl surface a
+  # migration failure in a single retry rather than a stuck loop).
+  backoffLimit: 1
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: loom-migration
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: loom-control-plane:{{ image_tag }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - alembic
+            - "-c"
+            - migrations/alembic.ini
+            - upgrade
+            - head
+          env:
+            - name: LOOM_CP_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  # Reuses the control-plane's DB credential. Alembic
+                  # needs the same permissions the control-plane needs
+                  # at startup, and a separate migration credential
+                  # would just be another key to rotate.
+                  name: loom-secrets
+                  key: cp-db-url
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
