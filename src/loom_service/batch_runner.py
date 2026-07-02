@@ -56,7 +56,7 @@ class _SubmitResult:
     error: dict[str, Any] | None = None
 
 
-PendingUnit = tuple[str, int | None, dict[str, Any], int]
+PendingUnit = tuple[str, int | None, dict[str, Any], int, str | None]
 
 
 def next_batch_state(
@@ -94,6 +94,7 @@ def _idempotency_key(
     task_id: str,
     sample_idx: int,
     combination_idx: int | None = None,
+    required_worker_pool: str | None = None,
 ) -> str:
     """Stable, inspectable key — operators can grep for it in logs.
 
@@ -104,8 +105,12 @@ def _idempotency_key(
     `{batch}::{task}::{combination}::{sample}`.
     """
     if combination_idx is None:
-        return f"{batch_id}::{task_id}::{sample_idx}"
-    return f"{batch_id}::{task_id}::{combination_idx}::{sample_idx}"
+        base = f"{batch_id}::{task_id}::{sample_idx}"
+    else:
+        base = f"{batch_id}::{task_id}::{combination_idx}::{sample_idx}"
+    if required_worker_pool:
+        return f"{base}::pool::{required_worker_pool}"
+    return base
 
 
 def _single_line_excerpt(text: str) -> str:
@@ -153,6 +158,56 @@ def _materialize_trial_config(
     out["agent_name"] = combination["agent_name"]
     out["agent_model"] = combination.get("agent_model")
     return out
+
+
+def _batch_required_worker_pools(batch: Batch) -> list[str]:
+    values = batch.required_worker_pools or []
+    pools: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        pool = str(raw).strip()
+        if not pool or pool in seen:
+            continue
+        seen.add(pool)
+        pools.append(pool)
+    return pools
+
+
+def _coverage_pending_units(
+    batch: Batch,
+    *,
+    task_ids: list[str],
+    shared_config: dict[str, Any],
+    failed_fanout_keys: set[str],
+    existing_idempotency_keys: set[str],
+) -> list[PendingUnit]:
+    required_pools = _batch_required_worker_pools(batch)
+    if not required_pools or not task_ids:
+        return []
+
+    combination_idx: int | None = None
+    cfg = shared_config
+    base_sample_idx = int(batch.n_per_task)
+    if batch.combinations:
+        combination_idx = 0
+        cfg = _materialize_trial_config(shared_config, batch.combinations[0])
+        base_sample_idx = int(batch.combinations[0].get("n_per_task", 1))
+
+    task_id = task_ids[0]
+    units: list[PendingUnit] = []
+    for offset, pool in enumerate(required_pools):
+        sample_idx = base_sample_idx + offset
+        key = _idempotency_key(
+            batch.id,
+            task_id,
+            sample_idx,
+            combination_idx=combination_idx,
+            required_worker_pool=pool,
+        )
+        if key in failed_fanout_keys or key in existing_idempotency_keys:
+            continue
+        units.append((task_id, combination_idx, cfg, sample_idx, pool))
+    return units
 
 
 def _rerun_targets(batch: Batch) -> list[dict[str, Any]]:
@@ -214,7 +269,7 @@ async def _pending_rerun_units(
                 continue
             combination = batch.combinations[combination_idx]
         cfg = _materialize_trial_config(shared_config, combination)
-        pending.append((task_id, combination_idx, cfg, sample_idx))
+        pending.append((task_id, combination_idx, cfg, sample_idx, None))
     return pending
 
 
@@ -229,9 +284,14 @@ async def _submit_one(
     provider_connection_id: UUID | None = None,
     provider_model_id: str | None = None,
     combination_idx: int | None = None,
+    required_worker_pool: str | None = None,
 ) -> _SubmitResult:
     idempotency_key = _idempotency_key(
-        batch_id, task_id, sample_idx, combination_idx=combination_idx,
+        batch_id,
+        task_id,
+        sample_idx,
+        combination_idx=combination_idx,
+        required_worker_pool=required_worker_pool,
     )
     payload: dict[str, Any] = {
         "task_id": task_id,
@@ -242,6 +302,8 @@ async def _submit_one(
     }
     if combination_idx is not None:
         payload["combination_idx"] = combination_idx
+    if required_worker_pool is not None:
+        payload["required_worker_pool"] = required_worker_pool
     if provider_connection_id is not None:
         payload["provider_connection_id"] = str(provider_connection_id)
     if provider_model_id is not None:
@@ -414,7 +476,9 @@ async def run_once(
                         task_count=len(task_ids),
                         n_per_task=b.n_per_task,
                         combinations=b.combinations,
-                    ) - len(failed_fanout_keys),
+                    )
+                    + (len(_batch_required_worker_pools(b)) if task_ids else 0)
+                    - len(failed_fanout_keys),
                 )
                 values: dict[str, Any] = {
                     "expected_trial_count": adjusted_expected,
@@ -464,6 +528,15 @@ async def run_once(
                 }
                 pending_units: list[PendingUnit] = []
                 shared_config = dict(b.trial_config)
+                existing_idempotency_keys = {
+                    str(row[0])
+                    for row in (await s.execute(
+                        select(Trial.idempotency_key).where(
+                            Trial.batch_id == b.id,
+                            Trial.idempotency_key.is_not(None),
+                        ),
+                    )).all()
+                }
                 for c_idx, combo in enumerate(b.combinations):
                     combo_config = _materialize_trial_config(
                         shared_config, combo,
@@ -479,8 +552,17 @@ async def run_once(
                             if (t, c_idx, s_idx) in existing_multi:
                                 continue
                             pending_units.append(
-                                (t, c_idx, combo_config, s_idx),
+                                (t, c_idx, combo_config, s_idx, None),
                             )
+                pending_units.extend(
+                    _coverage_pending_units(
+                        b,
+                        task_ids=task_ids,
+                        shared_config=shared_config,
+                        failed_fanout_keys=failed_fanout_keys,
+                        existing_idempotency_keys=existing_idempotency_keys,
+                    ),
+                )
                 work.append((
                     b.id, b.provider_connection_id, b.provider_model_id,
                     pending_units,
@@ -497,6 +579,15 @@ async def run_once(
                         ),
                     )).all()
                 }
+                existing_idempotency_keys = {
+                    str(row[0])
+                    for row in (await s.execute(
+                        select(Trial.idempotency_key).where(
+                            Trial.batch_id == b.id,
+                            Trial.idempotency_key.is_not(None),
+                        ),
+                    )).all()
+                }
                 pending_units = []
                 cfg = dict(b.trial_config)
                 for t in task_ids:
@@ -506,7 +597,16 @@ async def run_once(
                             continue
                         if (t, s_idx) in existing_single:
                             continue
-                        pending_units.append((t, None, cfg, s_idx))
+                        pending_units.append((t, None, cfg, s_idx, None))
+                pending_units.extend(
+                    _coverage_pending_units(
+                        b,
+                        task_ids=task_ids,
+                        shared_config=cfg,
+                        failed_fanout_keys=failed_fanout_keys,
+                        existing_idempotency_keys=existing_idempotency_keys,
+                    ),
+                )
                 work.append((
                     b.id, b.provider_connection_id, b.provider_model_id,
                     pending_units,
@@ -518,7 +618,7 @@ async def run_once(
     for batch_id, provider_connection_id, provider_model_id, pending_units in work:
         for chunk_start in range(0, len(pending_units), batch_size):
             chunk = pending_units[chunk_start:chunk_start + batch_size]
-            for tid, combo_idx, cfg, s_idx in chunk:
+            for tid, combo_idx, cfg, s_idx, required_pool in chunk:
                 submit_result = await _submit_one(
                     http_client,
                     authorization=cp_authorization,
@@ -529,6 +629,7 @@ async def run_once(
                     provider_connection_id=provider_connection_id,
                     provider_model_id=provider_model_id,
                     combination_idx=combo_idx,
+                    required_worker_pool=required_pool,
                 )
                 if (
                     not submit_result.ok

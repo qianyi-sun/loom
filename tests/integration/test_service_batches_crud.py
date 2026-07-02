@@ -560,6 +560,42 @@ async def test_post_batch_with_n_per_task_multiplies_count(
     assert body["n_per_task"] == 3
 
 
+async def test_post_batch_required_worker_pools_adds_coverage_count(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, _team_id = camp_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "MIT with deterministic pool coverage",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {},
+                "required_worker_pools": [" oldlab ", "k8s-worker", "oldlab"],
+            },
+        )
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["required_worker_pools"] == ["oldlab", "k8s-worker"]
+    assert body["expected_trial_count"] == 5
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        row = s.execute(
+            select(Batch).where(Batch.id == UUID(body["batch_id"])),
+        ).scalar_one()
+    sync_engine.dispose()
+    assert row.required_worker_pools == ["oldlab", "k8s-worker"]
+
+
 async def test_paused_team_rejects_batch_and_records_reason(
     camp_setup: tuple[FastAPI, str, UUID],
 ) -> None:

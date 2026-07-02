@@ -219,3 +219,82 @@ async def test_claim_filters_by_cpu_architecture(postgres_url: str):
         assert row is None
 
     await engine.dispose()
+
+
+async def test_claim_filters_by_required_worker_pool(postgres_url: str):
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as s:
+        team_id = uuid4()
+        await s.execute(insert(Team).values(id=team_id, name=f"pool-{team_id}"))
+        await s.execute(insert(TeamQuota).values(team_id=team_id, fair_share_weight=1.0))
+        await s.execute(insert(Task).values(
+            id="pool-task", checksum="0" * 64, config={"schema_version": "1"},
+        ))
+        gb10_trial = uuid4()
+        oldlab_trial = uuid4()
+        oldlab_worker = uuid4()
+        await s.execute(insert(Worker).values(
+            id=oldlab_worker,
+            hostname="oldlab-1",
+            version="v",
+            pool_name="oldlab",
+            capabilities=[{
+                "os": "linux",
+                "cpu_arch": "x86_64",
+                "gpu_vendor": "none",
+                "network_policies": ["public"],
+                "dynamic_network_policy": True,
+                "mounted_fs": True,
+                "resource_modes": ["auto"],
+            }],
+            registered_at=datetime.now(UTC),
+            last_seen_at=datetime.now(UTC),
+            status="active",
+        ))
+        for trial_id, required_pool in (
+            (gb10_trial, "gb10-arm64"),
+            (oldlab_trial, "oldlab"),
+        ):
+            await s.execute(insert(Trial).values(
+                id=trial_id,
+                team_id=team_id,
+                task_id="pool-task",
+                config={},
+                requires_caps={
+                    "os": "linux",
+                    "gpu_vendor": "none",
+                    "network_policies": ["public"],
+                    "cpu_arch": "any",
+                    "worker_pool": required_pool,
+                },
+                state="queued",
+            ))
+        await s.commit()
+
+    async with session_factory() as session:
+        row = await claim_one(
+            session,
+            worker_id=oldlab_worker,
+            worker_os=["linux"],
+            worker_gpu_vendors=["none"],
+            worker_network_policies=["public"],
+            worker_cpu_arches=["x86_64"],
+        )
+        await session.commit()
+
+    assert row is not None
+    assert row["id"] == oldlab_trial
+
+    async with session_factory() as session:
+        row = await claim_one(
+            session,
+            worker_id=oldlab_worker,
+            worker_os=["linux"],
+            worker_gpu_vendors=["none"],
+            worker_network_policies=["public"],
+            worker_cpu_arches=["x86_64"],
+        )
+        assert row is None
+
+    await engine.dispose()

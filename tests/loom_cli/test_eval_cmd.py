@@ -924,6 +924,49 @@ def test_batch_create_forwards_optional_fields(
     assert body["backend"] == "fake"
 
 
+def test_batch_create_forwards_required_worker_pools(
+    mock_server: MockServer,
+) -> None:
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 5,
+            "n_per_task": 1,
+            "backend": "docker",
+            "required_worker_pools": ["oldlab", "k8s-worker"],
+            "combinations": [],
+            "state": "submitted",
+            "created_at": "2026-06-16T00:00:00Z",
+        },
+    )
+
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "litellm",
+            "--benchmark",
+            "humaneval",
+            "--required-worker-pool",
+            "oldlab",
+            "--required-worker-pool",
+            "k8s-worker",
+        ]
+    )
+
+    assert rc == 0
+    body = json.loads(mock_server[1].content)
+    assert body["required_worker_pools"] == ["oldlab", "k8s-worker"]
+
+
 # ──────────────────────────────────────────────────────────────────────
 # eval batch list / show / cancel
 # ──────────────────────────────────────────────────────────────────────

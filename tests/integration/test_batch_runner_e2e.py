@@ -233,6 +233,75 @@ async def test_runner_fans_out_5_trials(
     assert batch_row.state == "running"
 
 
+async def test_runner_fans_out_required_worker_pool_coverage_units(
+    runner_setup: tuple[
+        async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
+    ],
+    postgres_url: str,
+) -> None:
+    session_factory, http_client, team_id, task_ids, captured = runner_setup
+    async with session_factory() as s:
+        c = Batch(
+            team_id=team_id,
+            name="coverage",
+            task_filter={
+                "benchmark_ids": ["runner-benchmark"],
+                "subset_kind": "first_n",
+                "n": 1,
+            },
+            trial_config={},
+            state="submitted",
+            created_by_token_prefix="abcdef12",
+            expected_trial_count=3,
+            required_worker_pools=["oldlab", "k8s-worker"],
+        )
+        s.add(c)
+        await s.commit()
+        await s.refresh(c)
+        cid = c.id
+
+    await run_once(
+        session_factory=session_factory,
+        http_client=http_client,
+        batch_size=10,
+        submit_rate_per_sec=100,
+    )
+
+    assert [body.get("required_worker_pool") for body in captured] == [
+        None,
+        "oldlab",
+        "k8s-worker",
+    ]
+    assert [body["idempotency_key"] for body in captured] == [
+        _idempotency_key(cid, task_ids[0], 0),
+        _idempotency_key(
+            cid,
+            task_ids[0],
+            1,
+            required_worker_pool="oldlab",
+        ),
+        _idempotency_key(
+            cid,
+            task_ids[0],
+            2,
+            required_worker_pool="k8s-worker",
+        ),
+    ]
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        trials = s.execute(
+            select(Trial)
+            .where(Trial.batch_id == cid)
+            .order_by(Trial.sample_idx.asc()),
+        ).scalars().all()
+    sync_engine.dispose()
+
+    assert len(trials) == 3
+    assert [t.sample_idx for t in trials] == [0, 1, 2]
+
+
 async def test_runner_is_idempotent(
     runner_setup: tuple[
         async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
@@ -382,7 +451,11 @@ async def test_runner_advances_to_finished_when_all_terminal(
         s.execute(
             update(Trial)
             .where(Trial.batch_id == cid)
-            .values(state="succeeded", finished_at=datetime.now(UTC)),
+            .values(
+                state="succeeded",
+                result={"aggregate_reward": 1.0},
+                finished_at=datetime.now(UTC),
+            ),
         )
         s.commit()
     sync_engine.dispose()

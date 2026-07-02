@@ -913,6 +913,13 @@ class Batch(Base):
         JSONB, nullable=False, server_default=text("'[]'::jsonb"),
         default=list,
     )
+    # Issue #188: release canaries can request deterministic terminal
+    # coverage on named worker pools. The batch runner emits one extra
+    # pool-pinned coverage trial per entry; ordinary batches keep [].
+    required_worker_pools: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb"),
+        default=list,
+    )
     # Plan 28 PR-3: outcome separate from lifecycle `status`. NULL
     # until terminal. Computed by the batch_runner when transitioning
     # to a terminal lifecycle state. Values: succeeded /

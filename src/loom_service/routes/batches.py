@@ -137,6 +137,10 @@ class _CreateBatch(BaseModel):
     # may omit this or pass their own team id; cross-team values require
     # admin scope and are used for provider validation + Batch.team_id.
     team_id: UUID | None = None
+    # Issue #188: operator/release canaries can require deterministic
+    # terminal coverage from named worker pools. The batch runner adds
+    # one extra pool-pinned coverage trial per normalized entry.
+    required_worker_pools: list[str] = Field(default_factory=list, max_length=20)
 
 
 def _sanitize_trial_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -144,6 +148,32 @@ def _sanitize_trial_config(config: dict[str, Any]) -> dict[str, Any]:
     if "request_params" in out:
         out["request_params"] = sanitize_request_extras(out.get("request_params"))
     return out
+
+
+def _normalize_required_worker_pools(values: Sequence[str]) -> list[str]:
+    pools: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        pool = str(raw).strip()
+        if not pool:
+            _reject_submission(
+                reason="invalid_input",
+                status_code=400,
+                detail="required_worker_pools entries must be non-empty strings",
+            )
+        if len(pool) > 80 or any(ch.isspace() for ch in pool):
+            _reject_submission(
+                reason="invalid_input",
+                status_code=400,
+                detail=(
+                    "required_worker_pools entries must be 1-80 characters "
+                    "and contain no whitespace"
+                ),
+            )
+        if pool not in seen:
+            seen.add(pool)
+            pools.append(pool)
+    return pools
 
 
 def _reject_submission(
@@ -356,6 +386,7 @@ def _serialize(
         "n_per_task": b.n_per_task,
         "backend": b.backend,
         "combinations": b.combinations,
+        "required_worker_pools": b.required_worker_pools,
         "visibility": b.visibility,
         "share_status": b.share_status,
         "source_provenance": b.source_provenance,
@@ -407,6 +438,9 @@ async def create_batch(
 
     catalog = known_names()
     trial_config = _sanitize_trial_config(payload.trial_config)
+    required_worker_pools = _normalize_required_worker_pools(
+        payload.required_worker_pools,
+    )
 
     if payload.combinations:
         # Multi-combination batch. trial_config MUST NOT carry
@@ -593,13 +627,13 @@ async def create_batch(
             task_count=len(valid_task_ids),
             n_per_task=payload.n_per_task,
             combinations=combinations_jsonb,
-        )
+        ) + len(required_worker_pools)
     else:
         expected = expected_trial_count(
             task_count=len(valid_task_ids),
             n_per_task=payload.n_per_task,
             combinations=None,
-        )
+        ) + len(required_worker_pools)
         combinations_jsonb = []
 
     explicit_name = payload.name.strip() if payload.name else ""
@@ -629,6 +663,7 @@ async def create_batch(
         n_per_task=payload.n_per_task,
         backend=payload.backend,
         combinations=combinations_jsonb,
+        required_worker_pools=required_worker_pools,
         provider_connection_id=payload.provider_connection_id,
         provider_model_id=payload.provider_model_id,
     )
@@ -644,6 +679,7 @@ async def create_batch(
         "n_per_task": b.n_per_task,
         "backend": b.backend,
         "combinations": b.combinations,
+        "required_worker_pools": b.required_worker_pools,
         "state": b.state,
         "created_at": b.created_at.isoformat(),
     }

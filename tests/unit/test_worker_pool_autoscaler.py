@@ -557,6 +557,10 @@ def test_queued_trial_capability_matching_uses_policy_backend_and_arch() -> None
     assert _queued_trial_matches_policy({"cpu_arch": "any"}, slurm) is True
     assert _queued_trial_matches_policy({"cpu_arch": "arm64"}, slurm) is False
     assert _queued_trial_matches_policy({"cpu_arch": "arm64"}, gb10) is True
+    assert _queued_trial_matches_policy({"worker_pool": "oldlab"}, slurm) is True
+    assert _queued_trial_matches_policy({"worker_pool": "gb10-arm64"}, slurm) is False
+    assert _queued_trial_matches_policy({"worker_pool": "gb10-arm64"}, gb10) is True
+    assert _queued_trial_matches_policy({"worker_pool": "oldlab"}, gb10) is False
 
 
 def test_persist_decision_updates_scale_up_and_scale_down_timestamps() -> None:
