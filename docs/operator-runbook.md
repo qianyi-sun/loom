@@ -851,7 +851,7 @@ increase queued connections without removing the token-row write hotspot.
 | `minio_max_pool_connections` | `256` | Worker-side boto3 S3 connection pool size. Size with `max_concurrent` because task materialization, artifacts, and trajectory upload overlap during sweeps. |
 | `minio_connect_timeout_sec` | `5.0` | S3 connect timeout for worker object-store calls. |
 | `minio_read_timeout_sec` | `120.0` | S3 socket read timeout for worker object-store calls. |
-| `minio_operation_timeout_sec` | `300.0` | Wall-clock timeout for each worker S3 wrapper call such as `download_prefix`, `put_object`, multipart part upload, and presign. |
+| `minio_operation_timeout_sec` | `300.0` | Wall-clock timeout for each worker S3 wrapper call. `download_prefix` uses this separately for prefix listing and each individual object download; `put_object`, multipart part upload, and presign also use it per call. |
 | `minio_operation_attempts` | `3` | Number of worker S3 operation attempts after timeouts, socket/client disconnects, or retryable S3 5xx/throttle responses. Each attempt gets the full operation timeout and reconnects the boto3 client before retrying. |
 | `task_materialize_timeout_sec` | `300.0` | Wall-clock timeout for pre-start task bundle materialization. If an `hf://`, `fixture://`, or `s3://` materializer hangs before `started_at`, the worker fails the claimed trial through setup failure writeback instead of leaving it stuck `claimed`. |
 
@@ -921,22 +921,27 @@ but each worker pays the build cost once).
   or reuse the cache before launching the high-concurrency batch. Only raise
   task `build_timeout_sec` after confirming the Docker daemon, registry auth,
   disk, and CPU pressure are healthy enough that the longer build is expected.
-- **Trial setup fails with `S3 download_prefix timed out`, retryable S3
-  5xx/throttle responses, socket disconnects, or trajectory/artifact upload
-  timeouts under high concurrency** → first confirm MinIO health and network
-  reachability, then raise `minio_operation_timeout_sec` or
-  `minio_operation_attempts`. If errors coincide with high worker concurrency
-  and connection starvation, raise `minio_max_pool_connections`; if Python
-  setup threads are saturated, tune `LOOM_WORKER_BLOCKING_IO_MAX_WORKERS`
-  separately. Exhausted retries leave the final exception type/message in the
-  trial failure message for diagnosis.
+- **Trial setup fails with `S3 download_prefix` list/download timeout,
+  retryable S3 5xx/throttle responses, socket disconnects, or
+  trajectory/artifact upload timeouts under high concurrency** → first confirm
+  MinIO health and network reachability, then raise
+  `minio_operation_timeout_sec` or `minio_operation_attempts`.
+  `download_prefix` retries prefix listing and each object download as separate
+  units, so one object disconnect should not restart the whole prefix. If
+  errors coincide with high worker concurrency and connection starvation, raise
+  `minio_max_pool_connections`; if Python setup threads are saturated, tune
+  `LOOM_WORKER_BLOCKING_IO_MAX_WORKERS` separately. Exhausted retries leave the
+  final exception type/message in the trial failure message for diagnosis.
 - **Trial setup fails with `task materialization timed out` before
   `started_at`** → inspect the source scheme in the failure message and worker
   logs. For `hf://`, verify whether the benchmark should already have been
   mirrored into internal object storage; direct worker HF access is only a
   compatibility path for private/gated source repos and should not replace the
   internal mirror/provision workflow. Raise `task_materialize_timeout_sec` only
-  when the source is reachable and legitimately slow.
+  when the source is reachable and legitimately slow, and keep it coordinated
+  with the claimed-without-start reclaim policy tracked by #193; otherwise a
+  healthy worker may still lose a long setup claim before it can mark the trial
+  running.
 - **Trial fails with `TrialCacheError: failed to acquire build slot`**
   → check the `active_trial_cache_builds` table for a stuck row past
   its `expires_at`; the next claimant will steal it on its own, but

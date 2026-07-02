@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from botocore.exceptions import ClientError, ConnectionClosedError
 
 from loom.trajectory.storage import MinioObjectStore
@@ -26,6 +28,45 @@ class _FakeS3Client:
 
     def close(self) -> None:
         self.closed = True
+
+
+class _PrefixPaginator:
+    def __init__(self, keys: list[str]) -> None:
+        self._keys = keys
+
+    def paginate(self, *, Bucket: str, Prefix: str):  # noqa: N803
+        yield {
+            "Contents": [
+                {"Key": key}
+                for key in self._keys
+                if key.startswith(Prefix)
+            ],
+        }
+
+
+class _PrefixDownloadClient(_FakeS3Client):
+    def __init__(
+        self,
+        name: str,
+        *,
+        keys: list[str],
+        fail_once_key: str | None = None,
+    ) -> None:
+        super().__init__(name)
+        self._keys = keys
+        self._fail_once_key = fail_once_key
+        self.downloads: list[str] = []
+
+    def get_paginator(self, name: str) -> _PrefixPaginator:
+        assert name == "list_objects_v2"
+        return _PrefixPaginator(self._keys)
+
+    def download_file(self, bucket: str, key: str, path: str) -> None:
+        self.downloads.append(key)
+        if self._fail_once_key == key:
+            self._fail_once_key = None
+            raise ConnectionClosedError(endpoint_url="http://minio:9000")
+        Path(path).write_text(f"{bucket}/{key}")
 
 
 def _store_with_clients(monkeypatch, clients: list[_FakeS3Client]) -> MinioObjectStore:  # type: ignore[no-untyped-def]
@@ -114,3 +155,31 @@ async def test_run_client_call_does_not_retry_permanent_s3_403(monkeypatch) -> N
 
     assert clients[0].closed is False
     assert clients[1].closed is False
+
+
+async def test_download_prefix_retries_only_failed_object_with_fresh_client(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    keys = ["bench/task/a.txt", "bench/task/b.txt"]
+    clients = [
+        _PrefixDownloadClient(
+            "first",
+            keys=keys,
+            fail_once_key="bench/task/b.txt",
+        ),
+        _PrefixDownloadClient("second", keys=keys),
+    ]
+    store = _store_with_clients(monkeypatch, clients)
+
+    count = await store.download_prefix(
+        bucket="benchmarks",
+        prefix="bench/task/",
+        out_dir=tmp_path,
+    )
+
+    assert count == 2
+    assert clients[0].downloads == ["bench/task/a.txt", "bench/task/b.txt"]
+    assert clients[1].downloads == ["bench/task/b.txt"]
+    assert (tmp_path / "a.txt").read_text() == "benchmarks/bench/task/a.txt"
+    assert (tmp_path / "b.txt").read_text() == "benchmarks/bench/task/b.txt"

@@ -801,7 +801,9 @@ or sidecar startup. Use `LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC`,
 artifact upload, or trajectory flush timeouts under high trial concurrency.
 The S3 operation attempt budget also covers transient boto3 socket/client
 disconnects and retryable S3 5xx/throttle responses; each retry replaces the
-client connection before trying again.
+client connection before trying again. `download_prefix` applies that budget
+separately to prefix listing and each object download, so one object disconnect
+does not restart the whole prefix download.
 Use `LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC` only when pre-start bundle
 materialization is reachable but legitimately slow; `hf://` sources that need
 private internet access should normally be mirrored into internal object
