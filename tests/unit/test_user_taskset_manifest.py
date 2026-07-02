@@ -65,6 +65,31 @@ def test_evaluation_without_verifier_rejected() -> None:
         })
 
 
+@pytest.mark.parametrize("bad_path", [
+    "../escape.py",
+    "/abs/verifier.py",
+    "verifier/../../etc/passwd",
+])
+def test_rejects_unsafe_verifier_file_path(bad_path: str) -> None:
+    with pytest.raises(ValidationError):
+        UserTaskSetManifest.model_validate({
+            **_MINIMAL,
+            "verifier": {"type": "pytest", "file": bad_path},
+        })
+
+
+@pytest.mark.parametrize("bad_path", [
+    "../transform.py",
+    "/transform.py",
+])
+def test_rejects_unsafe_transform_file_path(bad_path: str) -> None:
+    with pytest.raises(ValidationError):
+        UserTaskSetManifest.model_validate({
+            **_MINIMAL,
+            "transform": {"file": bad_path},
+        })
+
+
 @pytest.mark.parametrize("bad_slug", ["../escape", "has/slash", "has.dot", ""])
 def test_rejects_path_traversal_slug(bad_slug: str) -> None:
     with pytest.raises(ValidationError):

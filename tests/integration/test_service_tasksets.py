@@ -25,6 +25,7 @@ from loom.db.schema import (
     Team,
     TeamQuota,
     Token,
+    User,
 )
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
@@ -54,8 +55,8 @@ task_template:
 """
 
 
-def _manifest_bytes(*, intents: str = "", verifier: str = "") -> bytes:
-    body = _MANIFEST_YAML
+def _manifest_bytes(*, intents: str = "", verifier: str = "", display_name: str = "Sample Tasks") -> bytes:
+    body = _MANIFEST_YAML.replace("display_name: Sample Tasks", f"display_name: {display_name}")
     if intents:
         body = body.replace(
             "metadata:",
@@ -115,26 +116,52 @@ async def tasksets_setup(
 
     team_a = uuid4()
     team_b = uuid4()
+    user_a = uuid4()
+    user_b = uuid4()
     raw_a = f"loom_team_{uuid4().hex}"
     raw_b = f"loom_team_{uuid4().hex}"
+    legacy_raw = f"loom_team_{uuid4().hex}"
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
-        for team_id, raw in ((team_a, raw_a), (team_b, raw_b)):
+        for team_id, raw, user_id in (
+            (team_a, raw_a, user_a),
+            (team_b, raw_b, user_b),
+        ):
             s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
             s.execute(insert(TeamQuota).values(team_id=team_id))
+            username = f"TaskSetOwner-{team_id.hex[:8]}"
+            s.execute(
+                insert(User).values(
+                    id=user_id,
+                    username=username,
+                    username_normalized=username.casefold(),
+                    status="active",
+                    is_platform_admin=False,
+                ),
+            )
             s.execute(
                 insert(Token).values(
                     token_hash=hashlib.sha256(raw.encode()).digest(),
                     type="team",
                     scopes=["read:own", "submit"],
                     team_id=team_id,
+                    created_by_user_id=user_id,
                     issued_at=datetime.now(UTC),
                 ),
             )
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(legacy_raw.encode()).digest(),
+                type="team",
+                scopes=["read:own", "submit"],
+                team_id=team_a,
+                issued_at=datetime.now(UTC),
+            ),
+        )
         s.commit()
 
-    tokens = {"team_a": raw_a, "team_b": raw_b}
+    tokens = {"team_a": raw_a, "team_b": raw_b, "legacy_a": legacy_raw}
     teams = {"team_a": team_a, "team_b": team_b}
     try:
         yield app, tokens, teams
@@ -146,6 +173,7 @@ async def tasksets_setup(
             s.execute(delete(TaskSetManifest))
             s.execute(delete(TaskSet))
             s.execute(delete(Token))
+            s.execute(delete(User))
             s.execute(delete(TeamQuota))
             s.execute(delete(Team))
             s.commit()
@@ -251,6 +279,67 @@ async def test_duplicate_slug_returns_409(tasksets_setup) -> None:
         second = await client.post("/api/v1/tasksets", headers=headers, files=files)
     assert first.status_code == 202
     assert second.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_legacy_team_token_cannot_submit(tasksets_setup) -> None:
+    app, tokens, _teams = tasksets_setup
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/v1/tasksets",
+            headers={"Authorization": f"Bearer {tokens['legacy_a']}"},
+            files={"manifest": ("manifest.yaml", _manifest_bytes(), "application/x-yaml")},
+        )
+    assert resp.status_code == 403
+    assert "legacy team token" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_slug_does_not_overwrite_stored_manifest(tasksets_setup) -> None:
+    app, tokens, teams = tasksets_setup
+    settings = app.state.settings
+    manifest_key = f"tasksets/user/{teams['team_a']}/sample-tasks/manifest.yaml"
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        headers = {"Authorization": f"Bearer {tokens['team_a']}"}
+        first = await client.post(
+            "/api/v1/tasksets",
+            headers=headers,
+            files={
+                "manifest": (
+                    "manifest.yaml",
+                    _manifest_bytes(display_name="Original Tasks"),
+                    "application/x-yaml",
+                ),
+            },
+        )
+        assert first.status_code == 202, first.text
+        stored = app.state.minio_client.get_object(
+            Bucket=settings.artifacts_bucket,
+            Key=manifest_key,
+        )["Body"].read()
+
+        second = await client.post(
+            "/api/v1/tasksets",
+            headers=headers,
+            files={
+                "manifest": (
+                    "manifest.yaml",
+                    _manifest_bytes(display_name="Replacement Tasks"),
+                    "application/x-yaml",
+                ),
+            },
+        )
+        assert second.status_code == 409
+
+        after = app.state.minio_client.get_object(
+            Bucket=settings.artifacts_bucket,
+            Key=manifest_key,
+        )["Body"].read()
+    assert after == stored
+    assert b"Original Tasks" in stored
+    assert b"Replacement Tasks" not in stored
 
 
 @pytest.mark.asyncio
