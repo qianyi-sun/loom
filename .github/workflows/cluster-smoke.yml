@@ -124,7 +124,8 @@ jobs:
           # Spot-check a few well-known objects. NOTE: loom-worker is
           # currently a Deployment (not a DaemonSet); the
           # cluster-deploy.md spec says DaemonSet — tracked as a
-          # follow-up. See https://github.com/carinrc/loom/issues/108
+          # follow-up in the pre-2026-06-26 carinrc/loom archive tracker
+          # (archive URL: https://github.com/carinrc/loom/issues/108).
           kubectl --context kind-loom-smoke -n loom get deploy loom-service
           kubectl --context kind-loom-smoke -n loom get deploy loom-control-plane
           kubectl --context kind-loom-smoke -n loom get sts loom-postgres

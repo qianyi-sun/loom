@@ -9,6 +9,9 @@ What you're looking for, where it lives:
 - **[provider-onboarding.md](provider-onboarding.md)** — hosted
   third-party API setup, user-operated Slurm/vLLM checkpoint deployment,
   provider testing, model refresh, and safe registration
+- **[live-streaming.md](live-streaming.md)** — SSE `/stream` +
+  seq-cursor `/events?after_seq=N` API for real-time trajectory
+  event consumption; SPA `useTrialEventStream` hook contract
 
 ## I want to author a benchmark task
 

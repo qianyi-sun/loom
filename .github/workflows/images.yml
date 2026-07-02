@@ -11,12 +11,14 @@ name: images
 #
 # Implementation note: we don't use docker/setup-qemu-action +
 # docker/setup-buildx-action + docker/build-push-action because the
-# carinrc org's GitHub Actions allowed-actions policy blocks the
-# docker/* marketplace actions (confirmed via startup_failure when
-# any of them is `uses:`-d). Instead we drive `docker buildx` directly
-# via the CLI (built into ubuntu-latest runners since Docker 23) and
-# pull `tonistiigi/binfmt` to install QEMU emulators — both are plain
-# docker operations, not marketplace actions.
+# repo's GitHub Actions allowed-actions policy blocks the docker/*
+# marketplace actions (confirmed via startup_failure when any of
+# them is `uses:`-d — originally observed on the pre-2026-06-26
+# carinrc/loom org, kept as a precaution on qianyi-sun/loom until
+# the policy is re-audited). Instead we drive `docker buildx`
+# directly via the CLI (built into ubuntu-latest runners since Docker
+# 23) and pull `tonistiigi/binfmt` to install QEMU emulators — both
+# are plain docker operations, not marketplace actions.
 
 on:
   pull_request:

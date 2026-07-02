@@ -6,6 +6,11 @@ or write your own); pluggable task adapters (23 catalog entries ship in the
 core package, plus optional Terminal-Bench-2). One
 `uv sync`, then `loom run`.
 
+> **Cross-repo issue/PR refs:** bare `#N` in this guide may point to the
+> pre-2026-06-26 `carinrc/loom` archive tracker (numbering was reset on
+> the new canonical repo `qianyi-sun/loom`). See
+> [`repo-migration.md`](repo-migration.md).
+
 ## Install
 
 ```bash

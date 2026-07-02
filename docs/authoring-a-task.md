@@ -60,6 +60,46 @@ artifacts = ["result.txt"]
 | `litellm` | Out-of-box LLM agent | Tool-loop over Gateway calls; requires `[agent.model]`. |
 | `claude-code` | In-box CLI agent | Runs `claude` inside the container; requires the image to ship the CLI. |
 
+### The `oracle_eligible` task tag
+
+The oracle agent requires an in-sandbox `solution/solve.sh`. Adapter-emitted
+benchmarks are heterogeneous — SkillLearnBench, for example, ships upstream
+`solve.sh` for only 73 of its 100 tasks, and Terminal-Bench-2 mirrors
+`solution.sh` / `solution.yaml` only when the upstream instance provides
+one. The batch preflight (`src/loom_service/task_compat.py`) filters
+`(oracle, task)` pairs before dispatch so the matrix runner never launches a
+trial that would deterministically fail with
+`AgentError: OracleAgent requires .../solution/solve.sh; not found`.
+
+Adapters that produce oracle-eligible tasks should emit a per-instance
+`oracle_eligible` tag with values `"true"` or `"false"`:
+
+```python
+BenchmarkInstance(
+    instance_id="…",
+    task_config={…},
+    tags={
+        "oracle_eligible": "true" if solve_sh_present else "false",
+        # other tags…
+    },
+)
+```
+
+Resolution order in `task_provides_capability("solution_solve_sh", …)`:
+
+1. Task uses the `pytest` verifier → eligible (pytest adapters co-emit
+   `solution/solve.sh` next to `solution/_reference.py`).
+2. Explicit `oracle_eligible="true"` or `"false"` tag → wins over the
+   task-id prefix fallback.
+3. Task id matches a known adapter prefix (e.g. `terminal-bench-2/`) whose
+   adapter unconditionally emits `solution/solve.sh` → eligible.
+4. Otherwise → not eligible; the batch preflight excludes the task and
+   surfaces a count + concrete example in the API response.
+
+Hand-authored `task.toml` bundles don't need the tag — the pytest-verifier
+rule already covers the common case. Add the tag only when an adapter
+produces a mixed slate where some instances lack an upstream `solve.sh`.
+
 ## Verifier choices
 
 | name | What it does | Input |

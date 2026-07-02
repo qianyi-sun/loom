@@ -295,11 +295,11 @@ Preflight should fail with actionable diagnostics.
 
 Post-v1 implementation should proceed in dependency order:
 
-1. Decide skill injection and typed artifact contracts (#567, #568).
-2. Implement `SkillMarkdown` injection and typed artifact registry MVP (#573, #574).
-3. Decide and implement TaskSet/data-production registration (#569, #575, #576).
-4. Decide and implement RunGraph and custom container boundaries (#570, #571, #577, #578).
-5. Decide recipe/plugin versioning and implement the first official SkillOpt recipe (#572, #579).
+1. Decide skill injection and typed artifact contracts (carinrc#567, carinrc#568).
+2. Implement `SkillMarkdown` injection and typed artifact registry MVP (carinrc#573, carinrc#574).
+3. Decide and implement TaskSet/data-production registration (carinrc#569, carinrc#575, carinrc#576).
+4. Decide and implement RunGraph and custom container boundaries (carinrc#570, carinrc#571, carinrc#577, carinrc#578).
+5. Decide recipe/plugin versioning and implement the first official SkillOpt recipe (carinrc#572, carinrc#579).
 
 Each step should preserve the narrow-waist rule: Loom core gains reusable
 execution, artifact, lineage, security, and observability primitives; research
