@@ -94,6 +94,7 @@ jobs:
       LOOM_IMAGE_TAG: ${{ inputs.image_tag }}
       LOOM_DRY_RUN: ${{ inputs.dry_run }}
       LOOM_ROLLOUT_EVIDENCE_DIR: rollout-evidence
+      LOOM_ROLLOUT_LOCK_DIR: ${{ vars.LOOM_ROLLOUT_LOCK_DIR }}
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v8.2.0
@@ -136,6 +137,7 @@ jobs:
       LOOM_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
       LOOM_RELEASE_GATE_RUN_ID: ${{ inputs.release_gate_run_id }}
       LOOM_ROLLOUT_EVIDENCE_DIR: rollout-evidence
+      LOOM_ROLLOUT_LOCK_DIR: ${{ vars.LOOM_ROLLOUT_LOCK_DIR }}
     steps:
       - uses: actions/checkout@v5
         with:

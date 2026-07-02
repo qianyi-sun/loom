@@ -29,6 +29,15 @@ from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
+from loom_cli.cluster_backup_guard import is_protected_environment
+from loom_cli.rollout_lock import (
+    DEFAULT_ROLLOUT_LOCK_TTL_SECONDS,
+    RolloutLease,
+    RolloutLeaseError,
+    RolloutLeaseManager,
+    default_rollout_lock_dir,
+    rollout_owner_id,
+)
 from loom_cli.secret_source import (
     SecretSourceError,
     resolve_secret_source,
@@ -53,6 +62,96 @@ _DEFAULT_CP_URL = "http://localhost:8080"
 _DEFAULT_EXPIRES_DAYS = 365
 _DEFAULT_ADMIN_TOKEN_SOURCE = "env:LOOM_ADMIN_TOKEN"
 _RELEASE_TAG_SHA_RE = re.compile(r"(?:^|[-_])([0-9a-f]{7,40})$")
+
+
+def _add_rollout_lock_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--rollout-id",
+        default=None,
+        help=(
+            "Operator-visible protected rollout owner id. Defaults to "
+            "environment-hostname-pid when a lock is required."
+        ),
+    )
+    parser.add_argument(
+        "--rollout-lock-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for per-environment rollout mutation leases. Defaults "
+            "to $LOOM_ROLLOUT_LOCK_DIR or ~/.loom/rollout-locks for protected "
+            "environments."
+        ),
+    )
+    parser.add_argument(
+        "--rollout-lock-ttl-seconds",
+        type=int,
+        default=DEFAULT_ROLLOUT_LOCK_TTL_SECONDS,
+        help=(
+            "Protected rollout mutation lease TTL in seconds "
+            f"(default: {DEFAULT_ROLLOUT_LOCK_TTL_SECONDS})."
+        ),
+    )
+    parser.add_argument(
+        "--rollout-lock-evidence",
+        type=Path,
+        default=None,
+        help="Optional JSON evidence path for rollout lock acquire/release events.",
+    )
+    parser.add_argument(
+        "--force-rollout-lock",
+        action="store_true",
+        help=(
+            "Replace an active protected rollout mutation lease. Use only "
+            "after preserving evidence that the recorded owner is stale."
+        ),
+    )
+
+
+def _acquire_environment_state_rollout_lock(
+    args: argparse.Namespace,
+    *,
+    operation: str,
+) -> RolloutLease | None:
+    if not is_protected_environment(
+        environment=args.environment,
+        namespace=args.environment,
+    ):
+        return None
+    environment = args.environment
+    manager = RolloutLeaseManager(args.rollout_lock_dir or default_rollout_lock_dir())
+    try:
+        lease = manager.acquire(
+            environment=environment,
+            owner_id=rollout_owner_id(environment, args.rollout_id),
+            ttl_seconds=args.rollout_lock_ttl_seconds,
+            command=[
+                "loom",
+                "admin",
+                "environment-state",
+                operation,
+                "--environment",
+                args.environment,
+                "--file",
+                str(args.file),
+            ],
+            evidence_path=args.rollout_lock_evidence,
+            force=args.force_rollout_lock,
+        )
+    except (RolloutLeaseError, ValueError) as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        diagnostic = getattr(exc, "diagnostic", None)
+        if isinstance(diagnostic, dict):
+            sys.stderr.write(
+                "rollout lock diagnostic: "
+                + json.dumps(diagnostic, sort_keys=True)
+                + "\n",
+            )
+        raise
+    sys.stderr.write(
+        f"Acquired rollout mutation lease for {environment}: {lease.owner_id}\n",
+    )
+    return lease
 
 
 def _release_source_prefix(release_image_tag: str | None) -> str | None:
@@ -699,6 +798,20 @@ def _fetch_environment_state(
 
 
 def _environment_state_apply(args: argparse.Namespace) -> int:
+    try:
+        lease = _acquire_environment_state_rollout_lock(args, operation="apply")
+    except (RolloutLeaseError, ValueError):
+        return 1
+    rc = 1
+    try:
+        rc = _environment_state_apply_impl(args)
+        return rc
+    finally:
+        if lease is not None:
+            lease.release(status="released" if rc == 0 else "failed")
+
+
+def _environment_state_apply_impl(args: argparse.Namespace) -> int:
     from loom_cli.environment_state import (
         apply_external_slurm_autoscaler_supervisors,
         autoscaler_policy_payload,
@@ -798,6 +911,20 @@ def _environment_state_apply(args: argparse.Namespace) -> int:
 
 
 def _environment_state_check(args: argparse.Namespace) -> int:
+    try:
+        lease = _acquire_environment_state_rollout_lock(args, operation="check")
+    except (RolloutLeaseError, ValueError):
+        return 1
+    rc = 1
+    try:
+        rc = _environment_state_check_impl(args)
+        return rc
+    finally:
+        if lease is not None:
+            lease.release(status="released" if rc == 0 else "failed")
+
+
+def _environment_state_check_impl(args: argparse.Namespace) -> int:
     from loom_cli.environment_state import (
         autoscaler_blockers,
         diff_environment_state,
@@ -1537,6 +1664,7 @@ def dispatch(argv: list[str]) -> int:
                 "token source drifts from the protected-environment source."
             ),
         )
+        _add_rollout_lock_args(p)
 
     p_env_state_apply = env_state_sub.add_parser(
         "apply",
