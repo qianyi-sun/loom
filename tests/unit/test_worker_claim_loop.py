@@ -22,6 +22,12 @@ class _Settings:
         self.blocking_io_max_workers = blocking_io_max_workers
 
 
+class _RegistrationSettings:
+    hostname = "worker-host"
+    max_concurrent = 3
+    pool_name = "oldlab"
+
+
 class _ObjectStoreSettings:
     minio_endpoint = "http://minio:9000"
     minio_region = "us-east-1"
@@ -161,6 +167,94 @@ def test_worker_object_store_uses_worker_s3_timeout_and_pool_config(
         "operation_timeout": 600.0,
         "operation_attempts": 4,
     }
+
+
+async def test_register_worker_with_retry_retries_control_plane_dns_failure() -> None:
+    from loom.startup_retry import StartupRetryConfig
+
+    worker_id = uuid4()
+    attempts = 0
+    sleeps: list[float] = []
+
+    class _FakeCPClient:
+        async def register(self, **kwargs: object) -> dict[str, object]:
+            nonlocal attempts
+            attempts += 1
+            assert kwargs == {
+                "hostname": "worker-host",
+                "version": "0.0.1",
+                "capabilities": ml._DEFAULT_CAPS,  # type: ignore[attr-defined]
+                "max_concurrent": 3,
+                "pool_name": "oldlab",
+            }
+            if attempts < 3:
+                request = httpx.Request("POST", "http://loom-control-plane/workers/register")
+                raise httpx.ConnectError(
+                    "[Errno -3] Temporary failure in name resolution",
+                    request=request,
+                )
+            return {"worker_id": str(worker_id)}
+
+    async def _sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    info = await ml._register_worker_with_retry(  # type: ignore[attr-defined]
+        cp_client=_FakeCPClient(),
+        settings=_RegistrationSettings(),
+        retry_config=StartupRetryConfig(
+            max_attempts=4,
+            base_backoff_sec=0.1,
+            max_backoff_sec=1.0,
+            budget_sec=30.0,
+            jitter_sec=0.0,
+        ),
+        sleep=_sleep,
+    )
+
+    assert info == {"worker_id": str(worker_id)}
+    assert attempts == 3
+    assert sleeps == [0.1, 0.2]
+
+
+async def test_register_worker_with_retry_does_not_retry_auth_failure() -> None:
+    from loom.startup_retry import StartupRetryConfig
+
+    attempts = 0
+
+    class _FakeCPClient:
+        async def register(self, **_kwargs: object) -> dict[str, object]:
+            nonlocal attempts
+            attempts += 1
+            request = httpx.Request("POST", "http://loom-control-plane/workers/register")
+            response = httpx.Response(401, request=request, json={"detail": "bad token"})
+            raise httpx.HTTPStatusError(
+                "401 Unauthorized",
+                request=request,
+                response=response,
+            )
+
+    async def _sleep(_seconds: float) -> None:
+        raise AssertionError("auth failures must not sleep/retry")
+
+    try:
+        await ml._register_worker_with_retry(  # type: ignore[attr-defined]
+            cp_client=_FakeCPClient(),
+            settings=_RegistrationSettings(),
+            retry_config=StartupRetryConfig(
+                max_attempts=4,
+                base_backoff_sec=0.1,
+                max_backoff_sec=1.0,
+                budget_sec=30.0,
+                jitter_sec=0.0,
+            ),
+            sleep=_sleep,
+        )
+    except httpx.HTTPStatusError as exc:
+        assert exc.response.status_code == 401
+    else:  # pragma: no cover - defensive clarity
+        raise AssertionError("expected HTTPStatusError")
+
+    assert attempts == 1
 
 
 def test_docker_registry_auth_summary_reports_only_secret_free_metadata(

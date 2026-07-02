@@ -468,7 +468,14 @@ master key; non-empty stores must decrypt with the configured
 `LOOM_SECRET_STORE_MASTER_KEY` or `LOOM_SECRET_STORE_MASTER_KEYS`
 fallback set. A mismatch fails startup with an operator-facing
 SecretStore validation error rather than letting provider traffic hit an
-AEAD decrypt failure on the first model request.
+AEAD decrypt failure on the first model request. These startup DB probes
+use bounded retry for transient DNS, connection, or Postgres-starting
+failures so cluster sandbox/CoreDNS churn does not turn a recoverable
+dependency blip into CrashLoop evidence. The retry boundary is intentionally
+narrow: Alembic revision mismatch, missing migrations, bad credentials, and
+SecretStore decrypt failures remain immediate hard failures. Worker startup
+uses the same retry boundary for its initial Control Plane registration; 4xx
+registration failures such as bad worker tokens are not retried.
 
 ### Provider egress contract
 

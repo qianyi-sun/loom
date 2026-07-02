@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import (
 from loom.admin_secret import AdminSecretVerifier, load_optional_admin_secret_verifier
 from loom.db.schema_startup import assert_schema_at_head
 from loom.security.secret_store import assert_existing_secrets_decryptable
+from loom.startup_retry import retry_startup_dependency
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.rate_card import RateCardCache
@@ -65,7 +66,10 @@ def create_app(settings: GatewaySettings) -> FastAPI:
         await _assert_schema_startup(engine)
         app.state.settings = settings
         app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
-        await _assert_secret_store_startup(app.state.session_factory)
+        await retry_startup_dependency(
+            lambda: _assert_secret_store_startup(app.state.session_factory),
+            operation_name="gateway secret-store startup validation",
+        )
         app.state.admin_secret_verifier = admin_secret_verifier
         app.state.rate_card_cache = RateCardCache(
             session_factory=app.state.session_factory,

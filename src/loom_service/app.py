@@ -30,6 +30,7 @@ from loom.admin_secret import (
 )
 from loom.db.schema_startup import assert_schema_at_head
 from loom.security.secret_store import assert_existing_secrets_decryptable
+from loom.startup_retry import retry_startup_dependency
 from loom_service.batch_runner import run_loop
 from loom_service.config import LoomServiceSettings
 from loom_service.metrics import (
@@ -95,7 +96,10 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         engine = create_async_engine(str(settings.db_url))
         await _assert_schema_startup(engine)
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
-        await _assert_secret_store_startup(session_factory)
+        await retry_startup_dependency(
+            lambda: _assert_secret_store_startup(session_factory),
+            operation_name="service secret-store startup validation",
+        )
         admin_secret_verifier = _load_admin_secret_verifier(settings)
 
         minio_client = create_minio_client(

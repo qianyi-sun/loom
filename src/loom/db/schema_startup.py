@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from alembic.config import Config
@@ -9,6 +11,12 @@ from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine
+
+from loom.startup_retry import (
+    DEFAULT_STARTUP_RETRY_CONFIG,
+    StartupRetryConfig,
+    retry_startup_dependency,
+)
 
 
 class SchemaNotAtHeadError(RuntimeError):
@@ -54,6 +62,8 @@ async def assert_schema_at_head(
     *,
     db_url_env_var: str,
     alembic_ini: Path | None = None,
+    retry_config: StartupRetryConfig = DEFAULT_STARTUP_RETRY_CONFIG,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> int:
     """Fail fast when DB migrations have not been applied.
 
@@ -61,7 +71,12 @@ async def assert_schema_at_head(
     Long-running service processes only validate; production migration remains
     an explicit operator action.
     """
-    current_heads = await _database_current_heads(engine)
+    current_heads = await retry_startup_dependency(
+        lambda: _database_current_heads(engine),
+        operation_name=f"database schema startup check ({db_url_env_var})",
+        config=retry_config,
+        sleep=sleep,
+    )
     expected_heads = _script_heads(alembic_ini)
     if current_heads == expected_heads:
         return len(current_heads)

@@ -360,7 +360,13 @@ knob you need.
    serving requests that later fail with missing-column errors. Production
    images for these services must include `migrations/alembic.ini` and
    `migrations/versions/` so this startup gate can compare DB revisions against
-   the image code.
+   the image code. Startup validation retries transient DNS, connection, and
+   Postgres-starting failures with bounded backoff so a pod sandbox or CoreDNS
+   restart does not immediately crash the process; schema mismatch, bad
+   credentials, and SecretStore decrypt failures remain hard startup failures.
+   Worker pods use the same bounded startup retry for initial Control Plane
+   registration, while deterministic HTTP errors such as bad worker tokens still
+   fail immediately.
 
 6. **Apply DB-facing services and edge components:**
    ```bash
