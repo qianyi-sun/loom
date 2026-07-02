@@ -222,6 +222,21 @@ def test_opencode_runtime_ready_allows_compatible_model() -> None:
     assert err is None
 
 
+def test_terminus_2_accepts_openai_compatible_gateway_models() -> None:
+    err = validate_agent_model_compat(
+        "terminus-2",
+        ModelSpec(provider="openai", name="deepseek-chat"),
+    )
+    assert err is None
+
+
+def test_terminus_2_catalog_advertises_any_gateway_provider() -> None:
+    terminus = get_agent("terminus-2")
+    assert terminus is not None
+    assert terminus.supported_providers == ("*",)
+    assert terminus.supported_model_sources == ("api",)
+
+
 def test_existing_modelspec_default_source_is_api() -> None:
     """Backwards-compat: callers that don't set `source` get the legacy
     catalog-backed API path."""
