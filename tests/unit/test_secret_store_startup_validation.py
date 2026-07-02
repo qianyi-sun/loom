@@ -107,6 +107,60 @@ def test_gateway_lifespan_validates_schema_before_secret_rows(
     assert calls == ["schema", "secrets"]
 
 
+def test_gateway_lifespan_wraps_secret_validation_in_startup_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_llm_gateway import app as gateway_app
+    from loom_llm_gateway.config import GatewaySettings
+
+    calls: list[str] = []
+
+    async def _validate_secrets(_session_factory: object) -> int:
+        calls.append("secrets")
+        return 0
+
+    async def _retry(run, *, operation_name: str, **_kwargs: object) -> int:
+        calls.append(operation_name)
+        return await run()
+
+    monkeypatch.setattr(
+        gateway_app,
+        "_assert_schema_startup",
+        _schema_noop,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        gateway_app,
+        "_assert_secret_store_startup",
+        _validate_secrets,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        gateway_app,
+        "retry_startup_dependency",
+        _retry,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        gateway_app,
+        "create_async_engine",
+        lambda _db_url: _FakeEngine(),
+    )
+
+    app = gateway_app.create_app(
+        GatewaySettings(
+            _env_file=None,
+            db_url="postgresql+psycopg://loom:loom@example/loom",
+            step_jwt_signing_key="test-step-jwt-signing-key",
+        ),
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/healthz").status_code == 200
+
+    assert calls == ["gateway secret-store startup validation", "secrets"]
+
+
 def test_service_lifespan_validates_existing_secret_store_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -213,6 +267,68 @@ def test_service_lifespan_validates_schema_before_secret_rows(
         assert client.get("/api/v1/health").status_code == 200
 
     assert calls == ["schema", "secrets"]
+
+
+def test_service_lifespan_wraps_secret_validation_in_startup_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_service import app as service_app
+    from loom_service.config import LoomServiceSettings
+
+    calls: list[str] = []
+
+    async def _validate_secrets(_session_factory: object) -> int:
+        calls.append("secrets")
+        return 0
+
+    async def _retry(run, *, operation_name: str, **_kwargs: object) -> int:
+        calls.append(operation_name)
+        return await run()
+
+    async def _run_loop(**_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        service_app,
+        "_assert_schema_startup",
+        _schema_noop,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        service_app,
+        "_assert_secret_store_startup",
+        _validate_secrets,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        service_app,
+        "retry_startup_dependency",
+        _retry,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        service_app,
+        "create_async_engine",
+        lambda _db_url: _FakeEngine(),
+    )
+    monkeypatch.setattr(service_app, "run_loop", _run_loop)
+
+    app = service_app.create_app(
+        LoomServiceSettings(
+            _env_file=None,
+            db_url="postgresql+psycopg://loom:loom@example/loom",
+            gateway_url="http://gw.example",
+            control_plane_url="http://cp.example",
+            minio_endpoint="http://minio.example",
+            minio_access_key="minio-access",
+            minio_secret_key="minio-secret",
+        ),
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/api/v1/health").status_code == 200
+
+    assert calls == ["service secret-store startup validation", "secrets"]
 
 
 def test_control_plane_lifespan_validates_schema_before_background_tasks(

@@ -48,6 +48,11 @@ from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
 from loom.security.redaction import redact_text
+from loom.startup_retry import (
+    DEFAULT_STARTUP_RETRY_CONFIG,
+    StartupRetryConfig,
+    retry_startup_dependency,
+)
 from loom.trajectory.cp_event_sink import CpEventSink
 from loom.trajectory.storage import MinioObjectStore, ObjectStore
 from loom.verifier.base import Verifier
@@ -262,12 +267,9 @@ async def run_worker(settings: WorkerSettings) -> None:
             _client=gw_http,
         )
 
-        info = await cp_client.register(
-            hostname=_worker_hostname(settings.hostname),
-            version="0.0.1",
-            capabilities=_DEFAULT_CAPS,
-            max_concurrent=max(1, settings.max_concurrent),
-            pool_name=settings.pool_name,
+        info = await _register_worker_with_retry(
+            cp_client=cp_client,
+            settings=settings,
         )
         worker_id = UUID(info["worker_id"])
         logger.info("worker_registered worker_id=%s", worker_id)
@@ -388,6 +390,27 @@ async def run_worker(settings: WorkerSettings) -> None:
             # drain. Hard-kill via signal handlers in vllm_runner
             # covers crash paths.
             await vllm_registry.shutdown()
+
+
+async def _register_worker_with_retry(
+    *,
+    cp_client: HttpControlPlaneClient,
+    settings: WorkerSettings,
+    retry_config: StartupRetryConfig = DEFAULT_STARTUP_RETRY_CONFIG,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> dict[str, Any]:
+    return await retry_startup_dependency(
+        lambda: cp_client.register(
+            hostname=_worker_hostname(settings.hostname),
+            version="0.0.1",
+            capabilities=_DEFAULT_CAPS,
+            max_concurrent=max(1, settings.max_concurrent),
+            pool_name=settings.pool_name,
+        ),
+        operation_name="worker control-plane registration",
+        config=retry_config,
+        sleep=sleep,
+    )
 
 
 async def _report_worker_idle_exit(

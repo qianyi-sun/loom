@@ -492,7 +492,10 @@ to start when the database Alembic revision is behind repository code, so
 production deploys must run migrations before rolling DB-facing services. Their
 production images carry `migrations/alembic.ini` and `migrations/versions/` so
 the startup gate compares the live DB against the same migration tree as the
-running image.
+running image. Startup DB probes use bounded retry for transient DNS,
+connection, or Postgres-starting failures; schema mismatch, missing migrations,
+bad credentials, and SecretStore decrypt failures still fail startup without
+retry.
 
 ## SPA
 
