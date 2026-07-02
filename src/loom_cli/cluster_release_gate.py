@@ -138,6 +138,33 @@ def _image_identity_matches(
     return False
 
 
+def _runtime_identity_kind(live_image_id: str | None) -> str:
+    if not live_image_id:
+        return "missing"
+    if re.search(r"(?:^|/)import-\d{4}-\d{2}-\d{2}@", live_image_id):
+        return "kind-import"
+    return "runtime"
+
+
+def _local_image_ref_key(image: str | None) -> str | None:
+    if not image:
+        return None
+    for prefix in ("docker.io/library/", "library/"):
+        if image.startswith(prefix):
+            return image.removeprefix(prefix)
+    return image
+
+
+def _status_image_matches_template(
+    *,
+    live_image: str | None,
+    pod_template_image: str | None,
+) -> bool:
+    if not live_image or not pod_template_image:
+        return False
+    return _local_image_ref_key(live_image) == _local_image_ref_key(pod_template_image)
+
+
 def _hash_check(
     *,
     name: str,
@@ -245,10 +272,15 @@ def _image_identity_checks(
 
         generation = _get_field(_get_field(deployment, "metadata"), "generation")
         observed_generation = _get_field(_get_field(deployment, "status"), "observed_generation")
+        spec = _get_field(deployment, "spec")
+        status = _get_field(deployment, "status")
+        desired_replicas = _int_or_none(_get_field(spec, "replicas")) or 0
+        updated_replicas = _int_or_none(_get_field(status, "updated_replicas"))
+        ready_replicas = _int_or_none(_get_field(status, "ready_replicas"))
         rollout_issue = _deployment_rollout_issue(deployment)
         selector = _deployment_selector_labels(deployment, fallback_name=str(deployment_name))
         pod_template_spec = _get_field(
-            _get_field(_get_field(deployment, "spec"), "template"),
+            _get_field(spec, "template"),
             "spec",
         )
         template_images = _container_image_by_name(pod_template_spec)
@@ -272,6 +304,9 @@ def _image_identity_checks(
                 "expected_image_id": expected_image_id,
                 "generation": generation,
                 "observed_generation": observed_generation,
+                "desired_replicas": desired_replicas,
+                "updated_replicas": updated_replicas,
+                "ready_replicas": ready_replicas,
                 "pod_template_image": template_images.get(str(container_name)),
                 "selector": selector,
             }
@@ -284,6 +319,35 @@ def _image_identity_checks(
                         detail=detail,
                         evidence={**base_evidence, **rollout_evidence},
                         remediation="wait for the Deployment rollout to converge before accepting release",
+                    )
+                )
+                continue
+            pod_template_image = template_images.get(str(container_name))
+            if expected_image and pod_template_image != expected_image:
+                checks.append(
+                    ReleaseGateCheck(
+                        name=f"image-identity:{deployment_name}/{container_name}",
+                        outcome="fail",
+                        detail="Deployment template image does not match release manifest",
+                        evidence={
+                            **base_evidence,
+                            "identity_strategy": "deployment-template-image",
+                        },
+                        remediation="apply the rendered manifest for this release before accepting rollout",
+                    )
+                )
+                continue
+            if desired_replicas == 0:
+                checks.append(
+                    ReleaseGateCheck(
+                        name=f"image-identity:{deployment_name}/{container_name}",
+                        outcome="pass",
+                        detail="zero-replica Deployment template image matches release manifest",
+                        evidence={
+                            **base_evidence,
+                            "identity_strategy": "zero-replica-template-image",
+                            "zero_replica": True,
+                        },
                     )
                 )
                 continue
@@ -312,22 +376,40 @@ def _image_identity_checks(
             saw_target_generation_pod = False
             for pod in matching_ready_pods:
                 pod_spec_images = _container_image_by_name(_get_field(pod, "spec"))
-                pod_template_image = template_images.get(str(container_name))
                 if pod_template_image and pod_spec_images.get(str(container_name)) != pod_template_image:
                     continue
                 saw_target_generation_pod = True
                 statuses = _container_status_by_name(pod)
                 container_status = statuses.get(str(container_name))
+                pod_name = _get_field(_get_field(pod, "metadata"), "name")
                 if container_status is None:
+                    candidate_evidence = {
+                        **base_evidence,
+                        "pod": pod_name,
+                        "runtime_identity_kind": "missing",
+                    }
                     continue
                 live_image_id = _get_field(container_status, "image_id")
                 live_image = _get_field(container_status, "image")
-                pod_name = _get_field(_get_field(pod, "metadata"), "name")
+                runtime_identity_kind = _runtime_identity_kind(
+                    str(live_image_id) if live_image_id else None
+                )
+                status_image_matches_template = _status_image_matches_template(
+                    live_image=str(live_image) if live_image else None,
+                    pod_template_image=pod_template_image,
+                )
                 evidence = {
                     **base_evidence,
                     "pod": pod_name,
                     "live_image": live_image,
                     "live_image_id": live_image_id,
+                    "runtime_identity_kind": runtime_identity_kind,
+                    "status_image_matches_template": status_image_matches_template,
+                    "status_image_stale": (
+                        live_image is not None
+                        and pod_template_image is not None
+                        and not status_image_matches_template
+                    ),
                 }
                 candidate_evidence = evidence
                 if _image_identity_matches(
@@ -344,9 +426,28 @@ def _image_identity_checks(
                             detail="Ready pod image identity matches release manifest",
                             evidence={
                                 **evidence,
+                                "identity_strategy": "runtime-image-id-or-repo-digest",
                                 "expected_digest": _sha_from_ref(
                                     str(expected_repo_digest) if expected_repo_digest else None
                                 ),
+                                "runtime_identity_mismatch": False,
+                            },
+                        )
+                    )
+                    break
+                if runtime_identity_kind == "kind-import":
+                    checks.append(
+                        ReleaseGateCheck(
+                            name=f"image-identity:{deployment_name}/{container_name}",
+                            outcome="pass",
+                            detail="Ready pod uses kind-imported runtime identity for release template image",
+                            evidence={
+                                **evidence,
+                                "identity_strategy": "kind-import-template-image",
+                                "expected_digest": _sha_from_ref(
+                                    str(expected_repo_digest) if expected_repo_digest else None
+                                ),
+                                "runtime_identity_mismatch": True,
                             },
                         )
                     )
@@ -363,6 +464,17 @@ def _image_identity_checks(
                         )
                     )
                     continue
+                if candidate_evidence and candidate_evidence.get("runtime_identity_kind") == "missing":
+                    checks.append(
+                        ReleaseGateCheck(
+                            name=f"image-identity:{deployment_name}/{container_name}",
+                            outcome="fail",
+                            detail="Ready pod is missing runtime image identity",
+                            evidence=candidate_evidence,
+                            remediation="wait for kubelet container status imageID before accepting release",
+                        )
+                    )
+                    continue
                 checks.append(
                     ReleaseGateCheck(
                         name=f"image-identity:{deployment_name}/{container_name}",
@@ -370,9 +482,11 @@ def _image_identity_checks(
                         detail="Ready pod image identity does not match release manifest",
                         evidence={
                             **(candidate_evidence or base_evidence),
+                            "identity_strategy": "runtime-image-id-or-repo-digest",
                             "expected_digest": _sha_from_ref(
                                 str(expected_repo_digest) if expected_repo_digest else None
                             ),
+                            "runtime_identity_mismatch": True,
                         },
                         remediation="roll the Deployment to pods built from the release manifest image digest",
                     )
