@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 
+import httpx
 import pytest
 from sqlalchemy.exc import OperationalError
 
@@ -110,6 +111,38 @@ def test_startup_retry_treats_invalidated_db_connections_as_retryable() -> None:
     )
 
     assert is_retryable_startup_exception(exc)
+
+
+def test_sync_startup_retry_retries_transient_connect_error() -> None:
+    from loom.startup_retry import StartupRetryConfig, retry_startup_dependency_sync
+
+    attempts = 0
+    sleeps: list[float] = []
+
+    def _run() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            request = httpx.Request("GET", "http://loom-control-plane/trials/t")
+            raise httpx.ConnectError("[Errno 111] Connection refused", request=request)
+        return "ok"
+
+    result = retry_startup_dependency_sync(
+        _run,
+        operation_name="test sync startup dependency",
+        config=StartupRetryConfig(
+            max_attempts=4,
+            base_backoff_sec=0.1,
+            max_backoff_sec=1.0,
+            budget_sec=30.0,
+            jitter_sec=0.0,
+        ),
+        sleep=sleeps.append,
+    )
+
+    assert result == "ok"
+    assert attempts == 3
+    assert sleeps == [0.1, 0.2]
 
 
 @pytest.mark.asyncio

@@ -52,6 +52,7 @@ from loom.startup_retry import (
     DEFAULT_STARTUP_RETRY_CONFIG,
     StartupRetryConfig,
     retry_startup_dependency,
+    retry_startup_dependency_sync,
 )
 from loom.trajectory.cp_event_sink import CpEventSink
 from loom.trajectory.storage import MinioObjectStore, ObjectStore
@@ -427,7 +428,13 @@ async def _report_worker_idle_exit(
         )
 
 
-def _run_orphan_cleanup(settings: WorkerSettings, worker_id: UUID) -> None:
+def _run_orphan_cleanup(
+    settings: WorkerSettings,
+    worker_id: UUID,
+    *,
+    retry_config: StartupRetryConfig = DEFAULT_STARTUP_RETRY_CONFIG,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
     """Sync HTTP lookup against /trials/{id} — invoked once at startup."""
     token_value = settings.token.get_secret_value()
 
@@ -449,10 +456,15 @@ def _run_orphan_cleanup(settings: WorkerSettings, worker_id: UUID) -> None:
             # as None — only `state` drives the predicate now (#416).
             return body["state"], None
 
-    cleanup_orphan_trajectories(
-        cache_dir=settings.trajectory_cache_dir,
-        owned_worker_id=worker_id,
-        state_and_owner_lookup=_lookup,
+    retry_startup_dependency_sync(
+        lambda: cleanup_orphan_trajectories(
+            cache_dir=settings.trajectory_cache_dir,
+            owned_worker_id=worker_id,
+            state_and_owner_lookup=_lookup,
+        ),
+        operation_name="worker orphan trajectory startup cleanup",
+        config=retry_config,
+        sleep=sleep,
     )
 
 
