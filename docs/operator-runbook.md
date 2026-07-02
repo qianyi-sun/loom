@@ -983,7 +983,11 @@ but each worker pays the build cost once).
   when the source is reachable and legitimately slow, and keep it coordinated
   with the claimed-without-start reclaim policy tracked by #193; otherwise a
   healthy worker may still lose a long setup claim before it can mark the trial
-  running.
+  running. When the crash detector reclaims a pre-start claim, it records
+  `failure_reason=worker_lost_claim` and a `claimed_without_started_reclaimed`
+  message with the prior worker id, claim time, expiry window, and
+  `started_at=NULL`; if the retry budget is already exhausted, the terminal
+  `retry_exhausted` row preserves that message for attribution.
 - **Trial fails with `TrialCacheError: failed to acquire build slot`**
   → check the `active_trial_cache_builds` table for a stuck row past
   its `expires_at`; the next claimant will steal it on its own, but
@@ -2072,7 +2076,10 @@ following bounds:
   `claimed` trials with `started_at IS NULL` after
   `claimed_without_start_expiry_sec` (default 300s), even if the worker
   heartbeat is fresh. This covers setup/materialization paths that claim a
-  trial but never reach the worker's started writeback.
+  trial but never reach the worker's started writeback. Reclaim records
+  `worker_lost_claim` plus a `claimed_without_started_reclaimed` diagnostic
+  before clearing `worker_id`; a subsequent claim clears stale failure fields,
+  while terminal retry exhaustion preserves the last reclaim message.
 
 **Operator smoke for the in-flight-trial-across-restart path:**
 

@@ -124,7 +124,10 @@ Attach these to the release issue or release PR:
   team tokens, or manual SQL token insertion for cross-team release evidence.
   When `--batch-id` is provided, the `runs.claimed_without_started` row must
   be `PASS`; a nonzero value means the source run still has orphaned claimed
-  work and cannot be used as release evidence.
+  work and cannot be used as release evidence. For terminal failures that came
+  from a reclaimed pre-start claim, inspect the trial `failure_message` for the
+  `claimed_without_started_reclaimed` diagnostic with the prior worker id and
+  claim timing.
 - For IP-address staging hosts, note the hostless Ingress rendering, attach
   evidence that the TLS Secret certificate includes the staging IP as a Subject
   Alternative Name, and verify the ingress controller serves that Secret as its
