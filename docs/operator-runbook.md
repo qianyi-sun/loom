@@ -2120,6 +2120,49 @@ following bounds:
    `orphan_trajectory_preserved` (the slice-1 happy path) rather
    than `orphan_trajectory_deleted` for the reclaimed trial ids.
 
+## Rollout evidence path setup (#174)
+
+Public-beta and staging environments back host-mounted service data (Postgres,
+MinIO, backups, trajectories) under `/data/<environment-name>/`. That root
+directory is `root:root 755` so the operator user cannot create new siblings
+without sudo. Operator rollout/evidence workflows expect a stable set of
+writable directories (`rollouts/`, `evidence/`, `logs/`) at that same level.
+
+**Rule of thumb:** service data directories under `/data/<environment>/` stay
+locked down to their service accounts; operator evidence directories are
+owned by the human operator user with mode `755`. The
+`bootstrap-evidence-paths` command emits the exact `sudo install -d` sequence
+that establishes the operator-writable set idempotently:
+
+```bash
+loom cluster bootstrap-evidence-paths \
+  --rollout-root /data/loom-public-beta \
+  --operator-user qianyi
+```
+
+By default this emits `install -d` for `rollouts`, `evidence`, and `logs`.
+Override with `--evidence-paths rollouts,extra` when a workflow needs a
+different set. The command refuses to bootstrap directories that collide
+with reserved service names (`backups`, `migrations`, `minio`, `postgres`,
+`trajectories`); those already have specific ownership defined by the
+storage-migration runbook and must not be widened by an evidence bootstrap.
+
+Review the emitted script before running it:
+
+```bash
+loom cluster bootstrap-evidence-paths \
+  --rollout-root /data/loom-public-beta \
+  --operator-user qianyi \
+  > /tmp/bootstrap-evidence.sh
+$EDITOR /tmp/bootstrap-evidence.sh
+sudo bash /tmp/bootstrap-evidence.sh
+```
+
+`install -d` is idempotent — rerunning after a partial setup converges without
+deleting anything. Once the directories exist with operator ownership, all
+subsequent rollout evidence dirs (per-SHA subdirectories under
+`rollouts/`) can be created without sudo.
+
 ## Backup + restore
 
 Public-beta and staging are protected environments. Before any operation that
