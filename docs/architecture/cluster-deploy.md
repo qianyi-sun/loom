@@ -474,8 +474,9 @@ failures so cluster sandbox/CoreDNS churn does not turn a recoverable
 dependency blip into CrashLoop evidence. The retry boundary is intentionally
 narrow: Alembic revision mismatch, missing migrations, bad credentials, and
 SecretStore decrypt failures remain immediate hard failures. Worker startup
-uses the same retry boundary for its initial Control Plane registration; 4xx
-registration failures such as bad worker tokens are not retried.
+uses the same retry boundary for initial Control Plane registration and
+orphan-trajectory cleanup lookups; 4xx registration failures such as bad worker
+tokens are not retried.
 
 ### Provider egress contract
 

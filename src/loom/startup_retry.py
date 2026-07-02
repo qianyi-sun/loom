@@ -134,6 +134,51 @@ async def retry_startup_dependency(
     raise RuntimeError("unreachable startup retry loop exit")  # pragma: no cover
 
 
+def retry_startup_dependency_sync(
+    run: Callable[[], T],
+    *,
+    operation_name: str,
+    is_retryable: Callable[[BaseException], bool] = is_retryable_startup_exception,
+    config: StartupRetryConfig = DEFAULT_STARTUP_RETRY_CONFIG,
+    sleep: Callable[[float], None] = time.sleep,
+    now: Callable[[], float] = time.monotonic,
+) -> T:
+    max_attempts = max(1, int(config.max_attempts))
+    base_backoff = max(0.0, float(config.base_backoff_sec))
+    max_backoff = max(0.0, float(config.max_backoff_sec))
+    budget = max(0.0, float(config.budget_sec))
+    jitter = max(0.0, float(config.jitter_sec))
+    started = now()
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return run()
+        except Exception as exc:
+            if attempt >= max_attempts or not is_retryable(exc):
+                raise
+
+            wait_for = _next_backoff(
+                attempt=attempt,
+                base=base_backoff,
+                jitter=jitter,
+                cap=max_backoff,
+            )
+            if (now() - started) + wait_for > budget:
+                raise
+
+            logger.warning(
+                "startup_dependency_retry operation=%s attempt=%d/%d wait=%.2fs err=%r",
+                operation_name,
+                attempt,
+                max_attempts,
+                wait_for,
+                exc,
+            )
+            sleep(wait_for)
+
+    raise RuntimeError("unreachable startup retry loop exit")  # pragma: no cover
+
+
 def _is_retryable_db_exception(exc: BaseException) -> bool:
     message = str(exc).lower()
     if _contains_any(message, _PERMANENT_DB_ERROR_FRAGMENTS):

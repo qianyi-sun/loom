@@ -48,6 +48,17 @@ class _ObjectStoreSettings:
     minio_secret_key = _Secret("secret")
 
 
+class _OrphanCleanupSettings:
+    control_plane_url = "http://loom-control-plane:8080"
+    trajectory_cache_dir = "/tmp/not-used"
+
+    class _Secret:
+        def get_secret_value(self) -> str:
+            return "worker-token"
+
+    token = _Secret()
+
+
 def test_blocking_io_worker_count_defaults_from_trial_concurrency() -> None:
     assert (
         ml._resolve_blocking_io_max_workers(  # type: ignore[attr-defined]
@@ -255,6 +266,43 @@ async def test_register_worker_with_retry_does_not_retry_auth_failure() -> None:
         raise AssertionError("expected HTTPStatusError")
 
     assert attempts == 1
+
+
+def test_worker_orphan_cleanup_retries_transient_control_plane_lookup(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    from loom.startup_retry import StartupRetryConfig
+
+    worker_id = uuid4()
+    attempts = 0
+    sleeps: list[float] = []
+
+    def _cleanup(**kwargs: object) -> list[object]:
+        nonlocal attempts
+        attempts += 1
+        assert kwargs["owned_worker_id"] == worker_id
+        if attempts < 3:
+            request = httpx.Request("GET", "http://loom-control-plane:8080/trials/t")
+            raise httpx.ConnectError("[Errno 111] Connection refused", request=request)
+        return []
+
+    monkeypatch.setattr(ml, "cleanup_orphan_trajectories", _cleanup)
+
+    ml._run_orphan_cleanup(  # type: ignore[attr-defined]
+        _OrphanCleanupSettings(),
+        worker_id,
+        retry_config=StartupRetryConfig(
+            max_attempts=4,
+            base_backoff_sec=0.1,
+            max_backoff_sec=1.0,
+            budget_sec=30.0,
+            jitter_sec=0.0,
+        ),
+        sleep=sleeps.append,
+    )
+
+    assert attempts == 3
+    assert sleeps == [0.1, 0.2]
 
 
 def test_docker_registry_auth_summary_reports_only_secret_free_metadata(
