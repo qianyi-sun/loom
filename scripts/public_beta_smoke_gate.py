@@ -27,6 +27,8 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
+REQUEST_TIMEOUT_SEC = 30.0
+
 REQUIRED_CHECK_IDS: tuple[str, ...] = (
     "http.health",
     "spa.logged_out",
@@ -260,9 +262,12 @@ class SmokeClient:
         params: dict[str, str] | None = None,
         json_body: dict[str, Any] | None = None,
     ) -> HttpResponse:
+        target = path
         url = f"{self.server_url}{path}"
         if params:
-            url = f"{url}?{urlencode(params)}"
+            query = urlencode(params)
+            target = f"{target}?{query}"
+            url = f"{url}?{query}"
         body: bytes | None = None
         headers = {"Accept": "application/json, text/plain, */*"}
         if token:
@@ -273,7 +278,7 @@ class SmokeClient:
 
         request = Request(url, data=body, method=method, headers=headers)
         try:
-            with urlopen(request, timeout=30) as response:
+            with urlopen(request, timeout=REQUEST_TIMEOUT_SEC) as response:
                 payload = response.read(self.max_scan_bytes + 1)
                 result = HttpResponse(
                     status_code=int(response.status),
@@ -288,15 +293,49 @@ class SmokeClient:
                 body=payload[: self.max_scan_bytes],
             )
         except URLError as exc:
-            return HttpResponse(
-                status_code=0,
-                headers={},
-                body=f"request failed: {exc.reason}".encode(),
+            reason = exc.reason
+            if isinstance(reason, TimeoutError):
+                result = self._request_exception_response(
+                    method,
+                    target,
+                    reason,
+                    timed_out=True,
+                )
+            else:
+                result = self._request_exception_response(method, target, reason)
+        except TimeoutError as exc:
+            result = self._request_exception_response(
+                method,
+                target,
+                exc,
+                timed_out=True,
             )
+        except Exception as exc:  # pragma: no cover - depends on urllib/http.client internals
+            result = self._request_exception_response(method, target, exc)
 
         self.response_bytes_scanned += len(result.body)
         self.evidence_chunks.append(result.text)
         return result
+
+    def _request_exception_response(
+        self,
+        method: str,
+        target: str,
+        exc: BaseException,
+        *,
+        timed_out: bool = False,
+    ) -> HttpResponse:
+        if timed_out:
+            detail = (
+                f"request failed: {method} {target} timed out after "
+                f"{REQUEST_TIMEOUT_SEC:g}s: {type(exc).__name__}: {exc}"
+            )
+        else:
+            detail = (
+                f"request failed: {method} {target}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        return HttpResponse(status_code=0, headers={}, body=detail.encode())
 
 
 def _http_result(
@@ -317,6 +356,107 @@ def _http_result(
         "fail",
         f"{fail_detail}; got HTTP {response.status_code}: {response.text[:300]}",
         remediation,
+    )
+
+
+def _json_contains_id_result(
+    check_id: str,
+    subsystem: str,
+    response: HttpResponse,
+    *,
+    expected_id: str,
+    pass_detail: str,
+    missing_detail: str,
+    remediation: str,
+) -> CheckResult:
+    if response.status_code != 200:
+        return CheckResult(
+            check_id,
+            subsystem,
+            "fail",
+            f"{missing_detail}; got HTTP {response.status_code}: {response.text[:300]}",
+            remediation,
+        )
+    if _json_contains_id(response, expected_id):
+        return CheckResult(check_id, subsystem, "pass", pass_detail)
+    return CheckResult(
+        check_id,
+        subsystem,
+        "fail",
+        missing_detail,
+        remediation,
+    )
+
+
+def _auth_whoami_result(label: str, response: HttpResponse) -> CheckResult:
+    check_id = f"auth.{label}_whoami"
+    if response.status_code != 200:
+        return CheckResult(
+            check_id,
+            "auth",
+            "fail",
+            (
+                f"{label} API token could not authenticate; got "
+                f"HTTP {response.status_code}: {response.text[:300]}"
+            ),
+            "Create a scoped team API token and verify token expiry/scopes.",
+        )
+    try:
+        body = response.json()
+    except json.JSONDecodeError:
+        return CheckResult(
+            check_id,
+            "auth",
+            "fail",
+            f"{label} whoami returned non-JSON evidence: {response.text[:300]}",
+            "Fix /api/v1/auth/whoami before accepting smoke identity evidence.",
+        )
+    if not isinstance(body, dict):
+        return CheckResult(
+            check_id,
+            "auth",
+            "fail",
+            f"{label} whoami returned a non-object JSON payload.",
+            "Fix /api/v1/auth/whoami before accepting smoke identity evidence.",
+        )
+
+    credential_type = str(body.get("credential_type") or "(missing)")
+    principal_type = str(body.get("principal_type") or "(missing)")
+    username = str(body.get("username") or body.get("user_id") or "(none)")
+    team = str(body.get("team_name") or body.get("team_id") or "(none)")
+    role = str(body.get("role") or "(none)")
+    is_platform_admin = bool(body.get("is_platform_admin")) or role == "platform_admin"
+    principal_detail = (
+        f"credential_type={credential_type}, principal_type={principal_type}, "
+        f"user={username}, team={team}, role={role}, "
+        f"is_platform_admin={is_platform_admin}"
+    )
+    if (
+        credential_type == "user_owned_api_token"
+        and principal_type == "user"
+        and not is_platform_admin
+    ):
+        return CheckResult(
+            check_id,
+            "auth",
+            "pass",
+            f"{label} resolves as a non-admin user-owned API token: {principal_detail}.",
+        )
+    return CheckResult(
+        check_id,
+        "auth",
+        "fail",
+        (
+            f"{label} token is not a non-admin user-owned API token: "
+            f"{principal_detail}."
+        ),
+        (
+            "Provision disposable non-admin Team A/Team B users through the "
+            "registration, approval, password setup, and user API-token flow; "
+            "use those non-admin user-owned API tokens for cross-team negative "
+            "checks, and revoke them after smoke. Do not use legacy team tokens "
+            "or platform_admin tokens."
+        ),
     )
 
 
@@ -764,15 +904,7 @@ def run_smoke(args: argparse.Namespace) -> SmokeReport:
 
     for label, token in (("team_a", args.team_a_token), ("team_b", args.team_b_token)):
         response = client.request("GET", "/api/v1/auth/whoami", token=token)
-        results.append(_http_result(
-            f"auth.{label}_whoami",
-            "auth",
-            response,
-            expected=200,
-            pass_detail=f"{label} API token can authenticate with whoami.",
-            fail_detail=f"{label} API token could not authenticate",
-            remediation="Create a scoped team API token and verify token expiry/scopes.",
-        ))
+        results.append(_auth_whoami_result(label, response))
 
     providers = client.request("GET", "/api/v1/provider-connections", token=args.team_a_token)
     provider_names = _json_provider_connection_names(providers)
@@ -961,17 +1093,14 @@ def run_smoke(args: argparse.Namespace) -> SmokeReport:
 
     if args.batch_id:
         mine = client.request("GET", "/api/v1/run-library/batches", token=args.team_a_token)
-        mine_ok = mine.status_code == 200 and _json_contains_id(mine, args.batch_id)
-        results.append(CheckResult(
+        results.append(_json_contains_id_result(
             "library.my_team_contains_run",
             "run-library",
-            "pass" if mine_ok else "fail",
-            (
-                "Completed run appears in Team A My team Run Library."
-                if mine_ok
-                else "Completed run was missing from Team A My team Run Library."
-            ),
-            "" if mine_ok else "Check batch terminal state and Run Library visibility fields.",
+            mine,
+            expected_id=args.batch_id,
+            pass_detail="Completed run appears in Team A My team Run Library.",
+            missing_detail="Completed run was missing from Team A My team Run Library",
+            remediation="Check batch terminal state and Run Library visibility fields.",
         ))
 
         all_teams = client.request(
@@ -980,17 +1109,14 @@ def run_smoke(args: argparse.Namespace) -> SmokeReport:
             token=args.team_b_token,
             params={"scope": "all"},
         )
-        all_ok = all_teams.status_code == 200 and _json_contains_id(all_teams, args.batch_id)
-        results.append(CheckResult(
+        results.append(_json_contains_id_result(
             "library.all_teams_contains_run",
             "run-library",
-            "pass" if all_ok else "fail",
-            (
-                "Completed run appears in Team B All teams Run Library."
-                if all_ok
-                else "Completed run was missing from Team B All teams Run Library."
-            ),
-            "" if all_ok else "Check org visibility, share_status, and terminal batch state.",
+            all_teams,
+            expected_id=args.batch_id,
+            pass_detail="Completed run appears in Team B All teams Run Library.",
+            missing_detail="Completed run was missing from Team B All teams Run Library",
+            remediation="Check org visibility, share_status, and terminal batch state.",
         ))
 
         library_detail = client.request(
