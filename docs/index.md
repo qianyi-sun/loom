@@ -85,6 +85,10 @@ Start with the overview, drill into the area you care about:
 - **[architecture/adr-skill-artifact-injection.md](architecture/adr-skill-artifact-injection.md)** —
   post-v1 ADR for SkillMarkdown artifacts and generic trial-time skill
   injection
+- **[architecture/self-service-runtime-registration.md](architecture/self-service-runtime-registration.md)** —
+  design for self-service `ModelEndpoint`, `ServingDeployment`, and
+  `EvaluationHarness` registration, validation, GB10 serving, and run
+  references
 - **[architecture/cli-mode.md](architecture/cli-mode.md)** — how the
   `loom` CLI reuses `Trial.run()` statelessly with no server stack
 - **[architecture/local-llm.md](architecture/local-llm.md)** — local
