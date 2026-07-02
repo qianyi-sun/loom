@@ -165,6 +165,7 @@ loom cluster release-gate \
   --manifest "$ROLLOUT_DIR/release-manifest-$IMAGE_TAG.json" \
   --config "$CLUSTER_CONFIG" \
   --rendered-manifest "$ROLLOUT_DIR/rendered.yaml" \
+  --environment-state-check "$ROLLOUT_DIR/environment-state-check-$IMAGE_TAG.json" \
   --namespace "$K8S_NAMESPACE" \
   --environment public-beta \
   --format json \
@@ -172,9 +173,14 @@ loom cluster release-gate \
 ```
 
 This gate fails on rendered/config hash drift, unverifiable managed image
-identity convergence, and live DB Alembic revision mismatch. For normal runtime
-image IDs, it compares the Ready pod `imageID` against the manifest digest or
-image ID. For kind-loaded public-beta images, Kubernetes may report
+identity convergence, live DB Alembic revision mismatch, and missing or failed
+environment-state convergence evidence when the release manifest records
+external-worker desired state. Generate the environment-state artifact with
+`loom admin environment-state check --format json` after the matching
+`environment-state apply`; `ok=false` or any non-empty `drift` array keeps the
+release-gate artifact red and blocks workload-validation anchors. For normal
+runtime image IDs, it compares the Ready pod `imageID` against the manifest
+digest or image ID. For kind-loaded public-beta images, Kubernetes may report
 `docker.io/library/import-YYYY-MM-DD@sha256:...`; in that case the gate accepts
 the target-generation pod only when its pod spec and Deployment template image
 match the release manifest, and records the kind-import identity plus any stale
@@ -454,7 +460,9 @@ loom admin environment-state check \
   --file deploy/environment-state/public-beta.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
-  --worker-token file:/secure/path/worker-token
+  --worker-token file:/secure/path/worker-token \
+  --format json \
+  > "$ROLLOUT_DIR/environment-state-check-$IMAGE_TAG.json"
 
 loom admin slurm-workers status \
   --cp-url http://control-node.lan:18081 \

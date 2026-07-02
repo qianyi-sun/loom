@@ -86,8 +86,9 @@ def _manifest(
     *,
     expected_digest: str = "sha256:" + "1" * 64,
     alembic_heads: list[str] | None = None,
+    external_workers: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    manifest = {
         "schema_version": 1,
         "release": {
             "environment": "public-beta",
@@ -115,6 +116,37 @@ def _manifest(
             "expected_heads": alembic_heads or ["0050"],
             "compatible_heads": alembic_heads or ["0050"],
         },
+    }
+    if external_workers is not None:
+        manifest["external_workers"] = external_workers
+    return manifest
+
+
+def _external_workers_manifest_section() -> dict[str, Any]:
+    return {
+        "environment_state_file": {
+            "path": "deploy/environment-state/public-beta.toml",
+            "sha256": "state-sha",
+        },
+        "slurm_pools": [
+            {
+                "pool_name": "oldlab",
+                "actuator": "slurm",
+                "external_runner": True,
+                "env_file": (
+                    "/shared_work/qianyi/loom-worker-capacity/"
+                    "public-beta-oldlab-worker-public-beta-abc123.env"
+                ),
+                "repo_dir": "/shared_work/qianyi/loom-remote-worker-public-beta-abc123",
+            },
+        ],
+        "gb10_desired_states": [
+            {
+                "pool_name": "gb10-arm64",
+                "image_tag": "public-beta-abc123",
+                "env_config_version": "public-beta-abc123",
+            },
+        ],
     }
 
 
@@ -611,6 +643,137 @@ def test_release_gate_fails_on_live_alembic_revision_mismatch() -> None:
     assert "LOOM_CP_DB_URL" in check.detail
 
 
+def test_release_gate_requires_environment_state_check_when_manifest_records_external_workers() -> None:
+    report = collect_release_gate_report(
+        manifest=_manifest(external_workers=_external_workers_manifest_section()),
+        apps_v1=_FakeAppsV1({
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:public-beta-abc123",
+            ),
+        }),
+        core_v1=_FakeCoreV1([
+            _ready_pod(
+                name="loom-service-new",
+                app="loom-service",
+                image="loom-service:public-beta-abc123",
+                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+            ),
+        ]),
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+    )
+
+    assert not report.all_pass
+    check = next(
+        check for check in report.checks
+        if check.name == "environment-state-convergence"
+    )
+    assert check.outcome == "fail"
+    assert check.detail == "environment-state check artifact is required"
+    assert check.evidence["expected_profile"] == "deploy/environment-state/public-beta.toml"
+    assert check.evidence["expected_profile_sha256"] == "state-sha"
+
+
+def test_release_gate_fails_when_environment_state_check_reports_drift() -> None:
+    report = collect_release_gate_report(
+        manifest=_manifest(external_workers=_external_workers_manifest_section()),
+        apps_v1=_FakeAppsV1({
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:public-beta-abc123",
+            ),
+        }),
+        core_v1=_FakeCoreV1([
+            _ready_pod(
+                name="loom-service-new",
+                app="loom-service",
+                image="loom-service:public-beta-abc123",
+                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+            ),
+        ]),
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+        environment_state_check_artifact={
+            "environment": "public-beta",
+            "control_plane_environment": "production",
+            "profile": "deploy/environment-state/public-beta.toml",
+            "ok": False,
+            "drift": [
+                {
+                    "path": (
+                        "slurm_worker_jobs[production/oldlab/18186]."
+                        "LOOM_REMOTE_WORKER_ENV_FILE"
+                    ),
+                    "desired": "public-beta-d46a16c",
+                    "live": "public-beta-cb6af75",
+                },
+            ],
+        },
+        environment_state_check_path=(
+            "/data/loom-public-beta/rollouts/20260702T055745Z-public-beta-d46a16c/"
+            "environment-state-check-live-secrets.json"
+        ),
+    )
+
+    assert not report.all_pass
+    check = next(
+        check for check in report.checks
+        if check.name == "environment-state-convergence"
+    )
+    assert check.outcome == "fail"
+    assert check.detail == "live environment-state check reports drift"
+    assert check.evidence["drift_count"] == 1
+    assert check.evidence["drift"][0]["live"] == "public-beta-cb6af75"
+    assert "environment-state apply/check" in (check.remediation or "")
+
+
+def test_release_gate_passes_when_environment_state_check_is_clean() -> None:
+    report = collect_release_gate_report(
+        manifest=_manifest(external_workers=_external_workers_manifest_section()),
+        apps_v1=_FakeAppsV1({
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:public-beta-abc123",
+            ),
+        }),
+        core_v1=_FakeCoreV1([
+            _ready_pod(
+                name="loom-service-new",
+                app="loom-service",
+                image="loom-service:public-beta-abc123",
+                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+            ),
+        ]),
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+        environment_state_check_artifact={
+            "environment": "public-beta",
+            "control_plane_environment": "production",
+            "profile": "deploy/environment-state/public-beta.toml",
+            "ok": True,
+            "drift": [],
+        },
+        environment_state_check_path="environment-state-check-live-secrets.json",
+    )
+
+    assert report.all_pass
+    check = next(
+        check for check in report.checks
+        if check.name == "environment-state-convergence"
+    )
+    assert check.outcome == "pass"
+    assert check.detail == "live environment-state check passed"
+    assert check.evidence["drift_count"] == 0
+    assert check.evidence["artifact"] == "environment-state-check-live-secrets.json"
+
+
 def test_live_alembic_query_uses_kubectl_exec_without_leaking_db_url() -> None:
     calls: list[list[str]] = []
 
@@ -712,3 +875,71 @@ def test_cluster_release_gate_cli_dry_run_reports_structured_failure(
     out = json.loads(capsys.readouterr().out)
     assert out["all_pass"] is False
     assert out["checks"][0]["name"] == "alembic-heads"
+
+
+def test_cluster_release_gate_cli_passes_environment_state_check_artifact(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    manifest_path = tmp_path / "release-manifest.json"
+    manifest_path.write_text(
+        json.dumps(_manifest(external_workers=_external_workers_manifest_section())),
+        encoding="utf-8",
+    )
+    environment_state_check_path = tmp_path / "environment-state-check.json"
+    environment_state_check_path.write_text(
+        json.dumps({
+            "environment": "public-beta",
+            "control_plane_environment": "production",
+            "profile": "deploy/environment-state/public-beta.toml",
+            "ok": True,
+            "drift": [],
+        }),
+        encoding="utf-8",
+    )
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._load_clients",
+        lambda _context: (object(), object(), object(), object()),
+    )
+
+    def _fake_collect_release_gate_report(**kwargs: Any) -> ReleaseGateReport:
+        captured.update(kwargs)
+        return ReleaseGateReport(
+            environment="public-beta",
+            namespace="loom",
+            checks=[
+                ReleaseGateCheck(
+                    name="environment-state-convergence",
+                    outcome="pass",
+                    detail="live environment-state check passed",
+                    evidence={},
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd.collect_release_gate_report",
+        _fake_collect_release_gate_report,
+    )
+
+    rc = main([
+        "cluster",
+        "release-gate",
+        "--manifest",
+        str(manifest_path),
+        "--namespace",
+        "loom",
+        "--environment",
+        "public-beta",
+        "--environment-state-check",
+        str(environment_state_check_path),
+        "--dry-run",
+        "--format",
+        "json",
+    ])
+
+    assert rc == 0
+    assert captured["environment_state_check_artifact"]["ok"] is True
+    assert captured["environment_state_check_path"] == str(environment_state_check_path.resolve())

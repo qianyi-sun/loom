@@ -1317,6 +1317,20 @@ def _release_gate(args: argparse.Namespace) -> int:
         sys.stderr.write(f"error: release gate input invalid: {exc}\n")
         return 2
 
+    environment_state_check_artifact: dict[str, Any] | None = None
+    environment_state_check_path: str | None = None
+    environment_state_check_error: str | None = None
+    if args.environment_state_check:
+        check_path = Path(args.environment_state_check).resolve()
+        environment_state_check_path = str(check_path)
+        try:
+            loaded_check = json.loads(check_path.read_text(encoding="utf-8"))
+            if not isinstance(loaded_check, dict):
+                raise ValueError("environment-state check JSON root must be an object")
+            environment_state_check_artifact = loaded_check
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            environment_state_check_error = str(exc)
+
     if args.dry_run:
         live_alembic = None
         live_alembic_heads = list(manifest.get("alembic", {}).get("expected_heads", []) or [])
@@ -1348,6 +1362,9 @@ def _release_gate(args: argparse.Namespace) -> int:
         database_target=database_target,
         live_alembic_error=live_alembic_error,
         live_alembic_evidence=live_alembic_evidence,
+        environment_state_check_artifact=environment_state_check_artifact,
+        environment_state_check_path=environment_state_check_path,
+        environment_state_check_error=environment_state_check_error,
     )
 
     if args.environment:
@@ -3740,6 +3757,15 @@ def dispatch(argv: list[str]) -> int:
         "--environment",
         default=None,
         help="Optional logical environment guard; must match the manifest when set.",
+    )
+    p_release_gate.add_argument(
+        "--environment-state-check",
+        default=None,
+        help=(
+            "JSON artifact from `loom admin environment-state check --format json`. "
+            "Required when the release manifest records environment-state external "
+            "worker desired state."
+        ),
     )
     p_release_gate.add_argument(
         "--dry-run",

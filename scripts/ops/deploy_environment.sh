@@ -102,13 +102,22 @@ PY
 )"
 
 if [[ "${LOOM_RELEASE_GATE_HARD_CHECKS:-false}" == "true" ]]; then
-  uv run loom cluster release-gate \
-    --manifest "${evidence_dir}/release-manifest-${LOOM_IMAGE_TAG}.json" \
-    --config "${cluster_config}" \
-    --rendered-manifest "${evidence_dir}/rendered.yaml" \
-    --namespace "${namespace}" \
-    --environment "${LOOM_DEPLOY_ENVIRONMENT}" \
-    --format json \
+  release_gate_args=(
+    cluster
+    release-gate
+    --manifest "${evidence_dir}/release-manifest-${LOOM_IMAGE_TAG}.json"
+    --config "${cluster_config}"
+    --rendered-manifest "${evidence_dir}/rendered.yaml"
+    --namespace "${namespace}"
+    --environment "${LOOM_DEPLOY_ENVIRONMENT}"
+    --format json
+  )
+  if [[ -n "${LOOM_ENVIRONMENT_STATE_CHECK_JSON:-}" ]]; then
+    release_gate_args+=(
+      --environment-state-check "${LOOM_ENVIRONMENT_STATE_CHECK_JSON}"
+    )
+  fi
+  uv run loom "${release_gate_args[@]}" \
     > "${evidence_dir}/release-gate-${LOOM_IMAGE_TAG}.json"
 fi
 

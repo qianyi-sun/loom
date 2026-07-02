@@ -543,6 +543,142 @@ def _alembic_check(
     )
 
 
+def _environment_state_required(manifest: dict[str, Any]) -> bool:
+    external_workers = manifest.get("external_workers")
+    if not isinstance(external_workers, dict):
+        return False
+    state_file = external_workers.get("environment_state_file")
+    if isinstance(state_file, dict) and (state_file.get("path") or state_file.get("sha256")):
+        return True
+    for external_worker_field in ("slurm_pools", "gb10_desired_states"):
+        values = external_workers.get(external_worker_field)
+        if isinstance(values, list) and values:
+            return True
+    return False
+
+
+def _environment_state_manifest_evidence(manifest: dict[str, Any]) -> dict[str, Any]:
+    external_workers = manifest.get("external_workers")
+    if not isinstance(external_workers, dict):
+        return {}
+    state_file = external_workers.get("environment_state_file")
+    evidence: dict[str, Any] = {}
+    if isinstance(state_file, dict):
+        evidence["expected_profile"] = state_file.get("path")
+        evidence["expected_profile_sha256"] = state_file.get("sha256")
+    slurm_pools = external_workers.get("slurm_pools")
+    gb10_desired_states = external_workers.get("gb10_desired_states")
+    if isinstance(slurm_pools, list):
+        evidence["slurm_pool_count"] = len(slurm_pools)
+        evidence["slurm_pools"] = [
+            pool.get("pool_name") if isinstance(pool, dict) else None
+            for pool in slurm_pools
+        ]
+    if isinstance(gb10_desired_states, list):
+        evidence["gb10_desired_state_count"] = len(gb10_desired_states)
+        evidence["gb10_pools"] = [
+            desired.get("pool_name") if isinstance(desired, dict) else None
+            for desired in gb10_desired_states
+        ]
+    return evidence
+
+
+def _environment_state_check(
+    *,
+    manifest: dict[str, Any],
+    artifact: dict[str, Any] | None,
+    artifact_path: str | None,
+    artifact_error: str | None,
+) -> ReleaseGateCheck | None:
+    required = _environment_state_required(manifest)
+    if not required and artifact is None and artifact_error is None:
+        return None
+
+    evidence = {
+        **_environment_state_manifest_evidence(manifest),
+        "artifact": artifact_path,
+    }
+    remediation = (
+        "run environment-state apply/check: "
+        "`loom admin environment-state apply` and "
+        "`loom admin environment-state check --format json` for this release, "
+        "then pass the check JSON artifact to `loom cluster release-gate`"
+    )
+    if artifact_error is not None:
+        return ReleaseGateCheck(
+            name="environment-state-convergence",
+            outcome="fail",
+            detail="environment-state check artifact is unreadable",
+            evidence={**evidence, "error": artifact_error},
+            remediation=remediation,
+        )
+    if artifact is None:
+        return ReleaseGateCheck(
+            name="environment-state-convergence",
+            outcome="fail",
+            detail="environment-state check artifact is required",
+            evidence=evidence,
+            remediation=remediation,
+        )
+    if not isinstance(artifact, dict):
+        return ReleaseGateCheck(
+            name="environment-state-convergence",
+            outcome="fail",
+            detail="environment-state check artifact is invalid",
+            evidence={**evidence, "artifact_type": type(artifact).__name__},
+            remediation=remediation,
+        )
+
+    artifact_environment = artifact.get("environment")
+    manifest_environment = manifest.get("release", {}).get("environment")
+    drift = artifact.get("drift")
+    ok = artifact.get("ok")
+    artifact_evidence = {
+        **evidence,
+        "environment": artifact_environment,
+        "control_plane_environment": artifact.get("control_plane_environment"),
+        "profile": artifact.get("profile"),
+        "ok": ok,
+        "drift_count": len(drift) if isinstance(drift, list) else None,
+    }
+    if manifest_environment and artifact_environment != manifest_environment:
+        return ReleaseGateCheck(
+            name="environment-state-convergence",
+            outcome="fail",
+            detail="environment-state check environment does not match release manifest",
+            evidence={
+                **artifact_evidence,
+                "expected_environment": manifest_environment,
+            },
+            remediation="rerun environment-state check for the release manifest environment",
+        )
+    if not isinstance(ok, bool) or not isinstance(drift, list):
+        return ReleaseGateCheck(
+            name="environment-state-convergence",
+            outcome="fail",
+            detail="environment-state check artifact is invalid",
+            evidence=artifact_evidence,
+            remediation=remediation,
+        )
+    if ok and not drift:
+        return ReleaseGateCheck(
+            name="environment-state-convergence",
+            outcome="pass",
+            detail="live environment-state check passed",
+            evidence=artifact_evidence,
+        )
+    return ReleaseGateCheck(
+        name="environment-state-convergence",
+        outcome="fail",
+        detail="live environment-state check reports drift",
+        evidence={
+            **artifact_evidence,
+            "drift": drift,
+        },
+        remediation=remediation,
+    )
+
+
 def collect_release_gate_report(
     *,
     manifest: dict[str, Any],
@@ -555,6 +691,9 @@ def collect_release_gate_report(
     database_target: str = "env:LOOM_CP_DB_URL",
     live_alembic_error: str | None = None,
     live_alembic_evidence: dict[str, Any] | None = None,
+    environment_state_check_artifact: dict[str, Any] | None = None,
+    environment_state_check_path: str | None = None,
+    environment_state_check_error: str | None = None,
 ) -> ReleaseGateReport:
     environment = str(manifest.get("release", {}).get("environment") or "")
     expected_rendered = manifest.get("rendered_manifest", {}).get("sha256")
@@ -592,6 +731,14 @@ def collect_release_gate_report(
             live_alembic_evidence=live_alembic_evidence,
         )
     )
+    environment_state_check = _environment_state_check(
+        manifest=manifest,
+        artifact=environment_state_check_artifact,
+        artifact_path=environment_state_check_path,
+        artifact_error=environment_state_check_error,
+    )
+    if environment_state_check is not None:
+        checks.append(environment_state_check)
     return ReleaseGateReport(
         environment=environment,
         namespace=namespace,
