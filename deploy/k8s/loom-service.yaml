@@ -79,6 +79,14 @@ spec:
               value: "static_keys"
             - name: LOOM_SVC_STORAGE_BACKEND
               value: "minio"
+            - name: LOOM_SVC_TASKSET_MATERIALIZER_BATCH_SIZE
+              value: "1"
+            - name: LOOM_SVC_TASKSET_MATERIALIZER_CLAIM_TTL_SEC
+              value: "600"
+            - name: LOOM_SVC_TASKSET_MATERIALIZER_POLL_INTERVAL_SEC
+              value: "5"
+            - name: LOOM_SVC_TASKSET_MATERIALIZER_UPSTREAM_CACHE_ROOT
+              value: "/tmp/loom-taskset-upstream"
             - name: LOOM_SVC_TEAM_REGISTRATION_OPEN
               value: "False"
             - name: LOOM_SVC_TRAJECTORIES_BUCKET

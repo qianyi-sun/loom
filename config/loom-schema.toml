@@ -462,6 +462,26 @@ python_type = "SecretStr"
 secret      = { key = "batch-runner-cp-token" }
 # no required, no default → `SecretStr | None = None`
 
+[service_config.taskset_materializer_poll_interval_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 5
+
+[service_config.taskset_materializer_batch_size]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 1
+
+[service_config.taskset_materializer_claim_ttl_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 600
+
+[service_config.taskset_materializer_upstream_cache_root]
+used_by     = ["loom-service"]
+python_type = "Path"
+default     = "/tmp/loom-taskset-upstream"
+
 [service_config.local_servers_json]
 used_by     = ["loom-service"]
 python_type = "str"

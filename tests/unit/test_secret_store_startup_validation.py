@@ -161,6 +161,22 @@ def test_gateway_lifespan_wraps_secret_validation_in_startup_retry(
     assert calls == ["gateway secret-store startup validation", "secrets"]
 
 
+async def _blocking_run_loop(**_kwargs: object) -> None:
+    await asyncio.Event().wait()
+
+
+def _patch_service_background_loops(
+    monkeypatch: pytest.MonkeyPatch,
+    service_app: object,
+) -> None:
+    monkeypatch.setattr(service_app, "batch_run_loop", _blocking_run_loop)
+    monkeypatch.setattr(
+        service_app,
+        "taskset_materializer_run_loop",
+        _blocking_run_loop,
+    )
+
+
 def test_service_lifespan_validates_existing_secret_store_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -173,9 +189,6 @@ def test_service_lifespan_validates_existing_secret_store_rows(
         nonlocal calls
         calls += 1
         return 0
-
-    async def _run_loop(**_kwargs: object) -> None:
-        await asyncio.Event().wait()
 
     monkeypatch.setattr(
         service_app,
@@ -194,7 +207,7 @@ def test_service_lifespan_validates_existing_secret_store_rows(
         "create_async_engine",
         lambda _db_url: _FakeEngine(),
     )
-    monkeypatch.setattr(service_app, "run_loop", _run_loop)
+    _patch_service_background_loops(monkeypatch, service_app)
 
     app = service_app.create_app(
         LoomServiceSettings(
@@ -229,9 +242,6 @@ def test_service_lifespan_validates_schema_before_secret_rows(
         calls.append("secrets")
         return 0
 
-    async def _run_loop(**_kwargs: object) -> None:
-        await asyncio.Event().wait()
-
     monkeypatch.setattr(
         service_app,
         "_assert_schema_startup",
@@ -249,7 +259,7 @@ def test_service_lifespan_validates_schema_before_secret_rows(
         "create_async_engine",
         lambda _db_url: _FakeEngine(),
     )
-    monkeypatch.setattr(service_app, "run_loop", _run_loop)
+    _patch_service_background_loops(monkeypatch, service_app)
 
     app = service_app.create_app(
         LoomServiceSettings(
@@ -285,9 +295,6 @@ def test_service_lifespan_wraps_secret_validation_in_startup_retry(
         calls.append(operation_name)
         return await run()
 
-    async def _run_loop(**_kwargs: object) -> None:
-        await asyncio.Event().wait()
-
     monkeypatch.setattr(
         service_app,
         "_assert_schema_startup",
@@ -311,7 +318,7 @@ def test_service_lifespan_wraps_secret_validation_in_startup_retry(
         "create_async_engine",
         lambda _db_url: _FakeEngine(),
     )
-    monkeypatch.setattr(service_app, "run_loop", _run_loop)
+    _patch_service_background_loops(monkeypatch, service_app)
 
     app = service_app.create_app(
         LoomServiceSettings(

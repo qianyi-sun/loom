@@ -45,6 +45,10 @@ class LoomServiceSettings(BaseSettings):
     signed_url_expiry_sec: int = 3600
     storage_auth_kind: str = "static_keys"
     storage_backend: str = "minio"
+    taskset_materializer_batch_size: int = 1
+    taskset_materializer_claim_ttl_sec: int = 600
+    taskset_materializer_poll_interval_sec: int = 5
+    taskset_materializer_upstream_cache_root: Path = Path("/tmp/loom-taskset-upstream")
     team_registration_open: bool = False
     trajectories_bucket: str = "trajectories"
 
