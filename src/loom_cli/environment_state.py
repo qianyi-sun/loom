@@ -1005,6 +1005,28 @@ def _run_supervisor_command(
         raise EnvironmentStateProfileError(f"{' '.join(command)} failed: {message}")
 
 
+def _run_supervisor_command_idempotent(
+    command: list[str],
+    *,
+    runner: SubprocessRunner,
+) -> None:
+    """Run a systemctl command that must succeed on a missing unit (#331).
+
+    Systemd exit code 5 (LSB EXIT_NOTINSTALLED) means "unit not loaded" —
+    the timer/service was never installed, or was already removed. That
+    is the state we want when stopping/disabling a supervisor the operator
+    has taken out of scope, so treat it as a no-op instead of an error.
+    Non-5 non-zero codes still propagate.
+    """
+    rc, stdout, stderr = runner(command)
+    if rc == 0:
+        return
+    if rc == 5:
+        return
+    message = (stderr or stdout).strip() or f"command exited {rc}"
+    raise EnvironmentStateProfileError(f"{' '.join(command)} failed: {message}")
+
+
 def apply_external_slurm_autoscaler_supervisors(
     profile: EnvironmentStateProfile,
     *,
@@ -1043,14 +1065,56 @@ def apply_external_slurm_autoscaler_supervisors(
     )
     for supervisor in profile.external_slurm_autoscaler_supervisors:
         timer_name = supervisor["timer_name"]
-        if supervisor["enabled"]:
+        enabled = supervisor["enabled"]
+        active = supervisor["active"]
+        # #331: apply must enforce NEGATIVE desired state too. The four
+        # combinations map explicitly so a reader can see what each one
+        # produces. Positive transitions raise on failure (something is
+        # actually wrong); negative transitions tolerate exit code 5
+        # (unit already gone).
+        if enabled and active:
+            # Preserved from the original implementation — the dominant
+            # fully-on rollout.
             _run_supervisor_command(
                 ["systemctl", "--user", "enable", "--now", timer_name],
                 runner=command_runner,
             )
-        if supervisor["active"]:
             _run_supervisor_command(
                 ["systemctl", "--user", "restart", timer_name],
+                runner=command_runner,
+            )
+        elif enabled and not active:
+            # Enable for boot, keep stopped now (a temporary pause).
+            _run_supervisor_command(
+                ["systemctl", "--user", "enable", timer_name],
+                runner=command_runner,
+            )
+            _run_supervisor_command_idempotent(
+                ["systemctl", "--user", "stop", timer_name],
+                runner=command_runner,
+            )
+        elif not enabled and active:
+            # Explicit "run but not persistent"; rare but supported.
+            _run_supervisor_command_idempotent(
+                ["systemctl", "--user", "disable", timer_name],
+                runner=command_runner,
+            )
+            _run_supervisor_command(
+                ["systemctl", "--user", "restart", timer_name],
+                runner=command_runner,
+            )
+        else:
+            # The #331 failure mode: OLDLAB scoped out; operator wants
+            # the timer stopped AND to not come back after a boot. Stop
+            # before disable so an in-flight timer trigger does not get
+            # to fire; disable after so the unit does not survive a
+            # systemd user restart.
+            _run_supervisor_command_idempotent(
+                ["systemctl", "--user", "stop", timer_name],
+                runner=command_runner,
+            )
+            _run_supervisor_command_idempotent(
+                ["systemctl", "--user", "disable", timer_name],
                 runner=command_runner,
             )
     return applied
