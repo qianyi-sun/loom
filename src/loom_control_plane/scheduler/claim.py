@@ -61,6 +61,8 @@ UPDATE trials t
    SET state = 'claimed',
        worker_id = :worker_id,
        claimed_at = NOW(),
+       failure_reason = NULL,
+       failure_message = NULL,
        attempt_count = attempt_count + 1
   FROM next
  WHERE t.id = next.id

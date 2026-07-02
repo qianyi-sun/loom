@@ -377,7 +377,9 @@ Only cancel the batch after an explicit operator/coordinator decision.
   projection failures. Treat these as #190 blockers, not benchmark scores.
 - `runs.claimed_without_started` becomes nonzero in batch debug evidence or
   `scripts/public_beta_smoke_gate.py`. Treat this as #193 evidence requiring
-  diagnosis/reclaim follow-up.
+  diagnosis/reclaim follow-up. If the row later becomes terminal with
+  `retry_exhausted`, inspect the trial `failure_message` for the
+  `claimed_without_started_reclaimed` diagnostic and prior worker id.
 - Any required pool has no terminal trial after its #188 coverage trial has had
   enough time to be claimed and the other pools are already draining. Use batch
   debug worker-pool evidence before declaring this.
