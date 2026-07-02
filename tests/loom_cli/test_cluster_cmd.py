@@ -269,6 +269,143 @@ def test_collect_status_stale_deployment_generation_is_not_ready() -> None:
     assert not status.all_ready
 
 
+def test_collect_status_stale_updated_replicas_is_not_ready() -> None:
+    """#203 regression — the old-pods-still-serving state.
+
+    Observed on public-beta-7c0e222 rollout: Deployment desired=1, ready=1
+    (old pod still Ready), updated=0 (new pod not yet Ready). Previously
+    the healthy check treated ready==desired as sufficient because it
+    didn't gate on updated>=desired when updated is 0 (not None). That
+    made `loom cluster up` return success while the new image wasn't
+    yet serving.
+    """
+    apps = _fully_ready_apps()
+    apps.deployments["loom-service"] = _Workload(
+        metadata=_Spec(generation=12),
+        spec=_Spec(
+            replicas=1,
+            template=_Spec(
+                spec=_Spec(
+                    containers=[_Spec(name="app", image="loom-service:new")],
+                ),
+            ),
+        ),
+        status=_Spec(
+            ready_replicas=1,          # old pod still Ready
+            available_replicas=1,      # old pod still Available
+            updated_replicas=0,        # NO pod on the new template yet
+            replicas=1,                # total pods across old + new
+            observed_generation=12,
+        ),
+    )
+
+    status = collect_status(
+        apps,
+        _FakeNetworkingV1(),
+        _FakeCoreV1(secrets={"loom-secrets"}),
+        "loom",
+        context=None,
+    )
+
+    svc = next(c for c in status.components if c.name == "loom-service")
+    assert not svc.healthy, (
+        "desired=1 ready=1 updated=0 must NOT be healthy — a new pod hasn't "
+        "reached Ready yet; the old pod is masking the new-image readiness"
+    )
+    assert svc.note is not None
+    assert "updated-replicas" in svc.note
+    assert not status.all_ready
+
+
+def test_collect_status_stale_old_pods_still_around_is_not_ready() -> None:
+    """#203 — new pod is Ready but old pod hasn't terminated yet.
+
+    Deployment desired=1, ready=2 (both old + new are Ready — briefly
+    possible under a rolling update with maxSurge=1), updated=1,
+    replicas=2 (both alive). Not converged: the old pod is still around
+    and could still be serving traffic behind the Service selector.
+    """
+    apps = _fully_ready_apps()
+    apps.deployments["loom-service"] = _Workload(
+        metadata=_Spec(generation=12),
+        spec=_Spec(
+            replicas=1,
+            template=_Spec(
+                spec=_Spec(
+                    containers=[_Spec(name="app", image="loom-service:new")],
+                ),
+            ),
+        ),
+        status=_Spec(
+            ready_replicas=2,
+            available_replicas=2,
+            updated_replicas=1,
+            replicas=2,               # OLD pod still counted
+            observed_generation=12,
+        ),
+    )
+
+    status = collect_status(
+        apps,
+        _FakeNetworkingV1(),
+        _FakeCoreV1(secrets={"loom-secrets"}),
+        "loom",
+        context=None,
+    )
+
+    svc = next(c for c in status.components if c.name == "loom-service")
+    assert not svc.healthy, (
+        "replicas=2 while updated=1 means an old pod hasn't terminated; "
+        "the rollout is not fully converged"
+    )
+    assert svc.note is not None
+    assert "stale-pods" in svc.note or "old" in svc.note.lower()
+    assert not status.all_ready
+
+
+def test_collect_status_updated_reached_but_not_available_is_not_ready() -> None:
+    """#203 — updated pods exist but aren't Available (past minReadySeconds).
+
+    Ready>=desired is a weaker signal than Available>=desired. A pod can
+    be Ready (its containers report Ready) but not yet Available if the
+    Deployment's minReadySeconds hasn't elapsed. Rollout not yet safe.
+    """
+    apps = _fully_ready_apps()
+    apps.deployments["loom-service"] = _Workload(
+        metadata=_Spec(generation=12),
+        spec=_Spec(
+            replicas=1,
+            template=_Spec(
+                spec=_Spec(
+                    containers=[_Spec(name="app", image="loom-service:new")],
+                ),
+            ),
+        ),
+        status=_Spec(
+            ready_replicas=1,
+            available_replicas=0,     # not yet past minReadySeconds
+            updated_replicas=1,
+            replicas=1,
+            observed_generation=12,
+        ),
+    )
+
+    status = collect_status(
+        apps,
+        _FakeNetworkingV1(),
+        _FakeCoreV1(secrets={"loom-secrets"}),
+        "loom",
+        context=None,
+    )
+
+    svc = next(c for c in status.components if c.name == "loom-service")
+    assert not svc.healthy, (
+        "available_replicas < desired means the new pod hasn't cleared "
+        "minReadySeconds yet; not safe to declare rollout done"
+    )
+    assert not status.all_ready
+
+
 def test_collect_status_missing_updated_replicas_is_not_ready() -> None:
     apps = _fully_ready_apps()
     apps.deployments["loom-service"] = _Workload(

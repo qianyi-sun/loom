@@ -208,6 +208,11 @@ class ComponentStatus:
     generation: int | None = None
     observed_generation: int | None = None
     updated: int | None = None
+    # `total_replicas` counts every pod the Deployment controller knows about,
+    # including old-template pods that haven't terminated yet. Used by the
+    # #203 convergence check: if total > updated, the rollout still has old
+    # pods around and isn't fully swapped.
+    total_replicas: int | None = None
     pod_health_ok: bool = True
     last_restart_reason: str | None = None
     note: str | None = None
@@ -242,6 +247,21 @@ class ComponentStatus:
         if self.kind == "Deployment" and self.updated is None and self.desired > 0:
             return False
         if self.updated is not None and self.updated < self.desired:
+            return False
+        # #203: catch the "old pod still serving" state.
+        # `.status.replicas` counts EVERY pod the Deployment controller owns —
+        # both old-template pods (still running because their generation
+        # observed_generation held or they haven't finished terminating) and
+        # new-template pods (updated). If total > updated, the rollout has
+        # not yet swapped: old pods are still around, they may still be
+        # selected by the Service, and \`loom cluster up\` must not report
+        # this as ready.
+        if (
+            self.kind == "Deployment"
+            and self.updated is not None
+            and self.total_replicas is not None
+            and self.total_replicas > self.updated
+        ):
             return False
         return True
 
@@ -427,6 +447,7 @@ def _deployment_convergence_note(
     observed_generation: int | None,
     updated: int | None,
     desired: int,
+    total_replicas: int | None = None,
 ) -> str | None:
     if generation is not None and observed_generation is not None:
         if observed_generation < generation:
@@ -438,6 +459,14 @@ def _deployment_convergence_note(
         return f"updated-replicas: unknown/{desired}"
     if updated is not None and updated < desired:
         return f"updated-replicas: {updated}/{desired}"
+    # #203: report old pods still around even after the updated count
+    # matches desired.
+    if (
+        updated is not None
+        and total_replicas is not None
+        and total_replicas > updated
+    ):
+        return f"stale-pods: {total_replicas - updated} old"
     return None
 
 
@@ -604,11 +633,17 @@ def _collect_workload(
             generation = _int_or_none(getattr(metadata, "generation", None))
             observed_generation = _int_or_none(getattr(stat, "observed_generation", None))
             updated = _int_or_none(getattr(stat, "updated_replicas", None))
+            # #203: `.status.replicas` counts total pods including old
+            # template pods that haven't terminated yet. Compare against
+            # `updated_replicas` to detect the "old pod still around" case
+            # that ready_replicas==desired alone can mask.
+            total_replicas = _int_or_none(getattr(stat, "replicas", None))
             convergence_note = _deployment_convergence_note(
                 generation=generation,
                 observed_generation=observed_generation,
                 updated=updated,
                 desired=desired,
+                total_replicas=total_replicas,
             )
             pod_health_note = _deployment_pod_health_note(
                 d,
@@ -625,6 +660,7 @@ def _collect_workload(
                     generation=generation,
                     observed_generation=observed_generation,
                     updated=updated,
+                    total_replicas=total_replicas,
                     pod_health_ok=pod_health_note is None,
                     note=_combine_notes(convergence_note, pod_health_note),
                 )
