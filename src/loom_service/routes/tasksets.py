@@ -22,7 +22,7 @@ from loom.auth import AuthContext
 from loom.db.schema import TaskSetManifest
 from loom.models.taskset import UserTaskSetManifest
 from loom.taskset.intents import normalize_intents
-from loom_service.auth_guards import is_admin, require_scope
+from loom_service.auth_guards import is_admin, require_scope, require_submitting_user
 from loom_service.dependencies import SessionAndCtx
 from loom_service.taskset_intake import (
     delete_task_set,
@@ -100,6 +100,7 @@ async def create_task_set(
 ) -> TaskSetSubmitResponse:
     session, ctx = sc
     require_scope(ctx, "submit")
+    require_submitting_user(ctx)
     team_id = _require_team_id(ctx)
     settings = request.app.state.settings
     result = await submit_task_set(
@@ -164,6 +165,7 @@ async def rebuild_task_set_route(
 ) -> TaskSetSubmitResponse:
     session, ctx = sc
     require_scope(ctx, "submit")
+    require_submitting_user(ctx)
     team_id = _team_id_for_read(ctx)
     result = await rebuild_task_set(
         session, team_id=team_id, task_set_id=task_set_id,
@@ -175,5 +177,6 @@ async def rebuild_task_set_route(
 async def delete_task_set_route(task_set_id: str, sc: SessionAndCtx) -> None:
     session, ctx = sc
     require_scope(ctx, "submit")
+    require_submitting_user(ctx)
     team_id = _team_id_for_read(ctx)
     await delete_task_set(session, team_id=team_id, task_set_id=task_set_id)

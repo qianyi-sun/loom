@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _API_VERSION = "loom.taskset/v1"
 _KIND = "UserTaskSet"
@@ -13,6 +13,25 @@ _SOURCE_TYPES = frozenset({"hf", "git", "https", "jsonl-inline"})
 _INTENTS = frozenset({"trajectory_generation", "evaluation"})
 _VERIFIER_TYPES = frozenset({"pytest", "script", "exact-match", "regex", "llm-judge"})
 _SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$")
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+
+
+def validate_bundle_relative_path(path: str) -> str:
+    """Reject absolute or traversal paths for manifest bundle file refs."""
+    if not path or path.strip() != path:
+        raise ValueError("bundle file path must be non-empty without leading/trailing whitespace")
+    if path.startswith(("/", "\\")) or _WINDOWS_DRIVE_RE.match(path):
+        raise ValueError("bundle file path must be relative")
+    parts = path.replace("\\", "/").split("/")
+    if any(part == ".." for part in parts):
+        raise ValueError("bundle file path must not contain traversal segments")
+    return path
+
+
+def bundle_object_key(*, prefix: str, relative_path: str) -> str:
+    """Map a validated manifest-relative path to an object-store key."""
+    normalized = validate_bundle_relative_path(relative_path).replace("\\", "/").lstrip("/")
+    return f"{prefix}/{normalized}"
 
 
 class TaskSetMetadata(BaseModel):
@@ -38,11 +57,21 @@ class TaskSetVerifier(BaseModel):
     type: Literal["pytest", "script", "exact-match", "regex", "llm-judge"]
     file: str = Field(min_length=1)
 
+    @field_validator("file")
+    @classmethod
+    def _validate_file_path(cls, value: str) -> str:
+        return validate_bundle_relative_path(value)
+
 
 class TaskSetTransform(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     file: str = Field(min_length=1)
+
+    @field_validator("file")
+    @classmethod
+    def _validate_file_path(cls, value: str) -> str:
+        return validate_bundle_relative_path(value)
 
 
 class TaskSetLimits(BaseModel):
@@ -108,5 +137,7 @@ __all__ = [
     "_SOURCE_TYPES",
     "_VERIFIER_TYPES",
     "UserTaskSetManifest",
+    "bundle_object_key",
     "task_set_id_for",
+    "validate_bundle_relative_path",
 ]

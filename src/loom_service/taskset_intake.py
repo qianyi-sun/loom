@@ -25,7 +25,11 @@ from loom.db.schema import (
     TaskSetMaterializationJob,
 )
 from loom.db.task_set_visibility import visible_task_sets
-from loom.models.taskset import UserTaskSetManifest, task_set_id_for
+from loom.models.taskset import (
+    UserTaskSetManifest,
+    bundle_object_key,
+    task_set_id_for,
+)
 from loom.taskset.intents import IntentWarning, normalize_intents
 
 _ACTIVE_JOB_STATES = frozenset({"queued", "claimed", "running"})
@@ -136,7 +140,9 @@ async def submit_task_set(
             )
         _reject_unsafe_filename(verifier_upload.filename or manifest_model.verifier.file)
         verifier_bytes = await _read_upload(verifier_upload)
-        verifier_key = f"{prefix}/verifier/{manifest_model.verifier.file.lstrip('/')}"
+        verifier_key = bundle_object_key(
+            prefix=prefix, relative_path=manifest_model.verifier.file,
+        )
 
     transform_bytes: bytes | None = None
     transform_key: str | None = None
@@ -148,7 +154,9 @@ async def submit_task_set(
             )
         _reject_unsafe_filename(transform_upload.filename or manifest_model.transform.file)
         transform_bytes = await _read_upload(transform_upload)
-        transform_key = f"{prefix}/transform.py"
+        transform_key = bundle_object_key(
+            prefix=prefix, relative_path=manifest_model.transform.file,
+        )
 
     manifest_key = f"{prefix}/manifest.yaml"
     manifest_bytes = yaml.safe_dump(
@@ -160,33 +168,12 @@ async def submit_task_set(
         verifier_file_present=verifier_bytes is not None,
     )
 
-    _upload_object(
-        minio_client,
-        bucket=artifacts_bucket,
-        key=manifest_key,
-        body=manifest_bytes,
-        content_type="application/x-yaml",
-    )
     manifest_blob_uri = _blob_uri(bucket=artifacts_bucket, key=manifest_key)
     verifier_blob_uri: str | None = None
     transform_blob_uri: str | None = None
     if verifier_bytes is not None and verifier_key is not None:
-        _upload_object(
-            minio_client,
-            bucket=artifacts_bucket,
-            key=verifier_key,
-            body=verifier_bytes,
-            content_type="application/octet-stream",
-        )
         verifier_blob_uri = _blob_uri(bucket=artifacts_bucket, key=verifier_key)
     if transform_bytes is not None and transform_key is not None:
-        _upload_object(
-            minio_client,
-            bucket=artifacts_bucket,
-            key=transform_key,
-            body=transform_bytes,
-            content_type="text/x-python",
-        )
         transform_blob_uri = _blob_uri(bucket=artifacts_bucket, key=transform_key)
 
     job = TaskSetMaterializationJob(
@@ -216,13 +203,42 @@ async def submit_task_set(
     session.add(manifest_row)
     session.add(job)
     try:
-        await session.commit()
+        await session.flush()
     except IntegrityError as exc:
         await session.rollback()
         raise HTTPException(
             status_code=409,
             detail="task_set slug already exists for this team",
         ) from exc
+
+    try:
+        _upload_object(
+            minio_client,
+            bucket=artifacts_bucket,
+            key=manifest_key,
+            body=manifest_bytes,
+            content_type="application/x-yaml",
+        )
+        if verifier_bytes is not None and verifier_key is not None:
+            _upload_object(
+                minio_client,
+                bucket=artifacts_bucket,
+                key=verifier_key,
+                body=verifier_bytes,
+                content_type="application/octet-stream",
+            )
+        if transform_bytes is not None and transform_key is not None:
+            _upload_object(
+                minio_client,
+                bucket=artifacts_bucket,
+                key=transform_key,
+                body=transform_bytes,
+                content_type="text/x-python",
+            )
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
     await session.refresh(job)
 
     return TaskSetIntakeResult(
@@ -314,7 +330,14 @@ async def rebuild_task_set(
         state="queued",
     )
     session.add(job)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="materialization_already_active",
+        ) from exc
     await session.refresh(job)
 
     return TaskSetIntakeResult(
