@@ -281,9 +281,9 @@ def _ensure_terminus_2_arm64_base_if_needed(
     client: Any,
     dockerfile: Path,
 ) -> None:
-    if not _is_linux_arm64_worker():
-        return
     if not _dockerfile_uses_base_image(dockerfile, TERMINUS_2_FULL_IMAGE):
+        return
+    if not _is_linux_arm64_docker_daemon(client):
         return
 
     with _TERMINUS_2_BASE_LOCK:
@@ -330,6 +330,21 @@ def _ensure_terminus_2_arm64_base_if_needed(
                 "failed to build managed arm64 Terminus 2 base image "
                 f"{TERMINUS_2_FULL_IMAGE!r}: {exc}",
             ) from exc
+
+
+def _is_linux_arm64_docker_daemon(client: Any) -> bool:
+    with contextlib.suppress(Exception):
+        info = client.info()
+        if isinstance(info, dict):
+            os_type = str(info.get("OSType") or "").lower()
+            architecture = str(info.get("Architecture") or "").lower()
+            if os_type and os_type != "linux":
+                return False
+            if architecture in {"aarch64", "arm64"}:
+                return True
+            if architecture:
+                return False
+    return _is_linux_arm64_worker()
 
 
 def _is_linux_arm64_worker() -> bool:
