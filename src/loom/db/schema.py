@@ -994,6 +994,7 @@ class WorkerPoolAutoscalerPolicy(Base):
     last_occupied_slots: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_queued_slots: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_blocked_details: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_scale_up_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True),
