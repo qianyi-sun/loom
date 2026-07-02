@@ -17,7 +17,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -26,6 +26,12 @@ from uuid import uuid4
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
+
+try:
+    from loom_cli.secret_source import SecretSourceError, resolve_secret_source
+except ModuleNotFoundError:  # pragma: no cover - direct script execution fallback
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from loom_cli.secret_source import SecretSourceError, resolve_secret_source
 
 REQUEST_TIMEOUT_SEC = 30.0
 
@@ -244,6 +250,39 @@ def _report_dict(report: SmokeReport, secret_values: list[str]) -> dict[str, Any
         result["detail"] = redact_text(result["detail"], secret_values)
         result["remediation"] = redact_text(result["remediation"], secret_values)
     return raw
+
+
+def _resolve_optional_secret_source(value: str | None, *, flag_name: str) -> str | None:
+    if value is None:
+        return None
+    return cast(str, resolve_secret_source(value, flag_name=flag_name))
+
+
+def resolve_smoke_secret_args(args: argparse.Namespace) -> argparse.Namespace:
+    """Resolve smoke-gate secret-source refs into an isolated args namespace."""
+
+    resolved = argparse.Namespace(**vars(args))
+    resolved.team_a_token = resolve_secret_source(
+        args.team_a_token,
+        flag_name="--team-a-token",
+    )
+    resolved.team_b_token = resolve_secret_source(
+        args.team_b_token,
+        flag_name="--team-b-token",
+    )
+    resolved.catalog_minio_access_key = _resolve_optional_secret_source(
+        args.catalog_minio_access_key,
+        flag_name="--catalog-minio-access-key",
+    )
+    resolved.catalog_minio_secret_key = _resolve_optional_secret_source(
+        args.catalog_minio_secret_key,
+        flag_name="--catalog-minio-secret-key",
+    )
+    resolved.secret_needle = [
+        resolve_secret_source(value, flag_name="--secret-needle")
+        for value in args.secret_needle
+    ]
+    return resolved
 
 
 class SmokeClient:
@@ -1841,8 +1880,16 @@ def _append_mutation_checks(
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server-url", required=True, help="Public Loom URL, e.g. https://loom.example.com")
-    parser.add_argument("--team-a-token", required=True, help="Owner/source team API token.")
-    parser.add_argument("--team-b-token", required=True, help="Second team API token.")
+    parser.add_argument(
+        "--team-a-token",
+        required=True,
+        help="Owner/source team API token source: env:VAR, file:PATH, or -.",
+    )
+    parser.add_argument(
+        "--team-b-token",
+        required=True,
+        help="Second team API token source: env:VAR, file:PATH, or -.",
+    )
     parser.add_argument("--provider-connection-name", default=None)
     parser.add_argument(
         "--provider-model-provider",
@@ -1879,11 +1926,24 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--clone-provider-model-id", default=None)
     parser.add_argument("--reuse-provider-connection-id", default=None)
     parser.add_argument("--reuse-provider-model-id", default=None)
-    parser.add_argument("--secret-needle", action="append", default=[])
+    parser.add_argument(
+        "--secret-needle",
+        action="append",
+        default=[],
+        help="Additional secret needle source to scan for: env:VAR, file:PATH, or -.",
+    )
     parser.add_argument("--internal-url-needle", action="append", default=[])
     parser.add_argument("--catalog-minio-endpoint", default=None)
-    parser.add_argument("--catalog-minio-access-key", default=None)
-    parser.add_argument("--catalog-minio-secret-key", default=None)
+    parser.add_argument(
+        "--catalog-minio-access-key",
+        default=None,
+        help="Catalog MinIO access-key source: env:VAR, file:PATH, or -.",
+    )
+    parser.add_argument(
+        "--catalog-minio-secret-key",
+        default=None,
+        help="Catalog MinIO secret-key source: env:VAR, file:PATH, or -.",
+    )
     parser.add_argument("--catalog-minio-region", default="us-east-1")
     parser.add_argument("--catalog-bundle-benchmark-limit", type=int, default=20)
     parser.add_argument("--catalog-bundle-task-limit", type=int, default=200)
@@ -1947,11 +2007,17 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    try:
+        args = resolve_smoke_secret_args(args)
+    except SecretSourceError as exc:
+        parser.error(str(exc))
     report = run_smoke(args)
     secret_values = [
         args.team_a_token,
         args.team_b_token,
         args.catalog_minio_endpoint,
+        args.catalog_minio_access_key,
+        args.catalog_minio_secret_key,
         *args.secret_needle,
         *args.internal_url_needle,
     ]

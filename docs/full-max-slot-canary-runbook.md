@@ -189,16 +189,18 @@ The anchor is not clean if any of these checks show:
 
 Run this before the canary and store the output in `03-190-targeted/`. This is
 not the full/max-slot canary; it is the targeted durability proof that must
-already pass before the canary begins.
+already pass before the canary begins. Pass smoke-gate tokens, MinIO
+credentials, and explicit secret needles as `env:VAR`, `file:PATH`, or `-`
+sources; do not expand raw secret values into argv.
 
 ```bash
 uv run python scripts/public_beta_smoke_gate.py \
   --server-url "$PUBLIC_URL" \
-  --team-a-token "$TEAM_A_TOKEN" \
-  --team-b-token "$TEAM_B_TOKEN" \
+  --team-a-token env:TEAM_A_TOKEN \
+  --team-b-token env:TEAM_B_TOKEN \
   --catalog-minio-endpoint "$PUBLIC_BETA_MINIO_ENDPOINT" \
-  --catalog-minio-access-key "$PUBLIC_BETA_MINIO_ACCESS_KEY" \
-  --catalog-minio-secret-key "$PUBLIC_BETA_MINIO_SECRET_KEY" \
+  --catalog-minio-access-key env:PUBLIC_BETA_MINIO_ACCESS_KEY \
+  --catalog-minio-secret-key env:PUBLIC_BETA_MINIO_SECRET_KEY \
   --object-store-write-check-only \
   --object-store-write-check-bucket trajectories \
   --object-store-write-check-count 64 \
@@ -407,15 +409,15 @@ loom eval diagnose batch "$CANARY_BATCH_ID" --format json \
 
 uv run python scripts/public_beta_smoke_gate.py \
   --server-url "$PUBLIC_URL" \
-  --team-a-token "$TEAM_A_TOKEN" \
-  --team-b-token "$TEAM_B_TOKEN" \
+  --team-a-token env:TEAM_A_TOKEN \
+  --team-b-token env:TEAM_B_TOKEN \
   --provider-connection-name "$PROVIDER_CONNECTION_NAME" \
   --provider-model-provider "$PROVIDER_MODEL_PROVIDER" \
   --provider-model-name "$PROVIDER_MODEL_NAME" \
   --batch-id "$CANARY_BATCH_ID" \
   --catalog-minio-endpoint "$PUBLIC_BETA_MINIO_ENDPOINT" \
-  --catalog-minio-access-key "$PUBLIC_BETA_MINIO_ACCESS_KEY" \
-  --catalog-minio-secret-key "$PUBLIC_BETA_MINIO_SECRET_KEY" \
+  --catalog-minio-access-key env:PUBLIC_BETA_MINIO_ACCESS_KEY \
+  --catalog-minio-secret-key env:PUBLIC_BETA_MINIO_SECRET_KEY \
   --object-store-write-check \
   --object-store-write-check-bucket trajectories \
   --object-store-write-check-count 64 \
@@ -424,7 +426,7 @@ uv run python scripts/public_beta_smoke_gate.py \
   --required-worker-pool oldlab \
   --required-worker-pool k8s-worker \
   --required-worker-pool gb10-arm64 \
-  --secret-needle seeded-public-beta-secret \
+  --secret-needle env:PUBLIC_BETA_SECRET_NEEDLE \
   --internal-url-needle loom-minio.loom.svc.cluster.local \
   --fail-on-skip \
   --markdown-output "$CANARY_DIR/06-terminal/public-beta-smoke.md" \

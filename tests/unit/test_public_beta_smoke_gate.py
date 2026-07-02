@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
+import pytest
 from botocore.exceptions import ClientError
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -153,6 +155,142 @@ def test_console_summary_omits_check_details_and_secret_values() -> None:
     assert "1 fail" in rendered
     assert "public-beta-smoke.md" in rendered
     assert "public-beta-smoke.json" in rendered
+
+
+def test_resolve_smoke_secret_args_supports_env_file_and_stdin(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    gate = _load_gate_module()
+    secret_file = tmp_path / "minio-secret.txt"
+    secret_file.write_text("resolved-minio-secret\n", encoding="utf-8")
+    monkeypatch.setenv("SMOKE_TEAM_A_TOKEN", "resolved-team-a-token")
+    monkeypatch.setenv("SMOKE_TEAM_B_TOKEN", "resolved-team-b-token")
+    monkeypatch.setenv("SMOKE_MINIO_ACCESS", "resolved-minio-access")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("stdin-secret-needle\n"))
+
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "env:SMOKE_TEAM_A_TOKEN",
+        "--team-b-token", "env:SMOKE_TEAM_B_TOKEN",
+        "--catalog-minio-access-key", "env:SMOKE_MINIO_ACCESS",
+        "--catalog-minio-secret-key", f"file:{secret_file}",
+        "--secret-needle", "-",
+    ])
+
+    resolved = gate.resolve_smoke_secret_args(args)
+
+    assert resolved.team_a_token == "resolved-team-a-token"
+    assert resolved.team_b_token == "resolved-team-b-token"
+    assert resolved.catalog_minio_access_key == "resolved-minio-access"
+    assert resolved.catalog_minio_secret_key == "resolved-minio-secret"
+    assert resolved.secret_needle == ["stdin-secret-needle"]
+    assert args.team_a_token == "env:SMOKE_TEAM_A_TOKEN"
+
+
+def test_main_resolves_token_sources_before_requests_and_redacts_evidence(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    gate = _load_gate_module()
+    markdown_path = tmp_path / "smoke.md"
+    json_path = tmp_path / "smoke.json"
+    observed_tokens: list[str | None] = []
+    monkeypatch.setenv("SMOKE_TEAM_A_TOKEN", "resolved-team-a-token")
+    monkeypatch.setenv("SMOKE_TEAM_B_TOKEN", "resolved-team-b-token")
+
+    class FakeClient:
+        def __init__(self, server_url: str, *, max_scan_bytes: int) -> None:
+            self.server_url = server_url
+            self.evidence_chunks: list[str] = []
+            self.response_bytes_scanned = 0
+
+        def request(self, method: str, path: str, **kwargs):
+            token = kwargs.get("token")
+            if token is not None:
+                observed_tokens.append(token)
+            if path in {"/api/v1/health", "/"}:
+                body = b'{"status":"ok"}'
+            elif path == "/api/v1/auth/whoami":
+                body = (
+                    b'{"credential_type":"user_owned_api_token",'
+                    b'"principal_type":"team","username":"smoke-user",'
+                    b'"team_name":"Smoke Team","role":"member",'
+                    b'"is_platform_admin":false}'
+                )
+            elif path == "/api/v1/provider-connections":
+                body = b'{"items":[{"name":"mz_tn_canada_qianyi"}]}'
+            elif path == "/api/v1/models":
+                body = b'{"items":[{"provider":"openai","name":"gpt-4o-mini"}]}'
+            elif path == "/api/v1/agents":
+                body = b'{"items":[{"name":"oracle","service_mode_ready":true}]}'
+            elif path == "/api/v1/benchmarks":
+                body = (
+                    b'{"items":[{"id":"skilllearnbench","task_count":100,'
+                    b'"readiness_state":"runnable"}]}'
+                )
+            else:
+                body = b'{"items":[]}'
+            return gate.HttpResponse(status_code=200, headers={}, body=body)
+
+    monkeypatch.setattr(gate, "SmokeClient", FakeClient)
+
+    rc = gate.main([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "env:SMOKE_TEAM_A_TOKEN",
+        "--team-b-token", "env:SMOKE_TEAM_B_TOKEN",
+        "--markdown-output", str(markdown_path),
+        "--json-output", str(json_path),
+    ])
+
+    assert rc == 0
+    assert "resolved-team-a-token" in observed_tokens
+    assert "resolved-team-b-token" in observed_tokens
+    assert "env:SMOKE_TEAM_A_TOKEN" not in observed_tokens
+    captured = capsys.readouterr()
+    rendered = markdown_path.read_text(encoding="utf-8")
+    payload = json_path.read_text(encoding="utf-8")
+    assert "resolved-team-a-token" not in captured.out
+    assert "resolved-team-b-token" not in captured.out
+    assert "resolved-team-a-token" not in rendered
+    assert "resolved-team-b-token" not in rendered
+    assert "resolved-team-a-token" not in payload
+    assert "resolved-team-b-token" not in payload
+
+
+def test_main_rejects_literal_minio_secret_before_s3_use(
+    monkeypatch,
+    capsys,
+) -> None:
+    gate = _load_gate_module()
+    raw_secret = "plain-minio-secret-value"
+    monkeypatch.setenv("SMOKE_TEAM_A_TOKEN", "resolved-team-a-token")
+    monkeypatch.setenv("SMOKE_TEAM_B_TOKEN", "resolved-team-b-token")
+    monkeypatch.setenv("SMOKE_MINIO_ACCESS", "resolved-minio-access")
+    monkeypatch.setattr(gate, "SmokeClient", _empty_catalog_client(gate))
+    monkeypatch.setattr(
+        gate.boto3,
+        "client",
+        lambda *_args, **_kwargs: pytest.fail("literal secret reached S3 client"),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        gate.main([
+            "--server-url", "https://loom.example.com",
+            "--team-a-token", "env:SMOKE_TEAM_A_TOKEN",
+            "--team-b-token", "env:SMOKE_TEAM_B_TOKEN",
+            "--catalog-minio-endpoint", "http://minio:9000",
+            "--catalog-minio-access-key", "env:SMOKE_MINIO_ACCESS",
+            "--catalog-minio-secret-key", raw_secret,
+            "--object-store-write-check-only",
+        ])
+
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "--catalog-minio-secret-key" in err
+    assert "literal values are rejected" in err
+    assert raw_secret not in err
 
 
 def test_run_smoke_uses_parser_max_response_scan_bytes(monkeypatch) -> None:
@@ -330,6 +468,8 @@ def test_main_writes_evidence_when_run_library_list_times_out(
     gate = _load_gate_module()
     markdown_path = tmp_path / "smoke.md"
     json_path = tmp_path / "smoke.json"
+    monkeypatch.setenv("SMOKE_TEAM_A_TOKEN", "loom_api_team_a")
+    monkeypatch.setenv("SMOKE_TEAM_B_TOKEN", "loom_api_team_b")
 
     class FakeResponse:
         def __init__(self, body: bytes) -> None:
@@ -388,8 +528,8 @@ def test_main_writes_evidence_when_run_library_list_times_out(
     monkeypatch.setattr(gate, "urlopen", fake_urlopen)
     rc = gate.main([
         "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
+        "--team-a-token", "env:SMOKE_TEAM_A_TOKEN",
+        "--team-b-token", "env:SMOKE_TEAM_B_TOKEN",
         "--batch-id", "batch-1",
         "--markdown-output", str(markdown_path),
         "--json-output", str(json_path),
