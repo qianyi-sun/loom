@@ -13,6 +13,8 @@ from loom_cli.environment_state import (
     diff_external_slurm_autoscaler_supervisors,
     diff_external_slurm_runner_prerequisites,
     load_environment_state_profile,
+    render_external_slurm_autoscaler_service,
+    render_external_slurm_autoscaler_timer,
 )
 
 
@@ -694,9 +696,17 @@ active = true
 def test_external_slurm_autoscaler_supervisor_check_reports_stale_inactive_unit(
     tmp_path: Path,
 ) -> None:
+    workdir = tmp_path / "loom"
+    python_path = workdir / ".venv" / "bin" / "python"
+    script = workdir / "scripts" / "ops" / "worker_pool_autoscaler_external_once.py"
+    python_path.parent.mkdir(parents=True)
+    script.parent.mkdir(parents=True)
+    python_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    script.write_text("print('ok')\n", encoding="utf-8")
+    python_path.chmod(0o755)
     profile_path = tmp_path / "public-beta.state.toml"
     profile_path.write_text(
-        """
+        f"""
 environment = "public-beta"
 
 [[external_slurm_autoscaler_supervisors]]
@@ -704,9 +714,9 @@ name = "oldlab"
 pool_name = "oldlab"
 service_name = "loom-oldlab-autoscaler.service"
 timer_name = "loom-oldlab-autoscaler.timer"
-working_directory = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}"
-python_path = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}/.venv/bin/python"
-script_path = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}/scripts/ops/worker_pool_autoscaler_external_once.py"
+working_directory = "{workdir}"
+python_path = "{python_path}"
+script_path = "{script}"
 args = ["--pool-name", "oldlab", "--namespace", "loom-public-beta"]
 requires = ["network-online.target", "loom-public-beta-postgres-port-forward.service"]
 timer_on_boot_sec = "45"
@@ -718,10 +728,7 @@ active = true
         + "\n",
         encoding="utf-8",
     )
-    profile = load_environment_state_profile(
-        profile_path,
-        variables={"IMAGE_TAG": "public-beta-052e420"},
-    )
+    profile = load_environment_state_profile(profile_path)
     stale_service_unit = """
 [Service]
 Type=oneshot
@@ -752,6 +759,18 @@ WantedBy=timers.target
             return 0, "enabled\n", ""
         if command == ["systemctl", "--user", "is-active", "loom-oldlab-autoscaler.timer"]:
             return 3, "inactive\n", ""
+        if command == [
+            "systemctl",
+            "--user",
+            "show",
+            "loom-oldlab-autoscaler.service",
+            "--property=Result",
+            "--property=ExecMainStatus",
+            "--property=ExecMainCode",
+            "--property=ActiveState",
+            "--property=SubState",
+        ]:
+            return 0, "Result=success\nExecMainStatus=0\nActiveState=inactive\n", ""
         raise AssertionError(command)
 
     drift = diff_external_slurm_autoscaler_supervisors(profile, runner=_runner)
@@ -764,6 +783,213 @@ WantedBy=timers.target
     assert "public-beta-b453057" in drift[0].live
     assert drift[1].desired == "active"
     assert drift[1].live == "inactive"
+
+
+def test_external_slurm_autoscaler_supervisor_check_reports_unusable_execstart(
+    tmp_path: Path,
+) -> None:
+    workdir = tmp_path / "loom"
+    workdir.mkdir()
+    script = workdir / "scripts" / "ops" / "worker_pool_autoscaler_external_once.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("print('ok')\n", encoding="utf-8")
+    python_path = workdir / ".venv" / "bin" / "python"
+    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path.write_text(
+        f"""
+environment = "public-beta"
+
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab"
+pool_name = "oldlab"
+service_name = "loom-oldlab-autoscaler.service"
+timer_name = "loom-oldlab-autoscaler.timer"
+working_directory = "{workdir}"
+python_path = "{python_path}"
+script_path = "{script}"
+args = ["--pool-name", "oldlab", "--namespace", "loom-public-beta"]
+enabled = true
+active = true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    profile = load_environment_state_profile(profile_path)
+    supervisor = profile.external_slurm_autoscaler_supervisors[0]
+
+    def _runner(command: list[str]) -> tuple[int, str, str]:
+        if command == ["systemctl", "--user", "cat", "loom-oldlab-autoscaler.service"]:
+            return 0, render_external_slurm_autoscaler_service(supervisor), ""
+        if command == ["systemctl", "--user", "cat", "loom-oldlab-autoscaler.timer"]:
+            return 0, render_external_slurm_autoscaler_timer(supervisor), ""
+        if command == ["systemctl", "--user", "is-enabled", "loom-oldlab-autoscaler.timer"]:
+            return 0, "enabled\n", ""
+        if command == ["systemctl", "--user", "is-active", "loom-oldlab-autoscaler.timer"]:
+            return 0, "active\n", ""
+        if command == [
+            "systemctl",
+            "--user",
+            "show",
+            "loom-oldlab-autoscaler.service",
+            "--property=Result",
+            "--property=ExecMainStatus",
+            "--property=ExecMainCode",
+            "--property=ActiveState",
+            "--property=SubState",
+        ]:
+            return 0, "Result=success\nExecMainStatus=0\nActiveState=inactive\n", ""
+        raise AssertionError(command)
+
+    drift = diff_external_slurm_autoscaler_supervisors(profile, runner=_runner)
+
+    assert [item.path for item in drift] == [
+        "external_slurm_autoscaler_supervisors[public-beta/oldlab].exec_start.python_path",
+    ]
+    assert drift[0].desired == str(python_path)
+    assert drift[0].live == "missing"
+
+
+def test_external_slurm_autoscaler_supervisor_check_reports_unexecutable_python(
+    tmp_path: Path,
+) -> None:
+    workdir = tmp_path / "loom"
+    python_path = workdir / ".venv" / "bin" / "python"
+    script = workdir / "scripts" / "ops" / "worker_pool_autoscaler_external_once.py"
+    python_path.parent.mkdir(parents=True)
+    script.parent.mkdir(parents=True)
+    python_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    script.write_text("print('ok')\n", encoding="utf-8")
+    python_path.chmod(0o644)
+    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path.write_text(
+        f"""
+environment = "public-beta"
+
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab"
+pool_name = "oldlab"
+service_name = "loom-oldlab-autoscaler.service"
+timer_name = "loom-oldlab-autoscaler.timer"
+working_directory = "{workdir}"
+python_path = "{python_path}"
+script_path = "{script}"
+args = ["--pool-name", "oldlab"]
+enabled = true
+active = true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    profile = load_environment_state_profile(profile_path)
+    supervisor = profile.external_slurm_autoscaler_supervisors[0]
+
+    def _runner(command: list[str]) -> tuple[int, str, str]:
+        if command == ["systemctl", "--user", "cat", "loom-oldlab-autoscaler.service"]:
+            return 0, render_external_slurm_autoscaler_service(supervisor), ""
+        if command == ["systemctl", "--user", "cat", "loom-oldlab-autoscaler.timer"]:
+            return 0, render_external_slurm_autoscaler_timer(supervisor), ""
+        if command == ["systemctl", "--user", "is-enabled", "loom-oldlab-autoscaler.timer"]:
+            return 0, "enabled\n", ""
+        if command == ["systemctl", "--user", "is-active", "loom-oldlab-autoscaler.timer"]:
+            return 0, "active\n", ""
+        if command == [
+            "systemctl",
+            "--user",
+            "show",
+            "loom-oldlab-autoscaler.service",
+            "--property=Result",
+            "--property=ExecMainStatus",
+            "--property=ExecMainCode",
+            "--property=ActiveState",
+            "--property=SubState",
+        ]:
+            return 0, "Result=success\nExecMainStatus=0\nActiveState=inactive\n", ""
+        raise AssertionError(command)
+
+    drift = diff_external_slurm_autoscaler_supervisors(profile, runner=_runner)
+
+    assert [item.path for item in drift] == [
+        "external_slurm_autoscaler_supervisors[public-beta/oldlab].exec_start.python_path",
+    ]
+    assert drift[0].desired == str(python_path)
+    assert drift[0].live == "not executable"
+
+
+def test_external_slurm_autoscaler_supervisor_check_reports_failed_service_status(
+    tmp_path: Path,
+) -> None:
+    workdir = tmp_path / "loom"
+    python_path = workdir / ".venv" / "bin" / "python"
+    script = workdir / "scripts" / "ops" / "worker_pool_autoscaler_external_once.py"
+    python_path.parent.mkdir(parents=True)
+    script.parent.mkdir(parents=True)
+    python_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    script.write_text("print('ok')\n", encoding="utf-8")
+    python_path.chmod(0o755)
+    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path.write_text(
+        f"""
+environment = "public-beta"
+
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab"
+pool_name = "oldlab"
+service_name = "loom-oldlab-autoscaler.service"
+timer_name = "loom-oldlab-autoscaler.timer"
+working_directory = "{workdir}"
+python_path = "{python_path}"
+script_path = "{script}"
+args = ["--pool-name", "oldlab", "--namespace", "loom-public-beta"]
+enabled = true
+active = true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    profile = load_environment_state_profile(profile_path)
+    supervisor = profile.external_slurm_autoscaler_supervisors[0]
+
+    def _runner(command: list[str]) -> tuple[int, str, str]:
+        if command == ["systemctl", "--user", "cat", "loom-oldlab-autoscaler.service"]:
+            return 0, render_external_slurm_autoscaler_service(supervisor), ""
+        if command == ["systemctl", "--user", "cat", "loom-oldlab-autoscaler.timer"]:
+            return 0, render_external_slurm_autoscaler_timer(supervisor), ""
+        if command == ["systemctl", "--user", "is-enabled", "loom-oldlab-autoscaler.timer"]:
+            return 0, "enabled\n", ""
+        if command == ["systemctl", "--user", "is-active", "loom-oldlab-autoscaler.timer"]:
+            return 0, "active\n", ""
+        if command == [
+            "systemctl",
+            "--user",
+            "show",
+            "loom-oldlab-autoscaler.service",
+            "--property=Result",
+            "--property=ExecMainStatus",
+            "--property=ExecMainCode",
+            "--property=ActiveState",
+            "--property=SubState",
+        ]:
+            return (
+                0,
+                "Result=exit-code\nExecMainStatus=203\nExecMainCode=1\n"
+                "ActiveState=failed\nSubState=failed\n",
+                "",
+            )
+        raise AssertionError(command)
+
+    drift = diff_external_slurm_autoscaler_supervisors(profile, runner=_runner)
+
+    assert [item.path for item in drift] == [
+        "external_slurm_autoscaler_supervisors[public-beta/oldlab].service_status",
+    ]
+    assert drift[0].desired == "service result success"
+    assert drift[0].live == {
+        "active_state": "failed",
+        "exec_main_code": "1",
+        "exec_main_status": "203",
+        "result": "exit-code",
+        "sub_state": "failed",
+    }
 
 
 def test_external_slurm_autoscaler_supervisor_apply_writes_units_and_starts_timer(
