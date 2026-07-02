@@ -29,6 +29,10 @@ class LoomServiceSettings(BaseSettings):
     batch_runner_cp_token: SecretStr | None = None
     batch_runner_poll_interval_sec: int = 5
     batch_runner_submit_rate_per_sec: int = 100
+    taskset_materializer_poll_interval_sec: int = 5
+    taskset_materializer_batch_size: int = 1
+    taskset_materializer_claim_ttl_sec: int = 600
+    taskset_materializer_upstream_cache_root: Path = Path("/tmp/loom-taskset-upstream")
     bind_host: str = "0.0.0.0"
     bind_port: int = 8090
     control_plane_url: HttpUrl = cast(HttpUrl, "http://loom-control-plane:8080")

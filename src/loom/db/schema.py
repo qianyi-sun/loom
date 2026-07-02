@@ -405,6 +405,13 @@ class AdminAuditEvent(Base):
 
 class Task(Base):
     __tablename__ = "tasks"
+    __table_args__ = (
+        CheckConstraint(
+            "task_set_id IS NULL OR benchmark_id IS NULL",
+            name="tasks_benchmark_or_taskset_check",
+        ),
+        Index("tasks_task_set_id_idx", "task_set_id"),
+    )
     id: Mapped[str] = mapped_column(String, primary_key=True)
     checksum: Mapped[str] = mapped_column(String, nullable=False)
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
@@ -415,6 +422,10 @@ class Task(Base):
     # Parent benchmark, NULL for hand-authored tasks.
     benchmark_id: Mapped[str | None] = mapped_column(
         Text, ForeignKey("benchmarks.id"), nullable=True,
+    )
+    # Parent user TaskSet (#242 sub-plan 3). NULL for benchmark/hand-authored.
+    task_set_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("task_sets.id", ondelete="SET NULL"), nullable=True,
     )
     # PR-1 (benchmark series): open-ended key→value metadata. Adapters
     # populate from upstream (year/exam/difficulty/topic/…). The SPA

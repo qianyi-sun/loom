@@ -31,7 +31,7 @@ from loom.admin_secret import (
 from loom.db.schema_startup import assert_schema_at_head
 from loom.security.secret_store import assert_existing_secrets_decryptable
 from loom.startup_retry import retry_startup_dependency
-from loom_service.batch_runner import run_loop
+from loom_service.batch_runner import run_loop as batch_run_loop
 from loom_service.config import LoomServiceSettings
 from loom_service.metrics import (
     HTTP_REQUEST_LATENCY_SEC,
@@ -67,6 +67,7 @@ from loom_service.routes import (
 from loom_service.storage import (
     create_minio_client,
 )
+from loom_service.taskset_materializer import run_loop as taskset_materializer_run_loop
 
 
 def _load_admin_secret_verifier(
@@ -153,7 +154,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             f"Bearer {runner_token}" if runner_token else None
         )
         runner_task = asyncio.create_task(
-            run_loop(
+            batch_run_loop(
                 session_factory=session_factory,
                 http_client=http_client,
                 batch_size=settings.batch_runner_batch_size,
@@ -169,12 +170,29 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         )
         app.state.batch_runner_task = runner_task
 
+        materializer_task = asyncio.create_task(
+            taskset_materializer_run_loop(
+                session_factory=session_factory,
+                minio_client=minio_client,
+                artifacts_bucket=settings.artifacts_bucket,
+                upstream_cache_root=settings.taskset_materializer_upstream_cache_root,
+                batch_size=settings.taskset_materializer_batch_size,
+                poll_interval_sec=settings.taskset_materializer_poll_interval_sec,
+                claim_ttl_sec=settings.taskset_materializer_claim_ttl_sec,
+            ),
+            name="loom-svc-taskset-materializer",
+        )
+        app.state.taskset_materializer_task = materializer_task
+
         try:
             yield
         finally:
             runner_task.cancel()
+            materializer_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await runner_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await materializer_task
             with contextlib.suppress(Exception):
                 await gateway_client.aclose()
             with contextlib.suppress(Exception):
