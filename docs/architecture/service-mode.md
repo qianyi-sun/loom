@@ -500,9 +500,10 @@ production deploys must run migrations before rolling DB-facing services. Their
 production images carry `migrations/alembic.ini` and `migrations/versions/` so
 the startup gate compares the live DB against the same migration tree as the
 running image. Startup DB probes use bounded retry for transient DNS,
-connection, or Postgres-starting failures; schema mismatch, missing migrations,
-bad credentials, and SecretStore decrypt failures still fail startup without
-retry.
+connection, or Postgres-starting failures; worker startup retries initial
+Control Plane registration and orphan-trajectory cleanup lookups. Schema
+mismatch, missing migrations, bad credentials, and SecretStore decrypt failures
+still fail startup without retry.
 
 ## SPA
 

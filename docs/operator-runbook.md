@@ -395,8 +395,8 @@ knob you need.
    restart does not immediately crash the process; schema mismatch, bad
    credentials, and SecretStore decrypt failures remain hard startup failures.
    Worker pods use the same bounded startup retry for initial Control Plane
-   registration, while deterministic HTTP errors such as bad worker tokens still
-   fail immediately.
+   registration and the immediate orphan-trajectory cleanup lookup, while
+   deterministic HTTP errors such as bad worker tokens still fail immediately.
 
 6. **Apply DB-facing services and edge components:**
    ```bash
