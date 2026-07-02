@@ -2810,6 +2810,12 @@ Browser-only invite acceptance, SPA visual submission, and provider-error UI
 screenshots remain manual release evidence unless the staging environment adds a
 mock provider and browser automation job.
 
+For the final public-beta #49/#129 full/max-slot three-cluster canary, use
+[`docs/full-max-slot-canary-runbook.md`](full-max-slot-canary-runbook.md).
+That runbook is GO-gated: prepare the commands, preflight checklist, stop
+conditions, and evidence directory up front, but do not submit the canary until
+the coordinator confirms the clean anchor and #190 targeted durability evidence.
+
 ## Terminal-Bench 2.0 public-beta readiness
 
 The TB-2 adapter (`packages/loom-benchmark-terminal-bench-2`) and its 86-task
