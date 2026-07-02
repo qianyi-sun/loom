@@ -3244,6 +3244,54 @@ def _down(args: argparse.Namespace) -> int:
     return 0
 
 
+def _bootstrap_evidence_paths(args: argparse.Namespace) -> int:
+    """Emit sudo-install script for operator-writable rollout evidence dirs.
+
+    Delegates to :mod:`loom_cli.cluster_bootstrap_evidence_paths` for the
+    rendering + validation logic. This CLI shim only wires argparse defaults
+    and error-code translation.
+    """
+    import os
+
+    from loom_cli.cluster_bootstrap_evidence_paths import (
+        DEFAULT_EVIDENCE_PATHS,
+        ServiceDirCollisionError,
+        render_bootstrap_script,
+    )
+
+    operator_user = args.operator_user or os.environ.get("USER")
+    if not operator_user:
+        sys.stderr.write(
+            "error: --operator-user not supplied and $USER unset\n"
+        )
+        return 2
+
+    if args.evidence_paths is None:
+        evidence_paths: tuple[str, ...] = DEFAULT_EVIDENCE_PATHS
+    else:
+        evidence_paths = tuple(
+            name.strip() for name in args.evidence_paths.split(",") if name.strip()
+        )
+
+    try:
+        script = render_bootstrap_script(
+            rollout_root=Path(args.rollout_root),
+            operator_user=operator_user,
+            evidence_paths=evidence_paths,
+        )
+    except ServiceDirCollisionError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+
+    sys.stdout.write(script)
+    if not script.endswith("\n"):
+        sys.stdout.write("\n")
+    return 0
+
+
 def _bootstrap_secrets(args: argparse.Namespace) -> int:
     from loom_config.bootstrap import render_bootstrap_command
     schema = _load_schema(_REPO_ROOT / "config" / "loom-schema.toml")
@@ -3998,6 +4046,39 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_lifecycle.set_defaults(handler=_bootstrap_storage_lifecycle)
+
+    p_evidence = sub.add_parser(
+        "bootstrap-evidence-paths",
+        help=(
+            "Emit a sudo-install script that creates operator-writable "
+            "rollout evidence directories under a protected /data root "
+            "(#174)."
+        ),
+    )
+    p_evidence.add_argument(
+        "--rollout-root",
+        required=True,
+        help=(
+            "Absolute path to the environment data root (e.g. "
+            "/data/loom-public-beta)."
+        ),
+    )
+    p_evidence.add_argument(
+        "--operator-user",
+        default=None,
+        help=(
+            "POSIX username to own the created dirs. Defaults to $USER."
+        ),
+    )
+    p_evidence.add_argument(
+        "--evidence-paths",
+        default=None,
+        help=(
+            "Comma-separated leaf names to create under --rollout-root. "
+            "Defaults to `rollouts,evidence,logs`."
+        ),
+    )
+    p_evidence.set_defaults(handler=_bootstrap_evidence_paths)
 
     args = parser.parse_args(argv)
     return cast(int, args.handler(args))
