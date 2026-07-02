@@ -297,6 +297,32 @@ def test_run_smoke_fails_when_team_b_token_restores_platform_admin(monkeypatch) 
     assert "cross-team negative checks" in result.remediation
 
 
+def test_auth_whoami_accepts_user_owned_team_api_token() -> None:
+    gate = _load_gate_module()
+
+    result = gate._auth_whoami_result(
+        "team_a",
+        gate.HttpResponse(
+            status_code=200,
+            headers={},
+            body=(
+                b'{"credential_type":"user_owned_api_token",'
+                b'"principal_type":"team",'
+                b'"user_id":"03698dad-e6c3-42ed-a4f6-3781a6f25704",'
+                b'"username":"pb-smoke-team-a",'
+                b'"team_name":"Agentic RL",'
+                b'"role":null,'
+                b'"scopes":["read:own","submit","tokens:manage"],'
+                b'"is_platform_admin":false}'
+            ),
+        ),
+    )
+
+    assert result.status == "pass"
+    assert "user_owned_api_token" in result.detail
+    assert "pb-smoke-team-a" in result.detail
+
+
 def test_main_writes_evidence_when_run_library_list_times_out(
     monkeypatch,
     tmp_path: Path,
