@@ -373,3 +373,69 @@ async def test_get_delete_rebuild(tasksets_setup) -> None:
 
         gone = await client.get(f"/api/v1/tasksets/{task_set_id}", headers=headers)
         assert gone.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_list_tasksets_returns_own_team_rows(tasksets_setup) -> None:
+    app, tokens, _teams = tasksets_setup
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        headers = {"Authorization": f"Bearer {tokens['team_a']}"}
+        post = await client.post(
+            "/api/v1/tasksets",
+            headers=headers,
+            files={"manifest": ("manifest.yaml", _manifest_bytes(), "application/x-yaml")},
+        )
+        assert post.status_code == 202
+        task_set_id = post.json()["task_set_id"]
+        list_resp = await client.get("/api/v1/tasksets", headers=headers)
+    assert list_resp.status_code == 200
+    items = list_resp.json()["items"]
+    assert len(items) == 1
+    row = items[0]
+    assert row["task_set_id"] == task_set_id
+    assert row["display_name"] == "Sample Tasks"
+    assert row["status"] == "materializing"
+    assert row["evaluation_ready"] is False
+    assert row["task_count"] == 0
+    assert "created_at" in row
+
+
+@pytest.mark.asyncio
+async def test_list_tasksets_excludes_other_team(tasksets_setup) -> None:
+    app, tokens, _teams = tasksets_setup
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post(
+            "/api/v1/tasksets",
+            headers={"Authorization": f"Bearer {tokens['team_a']}"},
+            files={"manifest": ("manifest.yaml", _manifest_bytes(), "application/x-yaml")},
+        )
+        list_b = await client.get(
+            "/api/v1/tasksets",
+            headers={"Authorization": f"Bearer {tokens['team_b']}"},
+        )
+    assert list_b.status_code == 200
+    assert list_b.json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_list_tasksets_excludes_soft_deleted(tasksets_setup) -> None:
+    app, tokens, _teams = tasksets_setup
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        headers = {"Authorization": f"Bearer {tokens['team_a']}"}
+        post = await client.post(
+            "/api/v1/tasksets",
+            headers=headers,
+            files={"manifest": ("manifest.yaml", _manifest_bytes(), "application/x-yaml")},
+        )
+        task_set_id = post.json()["task_set_id"]
+        delete_resp = await client.delete(
+            f"/api/v1/tasksets/{task_set_id}",
+            headers=headers,
+        )
+        assert delete_resp.status_code == 204
+        list_resp = await client.get("/api/v1/tasksets", headers=headers)
+    assert list_resp.status_code == 200
+    assert list_resp.json()["items"] == []

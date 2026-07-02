@@ -1,7 +1,8 @@
-"""User TaskSet intake API (#242 sub-plan 2).
+"""User TaskSet intake API (#242 sub-plan 2, list in sub-plan 5).
 
 Routes:
 - POST   /api/v1/tasksets              — multipart submit (202)
+- GET    /api/v1/tasksets              — team-scoped list
 - GET    /api/v1/tasksets/{id}         — status + capabilities
 - POST   /api/v1/tasksets/{id}/rebuild — re-enqueue materialization (202)
 - DELETE /api/v1/tasksets/{id}         — soft-delete (204)
@@ -11,6 +12,7 @@ Cross-team access returns 404. Native ``/api/v1/benchmarks`` is unchanged.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -19,7 +21,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from loom.auth import AuthContext
-from loom.db.schema import TaskSetManifest
+from loom.db.schema import TaskSet, TaskSetManifest
+from loom.db.task_set_visibility import visible_task_sets
 from loom.models.taskset import UserTaskSetManifest
 from loom.taskset.intents import normalize_intents
 from loom_service.auth_guards import is_admin, require_scope, require_submitting_user
@@ -75,6 +78,24 @@ class TaskSetDetailResponse(BaseModel):
     materialization_job_state: str | None = None
 
 
+class TaskSetListItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    task_set_id: str
+    display_name: str
+    status: str
+    intents: list[str]
+    evaluation_ready: bool
+    task_count: int
+    created_at: datetime
+
+
+class TaskSetListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[TaskSetListItem] = Field(default_factory=list)
+
+
 def _require_team_id(ctx: AuthContext) -> UUID:
     if ctx.team_id is None:
         raise HTTPException(
@@ -113,6 +134,29 @@ async def create_task_set(
         transform_upload=transform,
     )
     return TaskSetSubmitResponse.model_validate(intake_result_to_response(result))
+
+
+@router.get("/tasksets", response_model=TaskSetListResponse)
+async def list_task_sets(sc: SessionAndCtx) -> TaskSetListResponse:
+    session, ctx = sc
+    require_scope(ctx, "read:own")
+    team_id = _team_id_for_read(ctx)
+    stmt = visible_task_sets(team_id=team_id).order_by(TaskSet.created_at.desc())
+    rows = (await session.execute(stmt)).scalars().all()
+    return TaskSetListResponse(
+        items=[
+            TaskSetListItem(
+                task_set_id=row.id,
+                display_name=row.display_name,
+                status=row.status,
+                intents=list(row.intents),
+                evaluation_ready=row.evaluation_ready,
+                task_count=row.task_count,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ],
+    )
 
 
 @router.get("/tasksets/{task_set_id:path}", response_model=TaskSetDetailResponse)
