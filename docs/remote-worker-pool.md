@@ -169,8 +169,9 @@ LOOM_WORKER_MINIO_ENDPOINT=http://control-node.lan:19000
 ```
 
 `LOOM_WORKER_SUBPROCESS_GATEWAY_URL` is optional. When it is set,
-`worker_service_tunnels.py check`, `check-remote`, `print-check-script`, and
-`watchdog` add a `subprocess-gateway` probe against the Gateway health endpoint.
+`worker_service_tunnels.py check`, `check-remote`, `print-check-script`,
+`watchdog`, and `watchdog-evidence` add or report a `subprocess-gateway` probe
+against the Gateway health endpoint.
 For `host.docker.internal` URLs, the script runs outside the sandbox and probes
 the equivalent host-side loopback URL, for example
 `http://127.0.0.1:30444/healthz`. Repeated `subprocess-gateway` failures cause
@@ -186,8 +187,16 @@ agent startup.
 The same script provides the rollout gate for those exact URLs:
 
 ```bash
+scripts/ops/worker_service_tunnels.py watchdog-evidence \
+  --expected-script-path "$PWD/scripts/ops/worker_service_tunnels.py" \
+  | tee remote-worker-watchdog-evidence.json
+
+export REMOTE_WORKER_ENV_FILE="$(
+  jq -r '.env_file.path' remote-worker-watchdog-evidence.json
+)"
+
 scripts/ops/worker_service_tunnels.py check \
-  --env-file .env.remote-worker
+  --env-file "$REMOTE_WORKER_ENV_FILE"
 ```
 
 For immediate local self-heal testing without waiting for the timer, run:
@@ -201,7 +210,7 @@ Validate from worker hosts too, not only from the control node:
 
 ```bash
 scripts/ops/worker_service_tunnels.py check-remote worker-hosts.txt \
-  --env-file .env.remote-worker
+  --env-file "$REMOTE_WORKER_ENV_FILE"
 ```
 
 `check-remote` sends only the derived health URLs over SSH. It does not send or
@@ -905,6 +914,7 @@ temp dirs, or trajectory cache files.
 Before treating a remote worker pool as usable:
 
 1. Install or verify durable control-node service tunnels with
+   `scripts/ops/worker_service_tunnels.py watchdog-evidence` and
    `scripts/ops/worker_service_tunnels.py check`.
 2. Run `scripts/ops/worker_service_tunnels.py check-remote` from every
    candidate worker context and record endpoint reachability.
