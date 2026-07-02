@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from loom_cli.__main__ import main
-from loom_cli.config import LoomConfig, load_config
+from loom_cli.config import LoomConfig, load_config, save_config
 from loom_cli.server_client import authed_client
 
 
@@ -466,6 +466,44 @@ def test_authed_client_uses_session_cookie_and_csrf_without_bearer() -> None:
         assert client.headers["X-Loom-CSRF"] == "loom_csrf_raw"
 
 
+def test_authed_client_refreshes_session_csrf_before_unsafe_request() -> None:
+    cfg = LoomConfig(
+        server_url="https://loom.test",
+        auth_session_cookie="loom_session_old",
+        auth_csrf_token="loom_csrf_old",
+    )
+    save_config(cfg)
+    requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/v1/auth/me":
+            return httpx.Response(
+                200,
+                json={"csrf_token": "loom_csrf_new"},
+                headers={
+                    "set-cookie": "loom_session=loom_session_new; Path=/; HttpOnly",
+                },
+            )
+        if request.url.path == "/api/v1/batches":
+            assert request.headers["X-Loom-CSRF"] == "loom_csrf_new"
+            assert request.headers["cookie"] == "loom_session=loom_session_new"
+            return httpx.Response(201, json={"id": "batch-1"})
+        return httpx.Response(404, json={"detail": request.url.path})
+
+    with authed_client(cfg, transport=httpx.MockTransport(_handler)) as client:
+        response = client.post("/api/v1/batches", json={})
+
+    assert response.status_code == 201
+    assert [request.url.path for request in requests] == [
+        "/api/v1/auth/me",
+        "/api/v1/batches",
+    ]
+    persisted = load_config()
+    assert persisted.auth_session_cookie == "loom_session_new"
+    assert persisted.auth_csrf_token == "loom_csrf_new"
+
+
 def test_whoami_when_not_logged_in_returns_2(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -519,6 +557,45 @@ def test_whoami_prints_legacy_team_token_scopes_and_prefix(
     assert "Scopes:    providers:manage, read:own, submit" in out
     assert "Token:     loom_api_abcd1234" in out
     assert raw_token not in out
+
+
+def test_whoami_persists_rotated_session_csrf(
+    mock_auth_server: MockAuthServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    save_config(
+        LoomConfig(
+            server_url="https://loom.test",
+            auth_session_cookie="loom_session_old",
+            auth_csrf_token="loom_csrf_old",
+        )
+    )
+    mock_auth_server.canned[("GET", "/api/v1/auth/whoami")] = httpx.Response(
+        200,
+        json={
+            "auth_kind": "session",
+            "principal_type": "user",
+            "username": "Ada",
+            "team_name": "Research",
+            "role": "owner",
+            "scopes": ["read:own"],
+            "csrf_token": "loom_csrf_rotated",
+        },
+        headers={
+            "set-cookie": "loom_session=loom_session_rotated; Path=/; HttpOnly",
+        },
+    )
+
+    rc = main(["auth", "whoami"])
+
+    assert rc == 0
+    persisted = load_config()
+    assert persisted.auth_session_cookie == "loom_session_rotated"
+    assert persisted.auth_csrf_token == "loom_csrf_rotated"
+    out = capsys.readouterr().out
+    assert "Principal: browser session" in out
+    assert "loom_session_rotated" not in out
+    assert "loom_csrf_rotated" not in out
 
 
 def test_whoami_prints_user_owned_api_token_identity(

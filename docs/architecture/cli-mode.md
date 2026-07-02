@@ -184,12 +184,18 @@ Gateway, Postgres, MinIO, or worker routes.
   `0600` on POSIX systems.
 - `loom auth whoami` calls `GET /api/v1/auth/whoami` and prints server, team,
   role/scopes, credential type, submitting user when present, and token prefix
-  without printing raw token material.
+  without printing raw token material. For browser-session auth, it also
+  persists any rotated session cookie or CSRF token returned by the server.
+  Mutating CLI requests refresh browser-session CSRF from `/api/v1/auth/me`
+  before sending unsafe methods and retry once on CSRF-specific rejection.
 - `loom providers ...` manages team provider connections through
   `/api/v1/provider-connections`; provider keys use `env:VAR`, `file:PATH`, or
   stdin sources rather than literal argv values.
 - `loom eval batch ...`, `loom eval trial ...`, and `loom eval usage ...` use
-  `/api/v1/batches`, `/api/v1/trials`, and `/api/v1/usage`.
+  `/api/v1/batches`, `/api/v1/trials`, and `/api/v1/usage`. Batch creation
+  validates agents locally when the local catalog is complete, and otherwise
+  resolves the deployed service's `/api/v1/agents` catalog so service-mode
+  submissions do not require `loom-launcher` installed in the operator venv.
 - `loom eval trial download TRIAL_ID --kind atif|trajectory|artifact` downloads
   through service-proxied `/api/v1/trials/...` routes. The CLI does not print
   raw MinIO/S3 signed URLs; `trial show` prints download commands.
