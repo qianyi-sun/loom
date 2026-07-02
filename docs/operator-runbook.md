@@ -152,10 +152,34 @@ Inspect a live environment with its own kubeconfig:
 
 ```bash
 export KUBECONFIG=/secure/path/to/loom-prod.kubeconfig
-loom cluster status --namespace loom-prod --format table
+loom cluster rollout-evidence cluster-status --namespace loom-prod --status-format table \
+  | tee "$ROLLOUT_DIR/cluster-status.txt"
 loom cluster audit --config deploy/environments/production.cluster.toml
 kubectl -n loom-prod get deploy,sts,svc,ingress
 ```
+
+For protected rollouts, collect image-tag evidence through the compatibility
+helper rather than Docker Go-template snippets. The helper reads Docker
+`RepoTags`, never prints container env, and exits non-zero with structured JSON
+diagnostics if expected tags are missing or Docker metadata cannot be read:
+
+```bash
+jq -r '.rendered_manifest.deployment_images[][]' \
+  "$ROLLOUT_DIR/release-manifest-$IMAGE_TAG.json" \
+  | sort -u > "$ROLLOUT_DIR/expected-image-tags.txt"
+
+docker image inspect $(cat "$ROLLOUT_DIR/expected-image-tags.txt") \
+  > "$ROLLOUT_DIR/docker-image-inspect.json"
+
+loom cluster rollout-evidence docker-images \
+  --inspect-json "$ROLLOUT_DIR/docker-image-inspect.json" \
+  $(sed 's/^/--expect-repo-tag /' "$ROLLOUT_DIR/expected-image-tags.txt") \
+  | tee "$ROLLOUT_DIR/docker-image-evidence.json"
+```
+
+`loom cluster rollout-evidence cluster-status --status-format text` remains a
+legacy alias for current `table` output. Prefer `--status-format json` for
+machine-readable rollout artifacts.
 
 Rollback stays environment-local. Use the matching `*.cluster.toml`,
 namespace, kubeconfig, DB backup, and object buckets for the environment being
@@ -2460,18 +2484,26 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    workers, worker-token admin routes, and batch-runner bootstrap routes stay
    internal-only.
 4. **Remote-worker private tunnels hold.** If remote workers are attached,
-   verify the tunnel watchdog timer is active, then verify the exact
-   worker-facing URLs from the control node and at least one worker host. If
+   collect watchdog evidence, then verify the exact worker-facing URLs from the
+   control node and at least one worker host. The evidence command resolves the
+   active `--env-file` path from the systemd unit without reading or printing
+   secret values, checks the watchdog script path, and records timer state. If
    `LOOM_WORKER_SUBPROCESS_GATEWAY_URL` is set, this includes the
    `subprocess-gateway` facade probe used by Docker sandboxes:
    ```bash
-   systemctl --user is-active loom-remote-worker-tunnel-watchdog.timer
+   scripts/ops/worker_service_tunnels.py watchdog-evidence \
+     --expected-script-path "$PWD/scripts/ops/worker_service_tunnels.py" \
+     | tee "$ROLLOUT_DIR/watchdog-evidence.json"
+
+   export REMOTE_WORKER_ENV_FILE="$(
+     jq -r '.env_file.path' "$ROLLOUT_DIR/watchdog-evidence.json"
+   )"
 
    scripts/ops/worker_service_tunnels.py check \
-     --env-file .env.remote-worker
+     --env-file "$REMOTE_WORKER_ENV_FILE"
 
    scripts/ops/worker_service_tunnels.py check-remote worker-hosts.txt \
-     --env-file .env.remote-worker
+     --env-file "$REMOTE_WORKER_ENV_FILE"
    ```
    This check is required after every rollout because a public ingress health
    check can pass while private worker tunnels are down.
@@ -2802,7 +2834,8 @@ checklist:
 - **`scripts/ops/worker_service_tunnels.py`** — covers the private
   remote-worker tunnel gate when out-of-cluster workers are attached. It renders
   durable systemd user units, installs the watchdog timer that restarts stale
-  active-looking tunnel units after repeated failed probes, checks the exact
+  active-looking tunnel units after repeated failed probes, emits secret-free
+  watchdog evidence with the resolved env-file path, checks the exact
   worker-facing URLs locally, includes the optional subprocess Gateway facade
   probe, and verifies those URLs from SSH worker hosts.
 

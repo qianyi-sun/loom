@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from argparse import Namespace
 from pathlib import Path
@@ -496,6 +497,140 @@ def test_watchdog_systemd_timer_runs_healthcheck_periodically() -> None:
     assert "OnUnitActiveSec=30" in timer
     assert "Unit=loom-remote-worker-tunnel-watchdog.service" in timer
     assert "WantedBy=timers.target" in timer
+
+
+def test_watchdog_evidence_discovers_env_file_without_reading_secrets(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    unit_dir = tmp_path / "systemd"
+    unit_dir.mkdir()
+    env_file = tmp_path / ".env.remote-worker"
+    env_file.write_text(
+        "\n".join([
+            "LOOM_WORKER_TOKEN=loom_w_should_not_print",
+            "LOOM_WORKER_MINIO_SECRET_KEY=secret_should_not_print",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    (unit_dir / "loom-remote-worker-tunnel-watchdog.service").write_text(
+        "\n".join([
+            "[Service]",
+            "ExecStart=/srv/loom-current/scripts/ops/worker_service_tunnels.py "
+            "watchdog "
+            f"--env-file {env_file} "
+            "--state-file /var/lib/loom/watchdog.json "
+            "--timeout-sec 5 "
+            "--failure-threshold 3",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    (unit_dir / "loom-remote-worker-tunnel-watchdog.timer").write_text(
+        module.render_watchdog_systemd_timer(interval_sec=30),
+        encoding="utf-8",
+    )
+
+    evidence = module.collect_watchdog_evidence(
+        unit_dir=unit_dir,
+        expected_script_path="/srv/loom-current/scripts/ops/worker_service_tunnels.py",
+        timer_active="active",
+    )
+
+    rendered = json.dumps(evidence)
+    assert evidence["ok"] is True
+    assert evidence["env_file"] == {
+        "path": str(env_file),
+        "exists": True,
+    }
+    assert evidence["service"]["script_path"] == (
+        "/srv/loom-current/scripts/ops/worker_service_tunnels.py"
+    )
+    assert evidence["timer"]["active_state"] == "active"
+    assert "loom_w_should_not_print" not in rendered
+    assert "secret_should_not_print" not in rendered
+
+
+def test_watchdog_evidence_reports_structured_path_drift(tmp_path: Path) -> None:
+    module = _load_module()
+    unit_dir = tmp_path / "systemd"
+    unit_dir.mkdir()
+    (unit_dir / "loom-remote-worker-tunnel-watchdog.service").write_text(
+        "\n".join([
+            "[Service]",
+            "ExecStart=/srv/loom-old/scripts/ops/worker_service_tunnels.py "
+            "watchdog --env-file /secure/.env.remote-worker",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+
+    evidence = module.collect_watchdog_evidence(
+        unit_dir=unit_dir,
+        expected_script_path="/srv/loom-current/scripts/ops/worker_service_tunnels.py",
+        timer_active="inactive",
+    )
+
+    assert evidence["ok"] is False
+    assert {
+        "code": "watchdog_script_path_drift",
+        "message": "Watchdog unit ExecStart points at a different script path.",
+        "expected_script_path": "/srv/loom-current/scripts/ops/worker_service_tunnels.py",
+        "actual_script_path": "/srv/loom-old/scripts/ops/worker_service_tunnels.py",
+    } in evidence["diagnostics"]
+    assert {
+        "code": "watchdog_timer_inactive",
+        "message": "Watchdog timer is not active.",
+        "active_state": "inactive",
+    } in evidence["diagnostics"]
+
+
+def test_watchdog_evidence_command_outputs_secret_free_json(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    module = _load_module()
+    unit_dir = tmp_path / "systemd"
+    unit_dir.mkdir()
+    env_file = tmp_path / ".env.remote-worker"
+    env_file.write_text(
+        "\n".join([
+            "LOOM_WORKER_TOKEN=loom_w_should_not_print",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    (unit_dir / "loom-remote-worker-tunnel-watchdog.service").write_text(
+        "\n".join([
+            "[Service]",
+            "ExecStart=/srv/loom-current/scripts/ops/worker_service_tunnels.py "
+            f"watchdog --env-file {env_file}",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    (unit_dir / "loom-remote-worker-tunnel-watchdog.timer").write_text(
+        module.render_watchdog_systemd_timer(interval_sec=30),
+        encoding="utf-8",
+    )
+
+    rc = module.main([
+        "watchdog-evidence",
+        "--unit-dir",
+        str(unit_dir),
+        "--expected-script-path",
+        "/srv/loom-current/scripts/ops/worker_service_tunnels.py",
+        "--timer-active",
+        "active",
+    ])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    body = json.loads(out)
+    assert body["ok"] is True
+    assert body["env_file"]["path"] == str(env_file)
+    assert "loom_w_should_not_print" not in out
 
 
 def test_tunnel_script_has_no_environment_specific_hosts() -> None:

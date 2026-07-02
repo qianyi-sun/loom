@@ -16,6 +16,7 @@ import shlex
 import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 from urllib.error import URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import urlopen
@@ -492,6 +493,146 @@ def _write_watchdog_state(state_file: Path, state: dict[str, int]) -> None:
     tmp.replace(state_file)
 
 
+def _evidence_diagnostic(
+    code: str,
+    message: str,
+    **details: str,
+) -> dict[str, str]:
+    return {"code": code, "message": message, **details}
+
+
+def _read_first_exec_start(unit_text: str) -> str | None:
+    for raw_line in unit_text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("ExecStart="):
+            return line.removeprefix("ExecStart=").strip()
+    return None
+
+
+def _parse_watchdog_exec_start(exec_start: str | None) -> tuple[str | None, str | None]:
+    if not exec_start:
+        return None, None
+    try:
+        parts = shlex.split(exec_start)
+    except ValueError:
+        return None, None
+    if not parts:
+        return None, None
+    script_path = parts[0]
+    env_file: str | None = None
+    for index, part in enumerate(parts):
+        if part == "--env-file" and index + 1 < len(parts):
+            env_file = parts[index + 1]
+            break
+        if part.startswith("--env-file="):
+            env_file = part.split("=", 1)[1]
+            break
+    return script_path, env_file
+
+
+def collect_watchdog_evidence(
+    *,
+    unit_dir: Path,
+    expected_script_path: str | None = None,
+    timer_active: str | None = None,
+) -> dict[str, Any]:
+    service_path = unit_dir.expanduser() / watchdog_service_name()
+    timer_path = unit_dir.expanduser() / watchdog_timer_name()
+    diagnostics: list[dict[str, str]] = []
+
+    service_text = ""
+    if service_path.exists():
+        service_text = service_path.read_text(encoding="utf-8")
+    else:
+        diagnostics.append(
+            _evidence_diagnostic(
+                "watchdog_service_missing",
+                "Watchdog service unit was not found.",
+                path=str(service_path),
+            )
+        )
+
+    if not timer_path.exists():
+        diagnostics.append(
+            _evidence_diagnostic(
+                "watchdog_timer_missing",
+                "Watchdog timer unit was not found.",
+                path=str(timer_path),
+            )
+        )
+
+    exec_start = _read_first_exec_start(service_text)
+    script_path, env_file = _parse_watchdog_exec_start(exec_start)
+    if exec_start is None and service_path.exists():
+        diagnostics.append(
+            _evidence_diagnostic(
+                "watchdog_exec_start_missing",
+                "Watchdog service unit does not contain ExecStart.",
+                path=str(service_path),
+            )
+        )
+    if env_file is None and service_path.exists():
+        diagnostics.append(
+            _evidence_diagnostic(
+                "watchdog_env_file_unresolved",
+                "Watchdog unit ExecStart does not include --env-file.",
+                path=str(service_path),
+            )
+        )
+    if (
+        expected_script_path
+        and script_path is not None
+        and script_path != expected_script_path
+    ):
+        diagnostics.append(
+            _evidence_diagnostic(
+                "watchdog_script_path_drift",
+                "Watchdog unit ExecStart points at a different script path.",
+                expected_script_path=expected_script_path,
+                actual_script_path=script_path,
+            )
+        )
+    if timer_active is not None and timer_active != "active":
+        diagnostics.append(
+            _evidence_diagnostic(
+                "watchdog_timer_inactive",
+                "Watchdog timer is not active.",
+                active_state=timer_active,
+            )
+        )
+
+    env_path = Path(env_file).expanduser() if env_file else None
+    if env_path is not None and not env_path.exists():
+        diagnostics.append(
+            _evidence_diagnostic(
+                "watchdog_env_file_missing",
+                "Watchdog unit --env-file path does not exist.",
+                path=str(env_path),
+            )
+        )
+    return {
+        "schema_version": 1,
+        "ok": not diagnostics,
+        "service": {
+            "name": watchdog_service_name(),
+            "path": str(service_path),
+            "exists": service_path.exists(),
+            "script_path": script_path,
+        },
+        "timer": {
+            "name": watchdog_timer_name(),
+            "path": str(timer_path),
+            "exists": timer_path.exists(),
+            "active_state": timer_active,
+        },
+        "env_file": {
+            "path": str(env_path) if env_path is not None else None,
+            "exists": env_path.exists() if env_path is not None else False,
+        },
+        "diagnostics": diagnostics,
+    }
+
+
 def apply_watchdog_results(
     results: list[ProbeResult],
     *,
@@ -607,6 +748,32 @@ def _run_watchdog(args: argparse.Namespace) -> int:
     # unit successfully, the systemd oneshot should not remain failed merely
     # because the pre-restart probe saw the stale tunnel.
     return 0
+
+
+def _systemctl_user_is_active(unit: str) -> str:
+    completed = subprocess.run(
+        ["systemctl", "--user", "is-active", unit],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    state = completed.stdout.strip()
+    if state:
+        return state
+    return "unknown"
+
+
+def _run_watchdog_evidence(args: argparse.Namespace) -> int:
+    timer_active = args.timer_active
+    if timer_active is None:
+        timer_active = _systemctl_user_is_active(watchdog_timer_name())
+    evidence = collect_watchdog_evidence(
+        unit_dir=Path(args.unit_dir),
+        expected_script_path=args.expected_script_path,
+        timer_active=timer_active,
+    )
+    print(json.dumps(evidence, indent=2, sort_keys=True))
+    return 0 if evidence["ok"] else 1
 
 
 def _run_render_systemd(args: argparse.Namespace) -> int:
@@ -832,6 +999,33 @@ def build_parser() -> argparse.ArgumentParser:
     watchdog.add_argument("--timeout-sec", type=float, default=5)
     watchdog.add_argument("--failure-threshold", type=int, default=3)
     watchdog.set_defaults(func=_run_watchdog)
+
+    watchdog_evidence = subparsers.add_parser(
+        "watchdog-evidence",
+        help=(
+            "Print secret-free JSON evidence for the watchdog unit path, "
+            "resolved env-file path, and timer state."
+        ),
+    )
+    watchdog_evidence.add_argument(
+        "--unit-dir",
+        default="~/.config/systemd/user",
+        help="systemd user unit directory to inspect.",
+    )
+    watchdog_evidence.add_argument(
+        "--expected-script-path",
+        default=None,
+        help="Expected durable worker_service_tunnels.py path for drift checks.",
+    )
+    watchdog_evidence.add_argument(
+        "--timer-active",
+        default=None,
+        help=(
+            "Override timer active state for dry-run tests. If omitted, "
+            "`systemctl --user is-active` is used."
+        ),
+    )
+    watchdog_evidence.set_defaults(func=_run_watchdog_evidence)
 
     return parser
 

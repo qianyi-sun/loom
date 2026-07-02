@@ -33,6 +33,13 @@ from loom_cli.cluster_backup_guard import (
     write_backup_manifest,
 )
 from loom_cli.cluster_config import ClusterConfig, load_cluster_config
+from loom_cli.cluster_rollout_evidence import (
+    build_docker_image_evidence,
+    docker_image_inspect,
+    load_docker_inspect_json,
+    normalize_cluster_status_format,
+    render_rollout_evidence_json,
+)
 from loom_config.doctor import (
     DoctorReport,
 )
@@ -1221,6 +1228,38 @@ def _release_manifest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _rollout_evidence_docker_images(args: argparse.Namespace) -> int:
+    try:
+        if args.inspect_json:
+            docs = load_docker_inspect_json(Path(args.inspect_json))
+        else:
+            inspect_targets = args.image or args.expect_repo_tag
+            if not inspect_targets:
+                raise ValueError(
+                    "provide --image or --expect-repo-tag when --inspect-json is omitted"
+                )
+            docs = docker_image_inspect(inspect_targets)
+        evidence = build_docker_image_evidence(
+            docs,
+            expected_repo_tags=args.expect_repo_tag,
+        )
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        evidence = {
+            "schema_version": 1,
+            "ok": False,
+            "images": [],
+            "expected_repo_tags": args.expect_repo_tag,
+            "diagnostics": [
+                {
+                    "code": "docker_image_evidence_unavailable",
+                    "message": str(exc),
+                },
+            ],
+        }
+    sys.stdout.write(render_rollout_evidence_json(evidence))
+    return 0 if evidence["ok"] else 1
+
+
 def _audit(args: argparse.Namespace) -> int:
     """`loom cluster audit` — render manifests and check the
     public/internal boundary (#77). Renders without touching the
@@ -1276,6 +1315,63 @@ def _status(args: argparse.Namespace) -> int:
         return 2
 
     if args.format == "json":
+        sys.stdout.write(_format_json(status))
+    else:
+        sys.stdout.write(_format_table(status))
+
+    return 0 if status.all_ready else 1
+
+
+def _rollout_evidence_cluster_status(args: argparse.Namespace) -> int:
+    try:
+        normalized_format, diagnostics = normalize_cluster_status_format(
+            args.status_format,
+        )
+    except ValueError as exc:
+        evidence = {
+            "schema_version": 1,
+            "ok": False,
+            "diagnostics": [
+                {
+                    "code": "cluster_status_format_invalid",
+                    "message": str(exc),
+                    "requested_format": args.status_format,
+                },
+            ],
+        }
+        sys.stdout.write(render_rollout_evidence_json(evidence))
+        return 2
+
+    if diagnostics:
+        sys.stderr.write(render_rollout_evidence_json({
+            "schema_version": 1,
+            "ok": True,
+            "diagnostics": diagnostics,
+        }))
+    try:
+        apps_v1, net_v1, core_v1, _storage_v1 = _load_clients(args.context)
+        status = collect_status(
+            apps_v1,
+            net_v1,
+            core_v1,
+            args.namespace,
+            context=args.context,
+        )
+    except Exception as exc:
+        evidence = {
+            "schema_version": 1,
+            "ok": False,
+            "diagnostics": [
+                {
+                    "code": "cluster_status_evidence_unavailable",
+                    "message": str(exc),
+                },
+            ],
+        }
+        sys.stdout.write(render_rollout_evidence_json(evidence))
+        return 2
+
+    if normalized_format == "json":
         sys.stdout.write(_format_json(status))
     else:
         sys.stdout.write(_format_table(status))
@@ -3039,6 +3135,61 @@ def dispatch(argv: list[str]) -> int:
         help="Output format. JSON for CI/scripting.",
     )
     p_status.set_defaults(handler=_status)
+
+    p_rollout_evidence = sub.add_parser(
+        "rollout-evidence",
+        help="Collect version-compatible protected-rollout evidence.",
+    )
+    rollout_sub = p_rollout_evidence.add_subparsers(
+        dest="rollout_evidence_cmd",
+        required=True,
+    )
+    p_rollout_docker = rollout_sub.add_parser(
+        "docker-images",
+        help=(
+            "Collect Docker image tag evidence from JSON inspect output or "
+            "live `docker image inspect`."
+        ),
+    )
+    p_rollout_docker.add_argument(
+        "--image",
+        action="append",
+        default=[],
+        help="Image reference to inspect with Docker. Repeatable.",
+    )
+    p_rollout_docker.add_argument(
+        "--expect-repo-tag",
+        action="append",
+        default=[],
+        help="RepoTag that must appear in Docker inspect RepoTags. Repeatable.",
+    )
+    p_rollout_docker.add_argument(
+        "--inspect-json",
+        default=None,
+        help="Path to saved `docker image inspect` JSON for dry-run evidence.",
+    )
+    p_rollout_docker.set_defaults(handler=_rollout_evidence_docker_images)
+
+    p_rollout_status = rollout_sub.add_parser(
+        "cluster-status",
+        help="Run `loom cluster status` with current and legacy format aliases.",
+    )
+    p_rollout_status.add_argument(
+        "--context",
+        default=None,
+        help="kubeconfig context (default: current context).",
+    )
+    p_rollout_status.add_argument(
+        "--namespace",
+        default="loom",
+        help="Kubernetes namespace (default: loom).",
+    )
+    p_rollout_status.add_argument(
+        "--status-format",
+        default="json",
+        help="Status output format: json, table, or legacy alias text.",
+    )
+    p_rollout_status.set_defaults(handler=_rollout_evidence_cluster_status)
 
     p_render = sub.add_parser(
         "render",

@@ -106,11 +106,12 @@ Attach these to the release issue or release PR:
   benchmark has a canonical scoring reference, score semantics, Harbor/upstream
   parity decision, and at least one same-output replay case definition.
 - If a remote-worker pool is attached, private tunnel evidence from
-  `scripts/ops/worker_service_tunnels.py check` and `check-remote` showing the
-  Control Plane, Gateway, optional subprocess Gateway facade, and MinIO
-  worker-facing URLs are healthy from the control node and from at least one
-  worker-host context, plus evidence that
-  `loom-remote-worker-tunnel-watchdog.timer` is active on the control node.
+  `scripts/ops/worker_service_tunnels.py watchdog-evidence`, `check`, and
+  `check-remote` showing the Control Plane, Gateway, optional subprocess
+  Gateway facade, and MinIO worker-facing URLs are healthy from the control
+  node and from at least one worker-host context. The watchdog evidence must
+  show the active timer state, the durable script path, and the resolved
+  env-file path without printing env-file contents.
 - If OLDLAB elastic workers are enabled, `worker_capacity_smoke` release-gate
   evidence must include the smoke batch id, runtime, failure count, and one
   `oldlab_worker_records` entry per OLDLAB worker with node name, Slurm job id,
@@ -319,13 +320,19 @@ If the public beta uses extra remote workers outside the Kubernetes cluster,
 run this private gate after every rollout and before load testing:
 
 ```bash
-systemctl --user is-active loom-remote-worker-tunnel-watchdog.timer
+scripts/ops/worker_service_tunnels.py watchdog-evidence \
+  --expected-script-path "$PWD/scripts/ops/worker_service_tunnels.py" \
+  | tee public-beta-watchdog-evidence.json
+
+export REMOTE_WORKER_ENV_FILE="$(
+  jq -r '.env_file.path' public-beta-watchdog-evidence.json
+)"
 
 scripts/ops/worker_service_tunnels.py check \
-  --env-file .env.remote-worker
+  --env-file "$REMOTE_WORKER_ENV_FILE"
 
 scripts/ops/worker_service_tunnels.py check-remote worker-hosts.txt \
-  --env-file .env.remote-worker
+  --env-file "$REMOTE_WORKER_ENV_FILE"
 ```
 
 For Slurm-only worker hosts, use the same generated check script inside each
