@@ -20,7 +20,9 @@ Stop before submitting any workload unless every item in this section is true.
 2. The public-beta anchor is clean at execution time. A clean anchor requires
    the latest `environment-state check` for the chosen rollout to report
    `ok=true` and `drift=[]`, with no active Slurm jobs, GB10 node-agent
-   reports, worker env files, or worker repo paths from an older `IMAGE_TAG`.
+   reports, worker env files, worker repo paths from an older `IMAGE_TAG`,
+   missing or unexecutable external autoscaler `ExecStart` paths, or recent
+   failed external autoscaler service results such as `status=203/EXEC`.
    Historical drift such as stale OLDLAB Slurm job `17972` on
    `public-beta-ce55a35` is a stop condition until the follow-up check proves
    the replacement state is clean.

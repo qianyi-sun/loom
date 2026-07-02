@@ -3359,7 +3359,9 @@ link it from #217; do not merge incomplete evidence.
   fingerprint, or when the profile's external runner env file is absent, the
   repo checkout is on the wrong release, the checkout is dirty, or a declared
   external Slurm autoscaler supervisor has stale unit content, an unscoped
-  command, a disabled timer, or an inactive timer.
+  command, a missing or unexecutable `ExecStart` command path, a recent failed
+  service result such as `status=203/EXEC`, a disabled timer, or an inactive
+  timer.
   The worker-pool autoscaler uses the same Slurm job release-state evidence
   before computing healthy capacity. Pending or running jobs whose redacted
   `LOOM_REMOTE_WORKER_ENV_FILE`, `LOOM_REMOTE_WORKER_REPO_DIR`, or worker-token

@@ -827,6 +827,107 @@ def _append_unit_drift(
         drift.append(StateDrift(path=path, desired=desired, live=live))
 
 
+def _append_exec_start_component_drift(
+    drift: list[StateDrift],
+    *,
+    prefix: str,
+    supervisor: dict[str, Any],
+) -> None:
+    python_path = Path(str(supervisor["python_path"]))
+    if not python_path.is_file():
+        drift.append(
+            StateDrift(
+                path=f"{prefix}.exec_start.python_path",
+                desired=str(python_path),
+                live="missing",
+            ),
+        )
+    elif not python_path.stat().st_mode & 0o111:
+        drift.append(
+            StateDrift(
+                path=f"{prefix}.exec_start.python_path",
+                desired=str(python_path),
+                live="not executable",
+            ),
+        )
+
+    script_path = Path(str(supervisor["script_path"]))
+    if not script_path.is_file():
+        drift.append(
+            StateDrift(
+                path=f"{prefix}.exec_start.script_path",
+                desired=str(script_path),
+                live="missing",
+            ),
+        )
+
+
+def _parse_systemctl_show_properties(stdout: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in stdout.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key:
+            values[key] = value
+    return values
+
+
+def _append_service_status_drift(
+    drift: list[StateDrift],
+    *,
+    prefix: str,
+    service_name: str,
+    runner: SubprocessRunner,
+) -> None:
+    rc, stdout, stderr = runner(
+        [
+            "systemctl",
+            "--user",
+            "show",
+            service_name,
+            "--property=Result",
+            "--property=ExecMainStatus",
+            "--property=ExecMainCode",
+            "--property=ActiveState",
+            "--property=SubState",
+        ],
+    )
+    if rc != 0:
+        drift.append(
+            StateDrift(
+                path=f"{prefix}.service_status",
+                desired="readable service status",
+                live=(stderr or stdout).strip() or f"systemctl exited {rc}",
+            ),
+        )
+        return
+
+    status = _parse_systemctl_show_properties(stdout)
+    result = status.get("Result", "")
+    exec_status = status.get("ExecMainStatus", "")
+    active_state = status.get("ActiveState", "")
+    failed = (
+        active_state == "failed"
+        or result not in {"", "success"}
+        or exec_status not in {"", "0"}
+    )
+    if not failed:
+        return
+
+    drift.append(
+        StateDrift(
+            path=f"{prefix}.service_status",
+            desired="service result success",
+            live={
+                "active_state": active_state,
+                "exec_main_code": status.get("ExecMainCode", ""),
+                "exec_main_status": exec_status,
+                "result": result,
+                "sub_state": status.get("SubState", ""),
+            },
+        ),
+    )
+
+
 def diff_external_slurm_autoscaler_supervisors(
     profile: EnvironmentStateProfile,
     *,
@@ -851,6 +952,17 @@ def diff_external_slurm_autoscaler_supervisors(
             path=f"{prefix}.timer_unit",
             desired=render_external_slurm_autoscaler_timer(supervisor),
             command=["systemctl", "--user", "cat", supervisor["timer_name"]],
+            runner=command_runner,
+        )
+        _append_exec_start_component_drift(
+            drift,
+            prefix=prefix,
+            supervisor=supervisor,
+        )
+        _append_service_status_drift(
+            drift,
+            prefix=prefix,
+            service_name=str(supervisor["service_name"]),
             runner=command_runner,
         )
         if supervisor["enabled"]:

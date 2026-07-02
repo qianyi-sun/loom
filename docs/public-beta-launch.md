@@ -90,7 +90,9 @@ Attach these to the release issue or release PR:
   autoscaler policies, GB10 desired state, and any external Slurm autoscaler
   supervisor before Monitor/resource-pool screenshots are used as evidence. For
   public-beta, the OLDLAB supervisor unit must point at the current rollout
-  checkout, include `--pool-name oldlab`, and have its user timer active. The
+  checkout, include `--pool-name oldlab`, have an executable `ExecStart`
+  Python path and existing autoscaler script, have no recent failed service
+  result such as `status=203/EXEC`, and have its user timer active. The
   public-beta profile targets the existing CP desired-state environment
   `production` until GB10 node agents are renamed in a coordinated rollout.
 - Benchmark reward acceptance transcript from
@@ -481,9 +483,11 @@ redacted sha256-prefix fingerprints. The Slurm check catches pending/stale
 capacity requests, active jobs launched from stale `LOOM_REMOTE_WORKER_*`
 paths, stale remote env worker-token fingerprints, inactive OLDLAB autoscaler
 timers, unscoped external autoscaler commands that omit `--pool-name oldlab`,
-and the active `gb10-arm64`/`oldlab` pool shapes; the node-agent check catches
-stale host-local checkouts, local-build fallback using an old tree, and env
-files that did not apply even when the pool still has healthy heartbeats.
+missing or unexecutable external autoscaler `ExecStart` command paths, recent
+failed autoscaler service results such as `status=203/EXEC`, and the active
+`gb10-arm64`/`oldlab` pool shapes; the node-agent check catches stale
+host-local checkouts, local-build fallback using an old tree, and env files
+that did not apply even when the pool still has healthy heartbeats.
 The external Slurm autoscaler also treats release-state drift as a hard blocked
 decision: stale pending/running jobs are not counted as healthy warm capacity,
 and `loom admin worker-pools autoscaler status` reports
