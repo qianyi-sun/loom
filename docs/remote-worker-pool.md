@@ -50,6 +50,15 @@ queued x86-specific work. Only tasks submitted with
 use `"any"` only after the image and verifier have been proven credible on
 both architectures.
 
+For Terminus 2 task bundles that inherit from
+`mictern2/terminus2-full:latest`, ARM64 workers prepare a Loom-managed local
+compatibility base image before building the task Dockerfile. The upstream
+`mictern2/terminus2-full:latest` image is currently amd64-only, so this
+worker-side prewarm keeps GB10 tasks runnable without expanding x86 capacity or
+changing normal x86 behavior. Operators should still treat a first build on a
+fresh ARM64 host as a warmup event because the local base image is created once
+per Docker daemon.
+
 Set `LOOM_WORKER_HOSTNAME` in each remote worker env file to the physical or
 VM host name, for example `trt-gb10-7`. If it is unset, the worker registers
 with the runtime hostname, which may be only a container ID in Docker Compose.

@@ -12,6 +12,9 @@ import asyncio
 import contextlib
 import hashlib
 import os
+import platform
+import tempfile
+import threading
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -30,6 +33,53 @@ DEFAULT_BUILD_CONTEXT_MAX_FILES = 2_000
 DEFAULT_BUILD_CONTEXT_MAX_BYTES = 512 * 1024 * 1024
 ENV_BUILD_CONTEXT_MAX_FILES = "LOOM_TASK_IMAGE_BUILD_MAX_FILES"
 ENV_BUILD_CONTEXT_MAX_BYTES = "LOOM_TASK_IMAGE_BUILD_MAX_BYTES"
+TERMINUS_2_FULL_IMAGE = "mictern2/terminus2-full:latest"
+_TERMINUS_2_BASE_LOCK = threading.Lock()
+_TERMINUS_2_ARM64_BASE_DOCKERFILE = """\
+FROM python:3.13-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \\
+    PIP_ROOT_USER_ACTION=ignore \\
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    bash \\
+    build-essential \\
+    ca-certificates \\
+    cmake \\
+    coreutils \\
+    curl \\
+    findutils \\
+    gawk \\
+    git \\
+    iproute2 \\
+    iputils-ping \\
+    jq \\
+    libffi-dev \\
+    libssl-dev \\
+    net-tools \\
+    nodejs \\
+    npm \\
+    openssh-client \\
+    patch \\
+    pkg-config \\
+    procps \\
+    python-is-python3 \\
+    python3 \\
+    python3-pip \\
+    python3-venv \\
+    rsync \\
+    socat \\
+    sudo \\
+    tmux \\
+    unzip \\
+    xz-utils \\
+    zip \\
+    zlib1g-dev \\
+  && rm -rf /var/lib/apt/lists/*
+"""
 
 
 class TaskImageBuildError(RuntimeError):
@@ -182,6 +232,10 @@ def _ensure_dockerfile_image(
 
         rel_dockerfile = dockerfile.relative_to(build_context).as_posix()
         _enforce_build_context_limits(build_context)
+        _ensure_terminus_2_arm64_base_if_needed(
+            client=client,
+            dockerfile=dockerfile,
+        )
         client.images.build(
             path=str(build_context),
             dockerfile=rel_dockerfile,
@@ -220,6 +274,113 @@ def _ensure_dockerfile_image(
     finally:
         with contextlib.suppress(Exception):
             client.close()
+
+
+def _ensure_terminus_2_arm64_base_if_needed(
+    *,
+    client: Any,
+    dockerfile: Path,
+) -> None:
+    if not _is_linux_arm64_worker():
+        return
+    if not _dockerfile_uses_base_image(dockerfile, TERMINUS_2_FULL_IMAGE):
+        return
+
+    with _TERMINUS_2_BASE_LOCK:
+        try:
+            existing_base = client.images.get(TERMINUS_2_FULL_IMAGE)
+            if _is_arm64_docker_image(existing_base):
+                return
+        except ImageNotFound:
+            pass
+
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix="loom-terminus-2-arm64-base-",
+            ) as context_dir:
+                dockerfile_path = Path(context_dir) / "Dockerfile"
+                dockerfile_path.write_text(
+                    _TERMINUS_2_ARM64_BASE_DOCKERFILE,
+                    encoding="utf-8",
+                )
+                client.images.build(
+                    path=context_dir,
+                    dockerfile="Dockerfile",
+                    tag=TERMINUS_2_FULL_IMAGE,
+                    rm=True,
+                    forcerm=True,
+                    pull=False,
+                    labels={
+                        "loom.managed_base": "terminus-2-arm64",
+                        "loom.managed_base.upstream": TERMINUS_2_FULL_IMAGE,
+                    },
+                )
+        except BuildError as exc:
+            tail = _format_build_log_tail(exc.build_log)
+            raise TaskImageBuildError(
+                "failed to build managed arm64 Terminus 2 base image "
+                f"{TERMINUS_2_FULL_IMAGE!r}: {exc}"
+                + (
+                    f"\nbuild log (last {_BUILD_LOG_TAIL_LINES} lines):\n{tail}"
+                    if tail else ""
+                ),
+            ) from exc
+        except Exception as exc:
+            raise TaskImageBuildError(
+                "failed to build managed arm64 Terminus 2 base image "
+                f"{TERMINUS_2_FULL_IMAGE!r}: {exc}",
+            ) from exc
+
+
+def _is_linux_arm64_worker() -> bool:
+    return platform.system().lower() == "linux" and platform.machine().lower() in {
+        "aarch64",
+        "arm64",
+    }
+
+
+def _is_arm64_docker_image(image: Any) -> bool:
+    attrs = getattr(image, "attrs", None)
+    if not isinstance(attrs, dict):
+        return False
+    architecture = str(attrs.get("Architecture") or "").lower()
+    return architecture in {"aarch64", "arm64"}
+
+
+def _dockerfile_uses_base_image(dockerfile: Path, image: str) -> bool:
+    normalized_image = _normalize_docker_image_name(image)
+    try:
+        lines = dockerfile.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise TaskImageBuildError(
+            f"failed to read Dockerfile {dockerfile}: {exc}",
+        ) from exc
+
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        if not parts:
+            continue
+        instruction = parts[0].lower()
+        if instruction == "arg":
+            continue
+        if instruction != "from":
+            continue
+        from_args = [part for part in parts[1:] if not part.startswith("--")]
+        if not from_args:
+            return False
+        return _normalize_docker_image_name(from_args[0]) == normalized_image
+    return False
+
+
+def _normalize_docker_image_name(image: str) -> str:
+    if image.startswith("docker.io/"):
+        return image.removeprefix("docker.io/")
+    if image.startswith("registry-1.docker.io/"):
+        return image.removeprefix("registry-1.docker.io/")
+    return image
 
 
 def _format_build_log_tail(build_log: Any) -> str:

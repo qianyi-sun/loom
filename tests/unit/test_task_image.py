@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import PurePosixPath
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -44,20 +45,30 @@ def _task_config(
 
 
 class _FakeImages:
-    def __init__(self, *, cached: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        cached: bool = False,
+        cached_images: set[str] | None = None,
+        image_attrs: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
         self.cached = cached
+        self.cached_images = cached_images or set()
+        self.image_attrs = image_attrs or {}
         self.get_calls: list[str] = []
         self.build_calls: list[dict[str, Any]] = []
 
     def get(self, image: str) -> object:
         self.get_calls.append(image)
-        if self.cached:
-            return object()
+        if self.cached or image in self.cached_images:
+            return SimpleNamespace(attrs=self.image_attrs.get(image, {}))
         raise ImageNotFound("missing")
 
     def build(self, **kwargs: Any) -> tuple[object, list[object]]:
         self.build_calls.append(kwargs)
-        self.cached = True
+        tag = kwargs.get("tag")
+        if isinstance(tag, str):
+            self.cached_images.add(tag)
         return object(), []
 
 
@@ -128,6 +139,96 @@ async def test_resolve_task_image_builds_and_caches_dockerfile_image(
         }
     ]
     assert fake_client.closed is True
+
+
+async def test_resolve_task_image_prewarms_terminus_2_base_on_arm64_linux(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    task_dir = tmp_path / "task"
+    dockerfile = task_dir / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text(
+        "FROM mictern2/terminus2-full:latest\nRUN echo ready\n",
+    )
+    fake_images = _FakeImages()
+    fake_client = _FakeDockerClient(fake_images)
+    monkeypatch.setattr(task_image.docker, "from_env", lambda: fake_client)
+    monkeypatch.setattr(
+        task_image,
+        "platform",
+        SimpleNamespace(
+            system=lambda: "Linux",
+            machine=lambda: "aarch64",
+        ),
+        raising=False,
+    )
+    cfg = _task_config(dockerfile="environment/Dockerfile")
+
+    image = await resolve_task_image(
+        task_config=cfg,
+        task_dir=task_dir,
+        task_checksum="abc123",
+    )
+
+    assert fake_images.get_calls == [
+        image,
+        "mictern2/terminus2-full:latest",
+    ]
+    base_build, task_build = fake_images.build_calls
+    assert base_build["tag"] == "mictern2/terminus2-full:latest"
+    assert base_build["dockerfile"] == "Dockerfile"
+    assert base_build["rm"] is True
+    assert base_build["forcerm"] is True
+    assert base_build["pull"] is False
+    assert base_build["labels"] == {
+        "loom.managed_base": "terminus-2-arm64",
+        "loom.managed_base.upstream": "mictern2/terminus2-full:latest",
+    }
+    assert task_build["path"] == str(task_dir)
+    assert task_build["dockerfile"] == "environment/Dockerfile"
+    assert task_build["tag"] == image
+    assert fake_client.closed is True
+
+
+async def test_resolve_task_image_rebuilds_non_managed_terminus_2_tag_on_arm64(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    task_dir = tmp_path / "task"
+    dockerfile = task_dir / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM mictern2/terminus2-full:latest\n")
+    fake_images = _FakeImages(
+        cached_images={"mictern2/terminus2-full:latest"},
+        image_attrs={
+            "mictern2/terminus2-full:latest": {
+                "Architecture": "amd64",
+                "Config": {"Labels": {}},
+            },
+        },
+    )
+    fake_client = _FakeDockerClient(fake_images)
+    monkeypatch.setattr(task_image.docker, "from_env", lambda: fake_client)
+    monkeypatch.setattr(
+        task_image,
+        "platform",
+        SimpleNamespace(
+            system=lambda: "Linux",
+            machine=lambda: "aarch64",
+        ),
+        raising=False,
+    )
+    cfg = _task_config(dockerfile="environment/Dockerfile")
+
+    await resolve_task_image(
+        task_config=cfg,
+        task_dir=task_dir,
+        task_checksum="abc123",
+    )
+
+    assert [call["tag"] for call in fake_images.build_calls] == [
+        "mictern2/terminus2-full:latest",
+        task_image_tag(cfg, task_checksum="abc123"),
+    ]
 
 
 async def test_resolve_task_image_passes_docker_api_timeout(
