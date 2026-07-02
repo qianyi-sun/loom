@@ -113,7 +113,10 @@ the admin approves it, and the user receives a one-time reset link. The service
 sets an HttpOnly session cookie. Auth responses return a CSRF token that the
 SPA keeps in memory; the browser sends cookies automatically, and mutating
 requests include the CSRF header. You should not paste a raw bearer token into
-the production SPA.
+the production SPA. The CLI stores the same session cookie plus CSRF token in
+the owner-only config file; `loom auth whoami` persists rotated session/CSRF
+values returned by the server, and mutating CLI requests refresh the session
+CSRF before retrying a CSRF-specific rejection.
 
 Your current team controls execution, cost attribution, provider credentials,
 members, and user-owned API tokens. Roles are enforced by the API:
@@ -848,7 +851,11 @@ internal object storage while preserving HF repo/revision/checksum provenance.
 Follow either path with `/api/v1/agents` discovery evidence and
 `loom datasets audit --all --verify-bundles`. These
 commands are separate from `scripts/seed_test_data.py`, which is only for
-disposable auth/run fixtures.
+disposable auth/run fixtures. `loom eval batch create` uses the local agent
+catalog when `loom-launcher` is installed, but falls back to the deployed
+server's `/api/v1/agents` catalog for service-mode submissions so an operator
+checkout can submit `codex` and other server-ready agents without installing
+local launcher adapters.
 
 Batch fan-out still treats deterministic non-license policy/config failures as
 terminal defense-in-depth instead of leaving the batch `submitted`; open Batch

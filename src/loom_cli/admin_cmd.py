@@ -19,6 +19,7 @@ port-forward (``kubectl port-forward deploy/loom-control-plane 8080:8080``).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -159,6 +160,30 @@ def _resolve_admin_token(source: str) -> str:
     raise ValueError(
         f"--admin-token must be one of: env:VAR, file:PATH, '-' (stdin). Got {source!r}",
     )
+
+
+def _secret_fingerprint(value: str) -> str:
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    return f"sha256:{digest} len={len(value)}"
+
+
+def _validate_expected_admin_token_fingerprint(
+    args: argparse.Namespace,
+    admin_token: str,
+) -> bool:
+    expected = getattr(args, "expect_admin_token_fingerprint", None)
+    if expected is None:
+        return True
+    live = _secret_fingerprint(admin_token)
+    if live == expected:
+        return True
+    sys.stderr.write(
+        "admin_token_fingerprint drift: "
+        f"desired={expected!r} live={live!r}. "
+        "Resolve the protected-environment admin token source before "
+        "running environment-state apply/check.\n",
+    )
+    return False
 
 
 def _mint_worker_token(args: argparse.Namespace) -> int:
@@ -636,6 +661,8 @@ def _environment_state_apply(args: argparse.Namespace) -> int:
     except ValueError as e:
         sys.stderr.write(f"error: {e}\n")
         return 2
+    if not _validate_expected_admin_token_fingerprint(args, admin_token):
+        return 1
 
     headers = {"Authorization": f"Bearer {admin_token}"}
     base = args.cp_url.rstrip("/")
@@ -733,6 +760,8 @@ def _environment_state_check(args: argparse.Namespace) -> int:
     except ValueError as e:
         sys.stderr.write(f"error: {e}\n")
         return 2
+    if not _validate_expected_admin_token_fingerprint(args, admin_token):
+        return 1
 
     rc, live = _fetch_environment_state(
         cp_url=args.cp_url,
@@ -1423,6 +1452,16 @@ def dispatch(argv: list[str]) -> int:
             choices=["text", "json"],
             default="text",
             help="Output format.",
+        )
+        p.add_argument(
+            "--expect-admin-token-fingerprint",
+            default=None,
+            help=(
+                "Redacted fingerprint expected for --admin-token, formatted "
+                "as 'sha256:<12-hex> len=<N>'. When set, environment-state "
+                "apply/check fail before contacting CP if the resolved admin "
+                "token source drifts from the protected-environment source."
+            ),
         )
 
     p_env_state_apply = env_state_sub.add_parser(

@@ -371,9 +371,17 @@ and `loom admin worker-pools autoscaler status` reports
 or cancelled and `environment-state check` is clean.
 
 ```bash
+LIVE_ADMIN_TOKEN_FINGERPRINT="$(
+  kubectl -n loom-public-beta get secret loom-admin-secret \
+    -o jsonpath='{.data.secrets\.toml}' \
+    | base64 -d \
+    | python3 -c 'import hashlib,sys,tomllib; token=tomllib.loads(sys.stdin.read())["admin"]["token"]; print(f"sha256:{hashlib.sha256(token.encode()).hexdigest()[:12]} len={len(token)}")'
+)"
+
 loom admin environment-state apply \
   --cp-url http://control-node.lan:18081 \
   --admin-token file:/secure/path/admin-token \
+  --expect-admin-token-fingerprint "$LIVE_ADMIN_TOKEN_FINGERPRINT" \
   --environment public-beta \
   --file deploy/environment-state/public-beta.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
@@ -382,6 +390,7 @@ loom admin environment-state apply \
 loom admin environment-state check \
   --cp-url http://control-node.lan:18081 \
   --admin-token file:/secure/path/admin-token \
+  --expect-admin-token-fingerprint "$LIVE_ADMIN_TOKEN_FINGERPRINT" \
   --environment public-beta \
   --file deploy/environment-state/public-beta.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \

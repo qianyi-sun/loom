@@ -566,6 +566,69 @@ def test_batch_create_model_agent_requires_provider_and_model(
     assert mock_server.requests == []
 
 
+def test_batch_create_resolves_agent_from_server_when_local_launcher_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Service-mode submissions should not depend on local launcher install."""
+    monkeypatch.setattr("loom_cli.eval_cmd.get_agent", lambda _name: None)
+    mock_server.canned[("GET", "/api/v1/agents")] = httpx.Response(
+        200,
+        json={
+            "items": [
+                {
+                    "name": "codex",
+                    "needs_model": True,
+                    "service_mode_ready": True,
+                },
+            ],
+        },
+    )
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 1,
+            "n_per_task": 1,
+            "backend": "docker",
+            "combinations": [],
+            "state": "submitted",
+            "created_at": "2026-07-01T00:00:00Z",
+        },
+    )
+
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "glm-5.1-thinking",
+            "--agent",
+            "codex",
+            "--benchmark",
+            "sample-tasks",
+            "--name",
+            "codex-smoke",
+        ]
+    )
+
+    assert rc == 0
+    assert [request.url.path for request in mock_server.requests] == [
+        "/api/v1/agents",
+        "/api/v1/provider-connections",
+        "/api/v1/batches",
+    ]
+    body = json.loads(mock_server.requests[-1].content)
+    assert body["trial_config"]["agent_name"] == "codex"
+    assert body["trial_config"]["agent_model"]["name"] == "glm-5.1-thinking"
+    assert "Created batch" in capsys.readouterr().out
+
+
 def test_batch_create_summary_uses_submitted_name_when_response_omits_name(
     mock_server: MockServer,
     capsys: pytest.CaptureFixture[str],

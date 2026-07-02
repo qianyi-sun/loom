@@ -430,9 +430,14 @@ knob you need.
    and active Slurm job launch env:
 
    ```bash
+   # Optional but recommended for protected environments: compute this from
+   # the canonical live secret source, not from the operator .env being tested.
+   ADMIN_TOKEN_FINGERPRINT="sha256:<12-hex> len=<N>"
+
    loom admin environment-state apply \
      --cp-url http://localhost:8080 \
      --admin-token env:ADMIN_TOKEN \
+     --expect-admin-token-fingerprint "$ADMIN_TOKEN_FINGERPRINT" \
      --environment public-beta \
      --file deploy/environment-state/public-beta.toml \
      --var IMAGE_TAG="$IMAGE_TAG" \
@@ -441,6 +446,7 @@ knob you need.
    loom admin environment-state check \
      --cp-url http://localhost:8080 \
      --admin-token env:ADMIN_TOKEN \
+     --expect-admin-token-fingerprint "$ADMIN_TOKEN_FINGERPRINT" \
      --environment public-beta \
      --file deploy/environment-state/public-beta.toml \
      --var IMAGE_TAG="$IMAGE_TAG" \
@@ -454,7 +460,9 @@ knob you need.
    actuator `slurm` but live `gb10`, or an active OLDLAB Slurm job still
    pointing at an older `LOOM_REMOTE_WORKER_REPO_DIR`; fix it with the profile
    apply and by draining/replacing stale Slurm jobs rather than a one-off SQL
-   patch.
+   patch. If `admin_token_fingerprint` fails, refresh the operator token
+   source from the canonical protected-environment secret before rerunning;
+   do not work around it by switching to an untracked token.
    The public-beta profile currently targets the legacy Control Plane
    environment name `production` because existing GB10 node agents read that
    desired-state key; the CLI still requires `--environment public-beta` so
@@ -2588,6 +2596,11 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    # then tail it:
    loom eval batch show <batch-id>
    ```
+   `loom eval batch create` validates local built-in agents first, but falls
+   back to the deployed `/api/v1/agents` catalog when local `loom-launcher`
+   adapters are absent. A fresh rollout/operator venv can therefore submit a
+   service-mode `codex` batch as long as the target public-beta service catalog
+   lists `codex` as ready.
    Re-run `batch show` until `state` reaches a terminal value.
 11. **Live progress visibility.** While the batch runs, the SPA Monitor page
    shows planned trials and current state transitions, and
@@ -3154,12 +3167,14 @@ link it from #217; do not merge incomplete evidence.
   validation uses `trt-gb10-1..15` at `LOOM_WORKER_MAX_CONCURRENT=10`, for 150
   configured ARM64 slots. After every rollout, first apply and check the
   versioned environment profile so DB-backed policy converges with the image
-  rollout:
+  rollout. Set `ADMIN_TOKEN_FINGERPRINT` from the canonical live admin secret
+  source for the protected environment before running these commands:
 
   ```bash
   loom admin environment-state apply \
     --cp-url http://control-node.lan:18081 \
     --admin-token file:/secure/path/admin-token \
+    --expect-admin-token-fingerprint "$ADMIN_TOKEN_FINGERPRINT" \
     --environment public-beta \
     --file deploy/environment-state/public-beta.toml \
     --var IMAGE_TAG="$IMAGE_TAG" \
@@ -3167,6 +3182,7 @@ link it from #217; do not merge incomplete evidence.
   loom admin environment-state check \
     --cp-url http://control-node.lan:18081 \
     --admin-token file:/secure/path/admin-token \
+    --expect-admin-token-fingerprint "$ADMIN_TOKEN_FINGERPRINT" \
     --environment public-beta \
     --file deploy/environment-state/public-beta.toml \
     --var IMAGE_TAG="$IMAGE_TAG" \

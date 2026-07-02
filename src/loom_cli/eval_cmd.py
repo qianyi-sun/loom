@@ -27,6 +27,8 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+import httpx
+
 from loom.security.redaction import redact_mapping
 from loom_cli.providers_cmd import (
     _resolve_by_name,
@@ -119,14 +121,47 @@ def _load_task_filter_json(raw: str) -> dict[str, Any]:
     return cast(dict[str, Any], data)
 
 
-def _agent_needs_model(agent_name: str) -> tuple[bool | None, str | None]:
+def _agent_items_from_response(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, dict):
+        items = data.get("items")
+    else:
+        items = data
+    if not isinstance(items, list):
+        return []
+    return [cast(dict[str, Any], item) for item in items if isinstance(item, dict)]
+
+
+def _agent_needs_model(
+    client: httpx.Client,
+    agent_name: str,
+) -> tuple[bool | None, str | None]:
     agent = get_agent(agent_name)
-    if agent is None:
-        return None, (
-            f"error: unknown agent {agent_name!r}. "
-            "Run `loom agents list` or check GET /api/v1/agents.\n"
-        )
-    return agent.needs_model, None
+    if agent is not None:
+        return agent.needs_model, None
+
+    data = assert_2xx(
+        client.get("/api/v1/agents"),
+        action=f"resolve service agent catalog for {agent_name!r}",
+    )
+    for item in _agent_items_from_response(data):
+        if item.get("name") != agent_name:
+            continue
+        needs_model = item.get("needs_model")
+        if not isinstance(needs_model, bool):
+            return None, (
+                f"error: service agent catalog entry {agent_name!r} did not "
+                "include a boolean needs_model field.\n"
+            )
+        if item.get("service_mode_ready") is False:
+            message = item.get("readiness_message")
+            suffix = f": {message}" if isinstance(message, str) and message else ""
+            return None, f"error: agent {agent_name!r} is not service-mode ready{suffix}.\n"
+        return needs_model, None
+    return None, (
+        f"error: unknown agent {agent_name!r}. Local loom-launcher adapters "
+        "were not available, and the server catalog did not list this agent. "
+        "Run `loom agents list` or check GET /api/v1/agents.\n"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -384,37 +419,37 @@ def _print_batch_summary(item: dict[str, Any]) -> None:
 
 def _batch_create(args: argparse.Namespace) -> int:
     def _body() -> int:
-        needs_model, agent_err = _agent_needs_model(args.agent)
-        if agent_err is not None:
-            sys.stderr.write(agent_err)
-            return 2
-        assert needs_model is not None
-
-        if needs_model:
-            missing = [
-                flag
-                for flag, value in (
-                    ("--provider", args.provider),
-                    ("--model", args.model),
-                )
-                if not value
-            ]
-            if missing:
-                message = (
-                    f"error: agent {args.agent!r} requires --provider and "
-                    "--model for batch creation; missing " + ", ".join(missing) + ".\n"
-                )
-                sys.stderr.write(message)
-                return 2
-        elif args.provider or args.model or args.agent_provider:
-            sys.stderr.write(
-                f"error: agent {args.agent!r} does not take a model; omit "
-                "--provider, --model, and --agent-provider.\n",
-            )
-            return 2
-
         cfg = require_logged_in()
         with authed_client(cfg) as c:
+            needs_model, agent_err = _agent_needs_model(c, args.agent)
+            if agent_err is not None:
+                sys.stderr.write(agent_err)
+                return 2
+            assert needs_model is not None
+
+            if needs_model:
+                missing = [
+                    flag
+                    for flag, value in (
+                        ("--provider", args.provider),
+                        ("--model", args.model),
+                    )
+                    if not value
+                ]
+                if missing:
+                    message = (
+                        f"error: agent {args.agent!r} requires --provider and "
+                        "--model for batch creation; missing " + ", ".join(missing) + ".\n"
+                    )
+                    sys.stderr.write(message)
+                    return 2
+            elif args.provider or args.model or args.agent_provider:
+                sys.stderr.write(
+                    f"error: agent {args.agent!r} does not take a model; omit "
+                    "--provider, --model, and --agent-provider.\n",
+                )
+                return 2
+
             trial_config: dict[str, Any] = {
                 "agent_name": args.agent,
                 "agent_model": None,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 from typing import Any
@@ -1095,6 +1096,52 @@ def test_environment_state_check_fetches_slurm_jobs_and_reports_external_prereq_
     assert "http://localhost:8080/admin/slurm-worker-jobs/status" in called_urls
     err = capsys.readouterr().err
     assert "external_slurm_runner_prerequisites[production/oldlab].env_file" in err
+
+
+def test_environment_state_check_fails_before_cp_when_admin_token_fingerprint_drifts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    profile_path = tmp_path / "public-beta.state.toml"
+    _write_environment_state_profile(profile_path)
+    stale_admin_token = "loom_admin_operator_stale_secret"
+    stale_fingerprint = (
+        "sha256:"
+        f"{hashlib.sha256(stale_admin_token.encode('utf-8')).hexdigest()[:12]} "
+        f"len={len(stale_admin_token)}"
+    )
+
+    def _fake_get(url, *, headers, timeout):  # type: ignore[no-untyped-def]
+        raise AssertionError("environment-state check contacted CP before token drift preflight")
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", stale_admin_token)
+
+    rc = main(
+        [
+            "admin",
+            "environment-state",
+            "check",
+            "--file",
+            str(profile_path),
+            "--environment",
+            "public-beta",
+            "--var",
+            "IMAGE_TAG=public-beta-57a7509",
+            "--var",
+            "ENV_CONFIG_VERSION=public-beta-57a7509",
+            "--expect-admin-token-fingerprint",
+            "sha256:liveexpected len=36",
+        ]
+    )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "admin_token_fingerprint" in err
+    assert "sha256:liveexpected len=36" in err
+    assert stale_fingerprint in err
+    assert stale_admin_token not in err
 
 
 def test_environment_state_check_passes_worker_token_without_leaking_secret(

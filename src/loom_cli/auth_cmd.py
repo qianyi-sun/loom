@@ -41,6 +41,7 @@ from loom_cli.server_client import (
     assert_2xx,
     assert_2xx_response,
     authed_client,
+    persist_session_credentials_from_response,
     require_logged_in,
 )
 
@@ -392,10 +393,9 @@ def _whoami(args: argparse.Namespace) -> int:
 
     try:
         with authed_client(cfg) as c:
-            data = assert_2xx(
-                c.get("/api/v1/auth/whoami"),
-                action="inspect authenticated principal",
-            )
+            response = c.get("/api/v1/auth/whoami")
+            data = assert_2xx(response, action="inspect authenticated principal")
+            persist_session_credentials_from_response(cfg, response, data=data)
     except HttpStatusError as e:
         sys.stderr.write(f"error: {e}\n")
         return 1
