@@ -104,6 +104,51 @@ def test_claim_returns_trial(app, claim_seed):  # type: ignore[no-untyped-def]
         assert body["attempt_count"] == 1
 
 
+def test_claim_clears_stale_failure_diagnostic(
+    app,
+    claim_seed,
+    postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    worker_id, raw_worker, _ = claim_seed
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    with session_factory() as session:
+        trial_id = session.execute(select(Trial.id)).scalar_one()
+        session.execute(
+            update(Trial)
+            .where(Trial.id == trial_id)
+            .values(
+                failure_reason="worker_lost_claim",
+                failure_message=(
+                    "claimed_without_started_reclaimed trial_id="
+                    f"{trial_id} worker_id={worker_id}"
+                ),
+            )
+        )
+        session.commit()
+    engine.dispose()
+
+    with TestClient(app) as client:
+        r = client.post(
+            "/trials/claim",
+            headers={"Authorization": f"Bearer {raw_worker}"},
+            json={"worker_id": str(worker_id), "caps": [_LINUX_PUBLIC_CAP]},
+        )
+        assert r.status_code == 200, r.text
+
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    with session_factory() as session:
+        row = session.execute(
+            select(Trial).where(Trial.id == trial_id),
+        ).scalar_one()
+    engine.dispose()
+
+    assert row.state == "claimed"
+    assert row.failure_reason is None
+    assert row.failure_message is None
+
+
 def test_claim_no_match_returns_204(app, claim_seed):  # type: ignore[no-untyped-def]
     worker_id, raw_worker, _ = claim_seed
     with TestClient(app) as client:

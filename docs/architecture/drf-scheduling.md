@@ -124,13 +124,24 @@ periodically and re-queues any `claimed` trial whose
 UPDATE trials
    SET state = 'queued',
        worker_id = NULL,
+       failure_reason = CASE
+         WHEN state = 'claimed' AND started_at IS NULL
+         THEN 'worker_lost_claim'
+         ELSE failure_reason
+       END,
        next_attempt_at = NOW() + INTERVAL '30 seconds'
  WHERE state = 'claimed'
    AND <heartbeat is stale>
 ```
 
 `next_attempt_at` sets a 30-second cool-down before re-claim so the
-trial doesn't immediately re-flap if the worker is recovering. The
+trial doesn't immediately re-flap if the worker is recovering. If a
+reclaimed trial was still `claimed` with `started_at IS NULL`, the
+crash detector also writes a `failure_message` diagnostic containing
+the trial id, previous worker id, `claimed_at`, expiry window, and
+`started_at=NULL`. That diagnostic is preserved if the row immediately
+exhausts retries; a later successful re-claim clears stale failure
+fields before the next attempt starts. The
 `attempt_count < max_attempts` predicate in the claim query then
 caps total retries; over-quota trials end up in `failed_terminal`.
 

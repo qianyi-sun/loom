@@ -24,6 +24,22 @@ _RECLAIM_SQL = text("""
 UPDATE trials
    SET state = 'queued',
        worker_id = NULL,
+       failure_reason = CASE
+           WHEN state = 'claimed' AND started_at IS NULL
+           THEN 'worker_lost_claim'
+           ELSE failure_reason
+       END,
+       failure_message = CASE
+           WHEN state = 'claimed' AND started_at IS NULL
+           THEN CONCAT(
+               'claimed_without_started_reclaimed trial_id=', id::text,
+               ' worker_id=', worker_id::text,
+               ' claimed_at=', claimed_at::text,
+               ' expiry_sec=', (:expiry_sec)::int::text,
+               ' started_at=NULL'
+           )
+           ELSE failure_message
+       END,
        next_attempt_at = NOW() + INTERVAL '1 second' * 30
  WHERE state IN ('claimed', 'running')
    AND worker_id IN (
@@ -37,6 +53,14 @@ _STALE_CLAIM_SQL = text("""
 UPDATE trials
    SET state = 'queued',
        worker_id = NULL,
+       failure_reason = 'worker_lost_claim',
+       failure_message = CONCAT(
+           'claimed_without_started_reclaimed trial_id=', id::text,
+           ' worker_id=', worker_id::text,
+           ' claimed_at=', claimed_at::text,
+           ' expiry_sec=', (:expiry_sec)::int::text,
+           ' started_at=NULL'
+       ),
        next_attempt_at = NOW() + INTERVAL '1 second' * 30
  WHERE state = 'claimed'
    AND started_at IS NULL
