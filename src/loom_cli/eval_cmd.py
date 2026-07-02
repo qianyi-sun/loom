@@ -368,6 +368,9 @@ def _print_batch_summary(item: dict[str, Any]) -> None:
     print(f"expected_trial_count:  {item.get('expected_trial_count', '?')}")
     print(f"n_per_task:            {item.get('n_per_task', 1)}")
     print(f"backend:               {item.get('backend', 'docker')}")
+    required_worker_pools = item.get("required_worker_pools") or []
+    if required_worker_pools:
+        print(f"required_worker_pools: {', '.join(required_worker_pools)}")
     if item.get("failure_reason"):
         print(f"failure_reason:        {item['failure_reason']}")
     if item.get("failure_message"):
@@ -504,6 +507,8 @@ def _batch_create(args: argparse.Namespace) -> int:
                 payload["n_per_task"] = args.n_per_task
             if args.backend is not None:
                 payload["backend"] = args.backend
+            if args.required_worker_pool:
+                payload["required_worker_pools"] = args.required_worker_pool
             if args.description is not None:
                 payload["description"] = args.description
             resp = c.post("/api/v1/batches", json=payload)
@@ -1089,6 +1094,16 @@ def dispatch(argv: list[str]) -> int:
         help="Number of trials per task (1–100).",
     )
     p_bc.add_argument("--backend", default=None, help="Worker backend (default: server default).")
+    p_bc.add_argument(
+        "--required-worker-pool",
+        dest="required_worker_pool",
+        action="append",
+        default=[],
+        help=(
+            "Require one extra coverage trial to run on this worker pool. "
+            "Repeat for mixed-pool release canaries."
+        ),
+    )
     p_bc.add_argument(
         "--agent-provider",
         dest="agent_provider",

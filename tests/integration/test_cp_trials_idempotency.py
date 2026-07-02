@@ -140,6 +140,37 @@ def test_different_idempotency_keys_different_trials(
     assert r1.json()["trial_id"] != r2.json()["trial_id"]
 
 
+def test_submit_trial_persists_required_worker_pool_capability(
+    app,  # type: ignore[no-untyped-def]
+    seed_team: tuple[UUID, str],
+    postgres_url: str,
+) -> None:
+    _, raw = seed_team
+    with TestClient(app) as client:
+        response = client.post(
+            "/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "task_id": "hello",
+                "config": {"agent_name": "oracle", "agent_model": None},
+                "idempotency_key": "pool-coverage-oldlab",
+                "required_worker_pool": " oldlab ",
+            },
+        )
+
+    assert response.status_code == 201, response.text
+    trial_id = UUID(response.json()["trial_id"])
+    engine = create_engine(postgres_url)
+    sl = sessionmaker(engine)
+    with sl() as session:
+        trial = session.execute(
+            select(Trial).where(Trial.id == trial_id),
+        ).scalar_one()
+    engine.dispose()
+
+    assert trial.requires_caps["worker_pool"] == "oldlab"
+
+
 def test_no_idempotency_key_creates_distinct_trials(
     app,  # type: ignore[no-untyped-def]
     seed_team: tuple[UUID, str],

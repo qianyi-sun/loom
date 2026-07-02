@@ -2603,10 +2603,18 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
      --model gpt-4o-mini \
      --agent codex \
      --n-per-task 1 \
-     --backend docker
+     --backend docker \
+     --required-worker-pool oldlab
    # then tail it:
    loom eval batch show <batch-id>
    ```
+   For mixed-pool release evidence, repeat `--required-worker-pool` for every
+   pool that must produce terminal evidence, for example `oldlab`,
+   `k8s-worker`, and `gb10-arm64`. The service adds one extra pool-pinned
+   coverage trial for each requested pool while leaving the normal batch trials
+   portable. Do not depend on theoretical max-slot saturation alone to force
+   OLDLAB/k8s/GB10 participation; the smoke gate below checks the resulting
+   terminal pool coverage explicitly.
    `loom eval batch create` validates local built-in agents first, but falls
    back to the deployed `/api/v1/agents` catalog when local `loom-launcher`
    adapters are absent. A fresh rollout/operator venv can therefore submit a
@@ -2753,7 +2761,10 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     detail/cancel traffic before accepting the gate. For OLDLAB-required
     full100/release evidence, the `runs.worker_pool_coverage` row must pass
     with `--required-worker-pool oldlab`; a missing pool means the batch did
-    not produce deterministic terminal evidence on that worker pool.
+    not produce deterministic terminal evidence on that worker pool. The
+    source batch should have been created with the same
+    `loom eval batch create --required-worker-pool oldlab` constraint so this
+    is a deterministic gate rather than a post-hoc DB distribution check.
 19. **Teardown clean.** `loom cluster down --yes` removes every applied
     object; PVCs survive (verify via `kubectl get pvc -n loom`). For
     public-beta or staging, pass `--with-volumes` or `--delete-namespace` only

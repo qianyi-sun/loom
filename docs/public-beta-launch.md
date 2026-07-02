@@ -257,6 +257,13 @@ Run a small architecture-targeted canary on every required worker pool, confirm
 the shared trial-cache registry or worker-local cache is reused, and treat any
 `task_image_build_timeout` / `building Docker image ... exceeded ...s` failure
 as a platform setup blocker rather than model-quality evidence.
+Do not rely on theoretical max-slot saturation to prove worker-pool coverage:
+create the release/acceptance batch with repeated `--required-worker-pool`
+flags, for example `--required-worker-pool oldlab --required-worker-pool
+k8s-worker --required-worker-pool gb10-arm64`. The service adds one
+pool-pinned coverage trial per required pool while leaving the normal portable
+trials portable, and `scripts/public_beta_smoke_gate.py --required-worker-pool`
+must later prove each required pool has terminal batch evidence.
 
 Run the benchmark reward gate after catalog provisioning and again after the
 supported-benchmark acceptance batch or batches reach a terminal state:
@@ -443,7 +450,9 @@ The public beta launch gate passes only when:
 - the smoke report's `service.no_oom_restarts` row is `PASS` for the deployed
   `loom-service` pods;
 - the smoke report's `runs.worker_pool_coverage` row is `PASS` for any
-  release-required worker pool such as `oldlab`;
+  release-required worker pool such as `oldlab`; create the source batch with
+  matching `loom eval batch create --required-worker-pool ...` flags instead
+  of depending on max-slot pressure to assign work to the pool;
 - no response, audit excerpt, log excerpt, or safe downloaded artifact contains
   seeded fake secrets or internal URLs;
 - unsafe artifacts are blocked and cannot be downloaded by another team;

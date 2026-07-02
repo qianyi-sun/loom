@@ -45,6 +45,10 @@ WITH next AS (
         WHERE w.id = (:worker_id)::uuid
           AND w.status = 'active'
           AND w.drain_state = 'active'
+          AND (
+            NULLIF(t.requires_caps->>'worker_pool', '') IS NULL
+            OR w.pool_name = t.requires_caps->>'worker_pool'
+          )
      )
    ORDER BY
        (q.in_flight_count * 1.0) / NULLIF(q.fair_share_weight, 0) ASC,

@@ -23,6 +23,27 @@ from loom_control_plane.scheduler.requires_caps import derive_requires_caps
 router = APIRouter()
 
 
+def _required_worker_pool(payload: dict[str, Any]) -> str | None:
+    raw = payload.get("required_worker_pool")
+    if raw is None:
+        return None
+    pool = str(raw).strip()
+    if not pool:
+        raise HTTPException(
+            status_code=400,
+            detail="required_worker_pool must be a non-empty string",
+        )
+    if len(pool) > 80 or any(ch.isspace() for ch in pool):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "required_worker_pool must be 1-80 characters "
+                "and contain no whitespace"
+            ),
+        )
+    return pool
+
+
 @router.post("/trials", status_code=201)
 async def submit_trial(
     request: Request,
@@ -134,6 +155,10 @@ async def submit_trial(
             detail=f"invalid trial config: {exc}",
         ) from exc
     requires_caps = derive_requires_caps(task_config)
+    requires_caps_json = requires_caps.model_dump(mode="json")
+    required_worker_pool = _required_worker_pool(payload)
+    if required_worker_pool is not None:
+        requires_caps_json["worker_pool"] = required_worker_pool
 
     trial_id = uuid4()
     async with request.app.state.session_factory() as session:
@@ -172,7 +197,7 @@ async def submit_trial(
             "team_id": submit_team_id,
             "task_id": task_id,
             "config": trial_config.model_dump(mode="json"),
-            "requires_caps": requires_caps.model_dump(mode="json"),
+            "requires_caps": requires_caps_json,
             "state": "queued",
             "submit_priority": trial_config.submit_priority,
             "batch_id": batch_id,

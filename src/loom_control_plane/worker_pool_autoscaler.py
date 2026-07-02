@@ -551,6 +551,9 @@ def _queued_trial_matches_policy(
     backend = requires_caps.get("backend")
     if isinstance(backend, str) and backend != policy_backend:
         return False
+    worker_pool = requires_caps.get("worker_pool")
+    if isinstance(worker_pool, str) and worker_pool.strip() and worker_pool.strip() != row.pool_name:
+        return False
     cpu_arch = requires_caps.get("cpu_arch")
     if isinstance(cpu_arch, str) and cpu_arch not in {policy_arch, "any"}:
         return False
