@@ -38,6 +38,7 @@ _LLM_FAMILY_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("anthropic", ("claude",)),
     ("google", ("gemini", "palm")),
     ("deepseek", ("deepseek",)),
+    ("zhipu", ("glm", "zhipu")),
     ("qwen", ("qwen",)),
     ("llama", ("llama", "meta-llama")),
     ("mistral", ("mistral", "mixtral", "codestral")),

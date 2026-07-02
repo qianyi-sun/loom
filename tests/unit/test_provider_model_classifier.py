@@ -22,6 +22,8 @@ def test_classifier_marks_mainstream_llm_ids_agent_capable() -> None:
         "meta-llama/Llama-3.1-70B-Instruct",
         "mistral-large-latest",
         "moonshot-v1-128k",
+        "glm-5.1-thinking",
+        "t:glm-5.1-thinking",
     ]:
         c = classify_model_id(model_id)
         assert c.agent_capable is True, model_id
