@@ -1056,6 +1056,174 @@ active = true
     ]
 
 
+def test_external_slurm_autoscaler_supervisor_apply_disables_when_enabled_false(
+    tmp_path: Path,
+) -> None:
+    """#331: enabled=false must translate to `disable --now`.
+
+    Observed during 2026-07-02 OLDLAB exclusion: the operator prepared
+    a scoped profile with `enabled=false` and `active=false`, expecting
+    `environment-state apply` to stop the timer. Instead the apply left
+    the running `loom-oldlab-autoscaler.timer` in place and it kept
+    submitting Slurm jobs. Fix: negative desired state must produce
+    negative systemctl calls (stop + disable), idempotently.
+    """
+    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path.write_text(
+        """
+environment = "public-beta"
+
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab"
+pool_name = "oldlab"
+service_name = "loom-oldlab-autoscaler.service"
+timer_name = "loom-oldlab-autoscaler.timer"
+working_directory = "/srv/loom/public-beta-052e420"
+python_path = "/srv/loom/public-beta-052e420/.venv/bin/python"
+script_path = "/srv/loom/public-beta-052e420/scripts/ops/worker_pool_autoscaler_external_once.py"
+args = ["--pool-name", "oldlab"]
+requires = ["network-online.target"]
+timer_on_boot_sec = "45"
+timer_on_unit_active_sec = "30"
+timer_accuracy_sec = "5"
+enabled = false
+active = false
+""".strip() + "\n",
+        encoding="utf-8",
+    )
+    profile = load_environment_state_profile(profile_path)
+    unit_dir = tmp_path / "systemd-user"
+    commands: list[list[str]] = []
+
+    def _runner(command: list[str]) -> tuple[int, str, str]:
+        commands.append(command)
+        return 0, "", ""
+
+    applied = apply_external_slurm_autoscaler_supervisors(
+        profile,
+        unit_dir=unit_dir,
+        runner=_runner,
+    )
+
+    # `stop` first so the timer stops firing new triggers even if the
+    # subsequent `disable` were to fail; `disable` after so the unit
+    # doesn't re-enable across a systemd user restart.
+    assert commands == [
+        ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "stop", "loom-oldlab-autoscaler.timer"],
+        ["systemctl", "--user", "disable", "loom-oldlab-autoscaler.timer"],
+    ]
+    assert applied == [
+        {
+            "kind": "external_slurm_autoscaler_supervisor",
+            "service": "loom-oldlab-autoscaler.service",
+            "timer": "loom-oldlab-autoscaler.timer",
+        },
+    ]
+
+
+def test_external_slurm_autoscaler_supervisor_apply_active_false_only_stops(
+    tmp_path: Path,
+) -> None:
+    """#331: active=false + enabled=true means stop but keep enabled.
+
+    Useful for a temporary pause where the operator wants systemd to
+    remember the timer for the next boot but doesn't want it firing now.
+    """
+    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path.write_text(
+        """
+environment = "public-beta"
+
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab"
+pool_name = "oldlab"
+service_name = "loom-oldlab-autoscaler.service"
+timer_name = "loom-oldlab-autoscaler.timer"
+working_directory = "/srv/loom/public-beta-052e420"
+python_path = "/srv/loom/public-beta-052e420/.venv/bin/python"
+script_path = "/srv/loom/public-beta-052e420/scripts/ops/worker_pool_autoscaler_external_once.py"
+args = ["--pool-name", "oldlab"]
+requires = ["network-online.target"]
+timer_on_boot_sec = "45"
+timer_on_unit_active_sec = "30"
+timer_accuracy_sec = "5"
+enabled = true
+active = false
+""".strip() + "\n",
+        encoding="utf-8",
+    )
+    profile = load_environment_state_profile(profile_path)
+    unit_dir = tmp_path / "systemd-user"
+    commands: list[list[str]] = []
+
+    def _runner(command: list[str]) -> tuple[int, str, str]:
+        commands.append(command)
+        return 0, "", ""
+
+    apply_external_slurm_autoscaler_supervisors(
+        profile,
+        unit_dir=unit_dir,
+        runner=_runner,
+    )
+
+    assert commands == [
+        ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "enable", "loom-oldlab-autoscaler.timer"],
+        ["systemctl", "--user", "stop", "loom-oldlab-autoscaler.timer"],
+    ]
+
+
+def test_external_slurm_autoscaler_supervisor_apply_idempotent_when_unit_missing(
+    tmp_path: Path,
+) -> None:
+    """#331 acceptance: keep idempotency when the unit is already
+    disabled/inactive or missing.
+
+    systemctl exit code 5 = 'not loaded' / no such unit. That happens on
+    an environment where the supervisor was never installed, and calling
+    disable/stop on a nothing is a legitimate no-op. Must NOT raise.
+    """
+    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path.write_text(
+        """
+environment = "public-beta"
+
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab"
+pool_name = "oldlab"
+service_name = "loom-oldlab-autoscaler.service"
+timer_name = "loom-oldlab-autoscaler.timer"
+working_directory = "/srv/loom/public-beta-052e420"
+python_path = "/srv/loom/public-beta-052e420/.venv/bin/python"
+script_path = "/srv/loom/public-beta-052e420/scripts/ops/worker_pool_autoscaler_external_once.py"
+args = ["--pool-name", "oldlab"]
+requires = ["network-online.target"]
+timer_on_boot_sec = "45"
+timer_on_unit_active_sec = "30"
+timer_accuracy_sec = "5"
+enabled = false
+active = false
+""".strip() + "\n",
+        encoding="utf-8",
+    )
+    profile = load_environment_state_profile(profile_path)
+    unit_dir = tmp_path / "systemd-user"
+
+    def _runner(command: list[str]) -> tuple[int, str, str]:
+        # daemon-reload succeeds; stop/disable return 5 (not loaded).
+        if command[-1] == "daemon-reload":
+            return 0, "", ""
+        return 5, "", "Failed to disable unit: Unit file loom-oldlab-autoscaler.timer does not exist."
+
+    # Must not raise — the supervisor is simply not installed.
+    apply_external_slurm_autoscaler_supervisors(
+        profile,
+        unit_dir=unit_dir,
+        runner=_runner,
+    )
+
+
 @pytest.mark.parametrize(
     ("path", "environment"),
     [
