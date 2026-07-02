@@ -9,7 +9,9 @@ from loom_cli.cluster_release_gate import (
     ReleaseGateCheck,
     ReleaseGateReport,
     collect_release_gate_report,
+    format_release_gate_markdown,
     query_live_alembic_heads,
+    release_gate_report_to_dict,
 )
 
 
@@ -772,6 +774,103 @@ def test_release_gate_passes_when_environment_state_check_is_clean() -> None:
     assert check.detail == "live environment-state check passed"
     assert check.evidence["drift_count"] == 0
     assert check.evidence["artifact"] == "environment-state-check-live-secrets.json"
+
+
+def test_release_gate_report_includes_component_evidence_rows() -> None:
+    report = collect_release_gate_report(
+        manifest=_manifest(external_workers=_external_workers_manifest_section()),
+        apps_v1=_FakeAppsV1({
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:public-beta-abc123",
+                generation=9,
+                observed_generation=9,
+            ),
+        }),
+        core_v1=_FakeCoreV1([
+            _ready_pod(
+                name="loom-service-new",
+                app="loom-service",
+                image="loom-service:public-beta-abc123",
+                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+            ),
+        ]),
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+        environment_state_check_artifact={
+            "environment": "public-beta",
+            "control_plane_environment": "production",
+            "profile": "deploy/environment-state/public-beta.toml",
+            "ok": True,
+            "drift": [],
+        },
+        environment_state_check_path="environment-state-check-live-secrets.json",
+    )
+
+    data = release_gate_report_to_dict(report)
+    rows = data["component_evidence"]
+
+    k8s_row = next(row for row in rows if row["component"] == "loom-service/app")
+    assert k8s_row["surface"] == "kubernetes"
+    assert k8s_row["expected_release"] == "loom-service:public-beta-abc123"
+    assert k8s_row["live_release"] == "loom-service:public-beta-abc123"
+    assert k8s_row["expected_digest"] == "loom-service@sha256:" + "1" * 64
+    assert k8s_row["live_digest"].endswith("sha256:" + "1" * 64)
+    assert k8s_row["generation"] == 9
+    assert k8s_row["readiness"] == "1/1 ready"
+    assert k8s_row["outcome"] == "pass"
+
+    oldlab_row = next(row for row in rows if row["component"] == "oldlab")
+    assert oldlab_row["surface"] == "external-worker"
+    assert oldlab_row["expected_release"] == "deploy/environment-state/public-beta.toml"
+    assert oldlab_row["live_release"] == "environment-state-check-live-secrets.json"
+    assert oldlab_row["readiness"] == "environment-state converged"
+    assert oldlab_row["outcome"] == "pass"
+
+    gb10_row = next(row for row in rows if row["component"] == "gb10-arm64")
+    assert gb10_row["surface"] == "external-worker"
+    assert gb10_row["outcome"] == "pass"
+
+
+def test_release_gate_markdown_formats_pasteable_component_table() -> None:
+    report = ReleaseGateReport(
+        environment="public-beta",
+        namespace="loom",
+        checks=[
+            ReleaseGateCheck(
+                name="image-identity:loom-service/app",
+                outcome="pass",
+                detail="Ready pod image identity matches release manifest",
+                evidence={
+                    "deployment": "loom-service",
+                    "container": "app",
+                    "expected_image": "loom-service:public-beta-abc123",
+                    "expected_repo_digest": "loom-service@sha256:" + "1" * 64,
+                    "generation": 7,
+                    "observed_generation": 7,
+                    "desired_replicas": 1,
+                    "ready_replicas": 1,
+                    "live_image": "loom-service:public-beta-abc123",
+                    "live_image_id": "docker-pullable://loom-service@sha256:" + "1" * 64,
+                    "pod": "loom-service-new",
+                },
+            ),
+        ],
+    )
+
+    markdown = format_release_gate_markdown(report)
+
+    assert "| Surface | Component | Expected | Live | Generation/job | Readiness | Restart/crash | Evidence | Result |" in markdown
+    assert (
+        "| kubernetes | loom-service/app | "
+        "`loom-service:public-beta-abc123 / loom-service@sha256:"
+        + "1" * 64
+        + "` | `loom-service:public-beta-abc123 / docker-pullable://loom-service@sha256:"
+        + "1" * 64
+        + "` | `7` | 1/1 ready |  | `pod=loom-service-new` | PASS |"
+    ) in markdown
 
 
 def test_live_alembic_query_uses_kubectl_exec_without_leaking_db_url() -> None:

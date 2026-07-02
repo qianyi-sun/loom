@@ -37,6 +37,7 @@ from loom_cli.cluster_config import ClusterConfig, load_cluster_config
 from loom_cli.cluster_release_gate import (
     collect_release_gate_report,
     format_release_gate_json,
+    format_release_gate_markdown,
     format_release_gate_table,
     query_live_alembic_heads,
 )
@@ -1392,6 +1393,8 @@ def _release_gate(args: argparse.Namespace) -> int:
 
     if args.format == "json":
         sys.stdout.write(format_release_gate_json(report))
+    elif args.format == "markdown":
+        sys.stdout.write(format_release_gate_markdown(report))
     else:
         sys.stdout.write(format_release_gate_table(report))
     return 0 if report.all_pass else 1
@@ -3777,9 +3780,9 @@ def dispatch(argv: list[str]) -> int:
     )
     p_release_gate.add_argument(
         "--format",
-        choices=["table", "json"],
+        choices=["table", "json", "markdown"],
         default="table",
-        help="Output format. JSON for CI/scripting.",
+        help="Output format. JSON for CI/scripting; Markdown for issue comments.",
     )
     p_release_gate.set_defaults(handler=_release_gate)
 

@@ -885,6 +885,7 @@ def release_gate_report_to_dict(report: ReleaseGateReport) -> dict[str, Any]:
         "environment": report.environment,
         "namespace": report.namespace,
         "all_pass": report.all_pass,
+        "component_evidence": build_component_evidence_rows(report),
         "checks": [
             {
                 "name": check.name,
@@ -900,6 +901,215 @@ def release_gate_report_to_dict(report: ReleaseGateReport) -> dict[str, Any]:
 
 def format_release_gate_json(report: ReleaseGateReport) -> str:
     return json.dumps(release_gate_report_to_dict(report), indent=2, sort_keys=True) + "\n"
+
+
+def _first_text(*values: Any) -> str:
+    for value in values:
+        if value is not None and str(value) != "":
+            return str(value)
+    return ""
+
+
+def _replica_readiness(evidence: dict[str, Any]) -> str:
+    desired = evidence.get("desired_replicas")
+    ready = evidence.get("ready_replicas")
+    if desired is None:
+        return ""
+    if ready is None:
+        return f"?/{desired} ready"
+    return f"{ready}/{desired} ready"
+
+
+def _kubernetes_component_row(check: ReleaseGateCheck) -> dict[str, Any] | None:
+    if not check.name.startswith("image-identity:"):
+        return None
+    evidence = check.evidence
+    deployment = evidence.get("deployment")
+    container = evidence.get("container")
+    if deployment is None or container is None:
+        component = check.name.removeprefix("image-identity:")
+    else:
+        component = f"{deployment}/{container}"
+    row_evidence = []
+    if evidence.get("pod"):
+        row_evidence.append(f"pod={evidence['pod']}")
+    if evidence.get("identity_strategy"):
+        row_evidence.append(f"strategy={evidence['identity_strategy']}")
+    if evidence.get("zero_replica"):
+        row_evidence.append("zero-replica")
+    return {
+        "surface": "kubernetes",
+        "component": component,
+        "expected_release": _first_text(evidence.get("expected_image")),
+        "expected_digest": _first_text(
+            evidence.get("expected_repo_digest"),
+            evidence.get("expected_image_id"),
+            evidence.get("expected_digest"),
+        ),
+        "live_release": _first_text(
+            evidence.get("live_image"),
+            evidence.get("pod_template_image"),
+        ),
+        "live_digest": _first_text(evidence.get("live_image_id")),
+        "generation": evidence.get("generation"),
+        "readiness": _replica_readiness(evidence),
+        "restart_crash_reason": _first_text(
+            evidence.get("restart_crash_reason"),
+            evidence.get("waiting_reason"),
+            evidence.get("terminated_reason"),
+        ),
+        "evidence": row_evidence,
+        "outcome": check.outcome,
+        "detail": check.detail,
+    }
+
+
+def _drift_component_and_job(path: str) -> tuple[str | None, str | None]:
+    slurm_match = re.search(r"slurm_worker_jobs\[[^/\]]+/([^/\]]+)/([^\]]+)\]", path)
+    if slurm_match:
+        return slurm_match.group(1), slurm_match.group(2)
+    gb10_match = re.search(r"gb10[^.\[]*\[[^/\]]+/([^/\]]+)", path)
+    if gb10_match:
+        return gb10_match.group(1), None
+    return None, None
+
+
+def _environment_state_component_rows(check: ReleaseGateCheck) -> list[dict[str, Any]]:
+    if check.name != "environment-state-convergence":
+        return []
+    evidence = check.evidence
+    components = [
+        str(pool)
+        for pool in evidence.get("slurm_pools", []) or []
+        if pool is not None
+    ]
+    components.extend(
+        str(pool)
+        for pool in evidence.get("gb10_pools", []) or []
+        if pool is not None
+    )
+    if not components:
+        return []
+
+    drifts_by_component: dict[str, list[dict[str, Any]]] = {component: [] for component in components}
+    jobs_by_component: dict[str, set[str]] = {component: set() for component in components}
+    for drift in evidence.get("drift", []) or []:
+        if not isinstance(drift, dict):
+            continue
+        component, job = _drift_component_and_job(str(drift.get("path") or ""))
+        if component in drifts_by_component:
+            drifts_by_component[component].append(drift)
+            if job:
+                jobs_by_component[component].add(job)
+
+    rows: list[dict[str, Any]] = []
+    for component in components:
+        component_drifts = drifts_by_component.get(component, [])
+        if check.outcome == "pass":
+            outcome = "pass"
+        elif component_drifts or not evidence.get("drift"):
+            outcome = "fail"
+        else:
+            outcome = "pass"
+        row_evidence = []
+        if evidence.get("artifact"):
+            row_evidence.append(str(evidence["artifact"]))
+        if evidence.get("expected_profile"):
+            row_evidence.append(str(evidence["expected_profile"]))
+        rows.append({
+            "surface": "external-worker",
+            "component": component,
+            "expected_release": _first_text(
+                evidence.get("expected_profile"),
+                evidence.get("expected_profile_sha256"),
+            ),
+            "expected_digest": _first_text(evidence.get("expected_profile_sha256")),
+            "live_release": _first_text(evidence.get("artifact"), evidence.get("profile")),
+            "live_digest": "",
+            "generation": ",".join(sorted(jobs_by_component.get(component, set()))),
+            "readiness": (
+                "environment-state converged"
+                if outcome == "pass"
+                else "environment-state drift"
+            ),
+            "restart_crash_reason": "" if outcome == "pass" else check.detail,
+            "evidence": row_evidence,
+            "outcome": outcome,
+            "detail": check.detail if outcome == "fail" else "live environment-state check passed",
+        })
+    return rows
+
+
+def build_component_evidence_rows(report: ReleaseGateReport) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for check in report.checks:
+        kubernetes_row = _kubernetes_component_row(check)
+        if kubernetes_row is not None:
+            rows.append(kubernetes_row)
+        rows.extend(_environment_state_component_rows(check))
+    return rows
+
+
+def _markdown_cell(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        text = ", ".join(str(item) for item in value if item is not None and str(item) != "")
+    else:
+        text = str(value)
+    return text.replace("|", "\\|").replace("\n", " ")
+
+
+def _code_cell(value: Any) -> str:
+    text = _markdown_cell(value)
+    if not text:
+        return ""
+    return f"`{text.replace('`', '')}`"
+
+
+def _release_identity_cell(row: dict[str, Any], *, release_key: str, digest_key: str) -> str:
+    release = _first_text(row.get(release_key))
+    digest = _first_text(row.get(digest_key))
+    if release and digest and digest != release:
+        return f"{release} / {digest}"
+    return _first_text(release, digest)
+
+
+def format_release_gate_markdown(report: ReleaseGateReport) -> str:
+    lines = [
+        f"Release gate: `{report.environment}` / namespace `{report.namespace}`",
+        "",
+        "| Surface | Component | Expected | Live | Generation/job | Readiness | Restart/crash | Evidence | Result |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    for row in build_component_evidence_rows(report):
+        expected = _release_identity_cell(
+            row,
+            release_key="expected_release",
+            digest_key="expected_digest",
+        )
+        live = _release_identity_cell(
+            row,
+            release_key="live_release",
+            digest_key="live_digest",
+        )
+        result = "PASS" if row.get("outcome") == "pass" else "FAIL"
+        lines.append(
+            "| "
+            + " | ".join([
+                _markdown_cell(row.get("surface")),
+                _markdown_cell(row.get("component")),
+                _code_cell(expected),
+                _code_cell(live),
+                _code_cell(row.get("generation")),
+                _markdown_cell(row.get("readiness")),
+                _markdown_cell(row.get("restart_crash_reason")),
+                _code_cell(row.get("evidence")),
+                result,
+            ])
+            + " |"
+        )
+    return "\n".join(lines) + "\n"
 
 
 def format_release_gate_table(report: ReleaseGateReport) -> str:
