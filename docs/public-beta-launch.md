@@ -170,6 +170,16 @@ loom cluster release-gate \
   --environment public-beta \
   --format json \
   > "$ROLLOUT_DIR/release-gate-$IMAGE_TAG.json"
+
+loom cluster release-gate \
+  --manifest "$ROLLOUT_DIR/release-manifest-$IMAGE_TAG.json" \
+  --config "$CLUSTER_CONFIG" \
+  --rendered-manifest "$ROLLOUT_DIR/rendered.yaml" \
+  --environment-state-check "$ROLLOUT_DIR/environment-state-check-$IMAGE_TAG.json" \
+  --namespace "$K8S_NAMESPACE" \
+  --environment public-beta \
+  --format markdown \
+  > "$ROLLOUT_DIR/release-gate-$IMAGE_TAG.md"
 ```
 
 This gate fails on rendered/config hash drift, unverifiable managed image
@@ -189,6 +199,16 @@ scaled to zero pass on Deployment-template image convergence and record
 zero-replica evidence instead of requiring a Ready pod. The DB probe runs inside
 `deploy/loom-control-plane` and reports `env:LOOM_CP_DB_URL` without printing
 the underlying connection string.
+
+The JSON release-gate artifact includes `component_evidence`, a concise
+machine-readable row set for each release-managed Kubernetes Deployment
+container and each external worker surface recorded by the environment-state
+manifest section. Each row records expected image/profile, live image or check
+artifact, generation or job id when available, readiness/convergence state,
+restart or crash detail when the gate observed one, supporting evidence, and
+pass/fail. The Markdown form is the pasteable issue-comment table for the same
+rows; attach both artifacts to the rollout directory when recording #286/#294
+evidence.
 
 Keep this artifact free of raw bearer tokens, provider keys, signed
 object-store URLs, internal service URLs, and secret refs; the production
