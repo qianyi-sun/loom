@@ -561,8 +561,10 @@ sidecars do not fail at docker-py's default read timeout. It also passes
 `LOOM_WORKER_MINIO_READ_TIMEOUT_SEC`,
 `LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC`, and
 `LOOM_WORKER_MINIO_OPERATION_ATTEMPTS` into the worker object store used for
-task materialization, artifacts, and trajectory upload. Pre-start task bundle
-materialization is also bounded by
+task materialization, artifacts, and trajectory upload. S3 prefix
+materialization retries prefix listing and each object download separately, so
+a transient disconnect on one task-bundle object does not restart the whole
+prefix. Pre-start task bundle materialization is also bounded by
 `LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC` (default 300 seconds); when it
 expires, the worker writes a redacted setup failure back to the control plane
 instead of leaving the trial indefinitely `claimed`.

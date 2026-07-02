@@ -535,29 +535,51 @@ class MinioObjectStore:
         prefix: str,
         out_dir: Path,
     ) -> int:
-        """List + download every object under `prefix`. Uses S3's paginator
-        because large benchmarks (SWE-Bench Verified is ~500 instances)
-        may have thousands of objects per task; the default list_objects
-        returns 1000-key pages."""
+        """List + download every object under `prefix`.
+
+        Listing and individual object downloads are separate retry units. A
+        transient disconnect while downloading one object must not restart the
+        entire prefix, because high-concurrency task materialization can make
+        that duplicate already-downloaded files and spend the outer worker
+        setup timeout before S3 retries have useful signal.
+        """
         if not prefix:
             raise ValueError(
                 "download_prefix requires a non-empty prefix; refusing to drain entire bucket",
             )
 
-        def _do(client: Any) -> int:
+        def _list(client: Any) -> list[tuple[str, str]]:
             paginator = client.get_paginator("list_objects_v2")
-            count = 0
-            out_dir.mkdir(parents=True, exist_ok=True)
+            objects: list[tuple[str, str]] = []
             for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
                 for obj in page.get("Contents", []):
                     key = obj["Key"]
                     rel = key[len(prefix) :].lstrip("/")
                     if not rel or _has_traversal(rel):
                         continue
-                    dest = out_dir / rel
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    client.download_file(bucket, key, str(dest))
-                    count += 1
-            return count
+                    objects.append((key, rel))
+            return objects
 
-        return await self._run_client_call("download_prefix", _do)
+        objects = await self._run_client_call("download_prefix.list", _list)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        for key, rel in objects:
+            dest = out_dir / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            partial = dest.with_name(f"{dest.name}.part")
+
+            def _download(
+                client: Any,
+                *,
+                key: str = key,
+                partial: Path = partial,
+                dest: Path = dest,
+            ) -> None:
+                with contextlib.suppress(FileNotFoundError):
+                    partial.unlink()
+                client.download_file(bucket, key, str(partial))
+                partial.replace(dest)
+
+            await self._run_client_call(f"download_prefix.download:{key}", _download)
+
+        return len(objects)
