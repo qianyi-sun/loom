@@ -16,6 +16,21 @@ def test_deploy_script_writes_release_manifest_before_cluster_up() -> None:
     assert "release-manifest" in script
     assert script.index("release-manifest") < script.index("loom cluster up")
     assert "release-manifest-${LOOM_IMAGE_TAG}.json" in script
+    assert "LOOM_EXPECTED_IMAGE_IDENTITIES_JSON" in script
+
+
+def test_deploy_script_runs_release_gate_after_cluster_up() -> None:
+    script = (REPO_ROOT / "scripts/ops/deploy_environment.sh").read_text(
+        encoding="utf-8",
+    )
+
+    assert "release-gate" in script
+    assert script.index("loom cluster up") < script.index("release-gate")
+    assert "--rendered-manifest \"${evidence_dir}/rendered.yaml\"" in script
+    assert (
+        "--manifest \"${evidence_dir}/release-manifest-${LOOM_IMAGE_TAG}.json\""
+        in script
+    )
 
 
 def test_deploy_workflow_uploads_rollout_evidence_artifact() -> None:

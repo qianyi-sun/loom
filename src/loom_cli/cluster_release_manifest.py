@@ -156,6 +156,7 @@ def build_release_manifest(
     generated_at: str | None = None,
     loom_cli_version: str = _loom_cli_version,
     alembic_ini: Path = _DEFAULT_ALEMBIC_INI,
+    expected_image_identities: dict[str, dict[str, dict[str, str]]] | None = None,
 ) -> dict[str, Any]:
     release_env_config_version = env_config_version or image_tag
     config_bytes = (
@@ -182,9 +183,11 @@ def build_release_manifest(
         "rendered_manifest": {
             "sha256": _sha256_text(rendered_manifests),
             "deployment_images": _rendered_deployment_images(rendered_manifests),
+            "deployment_image_identities": expected_image_identities or {},
         },
         "alembic": {
             "expected_heads": _alembic_heads(alembic_ini),
+            "compatible_heads": _alembic_heads(alembic_ini),
         },
         "external_workers": _external_worker_summary(
             environment_state_path=environment_state_path,

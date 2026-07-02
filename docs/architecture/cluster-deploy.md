@@ -653,13 +653,19 @@ threads them through preflight before apply. Pass the same `--config` so the
 preflight and rendered manifest prove the same storage boundary and target
 schema surface. Protected rollouts should first run `loom cluster
 release-manifest` against that exact config and image tag, storing the artifact
-beside the rendered YAML. The artifact records the expected git SHA, image tag,
-CLI version, rendered Deployment images, cluster-config/rendered-manifest
-hashes, Alembic heads, and external-worker desired-state fingerprints before
-any apply starts. After readiness passes, `up` compares rendered Deployment
-container images with the live Deployment specs and fails if a concurrent
-operator mutation drifted the live image away from the release manifest. On
-success, `up` has also rejected managed Deployment pods stuck in blocking
+beside the rendered YAML. For protected release acceptance, pass
+`--expected-image-identities-json` so the artifact records immutable image
+digests or image IDs, not just mutable tags. The artifact records the expected
+git SHA, image tag, CLI version, rendered Deployment images,
+cluster-config/rendered-manifest hashes, Alembic heads, and external-worker
+desired-state fingerprints before any apply starts. After readiness passes,
+`up` compares rendered Deployment container images with the live Deployment
+specs and fails if a concurrent operator mutation drifted the live image away
+from the release manifest. The separate `loom cluster release-gate` command
+then compares saved rendered/config hashes, manifest image digests or image IDs
+against target-generation Ready pod image IDs, and live DB Alembic heads queried
+from `deploy/loom-control-plane` via `env:LOOM_CP_DB_URL`. On success, `up` has
+also rejected managed Deployment pods stuck in blocking
 CrashLoop/image/config/start/OOM/failed states, then prints the rendered and
 live image for each managed Deployment/container so the rollout log captures
 image-convergence evidence.

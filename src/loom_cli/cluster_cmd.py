@@ -17,6 +17,7 @@ clear `pip install loom[cluster]` hint when the import fails.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import ipaddress
 import json
 import sys
@@ -33,6 +34,12 @@ from loom_cli.cluster_backup_guard import (
     write_backup_manifest,
 )
 from loom_cli.cluster_config import ClusterConfig, load_cluster_config
+from loom_cli.cluster_release_gate import (
+    collect_release_gate_report,
+    format_release_gate_json,
+    format_release_gate_table,
+    query_live_alembic_heads,
+)
 from loom_cli.cluster_rollout_evidence import (
     build_docker_image_evidence,
     docker_image_inspect,
@@ -1204,6 +1211,17 @@ def _release_manifest(args: argparse.Namespace) -> int:
             write_release_manifest,
         )
 
+        if args.expected_image_identities_json:
+            expected_image_identities = json.loads(
+                Path(args.expected_image_identities_json).resolve().read_text(
+                    encoding="utf-8",
+                )
+            )
+            if not isinstance(expected_image_identities, dict):
+                raise ValueError("expected image identities JSON root must be an object")
+        else:
+            expected_image_identities = None
+
         manifest = build_release_manifest(
             config=config,
             config_path=cfg_path,
@@ -1217,6 +1235,7 @@ def _release_manifest(args: argparse.Namespace) -> int:
             ),
             env_config_version=args.env_config_version,
             generated_at=args.generated_at,
+            expected_image_identities=expected_image_identities,
         )
         if args.output:
             write_release_manifest(Path(args.output), manifest)
@@ -1258,6 +1277,107 @@ def _rollout_evidence_docker_images(args: argparse.Namespace) -> int:
         }
     sys.stdout.write(render_rollout_evidence_json(evidence))
     return 0 if evidence["ok"] else 1
+
+
+def _release_gate(args: argparse.Namespace) -> int:
+    try:
+        manifest_path = Path(args.manifest).resolve()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        sys.stderr.write(f"error: release gate manifest invalid: {exc}\n")
+        return 2
+
+    try:
+        apps_v1, _net_v1, core_v1, _storage_v1 = _load_clients(args.context)
+    except RuntimeError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    except Exception as exc:
+        sys.stderr.write(
+            f"error: cannot connect to cluster: {type(exc).__name__}: {exc}\n",
+        )
+        return 2
+
+    try:
+        if args.config:
+            config_bytes = Path(args.config).resolve().read_bytes()
+            cluster_config_sha256 = hashlib.sha256(config_bytes).hexdigest()
+        else:
+            cluster_config_sha256 = manifest.get("cluster_config", {}).get("sha256")
+        if args.rendered_manifest:
+            rendered_manifest_text = Path(args.rendered_manifest).resolve().read_text(
+                encoding="utf-8",
+            )
+            rendered_manifest_sha256 = hashlib.sha256(
+                rendered_manifest_text.encode("utf-8"),
+            ).hexdigest()
+        else:
+            rendered_manifest_sha256 = manifest.get("rendered_manifest", {}).get("sha256")
+    except OSError as exc:
+        sys.stderr.write(f"error: release gate input invalid: {exc}\n")
+        return 2
+
+    if args.dry_run:
+        live_alembic = None
+        live_alembic_heads = list(manifest.get("alembic", {}).get("expected_heads", []) or [])
+        database_target = "env:LOOM_CP_DB_URL"
+        live_alembic_error = None
+        live_alembic_evidence = {"mode": "dry-run"}
+    else:
+        live_alembic = query_live_alembic_heads(
+            namespace=args.namespace,
+            context=args.context,
+        )
+        live_alembic_heads = live_alembic.heads
+        database_target = live_alembic.database_target
+        live_alembic_error = live_alembic.error
+        live_alembic_evidence = live_alembic.evidence
+
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=apps_v1,
+        core_v1=core_v1,
+        namespace=args.namespace,
+        rendered_manifest_sha256=(
+            str(rendered_manifest_sha256) if rendered_manifest_sha256 else None
+        ),
+        cluster_config_sha256=(
+            str(cluster_config_sha256) if cluster_config_sha256 else None
+        ),
+        live_alembic_heads=live_alembic_heads,
+        database_target=database_target,
+        live_alembic_error=live_alembic_error,
+        live_alembic_evidence=live_alembic_evidence,
+    )
+
+    if args.environment:
+        manifest_environment = manifest.get("release", {}).get("environment")
+        if manifest_environment != args.environment:
+            from loom_cli.cluster_release_gate import ReleaseGateCheck, ReleaseGateReport
+
+            report = ReleaseGateReport(
+                environment=str(manifest_environment or ""),
+                namespace=report.namespace,
+                checks=[
+                    *report.checks,
+                    ReleaseGateCheck(
+                        name="release-environment",
+                        outcome="fail",
+                        detail="release manifest environment does not match requested gate environment",
+                        evidence={
+                            "expected_environment": manifest_environment,
+                            "requested_environment": args.environment,
+                        },
+                        remediation="use the release manifest for the target environment",
+                    ),
+                ],
+            )
+
+    if args.format == "json":
+        sys.stdout.write(format_release_gate_json(report))
+    else:
+        sys.stdout.write(format_release_gate_table(report))
+    return 0 if report.all_pass else 1
 
 
 def _audit(args: argparse.Namespace) -> int:
@@ -3570,11 +3690,72 @@ def dispatch(argv: list[str]) -> int:
         help="Optional UTC timestamp override for deterministic tests.",
     )
     p_release_manifest.add_argument(
+        "--expected-image-identities-json",
+        default=None,
+        help=(
+            "Optional JSON object keyed by Deployment/container with expected "
+            "image, repo_digest, or image_id values from build evidence."
+        ),
+    )
+    p_release_manifest.add_argument(
         "--output",
         default=None,
         help="Output JSON path. Defaults to stdout.",
     )
     p_release_manifest.set_defaults(handler=_release_manifest)
+
+    p_release_gate = sub.add_parser(
+        "release-gate",
+        help=(
+            "Compare a release manifest against live cluster image, render, "
+            "and Alembic state."
+        ),
+    )
+    p_release_gate.add_argument(
+        "--manifest",
+        required=True,
+        help="Release manifest JSON produced by `loom cluster release-manifest`.",
+    )
+    p_release_gate.add_argument(
+        "--config",
+        default=None,
+        help="Cluster config path to hash and compare against the release manifest.",
+    )
+    p_release_gate.add_argument(
+        "--rendered-manifest",
+        default=None,
+        help="Rendered manifest YAML path to hash and compare against the release manifest.",
+    )
+    p_release_gate.add_argument(
+        "--context",
+        default=None,
+        help="kubeconfig context (default: current context).",
+    )
+    p_release_gate.add_argument(
+        "--namespace",
+        default="loom",
+        help="Kubernetes namespace (default: loom).",
+    )
+    p_release_gate.add_argument(
+        "--environment",
+        default=None,
+        help="Optional logical environment guard; must match the manifest when set.",
+    )
+    p_release_gate.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Do not execute the in-cluster Alembic probe. Intended for CLI "
+            "wiring tests and pre-live validation only."
+        ),
+    )
+    p_release_gate.add_argument(
+        "--format",
+        choices=["table", "json"],
+        default="table",
+        help="Output format. JSON for CI/scripting.",
+    )
+    p_release_gate.set_defaults(handler=_release_gate)
 
     p_doctor = sub.add_parser(
         "doctor",

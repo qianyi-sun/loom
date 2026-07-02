@@ -101,7 +101,17 @@ loom cluster release-manifest \
   --git-sha "$RELEASE_SHA" \
   --environment-state-file deploy/environment-state/public-beta.toml \
   --env-config-version "$ENV_CONFIG_VERSION" \
+  --expected-image-identities-json "$CANARY_DIR/00-anchor/image-identities-$IMAGE_TAG.json" \
   --output "$CANARY_DIR/00-anchor/release-manifest-$IMAGE_TAG.json"
+
+loom cluster release-gate \
+  --manifest "$CANARY_DIR/00-anchor/release-manifest-$IMAGE_TAG.json" \
+  --config "$CLUSTER_CONFIG" \
+  --rendered-manifest "$CANARY_DIR/00-anchor/rendered.yaml" \
+  --namespace "$K8S_NAMESPACE" \
+  --environment public-beta \
+  --format json \
+  | tee "$CANARY_DIR/01-clean-anchor/release-gate-$IMAGE_TAG.json"
 
 loom cluster status \
   --namespace "$K8S_NAMESPACE" \

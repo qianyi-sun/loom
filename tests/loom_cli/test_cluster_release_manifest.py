@@ -80,7 +80,41 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
     assert manifest["rendered_manifest"]["deployment_images"]["loom-service"][
         "loom-service"
     ].endswith(":public-beta-abc123")
+    manifest_with_identities = build_release_manifest(
+        config=config,
+        config_path=config_path,
+        rendered_manifests=rendered,
+        environment="public-beta",
+        image_tag="public-beta-abc123",
+        git_sha="a" * 40,
+        expected_image_identities={
+            "loom-service": {
+                "loom-service": {
+                    "image": "loom-service:public-beta-abc123",
+                    "repo_digest": (
+                        "loom-service@sha256:"
+                        + "1" * 64
+                    ),
+                    "image_id": "sha256:" + "2" * 64,
+                },
+            },
+        },
+        generated_at="2026-07-01T00:00:00Z",
+        loom_cli_version="test-version",
+    )
+    assert manifest_with_identities["rendered_manifest"][
+        "deployment_image_identities"
+    ] == {
+        "loom-service": {
+            "loom-service": {
+                "image": "loom-service:public-beta-abc123",
+                "repo_digest": "loom-service@sha256:" + "1" * 64,
+                "image_id": "sha256:" + "2" * 64,
+            },
+        },
+    }
     assert manifest["alembic"]["expected_heads"] == ["0050"]
+    assert manifest["alembic"]["compatible_heads"] == ["0050"]
     assert manifest["external_workers"]["environment_state_file"]["sha256"] == (
         hashlib.sha256(environment_state_path.read_bytes()).hexdigest()
     )
@@ -136,3 +170,51 @@ def test_cluster_release_manifest_cli_writes_manifest(tmp_path: Path) -> None:
     assert manifest["release"]["git_sha"] == "b" * 40
     assert manifest["release"]["image_tag"] == "public-beta-def456"
     assert manifest["cluster_config"]["path"] == str(config_path)
+
+
+def test_cluster_release_manifest_cli_accepts_expected_image_identities(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "cluster-config.toml"
+    config_path.write_text(
+        'image_tag = "public-beta-def456"\nnamespace = "loom-public-beta"\n',
+        encoding="utf-8",
+    )
+    identities_path = tmp_path / "image-identities.json"
+    identities_path.write_text(
+        json.dumps({
+            "loom-service": {
+                "loom-service": {
+                    "image": "loom-service:public-beta-def456",
+                    "repo_digest": "loom-service@sha256:" + "3" * 64,
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "release-manifest-public-beta-def456.json"
+
+    rc = main(
+        [
+            "cluster",
+            "release-manifest",
+            "--config",
+            str(config_path),
+            "--environment",
+            "public-beta",
+            "--image-tag",
+            "public-beta-def456",
+            "--git-sha",
+            "b" * 40,
+            "--expected-image-identities-json",
+            str(identities_path),
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert rc == 0
+    manifest = json.loads(output_path.read_text(encoding="utf-8"))
+    assert manifest["rendered_manifest"]["deployment_image_identities"][
+        "loom-service"
+    ]["loom-service"]["repo_digest"] == "loom-service@sha256:" + "3" * 64
