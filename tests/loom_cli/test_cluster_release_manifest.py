@@ -10,6 +10,7 @@ from loom_cli.__main__ import main
 from loom_cli.cluster_cmd import render_manifests
 from loom_cli.cluster_config import load_cluster_config
 from loom_cli.cluster_release_manifest import (
+    _alembic_heads,
     build_release_manifest,
     render_release_manifest_json,
 )
@@ -148,8 +149,9 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
             },
         },
     }
-    assert manifest["alembic"]["expected_heads"] == ["0052"]
-    assert manifest["alembic"]["compatible_heads"] == ["0052"]
+    alembic_heads = _alembic_heads()
+    assert manifest["alembic"]["expected_heads"] == alembic_heads
+    assert manifest["alembic"]["compatible_heads"] == alembic_heads
     assert manifest["external_workers"]["environment_state_file"]["sha256"] == (
         hashlib.sha256(environment_state_path.read_bytes()).hexdigest()
     )
