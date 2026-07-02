@@ -915,6 +915,7 @@ def test_worker_pool_autoscaler_status_gets_cp_decisions(
                         "last_decision": "scale_up",
                         "last_decision_reason": "queued_deficit",
                         "last_blocked_reason": None,
+                        "last_blocked_details": None,
                         "last_error": None,
                     },
                 ],
@@ -936,6 +937,63 @@ def test_worker_pool_autoscaler_status_gets_cp_decisions(
     assert "production/oldlab" in out
     assert "desired=12 actual=6 pending=6 draining=0" in out
     assert "decision=scale_up" in out
+
+
+def test_worker_pool_autoscaler_status_text_shows_no_safe_node_details(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _fake_get(url, *, headers, timeout):  # type: ignore[no-untyped-def]
+        return _StubResponse(
+            200,
+            json_data={
+                "policies": [
+                    {
+                        "environment": "production",
+                        "pool_name": "oldlab",
+                        "actuator": "slurm",
+                        "enabled": True,
+                        "min_slots": 1,
+                        "max_slots": 40,
+                        "last_desired_slots": 1,
+                        "last_actual_slots": 0,
+                        "last_pending_slots": 0,
+                        "last_draining_slots": 0,
+                        "last_occupied_slots": 0,
+                        "last_queued_slots": 1,
+                        "last_decision": "blocked",
+                        "last_decision_reason": "no_safe_slurm_nodes",
+                        "last_blocked_reason": "no_safe_slurm_nodes",
+                        "last_blocked_details": {
+                            "node_exclusions": [
+                                {
+                                    "hostname": "oldlab-1",
+                                    "reason": "insufficient_memory",
+                                    "free_memory_mib": 8000,
+                                },
+                                {
+                                    "hostname": "oldlab-2",
+                                    "reason": "cpu_load_high",
+                                    "cpu_load": 30.0,
+                                },
+                            ],
+                        },
+                        "last_error": None,
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+
+    rc = main(["admin", "worker-pools", "autoscaler", "status"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "decision=blocked" in out
+    assert "blocked=no_safe_slurm_nodes" in out
+    assert "details=oldlab-1:insufficient_memory,oldlab-2:cpu_load_high" in out
 
 
 def test_worker_pool_autoscaler_status_json_format_emits_raw_json(
@@ -1130,6 +1188,127 @@ def test_environment_state_check_fails_with_actionable_drift(
     assert "worker_pool_autoscaler_policies[public-beta/gb10-arm64].actuator" in err
     assert "desired='slurm' live='gb10'" in err
     assert "gb10_worker_pool_desired_states[public-beta/gb10-arm64].image_tag" in err
+
+
+def test_environment_state_check_json_reports_autoscaler_blockers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    profile_path = tmp_path / "public-beta.state.toml"
+    _write_environment_state_profile(profile_path)
+
+    def _fake_get(url, *, headers, timeout):  # type: ignore[no-untyped-def]
+        if url.endswith("/admin/worker-pool-autoscalers/status"):
+            return _StubResponse(
+                200,
+                json_data={
+                    "policies": [
+                        {
+                            "environment": "public-beta",
+                            "pool_name": "gb10-arm64",
+                            "actuator": "slurm",
+                            "enabled": True,
+                            "min_slots": 0,
+                            "max_slots": 150,
+                            "scale_up_threshold_slots": 1,
+                            "scale_down_idle_seconds": 600,
+                            "scale_up_cooldown_seconds": 60,
+                            "scale_down_cooldown_seconds": 300,
+                            "drain_timeout_seconds": 600,
+                            "force": False,
+                            "actuator_config": {
+                                "backend": "docker",
+                                "cpu_arch": "arm64",
+                                "partition": "gb10",
+                                "allowed_nodes": ["trt-gb10-1"],
+                                "requested_concurrency": 10,
+                                "max_jobs": 15,
+                                "pending_job_cap": 2,
+                            },
+                            "last_decision": "blocked",
+                            "last_decision_reason": "no_safe_slurm_nodes",
+                            "last_blocked_reason": "no_safe_slurm_nodes",
+                            "last_blocked_details": {
+                                "node_exclusions": [
+                                    {
+                                        "hostname": "trt-gb10-1",
+                                        "reason": "cpu_load_high",
+                                    },
+                                ],
+                            },
+                            "last_error": None,
+                        },
+                    ],
+                },
+            )
+        if url.endswith("/admin/gb10-worker-pools/status"):
+            return _StubResponse(
+                200,
+                json_data={
+                    "desired_states": [
+                        {
+                            "environment": "public-beta",
+                            "pool_name": "gb10-arm64",
+                            "image_tag": "public-beta-57a7509",
+                            "max_concurrent": 10,
+                            "env_config_version": "public-beta-57a7509",
+                            "target_slots": 150,
+                            "host_intents": {},
+                            "rollout_policy": {"mode": "all"},
+                            "env": {},
+                        },
+                    ],
+                },
+            )
+        if url.endswith("/admin/slurm-worker-jobs/status"):
+            return _StubResponse(200, json_data={"jobs": []})
+        raise AssertionError(url)
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+
+    rc = main(
+        [
+            "admin",
+            "environment-state",
+            "check",
+            "--file",
+            str(profile_path),
+            "--environment",
+            "public-beta",
+            "--var",
+            "IMAGE_TAG=public-beta-57a7509",
+            "--var",
+            "ENV_CONFIG_VERSION=public-beta-57a7509",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert rc == 1
+    body = json.loads(capsys.readouterr().out)
+    assert body["ok"] is False
+    assert body["drift"] == []
+    assert body["autoscaler_blockers"] == [
+        {
+            "environment": "public-beta",
+            "pool_name": "gb10-arm64",
+            "actuator": "slurm",
+            "last_decision": "blocked",
+            "last_decision_reason": "no_safe_slurm_nodes",
+            "last_blocked_reason": "no_safe_slurm_nodes",
+            "last_blocked_details": {
+                "node_exclusions": [
+                    {
+                        "hostname": "trt-gb10-1",
+                        "reason": "cpu_load_high",
+                    },
+                ],
+            },
+            "last_error": None,
+        },
+    ]
 
 
 def test_environment_state_check_fetches_slurm_jobs_and_reports_external_prereq_drift(

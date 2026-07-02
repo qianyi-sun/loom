@@ -3231,7 +3231,15 @@ link it from #217; do not merge incomplete evidence.
   memory is below the reserve plus one slot, or idle CPU is below the reserve
   plus one slot. With `max_concurrency_per_node=8`, five safe OLDLAB nodes can
   reach 40 slots; if current node load is near 24 on 24-CPU hosts, the
-  conservative policy should explain the exclusion and avoid scaling out.
+  conservative policy blocks scale-up with
+  `last_blocked_reason=no_safe_slurm_nodes` and records
+  `last_blocked_details.node_exclusions` in autoscaler status JSON. Text output
+  from `loom admin worker-pools autoscaler status` and `loom resources status`
+  summarizes those exclusions as `node:reason`, so operators do not have to
+  reconstruct CPU, memory, state, or active-job exclusions from raw `sinfo`.
+  The same hard blockers appear in `environment-state check --format json` as
+  `autoscaler_blockers`, and `loom cluster release-gate` fails the
+  environment-state convergence row while they are present.
   Temporarily exclude a node by removing it from `ALLOWED_NODES`; lower
   footprint with `MAX_JOBS`; lower per-node pressure with
   `REQUESTED_CONCURRENCY`; disable the pool with
@@ -3365,7 +3373,7 @@ link it from #217; do not merge incomplete evidence.
 
   The policy records desired slots, actual claimable slots, pending slots,
   draining slots, occupied slots, queued slots, idle-window age, last decision,
-  blocked reason, and actuator error. Normal scale-down marks workers
+  blocked reason, blocked details, and actuator error. Normal scale-down marks workers
   `draining` first; those workers stop claiming new work, finish assigned
   trials, and are released only after in-flight count reaches zero. To roll
   back, disable the policy or raise `min_slots`, then wait for Slurm jobs to

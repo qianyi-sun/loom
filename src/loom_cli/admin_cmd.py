@@ -565,6 +565,10 @@ def _worker_pool_autoscaler_status(args: argparse.Namespace) -> int:
     for row in policies:
         error = row.get("last_error") or "-"
         blocked = row.get("last_blocked_reason") or "-"
+        details = _format_autoscaler_blocked_details(
+            row.get("last_blocked_details"),
+        )
+        details_text = f" details={details}" if details else ""
         sys.stdout.write(
             f"  {row['environment']}/{row['pool_name']} "
             f"{row['actuator']} "
@@ -578,9 +582,28 @@ def _worker_pool_autoscaler_status(args: argparse.Namespace) -> int:
             f"queued={row.get('last_queued_slots') or 0} "
             f"decision={row.get('last_decision') or '-'} "
             f"reason={row.get('last_decision_reason') or '-'} "
-            f"blocked={blocked} error={error}\n",
+            f"blocked={blocked}{details_text} error={error}\n",
         )
     return 0
+
+
+def _format_autoscaler_blocked_details(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    node_exclusions = value.get("node_exclusions")
+    if isinstance(node_exclusions, list):
+        parts: list[str] = []
+        for item in node_exclusions:
+            if not isinstance(item, dict):
+                continue
+            hostname = str(item.get("hostname") or "").strip()
+            reason = str(item.get("reason") or "").strip()
+            if hostname and reason:
+                parts.append(f"{hostname}:{reason}")
+        if parts:
+            return ",".join(parts)
+    reason = str(value.get("reason") or "").strip()
+    return reason
 
 
 def _parse_environment_state_vars(values: list[str]) -> dict[str, str]:
@@ -776,6 +799,7 @@ def _environment_state_apply(args: argparse.Namespace) -> int:
 
 def _environment_state_check(args: argparse.Namespace) -> int:
     from loom_cli.environment_state import (
+        autoscaler_blockers,
         diff_environment_state,
         diff_external_slurm_autoscaler_supervisors,
         diff_external_slurm_runner_prerequisites,
@@ -822,13 +846,14 @@ def _environment_state_check(args: argparse.Namespace) -> int:
         )
     )
     drift.extend(diff_external_slurm_autoscaler_supervisors(profile))
+    blockers = autoscaler_blockers(profile, live)
     if args.format == "json":
         json.dump(
             {
                 "environment": profile.environment,
                 "control_plane_environment": profile.control_plane_environment,
                 "profile": str(args.file),
-                "ok": not drift,
+                "ok": not drift and not blockers,
                 "drift": [
                     {
                         "path": item.path,
@@ -837,13 +862,14 @@ def _environment_state_check(args: argparse.Namespace) -> int:
                     }
                     for item in drift
                 ],
+                "autoscaler_blockers": blockers,
                 "catalog_provisioning": profile.catalog_provisioning,
             },
             sys.stdout,
             indent=2,
         )
         sys.stdout.write("\n")
-        return 1 if drift else 0
+        return 1 if drift or blockers else 0
 
     if drift:
         sys.stderr.write(
@@ -859,6 +885,25 @@ def _environment_state_check(args: argparse.Namespace) -> int:
             "Apply the versioned desired state with "
             "`loom admin environment-state apply --file ...` after confirming "
             "the profile matches this rollout.\n",
+        )
+        return 1
+
+    if blockers:
+        sys.stderr.write(
+            f"Environment state autoscaler blockers for {_environment_state_label(profile)}: "
+            f"{len(blockers)} blocker(s)\n",
+        )
+        for blocker in blockers:
+            sys.stderr.write(
+                "  "
+                f"{blocker.get('environment')}/{blocker.get('pool_name')}: "
+                f"blocked={blocker.get('last_blocked_reason')} "
+                f"decision={blocker.get('last_decision') or '-'} "
+                f"reason={blocker.get('last_decision_reason') or '-'}\n",
+            )
+        sys.stderr.write(
+            "Resolve the autoscaler blocker before accepting this environment as "
+            "release-ready.\n",
         )
         return 1
 

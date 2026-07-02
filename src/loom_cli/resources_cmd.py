@@ -30,6 +30,25 @@ def _format_idle(pool: dict[str, Any]) -> str:
     return "-" if value is None else f"idle={int(value)}s"
 
 
+def _format_blocked_details(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    node_exclusions = value.get("node_exclusions")
+    if isinstance(node_exclusions, list):
+        parts: list[str] = []
+        for item in node_exclusions:
+            if not isinstance(item, dict):
+                continue
+            hostname = str(item.get("hostname") or "").strip()
+            reason = str(item.get("reason") or "").strip()
+            if hostname and reason:
+                parts.append(f"{hostname}:{reason}")
+        if parts:
+            return ",".join(parts)
+    reason = str(value.get("reason") or "").strip()
+    return reason
+
+
 def _print_text(resources: dict[str, Any]) -> None:
     aggregate = cast(dict[str, Any], resources.get("aggregate") or {})
     pools = cast(list[dict[str, Any]], resources.get("pools") or [])
@@ -82,6 +101,13 @@ def _print_text(resources: dict[str, Any]) -> None:
             or pool.get("last_autoscaler_blocked_reason")
             or "-"
         )
+        blocked_details = _format_blocked_details(
+            pool.get("blocked_details")
+            or pool.get("last_autoscaler_blocked_details"),
+        )
+        blocked_text = (
+            f"{blocked} ({blocked_details})" if blocked_details else str(blocked)
+        )
         pool_max_slots = int(
             pool.get("max_slots", pool.get("ceiling_slots", pool.get("total_slots", 0))),
         )
@@ -103,7 +129,7 @@ def _print_text(resources: dict[str, Any]) -> None:
             f"{int(pool.get('active_workers', 0)):<7} "
             f"{decision!s:<14} "
             f"{reason!s:<21} "
-            f"{blocked}",
+            f"{blocked_text}",
         )
 
 

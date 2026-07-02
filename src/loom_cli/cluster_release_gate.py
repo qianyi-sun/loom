@@ -633,6 +633,7 @@ def _environment_state_check(
     manifest_environment = manifest.get("release", {}).get("environment")
     drift = artifact.get("drift")
     ok = artifact.get("ok")
+    autoscaler_blockers = artifact.get("autoscaler_blockers")
     artifact_evidence = {
         **evidence,
         "environment": artifact_environment,
@@ -640,6 +641,11 @@ def _environment_state_check(
         "profile": artifact.get("profile"),
         "ok": ok,
         "drift_count": len(drift) if isinstance(drift, list) else None,
+        "autoscaler_blocker_count": (
+            len(autoscaler_blockers)
+            if isinstance(autoscaler_blockers, list)
+            else None
+        ),
     }
     if manifest_environment and artifact_environment != manifest_environment:
         return ReleaseGateCheck(
@@ -660,12 +666,25 @@ def _environment_state_check(
             evidence=artifact_evidence,
             remediation=remediation,
         )
-    if ok and not drift:
+    if not isinstance(autoscaler_blockers, list):
+        autoscaler_blockers = []
+    if ok and not drift and not autoscaler_blockers:
         return ReleaseGateCheck(
             name="environment-state-convergence",
             outcome="pass",
             detail="live environment-state check passed",
             evidence=artifact_evidence,
+        )
+    if autoscaler_blockers:
+        return ReleaseGateCheck(
+            name="environment-state-convergence",
+            outcome="fail",
+            detail="live environment-state check reports autoscaler blockers",
+            evidence={
+                **artifact_evidence,
+                "autoscaler_blockers": autoscaler_blockers,
+            },
+            remediation="resolve autoscaler blockers before accepting release-gate capacity evidence",
         )
     return ReleaseGateCheck(
         name="environment-state-convergence",

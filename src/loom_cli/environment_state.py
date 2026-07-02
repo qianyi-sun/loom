@@ -65,6 +65,15 @@ _GB10_COMPARE_FIELDS = (
     "force",
 )
 
+_AUTOSCALER_HARD_BLOCKERS = frozenset(
+    {
+        "no_safe_slurm_nodes",
+        "missing_slurm_allowed_nodes",
+        "slurm_autoscaler_config_invalid",
+        "release_state_drift",
+    },
+)
+
 _EXTERNAL_AUTOSCALER_SUPERVISOR_DEFAULTS: dict[str, Any] = {
     "args": [],
     "requires": ["network-online.target"],
@@ -558,6 +567,45 @@ def diff_environment_state(
         expected_worker_token=expected_worker_token,
     )
     return drift
+
+
+def autoscaler_blockers(
+    profile: EnvironmentStateProfile,
+    live: dict[str, Any],
+) -> list[dict[str, Any]]:
+    expected_keys = {
+        (policy["environment"], policy["pool_name"])
+        for policy in profile.autoscaler_policies
+    }
+    policies = _as_dict(live.get("autoscaler_status", {}), "autoscaler_status").get(
+        "policies",
+        [],
+    )
+    if not isinstance(policies, list):
+        return []
+    blockers: list[dict[str, Any]] = []
+    for policy in policies:
+        if not isinstance(policy, dict):
+            continue
+        key = (policy.get("environment"), policy.get("pool_name"))
+        if key not in expected_keys:
+            continue
+        reason = policy.get("last_blocked_reason")
+        if not isinstance(reason, str) or reason not in _AUTOSCALER_HARD_BLOCKERS:
+            continue
+        blockers.append(
+            {
+                "environment": policy.get("environment"),
+                "pool_name": policy.get("pool_name"),
+                "actuator": policy.get("actuator"),
+                "last_decision": policy.get("last_decision"),
+                "last_decision_reason": policy.get("last_decision_reason"),
+                "last_blocked_reason": reason,
+                "last_blocked_details": policy.get("last_blocked_details"),
+                "last_error": policy.get("last_error"),
+            }
+        )
+    return blockers
 
 
 SubprocessRunner = Callable[[list[str]], tuple[int, str, str]]

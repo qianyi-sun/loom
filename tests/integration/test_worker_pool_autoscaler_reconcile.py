@@ -21,6 +21,7 @@ from loom.db.schema import (
 )
 from loom_control_plane.elastic_slurm_worker_controller import (
     ElasticSlurmWorkerControllerConfig,
+    SlurmNodeResource,
     SlurmWorkerCommandRunner,
 )
 from loom_control_plane.slurm_worker_jobs import SlurmWorkerJobObservation
@@ -42,6 +43,7 @@ class FakeSlurmRunner(SlurmWorkerCommandRunner):
         self.fail_submit_nodes: set[str] = set()
         self.job_observations: list[SlurmWorkerJobObservation] | None = None
         self.queried_job_ids: list[tuple[str, ...]] = []
+        self.node_resources: dict[str, SlurmNodeResource] = {}
 
     async def query_jobs(
         self,
@@ -69,6 +71,12 @@ class FakeSlurmRunner(SlurmWorkerCommandRunner):
 
     async def cancel_job(self, job_id: str) -> None:
         self.cancelled_job_ids.append(job_id)
+
+    async def query_node_resources(
+        self,
+        nodes: tuple[str, ...],
+    ) -> dict[str, SlurmNodeResource]:
+        return {node: resource for node, resource in self.node_resources.items() if node in nodes}
 
 
 @pytest.fixture(autouse=True)
@@ -237,6 +245,99 @@ async def test_reconcile_submits_slurm_jobs_for_scale_up_deficit(
         assert policy.last_decision == "scale_up"
         assert policy.last_decision_reason == "queued_deficit"
         assert policy.last_pending_slots == 12
+    finally:
+        await engine.dispose()
+
+
+async def test_reconcile_persists_no_safe_slurm_node_blocker(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    try:
+        async with session_factory() as s:
+            await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
+                environment="production",
+                pool_name="oldlab",
+                actuator="slurm",
+                enabled=True,
+                min_slots=1,
+                max_slots=40,
+                scale_up_threshold_slots=1,
+                scale_down_idle_seconds=600,
+                scale_up_cooldown_seconds=60,
+                scale_down_cooldown_seconds=300,
+                drain_timeout_seconds=600,
+                actuator_config={
+                    "backend": "docker",
+                    "cpu_arch": "x86_64",
+                    "allowed_nodes": ["oldlab-1", "oldlab-2"],
+                    "env_file": "/secure/.env.remote-worker",
+                    "repo_dir": "/opt/loom",
+                    "requested_cpus": 2,
+                    "requested_memory_mib": 8192,
+                    "requested_concurrency": 1,
+                    "max_jobs": 2,
+                    "pending_job_cap": 2,
+                    "resource_aware": True,
+                    "cpu_per_slot": 2,
+                    "memory_mib_per_slot": 8192,
+                    "reserved_cpus": 4,
+                    "reserved_memory_mib": 24_576,
+                    "max_concurrency_per_node": 8,
+                },
+            ))
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        runner.node_resources = {
+            "oldlab-1": SlurmNodeResource("oldlab-1", "mixed", 24, 8_000, 4.0),
+            "oldlab-2": SlurmNodeResource("oldlab-2", "drain", 24, 120_000, 4.0),
+        }
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s,
+                now=now,
+                slurm_runner=runner,
+            )
+            await s.commit()
+
+        assert results[0].action == "blocked"
+        assert results[0].blocked_reason == "no_safe_slurm_nodes"
+        assert runner.submitted_nodes == []
+
+        async with session_factory() as s:
+            policy = (await s.execute(
+                select(WorkerPoolAutoscalerPolicy),
+            )).scalar_one()
+
+        assert policy.last_decision == "blocked"
+        assert policy.last_decision_reason == "no_safe_slurm_nodes"
+        assert policy.last_blocked_reason == "no_safe_slurm_nodes"
+        assert policy.last_blocked_details["node_exclusions"] == [
+            {
+                "hostname": "oldlab-1",
+                "reason": "insufficient_memory",
+                "safe_slots": 0,
+                "state": "mixed",
+                "cpus_total": 24,
+                "idle_cpus": None,
+                "cpu_load": 4.0,
+                "free_memory_mib": 8000,
+            },
+            {
+                "hostname": "oldlab-2",
+                "reason": "unsafe_state",
+                "safe_slots": 0,
+                "state": "drain",
+                "cpus_total": 24,
+                "idle_cpus": None,
+                "cpu_load": 4.0,
+                "free_memory_mib": 120000,
+            },
+        ]
+        assert policy.last_scale_up_at is None
     finally:
         await engine.dispose()
 

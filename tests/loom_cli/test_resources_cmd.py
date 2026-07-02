@@ -88,6 +88,62 @@ _SUMMARY = {
                 "decision_reason": "queued_deficit",
                 "last_autoscaler_blocked_reason": "pending_cap",
                 "blocked_reason": "pending_cap",
+                "last_autoscaler_blocked_details": None,
+                "blocked_details": None,
+                "last_autoscaler_error": None,
+            },
+            {
+                "pool_name": "oldlab",
+                "backend": "docker",
+                "cpu_arch": "x86_64",
+                "autoscaler_environment": "production",
+                "autoscaler_actuator": "slurm",
+                "autoscaler_enabled": True,
+                "autoscaler_idle_since_at": None,
+                "autoscaler_idle_seconds": None,
+                "desired_slots": 1,
+                "pending_slots": 0,
+                "current_active_slots": 0,
+                "max_slots": 40,
+                "ceiling_slots": 40,
+                "active_workers": 0,
+                "draining_workers": 0,
+                "total_slots": 0,
+                "draining_slots": 0,
+                "occupied_slots": 0,
+                "free_slots": 0,
+                "running_tasks": 0,
+                "starting_tasks": 0,
+                "queued_tasks": 1,
+                "last_autoscaler_decision": "blocked",
+                "last_autoscaler_reason": "no_safe_slurm_nodes",
+                "decision_reason": "no_safe_slurm_nodes",
+                "last_autoscaler_blocked_reason": "no_safe_slurm_nodes",
+                "blocked_reason": "no_safe_slurm_nodes",
+                "last_autoscaler_blocked_details": {
+                    "node_exclusions": [
+                        {
+                            "hostname": "oldlab-1",
+                            "reason": "insufficient_memory",
+                        },
+                        {
+                            "hostname": "oldlab-2",
+                            "reason": "cpu_load_high",
+                        },
+                    ],
+                },
+                "blocked_details": {
+                    "node_exclusions": [
+                        {
+                            "hostname": "oldlab-1",
+                            "reason": "insufficient_memory",
+                        },
+                        {
+                            "hostname": "oldlab-2",
+                            "reason": "cpu_load_high",
+                        },
+                    ],
+                },
                 "last_autoscaler_error": None,
             },
         ],
@@ -194,3 +250,7 @@ def test_resources_status_text_shows_slots_and_pool_breakdown(
     assert "2/2" in out
     assert "scale_up" in out
     assert "pending_cap" in out
+    assert "oldlab" in out
+    assert "blocked" in out
+    assert "no_safe_slurm_nodes" in out
+    assert "oldlab-1:insufficient_memory,oldlab-2:cpu_load_high" in out
