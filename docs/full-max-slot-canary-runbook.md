@@ -17,12 +17,13 @@ SkillLearnBench full/max-slot workload across all three release-managed pools:
 Stop before submitting any workload unless every item in this section is true.
 
 1. The coordinator has posted an explicit `GO` for this canary.
-2. The public-beta anchor is clean. The current known blocked candidate is
-   `public-beta-cb6af75`, which reached Kubernetes health but is not clean
-   because `environment-state check` failed on stale OLDLAB Slurm job `17972`.
-   A clean anchor requires a later successful `environment-state check` with
-   `ok=true` and `drift=[]` after that stale job is resolved by operator
-   decision.
+2. The public-beta anchor is clean at execution time. A clean anchor requires
+   the latest `environment-state check` for the chosen rollout to report
+   `ok=true` and `drift=[]`, with no active Slurm jobs, GB10 node-agent
+   reports, worker env files, or worker repo paths from an older `IMAGE_TAG`.
+   Historical drift such as stale OLDLAB Slurm job `17972` on
+   `public-beta-ce55a35` is a stop condition until the follow-up check proves
+   the replacement state is clean.
 3. #190 targeted durability validation has completed on the clean anchor.
    Do not use the full/max-slot canary as the first proof of the #190 S3
    materialization and trajectory/artifact durability fix.
