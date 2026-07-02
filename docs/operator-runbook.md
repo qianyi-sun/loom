@@ -842,6 +842,108 @@ parametrizes over every rollout-critical Dockerfile and asserts
 `PIP_RETRIES >= 5` and `PIP_DEFAULT_TIMEOUT >= 30`, so a future change
 that drops the env vars breaks CI before the rollout does.
 
+## One-command rollout driver (#340)
+
+`loom cluster rollout` orchestrates the full public-beta rollout: resolve
+target ref → worktree → build → kind-load → GB10 prep → backup → audit →
+render → preflight → migrate → env-state → cluster up → release-gate →
+smoke → summary. Every step writes evidence into a per-rollout directory
+tree; a re-run of the same command safely resumes from the interrupted
+step.
+
+### Invocation
+
+```bash
+loom cluster rollout \
+  --ref origin/dev \
+  --image-tag public-beta-abc1234 \
+  --cluster-name loom-public-beta \
+  --namespace loom-public-beta \
+  --cluster-config /operator/cluster-config.toml \
+  --rollout-root /data/loom-public-beta \
+  --scope current-gb10
+```
+
+Optional flags:
+
+- `--exclude-oldlab` — take the OLDLAB pool out of scope. Refused when
+  `--scope=full-cluster` because you can't claim full-cluster acceptance
+  while excluding a release-managed pool.
+- `--resume` — explicit opt-in to resume the newest in-progress rollout
+  for this `--image-tag`. Without `--resume`, an existing in-progress
+  rollout for the same tag is a hard refusal (the driver won't start
+  a second run against the same target — either resume or remove the
+  state.json).
+- `--dry-run` — print the planned step list + resolved SHA and exit
+  without touching anything. Safe to run any time.
+
+### Evidence layout
+
+Each invocation gets a directory under `<rollout-root>/rollouts/`:
+
+```
+20260702t235959z-public-beta-abc1234/
+├── state.json               # driver's state machine snapshot
+├── inputs.json              # resolved CLI args + config sha
+├── logs/driver.log
+├── 00-resolve-target/       # per-step: result.json, stdout.log, stderr.log,
+├── 01-worktree/             # step-specific artifacts (rendered.yaml,
+├── ...                      # loaded-images.json, migration.yaml, etc.)
+├── 13-smoke/
+└── 99-summary/summary.md
+```
+
+Every step transitions through the tiny FSM
+`not_started → running → verifying → done | failed` and the driver
+persists after every transition, so `Ctrl-C` at any point followed by
+a re-run picks up where it left off. `state.json` version is `1`.
+
+### Resume semantics
+
+- For each step, the driver reads `result.json`. If `state=done` and
+  the current `inputs_hash` matches the persisted one → skip.
+- If the persisted state is `running` or `verifying`, the driver calls
+  the step's `verify()` (read-only). MATCH → mark done and continue.
+  MISMATCH → drop back to `running` and retry. UNKNOWN → refuse to
+  advance and print a diagnostic (operator inspects and re-runs).
+- After a successful `run()`, the driver calls `verify()` again and
+  requires MATCH or UNKNOWN before marking done. A MISMATCH here means
+  the world doesn't match what `run()` reported — a real problem, not
+  a transient hiccup, so we refuse rather than retry silently.
+
+### Refusal rules
+
+- `--scope=full-cluster` + `--exclude-oldlab` → refused before any
+  mutation. (#340 acceptance criterion.)
+- Persisted `inputs.json` differs from current invocation → refused
+  with a per-key diff. Prevents accidentally continuing a rollout
+  against a different target sha.
+
+### Individual step reference
+
+Each step is a small Python module under
+`src/loom_cli/rollout/steps/`. Every step defines its own
+`inputs_hash`, `verify` and `run` — see the source for the exact
+observability and mutation contract:
+
+| # | Step | Delegates to |
+|---|---|---|
+| 00 | resolve-target | git rev-parse; validates image-tag ↔ sha7 |
+| 01 | worktree | `git worktree add` at target sha |
+| 02 | build-images | `docker build` × 5 rollout-critical images |
+| 03 | kind-load-images | `loom cluster load-images` (#96) |
+| 04 | gb10-prep | SSH ×N hosts: fetch, checkout, write env file, verify |
+| 05 | backup | `loom cluster backup` |
+| 06 | audit | `loom cluster audit` |
+| 07 | render | `loom cluster render` → `rendered.yaml` |
+| 08 | preflight | `loom cluster preflight` |
+| 09 | migrate | `loom cluster render-migration` + `kubectl wait` (#332) |
+| 10 | env-state | apply + check (#331 fix for stop-on-disable) |
+| 11 | cluster-up | `loom cluster up --wait` (#203 fix for updated replicas) |
+| 12 | release-gate | `loom cluster release-gate` (#339 fix for stale kind-import) |
+| 13 | smoke | HTTP health + benchmarks + trial submit + poll + trajectory HEAD |
+| 99 | summary | write `summary.md` from every prior step's result.json |
+
 ## Kind cluster: loading local images before rollout (#96)
 
 When a public-beta or staging cluster runs on top of `kind`, images built with

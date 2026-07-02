@@ -4285,5 +4285,20 @@ def dispatch(argv: list[str]) -> int:
     )
     p_render_migration.set_defaults(handler=_render_migration)
 
+    p_rollout = sub.add_parser(
+        "rollout",
+        help=(
+            "One-command public-beta rollout driver with state-machine "
+            "resume (#340). Orchestrates 14 steps: resolve-target → "
+            "worktree → build → kind-load → gb10-prep → backup → audit "
+            "→ render → preflight → migrate → env-state → cluster-up "
+            "→ release-gate → smoke, plus a summary."
+        ),
+    )
+    from loom_cli.rollout.cli import build_parser as _rollout_build_parser
+    from loom_cli.rollout.cli import handle as _rollout_handle
+    _rollout_build_parser(p_rollout)
+    p_rollout.set_defaults(handler=_rollout_handle)
+
     args = parser.parse_args(argv)
     return cast(int, args.handler(args))
