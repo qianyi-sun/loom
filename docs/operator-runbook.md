@@ -2645,9 +2645,13 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    pool that must produce terminal evidence, for example `oldlab`,
    `k8s-worker`, and `gb10-arm64`. The service adds one extra pool-pinned
    coverage trial for each requested pool while leaving the normal batch trials
-   portable. Do not depend on theoretical max-slot saturation alone to force
-   OLDLAB/k8s/GB10 participation; the smoke gate below checks the resulting
-   terminal pool coverage explicitly.
+   portable. When a target pool's CPU architecture is known from active workers
+   or autoscaler policy, the coverage trial is selected from tasks compatible
+   with that architecture; if the selected task slate cannot satisfy the pool,
+   fanout records `required_worker_pool_incompatible` instead of submitting an
+   unclaimable queued trial. Do not depend on theoretical max-slot saturation
+   alone to force OLDLAB/k8s/GB10 participation; the smoke gate below checks the
+   resulting terminal pool coverage explicitly.
    `loom eval batch create` validates local built-in agents first, but falls
    back to the deployed `/api/v1/agents` catalog when local `loom-launcher`
    adapters are absent. A fresh rollout/operator venv can therefore submit a

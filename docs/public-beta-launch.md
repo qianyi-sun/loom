@@ -296,8 +296,12 @@ create the release/acceptance batch with repeated `--required-worker-pool`
 flags, for example `--required-worker-pool oldlab --required-worker-pool
 k8s-worker --required-worker-pool gb10-arm64`. The service adds one
 pool-pinned coverage trial per required pool while leaving the normal portable
-trials portable, and `scripts/public_beta_smoke_gate.py --required-worker-pool`
-must later prove each required pool has terminal batch evidence.
+trials portable. When a target pool's CPU architecture is known from active
+workers or autoscaler policy, coverage uses a selected task compatible with that
+architecture; otherwise fanout records `required_worker_pool_incompatible`
+instead of submitting a permanently unclaimable coverage trial. The
+`scripts/public_beta_smoke_gate.py --required-worker-pool` check must later
+prove each required pool has terminal batch evidence.
 
 Run the benchmark reward gate after catalog provisioning and again after the
 supported-benchmark acceptance batch or batches reach a terminal state:
