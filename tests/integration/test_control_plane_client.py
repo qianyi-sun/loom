@@ -16,7 +16,16 @@ from sqlalchemy import create_engine, delete, insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Task, Team, TeamQuota, Token, Trial, Worker
+from loom.db.schema import (
+    Artifact,
+    ArtifactLineageEdge,
+    Task,
+    Team,
+    TeamQuota,
+    Token,
+    Trial,
+    Worker,
+)
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 from loom_worker.control_plane_client import HttpControlPlaneClient
@@ -63,6 +72,14 @@ async def cp_setup(
     sync_engine = create_engine(postgres_url)
     session_local = sessionmaker(sync_engine)
     with session_local() as s:
+        s.execute(delete(ArtifactLineageEdge))
+        s.execute(delete(Artifact))
+        s.execute(delete(Trial))
+        s.execute(delete(Worker))
+        s.execute(delete(Token))
+        s.execute(delete(TeamQuota))
+        s.execute(delete(Team))
+        s.execute(delete(Task))
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(raw.encode()).digest(),
             type="worker",
@@ -76,6 +93,8 @@ async def cp_setup(
     finally:
         await async_engine.dispose()
         with session_local() as s:
+            s.execute(delete(ArtifactLineageEdge))
+            s.execute(delete(Artifact))
             s.execute(delete(Trial))
             s.execute(delete(Worker))
             s.execute(delete(Token))
@@ -401,7 +420,7 @@ async def test_patch_trajectory_index_persists_result_projection(  # type: ignor
             conn.execute(insert(Trial).values(
                 id=trial_id, team_id=team_id, task_id="t",
                 config={}, requires_caps={}, state="succeeded",
-                worker_id=wid,
+                worker_id=wid, result={},
             ))
 
         result_payload = {
@@ -467,7 +486,7 @@ async def test_patch_output_projection_accepts_index_with_trial_id(  # type: ign
             conn.execute(insert(Trial).values(
                 id=trial_id, team_id=team_id, task_id="t",
                 config={}, requires_caps={}, state="succeeded",
-                worker_id=wid,
+                worker_id=wid, result={},
             ))
 
         result_payload = {

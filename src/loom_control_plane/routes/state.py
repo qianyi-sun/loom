@@ -18,7 +18,8 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
+from sqlalchemy.dialects.postgresql import JSONB
 
 from loom.auth import verify_bearer_token
 from loom.models.result import FailureReason, TrialState
@@ -40,6 +41,8 @@ _ALLOWED_FROM: dict[TrialState, set[TrialState]] = {
 _PATCH_SQL = text("""
 UPDATE trials
    SET state = (:new_state)::text,
+       result = CASE WHEN (:has_result)::boolean
+                     THEN :result_payload ELSE result END,
        failure_reason = (:failure_reason)::text,
        failure_message = CASE WHEN (:failure_message)::text IS NOT NULL
                                THEN (:failure_message)::text
@@ -52,6 +55,15 @@ UPDATE trials
    AND worker_id = (:worker_id)::uuid
    AND state = ANY(:allowed_from)
  RETURNING id, state;
+""").bindparams(bindparam("result_payload", type_=JSONB))
+
+_SUCCEEDED_RESULT_GUARD_SQL = text("""
+SELECT id
+  FROM trials
+ WHERE id = (:trial_id)::uuid
+   AND worker_id = (:worker_id)::uuid
+   AND state = ANY(:allowed_from)
+   AND result IS NULL
 """)
 
 _TERMINAL = {
@@ -113,12 +125,33 @@ async def patch_state(
         )
 
     allowed_from = sorted(s.value for s in _ALLOWED_FROM[new_state])
+    result_payload = payload.get("result")
+    has_result = result_payload is not None
 
     async with request.app.state.session_factory() as session:
+        if new_state == TrialState.SUCCEEDED and not has_result:
+            missing_result = (await session.execute(_SUCCEEDED_RESULT_GUARD_SQL, {
+                "trial_id": trial_id,
+                "worker_id": worker_id,
+                "allowed_from": allowed_from,
+            })).first()
+            if missing_result is not None:
+                STATE_PATCH_TOTAL.labels(
+                    endpoint="state", result="invalid",
+                ).inc()
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "state 'succeeded' requires result to be supplied "
+                        "or already persisted"
+                    ),
+                )
         row = (await session.execute(_PATCH_SQL, {
             "trial_id": trial_id,
             "worker_id": worker_id,
             "new_state": new_state.value,
+            "result_payload": result_payload,
+            "has_result": has_result,
             "failure_reason": failure_reason_str,
             "failure_message": failure_message_str,
             "is_terminal": new_state in _TERMINAL,

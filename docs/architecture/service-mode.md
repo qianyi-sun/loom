@@ -243,11 +243,16 @@ not a state of its own.
 ## Fencing
 
 Every Worker → CP state PATCH carries `(state, worker_id,
-failure_reason?)`. The CP's `PATCH /trials/{id}/state` UPDATE matches
-on both `id = :trial_id` AND `worker_id = :worker_id`; if a different
-Worker has taken the trial over (heartbeat timeout → crash detector
-reassigned ownership), the UPDATE matches zero rows and the CP
-returns 409. Two Workers can never both think they own a trial.
+failure_reason?)`, and a `state=succeeded` PATCH must either include
+`result` or target a trial whose result was already persisted by the
+fenced trajectory projection endpoint. If a Worker reports
+`state=succeeded` while the row still has `result IS NULL`, the CP
+returns 400 before the database invariant can surface as an internal
+error. The CP's `PATCH /trials/{id}/state` UPDATE matches on both
+`id = :trial_id` AND `worker_id = :worker_id`; if a different Worker
+has taken the trial over (heartbeat timeout → crash detector reassigned
+ownership), the UPDATE matches zero rows and the CP returns 409. Two
+Workers can never both think they own a trial.
 
 `loom_worker.HttpControlPlaneClient` translates `409 Conflict` →
 `False` return (the Worker logs + abandons the trial). The trial
