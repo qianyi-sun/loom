@@ -45,6 +45,14 @@ function mockPickerEndpoints(): ReturnType<typeof vi.spyOn> {
               supported_providers: ["*"],
               supported_model_sources: ["api"],
             },
+            {
+              name: "terminus-2",
+              needs_model: true,
+              kind: "adapter",
+              description: "Terminal-Bench Terminus adapter.",
+              supported_providers: ["*"],
+              supported_model_sources: ["api"],
+            },
           ],
         });
       }
@@ -54,6 +62,13 @@ function mockPickerEndpoints(): ReturnType<typeof vi.spyOn> {
             {
               id: "conn-1",
               name: "Lab vLLM",
+              type: "openai-compatible",
+              status: "valid",
+              rate_card_provider: "openai",
+            },
+            {
+              id: "conn-mz",
+              name: "mz_tn_canada_qianyi",
               type: "openai-compatible",
               status: "valid",
               rate_card_provider: "openai",
@@ -79,6 +94,22 @@ function mockPickerEndpoints(): ReturnType<typeof vi.spyOn> {
               last_preflight_http_status: 403,
               last_preflight_error_code: "access-denied",
               last_preflight_error_message: "HTTP 403 from upstream: [REDACTED]",
+            },
+            {
+              provider: "openai",
+              name: "gpt-4o-mini",
+              provider_connection_id: "conn-mz",
+              provider_connection_name: "mz_tn_canada_qianyi",
+              provider_connection_type: "openai-compatible",
+              source: "discovered",
+              agent_capable: true,
+              recommended: true,
+              visibility: "default",
+              hidden_reason: null,
+              last_preflight_status: null,
+              last_preflight_http_status: null,
+              last_preflight_error_code: null,
+              last_preflight_error_message: null,
             },
           ],
         });
@@ -154,5 +185,26 @@ describe("AgentModelPicker copy", () => {
       screen.getByText(/This model failed its last preflight/i),
     ).toBeInTheDocument();
     expect(screen.getByText(/access-denied/i)).toBeInTheDocument();
+  });
+
+  it("keeps mz_tn_canada_qianyi models visible for terminus-2", async () => {
+    const user = userEvent.setup();
+    renderPicker();
+
+    await user.selectOptions(
+      await screen.findByLabelText(/^Agent$/i),
+      await screen.findByRole("option", { name: "terminus-2" }),
+    );
+    await user.selectOptions(
+      screen.getByLabelText(/^Provider connection$/i),
+      await screen.findByRole("option", { name: /mz_tn_canada_qianyi/i }),
+    );
+
+    expect(
+      await screen.findByRole("option", { name: /gpt-4o-mini/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/No discovered models match this agent and search/i),
+    ).not.toBeInTheDocument();
   });
 });

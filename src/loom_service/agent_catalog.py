@@ -214,7 +214,7 @@ _ADAPTER_OVERRIDES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     # Upstream Terminus from terminal-bench, wrapped by a tiny CLI
     # in loom_launcher.terminus_2_runner. LiteLLM-backed so it can call
     # any provider via the gateway's openai-compatible facade.
-    "terminus-2": (("anthropic",), ("api",)),
+    "terminus-2": (("*",), ("api",)),
     # "hello" is a canary that doesn't actually need an LLM in practice,
     # but adapters self-declare needs_model — keep permissive.
     "hello": (("*",), ("api", "local-server", "hf")),
