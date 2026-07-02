@@ -155,6 +155,7 @@ async def setup(
         now = datetime.now(UTC)
         for model_id in [
             "deepseek-chat",
+            "glm-5.1-thinking",
             "amap-coordinate-convert",
             "apisports-afl-games",
             "tushare-stock-basic",
@@ -268,8 +269,8 @@ async def test_models_deduplicates_across_rate_cards_and_adds_byo_metadata(
         ("openai", "gpt-4o"),
     ]
     byo_items = [m for m in items if m.get("provider_connection_name") == "Lab vLLM"]
-    assert [m["name"] for m in byo_items] == ["deepseek-chat"]
-    item = byo_items[0]
+    assert [m["name"] for m in byo_items] == ["deepseek-chat", "glm-5.1-thinking"]
+    item = next(m for m in byo_items if m["name"] == "glm-5.1-thinking")
     assert item["provider"] == "openai"
     assert item["provider_connection_id"]
     assert item["provider_connection_type"] == "openai-compatible"
