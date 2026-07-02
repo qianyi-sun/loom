@@ -17,7 +17,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from sqlalchemy import create_engine, delete, insert, select
+from sqlalchemy import create_engine, delete, insert, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -30,7 +30,12 @@ from loom.db.schema import (
     TeamQuota,
     Token,
     Trial,
+    Worker,
+    WorkerPoolAutoscalerPolicy,
 )
+from loom.models.task import TaskConfig, normalize_steps
+from loom_control_plane.scheduler.claim import claim_one
+from loom_control_plane.scheduler.requires_caps import derive_requires_caps
 from loom_service.batch_runner import (
     _idempotency_key,
     next_batch_state,
@@ -38,11 +43,19 @@ from loom_service.batch_runner import (
 )
 
 
-def _valid_task_config(task_id: str) -> dict[str, object]:
+def _valid_task_config(
+    task_id: str,
+    *,
+    cpu_arch: str = "x86_64",
+) -> dict[str, object]:
     return {
         "schema_version": "1",
         "task": {"id": task_id, "name": task_id},
-        "environment": {"os": "linux", "docker_image": "alpine"},
+        "environment": {
+            "os": "linux",
+            "cpu_arch": cpu_arch,
+            "docker_image": "alpine",
+        },
         "agent": {"name": "oracle"},
         "verifier": {"name": "pytest"},
         "steps": [{"name": "main"}],
@@ -65,6 +78,7 @@ async def runner_setup(
     sl = sessionmaker(sync_engine)
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+        s.execute(insert(TeamQuota).values(team_id=team_id))
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(raw.encode()).digest(),
             type="team", scopes=["submit"], team_id=team_id,
@@ -121,6 +135,15 @@ async def runner_setup(
                                 ),
                             },
                         )
+                task_row = s.execute(
+                    select(Task).where(Task.id == body["task_id"]),
+                ).scalar_one()
+                requires_caps = derive_requires_caps(
+                    normalize_steps(TaskConfig.model_validate(task_row.config)),
+                ).model_dump(mode="json")
+                required_pool = body.get("required_worker_pool")
+                if required_pool:
+                    requires_caps["worker_pool"] = str(required_pool).strip()
                 new_id = uuid4()
                 s.execute(insert(Trial).values(
                     id=new_id,
@@ -128,7 +151,7 @@ async def runner_setup(
                     team_id=team_id,
                     state="queued",
                     config=body["config"],
-                    requires_caps={},
+                    requires_caps=requires_caps,
                     submitted_at=datetime.now(UTC),
                     batch_id=(
                         UUID(body["batch_id"])
@@ -169,6 +192,8 @@ async def runner_setup(
         sl = sessionmaker(sync_engine)
         with sl() as s:
             s.execute(delete(Trial))
+            s.execute(delete(Worker))
+            s.execute(delete(WorkerPoolAutoscalerPolicy))
             s.execute(delete(Token))
             s.execute(delete(Batch))
             s.execute(delete(ProviderConnection))
@@ -178,6 +203,22 @@ async def runner_setup(
             s.execute(delete(Team))
             s.commit()
         sync_engine.dispose()
+
+
+def _insert_gb10_arm64_policy(postgres_url: str) -> None:
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(insert(WorkerPoolAutoscalerPolicy).values(
+            environment="test",
+            pool_name="gb10-arm64",
+            actuator="gb10",
+            enabled=True,
+            max_slots=10,
+            actuator_config={"backend": "docker", "cpu_arch": "arm64"},
+        ))
+        s.commit()
+    sync_engine.dispose()
 
 
 async def test_runner_fans_out_5_trials(
@@ -300,6 +341,173 @@ async def test_runner_fans_out_required_worker_pool_coverage_units(
 
     assert len(trials) == 3
     assert [t.sample_idx for t in trials] == [0, 1, 2]
+
+
+async def test_runner_rejects_required_pool_coverage_when_tasks_mismatch_pool_arch(
+    runner_setup: tuple[
+        async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
+    ],
+    postgres_url: str,
+) -> None:
+    session_factory, http_client, team_id, task_ids, captured = runner_setup
+    _insert_gb10_arm64_policy(postgres_url)
+    async with session_factory() as s:
+        c = Batch(
+            team_id=team_id,
+            name="x86-only coverage",
+            task_filter={
+                "task_ids": [task_ids[0]],
+                "subset_kind": "explicit",
+            },
+            trial_config={},
+            state="submitted",
+            created_by_token_prefix="abcdef12",
+            expected_trial_count=2,
+            required_worker_pools=["gb10-arm64"],
+        )
+        s.add(c)
+        await s.commit()
+        await s.refresh(c)
+        cid = c.id
+
+    await run_once(
+        session_factory=session_factory,
+        http_client=http_client,
+        batch_size=10,
+        submit_rate_per_sec=100,
+    )
+
+    assert [body.get("required_worker_pool") for body in captured] == [None]
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        batch_row = s.execute(
+            select(Batch).where(Batch.id == cid),
+        ).scalar_one()
+        trials = s.execute(
+            select(Trial).where(Trial.batch_id == cid),
+        ).scalars().all()
+    sync_engine.dispose()
+
+    assert len(trials) == 1
+    assert batch_row.expected_trial_count == 1
+    assert batch_row.result_status == "partial_failed"
+    assert batch_row.fanout_errors
+    error = batch_row.fanout_errors[0]
+    assert error["reason"] == "required_worker_pool_incompatible"
+    assert error["required_worker_pool"] == "gb10-arm64"
+    assert error["pool_cpu_arches"] == ["arm64"]
+    assert error["task_cpu_arches"] == {"x86_64": [task_ids[0]]}
+
+
+async def test_runner_selects_claimable_task_for_arm64_required_pool_coverage(
+    runner_setup: tuple[
+        async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
+    ],
+    postgres_url: str,
+) -> None:
+    session_factory, http_client, team_id, task_ids, captured = runner_setup
+    _insert_gb10_arm64_policy(postgres_url)
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            update(Task)
+            .where(Task.id == task_ids[1])
+            .values(config=_valid_task_config(task_ids[1], cpu_arch="arm64")),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    async with session_factory() as s:
+        c = Batch(
+            team_id=team_id,
+            name="mixed coverage",
+            task_filter={
+                "task_ids": [task_ids[0], task_ids[1]],
+                "subset_kind": "explicit",
+            },
+            trial_config={},
+            state="submitted",
+            created_by_token_prefix="abcdef12",
+            expected_trial_count=3,
+            required_worker_pools=["gb10-arm64"],
+        )
+        s.add(c)
+        await s.commit()
+        await s.refresh(c)
+        cid = c.id
+
+    await run_once(
+        session_factory=session_factory,
+        http_client=http_client,
+        batch_size=10,
+        submit_rate_per_sec=100,
+    )
+
+    coverage_key = _idempotency_key(
+        cid,
+        task_ids[1],
+        1,
+        required_worker_pool="gb10-arm64",
+    )
+    assert captured[-1]["task_id"] == task_ids[1]
+    assert captured[-1]["required_worker_pool"] == "gb10-arm64"
+    assert captured[-1]["idempotency_key"] == coverage_key
+
+    gb10_worker = uuid4()
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(insert(Worker).values(
+            id=gb10_worker,
+            hostname="trt-gb10-1",
+            version="v",
+            pool_name="gb10-arm64",
+            capabilities=[{
+                "os": "linux",
+                "cpu_arch": "arm64",
+                "gpu_vendor": "none",
+                "network_policies": ["public"],
+                "dynamic_network_policy": True,
+                "mounted_fs": True,
+                "resource_modes": ["auto"],
+            }],
+            registered_at=datetime.now(UTC),
+            last_seen_at=datetime.now(UTC),
+            status="active",
+        ))
+        coverage_trial = s.execute(
+            select(Trial).where(Trial.idempotency_key == coverage_key),
+        ).scalar_one()
+        assert coverage_trial.requires_caps == {
+            "os": "linux",
+            "cpu_arch": "arm64",
+            "gpu_vendor": "none",
+            "network_policies": ["public"],
+            "worker_pool": "gb10-arm64",
+        }
+        coverage_trial_id = coverage_trial.id
+        s.commit()
+    sync_engine.dispose()
+
+    claimed: list[UUID] = []
+    for _ in range(2):
+        async with session_factory() as session:
+            row = await claim_one(
+                session,
+                worker_id=gb10_worker,
+                worker_os=["linux"],
+                worker_gpu_vendors=["none"],
+                worker_network_policies=["public"],
+                worker_cpu_arches=["arm64"],
+            )
+            await session.commit()
+            assert row is not None
+            claimed.append(row["id"])
+
+    assert coverage_trial_id in claimed
 
 
 async def test_runner_is_idempotent(

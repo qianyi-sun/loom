@@ -34,7 +34,7 @@ import httpx
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from loom.db.schema import Batch, Trial
+from loom.db.schema import Batch, Task, Trial, Worker, WorkerPoolAutoscalerPolicy
 from loom_service.task_config_validation import (
     expected_trial_count,
     split_valid_task_configs,
@@ -173,17 +173,163 @@ def _batch_required_worker_pools(batch: Batch) -> list[str]:
     return pools
 
 
-def _coverage_pending_units(
+def _task_cpu_arch(config: object) -> str:
+    if not isinstance(config, Mapping):
+        return "x86_64"
+    environment = config.get("environment")
+    if not isinstance(environment, Mapping):
+        return "x86_64"
+    raw = environment.get("cpu_arch", "x86_64")
+    if not isinstance(raw, str):
+        return "x86_64"
+    arch = raw.strip()
+    return arch or "x86_64"
+
+
+def _worker_capability_cpu_arch(capability: object) -> str:
+    if not isinstance(capability, Mapping):
+        return "x86_64"
+    raw = capability.get("cpu_arch", "x86_64")
+    if not isinstance(raw, str):
+        return "x86_64"
+    arch = raw.strip()
+    return arch or "x86_64"
+
+
+def _policy_cpu_arch(policy: WorkerPoolAutoscalerPolicy) -> str:
+    actuator_config = policy.actuator_config or {}
+    raw = actuator_config.get("cpu_arch") if isinstance(actuator_config, Mapping) else None
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return "arm64" if policy.actuator == "gb10" else "x86_64"
+
+
+async def _known_pool_cpu_arches(
+    session: AsyncSession,
+    pool_names: list[str],
+) -> dict[str, tuple[str, ...]]:
+    if not pool_names:
+        return {}
+    arches_by_pool: dict[str, set[str]] = {pool: set() for pool in pool_names}
+    worker_rows = (
+        await session.execute(
+            select(Worker.pool_name, Worker.capabilities).where(
+                Worker.pool_name.in_(pool_names),
+                Worker.status == "active",
+                Worker.drain_state == "active",
+            ),
+        )
+    ).all()
+    for pool_name, capabilities in worker_rows:
+        if not isinstance(pool_name, str) or pool_name not in arches_by_pool:
+            continue
+        if not isinstance(capabilities, list):
+            continue
+        for capability in capabilities:
+            arches_by_pool[pool_name].add(_worker_capability_cpu_arch(capability))
+
+    policy_rows = (
+        await session.execute(
+            select(WorkerPoolAutoscalerPolicy).where(
+                WorkerPoolAutoscalerPolicy.enabled.is_(True),
+                WorkerPoolAutoscalerPolicy.pool_name.in_(pool_names),
+            ),
+        )
+    ).scalars().all()
+    for policy in policy_rows:
+        if policy.pool_name in arches_by_pool:
+            arches_by_pool[policy.pool_name].add(_policy_cpu_arch(policy))
+
+    return {
+        pool: tuple(sorted(arches))
+        for pool, arches in arches_by_pool.items()
+        if arches
+    }
+
+
+async def _task_cpu_arches(
+    session: AsyncSession,
+    task_ids: list[str],
+) -> dict[str, str]:
+    rows = (
+        await session.execute(
+            select(Task.id, Task.config).where(Task.id.in_(task_ids)),
+        )
+    ).all()
+    return {str(task_id): _task_cpu_arch(config) for task_id, config in rows}
+
+
+def _cpu_arch_compatible(task_cpu_arch: str, pool_cpu_arches: tuple[str, ...]) -> bool:
+    return (
+        task_cpu_arch == "any"
+        or "any" in pool_cpu_arches
+        or task_cpu_arch in pool_cpu_arches
+    )
+
+
+def _group_task_cpu_arches(
+    task_ids: list[str],
+    task_cpu_arches: Mapping[str, str],
+) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for task_id in task_ids:
+        arch = task_cpu_arches.get(task_id, "x86_64")
+        grouped.setdefault(arch, []).append(task_id)
+    return {arch: grouped[arch] for arch in sorted(grouped)}
+
+
+def _coverage_incompatible_error(
+    batch: Batch,
+    *,
+    task_id: str,
+    sample_idx: int,
+    combination_idx: int | None,
+    required_worker_pool: str,
+    pool_cpu_arches: tuple[str, ...],
+    task_cpu_arches: Mapping[str, str],
+    task_ids: list[str],
+) -> dict[str, Any]:
+    key = _idempotency_key(
+        batch.id,
+        task_id,
+        sample_idx,
+        combination_idx=combination_idx,
+        required_worker_pool=required_worker_pool,
+    )
+    task_arch_summary = _group_task_cpu_arches(task_ids, task_cpu_arches)
+    detail = (
+        f"required_worker_pool {required_worker_pool!r} advertises "
+        f"cpu_arch {list(pool_cpu_arches)!r}, but selected tasks require "
+        f"cpu_arch {task_arch_summary!r}; refusing to submit unclaimable "
+        "coverage trial"
+    )
+    return {
+        "task_id": task_id,
+        "sample_idx": sample_idx,
+        "combination_idx": combination_idx,
+        "idempotency_key": key,
+        "status_code": 400,
+        "reason": "required_worker_pool_incompatible",
+        "required_worker_pool": required_worker_pool,
+        "pool_cpu_arches": list(pool_cpu_arches),
+        "task_cpu_arches": task_arch_summary,
+        "detail": detail,
+        "seen_at": datetime.now(UTC).isoformat(),
+    }
+
+
+async def _coverage_pending_units(
+    session: AsyncSession,
     batch: Batch,
     *,
     task_ids: list[str],
     shared_config: dict[str, Any],
     failed_fanout_keys: set[str],
     existing_idempotency_keys: set[str],
-) -> list[PendingUnit]:
+) -> tuple[list[PendingUnit], list[dict[str, Any]]]:
     required_pools = _batch_required_worker_pools(batch)
     if not required_pools or not task_ids:
-        return []
+        return [], []
 
     combination_idx: int | None = None
     cfg = shared_config
@@ -193,10 +339,50 @@ def _coverage_pending_units(
         cfg = _materialize_trial_config(shared_config, batch.combinations[0])
         base_sample_idx = int(batch.combinations[0].get("n_per_task", 1))
 
-    task_id = task_ids[0]
+    task_cpu_arches = await _task_cpu_arches(session, task_ids)
+    pool_cpu_arches_by_name = await _known_pool_cpu_arches(session, required_pools)
     units: list[PendingUnit] = []
+    errors: list[dict[str, Any]] = []
     for offset, pool in enumerate(required_pools):
         sample_idx = base_sample_idx + offset
+        pool_cpu_arches = pool_cpu_arches_by_name.get(pool)
+        task_id = task_ids[0]
+        if pool_cpu_arches:
+            compatible_task_id = next(
+                (
+                    candidate
+                    for candidate in task_ids
+                    if _cpu_arch_compatible(
+                        task_cpu_arches.get(candidate, "x86_64"),
+                        pool_cpu_arches,
+                    )
+                ),
+                None,
+            )
+            if compatible_task_id is None:
+                key = _idempotency_key(
+                    batch.id,
+                    task_id,
+                    sample_idx,
+                    combination_idx=combination_idx,
+                    required_worker_pool=pool,
+                )
+                if key in failed_fanout_keys or key in existing_idempotency_keys:
+                    continue
+                errors.append(
+                    _coverage_incompatible_error(
+                        batch,
+                        task_id=task_id,
+                        sample_idx=sample_idx,
+                        combination_idx=combination_idx,
+                        required_worker_pool=pool,
+                        pool_cpu_arches=pool_cpu_arches,
+                        task_cpu_arches=task_cpu_arches,
+                        task_ids=task_ids,
+                    ),
+                )
+                continue
+            task_id = compatible_task_id
         key = _idempotency_key(
             batch.id,
             task_id,
@@ -207,7 +393,7 @@ def _coverage_pending_units(
         if key in failed_fanout_keys or key in existing_idempotency_keys:
             continue
         units.append((task_id, combination_idx, cfg, sample_idx, pool))
-    return units
+    return units, errors
 
 
 def _rerun_targets(batch: Batch) -> list[dict[str, Any]]:
@@ -446,6 +632,7 @@ async def run_once(
     # Each work item is (batch_id, [(task_id, combination_idx_or_None,
     # trial_config, sample_idx), ...]).
     work: list[tuple[UUID, UUID | None, str | None, list[PendingUnit]]] = []
+    fanout_errors_by_batch: dict[UUID, list[dict[str, Any]]] = {}
     async with session_factory() as s:
         batches_to_process = (await s.execute(
             select(Batch)
@@ -554,15 +741,19 @@ async def run_once(
                             pending_units.append(
                                 (t, c_idx, combo_config, s_idx, None),
                             )
-                pending_units.extend(
-                    _coverage_pending_units(
-                        b,
-                        task_ids=task_ids,
-                        shared_config=shared_config,
-                        failed_fanout_keys=failed_fanout_keys,
-                        existing_idempotency_keys=existing_idempotency_keys,
-                    ),
+                coverage_units, coverage_errors = await _coverage_pending_units(
+                    s,
+                    b,
+                    task_ids=task_ids,
+                    shared_config=shared_config,
+                    failed_fanout_keys=failed_fanout_keys,
+                    existing_idempotency_keys=existing_idempotency_keys,
                 )
+                pending_units.extend(coverage_units)
+                if coverage_errors:
+                    fanout_errors_by_batch.setdefault(b.id, []).extend(
+                        coverage_errors,
+                    )
                 work.append((
                     b.id, b.provider_connection_id, b.provider_model_id,
                     pending_units,
@@ -598,15 +789,19 @@ async def run_once(
                         if (t, s_idx) in existing_single:
                             continue
                         pending_units.append((t, None, cfg, s_idx, None))
-                pending_units.extend(
-                    _coverage_pending_units(
-                        b,
-                        task_ids=task_ids,
-                        shared_config=cfg,
-                        failed_fanout_keys=failed_fanout_keys,
-                        existing_idempotency_keys=existing_idempotency_keys,
-                    ),
+                coverage_units, coverage_errors = await _coverage_pending_units(
+                    s,
+                    b,
+                    task_ids=task_ids,
+                    shared_config=cfg,
+                    failed_fanout_keys=failed_fanout_keys,
+                    existing_idempotency_keys=existing_idempotency_keys,
                 )
+                pending_units.extend(coverage_units)
+                if coverage_errors:
+                    fanout_errors_by_batch.setdefault(b.id, []).extend(
+                        coverage_errors,
+                    )
                 work.append((
                     b.id, b.provider_connection_id, b.provider_model_id,
                     pending_units,
@@ -614,7 +809,6 @@ async def run_once(
         await s.commit()
 
     # Phase 2: HTTP fanout. No DB locks.
-    fanout_errors_by_batch: dict[UUID, list[dict[str, Any]]] = {}
     for batch_id, provider_connection_id, provider_model_id, pending_units in work:
         for chunk_start in range(0, len(pending_units), batch_size):
             chunk = pending_units[chunk_start:chunk_start + batch_size]

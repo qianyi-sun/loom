@@ -32,7 +32,11 @@ Stop before submitting any workload unless every item in this section is true.
    Postgres, or DNS dependency crash loops.
 5. #188 pool coverage is configured in the canary submission with repeated
    `--required-worker-pool oldlab --required-worker-pool k8s-worker
-   --required-worker-pool gb10-arm64`.
+   --required-worker-pool gb10-arm64`. The selected task slate must include at
+   least one task compatible with each required pool's CPU architecture when
+   that architecture is known from active workers or autoscaler policy; fanout
+   records `required_worker_pool_incompatible` rather than submitting an
+   unclaimable coverage trial when it cannot satisfy a pool.
 6. #193 coverage expectations are explicit. The current canary covers the
    release-gate observable `claimed_without_started=0` through batch debug
    evidence and `scripts/public_beta_smoke_gate.py`. It does not replace a
@@ -317,7 +321,10 @@ jq '{id, state, expected_trial_count, required_worker_pools}' \
 
 Stop if `required_worker_pools` is not exactly
 `["oldlab","k8s-worker","gb10-arm64"]` or if the expected count does not
-include the three #188 coverage trials.
+include the three #188 coverage trials. During the watch loop, also stop if
+batch debug or detail output records a `required_worker_pool_incompatible`
+fanout error; the task slate is not valid release evidence for all required
+pools.
 
 ## Watch Loop
 
