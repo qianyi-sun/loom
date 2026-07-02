@@ -453,7 +453,7 @@ class Benchmark(Base):
 
 
 class TaskSet(Base):
-    """Team-owned user TaskSet (#242 sub-plan 1)."""
+    """Team-owned user TaskSet"""
     __tablename__ = "task_sets"
     __table_args__ = (
         CheckConstraint(
@@ -525,7 +525,7 @@ class TaskSet(Base):
 
 
 class TaskSetManifest(Base):
-    """Current manifest sidecar for a user TaskSet (#242 sub-plan 1)."""
+    """Current manifest sidecar for a user TaskSet."""
     __tablename__ = "task_set_manifests"
     task_set_id: Mapped[str] = mapped_column(
         Text, ForeignKey("task_sets.id", ondelete="CASCADE"), primary_key=True,
@@ -534,6 +534,79 @@ class TaskSetManifest(Base):
     manifest: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     verifier_blob_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
     transform_blob_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+
+class TaskSetMaterializationJob(Base):
+    """Queued materialization work for a user TaskSet (#242 sub-plan 2)."""
+    __tablename__ = "task_set_materialization_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('queued', 'claimed', 'running', 'succeeded', "
+            "'failed', 'cancelled')",
+            name="task_set_materialization_jobs_state_check",
+        ),
+        Index(
+            "task_set_materialization_jobs_active_uidx",
+            "task_set_id",
+            unique=True,
+            postgresql_where=text(
+                "state IN ('queued', 'claimed', 'running')",
+            ),
+        ),
+        Index(
+            "task_set_materialization_jobs_queued_idx",
+            "enqueued_at",
+            postgresql_where=text("state = 'queued'"),
+        ),
+    )
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+        default=uuid4,
+    )
+    task_set_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("task_sets.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    owning_team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id"), nullable=False,
+    )
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0"),
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("3"),
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    enqueued_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    claimed_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    claimed_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_summary: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb"),
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
     )
@@ -921,10 +994,7 @@ class WorkerPoolAutoscalerPolicy(Base):
     last_occupied_slots: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_queued_slots: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    last_blocked_details: Mapped[dict[str, Any] | None] = mapped_column(
-        JSONB,
-        nullable=True,
-    )
+    last_blocked_details: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_scale_up_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True),

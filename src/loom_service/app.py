@@ -56,6 +56,7 @@ from loom_service.routes import (
     run_library,
     secret_store_admin,
     tasks,
+    tasksets,
     team_registrations,
     teams,
     tokens,
@@ -214,6 +215,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(atif.router, prefix="/api/v1")
     app.include_router(tasks.router, prefix="/api/v1")
     app.include_router(benchmarks.router, prefix="/api/v1")
+    app.include_router(tasksets.router, prefix="/api/v1")
     app.include_router(batches.router, prefix="/api/v1")
     app.include_router(run_library.router, prefix="/api/v1")
     app.include_router(rate_cards.router, prefix="/api/v1")
