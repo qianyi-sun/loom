@@ -48,6 +48,11 @@ class LoomServiceSettings(BaseSettings):
     taskset_materializer_batch_size: int = 1
     taskset_materializer_claim_ttl_sec: int = 600
     taskset_materializer_poll_interval_sec: int = 5
+    taskset_materializer_transform_cpu_limit_sec: int = 10
+    taskset_materializer_transform_memory_limit_mb: int = 256
+    taskset_materializer_transform_network_isolated: bool = False
+    taskset_materializer_transform_wall_timeout_sec: int = 30
+    taskset_materializer_transforms_enabled: bool = False
     taskset_materializer_upstream_cache_root: Path = Path("/tmp/loom-taskset-upstream")
     team_registration_open: bool = False
     trajectories_bucket: str = "trajectories"

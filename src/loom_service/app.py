@@ -31,6 +31,7 @@ from loom.admin_secret import (
 from loom.db.schema_startup import assert_schema_at_head
 from loom.security.secret_store import assert_existing_secrets_decryptable
 from loom.startup_retry import retry_startup_dependency
+from loom.taskset.transform_sandbox import TransformSandboxConfig
 from loom_service.batch_runner import run_loop as batch_run_loop
 from loom_service.config import LoomServiceSettings
 from loom_service.metrics import (
@@ -179,6 +180,13 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                 batch_size=settings.taskset_materializer_batch_size,
                 poll_interval_sec=settings.taskset_materializer_poll_interval_sec,
                 claim_ttl_sec=settings.taskset_materializer_claim_ttl_sec,
+                transform_config=TransformSandboxConfig(
+                    enabled=settings.taskset_materializer_transforms_enabled,
+                    network_isolated=settings.taskset_materializer_transform_network_isolated,
+                    wall_timeout_sec=settings.taskset_materializer_transform_wall_timeout_sec,
+                    cpu_limit_sec=settings.taskset_materializer_transform_cpu_limit_sec,
+                    memory_limit_mb=settings.taskset_materializer_transform_memory_limit_mb,
+                ),
             ),
             name="loom-svc-taskset-materializer",
         )
