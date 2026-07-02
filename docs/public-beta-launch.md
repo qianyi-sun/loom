@@ -223,17 +223,22 @@ point `LOOM_EXPECTED_IMAGE_IDENTITIES_JSON` at the image identity JSON file.
 
 ## Automated Gate
 
+Secret-bearing smoke-gate inputs (`--team-a-token`, `--team-b-token`,
+`--catalog-minio-access-key`, `--catalog-minio-secret-key`, and
+`--secret-needle`) accept `env:VAR`, `file:PATH`, or `-` sources. Do not expand
+raw secret values into argv.
+
 Before submitting public-beta canaries or supported-benchmark release trials,
 run the object-store write gate by itself:
 
 ```bash
 python scripts/public_beta_smoke_gate.py \
   --server-url https://loom.example.com \
-  --team-a-token "$TEAM_A_TOKEN" \
-  --team-b-token "$TEAM_B_TOKEN" \
+  --team-a-token env:TEAM_A_TOKEN \
+  --team-b-token env:TEAM_B_TOKEN \
   --catalog-minio-endpoint "$PUBLIC_BETA_MINIO_ENDPOINT" \
-  --catalog-minio-access-key "$PUBLIC_BETA_MINIO_ACCESS_KEY" \
-  --catalog-minio-secret-key "$PUBLIC_BETA_MINIO_SECRET_KEY" \
+  --catalog-minio-access-key env:PUBLIC_BETA_MINIO_ACCESS_KEY \
+  --catalog-minio-secret-key env:PUBLIC_BETA_MINIO_SECRET_KEY \
   --object-store-write-check-only \
   --object-store-write-check-bucket trajectories \
   --object-store-write-check-count 64 \
@@ -253,8 +258,8 @@ After browser setup and a completed Team A source run, run:
 ```bash
 python scripts/public_beta_smoke_gate.py \
   --server-url https://loom.example.com \
-  --team-a-token "$TEAM_A_TOKEN" \
-  --team-b-token "$TEAM_B_TOKEN" \
+  --team-a-token env:TEAM_A_TOKEN \
+  --team-b-token env:TEAM_B_TOKEN \
   --provider-connection-name mz_tn_canada_qianyi \
   --provider-model-provider yibuapi \
   --provider-model-name gpt-4o-mini \
@@ -267,15 +272,15 @@ python scripts/public_beta_smoke_gate.py \
   --clone-provider-connection-id "$TEAM_B_PROVIDER_CONNECTION_ID" \
   --reuse-provider-connection-id "$TEAM_B_PROVIDER_CONNECTION_ID" \
   --catalog-minio-endpoint "$PUBLIC_BETA_MINIO_ENDPOINT" \
-  --catalog-minio-access-key "$PUBLIC_BETA_MINIO_ACCESS_KEY" \
-  --catalog-minio-secret-key "$PUBLIC_BETA_MINIO_SECRET_KEY" \
+  --catalog-minio-access-key env:PUBLIC_BETA_MINIO_ACCESS_KEY \
+  --catalog-minio-secret-key env:PUBLIC_BETA_MINIO_SECRET_KEY \
   --object-store-write-check \
   --object-store-write-check-bucket trajectories \
   --object-store-write-check-count 64 \
   --object-store-write-check-concurrency 16 \
   --k8s-namespace loom-public-beta \
   --required-worker-pool oldlab \
-  --secret-needle seeded-public-beta-secret \
+  --secret-needle env:PUBLIC_BETA_SECRET_NEEDLE \
   --internal-url-needle loom-minio.loom.svc.cluster.local \
   --allow-mutating-checks \
   --fail-on-skip \

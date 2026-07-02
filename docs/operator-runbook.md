@@ -2616,11 +2616,11 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     ```bash
     python scripts/public_beta_smoke_gate.py \
       --server-url https://loom.example.com \
-      --team-a-token "$TEAM_A_TOKEN" \
-      --team-b-token "$TEAM_B_TOKEN" \
+      --team-a-token env:TEAM_A_TOKEN \
+      --team-b-token env:TEAM_B_TOKEN \
       --catalog-minio-endpoint "$PUBLIC_BETA_MINIO_ENDPOINT" \
-      --catalog-minio-access-key "$PUBLIC_BETA_MINIO_ACCESS_KEY" \
-      --catalog-minio-secret-key "$PUBLIC_BETA_MINIO_SECRET_KEY" \
+      --catalog-minio-access-key env:PUBLIC_BETA_MINIO_ACCESS_KEY \
+      --catalog-minio-secret-key env:PUBLIC_BETA_MINIO_SECRET_KEY \
       --object-store-write-check-only \
       --object-store-write-check-bucket trajectories \
       --object-store-write-check-count 64 \
@@ -2762,12 +2762,14 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     trial retry budget is consumed before a terminal failure is recorded.
 18. **Automated evidence script.** After steps 4-16, run the repeatable API
     gate. Use disposable staging data because clone/reuse checks create Team B
-    records:
+    records. Pass smoke-gate tokens, MinIO credentials, and explicit secret
+    needles as `env:VAR`, `file:PATH`, or `-` sources; do not expand raw secret
+    values into argv:
     ```bash
     python scripts/public_beta_smoke_gate.py \
       --server-url https://loom.example.com \
-      --team-a-token "$TEAM_A_TOKEN" \
-      --team-b-token "$TEAM_B_TOKEN" \
+      --team-a-token env:TEAM_A_TOKEN \
+      --team-b-token env:TEAM_B_TOKEN \
       --provider-connection-name mz_tn_canada_qianyi \
       --provider-model-provider yibuapi \
       --provider-model-name gpt-4o-mini \
@@ -2780,15 +2782,15 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
       --clone-provider-connection-id "$TEAM_B_PROVIDER_CONNECTION_ID" \
       --reuse-provider-connection-id "$TEAM_B_PROVIDER_CONNECTION_ID" \
       --catalog-minio-endpoint "$PUBLIC_BETA_MINIO_ENDPOINT" \
-      --catalog-minio-access-key "$PUBLIC_BETA_MINIO_ACCESS_KEY" \
-      --catalog-minio-secret-key "$PUBLIC_BETA_MINIO_SECRET_KEY" \
+      --catalog-minio-access-key env:PUBLIC_BETA_MINIO_ACCESS_KEY \
+      --catalog-minio-secret-key env:PUBLIC_BETA_MINIO_SECRET_KEY \
       --object-store-write-check \
       --object-store-write-check-bucket trajectories \
       --object-store-write-check-count 64 \
       --object-store-write-check-concurrency 16 \
       --k8s-namespace loom-public-beta \
       --required-worker-pool oldlab \
-      --secret-needle seeded-public-beta-secret \
+      --secret-needle env:PUBLIC_BETA_SECRET_NEEDLE \
       --internal-url-needle loom-minio.loom.svc.cluster.local \
       --allow-mutating-checks \
       --fail-on-skip \
