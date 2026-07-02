@@ -119,6 +119,8 @@ def test_desired_state_node_report_and_status_round_trip(app) -> None:
                 "last_apply_result": "compose restarted and worker heartbeat verified",
                 "agent_version": "test-agent",
                 "compose_project_dir": "/opt/loom",
+                "source_git_commit": "76875ac6d38c91c947c44b22788348db27a8d45b",
+                "source_git_dirty": False,
             },
         )
         assert reported.status_code == 200, reported.text
@@ -130,6 +132,8 @@ def test_desired_state_node_report_and_status_round_trip(app) -> None:
         assert node["desired_intent"] == "draining"
         assert node["current_intent"] == "draining"
         assert node["apply_state"] == "applied"
+        assert node["source_git_commit"] == "76875ac6d38c91c947c44b22788348db27a8d45b"
+        assert node["source_git_dirty"] is False
 
         status = client.get(
             "/admin/gb10-worker-pools/status",
@@ -141,6 +145,11 @@ def test_desired_state_node_report_and_status_round_trip(app) -> None:
     assert len(status_body["desired_states"]) == 1
     assert len(status_body["nodes"]) == 1
     assert status_body["nodes"][0]["hostname"] == "trt-gb10-1"
+    assert (
+        status_body["nodes"][0]["source_git_commit"]
+        == "76875ac6d38c91c947c44b22788348db27a8d45b"
+    )
+    assert status_body["nodes"][0]["source_git_dirty"] is False
     assert status_body["nodes"][0]["last_heartbeat_at"] is not None
 
 

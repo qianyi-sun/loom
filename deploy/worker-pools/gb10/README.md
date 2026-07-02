@@ -411,9 +411,11 @@ loom admin gb10-workers status \
   --format json
 ```
 
-For release rollouts, gate convergence against the intended image/env target.
-This exits non-zero if active nodes or Control Plane desired state are still on
-the old release.
+For release rollouts, gate convergence against the intended image/env target and
+source checkout provenance. This exits non-zero if active nodes or Control Plane
+desired state are still on the old release, if active node-agent reports do not
+include source provenance, if the checkout is dirty, or if the reported git
+commit does not start with the trailing SHA in the release tag.
 
 ```bash
 loom admin gb10-workers status \
@@ -431,10 +433,10 @@ tag is not available from a registry, it falls back to `docker compose build`
 from the host-local checkout before running `docker compose stop --timeout
 <drain-timeout> worker` and `docker compose up -d worker`. The stop path sends
 SIGTERM to the worker, which uses the existing worker drain logic before the
-restart. When the local-build fallback is used, make sure the host-local
-checkout is on the release commit; the release-target status gate above is the
-operator-visible guardrail for stale image/env state.
-container exits. Use `--force` only for an explicit emergency override.
+container exits. When the local-build fallback is used, make sure the
+host-local checkout is on the release commit; the release-target status gate
+above is the operator-visible guardrail for stale source, image, or env state.
+Use `--force` only for an explicit emergency override.
 
 Retry a failed rollout by fixing the local cause and restarting the service:
 

@@ -542,7 +542,13 @@ loom admin gb10-workers status \
 For release rollouts, make the status check a convergence gate by passing the
 expected image tag and env config version. The command exits non-zero if any
 active GB10 node, or the desired state itself, is still on the previous target;
-capacity marked draining/stopped is ignored.
+capacity marked draining/stopped is ignored. Active nodes must also report
+source checkout provenance: the node-agent records `compose_project_dir`, the
+checkout's git commit, and whether the tree is dirty. If `--release-image-tag`
+ends in a short SHA such as `public-beta-76875ac`, the active node's source git
+commit must start with that SHA and the checkout must be clean. Missing
+provenance is a release-gate failure because it means the operator cannot prove
+that a local build fallback used the desired source tree.
 
 ```bash
 loom admin gb10-workers status \

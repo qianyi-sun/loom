@@ -746,6 +746,141 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_nodes(
     assert "env-old" in err
 
 
+def test_gb10_workers_status_release_target_gate_fails_on_stale_source_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _fake_get(url, **kwargs):  # type: ignore[no-untyped-def]
+        return _StubResponse(
+            200,
+            json_data={
+                "desired_states": [
+                    {
+                        "environment": "production",
+                        "pool_name": "gb10-arm64",
+                        "image_tag": "public-beta-76875ac",
+                        "max_concurrent": 10,
+                        "env_config_version": "public-beta-76875ac",
+                        "previous_image_tag": "public-beta-b453057",
+                    },
+                ],
+                "nodes": [
+                    {
+                        "environment": "production",
+                        "pool_name": "gb10-arm64",
+                        "hostname": "trt-gb10-1",
+                        "apply_state": "applied",
+                        "current_image_tag": "public-beta-76875ac",
+                        "desired_image_tag": "public-beta-76875ac",
+                        "current_max_concurrent": 10,
+                        "desired_max_concurrent": 10,
+                        "current_env_config_version": "public-beta-76875ac",
+                        "desired_env_config_version": "public-beta-76875ac",
+                        "current_intent": "active",
+                        "desired_intent": "active",
+                        "last_apply_result": "already current",
+                        "error_message": None,
+                        "compose_project_dir": (
+                            "/home/trt/loom-remote-worker/"
+                            "loom-public-beta-b453057/deploy"
+                        ),
+                        "source_git_commit": (
+                            "b45305709414b1e88cbb1f3d92e5f28375ee93b9"
+                        ),
+                        "source_git_dirty": False,
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+
+    rc = main(
+        [
+            "admin",
+            "gb10-workers",
+            "status",
+            "--release-image-tag",
+            "public-beta-76875ac",
+            "--release-env-config-version",
+            "public-beta-76875ac",
+        ]
+    )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "GB10 rollout target mismatch" in err
+    assert "trt-gb10-1" in err
+    assert "source=b45305709414" in err
+    assert "expected_source=76875ac" in err
+    assert "loom-public-beta-b453057/deploy" in err
+
+
+def test_gb10_workers_status_release_target_gate_fails_without_source_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _fake_get(url, **kwargs):  # type: ignore[no-untyped-def]
+        return _StubResponse(
+            200,
+            json_data={
+                "desired_states": [
+                    {
+                        "environment": "production",
+                        "pool_name": "gb10-arm64",
+                        "image_tag": "public-beta-76875ac",
+                        "max_concurrent": 10,
+                        "env_config_version": "public-beta-76875ac",
+                    },
+                ],
+                "nodes": [
+                    {
+                        "environment": "production",
+                        "pool_name": "gb10-arm64",
+                        "hostname": "trt-gb10-1",
+                        "apply_state": "applied",
+                        "current_image_tag": "public-beta-76875ac",
+                        "desired_image_tag": "public-beta-76875ac",
+                        "current_max_concurrent": 10,
+                        "desired_max_concurrent": 10,
+                        "current_env_config_version": "public-beta-76875ac",
+                        "desired_env_config_version": "public-beta-76875ac",
+                        "current_intent": "active",
+                        "desired_intent": "active",
+                        "last_apply_result": "already current",
+                        "error_message": None,
+                        "compose_project_dir": (
+                            "/home/trt/loom-remote-worker/"
+                            "loom-public-beta-b453057/deploy"
+                        ),
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+
+    rc = main(
+        [
+            "admin",
+            "gb10-workers",
+            "status",
+            "--release-image-tag",
+            "public-beta-76875ac",
+            "--release-env-config-version",
+            "public-beta-76875ac",
+        ]
+    )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "trt-gb10-1" in err
+    assert "source=-/expected_source=76875ac" in err
+    assert "loom-public-beta-b453057/deploy" in err
+
+
 # ──────────────────────────────────────────────────────────────────────
 # loom admin worker-pools autoscaler status
 # ──────────────────────────────────────────────────────────────────────

@@ -99,6 +99,94 @@ def test_build_plan_allows_canary_host_and_force_override() -> None:
     assert build_plan(desired, blocked_local, force=True).blocked_reason is None
 
 
+def test_report_node_includes_compose_source_git_provenance(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = tmp_path / "loom-public-beta-76875ac"
+    deploy_dir = repo / "deploy"
+    deploy_dir.mkdir(parents=True)
+    compose_file = deploy_dir / "docker-compose.remote-worker.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "config", "user.email", "codex@example.invalid"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Codex"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=repo,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout.strip()
+    desired = DesiredState(
+        environment="production",
+        pool_name="gb10-arm64",
+        image_tag="public-beta-76875ac",
+        max_concurrent=10,
+        env_config_version="public-beta-76875ac",
+        rollout_policy={"mode": "all"},
+        env={},
+    )
+    local = LocalWorkerState(
+        hostname="trt-gb10-1",
+        image_tag="public-beta-76875ac",
+        pool_name="gb10-arm64",
+        max_concurrent=10,
+        env_config_version="public-beta-76875ac",
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_post(url, *, headers, json, timeout):  # type: ignore[no-untyped-def]
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+
+        class _Response:
+            status_code = 200
+
+        return _Response()
+
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+    monkeypatch.setattr(gb10_agent.httpx, "post", _fake_post)
+
+    gb10_agent._report_node(
+        SimpleNamespace(
+            cp_url="http://cp:8080",
+            admin_token="env:LOOM_ADMIN_TOKEN",
+            compose_file=[compose_file],
+        ),
+        desired=desired,
+        local=local,
+        apply_state="applied",
+        last_apply_result="already current",
+    )
+
+    assert captured["url"] == (
+        "http://cp:8080/admin/gb10-worker-pools/production/"
+        "gb10-arm64/nodes/trt-gb10-1/report"
+    )
+    body = captured["json"]
+    assert isinstance(body, dict)
+    assert body["compose_project_dir"] == str(deploy_dir)
+    assert body["source_git_commit"] == commit
+    assert body["source_git_dirty"] is False
+
+
 def test_render_env_updates_preserves_comments_and_appends_missing_keys(tmp_path: Path) -> None:
     env_file = tmp_path / "remote-worker.env"
     env_file.write_text(

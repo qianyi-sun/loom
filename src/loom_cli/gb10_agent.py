@@ -367,6 +367,12 @@ def _report_node(
         admin_token = _resolve_admin_token(args.admin_token)
     except ValueError:
         return
+    compose_project_dir = (
+        Path(args.compose_file[0]).resolve().parent
+        if getattr(args, "compose_file", None)
+        else None
+    )
+    source_git_commit, source_git_dirty = _source_git_provenance(compose_project_dir)
     url = (
         f"{args.cp_url.rstrip('/')}/admin/gb10-worker-pools/"
         f"{desired.environment}/{desired.pool_name}/nodes/{local.hostname}/report"
@@ -380,9 +386,9 @@ def _report_node(
         "last_apply_result": last_apply_result,
         "error_message": error_message,
         "agent_version": AGENT_VERSION,
-        "compose_project_dir": str(Path(args.compose_file[0]).resolve().parent)
-        if getattr(args, "compose_file", None)
-        else None,
+        "compose_project_dir": str(compose_project_dir) if compose_project_dir else None,
+        "source_git_commit": source_git_commit,
+        "source_git_dirty": source_git_dirty,
     }
     try:
         httpx.post(
@@ -393,6 +399,35 @@ def _report_node(
         )
     except httpx.RequestError:
         return
+
+
+def _source_git_provenance(source_dir: Path | None) -> tuple[str | None, bool | None]:
+    if source_dir is None:
+        return None, None
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(source_dir), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    if head.returncode != 0:
+        return None, None
+    try:
+        status = subprocess.run(
+            ["git", "-C", str(source_dir), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return head.stdout.strip(), None
+    dirty = bool(status.stdout.strip()) if status.returncode == 0 else None
+    return head.stdout.strip(), dirty
 
 
 def _print_plan(plan: AgentPlan, *, json_output: bool) -> None:

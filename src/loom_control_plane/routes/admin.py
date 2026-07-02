@@ -98,6 +98,8 @@ class _GB10NodeReportPayload(BaseModel):
     error_message: str | None = None
     agent_version: str | None = None
     compose_project_dir: str | None = None
+    source_git_commit: str | None = None
+    source_git_dirty: bool | None = None
     worker_id: UUID | None = None
     last_apply_at: datetime | None = None
 
@@ -453,6 +455,8 @@ async def report_gb10_worker_node_status(
                 error_message=payload.error_message,
                 agent_version=payload.agent_version,
                 compose_project_dir=payload.compose_project_dir,
+                source_git_commit=payload.source_git_commit,
+                source_git_dirty=payload.source_git_dirty,
                 worker_id=payload.worker_id,
                 last_apply_at=payload.last_apply_at,
             ),
