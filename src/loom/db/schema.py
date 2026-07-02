@@ -452,6 +452,96 @@ class Benchmark(Base):
     imported_by: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class TaskSet(Base):
+    """Team-owned user TaskSet (#242 sub-plan 1)."""
+    __tablename__ = "task_sets"
+    __table_args__ = (
+        CheckConstraint(
+            "visibility IN ('private')",
+            name="task_sets_visibility_check",
+        ),
+        CheckConstraint(
+            "status IN ('materializing', 'ready', 'partial', 'failed', 'deleted')",
+            name="task_sets_status_check",
+        ),
+        CheckConstraint(
+            "cardinality(intents) > 0 AND "
+            "intents <@ ARRAY['trajectory_generation', 'evaluation']::text[]",
+            name="task_sets_intents_check",
+        ),
+        CheckConstraint(
+            "slug <> '' AND slug = trim(slug) AND slug !~ '[./\\\\]'",
+            name="task_sets_slug_check",
+        ),
+        CheckConstraint(
+            "id = 'ts/' || owning_team_id::text || '/' || slug",
+            name="task_sets_id_namespace_check",
+        ),
+        CheckConstraint(
+            "task_count >= 0",
+            name="task_sets_task_count_nonneg_check",
+        ),
+        UniqueConstraint("owning_team_id", "slug", name="task_sets_team_slug_uidx"),
+        Index(
+            "task_sets_team_visibility_status_idx",
+            "owning_team_id",
+            "visibility",
+            "status",
+        ),
+        Index(
+            "task_sets_evaluation_ready_idx",
+            "evaluation_ready",
+            postgresql_where=text("evaluation_ready = true"),
+        ),
+    )
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    owning_team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id"), nullable=False,
+    )
+    slug: Mapped[str] = mapped_column(Text, nullable=False)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    visibility: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'private'"),
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    intents: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    evaluation_ready: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"),
+    )
+    manifest_blob_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    task_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0"),
+    )
+    soft_deleted_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+
+class TaskSetManifest(Base):
+    """Current manifest sidecar for a user TaskSet (#242 sub-plan 1)."""
+    __tablename__ = "task_set_manifests"
+    task_set_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("task_sets.id", ondelete="CASCADE"), primary_key=True,
+    )
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    verifier_blob_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    transform_blob_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+
 class Agent(Base):
     __tablename__ = "agents"
     name: Mapped[str] = mapped_column(String, primary_key=True)
