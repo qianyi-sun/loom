@@ -104,7 +104,7 @@ adapters compose one of them:
 | gemini-cli | stdout_jsonl | Google Gemini CLI |
 | kimi-cli | tail_pty | Moonshot Kimi CLI |
 | mini-swe-agent | stdout_jsonl | |
-| opencode | stdout_jsonl | Custom OpenAI-compatible provider id; uses `/v1/chat/completions`, not Responses API |
+| opencode | stdout_jsonl | Custom OpenAI-compatible provider id; uses the `/openai/v1/chat/completions` provider facade, not Responses API; the facade accepts the CLI's streaming request by returning synthetic OpenAI SSE from a cost-attributed non-streaming upstream call |
 | openhands | stdout_jsonl | legacy name backed by the SDK runner |
 | openhands-sdk | stdout_jsonl | SDK variant |
 | qwen-cli | tail_pty | Alibaba Qwen CLI |

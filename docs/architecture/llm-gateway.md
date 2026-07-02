@@ -58,20 +58,17 @@ upstream shape, so client-side parsing stays standard. The
 normalisation (TokenUsage → cost) happens *next to* the forward, not
 *after* it.
 
-Streaming is supported on the OpenAI Responses routes and on both
-Anthropic Messages routes. The Gateway accepts `stream=true` on
-`/v1/messages`, `/v1/responses`, `/openai/v1/responses`, and
-`/anthropic/v1/messages`, forwards the native SSE stream to the
-selected provider, and records usage from the terminal usage-bearing
-SSE event. For Anthropic streams that means tee-parsing the upstream
-bytes as they pass through the route: `message_start` carries the
-input + cache token counts, the final `message_delta` carries the
-cumulative `output_tokens`, and `record_call` runs after the upstream
-stream completes (or on client disconnect, with whatever usage was
-accumulated). Cost attribution is preserved without buffering the
-full response. Other native routes (`/v1/chat/completions`) still
-reject `stream=true` because their cost path expects the full JSON
-body.
+Streaming is supported on the OpenAI Responses routes, the OpenAI Chat
+provider facade, and on both Anthropic Messages routes. The Gateway accepts
+`stream=true` on `/v1/messages`, `/v1/responses`, `/openai/v1/responses`,
+`/openai/v1/chat/completions`, and `/anthropic/v1/messages`. Responses and
+Anthropic routes forward native SSE streams and record usage from the terminal
+usage-bearing SSE event. The OpenAI Chat provider facade preserves usage by
+calling the upstream OpenAI-compatible `/chat/completions` endpoint with
+`stream=false`, recording usage from the full JSON response, and returning a
+synthetic OpenAI `chat.completion.chunk` SSE stream to streaming clients such
+as opencode or aider. Other native routes (`/v1/chat/completions`) still reject
+`stream=true` because their cost path expects the full JSON body.
 
 For provider connections that are OpenAI-chat-compatible but not
 Responses-compatible, the Responses facade has a narrow compatibility
@@ -204,7 +201,7 @@ or BYO OpenAI-compatible dispatch because:
 | BYO `/responses` endpoint is actually chat-only | One fallback POST to `/chat/completions`; success returns synthetic Responses JSON/SSE and records normal `openai_responses` usage from chat `usage` tokens |
 | Rate-card missing                      | 422 `RateCardNotFoundError`; no row inserted |
 | Bearer invalid / over RPM              | 401 / 429; no upstream call          |
-| `stream=true`                          | Allowed for OpenAI Responses and Anthropic provider-facade calls; other v1 dialect paths reject it where final usage cannot be attributed |
+| `stream=true`                          | Allowed for OpenAI Responses, OpenAI Chat provider-facade, and Anthropic provider-facade calls; other v1 dialect paths reject it where final usage cannot be attributed |
 | Model not in team allowlist            | 403; no upstream call                 |
 
 A failed call still produces an `llm_calls` row when the upstream

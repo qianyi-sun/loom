@@ -497,8 +497,11 @@ async def test_facade_rejects_malformed_connection_id_header(
     assert "not a valid UUID" in r.json()["detail"]
 
 
-async def test_facade_rejects_stream_true(facade_setup) -> None:
-    app, jwt, _team_id, _trial_id, conn_id, captures = facade_setup
+async def test_facade_stream_true_returns_synthetic_sse_and_records_usage(
+    facade_setup,
+    postgres_url: str,
+) -> None:
+    app, jwt, team_id, trial_id, conn_id, captures = facade_setup
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(
         transport=transport,
@@ -516,10 +519,52 @@ async def test_facade_rejects_stream_true(facade_setup) -> None:
                 "stream": True,
             },
         )
-    assert r.status_code == 501
-    assert "stream=true" in r.json()["detail"]
-    # Upstream MUST not have been called.
-    assert len(captures["requests"]) == 0  # type: ignore[arg-type]
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("text/event-stream")
+    lines = [line for line in r.text.splitlines() if line.startswith("data: ")]
+    assert lines[-1] == "data: [DONE]"
+    chunks = [
+        line.removeprefix("data: ")
+        for line in lines
+        if line != "data: [DONE]"
+    ]
+    assert chunks
+
+    import json
+
+    first_chunk = json.loads(chunks[0])
+    assert first_chunk["object"] == "chat.completion.chunk"
+    assert first_chunk["choices"][0]["delta"] == {
+        "role": "assistant",
+        "content": "hello",
+    }
+    final_choice_chunk = json.loads(chunks[1])
+    assert final_choice_chunk["choices"][0]["finish_reason"] == "stop"
+    usage_chunk = json.loads(chunks[-1])
+    assert usage_chunk["choices"] == []
+    assert usage_chunk["usage"] == {
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "total_tokens": 150,
+    }
+
+    requests: list[httpx.Request] = captures["requests"]  # type: ignore[assignment]
+    assert len(requests) == 1
+    sent = json.loads(requests[0].content)
+    assert sent["stream"] is False
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+    sync_engine.dispose()
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert row["team_id"] == team_id
+    assert row["trial_id"] == trial_id
+    assert row["step_id"] == "step-1"
+    assert row["dialect"] == "openai_facade"
+    assert row["input_tokens"] == 100
+    assert row["output_tokens"] == 50
 
 
 async def test_facade_rejects_missing_model_field(facade_setup) -> None:
