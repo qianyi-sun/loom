@@ -91,7 +91,28 @@ if [[ "${LOOM_DRY_RUN:-false}" == "true" ]]; then
   exit 0
 fi
 
-uv run loom cluster up --config "${cluster_config}" --timeout 900
+if [[ "${LOOM_DEPLOY_ENVIRONMENT}" != "development" && -z "${LOOM_ROLLOUT_LOCK_DIR:-}" ]]; then
+  echo "LOOM_ROLLOUT_LOCK_DIR is required for ${LOOM_DEPLOY_ENVIRONMENT} deploys." >&2
+  echo "Set it to the shared protected-environment rollout lock directory." >&2
+  exit 2
+fi
+
+cluster_up_args=(
+  cluster
+  up
+  --config "${cluster_config}"
+  --timeout 900
+  --environment "${LOOM_DEPLOY_ENVIRONMENT}"
+  --rollout-id "${LOOM_IMAGE_TAG}"
+  --rollout-lock-evidence "${evidence_dir}/rollout-mutation-lock-${LOOM_IMAGE_TAG}.json"
+)
+if [[ -n "${LOOM_ROLLOUT_LOCK_DIR:-}" ]]; then
+  cluster_up_args+=(--rollout-lock-dir "${LOOM_ROLLOUT_LOCK_DIR}")
+fi
+if [[ "${LOOM_FORCE_ROLLOUT_LOCK:-false}" == "true" ]]; then
+  cluster_up_args+=(--force-rollout-lock)
+fi
+uv run loom "${cluster_up_args[@]}"
 namespace="$(uv run python - "${cluster_config}" <<'PY'
 import sys
 import tomllib

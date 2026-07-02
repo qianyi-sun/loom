@@ -160,8 +160,36 @@ loom cluster release-manifest \
 
 The image identities JSON is build evidence keyed by Deployment and container,
 with `image`, and at least one immutable `repo_digest` or `image_id` per
-release-managed container. After `loom cluster up` reaches readiness, run the
-hard convergence gate against the same saved inputs:
+release-managed container. Before the first release-managed mutation, choose a
+shared lock directory that every public-beta operator on the host uses:
+
+```bash
+export LOOM_ROLLOUT_LOCK_DIR=/data/loom-public-beta/rollout-locks
+
+loom cluster up \
+  --config "$CLUSTER_CONFIG" \
+  --namespace "$K8S_NAMESPACE" \
+  --environment public-beta \
+  --rollout-id "$IMAGE_TAG" \
+  --rollout-lock-dir "$LOOM_ROLLOUT_LOCK_DIR" \
+  --rollout-lock-evidence "$ROLLOUT_DIR/rollout-mutation-lock-$IMAGE_TAG.json" \
+  --timeout 900
+```
+
+The lease covers `loom cluster up` for Kubernetes release-managed components and
+`loom admin environment-state apply/check` for the external worker desired-state
+gate in this first slice. It does not stop manual `kubectl`, Slurm, or GB10 host
+commands that bypass Loom tooling; those remain detected by release-gate and
+environment-state convergence checks. A second Loom-protected mutation for the
+same environment fails with the active owner id and expiry. Use
+`--force-rollout-lock` only after preserving evidence that the recorded owner is
+stale, such as a dead terminal/session, no active rollout process for the owner
+PID/host, and no in-flight rollout issue comment claiming ownership. The force
+flag replaces an abandoned durable record; it does not bypass an active process
+that still holds the advisory lock.
+
+After `loom cluster up` reaches readiness, run the hard convergence gate against
+the same saved inputs:
 
 ```bash
 loom cluster release-gate \
@@ -487,7 +515,10 @@ loom admin environment-state apply \
   --environment public-beta \
   --file deploy/environment-state/public-beta.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
-  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
+  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+  --rollout-id "$IMAGE_TAG" \
+  --rollout-lock-dir "$LOOM_ROLLOUT_LOCK_DIR" \
+  --rollout-lock-evidence "$ROLLOUT_DIR/environment-state-apply-lock-$IMAGE_TAG.json"
 
 loom admin environment-state check \
   --cp-url http://control-node.lan:18081 \
@@ -498,6 +529,9 @@ loom admin environment-state check \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
   --worker-token file:/secure/path/worker-token \
+  --rollout-id "$IMAGE_TAG" \
+  --rollout-lock-dir "$LOOM_ROLLOUT_LOCK_DIR" \
+  --rollout-lock-evidence "$ROLLOUT_DIR/environment-state-check-lock-$IMAGE_TAG.json" \
   --format json \
   > "$ROLLOUT_DIR/environment-state-check-$IMAGE_TAG.json"
 

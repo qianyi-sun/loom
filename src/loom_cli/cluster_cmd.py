@@ -48,6 +48,14 @@ from loom_cli.cluster_rollout_evidence import (
     normalize_cluster_status_format,
     render_rollout_evidence_json,
 )
+from loom_cli.rollout_lock import (
+    DEFAULT_ROLLOUT_LOCK_TTL_SECONDS,
+    RolloutLease,
+    RolloutLeaseError,
+    RolloutLeaseManager,
+    default_rollout_lock_dir,
+    rollout_owner_id,
+)
 from loom_config.doctor import (
     DoctorReport,
 )
@@ -102,6 +110,90 @@ _COMPONENT_DESCRIPTIONS: dict[str, str] = {
     "postgres": "Postgres (state)",
     "minio": "Object store (trajectories + ATIF)",
 }
+
+
+def _add_rollout_lock_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--rollout-id",
+        default=None,
+        help=(
+            "Operator-visible protected rollout owner id. Defaults to "
+            "environment-hostname-pid when a lock is required."
+        ),
+    )
+    parser.add_argument(
+        "--rollout-lock-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for per-environment rollout mutation leases. Defaults "
+            "to $LOOM_ROLLOUT_LOCK_DIR or ~/.loom/rollout-locks for protected "
+            "environments."
+        ),
+    )
+    parser.add_argument(
+        "--rollout-lock-ttl-seconds",
+        type=int,
+        default=DEFAULT_ROLLOUT_LOCK_TTL_SECONDS,
+        help=(
+            "Protected rollout mutation lease TTL in seconds "
+            f"(default: {DEFAULT_ROLLOUT_LOCK_TTL_SECONDS})."
+        ),
+    )
+    parser.add_argument(
+        "--rollout-lock-evidence",
+        type=Path,
+        default=None,
+        help="Optional JSON evidence path for rollout lock acquire/release events.",
+    )
+    parser.add_argument(
+        "--force-rollout-lock",
+        action="store_true",
+        help=(
+            "Replace an active protected rollout mutation lease. Use only "
+            "after preserving evidence that the recorded owner is stale."
+        ),
+    )
+
+
+def _acquire_protected_rollout_lock(
+    args: argparse.Namespace,
+    *,
+    command: list[str],
+) -> RolloutLease | None:
+    if not is_protected_environment(
+        environment=args.environment,
+        namespace=args.namespace,
+    ):
+        return None
+    environment = infer_environment(
+        environment=args.environment,
+        namespace=args.namespace,
+    )
+    manager = RolloutLeaseManager(args.rollout_lock_dir or default_rollout_lock_dir())
+    try:
+        lease = manager.acquire(
+            environment=environment,
+            owner_id=rollout_owner_id(environment, args.rollout_id),
+            ttl_seconds=args.rollout_lock_ttl_seconds,
+            command=command,
+            evidence_path=args.rollout_lock_evidence,
+            force=args.force_rollout_lock,
+        )
+    except (RolloutLeaseError, ValueError) as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        diagnostic = getattr(exc, "diagnostic", None)
+        if isinstance(diagnostic, dict):
+            sys.stderr.write(
+                "rollout lock diagnostic: "
+                + json.dumps(diagnostic, sort_keys=True)
+                + "\n",
+            )
+        raise
+    sys.stderr.write(
+        f"Acquired rollout mutation lease for {environment}: {lease.owner_id}\n",
+    )
+    return lease
 
 
 @dataclass
@@ -2693,6 +2785,40 @@ def wait_for_ready(
 
 def _up(args: argparse.Namespace) -> int:
     try:
+        command = [
+            "loom",
+            "cluster",
+            "up",
+            "--environment",
+            args.environment or infer_environment(
+                environment=args.environment,
+                namespace=args.namespace,
+            ),
+            "--namespace",
+            args.namespace,
+        ]
+        if args.config:
+            command.extend(["--config", str(args.config)])
+        if args.rollout_id:
+            command.extend(["--rollout-id", args.rollout_id])
+        lease = _acquire_protected_rollout_lock(
+            args,
+            command=command,
+        )
+    except (RolloutLeaseError, ValueError):
+        return 1
+
+    rc = 1
+    try:
+        rc = _up_impl(args)
+        return rc
+    finally:
+        if lease is not None:
+            lease.release(status="released" if rc == 0 else "failed")
+
+
+def _up_impl(args: argparse.Namespace) -> int:
+    try:
         apps_v1, net_v1, core_v1, storage_v1 = _load_clients(args.context)
     except RuntimeError as exc:
         sys.stderr.write(f"error: {exc}\n")
@@ -3541,6 +3667,7 @@ def dispatch(argv: list[str]) -> int:
             f"(default: {_DEFAULT_UP_POLL_INTERVAL_SEC})."
         ),
     )
+    _add_rollout_lock_args(p_up)
     p_up.set_defaults(handler=_up)
 
     p_down = sub.add_parser(
