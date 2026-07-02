@@ -43,10 +43,12 @@ Out of scope for this route (explicit follow-ups):
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
+from starlette.responses import StreamingResponse
 
 from loom_llm_gateway.dialect import DIALECTS
 from loom_llm_gateway.llm_calls import record_call
@@ -86,7 +88,7 @@ _OPENAI_SHAPED_TYPES = frozenset({"openai-compatible", "custom"})
 _FACADE_DIALECT = "openai_facade"
 
 
-@router.post("/openai/v1/chat/completions")
+@router.post("/openai/v1/chat/completions", response_model=None)
 async def openai_chat_facade(
     request: Request,
     payload: dict[str, Any],
@@ -95,7 +97,7 @@ async def openai_chat_facade(
         default=None,
         alias="x-loom-provider-connection-id",
     ),
-) -> dict[str, Any]:
+) -> dict[str, Any] | StreamingResponse:
     settings = request.app.state.settings
     signing_key = settings.step_jwt_signing_key.get_secret_value()
 
@@ -115,23 +117,14 @@ async def openai_chat_facade(
         x_loom_provider_connection_id,
     )
 
-    # Streaming is rejected (501) for the same reason /v1/messages
-    # rejects it: cost attribution requires the final usage block,
-    # which SSE breaks. v1.5 ships SSE passthrough — when it does,
-    # this route should refuse stream=true for connections without
-    # operator-supplied pricing rather than blanket-reject.
-    if payload.get("stream"):
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                "stream=true not yet supported on the facade "
-                "(cost attribution needs the final usage block). "
-                "Set stream=false."
-            ),
-        )
-
     if not isinstance(payload.get("model"), str) or not payload["model"]:
         raise HTTPException(status_code=400, detail="`model` is required")
+
+    client_requested_stream = bool(payload.get("stream"))
+    upstream_payload = dict(payload)
+    if client_requested_stream:
+        upstream_payload["stream"] = False
+        upstream_payload.pop("stream_options", None)
 
     # Resolve + decrypt. Both happen inside one session so the
     # SecretStore.get sees the same transaction the lookup did.
@@ -156,7 +149,7 @@ async def openai_chat_facade(
         outcome = await send_with_retry(
             lambda: upstream.post(
                 upstream_url,
-                json=payload,
+                json=upstream_payload,
                 headers=upstream_headers,
                 timeout=settings.upstream_timeout_sec,
                 follow_redirects=False,
@@ -254,4 +247,109 @@ async def openai_chat_facade(
             request_params=normalize_request_params(payload),
         )
 
-    return body
+    return openai_chat_facade_result(
+        body=body,
+        client_requested_stream=client_requested_stream,
+    )
+
+
+def openai_chat_facade_result(
+    *,
+    body: dict[str, Any],
+    client_requested_stream: bool,
+) -> dict[str, Any] | StreamingResponse:
+    if not client_requested_stream:
+        return body
+
+    async def _body() -> Any:
+        for chunk in _synthetic_openai_chat_sse_chunks(body):
+            yield chunk
+
+    return StreamingResponse(
+        _body(),
+        media_type="text/event-stream",
+    )
+
+
+def _synthetic_openai_chat_sse_chunks(body: dict[str, Any]) -> list[bytes]:
+    base = _chat_completion_chunk_base(body)
+    chunks: list[bytes] = []
+    choices = body.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            index = _choice_index(choice)
+            delta = _message_to_delta(choice.get("message"))
+            if delta:
+                chunks.append(_sse_chunk({
+                    **base,
+                    "choices": [{
+                        "index": index,
+                        "delta": delta,
+                        "finish_reason": None,
+                    }],
+                }))
+            chunks.append(_sse_chunk({
+                **base,
+                "choices": [{
+                    "index": index,
+                    "delta": {},
+                    "finish_reason": choice.get("finish_reason"),
+                }],
+            }))
+    usage = body.get("usage")
+    if isinstance(usage, dict):
+        chunks.append(_sse_chunk({
+            **base,
+            "choices": [],
+            "usage": usage,
+        }))
+    chunks.append(b"data: [DONE]\n\n")
+    return chunks
+
+
+def _chat_completion_chunk_base(body: dict[str, Any]) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "id": body.get("id", "chatcmpl_loom_facade"),
+        "object": "chat.completion.chunk",
+        "created": body.get("created", 0),
+        "model": body.get("model", ""),
+    }
+    if "system_fingerprint" in body:
+        base["system_fingerprint"] = body["system_fingerprint"]
+    return base
+
+
+def _choice_index(choice: dict[str, Any]) -> int:
+    index = choice.get("index")
+    return index if isinstance(index, int) else 0
+
+
+def _message_to_delta(message: Any) -> dict[str, Any]:
+    if not isinstance(message, dict):
+        return {}
+    delta: dict[str, Any] = {}
+    role = message.get("role")
+    if isinstance(role, str):
+        delta["role"] = role
+    if message.get("content") is not None:
+        delta["content"] = message["content"]
+    if message.get("refusal") is not None:
+        delta["refusal"] = message["refusal"]
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        delta["tool_calls"] = [
+            {"index": idx, **tool_call}
+            for idx, tool_call in enumerate(tool_calls)
+            if isinstance(tool_call, dict)
+        ]
+    return delta
+
+
+def _sse_chunk(event: dict[str, Any]) -> bytes:
+    return (
+        "data: "
+        + json.dumps(event, separators=(",", ":"), ensure_ascii=False)
+        + "\n\n"
+    ).encode("utf-8")
