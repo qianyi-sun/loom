@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class CheckResult(BaseModel):
@@ -13,6 +13,7 @@ class CheckResult(BaseModel):
     passed: bool
     score: float | None = None
     message: str | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
     duration_sec: float | None = None
 
 
