@@ -268,7 +268,18 @@ def test_release_gate_accepts_kind_import_runtime_identity_when_template_matches
     assert check.evidence["runtime_identity_mismatch"] is True
 
 
-def test_release_gate_ignores_stale_status_image_tag_when_template_matches() -> None:
+def test_release_gate_rejects_stale_status_image_on_kind_import_pod() -> None:
+    """#339 regression — kind-import must not mask a stale status image.
+
+    Deployment template image says `public-beta-abc123` (the release target),
+    but the container status still reports the old `public-beta-old` tag.
+    The pod's runtime image ID has the kind-import shape, so the previous
+    implementation would pass on `identity_strategy=kind-import-template-image`
+    regardless of the tag drift. The operator observation on `public-beta-2eef3bf9`
+    was that the release gate said "pass" while `loom-web` was still serving
+    `public-beta-05ab776`. The gate must fail here so the operator waits for
+    a fresh pod (or restarts the Deployment) before accepting the release.
+    """
     manifest = _manifest(expected_digest="sha256:" + "1" * 64)
     apps = _FakeAppsV1({
         "loom-service": _deployment(
@@ -296,14 +307,24 @@ def test_release_gate_ignores_stale_status_image_tag_when_template_matches() -> 
         live_alembic_heads=["0050"],
     )
 
-    assert report.all_pass
+    assert not report.all_pass
     check = next(
         check for check in report.checks
         if check.name == "image-identity:loom-service/app"
     )
-    assert check.evidence["live_image"] == "loom-service:public-beta-old"
-    assert check.evidence["status_image_matches_template"] is False
+    assert check.outcome == "fail"
+    # The gate must explain both facts to the operator: this was the kind-import
+    # code path AND the pod's status image tag is stale relative to the release
+    # target. Otherwise the operator repeats the manual load and is surprised.
+    assert check.evidence["runtime_identity_kind"] == "kind-import"
     assert check.evidence["status_image_stale"] is True
+    assert check.evidence["status_image_matches_template"] is False
+    assert check.evidence["identity_strategy"] == "kind-import-template-image"
+    assert check.evidence["live_image"] == "loom-service:public-beta-old"
+    # Remediation should point at rolling / waiting for pod refresh, not at
+    # rebuilding image digests (that's the wrong lever for kind-import drift).
+    assert check.remediation is not None
+    assert "roll" in check.remediation.lower() or "restart" in check.remediation.lower()
 
 
 def test_release_gate_does_not_mark_default_docker_prefix_status_image_stale() -> None:
