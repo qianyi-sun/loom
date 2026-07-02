@@ -728,6 +728,60 @@ knob you need.
     Delete short-lived remote secret files as soon as the run has performed its
     own post-run scan.
 
+## Kind cluster: loading local images before rollout (#96)
+
+When a public-beta or staging cluster runs on top of `kind`, images built with
+host docker are **not automatically visible** to the kind node's containerd. A
+plain `kubectl apply` against a Deployment that references a local tag
+(`loom-worker:public-beta-<sha7>`) will hit `ErrImagePull` / `ImagePullBackOff`
+because containerd tries the default registry (`docker.io/library/...`) and
+finds nothing.
+
+The `loom cluster load-images` subcommand wraps `kind load docker-image` for
+each requested tag and gives a preflight-friendly `--check-only` mode.
+
+Load images explicitly:
+
+```bash
+loom cluster load-images \
+  --cluster-name loom-public-beta \
+  --image loom-control-plane:public-beta-1bbc323 \
+  --image loom-service:public-beta-1bbc323 \
+  --image loom-llm-gateway:public-beta-1bbc323 \
+  --image loom-worker:public-beta-1bbc323
+```
+
+Or extract the image set directly from a rendered manifest so nothing drifts
+between what `loom cluster render` emits and what gets loaded:
+
+```bash
+loom cluster render > /tmp/rendered.yaml
+loom cluster load-images \
+  --cluster-name loom-public-beta \
+  --from-manifest /tmp/rendered.yaml
+```
+
+Registry-qualified images (`docker.io/library/postgres:16`,
+`gcr.io/foo/bar:baz`, `registry.k8s.io/...`) are skipped — those can be
+pulled by the cluster itself.
+
+Preflight smoke: verify without mutating anything. This is what belongs in the
+rollout driver before `kubectl apply`:
+
+```bash
+loom cluster load-images \
+  --cluster-name loom-public-beta \
+  --from-manifest /tmp/rendered.yaml \
+  --check-only
+```
+
+Exit `0` when every requested tag is present in the kind node's containerd,
+`1` with a diagnostic listing missing images and the exact
+`loom cluster load-images ...` command to fix.
+
+`kind load docker-image` is idempotent — rerunning after a partial load
+converges without any special handling.
+
 ## Upgrade
 
 ### Breaking changes by release

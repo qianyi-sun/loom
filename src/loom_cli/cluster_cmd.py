@@ -3244,6 +3244,73 @@ def _down(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_images(args: argparse.Namespace) -> int:
+    """Handler for `loom cluster load-images` (#96)."""
+    from loom_cli.cluster_load_images import (
+        load_images_into_kind,
+        resolve_images,
+    )
+
+    manifest_paths = [Path(p) for p in args.from_manifest]
+    try:
+        images = resolve_images(
+            explicit=args.image,
+            manifest_paths=manifest_paths,
+        )
+    except FileNotFoundError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+
+    if not images:
+        sys.stderr.write(
+            "error: no images to process. Pass --image TAG (repeatable) "
+            "and/or --from-manifest PATH.\n"
+        )
+        return 2
+
+    result = load_images_into_kind(
+        cluster_name=args.cluster_name,
+        images=images,
+        check_only=args.check_only,
+    )
+
+    if args.check_only:
+        if result.missing:
+            sys.stderr.write(
+                "error: kind cluster is missing images that a rollout "
+                "would require:\n"
+            )
+            for image in result.missing:
+                sys.stderr.write(f"  - {image}\n")
+            fix_cmd = (
+                f"  loom cluster load-images --cluster-name "
+                f"{args.cluster_name} " + " ".join(
+                    f"--image {img}" for img in result.missing
+                )
+            )
+            sys.stderr.write(
+                "\nTo fix, load them into the kind node cache:\n"
+                f"{fix_cmd}\n"
+            )
+            return 1
+        sys.stdout.write(
+            f"all {len(images)} image(s) present in kind cluster "
+            f"'{args.cluster_name}'\n"
+        )
+        return 0
+
+    for image in result.loaded:
+        sys.stdout.write(f"loaded: {image}\n")
+    if result.failed:
+        sys.stderr.write("error: kind load failed for:\n")
+        for image in result.failed:
+            err_line = result.stderr.get(image, "").strip().splitlines()
+            summary = err_line[-1] if err_line else "(no stderr)"
+            sys.stderr.write(f"  - {image}: {summary}\n")
+        return 1
+    return 0
+
+
 def _bootstrap_evidence_paths(args: argparse.Namespace) -> int:
     """Emit sudo-install script for operator-writable rollout evidence dirs.
 
@@ -4079,6 +4146,54 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_evidence.set_defaults(handler=_bootstrap_evidence_paths)
+
+    p_load_images = sub.add_parser(
+        "load-images",
+        help=(
+            "Load local docker images into a kind cluster's node runtime "
+            "so kubectl apply doesn't ErrImagePull (#96)."
+        ),
+    )
+    p_load_images.add_argument(
+        "--cluster-name",
+        required=True,
+        help=(
+            "Name of the kind cluster (as in `kind get clusters`). Used "
+            "as --name to `kind load` and as the control-plane container "
+            "prefix for `--check-only`."
+        ),
+    )
+    p_load_images.add_argument(
+        "--image",
+        action="append",
+        default=[],
+        help=(
+            "Local image tag to load (repeatable). Format: 'name:tag'. "
+            "Combine with --from-manifest to also parse tags out of "
+            "rendered Kubernetes manifests."
+        ),
+    )
+    p_load_images.add_argument(
+        "--from-manifest",
+        action="append",
+        default=[],
+        help=(
+            "Path to a rendered Kubernetes YAML manifest. Local image "
+            "tags found under pod spec container/initContainer image "
+            "fields are added to the load set. Registry-qualified "
+            "images are skipped."
+        ),
+    )
+    p_load_images.add_argument(
+        "--check-only",
+        action="store_true",
+        help=(
+            "Do not load; instead query the kind node's containerd via "
+            "`docker exec ... crictl images` and exit non-zero if any "
+            "of the requested tags are missing. Suitable for preflight."
+        ),
+    )
+    p_load_images.set_defaults(handler=_load_images)
 
     args = parser.parse_args(argv)
     return cast(int, args.handler(args))
