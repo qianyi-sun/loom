@@ -2223,6 +2223,10 @@ separate product policy exists.
   - **Team A** owns the source provider connection and completed smoke run.
   - **Team B** validates org-wide Run Library read/reuse without gaining Team A
     execution control.
+- Disposable non-admin Team A and Team B smoke users, each with a user-owned
+  API token minted through the normal `/api/v1/tokens` flow. Do not use a
+  platform-admin browser/session principal, an admin-minted legacy team token,
+  or manual SQL token insertion as release evidence.
 - A real or mock OpenAI-compatible provider key for Team A. Use an environment
   reference such as `env:OPENAI_API_KEY`; do not paste raw provider keys into
   issue comments, shell history, or committed files.
@@ -2465,8 +2469,49 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    loom auth whoami
    ```
    Repeat with Team B's user. Evidence should show usernames, teams, roles, and
-   scopes, never raw passwords. Team-owner API token creation remains a separate
-   automation smoke if the release touches token lifecycle.
+   scopes, never raw passwords. Then mint short-lived smoke API tokens from the
+   logged-in non-admin user session, not from an admin bearer or manual DB write:
+   ```bash
+   export SMOKE_TOKEN_NAME="public-beta-team-a-$(date -u +%Y%m%dT%H%M%SZ)"
+   python - <<'PY'
+   import json
+   import os
+
+   from loom_cli.config import load_config
+   from loom_cli.server_client import authed_client
+
+   payload = {
+       "name": os.environ["SMOKE_TOKEN_NAME"],
+       "type": "team",
+       "scopes": ["read:own", "submit", "providers:manage", "tokens:manage"],
+       "expires_in_days": 7,
+   }
+   with authed_client(load_config()) as client:
+       response = client.post("/api/v1/tokens", json=payload)
+       response.raise_for_status()
+       print(json.dumps(response.json(), indent=2))
+   PY
+   ```
+   Save the returned raw `token` only in the local operator shell as
+   `TEAM_A_TOKEN` or `TEAM_B_TOKEN`; shared evidence should keep only the hash
+   prefix. Verify each token in an isolated config or shell:
+   `loom auth login --server https://loom.example.com --token env:TEAM_A_TOKEN`
+   followed by `loom auth whoami` must print `Principal: user-owned API token`,
+   a `User:` line, the intended team, and no `platform_admin` role. After the
+   smoke, revoke by prefix through the same user session:
+   ```bash
+   export SMOKE_TOKEN_PREFIX=<8-hex-prefix>
+   python - <<'PY'
+   import os
+
+   from loom_cli.config import load_config
+   from loom_cli.server_client import authed_client
+
+   with authed_client(load_config()) as client:
+       response = client.delete(f"/api/v1/tokens/{os.environ['SMOKE_TOKEN_PREFIX']}")
+       response.raise_for_status()
+   PY
+   ```
 7. **Provider connection create + test.** As Team A, create the public-beta
    smoke provider through the CLI (or `POST /api/v1/provider-connections`),
    then probe. The release fixture uses YibuAPI through Loom's
@@ -2667,12 +2712,18 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     Store `public-beta-smoke.json` with release artifacts if the environment has
     a private artifact store. The script redacts raw API tokens, seeded fake
     secrets, provider-key-like values, signed object-store URLs, and internal
-    service URLs before writing evidence. The `object_store.minio_write_probe`
-    row must pass before submitting canary or release-trial work; if it reports
-    `XMinioStorageFull`, connection failures, or timeouts, reclaim/provision
-    MinIO-backed storage or reduce worker concurrency first instead of
-    discovering the failure during worker trajectory or artifact upload. The
-    `service.no_oom_restarts` row must pass for full100/release evidence; if it
+    service URLs before writing evidence. The `auth.team_a_whoami` and
+    `auth.team_b_whoami` rows must prove non-admin user-owned API tokens; a
+    `legacy_team_token` or `platform_admin` principal fails because it cannot
+    exercise cross-team negative checks. If an API request times out or raises a
+    transport exception, the script records a failed row with method, endpoint,
+    timeout, and response detail, then still writes Markdown/JSON evidence. The
+    `object_store.minio_write_probe` row must pass before submitting canary or
+    release-trial work; if it reports `XMinioStorageFull`, connection failures,
+    or timeouts, reclaim/provision MinIO-backed storage or reduce worker
+    concurrency first instead of discovering the failure during worker
+    trajectory or artifact upload. The `service.no_oom_restarts` row must pass
+    for full100/release evidence; if it
     reports an `OOMKilled` last state or unexpected current restart count,
     inspect `loom-service` memory, previous pod logs, and large batch
     detail/cancel traffic before accepting the gate. For OLDLAB-required
@@ -2702,8 +2753,8 @@ checklist:
   probes `/healthz` + `/metrics` on every component. Closes the
   cold-start regression gap (~15-20 min).
 - **`scripts/public_beta_smoke_gate.py`** — covers public health, logged-out SPA
-  reachability, two-team API-token auth, provider/model discovery, runnable
-  benchmark catalog presence, sampled ready benchmark bundle objects,
+  reachability, two-team non-admin user-owned API-token auth, provider/model
+  discovery, runnable benchmark catalog presence, sampled ready benchmark bundle objects,
   concurrent object-store write/delete probing, service pod restart/OOM status,
   batch/trial detail, `claimed_without_started=0` from batch debug evidence,
   required terminal worker-pool coverage from batch debug evidence,
@@ -2711,7 +2762,8 @@ checklist:
   visibility, owner-team label, cross-team safe artifact download,
   direct-route denial,
   clone config, reuse artifact, provenance, blocked artifact denial, private
-  artifact denial, cross-team mutation denial, and response leak scanning.
+  artifact denial, cross-team mutation denial, structured API timeout/transport
+  failures, and response leak scanning.
 - **`scripts/ops/worker_service_tunnels.py`** — covers the private
   remote-worker tunnel gate when out-of-cluster workers are attached. It renders
   durable systemd user units, installs the watchdog timer that restarts stale
