@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 from botocore.exceptions import ClientError
 
@@ -183,6 +184,200 @@ def test_run_smoke_uses_parser_max_response_scan_bytes(monkeypatch) -> None:
     gate.run_smoke(args)
 
     assert observed["max_scan_bytes"] == 12345
+
+
+def test_run_smoke_fails_when_team_b_uses_legacy_team_token(monkeypatch) -> None:
+    gate = _load_gate_module()
+
+    class FakeClient:
+        def __init__(self, server_url: str, *, max_scan_bytes: int) -> None:
+            self.server_url = server_url
+            self.evidence_chunks: list[str] = []
+            self.response_bytes_scanned = 0
+
+        def request(self, method: str, path: str, **kwargs):
+            token = kwargs.get("token")
+            if path in {"/api/v1/health", "/"}:
+                body = b'{"status":"ok"}'
+            elif path == "/api/v1/auth/whoami" and token == "loom_api_team_a":
+                body = (
+                    b'{"credential_type":"user_owned_api_token",'
+                    b'"principal_type":"user","username":"team-a-smoke",'
+                    b'"team_name":"Team A","role":"owner","is_platform_admin":false}'
+                )
+            elif path == "/api/v1/auth/whoami" and token == "loom_api_team_b":
+                body = (
+                    b'{"credential_type":"legacy_team_token",'
+                    b'"principal_type":"team","team_name":"Team B",'
+                    b'"is_platform_admin":false}'
+                )
+            elif path == "/api/v1/provider-connections":
+                body = b'{"items":[{"name":"mz_tn_canada_qianyi"}]}'
+            elif path == "/api/v1/models":
+                body = b'{"items":[{"provider":"openai","name":"gpt-4o-mini"}]}'
+            elif path == "/api/v1/agents":
+                body = b'{"items":[{"name":"oracle","service_mode_ready":true}]}'
+            elif path == "/api/v1/benchmarks":
+                body = (
+                    b'{"items":[{"id":"skilllearnbench","task_count":100,'
+                    b'"readiness_state":"runnable"}]}'
+                )
+            else:
+                body = b'{"items":[]}'
+            return gate.HttpResponse(status_code=200, headers={}, body=body)
+
+    monkeypatch.setattr(gate, "SmokeClient", FakeClient)
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+    ])
+
+    report = gate.run_smoke(args)
+    result = next(r for r in report.results if r.check_id == "auth.team_b_whoami")
+
+    assert result.status == "fail"
+    assert "legacy_team_token" in result.detail
+    assert "non-admin user-owned API token" in result.remediation
+
+
+def test_run_smoke_fails_when_team_b_token_restores_platform_admin(monkeypatch) -> None:
+    gate = _load_gate_module()
+
+    class FakeClient:
+        def __init__(self, server_url: str, *, max_scan_bytes: int) -> None:
+            self.server_url = server_url
+            self.evidence_chunks: list[str] = []
+            self.response_bytes_scanned = 0
+
+        def request(self, method: str, path: str, **kwargs):
+            token = kwargs.get("token")
+            if path in {"/api/v1/health", "/"}:
+                body = b'{"status":"ok"}'
+            elif path == "/api/v1/auth/whoami" and token == "loom_api_team_a":
+                body = (
+                    b'{"credential_type":"user_owned_api_token",'
+                    b'"principal_type":"user","username":"team-a-smoke",'
+                    b'"team_name":"Team A","role":"owner","is_platform_admin":false}'
+                )
+            elif path == "/api/v1/auth/whoami" and token == "loom_api_team_b":
+                body = (
+                    b'{"credential_type":"user_owned_api_token",'
+                    b'"principal_type":"user","username":"qianyi",'
+                    b'"team_name":"Team B","role":"platform_admin",'
+                    b'"is_platform_admin":true}'
+                )
+            elif path == "/api/v1/provider-connections":
+                body = b'{"items":[{"name":"mz_tn_canada_qianyi"}]}'
+            elif path == "/api/v1/models":
+                body = b'{"items":[{"provider":"openai","name":"gpt-4o-mini"}]}'
+            elif path == "/api/v1/agents":
+                body = b'{"items":[{"name":"oracle","service_mode_ready":true}]}'
+            elif path == "/api/v1/benchmarks":
+                body = (
+                    b'{"items":[{"id":"skilllearnbench","task_count":100,'
+                    b'"readiness_state":"runnable"}]}'
+                )
+            else:
+                body = b'{"items":[]}'
+            return gate.HttpResponse(status_code=200, headers={}, body=body)
+
+    monkeypatch.setattr(gate, "SmokeClient", FakeClient)
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+    ])
+
+    report = gate.run_smoke(args)
+    result = next(r for r in report.results if r.check_id == "auth.team_b_whoami")
+
+    assert result.status == "fail"
+    assert "platform_admin" in result.detail
+    assert "cross-team negative checks" in result.remediation
+
+
+def test_main_writes_evidence_when_run_library_list_times_out(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    gate = _load_gate_module()
+    markdown_path = tmp_path / "smoke.md"
+    json_path = tmp_path / "smoke.json"
+
+    class FakeResponse:
+        def __init__(self, body: bytes) -> None:
+            self.status = 200
+            self.headers: dict[str, str] = {}
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return self._body
+
+    def fake_urlopen(request, timeout: float):
+        url = request.full_url
+        path = urlparse(url).path
+        query = urlparse(url).query
+        if path == "/api/v1/run-library/batches" and query == "":
+            raise TimeoutError("The read operation timed out")
+        if path in {"/api/v1/health", "/"}:
+            return FakeResponse(b'{"status":"ok"}')
+        if path == "/api/v1/auth/whoami":
+            return FakeResponse(
+                b'{"credential_type":"user_owned_api_token",'
+                b'"principal_type":"user","username":"smoke-user",'
+                b'"team_name":"Smoke Team","role":"member",'
+                b'"is_platform_admin":false}'
+            )
+        if path == "/api/v1/provider-connections":
+            return FakeResponse(b'{"items":[{"name":"mz_tn_canada_qianyi"}]}')
+        if path == "/api/v1/models":
+            return FakeResponse(b'{"items":[{"provider":"openai","name":"gpt-4o-mini"}]}')
+        if path == "/api/v1/agents":
+            return FakeResponse(b'{"items":[{"name":"oracle","service_mode_ready":true}]}')
+        if path == "/api/v1/benchmarks":
+            return FakeResponse(
+                b'{"items":[{"id":"skilllearnbench","task_count":100,'
+                b'"readiness_state":"runnable"}]}'
+            )
+        if path == "/api/v1/batches/batch-1":
+            return FakeResponse(
+                b'{"id":"batch-1","debug_evidence":{"trials":{'
+                b'"summary":{"claimed_without_started":0},'
+                b'"worker_pools":{"terminal":{"oldlab":1},'
+                b'"unknown_terminal":0}}}}'
+            )
+        if path == "/api/v1/run-library/batches/batch-1":
+            return FakeResponse(
+                b'{"id":"batch-1","owner_team":{"id":"team-a","name":"Team A"}}'
+            )
+        return FakeResponse(b'{"items":[{"id":"batch-1"}]}')
+
+    monkeypatch.setattr(gate, "urlopen", fake_urlopen)
+    rc = gate.main([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+        "--batch-id", "batch-1",
+        "--markdown-output", str(markdown_path),
+        "--json-output", str(json_path),
+    ])
+
+    assert rc == 1
+    assert markdown_path.exists()
+    assert json_path.exists()
+    markdown = markdown_path.read_text(encoding="utf-8")
+    payload = json_path.read_text(encoding="utf-8")
+    assert "library.my_team_contains_run" in markdown
+    assert "GET /api/v1/run-library/batches" in markdown
+    assert "timed out after 30s" in markdown
+    assert "library.my_team_contains_run" in payload
 
 
 def test_owner_team_label_check_accepts_truncated_large_detail_prefix() -> None:

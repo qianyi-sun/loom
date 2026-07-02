@@ -115,7 +115,10 @@ Attach these to the release issue or release PR:
   Loom worker id, configured concurrency, and claimed trial count.
 - `scripts/public_beta_smoke_gate.py` Markdown evidence with `--fail-on-skip`
   and `--allow-mutating-checks` against disposable staging data. The report
-  must include the service restart/OOM row by passing `--k8s-namespace`.
+  must include the service restart/OOM row by passing `--k8s-namespace`, and
+  the `auth.team_a_whoami` / `auth.team_b_whoami` rows must show non-admin
+  user-owned API tokens. Do not use platform-admin tokens, admin-minted legacy
+  team tokens, or manual SQL token insertion for cross-team release evidence.
   When `--batch-id` is provided, the `runs.claimed_without_started` row must
   be `PASS`; a nonzero value means the source run still has orphaned claimed
   work and cannot be used as release evidence.
@@ -212,7 +215,7 @@ python scripts/public_beta_smoke_gate.py \
 The script checks:
 
 - public health and logged-out SPA reachability;
-- Team A and Team B token auth;
+- Team A and Team B non-admin user-owned API-token auth;
 - provider connection and model-discovery surfaces;
 - runnable benchmark catalog presence;
 - sampled ready benchmark task bundle prefixes in object storage;
@@ -232,11 +235,14 @@ The script checks:
 - blocked artifact denial;
 - private artifact denial;
 - cross-team mutation denial;
+- structured API timeout and transport-exception failures that still write
+  Markdown/JSON evidence;
 - seeded fake secret, token-pattern, signed-URL, and internal-URL leaks.
 
 The script intentionally redacts raw tokens, provider-key-like values, seeded
 fake secrets, signed object-store URLs, and internal service URLs from its
-Markdown and JSON output.
+Markdown and JSON output. A timed-out API endpoint should produce a failed row
+with the HTTP method, endpoint, and timeout instead of a Python traceback.
 
 Before submitting a public-beta canary or supported-benchmark acceptance run,
 the `object_store.minio_write_probe` row must pass. If it fails with
