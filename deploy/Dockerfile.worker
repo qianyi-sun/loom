@@ -1,4 +1,7 @@
 FROM python:3.11-slim
+# #199: transient PyPI ReadTimeouts during rollout builds — see
+# docs/operator-runbook.md#rollout-build-resilience.
+ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
 WORKDIR /app
 # Worker uses the Docker SDK for Python (the `docker` PyPI package
 # already in pyproject.toml deps) to talk to the host daemon over the

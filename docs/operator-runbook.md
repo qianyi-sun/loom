@@ -798,6 +798,50 @@ The most common failure modes:
   wait for `ttlSecondsAfterFinished` or `kubectl delete job -n <ns>
   loom-migrate-<image-tag>-<suffix>`. Then re-render + re-apply.
 
+## Rollout build resilience (#199)
+
+Public-beta and staging rollout builds run `pip install` inside each service
+image (`Dockerfile.control-plane`, `Dockerfile.gateway`, `Dockerfile.service`,
+`Dockerfile.worker`, `Dockerfile.egress-xds`). A single transient PyPI
+`ReadTimeoutError` used to fail the whole rollout — observed during
+`public-beta-92f0090` where `loom-service` aborted mid-build even though CI
+and the preceding `loom-control-plane` image had built cleanly.
+
+Each rollout-critical Dockerfile now sets:
+
+```dockerfile
+ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
+```
+
+pip honors these env vars natively, so the individual `pip install` lines
+don't need per-invocation flag surgery. Effect vs. defaults:
+
+| Setting | Default | Rollout | Notes |
+|---|---:|---:|---|
+| retries per package | 5 | **10** | doubles tolerance for transient DNS / TLS / mid-transfer resets |
+| connect + read timeout | 15 s | **60 s** | tolerates a slow single-wheel transfer without giving up |
+
+Worst case per package: 10 × 60 s = 10 min. In practice pip's exponential
+backoff caps sooner and the retries are only exercised when PyPI is actually
+struggling. Fast-path installs are unchanged.
+
+**Sandbox images** (`Dockerfile.agent-sandbox`, `Dockerfile.gateway-sandbox`)
+are not release-gating; they can be rebuilt out-of-band without blocking a
+rollout, and they intentionally do not set these env vars so the operator
+can override PyPI mirror settings at build time when constructing bespoke
+agent variants.
+
+**When the retry is exhausted anyway** — the rollout evidence directory
+still contains the `docker-build.log` for each service. Search for
+`Retrying (Retry(total=` or `ReadTimeoutError` lines to distinguish a
+network-timeout failure from an application-code error. #340 (rollout
+driver) will surface this classification in the evidence summary.
+
+Test coverage: `tests/loom_cli/test_dockerfile_pip_resilience.py`
+parametrizes over every rollout-critical Dockerfile and asserts
+`PIP_RETRIES >= 5` and `PIP_DEFAULT_TIMEOUT >= 30`, so a future change
+that drops the env vars breaks CI before the rollout does.
+
 ## Kind cluster: loading local images before rollout (#96)
 
 When a public-beta or staging cluster runs on top of `kind`, images built with
