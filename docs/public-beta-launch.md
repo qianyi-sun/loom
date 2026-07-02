@@ -151,14 +151,38 @@ loom cluster release-manifest \
   --git-sha "$(git rev-parse HEAD)" \
   --environment-state-file deploy/environment-state/public-beta.toml \
   --env-config-version "${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+  --expected-image-identities-json "$ROLLOUT_DIR/image-identities-$IMAGE_TAG.json" \
   --output "$ROLLOUT_DIR/release-manifest-$IMAGE_TAG.json"
 ```
+
+The image identities JSON is build evidence keyed by Deployment and container,
+with `image`, and at least one immutable `repo_digest` or `image_id` per
+release-managed container. After `loom cluster up` reaches readiness, run the
+hard convergence gate against the same saved inputs:
+
+```bash
+loom cluster release-gate \
+  --manifest "$ROLLOUT_DIR/release-manifest-$IMAGE_TAG.json" \
+  --config "$CLUSTER_CONFIG" \
+  --rendered-manifest "$ROLLOUT_DIR/rendered.yaml" \
+  --namespace "$K8S_NAMESPACE" \
+  --environment public-beta \
+  --format json \
+  > "$ROLLOUT_DIR/release-gate-$IMAGE_TAG.json"
+```
+
+This gate fails on rendered/config hash drift, unverifiable managed image
+digest or image ID convergence for Ready pods, and live DB Alembic revision
+mismatch. The DB probe runs inside `deploy/loom-control-plane` and reports
+`env:LOOM_CP_DB_URL` without printing the underlying connection string.
 
 Keep this artifact free of raw bearer tokens, provider keys, signed
 object-store URLs, internal service URLs, and secret refs; the production
 release gate rejects those patterns. The deploy workflow writes the same
 artifact, plus `rendered.yaml`, into `rollout-evidence/` before `loom cluster
-up` and uploads the directory as a workflow artifact.
+up` and uploads the directory as a workflow artifact. To have the deploy helper
+run this hard gate automatically, set `LOOM_RELEASE_GATE_HARD_CHECKS=true` and
+point `LOOM_EXPECTED_IMAGE_IDENTITIES_JSON` at the image identity JSON file.
 
 ## Automated Gate
 

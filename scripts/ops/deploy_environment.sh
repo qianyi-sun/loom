@@ -79,6 +79,11 @@ if [[ -f "${environment_state_file}" ]]; then
     --env-config-version "${LOOM_ENV_CONFIG_VERSION:-${LOOM_IMAGE_TAG}}"
   )
 fi
+if [[ -n "${LOOM_EXPECTED_IMAGE_IDENTITIES_JSON:-}" ]]; then
+  manifest_args+=(
+    --expected-image-identities-json "${LOOM_EXPECTED_IMAGE_IDENTITIES_JSON}"
+  )
+fi
 uv run loom "${manifest_args[@]}"
 
 if [[ "${LOOM_DRY_RUN:-false}" == "true" ]]; then
@@ -87,11 +92,24 @@ if [[ "${LOOM_DRY_RUN:-false}" == "true" ]]; then
 fi
 
 uv run loom cluster up --config "${cluster_config}" --timeout 900
-uv run loom cluster status --namespace "$(uv run python - "${cluster_config}" <<'PY'
+namespace="$(uv run python - "${cluster_config}" <<'PY'
 import sys
 import tomllib
 from pathlib import Path
 
 print(tomllib.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["namespace"])
 PY
-)" --format table
+)"
+
+if [[ "${LOOM_RELEASE_GATE_HARD_CHECKS:-false}" == "true" ]]; then
+  uv run loom cluster release-gate \
+    --manifest "${evidence_dir}/release-manifest-${LOOM_IMAGE_TAG}.json" \
+    --config "${cluster_config}" \
+    --rendered-manifest "${evidence_dir}/rendered.yaml" \
+    --namespace "${namespace}" \
+    --environment "${LOOM_DEPLOY_ENVIRONMENT}" \
+    --format json \
+    > "${evidence_dir}/release-gate-${LOOM_IMAGE_TAG}.json"
+fi
+
+uv run loom cluster status --namespace "${namespace}" --format table
