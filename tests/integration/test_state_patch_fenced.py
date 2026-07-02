@@ -99,19 +99,51 @@ def test_state_patch_with_wrong_worker_fenced(app, state_seed):  # type: ignore[
         assert "claim" in r.json()["detail"].lower()
 
 
-def test_state_patch_terminal_state(app, state_seed):  # type: ignore[no-untyped-def]
+def test_state_patch_terminal_state(
+    app, state_seed, postgres_url,
+):  # type: ignore[no-untyped-def]
     """Transition to a terminal state should set finished_at."""
     trial_id, worker_a, _, raw_a, _ = state_seed
+    result_payload = {"aggregate_reward": 1.0}
     with TestClient(app) as client:
         r = client.patch(
             f"/trials/{trial_id}/state",
             headers={"Authorization": f"Bearer {raw_a}"},
             json={
                 "worker_id": str(worker_a), "state": "succeeded",
+                "result": result_payload,
             },
         )
         assert r.status_code == 200
         assert r.json()["state"] == "succeeded"
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as s:
+            row = s.get(Trial, trial_id)
+            assert row is not None
+            assert row.result == result_payload
+    finally:
+        engine.dispose()
+
+
+def test_state_patch_rejects_succeeded_without_result(
+    app, state_seed,
+):  # type: ignore[no-untyped-def]
+    """A bare succeeded PATCH must fail before the DB CHECK constraint.
+
+    Migration 0039 makes `state='succeeded'` require `result IS NOT NULL`.
+    The API contract should return a clear 4xx for workers that try to
+    report success before writing/providing result.
+    """
+    trial_id, worker_a, _, raw_a, _ = state_seed
+    with TestClient(app, raise_server_exceptions=False) as client:
+        r = client.patch(
+            f"/trials/{trial_id}/state",
+            headers={"Authorization": f"Bearer {raw_a}"},
+            json={"worker_id": str(worker_a), "state": "succeeded"},
+        )
+        assert 400 <= r.status_code < 500
+        assert "result" in r.json()["detail"].lower()
 
 
 def test_state_patch_rejects_invalid_state(app, state_seed):  # type: ignore[no-untyped-def]
