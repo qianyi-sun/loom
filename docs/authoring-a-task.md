@@ -154,7 +154,12 @@ python3 "$task_dir/verifier/check.py" \
 their own task/artifact paths from the script location, `/workspace`, or safe
 defaults. A model's wrong answer should produce a scored verifier result such
 as `{"rewards":{"score":0.0},"checks":[...]}` so the trial succeeds as a
-platform run while recording model correctness separately.
+platform run while recording model correctness separately. If a script verifier
+exits before writing valid JSON, Loom reports a verifier infrastructure failure
+and includes return code, stdout/stderr tails, truncation status, duration, the
+script path, and the expected output path in `VerifierResult.error.detail`.
+Individual `checks[].detail` fields may be objects or simpler JSON values such
+as strings when upstream verifier tooling emits legacy diagnostics.
 
 For `litellm` service-mode runs, the platform can write the final model
 response into declared step artifacts before verification. Keep benchmark

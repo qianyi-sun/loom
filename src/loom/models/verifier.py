@@ -13,7 +13,7 @@ class CheckResult(BaseModel):
     passed: bool
     score: float | None = None
     message: str | None = None
-    detail: dict[str, Any] = Field(default_factory=dict)
+    detail: Any = Field(default_factory=dict)
     duration_sec: float | None = None
 
 

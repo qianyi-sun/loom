@@ -24,6 +24,7 @@ from loom.models.result import ArtifactRef, FailureReason, StepError, StepResult
 from loom.models.task import StepConfig
 from loom.models.trajectory import AgentRetryEvent, StepEndEvent, StepStartEvent
 from loom.models.trial import RetryPolicy, RetryReason
+from loom.models.verifier import VerifierError, VerifierResult
 from loom.retry import next_attempt_at
 from loom.trajectory.reader import TrajectoryReader
 from loom.trajectory.writer import TrajectoryWriter
@@ -128,10 +129,23 @@ async def run_step(
                     timeout=verifier_timeout,
                 )
         except TimeoutError:
+            message = f"verifier exceeded {verifier_timeout}s"
+            verifier_result = VerifierResult(
+                rewards={},
+                error=VerifierError(
+                    kind="timeout",
+                    message=message,
+                    detail={
+                        "timeout_sec": verifier_timeout,
+                        "step_name": step.name,
+                        "verifier_name": getattr(ctx.verifier, "name", None),
+                    },
+                ),
+            )
             if sr_error is None:
                 sr_error = StepError(
                     phase="verifier", reason="timeout",
-                    message=f"verifier exceeded {verifier_timeout}s",
+                    message=message,
                     occurred_at=datetime.now(UTC),
                 )
         except Exception as exc:

@@ -11,9 +11,10 @@ import json
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from loom.driver.base import Driver
+from loom.models.exec import ExecResult
 from loom.models.verifier import CheckResult, VerifierError, VerifierResult
 
 if TYPE_CHECKING:
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from loom.trajectory.reader import TrajectoryReader
 
 _OUTPUT_PATH = PurePosixPath("/loom/verifier/output.json")
+_DIAGNOSTIC_TAIL_BYTES = 4096
 
 
 @dataclass
@@ -42,22 +44,32 @@ class ScriptVerifier:
         trajectory: TrajectoryReader,
     ) -> VerifierResult:
         await env.exec("mkdir -p /loom/verifier", user="root")
-        cmd = (
-            f"LOOM_VERIFIER_OUTPUT={_OUTPUT_PATH.as_posix()} "
-            f"sh {self.script_path.as_posix()} || true"
+        cmd = f"sh {self.script_path.as_posix()}"
+        exec_result = await env.exec(
+            cmd,
+            user=self.user,
+            env={"LOOM_VERIFIER_OUTPUT": _OUTPUT_PATH.as_posix()},
         )
-        await env.exec(cmd, user=self.user)
+        diagnostic = _exec_diagnostic(
+            exec_result=exec_result,
+            output_path=_OUTPUT_PATH,
+            script_path=self.script_path,
+        )
 
         with tempfile.TemporaryDirectory() as td:
             local = Path(td) / "output.json"
             try:
                 await env.download(_OUTPUT_PATH, local)
             except FileNotFoundError:
+                kind: Literal["exec_failure", "missing_tests"] = (
+                    "exec_failure" if exec_result.return_code != 0 else "missing_tests"
+                )
                 return VerifierResult(
                     rewards={},
                     error=VerifierError(
-                        kind="missing_tests",
+                        kind=kind,
                         message=f"script did not write {_OUTPUT_PATH}",
+                        detail=diagnostic,
                     ),
                 )
             try:
@@ -68,6 +80,7 @@ class ScriptVerifier:
                     error=VerifierError(
                         kind="parse_failure",
                         message=f"$LOOM_VERIFIER_OUTPUT json parse failed: {exc}",
+                        detail=diagnostic,
                     ),
                 )
 
@@ -77,3 +90,25 @@ class ScriptVerifier:
             structured=data.get("structured"),
             confidence=data.get("confidence"),
         )
+
+
+def _exec_diagnostic(
+    *,
+    exec_result: ExecResult,
+    output_path: PurePosixPath,
+    script_path: PurePosixPath,
+) -> dict[str, object]:
+    return {
+        "return_code": exec_result.return_code,
+        "stdout_tail": _decode_tail(exec_result.stdout),
+        "stderr_tail": _decode_tail(exec_result.stderr),
+        "truncated": exec_result.truncated,
+        "duration_sec": exec_result.duration_sec,
+        "output_path": output_path.as_posix(),
+        "script_path": script_path.as_posix(),
+    }
+
+
+def _decode_tail(data: bytes) -> str:
+    tail = data[-_DIAGNOSTIC_TAIL_BYTES:]
+    return tail.decode("utf-8", errors="replace")
