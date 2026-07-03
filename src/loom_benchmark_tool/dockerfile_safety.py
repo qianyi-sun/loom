@@ -18,7 +18,7 @@ _FROM_NODE_RE = re.compile(
     re.IGNORECASE,
 )
 _NODESOURCE_MAJOR_RE = re.compile(r"\b(?:setup|node)_(\d+)\.x\b")
-_NPM_LATEST_RE = re.compile(r"\bnpm\s+install\b[^\n]*\bnpm@latest\b")
+_NPM_LATEST_RE = re.compile(r"\bnpm\s+(?:install|i)\b[^\n]*\bnpm@latest\b")
 _TRAILING_TRUE_RE = re.compile(r"(?:^|\s)\|\|\s*true\s*$")
 _MKDIR_APP_RE = re.compile(r"\bmkdir\s+(?:-[^\s]+\s+)*[^&;|]*?/app(?:/|\s|$)")
 _WORKDIR_APP_RE = re.compile(r"^\s*WORKDIR\s+/app(?:/|\s|$)", re.IGNORECASE)
@@ -44,44 +44,52 @@ def validate_task_dir_dockerfiles(task_dir: Path) -> None:
 
 def validate_dockerfile_text(text: str, *, path: Path | None = None) -> None:
     label = path.as_posix() if path is not None else "Dockerfile"
-    instructions = list(_logical_instructions(text))
-    fixed_node_major = _fixed_node_major(instructions)
+    fixed_node_major: int | None = None
     app_dir_created = False
 
-    for line_no, instruction in instructions:
+    for line_no, instruction in _logical_instructions(text):
         stripped = instruction.strip()
         upper = stripped.upper()
+        if upper.startswith("FROM "):
+            app_dir_created = False
+            fixed_node_major = _node_major_from_from_instruction(stripped)
+            continue
+
         if _WORKDIR_APP_RE.search(stripped):
             app_dir_created = True
-        if _MKDIR_APP_RE.search(stripped):
-            app_dir_created = True
+            continue
 
         if not upper.startswith("RUN "):
             continue
 
         body = stripped[4:].strip()
-        _validate_pip_indexes(body, label=label, line_no=line_no)
-        if fixed_node_major is not None and _NPM_LATEST_RE.search(body):
-            raise ValueError(
-                f"{label}:{line_no} uses moving npm@latest under fixed "
-                f"Node {fixed_node_major}; pin an npm major compatible with "
-                "that Node major",
-            )
         if _broad_trailing_true(body):
             raise ValueError(
                 f"{label}:{line_no} has trailing || true after a multi-command "
                 "setup chain; scope tolerated failures to the optional command",
             )
 
-        for match in _APP_WRITE_RE.finditer(body):
-            before = body[:match.start()]
-            if app_dir_created or _MKDIR_APP_RE.search(before):
-                continue
-            command = " ".join(match.group("cmd").split())
-            raise ValueError(
-                f"{label}:{line_no} writes to /app before creating the /app "
-                f"parent directory: {command}",
-            )
+        for segment in _shell_segments(body):
+            _validate_pip_indexes(segment, label=label, line_no=line_no)
+            if match := _NODESOURCE_MAJOR_RE.search(segment):
+                fixed_node_major = int(match.group(1))
+            if fixed_node_major is not None and _NPM_LATEST_RE.search(segment):
+                raise ValueError(
+                    f"{label}:{line_no} uses moving npm@latest under fixed "
+                    f"Node {fixed_node_major}; pin an npm major compatible with "
+                    "that Node major",
+                )
+            for match in _APP_WRITE_RE.finditer(segment):
+                before = segment[:match.start()]
+                if app_dir_created or _MKDIR_APP_RE.search(before):
+                    continue
+                command = " ".join(match.group("cmd").split())
+                raise ValueError(
+                    f"{label}:{line_no} writes to /app before creating the /app "
+                    f"parent directory: {command}",
+                )
+            if _MKDIR_APP_RE.search(segment):
+                app_dir_created = True
 
 
 def _logical_instructions(text: str) -> Iterator[tuple[int, str]]:
@@ -101,12 +109,9 @@ def _logical_instructions(text: str) -> Iterator[tuple[int, str]]:
         yield start_line, " ".join(part for part in current if part).strip()
 
 
-def _fixed_node_major(instructions: list[tuple[int, str]]) -> int | None:
-    for _line_no, instruction in instructions:
-        if match := _FROM_NODE_RE.search(instruction):
-            return int(match.group(1))
-        if match := _NODESOURCE_MAJOR_RE.search(instruction):
-            return int(match.group(1))
+def _node_major_from_from_instruction(instruction: str) -> int | None:
+    if match := _FROM_NODE_RE.search(instruction):
+        return int(match.group(1))
     return None
 
 
@@ -145,19 +150,26 @@ def _shell_segments(body: str) -> list[str]:
 
 def _pip_install_index(tokens: list[str]) -> int | None:
     for index, token in enumerate(tokens[:-1]):
-        if token == "pip" and tokens[index + 1] == "install":
-            return index + 1
-        if token.endswith("/pip") and tokens[index + 1] == "install":
+        command = token.rsplit("/", 1)[-1]
+        if _is_pip_command(command) and tokens[index + 1] == "install":
             return index + 1
     for index in range(len(tokens) - 3):
         if (
-            tokens[index] in {"python", "python3"}
+            _is_python_command(tokens[index].rsplit("/", 1)[-1])
             and tokens[index + 1] == "-m"
             and tokens[index + 2] == "pip"
             and tokens[index + 3] == "install"
         ):
             return index + 3
     return None
+
+
+def _is_pip_command(command: str) -> bool:
+    return bool(re.fullmatch(r"pip(?:\d+(?:\.\d+)?)?", command))
+
+
+def _is_python_command(command: str) -> bool:
+    return bool(re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", command))
 
 
 def _uses_pytorch_as_sole_index(args: list[str]) -> bool:

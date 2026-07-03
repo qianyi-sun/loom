@@ -185,6 +185,77 @@ def test_run_publish_includes_valid_task_config_in_manifest(
     }
 
 
+def test_run_publish_rejects_unsafe_converted_dockerfile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from loom_benchmark_tool import publish_cmd
+
+    class FakeAdapter:
+        name = "fake-bench"
+        display_name = "Fake Bench"
+        upstream_source = UpstreamSource(kind="huggingface", locator="fake/source")
+        license_spdx = "MIT"
+        license_url = ""
+        splits = ("test",)
+        series = "fake"
+
+        def list_instances(
+            self,
+            *,
+            source_dir: Path,
+            split: str,
+        ) -> list[BenchmarkInstance]:
+            return [BenchmarkInstance(instance_id="task-001", split=split, raw={})]
+
+        def convert_instance(
+            self,
+            instance: BenchmarkInstance,
+            *,
+            out_dir: Path,
+        ) -> ConvertedTask:
+            (out_dir / "task.toml").write_text(_task_toml("fake-bench/task-001"))
+            dockerfile = out_dir / "environment" / "Dockerfile"
+            dockerfile.parent.mkdir()
+            dockerfile.write_text(
+                "FROM python:3.13-bookworm\n"
+                "RUN pip install torch pyyaml "
+                "--index-url https://download.pytorch.org/whl/cpu\n",
+            )
+            return ConvertedTask(
+                task_id="fake-bench/task-001",
+                checksum=sha256_of_dir(out_dir),
+                license_spdx="MIT",
+                warnings=(),
+            )
+
+    class FakeHfApi:
+        def __init__(self, *, token: str) -> None:
+            self.token = token
+
+        def create_repo(self, **_kwargs: object) -> None:
+            return None
+
+        def upload_folder(self, **_kwargs: object) -> object:
+            raise AssertionError("unsafe bundle should not upload")
+
+    monkeypatch.setitem(publish_cmd.REGISTRY, "fake-bench", FakeAdapter())
+    monkeypatch.setattr(
+        publish_cmd,
+        "fetch_upstream",
+        lambda *_args, **_kwargs: tmp_path,
+    )
+    monkeypatch.setattr(publish_cmd, "HfApi", FakeHfApi)
+
+    with pytest.raises(ValueError, match="package-specific pip index"):
+        publish_cmd.run_publish(
+            benchmark="fake-bench",
+            hf_org="fake-org",
+            hf_token="fake-token",
+            cache_dir=tmp_path / "cache",
+        )
+
+
 def test_run_publish_filters_specific_instance_ids(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

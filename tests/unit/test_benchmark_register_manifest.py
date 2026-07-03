@@ -185,6 +185,32 @@ async def test_mirror_manifest_task_bundle_rejects_checksum_drift(
 
 
 @pytest.mark.asyncio
+async def test_mirror_manifest_task_bundle_rejects_unsafe_dockerfile(
+    tmp_path: Path,
+) -> None:
+    bundle = tmp_path / "repo" / "task-001"
+    (bundle / "environment").mkdir(parents=True)
+    (bundle / "task.toml").write_text("[task]\nid='fake-bench/task-001'\n")
+    (bundle / "environment" / "Dockerfile").write_text(
+        "FROM node:18-bookworm\n"
+        "RUN npm install -g npm@latest\n",
+    )
+    checksum = _bundle_checksum(bundle)
+
+    with pytest.raises(ValueError, match="npm@latest"):
+        await mirror_manifest_task_bundle(
+            repo_id="PRHW/loom-benchmark-fake",
+            revision="7908700",
+            task_id="fake-bench/task-001",
+            checksum=checksum,
+            hf_path="task-001/",
+            snapshot_root=tmp_path / "repo",
+            object_store=FakeObjectStore(),
+            bucket="loom-benchmarks",
+        )
+
+
+@pytest.mark.asyncio
 async def test_run_register_mirror_writes_internal_source_and_hf_provenance(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

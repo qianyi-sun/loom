@@ -38,6 +38,7 @@ from loom_benchmarks.registry import REGISTRY
 from loom_benchmarks.util import sha256_of_dir
 
 from loom.license_policy import tags_with_license_execution_policy
+from loom_benchmark_tool.dockerfile_safety import validate_task_dir_dockerfiles
 from loom_benchmark_tool.import_cmd import _select_instances, _validate_instance_id
 from loom_benchmark_tool.manifest import (
     MANIFEST_FILENAME,
@@ -162,6 +163,7 @@ def run_publish(
             bundle_dir = staging_dir / safe_name
             bundle_dir.mkdir(parents=True, exist_ok=True)
             converted = adapter.convert_instance(inst, out_dir=bundle_dir)
+            validate_task_dir_dockerfiles(bundle_dir)
             checksum = _bundle_checksum(bundle_dir)
             # Sanity-check the adapter's claimed checksum matches
             # our recomputed one. Misalignment would mean the DB
