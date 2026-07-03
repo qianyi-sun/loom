@@ -15,6 +15,7 @@ import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
 import { modelLabel } from "../lib/modelLabel";
 import { ownershipLabel } from "../lib/ownership";
 import { batchStateVariant } from "../lib/statusVariant";
+import { formatUsageCost } from "../lib/usageCost";
 
 const TERMINAL_STATES = new Set(["finished", "cancelled"]);
 
@@ -67,6 +68,20 @@ function primaryModel(batch: RunLibraryBatch): string {
 
 function formatDate(value: string | null): string {
   return formatLocalDateTime(value, { fallback: "--" });
+}
+
+function costStatusLabel(batch: RunLibraryBatch): string {
+  const raw = batch as unknown as Record<string, unknown>;
+  const costStatus =
+    typeof raw.cost_status === "string" && raw.cost_status
+      ? raw.cost_status
+      : "unknown";
+  const source =
+    typeof raw.cost_estimate_source === "string" && raw.cost_estimate_source
+      ? raw.cost_estimate_source
+      : "unknown";
+  const status = costStatus === "price_unknown" ? "unknown" : costStatus;
+  return `${status}/${source}`;
 }
 
 function ArtifactBadges({
@@ -390,6 +405,7 @@ export default function RunLibrary(): JSX.Element {
                       "Status",
                       "Score",
                       "Trials",
+                      "Usage cost",
                       "Token",
                       "Created",
                       "Artifacts",
@@ -437,12 +453,20 @@ export default function RunLibrary(): JSX.Element {
                           </StatusPill>
                         </td>
                         <td className="px-4 py-3 text-slate-700">
-                          {batch.aggregate_reward != null
-                            ? batch.aggregate_reward.toFixed(3)
-                            : "--"}
+                          <div>
+                            {batch.aggregate_reward != null
+                              ? batch.aggregate_reward.toFixed(3)
+                              : "--"}
+                          </div>
+                          <div className="text-xs text-slate-500">
+                            {costStatusLabel(batch)}
+                          </div>
                         </td>
                         <td className="px-4 py-3 text-slate-700">
                           {batch.expected_trial_count}
+                        </td>
+                        <td className="px-4 py-3 text-slate-700">
+                          {formatUsageCost(batch)}
                         </td>
                         <td className="px-4 py-3 font-mono text-xs text-slate-500">
                           {batch.created_by_token_prefix}

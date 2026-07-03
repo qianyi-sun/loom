@@ -25,6 +25,9 @@ class LoomServiceSettings(BaseSettings):
     auth_return_login_token: bool = False
     auth_session_cookie_name: str = "loom_session"
     auth_session_ttl_sec: int = 604800
+    batch_budget_estimate_input_tokens_per_call: int = 1000000
+    batch_budget_estimate_llm_calls_per_trial: int = 1
+    batch_budget_estimate_output_tokens_per_call: int = 0
     batch_runner_batch_size: int = 50
     batch_runner_cp_token: SecretStr | None = None
     batch_runner_poll_interval_sec: int = 5
@@ -44,6 +47,10 @@ class LoomServiceSettings(BaseSettings):
     minio_region: str = "us-east-1"
     minio_secret_key: SecretStr
     signed_url_expiry_sec: int = 3600
+    stale_running_trial_grace_sec: float = 900.0
+    stale_running_trial_reclaim_enabled: bool = True
+    stale_running_trial_silence_sec: float = 900.0
+    stale_running_trial_timeout_multiplier: float = 3.0
     storage_auth_kind: str = "static_keys"
     storage_backend: str = "minio"
     taskset_materializer_batch_size: int = 1
@@ -64,6 +71,7 @@ class LoomServiceSettings(BaseSettings):
     trial_retry_default_backoff_multiplier: float = 2.0
     trial_retry_default_max_attempts: int = 3
     trial_retry_default_retry_on: list[str] = ["gateway_error", "provider_transport_disconnect"]
+    worker_heartbeat_expiry_sec: int = 120
 
 
 LoomServiceSettings.model_rebuild()

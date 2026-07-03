@@ -31,11 +31,16 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import (
+    Artifact,
+    ArtifactLineageEdge,
     Batch,
     ProviderConnection,
     ProviderModelCache,
     Secret,
     Task,
+    TaskSet,
+    TaskSetManifest,
+    TaskSetMaterializationJob,
     Team,
     TeamMembership,
     TeamQuota,
@@ -240,9 +245,14 @@ async def app_setup(
         await engine.dispose()
         with sl() as s:
             s.execute(delete(Trial))
+            s.execute(delete(ArtifactLineageEdge))
+            s.execute(delete(Artifact))
             s.execute(delete(Batch))
             s.execute(delete(ProviderConnection))
             s.execute(delete(Secret))
+            s.execute(delete(TaskSetMaterializationJob))
+            s.execute(delete(TaskSetManifest))
+            s.execute(delete(TaskSet))
             s.execute(delete(Token))
             s.execute(delete(UserSession))
             s.execute(delete(TeamMembership))

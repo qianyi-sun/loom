@@ -792,6 +792,9 @@ export default function NewBatch(): JSX.Element {
   const [rows, setRows] = useState<ComboRow[]>(() => [newRow()]);
   const [advanced, setAdvanced] = useState<AdvancedState>(INITIAL_ADVANCED);
   const [confirmedLargeFanOut, setConfirmedLargeFanOut] = useState(false);
+  const [budgetUsd, setBudgetUsd] = useState("");
+  const [budgetPolicy, setBudgetPolicy] = useState<"none" | "soft" | "hard">("none");
+  const [budgetConfirmed, setBudgetConfirmed] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
   const navigate = useNavigate();
@@ -1175,6 +1178,13 @@ export default function NewBatch(): JSX.Element {
       return;
     }
 
+    const budgetText = budgetUsd.trim();
+    const budgetValue = budgetText ? Number.parseFloat(budgetText) : undefined;
+    if (budgetText && (!Number.isFinite(budgetValue) || budgetValue! < 0)) {
+      setLocalError("Budget USD must be a non-negative number.");
+      return;
+    }
+
     const adv = buildAdvancedConfig(advanced);
     if (!adv.ok) {
       setLocalError(`Advanced options: ${adv.error}`);
@@ -1233,6 +1243,11 @@ export default function NewBatch(): JSX.Element {
     };
     const suffix = nameSuffix.trim();
     if (suffix) payload.name_suffix = suffix;
+    if (budgetValue !== undefined) {
+      payload.budget_usd = budgetValue;
+      payload.budget_policy = budgetPolicy === "none" ? "hard" : budgetPolicy;
+      payload.budget_confirmed = budgetConfirmed;
+    }
     create.mutate(payload);
   };
 
@@ -1966,6 +1981,57 @@ export default function NewBatch(): JSX.Element {
               <p>{releaseBackendText}</p>
               <p>{releaseProviderText}</p>
               <p>{releaseModelText}</p>
+            </Card.Body>
+          </Card>
+          <Card>
+            <Card.Header
+              title="Batch budget"
+              description="Set a provider spend limit for this batch."
+            />
+            <Card.Body className="space-y-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <label className="block">
+                  <FieldLabel hint="optional">Budget USD</FieldLabel>
+                  <Input
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    value={budgetUsd}
+                    onChange={(e) => setBudgetUsd(e.target.value)}
+                    aria-label="Budget USD"
+                    placeholder="0.00"
+                  />
+                </label>
+                <label className="block">
+                  <FieldLabel>Budget policy</FieldLabel>
+                  <select
+                    value={budgetPolicy}
+                    onChange={(e) => {
+                      setBudgetPolicy(e.target.value as "none" | "soft" | "hard");
+                      setBudgetConfirmed(false);
+                    }}
+                    aria-label="Budget policy"
+                    className="block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
+                  >
+                    <option value="none">None</option>
+                    <option value="hard">Hard stop</option>
+                    <option value="soft">Soft confirm</option>
+                  </select>
+                </label>
+              </div>
+              {budgetUsd.trim() && budgetPolicy === "soft" ? (
+                <label className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                  <input
+                    type="checkbox"
+                    checked={budgetConfirmed}
+                    onChange={(e) => setBudgetConfirmed(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 rounded border-amber-300"
+                  />
+                  <span>
+                    I understand this soft budget may require confirmation.
+                  </span>
+                </label>
+              ) : null}
             </Card.Body>
           </Card>
           <Card>

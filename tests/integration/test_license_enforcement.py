@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, insert, update
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Task, Team, TeamQuota, Token
+from loom.db.schema import Task, Team, TeamQuota, Token, User
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
@@ -24,16 +24,25 @@ def seed(postgres_url: str) -> Iterator[dict]:
     engine = create_engine(postgres_url)
     session_local = sessionmaker(engine)
     team_id = uuid4()
+    user_id = uuid4()
     raw = f"team_{uuid4().hex}"
     now = datetime.now(UTC)
     with session_local() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+        s.execute(insert(User).values(
+            id=user_id,
+            username=f"LicensePolicyUser-{user_id.hex[:8]}",
+            username_normalized=f"license-policy-user-{user_id.hex[:8]}",
+            status="active",
+            is_platform_admin=False,
+        ))
         # The DB still carries the legacy license_allowlist default, but it is
         # informational only and must not affect submit.
         s.execute(insert(TeamQuota).values(team_id=team_id))
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(raw.encode()).digest(),
             type="team", scopes=["submit"], team_id=team_id,
+            created_by_user_id=user_id,
             issued_at=now, expires_at=None,
         ))
         # Three tasks: MIT, GPL-3.0, no license.
@@ -97,6 +106,7 @@ def seed(postgres_url: str) -> Iterator[dict]:
             s.execute(delete(Token))
             s.execute(delete(Task))
             s.execute(delete(TeamQuota))
+            s.execute(delete(User).where(User.id == user_id))
             s.execute(delete(Team))
             s.commit()
         engine.dispose()

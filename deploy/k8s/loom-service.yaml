@@ -28,6 +28,12 @@ spec:
               value: "loom_session"
             - name: LOOM_SVC_AUTH_SESSION_TTL_SEC
               value: "604800"
+            - name: LOOM_SVC_BATCH_BUDGET_ESTIMATE_INPUT_TOKENS_PER_CALL
+              value: "1000000"
+            - name: LOOM_SVC_BATCH_BUDGET_ESTIMATE_LLM_CALLS_PER_TRIAL
+              value: "1"
+            - name: LOOM_SVC_BATCH_BUDGET_ESTIMATE_OUTPUT_TOKENS_PER_CALL
+              value: "0"
             - name: LOOM_SVC_BATCH_RUNNER_BATCH_SIZE
               value: "50"
             - name: LOOM_SVC_BATCH_RUNNER_CP_TOKEN
@@ -77,6 +83,14 @@ spec:
                   key: minio-secret-key
             - name: LOOM_SVC_SIGNED_URL_EXPIRY_SEC
               value: "3600"
+            - name: LOOM_SVC_STALE_RUNNING_TRIAL_GRACE_SEC
+              value: "900.0"
+            - name: LOOM_SVC_STALE_RUNNING_TRIAL_RECLAIM_ENABLED
+              value: "True"
+            - name: LOOM_SVC_STALE_RUNNING_TRIAL_SILENCE_SEC
+              value: "900.0"
+            - name: LOOM_SVC_STALE_RUNNING_TRIAL_TIMEOUT_MULTIPLIER
+              value: "3.0"
             - name: LOOM_SVC_STORAGE_AUTH_KIND
               value: "static_keys"
             - name: LOOM_SVC_STORAGE_BACKEND
@@ -117,6 +131,8 @@ spec:
               value: "3"
             - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_RETRY_ON
               value: "[\"gateway_error\", \"provider_transport_disconnect\"]"
+            - name: LOOM_SVC_WORKER_HEARTBEAT_EXPIRY_SEC
+              value: "120"
 
             - name: LOOM_SVC_ADMIN_SECRET_FILE
               value: "/var/run/loom/secrets/admin/secrets.toml"

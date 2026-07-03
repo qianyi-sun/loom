@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Task, Team, Token, Trial
+from loom.db.schema import Task, Team, Token, Trial, User
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
@@ -18,15 +18,24 @@ def cancel_seed(postgres_url: str) -> Iterator[tuple[str, UUID, UUID, UUID]]:
     engine = create_engine(postgres_url)
     session_factory = sessionmaker(engine)
     team_id = uuid4()
+    user_id = uuid4()
     raw = f"t_{uuid4().hex}"
     queued = uuid4()
     running = uuid4()
     done = uuid4()
     with session_factory() as s:
         s.execute(insert(Team).values(id=team_id, name=f"x-{team_id}"))
+        s.execute(insert(User).values(
+            id=user_id,
+            username=f"CancelUser-{user_id.hex[:8]}",
+            username_normalized=f"cancel-user-{user_id.hex[:8]}",
+            status="active",
+            is_platform_admin=False,
+        ))
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(raw.encode()).digest(),
             type="team", scopes=["submit"], team_id=team_id,
+            created_by_user_id=user_id,
             issued_at=datetime.now(UTC), expires_at=None,
         ))
         s.execute(insert(Task).values(id="t", checksum="0" * 64, config={}))
@@ -36,6 +45,7 @@ def cancel_seed(postgres_url: str) -> Iterator[tuple[str, UUID, UUID, UUID]]:
             s.execute(insert(Trial).values(
                 id=tid, team_id=team_id, task_id="t",
                 config={}, requires_caps={}, state=state,
+                result={} if state == "succeeded" else None,
             ))
         s.commit()
     try:
@@ -44,6 +54,7 @@ def cancel_seed(postgres_url: str) -> Iterator[tuple[str, UUID, UUID, UUID]]:
         with session_factory() as s:
             s.execute(delete(Trial))
             s.execute(delete(Token))
+            s.execute(delete(User).where(User.id == user_id))
             s.execute(delete(Team))
             s.execute(delete(Task))
             s.commit()

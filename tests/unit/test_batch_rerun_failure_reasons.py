@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from loom_service.routes.batches import _is_rerunnable_failure
+from loom_service.failure_taxonomy import is_auto_safe_rerun
 
 
 @pytest.mark.parametrize(
@@ -17,10 +17,20 @@ from loom_service.routes.batches import _is_rerunnable_failure
 def test_transient_failures_are_rerunnable(failure_reason: str) -> None:
     trial = SimpleNamespace(state="failed", failure_reason=failure_reason)
 
-    assert _is_rerunnable_failure(trial) is True
+    assert is_auto_safe_rerun(trial) is True
 
 
 def test_non_transient_failures_are_not_rerunnable() -> None:
     trial = SimpleNamespace(state="failed", failure_reason="verifier_error")
 
-    assert _is_rerunnable_failure(trial) is False
+    assert is_auto_safe_rerun(trial) is False
+
+
+def test_reward_zero_success_is_not_rerunnable() -> None:
+    trial = SimpleNamespace(
+        state="succeeded",
+        failure_reason=None,
+        result={"aggregate_reward": 0.0},
+    )
+
+    assert is_auto_safe_rerun(trial) is False

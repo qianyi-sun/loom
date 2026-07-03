@@ -55,13 +55,14 @@ from loom_llm_gateway.llm_calls import record_call
 from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
-    compute_facade_cost_usd,
+    compute_facade_cost_estimate,
     decrypt_facade_api_key,
     http_failure_category,
     record_facade_failed_call,
     redact_api_key,
     resolve_facade_connection,
     resolve_provider_connection_id,
+    token_usage_with_cost_metadata,
     verify_facade_auth,
 )
 
@@ -220,12 +221,13 @@ async def openai_chat_facade(
     # `usage` (some operator endpoints omit it) → 0/0 with a 0 cost row
     # so attribution still exists for debug.
     usage = DIALECTS["openai_chat"].extract_tokens(body)
-    cost_usd, rate_card_hash = await compute_facade_cost_usd(
+    cost_estimate = await compute_facade_cost_estimate(
         row,
         payload["model"],
         usage,
         rate_card_cache=request.app.state.rate_card_cache,
     )
+    usage = token_usage_with_cost_metadata(usage, cost_estimate)
 
     # Audit. We use a fresh session so the upstream call's latency
     # didn't keep the connection-lookup session open longer than
@@ -240,8 +242,8 @@ async def openai_chat_facade(
             dialect=_FACADE_DIALECT,
             model=payload["model"],
             usage=usage,
-            cost_usd=cost_usd,
-            rate_card_hash=rate_card_hash,
+            cost_usd=cost_estimate.cost_usd,
+            rate_card_hash=cost_estimate.rate_card_hash,
             provider=row.provider_type,
             attempt=outcome.attempt,
             request_params=normalize_request_params(payload),

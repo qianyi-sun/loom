@@ -37,6 +37,11 @@ from loom.trajectory.storage import ObjectStore
 from loom.trajectory.writer import TrajectoryWriter
 from loom.trial.finalize import finalize_trajectory
 from loom.trial.step_runner import run_step
+from loom.trial.watchdog_cancellation import (
+    WatchdogTriggerReason,
+    extract_watchdog_cancellation,
+    watchdog_timeout_failure_message,
+)
 from loom.trial.workspace import materialize_workspace
 from loom.verifier.base import Verifier
 
@@ -251,22 +256,48 @@ class Trial:
                         result.failure_message = terminal_failure[1]
                     else:
                         result.state = TrialState.SUCCEEDED
-                except asyncio.CancelledError:
-                    cancelled = True
-                    result.state = TrialState.CANCELLED
-                    try:
-                        await writer.append(
-                            TrialCancelledEvent(
-                                emitted_at=datetime.now(UTC),
-                                trial_id=self.ctx.trial_id,
-                                step_id="__trial__",
-                                seq=seq.next(),
-                                cancellation_requested_at=datetime.now(UTC),
-                                observed_at=datetime.now(UTC),
-                            )
+                except asyncio.CancelledError as exc:
+                    watchdog_cancellation = extract_watchdog_cancellation(exc)
+                    if (
+                        watchdog_cancellation is not None
+                        and watchdog_cancellation.reason == WatchdogTriggerReason.HARD_DEADLINE
+                    ):
+                        result.state = TrialState.FAILED
+                        result.failure_reason = FailureReason.AGENT_TIMEOUT
+                        result.failure_message = watchdog_timeout_failure_message(
+                            watchdog_cancellation,
                         )
-                    except Exception:
-                        logger.exception("failed to append TrialCancelledEvent")
+                    else:
+                        cancelled = True
+                        result.state = TrialState.CANCELLED
+                        try:
+                            await writer.append(
+                                TrialCancelledEvent(
+                                    emitted_at=datetime.now(UTC),
+                                    trial_id=self.ctx.trial_id,
+                                    step_id="__trial__",
+                                    seq=seq.next(),
+                                    cancellation_requested_at=datetime.now(UTC),
+                                    observed_at=datetime.now(UTC),
+                                )
+                            )
+                        except Exception:
+                            logger.exception("failed to append TrialCancelledEvent")
+                    if not cancelled:
+                        try:
+                            await writer.append(
+                                TrialErrorEvent(
+                                    emitted_at=datetime.now(UTC),
+                                    trial_id=self.ctx.trial_id,
+                                    step_id="__trial__",
+                                    seq=seq.next(),
+                                    error_type="WatchdogHardDeadline",
+                                    message=result.failure_message or "",
+                                    traceback=None,
+                                )
+                            )
+                        except Exception:
+                            logger.exception("failed to append TrialErrorEvent")
                 except Exception as exc:
                     result.state = TrialState.FAILED
                     reason, message = classify_failure(exc)

@@ -131,10 +131,15 @@ stores the provider namespace to use with the raw request model id. Safe
 defaults are `anthropic`, `google`, and `openai` for
 `openai-compatible`; `custom` has no default. When a facade connection is
 set to `pricing_source='rate-card'` and no matching entry exists, the
-gateway records tokens with `cost_usd=0` and
-`rate_card_hash='facade:rate-card:missing'` so billing audits can flag
-the gap without losing call attribution. Trial and batch responses still
-show the non-zero call count and token totals in this case.
+gateway records tokens with `cost_usd=0`,
+`rate_card_hash='facade:rate-card:missing'`, and provider extras marking
+`_loom_cost_source=unpriced`,
+`_loom_cost_confidence=unavailable`, and
+`_loom_unpriced_reason=missing_rate_card_entry`. API projections expose
+that as `estimated_cost_usd=null` and `cost_status=price_unknown` so an
+unpriced model such as `glm-5.1-thinking` is never presented as a
+zero-dollar run. Trial and batch responses still show the non-zero call
+count and token totals in this case.
 
 For hosted YibuAPI usage, sync the official pricing catalog into the
 service rate-card table:
@@ -210,6 +215,11 @@ service rate-card table has rows for that provider/model pair. For
 user-managed or self-deployed APIs, keep `tokens-only`: Loom records
 token totals and returns `estimated_cost_usd=null` with
 `cost_status='not_applicable'` rather than inventing a dollar amount.
+Operator-supplied/manual pricing is supported by setting
+`pricing_source='operator-supplied'` with `pricing_data` keys
+`input_usd_per_1m` and `output_usd_per_1m`; facade calls then carry
+`cost_estimate_source='operator-supplied'` and
+`cost_estimate_confidence='configured'`.
 Rate-card metadata is optional for launch selection: BYO provider model
 discovery and manual model ids are exposed through `/api/v1/models`
 even when no matching rate-card entry exists. Missing facade pricing is
@@ -255,9 +265,12 @@ Both modes support it:
 
 - **Not a billing system.** Cost is internal accounting against
   team quotas + the `/api/v1/usage` dashboard. Loom does not invoice.
-- **Not a budget guard.** There's no enforcement that a team stays
-  under a dollar cap. Rate limiting is per-(team, provider) RPM at
-  the Gateway, not $/day. (Tracked as a follow-up if needed.)
+- **Not a billing system budget.** Batch-level `budget_usd` is an
+  operator safety guard. `hard` budgets reject over-budget pre-run
+  estimates and cancel running batches after recorded provider usage
+  exceeds the cap; `soft` budgets require explicit confirmation when
+  the estimate is over the cap or unpriced. This is still internal
+  spend control, not invoicing or per-team currency accounting.
 - **Not currency-aware.** All amounts are USD by convention; no
   conversion or per-team currency.
 

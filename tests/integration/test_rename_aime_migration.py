@@ -38,10 +38,12 @@ def at_0014(postgres_url: str) -> Engine:
     # starts from the same baseline.
     with engine.begin() as conn:
         conn.execute(text(
-            "DELETE FROM tasks WHERE benchmark_id IN ('aime', 'aime-aimo-validation')",
+            "DELETE FROM tasks WHERE benchmark_id IN "
+            "('aime', 'aime-aimo-validation', 'aime-2025', 'aime-25')",
         ))
         conn.execute(text(
-            "DELETE FROM benchmarks WHERE id IN ('aime', 'aime-aimo-validation')",
+            "DELETE FROM benchmarks WHERE id IN "
+            "('aime', 'aime-aimo-validation', 'aime-2025', 'aime-25')",
         ))
     return engine
 

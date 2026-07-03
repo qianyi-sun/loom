@@ -289,6 +289,10 @@ async def test_facade_forwards_with_decrypted_key_and_records_llm_call(
     #                       = 0.0005 + 0.00075 = 0.00125
     assert float(row["cost_usd"]) == pytest.approx(0.00125, abs=1e-7)
     assert "operator-supplied" in row["rate_card_hash"]
+    assert row["provider_extras"]["_loom_cost_source"] == "operator-supplied"
+    assert row["provider_extras"]["_loom_cost_confidence"] == "configured"
+    assert row["provider_extras"]["_loom_cost_currency"] == "USD"
+    assert row["provider_extras"]["_loom_pricing_source"] == "operator-supplied"
 
 
 async def test_facade_records_redacted_request_params(
@@ -402,6 +406,10 @@ async def test_facade_rate_card_pricing_uses_connection_provider(
     assert float(row["cost_usd"]) == pytest.approx(0.0006, abs=1e-7)
     assert row["rate_card_hash"] != "facade:rate-card"
     assert len(row["rate_card_hash"]) == 64
+    assert row["provider_extras"]["_loom_cost_source"] == "rate-card"
+    assert row["provider_extras"]["_loom_cost_confidence"] == "configured"
+    assert row["provider_extras"]["_loom_rate_card_provider"] == "together"
+    assert row["provider_extras"]["_loom_pricing_source"] == "rate-card"
 
 
 async def test_facade_rate_card_missing_entry_records_missing_marker(
@@ -455,6 +463,10 @@ async def test_facade_rate_card_missing_entry_records_missing_marker(
     row = dict(rows[0]._mapping)
     assert float(row["cost_usd"]) == 0.0
     assert row["rate_card_hash"] == "facade:rate-card:missing"
+    assert row["provider_extras"]["_loom_cost_source"] == "unpriced"
+    assert row["provider_extras"]["_loom_cost_confidence"] == "unavailable"
+    assert row["provider_extras"]["_loom_unpriced_reason"] == "missing_rate_card_entry"
+    assert row["provider_extras"]["_loom_rate_card_provider"] == "together"
 
 
 # ──────────────────────────────────────────────────────────────────────

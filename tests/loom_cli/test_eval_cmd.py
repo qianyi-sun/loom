@@ -5,6 +5,7 @@ integration tests in tests/integration; this file pins the CLI surface
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -1436,6 +1437,116 @@ def test_batch_debug_renders_text_summary(
     assert "Inspect batch fan-out errors." in out
 
 
+def test_batch_rerun_plan_outputs_task_id_list(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", f"/api/v1/batches/{_BATCH_ID}/rerun-plan")] = (
+        httpx.Response(
+            200,
+            json={
+                "schema_version": "1",
+                "batch_id": _BATCH_ID,
+                "supplemental_task_ids": [
+                    "source-useful/task-a",
+                    "source-useful/task-b",
+                ],
+                "summary": {
+                    "auto_safe": 2,
+                    "operator_approval": 1,
+                    "not_rerunnable": 3,
+                    "already_covered": 0,
+                    "selected_final_trials": 6,
+                },
+                "auto_safe": [],
+                "operator_approval": [],
+                "not_rerunnable": [],
+                "final_trial_selection": [],
+            },
+        )
+    )
+
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "rerun-plan",
+            _BATCH_ID,
+            "--task-id",
+            "source-useful/task-b",
+            "--task-id",
+            "source-useful/task-a",
+            "--format",
+            "task-ids",
+        ]
+    )
+
+    assert rc == 0
+    assert capsys.readouterr().out == (
+        "source-useful/task-a\nsource-useful/task-b\n"
+    )
+    assert mock_server[0].url.path == f"/api/v1/batches/{_BATCH_ID}/rerun-plan"
+    assert mock_server[0].url.params.get_list("task_id") == [
+        "source-useful/task-b",
+        "source-useful/task-a",
+    ]
+
+
+def test_batch_rerun_plan_renders_text_summary(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", f"/api/v1/batches/{_BATCH_ID}/rerun-plan")] = (
+        httpx.Response(
+            200,
+            json={
+                "schema_version": "1",
+                "batch_id": _BATCH_ID,
+                "supplemental_task_ids": ["source-useful/task-a"],
+                "summary": {
+                    "auto_safe": 1,
+                    "operator_approval": 1,
+                    "not_rerunnable": 2,
+                    "already_covered": 0,
+                    "selected_final_trials": 4,
+                },
+                "auto_safe": [
+                    {
+                        "task_id": "source-useful/task-a",
+                        "failure_class": "platform_failure",
+                        "root_cause": "provider_transport",
+                    }
+                ],
+                "operator_approval": [
+                    {
+                        "task_id": "source-useful/task-b",
+                        "failure_class": "verifier_failure",
+                        "root_cause": "verifier_harness",
+                    }
+                ],
+                "not_rerunnable": [
+                    {
+                        "task_id": "source-useful/task-score-zero",
+                        "failure_class": "score_failure",
+                        "platform_outcome": "success",
+                    }
+                ],
+                "final_trial_selection": [],
+            },
+        )
+    )
+
+    rc = main(["eval", "batch", "rerun-plan", _BATCH_ID])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Supplemental rerun plan" in out
+    assert "auto_safe:           1" in out
+    assert "operator_approval:   1" in out
+    assert "not_rerunnable:      2" in out
+    assert "source-useful/task-a" in out
+
+
 def test_diagnose_batch_fetches_machine_readable_report(
     mock_server: MockServer,
     capsys: pytest.CaptureFixture[str],
@@ -1542,6 +1653,79 @@ def test_batch_cancel(
     rc = main(["eval", "batch", "cancel", _BATCH_ID])
     assert rc == 0
     assert "Cancelled batch" in capsys.readouterr().out
+
+
+def test_batch_delivery_bundle_creates_downloads_and_writes_checksum(
+    mock_server: MockServer,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output = tmp_path / "delivery.tar.gz"
+    archive = b"delivery archive bytes"
+    digest = hashlib.sha256(archive).hexdigest()
+    artifact_id = "00000000-0000-0000-0000-00000000d311"
+    supplemental_id = "00000000-0000-0000-0000-00000000d312"
+    mock_server.canned[
+        ("POST", f"/api/v1/batches/{_BATCH_ID}/delivery-export")
+    ] = httpx.Response(
+        201,
+        json={
+            "id": artifact_id,
+            "status": "ready",
+            "archive_filename": "source-useful-5003-delivery.tar.gz",
+            "sha256": digest,
+            "download_url": (
+                f"/api/v1/batches/{_BATCH_ID}/delivery-export/{artifact_id}/download"
+            ),
+            "manifest": {
+                "task_count": 5003,
+                "trial_count": 5003,
+                "reward_distribution": {"0.0": 1139, "1.0": 3864},
+                "object_counts": {"atif": 5003, "trajectory": 5003},
+            },
+        },
+    )
+    mock_server.canned[
+        (
+            "GET",
+            f"/api/v1/batches/{_BATCH_ID}/delivery-export/{artifact_id}/download",
+        )
+    ] = httpx.Response(200, content=archive)
+
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "delivery-bundle",
+            _BATCH_ID,
+            "--supplemental-batch-id",
+            supplemental_id,
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert rc == 0
+    assert output.read_bytes() == archive
+    assert output.with_suffix(output.suffix + ".sha256").read_text() == (
+        f"{digest}  {output.name}\n"
+    )
+    out = capsys.readouterr().out
+    assert "Delivery bundle ready" in out
+    assert "5003 trials" in out
+    assert digest in out
+
+    create_req = mock_server[0]
+    assert create_req.method == "POST"
+    assert create_req.url.path == f"/api/v1/batches/{_BATCH_ID}/delivery-export"
+    assert json.loads(create_req.content) == {
+        "supplemental_batch_ids": [supplemental_id],
+    }
+    download_req = mock_server[1]
+    assert download_req.method == "GET"
+    assert download_req.url.path == (
+        f"/api/v1/batches/{_BATCH_ID}/delivery-export/{artifact_id}/download"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────

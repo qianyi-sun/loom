@@ -690,7 +690,11 @@ def test_chat_byo_records_llm_call_for_usage_attribution(  # type: ignore[no-unt
     assert row["model"] == "gpt-99"
     assert row["input_tokens"] == 10
     assert row["output_tokens"] == 5
-    assert row["provider_extras"] == {}
+    assert row["provider_extras"]["cache_creation_input_tokens"] == 0
+    assert row["provider_extras"]["cache_read_input_tokens"] == 0
+    assert row["provider_extras"]["_loom_cost_source"] == "tokens-only"
+    assert row["provider_extras"]["_loom_cost_confidence"] == "not_applicable"
+    assert row["provider_extras"]["_loom_pricing_source"] == "tokens-only"
     assert float(row["cost_usd"]) == 0.0
     assert row["rate_card_hash"] == "facade:tokens-only"
 

@@ -5,6 +5,7 @@ Exercises the entire Plan 3 stack end-to-end against fakes.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
@@ -27,6 +28,7 @@ from loom.models.task import (
 from loom.models.verifier import VerifierError, VerifierResult
 from loom.trajectory.storage import FakeObjectStore
 from loom.trial.trial import Trial, TrialContext
+from loom.trial.watchdog_cancellation import WatchdogCancellation, WatchdogTriggerReason
 from tests._trial_config_defaults import stub_trial_config
 
 pytestmark = pytest.mark.docker
@@ -460,6 +462,66 @@ async def test_trial_run_cancellation_stashes_result(
     # Bug 4 fix: result available via trial.result
     assert trial.result is not None
     assert trial.result.state == TrialState.CANCELLED
+
+
+async def test_trial_run_watchdog_hard_deadline_records_agent_timeout(
+    hello_task: Path,
+    tmp_path: Path,
+):
+    task = TaskConfig(
+        schema_version="1",
+        task=TaskMetadata(id="hello", name="hello"),
+        environment=EnvironmentConfig(os="linux", docker_image="alpine"),
+        agent=AgentDefaults(name="oracle", timeout_sec=10.0),
+        verifier=VerifierDefaults(name="pass"),
+        steps=[StepConfig(name="main")],
+    )
+
+    class _SlowAgent:
+        mode = "out-of-box"
+        name = "slow"
+        version = "1.0"
+        supports_os = frozenset({"linux"})
+        model = None
+
+        async def run(self, **_):  # type: ignore[no-untyped-def]
+            await asyncio.sleep(60)
+
+    trial_id = uuid4()
+    ctx = TrialContext(
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=task,
+        task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(),
+        driver=FakeDriver(),
+        agent=_SlowAgent(),  # type: ignore[arg-type]
+        verifier=_AlwaysPassVerifier(),
+        object_store=FakeObjectStore(),
+        local_trajectory_path=tmp_path / "events.jsonl",
+    )
+    trial = Trial(ctx=ctx)
+
+    task_handle = asyncio.create_task(trial.run())
+    await asyncio.sleep(0.1)
+    task_handle.cancel(
+        WatchdogCancellation(
+            reason=WatchdogTriggerReason.HARD_DEADLINE,
+            message="trial exceeded worker hard deadline",
+            elapsed_sec=41.0,
+            hard_deadline_sec=40.0,
+        )
+    )
+
+    result = await task_handle
+
+    assert result.state == TrialState.FAILED
+    assert result.failure_reason == FailureReason.AGENT_TIMEOUT
+    assert result.failure_message is not None
+    assert "watchdog hard deadline" in result.failure_message
+    assert "elapsed_sec=41" in result.failure_message
+    assert "hard_deadline_sec=40" in result.failure_message
 
 
 async def test_trial_run_unscored_agent_error_marks_failed(

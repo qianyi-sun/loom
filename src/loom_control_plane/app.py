@@ -114,6 +114,13 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 expiry_sec=settings.worker_heartbeat_expiry_sec,
                 interval_sec=settings.worker_reclaim_sweep_interval_sec,
                 claimed_without_start_expiry_sec=(settings.claimed_without_start_expiry_sec),
+                running_stale_timeout_multiplier=(
+                    settings.stale_running_trial_timeout_multiplier
+                    if settings.stale_running_trial_reclaim_enabled
+                    else None
+                ),
+                running_stale_grace_sec=settings.stale_running_trial_grace_sec,
+                running_stale_silence_sec=settings.stale_running_trial_silence_sec,
             ),
             name="loom-cp-crash-detector",
         )

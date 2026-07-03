@@ -31,6 +31,10 @@ from sqlalchemy import and_, func, or_, select
 
 from loom.db.schema import LlmCall, Task, Team, Trial, User
 from loom.models.types import ModelSpec
+from loom_llm_gateway.rate_card import (
+    COST_META_CONFIDENCE_KEY,
+    COST_META_SOURCE_KEY,
+)
 from loom_service.agent_catalog import (
     known_names,
     validate_agent_model_compat,
@@ -51,6 +55,7 @@ from loom_service.monitor_filters import (
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.routes.object_downloads import stream_object_response
+from loom_service.stale_running_debug import trial_stale_running_debug_context
 from loom_service.usage_accounting import (
     empty_usage_projection,
     price_snapshots_for_trials,
@@ -90,9 +95,37 @@ def _empty_usage_projection() -> dict[str, Any]:
 def _priced_call_filter() -> Any:
     return (
         ~LlmCall.rate_card_hash.like("facade:tokens-only%")
-        & ~LlmCall.rate_card_hash.like("facade:rate-card:missing%")
+        & ~_price_unknown_call_filter()
         & (LlmCall.rate_card_hash != "failed-upstream")
     )
+
+
+def _price_unknown_call_filter() -> Any:
+    return (
+        LlmCall.rate_card_hash.like("facade:rate-card:missing%")
+        | _cost_meta_filter(COST_META_SOURCE_KEY, "unpriced")
+    )
+
+
+def _cost_meta_filter(key: str, value: str) -> Any:
+    return func.coalesce(LlmCall.provider_extras.op("->>")(key), "") == value
+
+
+def _cost_source_counts(row: Any) -> dict[str, int]:
+    return {
+        "operator-supplied": int(row.cost_source_operator_supplied_count or 0),
+        "rate-card": int(row.cost_source_rate_card_count or 0),
+        "tokens-only": int(row.cost_source_tokens_only_count or 0),
+        "unpriced": int(row.cost_source_unpriced_count or 0),
+    }
+
+
+def _cost_confidence_counts(row: Any) -> dict[str, int]:
+    return {
+        "configured": int(row.cost_confidence_configured_count or 0),
+        "not_applicable": int(row.cost_confidence_not_applicable_count or 0),
+        "unavailable": int(row.cost_confidence_unavailable_count or 0),
+    }
 
 
 async def _usage_by_trial_ids(
@@ -125,13 +158,34 @@ async def _usage_by_trial_ids(
                 .filter(LlmCall.rate_card_hash.like("facade:tokens-only%"))
                 .label("token_only_llm_calls_count"),
                 func.count(LlmCall.id)
-                .filter(
-                    LlmCall.rate_card_hash.like("facade:rate-card:missing%"),
-                )
+                .filter(_price_unknown_call_filter())
                 .label("price_unknown_llm_calls_count"),
                 func.count(LlmCall.id)
                 .filter(LlmCall.rate_card_hash == "failed-upstream")
                 .label("failed_upstream_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(_cost_meta_filter(COST_META_SOURCE_KEY, "operator-supplied"))
+                .label("cost_source_operator_supplied_count"),
+                func.count(LlmCall.id)
+                .filter(_cost_meta_filter(COST_META_SOURCE_KEY, "rate-card"))
+                .label("cost_source_rate_card_count"),
+                func.count(LlmCall.id)
+                .filter(_cost_meta_filter(COST_META_SOURCE_KEY, "tokens-only"))
+                .label("cost_source_tokens_only_count"),
+                func.count(LlmCall.id)
+                .filter(_cost_meta_filter(COST_META_SOURCE_KEY, "unpriced"))
+                .label("cost_source_unpriced_count"),
+                func.count(LlmCall.id)
+                .filter(_cost_meta_filter(COST_META_CONFIDENCE_KEY, "configured"))
+                .label("cost_confidence_configured_count"),
+                func.count(LlmCall.id)
+                .filter(
+                    _cost_meta_filter(COST_META_CONFIDENCE_KEY, "not_applicable"),
+                )
+                .label("cost_confidence_not_applicable_count"),
+                func.count(LlmCall.id)
+                .filter(_cost_meta_filter(COST_META_CONFIDENCE_KEY, "unavailable"))
+                .label("cost_confidence_unavailable_count"),
                 func.count(LlmCall.id)
                 .filter(usage_status_filter("partial"))
                 .label("partial_usage_llm_calls_count"),
@@ -165,6 +219,8 @@ async def _usage_by_trial_ids(
             missing_usage_llm_calls_count=int(
                 row.missing_usage_llm_calls_count or 0,
             ),
+            cost_source_counts=_cost_source_counts(row),
+            cost_confidence_counts=_cost_confidence_counts(row),
         )
         for row in rows
     }
@@ -227,6 +283,8 @@ def _trial_row(
         "estimated_cost_usd": usage_projection["estimated_cost_usd"],
         "cost_currency": usage_projection["cost_currency"],
         "cost_status": usage_projection["cost_status"],
+        "cost_estimate_source": usage_projection["cost_estimate_source"],
+        "cost_estimate_confidence": usage_projection["cost_estimate_confidence"],
         "pricing_modes": usage_projection["pricing_modes"],
         "priced_llm_calls_count": usage_projection["priced_llm_calls_count"],
         "token_only_llm_calls_count": usage_projection["token_only_llm_calls_count"],
@@ -514,6 +572,13 @@ async def get_trial(
         .scalars()
         .all()
     )
+    debug_context = await trial_stale_running_debug_context(
+        s,
+        trial,
+        task=task,
+        llm_calls=llm_calls,
+        settings=request.app.state.settings,
+    )
     base = _trial_row(
         trial,
         usage=usage_by_trial.get(trial.id),
@@ -553,6 +618,7 @@ async def get_trial(
         trial,
         task=task,
         llm_calls=llm_calls,
+        **debug_context,
     )
     base["debug_evidence"] = debug_evidence
     base["diagnosis"] = build_trial_diagnosis(debug_evidence)
@@ -591,11 +657,19 @@ async def get_trial_debug(
         .scalars()
         .all()
     )
+    debug_context = await trial_stale_running_debug_context(
+        s,
+        trial,
+        task=task,
+        llm_calls=llm_calls,
+        settings=request.app.state.settings,
+    )
     return build_trial_debug_evidence(
         request,
         trial,
         task=task,
         llm_calls=llm_calls,
+        **debug_context,
     )
 
 
@@ -631,11 +705,19 @@ async def get_trial_diagnosis(
         .scalars()
         .all()
     )
+    debug_context = await trial_stale_running_debug_context(
+        s,
+        trial,
+        task=task,
+        llm_calls=llm_calls,
+        settings=request.app.state.settings,
+    )
     debug_evidence = build_trial_debug_evidence(
         request,
         trial,
         task=task,
         llm_calls=llm_calls,
+        **debug_context,
     )
     return build_trial_diagnosis(debug_evidence)
 

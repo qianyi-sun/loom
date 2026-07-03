@@ -551,6 +551,8 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
             "decision_reason": "at_target",
             "last_autoscaler_blocked_reason": None,
             "blocked_reason": None,
+            "last_autoscaler_blocked_details": None,
+            "blocked_details": None,
             "last_autoscaler_error": None,
         },
         {
@@ -581,6 +583,8 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
             "decision_reason": "queued_deficit",
             "last_autoscaler_blocked_reason": "pending_cap",
             "blocked_reason": "pending_cap",
+            "last_autoscaler_blocked_details": None,
+            "blocked_details": None,
             "last_autoscaler_error": None,
         },
     ]

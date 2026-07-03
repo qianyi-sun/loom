@@ -23,6 +23,40 @@ from loom.db.schema import RateCard
 from loom.models.types import ModelSpec
 from loom_llm_gateway.errors import RateCardNotFoundError
 
+COST_META_SOURCE_KEY = "_loom_cost_source"
+COST_META_CONFIDENCE_KEY = "_loom_cost_confidence"
+COST_META_CURRENCY_KEY = "_loom_cost_currency"
+COST_META_PRICING_SOURCE_KEY = "_loom_pricing_source"
+COST_META_RATE_CARD_PROVIDER_KEY = "_loom_rate_card_provider"
+COST_META_UNPRICED_REASON_KEY = "_loom_unpriced_reason"
+
+
+@dataclass(frozen=True)
+class CostEstimate:
+    cost_usd: float
+    rate_card_hash: str
+    source: str
+    confidence: str
+    currency: str | None
+    pricing_source: str | None = None
+    rate_card_provider: str | None = None
+    unpriced_reason: str | None = None
+
+    def provider_extras(self) -> dict[str, Any]:
+        extras: dict[str, Any] = {
+            COST_META_SOURCE_KEY: self.source,
+            COST_META_CONFIDENCE_KEY: self.confidence,
+        }
+        if self.currency:
+            extras[COST_META_CURRENCY_KEY] = self.currency
+        if self.pricing_source:
+            extras[COST_META_PRICING_SOURCE_KEY] = self.pricing_source
+        if self.rate_card_provider:
+            extras[COST_META_RATE_CARD_PROVIDER_KEY] = self.rate_card_provider
+        if self.unpriced_reason:
+            extras[COST_META_UNPRICED_REASON_KEY] = self.unpriced_reason
+        return extras
+
 
 class RateCardEntry(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")

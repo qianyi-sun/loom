@@ -25,7 +25,11 @@ export function usageCostAmount(item: UsageCostLike): number | null {
 
 export function formatUsageCost(item: UsageCostLike): string {
   const value = usageCostAmount(item);
-  if (value == null) return "n/a";
+  if (value == null) {
+    if (item.cost_status === "price_unknown") return "unknown/unpriced";
+    if (item.cost_status === "failed_upstream") return "unavailable";
+    return "n/a";
+  }
   const currency = item.cost_currency ?? "USD";
   if (currency === "USD") return `$${value.toFixed(4)}`;
   return `${value.toFixed(4)} ${currency}`;

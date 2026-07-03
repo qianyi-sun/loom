@@ -42,6 +42,8 @@ from collections.abc import Coroutine
 from typing import Any, Protocol
 from uuid import UUID
 
+from loom.trial.watchdog_cancellation import WatchdogCancellation, WatchdogTriggerReason
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_POLL_INTERVAL_SEC = 30.0
@@ -135,7 +137,14 @@ async def _watch(
                 trial_id, elapsed, hard_deadline_sec,
             )
             trigger["reason"] = "hard_deadline"
-            task.cancel()
+            task.cancel(
+                WatchdogCancellation(
+                    reason=WatchdogTriggerReason.HARD_DEADLINE,
+                    message="worker hard deadline elapsed",
+                    elapsed_sec=elapsed,
+                    hard_deadline_sec=hard_deadline_sec,
+                )
+            )
             return
 
         try:
@@ -153,5 +162,28 @@ async def _watch(
                 trial_id,
             )
             trigger["reason"] = "cp_cancelled"
-            task.cancel()
+            task.cancel(
+                WatchdogCancellation(
+                    reason=WatchdogTriggerReason.CP_CANCELLED,
+                    message="control plane reported trial cancelled",
+                    cp_state=state,
+                )
+            )
+            return
+
+        if state in {"failed", "succeeded"}:
+            logger.info(
+                "trial_terminal_observed_by_watchdog trial_id=%s state=%s — "
+                "cancelling runner task",
+                trial_id,
+                state,
+            )
+            trigger["reason"] = "cp_terminal"
+            task.cancel(
+                WatchdogCancellation(
+                    reason=WatchdogTriggerReason.CP_TERMINAL,
+                    message="control plane reported trial terminal",
+                    cp_state=state,
+                )
+            )
             return

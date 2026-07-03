@@ -17,7 +17,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Annotated, Any, NoReturn
+from typing import Annotated, Any, Literal, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -29,6 +29,7 @@ from loom.db.schema import (
     Batch,
     Benchmark,
     LlmCall,
+    ProviderConnection,
     ProviderModelCache,
     Task,
     Team,
@@ -40,6 +41,10 @@ from loom.models.batch import Combination
 from loom.models.types import ModelSpec
 from loom.request_params import sanitize_request_extras
 from loom.security.redaction import redact_mapping, redact_text
+from loom_llm_gateway.rate_card import (
+    COST_META_CONFIDENCE_KEY,
+    COST_META_SOURCE_KEY,
+)
 from loom_service.agent_catalog import (
     get_agent,
     known_names,
@@ -55,6 +60,11 @@ from loom_service.batch_identity import build_batch_identity
 from loom_service.debug_evidence import build_batch_debug_evidence
 from loom_service.dependencies import SessionAndCtx
 from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
+from loom_service.failure_taxonomy import (
+    build_supplemental_rerun_plan,
+    is_auto_safe_rerun,
+    is_replaceable_by_successful_supplemental,
+)
 from loom_service.metrics import SUBMISSION_REJECTS_TOTAL
 from loom_service.monitor_filters import (
     apply_batch_monitor_filters,
@@ -62,6 +72,7 @@ from loom_service.monitor_filters import (
 )
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
+from loom_service.stale_running_debug import batch_stale_running_decisions
 from loom_service.task_compat import task_supports_agent
 from loom_service.task_config_validation import (
     expected_trial_count,
@@ -71,7 +82,9 @@ from loom_service.task_config_validation import (
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
 from loom_service.usage_accounting import (
     empty_usage_projection,
+    estimate_pre_run_batch_budget,
     price_snapshots_for_trials,
+    project_batch_budget,
     summarize_llm_evidence_for_trials,
     summarize_usage_counts,
     usage_status_filter,
@@ -93,6 +106,7 @@ _RERUNNABLE_FAILURE_REASONS: frozenset[str] = frozenset(
 @dataclass(frozen=True)
 class _BatchTrialProjection:
     id: UUID
+    batch_id: UUID | None
     team_id: UUID
     task_id: str
     config: dict[str, Any]
@@ -101,6 +115,7 @@ class _BatchTrialProjection:
     failure_message: str | None
     result: dict[str, Any] | None
     started_at: datetime | None
+    finished_at: datetime | None
     sample_idx: int
     combination_idx: int
     provider_connection_id: UUID | None
@@ -141,6 +156,14 @@ class _CreateBatch(BaseModel):
     # terminal coverage from named worker pools. The batch runner adds
     # one extra pool-pinned coverage trial per normalized entry.
     required_worker_pools: list[str] = Field(default_factory=list, max_length=20)
+    budget_usd: float | None = Field(default=None, ge=0)
+    budget_policy: Literal["none", "soft", "hard"] = "none"
+    budget_confirmed: bool = False
+
+
+class _RerunFailedBatch(BaseModel):
+    task_ids: list[str] = Field(default_factory=list, max_length=5000)
+    include_operator_approval: bool = False
 
 
 def _sanitize_trial_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -207,7 +230,7 @@ def _reject_submission(
     *,
     reason: str,
     status_code: int,
-    detail: str,
+    detail: Any,
 ) -> NoReturn:
     SUBMISSION_REJECTS_TOTAL.labels(reason=reason).inc()
     raise HTTPException(status_code=status_code, detail=detail)
@@ -437,6 +460,7 @@ def _serialize(
     usage_projection = dict(usage or _empty_usage_projection())
     usage_projection.pop("total_cost_usd", None)
     out.update(usage_projection)
+    out.update(project_batch_budget(b, usage_projection))
     if summary is not None:
         out["trial_summary"] = summary
         out["aggregate_reward"] = aggregate_reward
@@ -587,6 +611,7 @@ async def create_batch(
 
     # Validate provider_connection_id before task materialization/fan-out
     # work so known bad provider/model input returns a direct actionable error.
+    provider_connection: ProviderConnection | None = None
     if payload.provider_connection_id is not None:
         try:
             await validate_provider_connection(
@@ -604,6 +629,14 @@ async def create_batch(
             provider_connection_id=payload.provider_connection_id,
             provider_model_id=payload.provider_model_id,
         )
+        provider_connection = (
+            await s.execute(
+                select(ProviderConnection).where(
+                    ProviderConnection.id == payload.provider_connection_id,
+                    ProviderConnection.deleted_at.is_(None),
+                ),
+            )
+        ).scalar_one_or_none()
 
     task_result = await resolve_task_filter_with_diagnostics(
         s,
@@ -664,6 +697,59 @@ async def create_batch(
         ) + len(required_worker_pools)
         combinations_jsonb = []
 
+    budget_policy = payload.budget_policy
+    if payload.budget_usd is None:
+        budget_policy = "none"
+    elif budget_policy == "none":
+        budget_policy = "hard"
+
+    budget_estimate = await estimate_pre_run_batch_budget(
+        s,
+        provider_connection=provider_connection,
+        provider_model_id=payload.provider_model_id,
+        expected_trial_count=expected,
+        settings=request.app.state.settings,
+        budget_usd=payload.budget_usd,
+        budget_policy=budget_policy,
+    )
+    if budget_policy != "none":
+        pre_run_cost = budget_estimate.pre_run_estimated_cost_usd
+        budget_value = budget_estimate.budget_usd
+        if pre_run_cost is None:
+            reason = (
+                "batch_budget_unpriced"
+                if budget_policy == "hard"
+                else "batch_budget_unpriced_confirmation_required"
+            )
+            if budget_policy == "hard" or not payload.budget_confirmed:
+                _reject_submission(
+                    reason=reason,
+                    status_code=400 if budget_policy == "hard" else 409,
+                    detail={
+                        "reason": reason,
+                        "budget": budget_estimate.as_api_dict(),
+                    },
+                )
+        elif budget_value is not None and pre_run_cost > budget_value:
+            if budget_policy == "hard":
+                _reject_submission(
+                    reason="batch_budget_exceeded",
+                    status_code=400,
+                    detail={
+                        "reason": "batch_budget_exceeded",
+                        "budget": budget_estimate.as_api_dict(),
+                    },
+                )
+            if not payload.budget_confirmed:
+                _reject_submission(
+                    reason="batch_budget_confirmation_required",
+                    status_code=409,
+                    detail={
+                        "reason": "batch_budget_confirmation_required",
+                        "budget": budget_estimate.as_api_dict(),
+                    },
+                )
+
     explicit_name = payload.name.strip() if payload.name else ""
     explicit_description = payload.description.strip() if payload.description else ""
     generated_identity = build_batch_identity(
@@ -694,10 +780,24 @@ async def create_batch(
         required_worker_pools=required_worker_pools,
         provider_connection_id=payload.provider_connection_id,
         provider_model_id=payload.provider_model_id,
+        budget_usd=payload.budget_usd if budget_policy != "none" else None,
+        budget_policy=budget_policy,
+        budget_confirmed_at=(
+            datetime.now(UTC)
+            if budget_policy == "soft" and payload.budget_confirmed
+            else None
+        ),
+        pre_run_estimated_cost_usd=budget_estimate.pre_run_estimated_cost_usd,
+        pre_run_cost_estimate_source=budget_estimate.cost_estimate_source,
+        pre_run_cost_estimate_confidence=(
+            budget_estimate.cost_estimate_confidence
+        ),
     )
     s.add(b)
     await s.commit()
     await s.refresh(b)
+    usage_projection = _empty_usage_projection()
+    budget_projection = project_batch_budget(b, usage_projection)
     return {
         "batch_id": str(b.id),
         "team_id": str(b.team_id),
@@ -710,6 +810,7 @@ async def create_batch(
         "required_worker_pools": b.required_worker_pools,
         "state": b.state,
         "created_at": b.created_at.isoformat(),
+        **budget_projection,
     }
 
 
@@ -858,9 +959,37 @@ def _empty_usage_projection() -> dict[str, Any]:
 def _priced_call_filter() -> Any:
     return (
         ~LlmCall.rate_card_hash.like("facade:tokens-only%")
-        & ~LlmCall.rate_card_hash.like("facade:rate-card:missing%")
+        & ~_price_unknown_call_filter()
         & (LlmCall.rate_card_hash != "failed-upstream")
     )
+
+
+def _price_unknown_call_filter() -> Any:
+    return (
+        LlmCall.rate_card_hash.like("facade:rate-card:missing%")
+        | _cost_meta_filter(COST_META_SOURCE_KEY, "unpriced")
+    )
+
+
+def _cost_meta_filter(key: str, value: str) -> Any:
+    return func.coalesce(LlmCall.provider_extras.op("->>")(key), "") == value
+
+
+def _cost_source_counts(row: Any) -> dict[str, int]:
+    return {
+        "operator-supplied": int(row.cost_source_operator_supplied_count or 0),
+        "rate-card": int(row.cost_source_rate_card_count or 0),
+        "tokens-only": int(row.cost_source_tokens_only_count or 0),
+        "unpriced": int(row.cost_source_unpriced_count or 0),
+    }
+
+
+def _cost_confidence_counts(row: Any) -> dict[str, int]:
+    return {
+        "configured": int(row.cost_confidence_configured_count or 0),
+        "not_applicable": int(row.cost_confidence_not_applicable_count or 0),
+        "unavailable": int(row.cost_confidence_unavailable_count or 0),
+    }
 
 
 async def _usage_totals_for_trials(
@@ -893,13 +1022,34 @@ async def _usage_totals_for_trials(
                 .filter(LlmCall.rate_card_hash.like("facade:tokens-only%"))
                 .label("token_only_llm_calls_count"),
                 func.count(LlmCall.id)
-                .filter(
-                    LlmCall.rate_card_hash.like("facade:rate-card:missing%"),
-                )
+                .filter(_price_unknown_call_filter())
                 .label("price_unknown_llm_calls_count"),
                 func.count(LlmCall.id)
                 .filter(LlmCall.rate_card_hash == "failed-upstream")
                 .label("failed_upstream_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(_cost_meta_filter(COST_META_SOURCE_KEY, "operator-supplied"))
+                .label("cost_source_operator_supplied_count"),
+                func.count(LlmCall.id)
+                .filter(_cost_meta_filter(COST_META_SOURCE_KEY, "rate-card"))
+                .label("cost_source_rate_card_count"),
+                func.count(LlmCall.id)
+                .filter(_cost_meta_filter(COST_META_SOURCE_KEY, "tokens-only"))
+                .label("cost_source_tokens_only_count"),
+                func.count(LlmCall.id)
+                .filter(_cost_meta_filter(COST_META_SOURCE_KEY, "unpriced"))
+                .label("cost_source_unpriced_count"),
+                func.count(LlmCall.id)
+                .filter(_cost_meta_filter(COST_META_CONFIDENCE_KEY, "configured"))
+                .label("cost_confidence_configured_count"),
+                func.count(LlmCall.id)
+                .filter(
+                    _cost_meta_filter(COST_META_CONFIDENCE_KEY, "not_applicable"),
+                )
+                .label("cost_confidence_not_applicable_count"),
+                func.count(LlmCall.id)
+                .filter(_cost_meta_filter(COST_META_CONFIDENCE_KEY, "unavailable"))
+                .label("cost_confidence_unavailable_count"),
                 func.count(LlmCall.id)
                 .filter(usage_status_filter("partial"))
                 .label("partial_usage_llm_calls_count"),
@@ -928,6 +1078,8 @@ async def _usage_totals_for_trials(
         missing_usage_llm_calls_count=int(
             row.missing_usage_llm_calls_count or 0,
         ),
+        cost_source_counts=_cost_source_counts(row),
+        cost_confidence_counts=_cost_confidence_counts(row),
     )
 
 
@@ -994,6 +1146,7 @@ async def _trial_projections_for_batch_ids(
         await session.execute(
             select(
                 Trial.id,
+                Trial.batch_id,
                 Trial.team_id,
                 Trial.task_id,
                 Trial.config,
@@ -1002,6 +1155,7 @@ async def _trial_projections_for_batch_ids(
                 Trial.failure_message,
                 Trial.result,
                 Trial.started_at,
+                Trial.finished_at,
                 Trial.sample_idx,
                 Trial.combination_idx,
                 Trial.provider_connection_id,
@@ -1013,6 +1167,7 @@ async def _trial_projections_for_batch_ids(
     return [
         _BatchTrialProjection(
             id=row.id,
+            batch_id=row.batch_id,
             team_id=row.team_id,
             task_id=row.task_id,
             config=row.config,
@@ -1021,6 +1176,7 @@ async def _trial_projections_for_batch_ids(
             failure_message=row.failure_message,
             result=row.result,
             started_at=row.started_at,
+            finished_at=row.finished_at,
             sample_idx=row.sample_idx,
             combination_idx=row.combination_idx,
             provider_connection_id=row.provider_connection_id,
@@ -1068,13 +1224,34 @@ async def _usage_by_batch_ids(
                 .filter(LlmCall.rate_card_hash.like("facade:tokens-only%"))
                 .label("token_only_llm_calls_count"),
                 func.count(LlmCall.id)
-                .filter(
-                    LlmCall.rate_card_hash.like("facade:rate-card:missing%"),
-                )
+                .filter(_price_unknown_call_filter())
                 .label("price_unknown_llm_calls_count"),
                 func.count(LlmCall.id)
                 .filter(LlmCall.rate_card_hash == "failed-upstream")
                 .label("failed_upstream_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(_cost_meta_filter(COST_META_SOURCE_KEY, "operator-supplied"))
+                .label("cost_source_operator_supplied_count"),
+                func.count(LlmCall.id)
+                .filter(_cost_meta_filter(COST_META_SOURCE_KEY, "rate-card"))
+                .label("cost_source_rate_card_count"),
+                func.count(LlmCall.id)
+                .filter(_cost_meta_filter(COST_META_SOURCE_KEY, "tokens-only"))
+                .label("cost_source_tokens_only_count"),
+                func.count(LlmCall.id)
+                .filter(_cost_meta_filter(COST_META_SOURCE_KEY, "unpriced"))
+                .label("cost_source_unpriced_count"),
+                func.count(LlmCall.id)
+                .filter(_cost_meta_filter(COST_META_CONFIDENCE_KEY, "configured"))
+                .label("cost_confidence_configured_count"),
+                func.count(LlmCall.id)
+                .filter(
+                    _cost_meta_filter(COST_META_CONFIDENCE_KEY, "not_applicable"),
+                )
+                .label("cost_confidence_not_applicable_count"),
+                func.count(LlmCall.id)
+                .filter(_cost_meta_filter(COST_META_CONFIDENCE_KEY, "unavailable"))
+                .label("cost_confidence_unavailable_count"),
                 func.count(LlmCall.id)
                 .filter(usage_status_filter("partial"))
                 .label("partial_usage_llm_calls_count"),
@@ -1109,6 +1286,8 @@ async def _usage_by_batch_ids(
             missing_usage_llm_calls_count=int(
                 row.missing_usage_llm_calls_count or 0,
             ),
+            cost_source_counts=_cost_source_counts(row),
+            cost_confidence_counts=_cost_confidence_counts(row),
         )
         for row in rows
     }
@@ -1226,7 +1405,7 @@ def _trial_key(trial: Any) -> tuple[str, int, int]:
 
 
 def _is_rerunnable_failure(trial: Any) -> bool:
-    return str(trial.state) == "failed" and trial.failure_reason in _RERUNNABLE_FAILURE_REASONS
+    return is_auto_safe_rerun(trial)
 
 
 def _effective_trials(
@@ -1240,7 +1419,7 @@ def _effective_trials(
             continue
         key = _trial_key(trial)
         original = original_by_key.get(key)
-        if original is None or not _is_rerunnable_failure(original):
+        if original is None or not is_replaceable_by_successful_supplemental(original):
             continue
         effective[key] = trial
     return list(effective.values())
@@ -1339,6 +1518,11 @@ async def get_batch(
             s,
             rerun_batch_ids,
         )
+    rerun_plan = build_supplemental_rerun_plan(
+        b,
+        original_trials,
+        supplemental_trials=rerun_trials,
+    )
     effective_trials = _effective_trials(original_trials, rerun_trials)
     effective_summary = _summary_from_trials(effective_trials)
     effective_reward = _rollup_from_trials(effective_trials)
@@ -1370,6 +1554,8 @@ async def get_batch(
             for child in rerun_batches
         ],
         "rerunnable_failed_count": rerunnable_failed_count,
+        "rerun_plan": rerun_plan,
+        "final_trial_selection": rerun_plan["final_trial_selection"],
         "effective_trial_summary": effective_summary,
         "effective_result_status": _result_status_from_trials(effective_trials),
         "effective_aggregate_reward": effective_reward,
@@ -1406,11 +1592,18 @@ async def get_batch(
     if include_debug:
         llm_calls = await _llm_calls_for_trials(s, original_trials)
         worker_pool_names = await _worker_pool_names_for_trials(s, original_trials)
+        stale_running_decisions = await batch_stale_running_decisions(
+            s,
+            original_trials,
+            llm_calls=llm_calls,
+            settings=request.app.state.settings,
+        )
         debug_evidence = build_batch_debug_evidence(
             b,
             trials=original_trials,
             llm_calls=llm_calls,
             worker_pool_names_by_id=worker_pool_names,
+            stale_running_decisions_by_trial_id=stale_running_decisions,
         )
         extra["debug_evidence"] = debug_evidence
         extra["diagnosis"] = build_batch_diagnosis(
@@ -1431,6 +1624,7 @@ async def get_batch(
 
 @router.get("/batches/{batch_id}/debug")
 async def get_batch_debug(
+    request: Request,
     sc: SessionAndCtx,
     batch_id: UUID,
 ) -> dict[str, Any]:
@@ -1450,16 +1644,24 @@ async def get_batch_debug(
     trials = await _trial_projections_for_batch(s, batch_id)
     llm_calls = await _llm_calls_for_trials(s, trials)
     worker_pool_names = await _worker_pool_names_for_trials(s, trials)
+    stale_running_decisions = await batch_stale_running_decisions(
+        s,
+        trials,
+        llm_calls=llm_calls,
+        settings=request.app.state.settings,
+    )
     return build_batch_debug_evidence(
         b,
         trials=trials,
         llm_calls=llm_calls,
         worker_pool_names_by_id=worker_pool_names,
+        stale_running_decisions_by_trial_id=stale_running_decisions,
     )
 
 
 @router.get("/batches/{batch_id}/diagnosis")
 async def get_batch_diagnosis(
+    request: Request,
     sc: SessionAndCtx,
     batch_id: UUID,
 ) -> dict[str, Any]:
@@ -1479,15 +1681,83 @@ async def get_batch_diagnosis(
     trials = await _trial_projections_for_batch(s, batch_id)
     llm_calls = await _llm_calls_for_trials(s, trials)
     worker_pool_names = await _worker_pool_names_for_trials(s, trials)
+    stale_running_decisions = await batch_stale_running_decisions(
+        s,
+        trials,
+        llm_calls=llm_calls,
+        settings=request.app.state.settings,
+    )
     debug_evidence = build_batch_debug_evidence(
         b,
         trials=trials,
         llm_calls=llm_calls,
         worker_pool_names_by_id=worker_pool_names,
+        stale_running_decisions_by_trial_id=stale_running_decisions,
     )
     return build_batch_diagnosis(
         debug_evidence,
         trial_failures=trial_failure_records(trials),
+    )
+
+
+@router.get("/batches/{batch_id}/rerun-plan")
+async def get_batch_rerun_plan(
+    sc: SessionAndCtx,
+    batch_id: UUID,
+    task_id: Annotated[
+        list[str] | None,
+        Query(
+            description=(
+                "Optional task id filter. Repeat task_id to generate a plan "
+                "for an explicit supplemental task list."
+            )
+        ),
+    ] = None,
+    include_operator_approval: Annotated[
+        bool,
+        Query(
+            description=(
+                "Include operator-approval rows in supplemental_task_ids. "
+                "Defaults to false so only auto-safe rows are emitted."
+            )
+        ),
+    ] = False,
+) -> dict[str, Any]:
+    s, ctx = sc
+    require_scope(ctx, "read:own")
+    b = (
+        await s.execute(
+            select(Batch).where(Batch.id == batch_id),
+        )
+    ).scalar_one_or_none()
+    if b is None:
+        raise HTTPException(
+            status_code=404,
+            detail="batch not found",
+        )
+    require_team_or_admin(ctx, b.team_id)
+    original_trials = await _trial_projections_for_batch(s, batch_id)
+    child_batch_ids = (
+        (
+            await s.execute(
+                select(Batch.id).where(Batch.rerun_of_batch_id == batch_id),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    supplemental_trials: list[Any] = []
+    if child_batch_ids:
+        supplemental_trials = await _trial_projections_for_batch_ids(
+            s,
+            child_batch_ids,
+        )
+    return build_supplemental_rerun_plan(
+        b,
+        original_trials,
+        task_ids=task_id,
+        supplemental_trials=supplemental_trials,
+        include_operator_approval=include_operator_approval,
     )
 
 
@@ -1496,6 +1766,7 @@ async def rerun_failed_batch(
     request: Request,
     sc: SessionAndCtx,
     batch_id: UUID,
+    payload: _RerunFailedBatch | None = None,
 ) -> dict[str, Any]:
     s, ctx = sc
     try:
@@ -1533,23 +1804,7 @@ async def rerun_failed_batch(
             ),
         )
 
-    failed_trials = (
-        (
-            await s.execute(
-                select(Trial)
-                .where(
-                    and_(
-                        Trial.batch_id == batch_id,
-                        Trial.state == "failed",
-                        Trial.failure_reason.in_(sorted(_RERUNNABLE_FAILURE_REASONS)),
-                    ),
-                )
-                .order_by(Trial.task_id.asc(), Trial.combination_idx.asc(), Trial.sample_idx.asc()),
-            )
-        )
-        .scalars()
-        .all()
-    )
+    original_trials = await _trial_projections_for_batch(s, batch_id)
     child_batch_ids = (
         (
             await s.execute(
@@ -1559,27 +1814,24 @@ async def rerun_failed_batch(
         .scalars()
         .all()
     )
-    successful_rerun_keys: set[tuple[str, int, int]] = set()
+    supplemental_trials: list[Any] = []
     if child_batch_ids:
-        successful_rerun_keys = {
-            _trial_key(trial)
-            for trial in (
-                await s.execute(
-                    select(Trial).where(
-                        and_(
-                            Trial.batch_id.in_(child_batch_ids),
-                            Trial.state == "succeeded",
-                        ),
-                    ),
-                )
-            )
-            .scalars()
-            .all()
-        }
-        failed_trials = [
-            trial for trial in failed_trials if _trial_key(trial) not in successful_rerun_keys
-        ]
-    if not failed_trials:
+        supplemental_trials = await _trial_projections_for_batch_ids(
+            s,
+            child_batch_ids,
+        )
+    request_payload = payload or _RerunFailedBatch()
+    plan = build_supplemental_rerun_plan(
+        b,
+        original_trials,
+        task_ids=(request_payload.task_ids or None),
+        supplemental_trials=supplemental_trials,
+        include_operator_approval=request_payload.include_operator_approval,
+    )
+    selected_targets = list(plan["auto_safe"])
+    if request_payload.include_operator_approval:
+        selected_targets.extend(plan["operator_approval"])
+    if not selected_targets:
         _reject_submission(
             reason="invalid_input",
             status_code=400,
@@ -1588,15 +1840,15 @@ async def rerun_failed_batch(
 
     targets = [
         {
-            "task_id": trial.task_id,
-            "sample_idx": int(trial.sample_idx),
-            "combination_idx": int(trial.combination_idx),
-            "original_trial_id": str(trial.id),
-            "failure_reason": trial.failure_reason,
+            "task_id": target["task_id"],
+            "sample_idx": int(target["sample_idx"]),
+            "combination_idx": int(target["combination_idx"]),
+            "original_trial_id": target["original_trial_id"],
+            "failure_reason": target["failure_reason"],
         }
-        for trial in failed_trials
+        for target in selected_targets
     ]
-    task_ids = sorted({trial.task_id for trial in failed_trials})
+    task_ids = sorted({target["task_id"] for target in selected_targets})
     token_prefix = ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
     rerun = Batch(
         team_id=b.team_id,
@@ -1626,6 +1878,7 @@ async def rerun_failed_batch(
         "state": rerun.state,
         "created_at": rerun.created_at.isoformat(),
         "rerun_target_count": len(targets),
+        "rerun_plan": plan,
     }
 
 

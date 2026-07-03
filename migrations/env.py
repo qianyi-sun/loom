@@ -18,9 +18,12 @@ if config.config_file_name is not None:
     # attachment to project loggers like `loom_worker.trial_runner`.
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
-db_url = os.environ.get("LOOM_DB_URL")
+configured_url = config.get_main_option("sqlalchemy.url")
+db_url = configured_url or os.environ.get("LOOM_DB_URL")
 if not db_url:
-    raise RuntimeError("LOOM_DB_URL must be set to run migrations")
+    raise RuntimeError(
+        "sqlalchemy.url or LOOM_DB_URL must be set to run migrations",
+    )
 config.set_main_option("sqlalchemy.url", db_url)
 
 target_metadata = Base.metadata

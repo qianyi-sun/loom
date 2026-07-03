@@ -250,6 +250,167 @@ async def test_post_batch_materializes_count(
     assert detail_body["submitted_by_user"]["team_id"] == str(team_id)
 
 
+def _insert_budget_provider(
+    postgres_url: str,
+    team_id: UUID,
+    *,
+    pricing_source: str = "operator-supplied",
+    pricing_data: dict[str, float] | None = None,
+    rate_card_provider: str | None = None,
+) -> UUID:
+    provider_connection_id = uuid4()
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(ProviderConnection).values(
+                id=provider_connection_id,
+                team_id=team_id,
+                provider_type="openai-compatible",
+                display_name=f"budget-provider-{provider_connection_id.hex[:8]}",
+                base_url="https://budget-provider.example/v1",
+                upstream_host="budget-provider.example",
+                encrypted_api_key_ref="env:BUDGET_PROVIDER_KEY",
+                pricing_source=pricing_source,
+                pricing_data=pricing_data
+                if pricing_data is not None
+                else (
+                    {
+                        "input_usd_per_1m": 1.0,
+                        "output_usd_per_1m": 0.0,
+                    }
+                    if pricing_source == "operator-supplied"
+                    else None
+                ),
+                rate_card_provider=rate_card_provider,
+                created_by="test:budget",
+                status="valid",
+            )
+        )
+    sync_engine.dispose()
+    return provider_connection_id
+
+
+async def test_post_batch_soft_budget_requires_confirmation_when_estimate_exceeds(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    provider_connection_id = _insert_budget_provider(postgres_url, team_id)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "soft-budget-needs-confirm",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {},
+                "provider_connection_id": str(provider_connection_id),
+                "provider_model_id": "glm-5.1-thinking",
+                "budget_usd": 1.0,
+                "budget_policy": "soft",
+            },
+        )
+
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert detail["reason"] == "batch_budget_confirmation_required"
+    assert detail["budget"]["budget_policy"] == "soft"
+    assert detail["budget"]["budget_usd"] == pytest.approx(1.0)
+    assert detail["budget"]["pre_run_estimated_cost_usd"] == pytest.approx(3.0)
+    assert detail["budget"]["cost_estimate_source"] == "operator-supplied"
+    assert detail["budget"]["cost_estimate_confidence"] == "configured"
+
+
+async def test_post_batch_hard_budget_rejects_when_estimate_exceeds(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    provider_connection_id = _insert_budget_provider(postgres_url, team_id)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "hard-budget-reject",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {},
+                "provider_connection_id": str(provider_connection_id),
+                "provider_model_id": "glm-5.1-thinking",
+                "budget_usd": 1.0,
+                "budget_policy": "hard",
+            },
+        )
+        listed = await ac.get(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert detail["reason"] == "batch_budget_exceeded"
+    assert detail["budget"]["pre_run_estimated_cost_usd"] == pytest.approx(3.0)
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["items"] == []
+
+
+async def test_post_batch_confirmed_soft_budget_persists_budget_projection(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    provider_connection_id = _insert_budget_provider(postgres_url, team_id)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "confirmed-soft-budget",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {},
+                "provider_connection_id": str(provider_connection_id),
+                "provider_model_id": "glm-5.1-thinking",
+                "budget_usd": 1.0,
+                "budget_policy": "soft",
+                "budget_confirmed": True,
+            },
+        )
+        detail = await ac.get(
+            f"/api/v1/batches/{r.json().get('batch_id')}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["budget_usd"] == pytest.approx(1.0)
+    assert body["budget_policy"] == "soft"
+    assert body["pre_run_estimated_cost_usd"] == pytest.approx(3.0)
+    assert body["budget_remaining_usd"] == pytest.approx(1.0)
+    assert body["budget_status"] == "soft_over_pre_run_estimate"
+
+    assert detail.status_code == 200, detail.text
+    detail_body = detail.json()
+    assert detail_body["budget_usd"] == pytest.approx(1.0)
+    assert detail_body["budget_policy"] == "soft"
+    assert detail_body["pre_run_estimated_cost_usd"] == pytest.approx(3.0)
+    assert detail_body["budget_remaining_usd"] == pytest.approx(1.0)
+
+
 async def test_legacy_team_token_cannot_create_batch(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
@@ -2597,6 +2758,234 @@ async def test_rerun_failed_batch_creates_linked_exact_targets(
             "sample_idx": 1,
             "combination_idx": 0,
             "original_trial_id": str(failed_trial_id),
+            "failure_reason": "gateway_error",
+        }
+    ]
+
+
+async def test_batch_rerun_plan_classifies_score_task_and_platform_outcomes(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="source-useful-main",
+                task_filter={
+                    "task_ids": [
+                        "local/mit-0",
+                        "local/mit-1",
+                        "local/apache-0",
+                        "local/apache-1",
+                    ],
+                    "subset_kind": "explicit",
+                },
+                trial_config={},
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=4,
+                result_status="partial_failed",
+                finished_at=datetime.now(UTC),
+            )
+        )
+        conn.execute(
+            insert(Trial),
+            [
+                {
+                    "id": uuid4(),
+                    "task_id": "local/mit-0",
+                    "team_id": team_id,
+                    "state": "failed",
+                    "failure_reason": "gateway_error",
+                    "failure_message": "gateway 503",
+                    "config": {},
+                    "requires_caps": {},
+                    "submitted_at": datetime.now(UTC),
+                    "batch_id": batch_id,
+                    "sample_idx": 0,
+                    "combination_idx": 0,
+                    "result": None,
+                },
+                {
+                    "id": uuid4(),
+                    "task_id": "local/mit-1",
+                    "team_id": team_id,
+                    "state": "failed",
+                    "failure_reason": "verifier_timeout",
+                    "failure_message": "verifier exceeded timeout",
+                    "config": {},
+                    "requires_caps": {},
+                    "submitted_at": datetime.now(UTC),
+                    "batch_id": batch_id,
+                    "sample_idx": 0,
+                    "combination_idx": 0,
+                    "result": None,
+                },
+                {
+                    "id": uuid4(),
+                    "task_id": "local/apache-0",
+                    "team_id": team_id,
+                    "state": "failed",
+                    "failure_reason": "task_compatibility",
+                    "failure_message": "task bundle is incompatible",
+                    "config": {},
+                    "requires_caps": {},
+                    "submitted_at": datetime.now(UTC),
+                    "batch_id": batch_id,
+                    "sample_idx": 0,
+                    "combination_idx": 0,
+                    "result": None,
+                },
+                {
+                    "id": uuid4(),
+                    "task_id": "local/apache-1",
+                    "team_id": team_id,
+                    "state": "succeeded",
+                    "failure_reason": None,
+                    "failure_message": None,
+                    "config": {},
+                    "requires_caps": {},
+                    "submitted_at": datetime.now(UTC),
+                    "batch_id": batch_id,
+                    "sample_idx": 0,
+                    "combination_idx": 0,
+                    "result": {"aggregate_reward": 0.0},
+                },
+            ],
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        r = await ac.get(
+            f"/api/v1/batches/{batch_id}/rerun-plan",
+            headers={"Authorization": f"Bearer {raw}"},
+            params=[
+                ("task_id", "local/apache-1"),
+                ("task_id", "local/mit-0"),
+                ("task_id", "local/mit-1"),
+                ("task_id", "local/apache-0"),
+            ],
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["supplemental_task_ids"] == ["local/mit-0"]
+    assert [item["task_id"] for item in body["auto_safe"]] == ["local/mit-0"]
+    assert [item["task_id"] for item in body["operator_approval"]] == ["local/mit-1"]
+    assert [item["task_id"] for item in body["not_rerunnable"]] == [
+        "local/apache-0",
+        "local/apache-1",
+    ]
+    assert body["not_rerunnable"][1]["failure_class"] == "score_failure"
+    assert body["not_rerunnable"][1]["platform_outcome"] == "success"
+    assert body["summary"] == {
+        "auto_safe": 1,
+        "operator_approval": 1,
+        "not_rerunnable": 2,
+        "already_covered": 0,
+        "selected_final_trials": 4,
+    }
+
+
+async def test_rerun_failed_batch_accepts_task_ids_and_returns_plan(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+    auto_safe_trial_id = uuid4()
+    task_failure_trial_id = uuid4()
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="mixed-failures",
+                task_filter={
+                    "task_ids": ["local/mit-0", "local/apache-0"],
+                    "subset_kind": "explicit",
+                },
+                trial_config={},
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=2,
+                result_status="all_failed",
+                finished_at=datetime.now(UTC),
+            )
+        )
+        conn.execute(
+            insert(Trial),
+            [
+                {
+                    "id": auto_safe_trial_id,
+                    "task_id": "local/mit-0",
+                    "team_id": team_id,
+                    "state": "failed",
+                    "failure_reason": "gateway_error",
+                    "failure_message": "gateway 503",
+                    "config": {},
+                    "requires_caps": {},
+                    "submitted_at": datetime.now(UTC),
+                    "batch_id": batch_id,
+                    "sample_idx": 0,
+                    "combination_idx": 0,
+                    "result": None,
+                },
+                {
+                    "id": task_failure_trial_id,
+                    "task_id": "local/apache-0",
+                    "team_id": team_id,
+                    "state": "failed",
+                    "failure_reason": "task_compatibility",
+                    "failure_message": "task bundle is incompatible",
+                    "config": {},
+                    "requires_caps": {},
+                    "submitted_at": datetime.now(UTC),
+                    "batch_id": batch_id,
+                    "sample_idx": 0,
+                    "combination_idx": 0,
+                    "result": None,
+                },
+            ],
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        r = await ac.post(
+            f"/api/v1/batches/{batch_id}/rerun-failed",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"task_ids": ["local/apache-0", "local/mit-0"]},
+        )
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["rerun_plan"]["supplemental_task_ids"] == ["local/mit-0"]
+    assert body["rerun_plan"]["summary"]["not_rerunnable"] == 1
+    assert body["rerun_plan"]["auto_safe"][0]["failure_class"] == "platform_failure"
+    rerun_batch_id = UUID(body["batch_id"])
+
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        row = s.execute(
+            select(Batch).where(Batch.id == rerun_batch_id),
+        ).scalar_one()
+    sync_engine.dispose()
+
+    assert row.rerun_targets == [
+        {
+            "task_id": "local/mit-0",
+            "sample_idx": 0,
+            "combination_idx": 0,
+            "original_trial_id": str(auto_safe_trial_id),
             "failure_reason": "gateway_error",
         }
     ]

@@ -159,7 +159,7 @@ default_per_service = { control-plane = 9090, llm-gateway = 9101, worker = 9090 
 # ─── control-plane only ───
 
 [service_config.worker_heartbeat_expiry_sec]
-used_by     = ["control-plane"]
+used_by     = ["control-plane", "loom-service"]
 python_type = "int"
 default     = 120
 
@@ -173,6 +173,30 @@ used_by     = ["control-plane"]
 python_type = "int"
 default     = 300
 description = "Seconds before the crash detector reclaims a trial stuck in claimed with no started_at while the owning worker is still fresh."
+
+[service_config.stale_running_trial_reclaim_enabled]
+used_by     = ["control-plane", "loom-service"]
+python_type = "bool"
+default     = true
+description = "Enable the conservative #378 stale-running reclaim sweep. The sweep only fails running trials whose worker heartbeat is still fresh, runtime exceeds the effective agent timeout backstop, and trial events/LLM calls have been silent beyond the configured silence window."
+
+[service_config.stale_running_trial_timeout_multiplier]
+used_by     = ["control-plane", "loom-service"]
+python_type = "float"
+default     = 3.0
+description = "Multiplier applied to the effective agent timeout for the control-plane stale-running reclaim decision (#378). The CP uses this with stale_running_trial_grace_sec and only reclaims when the worker heartbeat is fresh."
+
+[service_config.stale_running_trial_grace_sec]
+used_by     = ["control-plane", "loom-service"]
+python_type = "float"
+default     = 900.0
+description = "Additive grace for the control-plane stale-running reclaim deadline (#378). Default is intentionally larger than the worker hard-deadline grace so the worker normally records the terminal diagnostic first."
+
+[service_config.stale_running_trial_silence_sec]
+used_by     = ["control-plane", "loom-service"]
+python_type = "float"
+default     = 900.0
+description = "Required silence window for stale-running reclaim (#378). A running trial is not failed while it has recent trial_events or llm_calls activity inside this window, even if runtime already exceeds the timeout backstop."
 
 [service_config.signed_url_expiry_sec]
 used_by     = ["control-plane", "loom-service"]
@@ -510,6 +534,24 @@ used_by     = ["loom-service"]
 python_type = "SecretStr"
 secret      = { key = "batch-runner-cp-token" }
 # no required, no default → `SecretStr | None = None`
+
+[service_config.batch_budget_estimate_llm_calls_per_trial]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 1
+description = "Pre-run batch budget estimate assumption for model calls per trial. Actual live/final accounting still uses llm_calls rows."
+
+[service_config.batch_budget_estimate_input_tokens_per_call]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 1000000
+description = "Pre-run batch budget estimate assumption for prompt/input tokens per LLM call. Operators can tune this conservative default per deployment."
+
+[service_config.batch_budget_estimate_output_tokens_per_call]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 0
+description = "Pre-run batch budget estimate assumption for completion/output tokens per LLM call. Actual live/final accounting uses provider-reported tokens."
 
 [service_config.taskset_materializer_poll_interval_sec]
 used_by     = ["loom-service"]

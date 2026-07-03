@@ -26,6 +26,7 @@ from loom.db.schema import (
     TeamQuota,
     Token,
     Trial,
+    User,
     Worker,
 )
 from loom_service import agent_catalog
@@ -99,11 +100,19 @@ async def setup(
     )
 
     team_id = uuid4()
+    user_id = uuid4()
     raw = f"loom_team_{uuid4().hex}"
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+        s.execute(insert(User).values(
+            id=user_id,
+            username=f"BatchComboUser-{user_id.hex[:8]}",
+            username_normalized=f"batch-combo-user-{user_id.hex[:8]}",
+            status="active",
+            is_platform_admin=False,
+        ))
         s.execute(insert(TeamQuota).values(team_id=team_id))
         s.execute(
             insert(Token).values(
@@ -111,6 +120,7 @@ async def setup(
                 type="team",
                 scopes=["submit", "read:own"],
                 team_id=team_id,
+                created_by_user_id=user_id,
                 issued_at=datetime.now(UTC),
             )
         )
@@ -160,6 +170,7 @@ async def setup(
             s.execute(delete(Token))
             s.execute(delete(Worker))
             s.execute(delete(TeamQuota))
+            s.execute(delete(User).where(User.id == user_id))
             s.execute(delete(Team))
             s.execute(delete(RateCard))
             s.commit()
