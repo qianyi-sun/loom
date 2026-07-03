@@ -179,6 +179,7 @@ spec:
         - { port: {{ target.port }}, protocol: TCP }
 {% endfor %}
 
+{% if k8s_worker.enabled %}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -217,6 +218,7 @@ spec:
       ports:
         - { port: 53, protocol: UDP }
         - { port: 53, protocol: TCP }
+{% endif %}
 
 ---
 apiVersion: networking.k8s.io/v1

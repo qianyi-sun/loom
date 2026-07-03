@@ -101,6 +101,7 @@ def audit_boundary(
     # pass 1, then in pass 2 flag any required component without
     # coverage.
     np_covered_apps: set[str] = set()
+    observed_workloads: set[str] = set()
 
     for doc in yaml.safe_load_all(yaml_text):
         if not doc:
@@ -114,6 +115,7 @@ def audit_boundary(
             violations.extend(_audit_ingress(doc, name, allowlist))
         elif kind in ("Deployment", "StatefulSet", "DaemonSet"):
             violations.extend(_audit_pod_template(doc, kind, name))
+            observed_workloads.add(name)
         elif kind == "NetworkPolicy":
             np_covered_apps |= _network_policy_selected_apps(doc)
 
@@ -121,8 +123,14 @@ def audit_boundary(
         # Pass 2: every required component MUST be selected by at
         # least one NetworkPolicy. A pod without any NetworkPolicy
         # selecting it gets k8s's default allow-all behavior, which
-        # is exactly the boundary we want to enforce.
-        missing = _REQUIRES_NETWORK_POLICY - np_covered_apps
+        # is exactly the boundary we want to enforce. Components that
+        # were legitimately omitted from the render (e.g.
+        # `loom-worker` on profiles with `k8s_worker.enabled=false`
+        # per #383) don't need a policy because there's no pod to
+        # protect — restrict the check to workloads actually present.
+        missing = (
+            _REQUIRES_NETWORK_POLICY & observed_workloads
+        ) - np_covered_apps
         for app in sorted(missing):
             violations.append(BoundaryViolation(
                 kind="missing-network-policy",

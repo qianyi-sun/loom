@@ -179,6 +179,7 @@ def build_release_manifest(
             "path": str(config_path) if config_path is not None else None,
             "sha256": _sha256_bytes(config_bytes),
             "namespace": config.namespace,
+            "k8s_worker_enabled": config.k8s_worker.enabled,
         },
         "rendered_manifest": {
             "sha256": _sha256_text(rendered_manifests),

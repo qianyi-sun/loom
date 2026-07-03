@@ -220,6 +220,19 @@ connections between environments, and do not reuse worker tokens across
 environments. Remote OLDLAB/Lux capacity attaches behind the environment's own
 worker token and service URLs; it does not own production control-plane state.
 
+**OLDLAB x86 execution capacity is Slurm-managed, not in-cluster.**
+Public-beta, staging, and production profiles render with
+`k8s_worker.enabled=false` (#383). On these clusters, the in-cluster
+`loom-worker` Deployment is not present and `POST /api/v1/batches`
+rejects submissions whose `required_worker_pools` list contains
+`k8s-worker` — use `oldlab` for x86_64 required-pool coverage
+instead. Never scale up an in-cluster `loom-worker` on a host that
+also participates in the Slurm-managed `oldlab` pool: k8s and Slurm
+reservations do not coordinate, and the shared host Docker daemon
+will over-subscribe. Local kind clusters (`development` profile)
+keep `enabled=true` because there is no external Slurm to share
+with.
+
 ## At-a-glance: deploy a fresh cluster
 
 The fastest path uses the `loom cluster` CLI (shipped via #76). Install

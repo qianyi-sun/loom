@@ -669,8 +669,19 @@ def test_audit_passes_when_all_components_have_network_policy() -> None:
 
 def test_audit_partial_coverage_flags_only_missing_components() -> None:
     """Coverage check is per-component — only the uncovered ones get
-    flagged."""
+    flagged. Components that aren't present as workloads in the
+    manifest are exempt from the check because there is no pod to
+    protect (#383 relaxed the rule for `k8s_worker.enabled=false`)."""
     yaml_text = (
+        "apiVersion: apps/v1\nkind: Deployment\n"
+        "metadata: { name: loom-control-plane }\nspec: {}\n"
+        "---\n"
+        "apiVersion: apps/v1\nkind: Deployment\n"
+        "metadata: { name: loom-worker }\nspec: {}\n"
+        "---\n"
+        "apiVersion: apps/v1\nkind: StatefulSet\n"
+        "metadata: { name: loom-postgres }\nspec: {}\n"
+        "---\n"
         "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\n"
         "metadata: { name: loom-postgres }\n"
         "spec:\n  podSelector:\n    matchLabels: { app: loom-postgres }\n"
@@ -709,7 +720,27 @@ def test_audit_network_policy_with_non_app_selector_ignored() -> None:
     matches reality: future operator-added policies on third-party
     selectors shouldn't accidentally satisfy the loom-component
     coverage requirement."""
+    # Include all _REQUIRES_NETWORK_POLICY workloads as Deployments/
+    # StatefulSets/DaemonSets so the audit exercises them, then attach
+    # only the non-app-selector NetworkPolicy which should NOT count
+    # as coverage for any of them.
     yaml_text = (
+        "apiVersion: apps/v1\nkind: Deployment\n"
+        "metadata: { name: loom-control-plane }\nspec: {}\n---\n"
+        "apiVersion: apps/v1\nkind: Deployment\n"
+        "metadata: { name: loom-llm-gateway }\nspec: {}\n---\n"
+        "apiVersion: apps/v1\nkind: Deployment\n"
+        "metadata: { name: loom-service }\nspec: {}\n---\n"
+        "apiVersion: apps/v1\nkind: Deployment\n"
+        "metadata: { name: loom-web }\nspec: {}\n---\n"
+        "apiVersion: apps/v1\nkind: Deployment\n"
+        "metadata: { name: loom-worker }\nspec: {}\n---\n"
+        "apiVersion: apps/v1\nkind: StatefulSet\n"
+        "metadata: { name: loom-postgres }\nspec: {}\n---\n"
+        "apiVersion: apps/v1\nkind: StatefulSet\n"
+        "metadata: { name: loom-minio }\nspec: {}\n---\n"
+        "apiVersion: apps/v1\nkind: DaemonSet\n"
+        "metadata: { name: loom-gateway-router }\nspec: {}\n---\n"
         "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\n"
         "metadata: { name: other }\n"
         "spec:\n  podSelector:\n    matchLabels: { team: research }\n"

@@ -87,6 +87,10 @@ if TYPE_CHECKING:
         memory_limit: str = "16Gi"
 
     @dataclass(frozen=True)
+    class _K8s_workerConfig:
+        enabled: bool = False
+
+    @dataclass(frozen=True)
     class ClusterConfig:
         image_tag: str = "0.7"
         ingress_cert_manager_cluster_issuer: str = ""
@@ -94,6 +98,7 @@ if TYPE_CHECKING:
         ingress_host: str = "loom.example.com"
         ingress_tls_secret_name: str = "loom-tls"
         artifacts_bucket: str = "artifacts"
+        k8s_worker: _K8s_workerConfig = field(default_factory=_K8s_workerConfig)
         minio_image: str = "minio/minio"
         minio_storage_gi: int = 500
         namespace: str = "loom"

@@ -183,9 +183,19 @@ MinIO bucket lifecycle: `AbortIncompleteMultipartUpload after 7 days` for non-tr
 
 ## Component map
 
+The `loom-worker` component below is optional and controlled by the
+render toggle `k8s_worker.enabled` in `config/cluster-config.toml`.
+Profiles that share OLDLAB hosts with Slurm (`staging`, `production`,
+public-beta) ship with `enabled=false` — the loom-worker Deployment
+and its NetworkPolicy are omitted, and trial execution capacity comes
+from the Slurm-managed `oldlab` pool instead. See #383 for the
+rationale (avoiding double-scheduling of the host Docker daemon
+between k8s and Slurm). The `development` profile (local kind
+clusters) keeps `enabled=true` because there is no external Slurm.
+
 | Component | Form | Lives where | Responsibility |
 |---|---|---|---|
-| `loom-worker` | DaemonSet (one pod per worker node) | `loom` namespace | Spawns sandboxes via docker.sock; manages per-trial Docker bridges + singleton lifecycle; writes step-JWT files; trajectory write-through; bench-cache read-through. |
+| `loom-worker` | DaemonSet (one pod per worker node) — rendered only when `k8s_worker.enabled=true` (#383) | `loom` namespace | Spawns sandboxes via docker.sock; manages per-trial Docker bridges + singleton lifecycle; writes step-JWT files; trajectory write-through; bench-cache read-through. |
 | `loom-llm-gateway-sandbox` | Worker-spawned Docker container (one per worker node) | Host Docker; NOT a k8s pod | TLS-terminates sandbox traffic; validates step-JWT; forwards to gateway-router. Worker manages lifecycle via `docker events`. |
 | `loom-gateway-router` | DaemonSet (one pod per worker node, hostPort 30443) | `loom` namespace | TCP proxy: `host:30443` → in-cluster `loom-llm-gateway.loom.svc:9100`. |
 | `loom-llm-gateway` | Deployment (≥2 replicas) | `loom` namespace | Provider-facade routes (`/openai/v1/...`, `/anthropic/v1/...`) plus BYO OpenAI-compatible `/v1/chat/completions` and `/v1/responses`; resolves `provider_connection_id`; decrypts API key; forwards through the egress proxy. |

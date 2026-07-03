@@ -176,6 +176,33 @@ def _normalize_required_worker_pools(values: Sequence[str]) -> list[str]:
     return pools
 
 
+def _reject_if_k8s_worker_unavailable(
+    request: Request,
+    required_worker_pools: Sequence[str],
+) -> None:
+    """Fail-loudly gate for #383. When the cluster's
+    `k8s_worker.enabled` render toggle is false, the k8s loom-worker
+    Deployment is not rendered, so `k8s-worker` pool coverage cannot
+    be satisfied. Reject up front instead of accepting a submission
+    whose coverage trial will queue forever.
+    """
+    if "k8s-worker" not in required_worker_pools:
+        return
+    settings = request.app.state.settings
+    if settings.k8s_worker_enabled:
+        return
+    _reject_submission(
+        reason="k8s_worker_unavailable",
+        status_code=400,
+        detail=(
+            "required_worker_pool 'k8s-worker' is not available on this "
+            "cluster: k8s_worker.enabled=false in the deployed profile "
+            "(#383). Use 'oldlab' for x86_64 coverage or 'gb10-arm64' "
+            "for arm64 coverage."
+        ),
+    )
+
+
 def _reject_submission(
     *,
     reason: str,
@@ -441,6 +468,7 @@ async def create_batch(
     required_worker_pools = _normalize_required_worker_pools(
         payload.required_worker_pools,
     )
+    _reject_if_k8s_worker_unavailable(request, required_worker_pools)
 
     if payload.combinations:
         # Multi-combination batch. trial_config MUST NOT carry
@@ -1489,6 +1517,7 @@ async def rerun_failed_batch(
         )
     require_team_or_admin(ctx, b.team_id)
     await _reject_if_team_paused(s, b.team_id)
+    _reject_if_k8s_worker_unavailable(request, b.required_worker_pools or [])
 
     active_backends = await get_active_backends(s)
     if b.backend not in active_backends:

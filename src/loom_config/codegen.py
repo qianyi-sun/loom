@@ -145,11 +145,22 @@ def _render_render_value(entry: RenderConfigEntry) -> str:
     if py == "table":
         assert entry.fields is not None
         sub = "\n".join(
-            f"{k} = {_literal(v, _guess_py(v))}"
+            f"{k} = {_toml_literal(v, _guess_py(v))}"
             for k, v in entry.fields.items()
         )
         return f"\n[{entry.name}]\n{sub}\n"
-    return f"{entry.name} = {_literal(entry.default, py)}\n"
+    return f"{entry.name} = {_toml_literal(entry.default, py)}\n"
+
+
+def _toml_literal(value: Any, py: str) -> str:
+    """TOML-cased literal for cluster-config.example.toml output.
+
+    Diverges from `_literal` only in that TOML requires lowercase
+    `true`/`false` where Python source uses `True`/`False`.
+    """
+    if py == "bool":
+        return "true" if value else "false"
+    return _literal(value, py)
 
 
 def _guess_py(value: Any) -> str:

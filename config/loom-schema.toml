@@ -723,6 +723,12 @@ python_type = "int"
 default     = 1
 description = "Maximum concurrent layered trial-cache image builds allowed for the same worker daemon group. Workers coordinate daemon-wide synthetic slots through active_trial_cache_builds using pool_name, hostname, and docker_socket as the daemon fingerprint. Keep 1 for shared OLDLAB/k8s Docker daemons; raise only for isolated daemon hosts."
 
+[service_config.k8s_worker_enabled]
+used_by     = ["loom-service"]
+python_type = "bool"
+default     = true
+description = "Whether the k8s loom-worker Deployment is rendered on this cluster (#383). When false, POST /api/v1/batches rejects submissions whose required_worker_pools list contains 'k8s-worker' because that pool cannot exist on this cluster. Rendered by cluster-render from k8s_worker.enabled in the profile config."
+
 # ─── non-codegen secrets: keys mounted from loom-secrets without Settings fields ───
 # Not Pydantic fields — bootstrap-secrets covers them, doctor verifies them,
 # but no codegen Settings field is emitted. Use this for third-party containers
@@ -834,3 +840,18 @@ python_type = "table"
 # scaled to zero. Operators flip both to 1+ when enabling sandbox-
 # isolated egress.
 fields      = { service = 2, control_plane = 2, gateway = 2, web = 0, worker = 3, egress_xds = 0, egress_proxy = 0 }
+
+[render_config.k8s_worker]
+python_type = "table"
+# enabled=false is the safe default so profiles that share OLDLAB
+# hosts with Slurm do not double-schedule the host Docker daemon
+# (#383). The `development` profile explicitly flips this back to
+# true because local kind clusters have no external Slurm capacity;
+# k8s workers ARE the trial execution path there. `staging`,
+# `production`, and public-beta ship with the default and rely on
+# Slurm-managed pools for x86 trial execution. Toggling this to
+# false omits the loom-worker Deployment YAML entirely from the
+# rendered manifest and causes `POST /api/v1/batches` to reject
+# submissions whose `required_worker_pools` list contains
+# `k8s-worker`.
+fields      = { enabled = false }

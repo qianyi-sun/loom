@@ -3,3 +3,9 @@ ingress_host = "staging.yylx.world"
 ingress_tls_secret_name = "loom-staging-tls"
 trajectories_bucket = "loom-staging-trajectories"
 artifacts_bucket = "loom-staging-artifacts"
+
+# Trial execution capacity comes from Slurm-managed pools (`oldlab`,
+# `gb10-arm64`); the in-cluster loom-worker Deployment is omitted to
+# avoid double-scheduling the OLDLAB host Docker daemon. See #383.
+[k8s_worker]
+enabled = false
