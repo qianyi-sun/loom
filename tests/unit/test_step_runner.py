@@ -313,6 +313,14 @@ async def test_run_step_records_verifier_timeout_as_structured_result(
     assert sr.verifier_result.error.kind == "timeout"
     assert sr.verifier_result.error.detail["timeout_sec"] == 0.01
     assert sr.verifier_result.error.detail["step_name"] == "main"
+    # #377: verifier-timeout evidence now includes elapsed_sec and a
+    # best-effort in-sandbox probe so operators can distinguish
+    # "stuck in a wait" from "task genuinely too slow" from "harness
+    # bug" without a rerun.
+    assert "elapsed_sec" in sr.verifier_result.error.detail
+    assert sr.verifier_result.error.detail["elapsed_sec"] >= 0.0
+    assert "post_mortem_probe" in sr.verifier_result.error.detail
+    assert isinstance(sr.verifier_result.error.detail["post_mortem_probe"], str)
 
 
 async def test_run_step_skip_verifier(context: TrialContext):
