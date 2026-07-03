@@ -329,6 +329,59 @@ async def test_requeue_trial_retry_returns_false_after_trial_started(  # type: i
         await http.aclose()
 
 
+async def test_requeue_trial_retry_returns_false_when_team_attempt_budget_exhausted(  # type: ignore[no-untyped-def]
+    cp_setup, postgres_url,
+):
+    app, raw = cp_setup
+    cp, http = await _client(app, raw)
+    try:
+        info = await cp.register(hostname="h", version="v", capabilities=_CAPS)
+        wid = UUID(info["worker_id"])
+
+        team_id = uuid4()
+        trial_id = uuid4()
+        engine = create_engine(postgres_url)
+        with engine.begin() as conn:
+            conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+            conn.execute(insert(TeamQuota).values(team_id=team_id, max_attempts=1))
+            conn.execute(insert(Task).values(
+                id="t", checksum="0" * 64, config={},
+            ))
+            conn.execute(insert(Trial).values(
+                id=trial_id, team_id=team_id, task_id="t",
+                config={}, requires_caps={}, state="claimed",
+                worker_id=wid, attempt_count=1,
+            ))
+
+        assert await cp.requeue_trial_retry(
+            trial_id=trial_id,
+            worker_id=wid,
+            failure_reason="provider_transport_disconnect",
+            failure_message="Server disconnected without sending a response.",
+            retry_after_sec=0.0,
+        ) is False
+
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(
+                    Trial.state,
+                    Trial.worker_id,
+                    Trial.attempt_count,
+                    Trial.failure_reason,
+                    Trial.next_attempt_at,
+                ).where(Trial.id == trial_id)
+            ).one()
+        engine.dispose()
+
+        assert row.state == "claimed"
+        assert row.worker_id == wid
+        assert row.attempt_count == 1
+        assert row.failure_reason is None
+        assert row.next_attempt_at is None
+    finally:
+        await http.aclose()
+
+
 async def test_get_task_bundle_returns_config(  # type: ignore[no-untyped-def]
     cp_setup, postgres_url,
 ):

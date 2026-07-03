@@ -23,18 +23,21 @@ router = APIRouter()
 _WORKER_HEARTBEAT_STATUSES = {"active", "idle-exit", "shutting-down"}
 
 _REQUEUE_TRIAL_RETRY_SQL = text("""
-UPDATE trials
+UPDATE trials t
    SET state = 'queued',
        worker_id = NULL,
        failure_reason = (:failure_reason)::text,
        failure_message = (:failure_message)::text,
        next_attempt_at = NOW() + (:retry_after_sec)::double precision
                          * INTERVAL '1 second'
- WHERE id = (:trial_id)::uuid
-   AND worker_id = (:worker_id)::uuid
-   AND state = 'claimed'
-   AND started_at IS NULL
- RETURNING id;
+  FROM team_quotas q
+ WHERE t.id = (:trial_id)::uuid
+   AND t.worker_id = (:worker_id)::uuid
+   AND t.state = 'claimed'
+   AND t.started_at IS NULL
+   AND q.team_id = t.team_id
+   AND t.attempt_count < q.max_attempts
+ RETURNING t.id;
 """)
 
 
