@@ -1253,6 +1253,9 @@ async def test_clone_config_uses_destination_provider_and_records_provenance(
     assert body["provider_connection_id"] == str(conn_b)
     assert body["provider_connection_id"] != str(conn_a)
     assert body["source_provenance"][0]["source_batch_id"] == str(batch_shared)
+    # #401 PR-3: source batch has no explicit `retry` → mismatch is null;
+    # cloned trials will inherit current deployment defaults at submit.
+    assert body["retry_default_snapshot_mismatch"] is None
     assert mutation.status_code == 403
 
     sync_engine = create_engine(str(postgres_url))
@@ -1267,6 +1270,71 @@ async def test_clone_config_uses_destination_provider_and_records_provenance(
         assert row.provider_connection_id != conn_a
         assert row.source_provenance[0]["source_batch_id"] == str(batch_shared)
     sync_engine.dispose()
+
+
+async def test_clone_config_surfaces_retry_default_mismatch(
+    run_library_setup: dict[str, object],
+) -> None:
+    """#401 PR-3: source batch with explicit RetryPolicy that diverges from
+    current deployment defaults surfaces a `retry_default_snapshot_mismatch`
+    payload so the SPA can warn the operator before they run the clone."""
+    app = run_library_setup["app"]
+    raw_b = run_library_setup["raw_b"]
+    batch_shared = run_library_setup["batch_shared"]
+    conn_b = run_library_setup["conn_b"]
+    postgres_url = run_library_setup["postgres_url"]
+
+    # Patch the source batch's trial_config to carry an explicit retry policy
+    # that differs from the current cluster defaults.
+    sync_engine = create_engine(str(postgres_url))
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        row = s.execute(
+            select(Batch).where(Batch.id == batch_shared),
+        ).scalar_one()
+        patched = dict(row.trial_config)
+        patched["retry"] = {
+            "max_attempts": 7,
+            "retry_on": ["worker_crash", "agent_timeout"],
+            "backoff": {
+                "base_sec": 5.0, "max_sec": 60.0,
+                "multiplier": 3.0, "jitter": 0.5,
+            },
+        }
+        s.execute(
+            Batch.__table__.update()
+            .where(Batch.id == batch_shared)
+            .values(trial_config=patched),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        cloned = await ac.post(
+            f"/api/v1/run-library/batches/{batch_shared}/clone-config",
+            json={
+                "name": "beta clone with retry mismatch",
+                "provider_connection_id": str(conn_b),
+            },
+            headers={"Authorization": f"Bearer {raw_b}"},
+        )
+
+    assert cloned.status_code == 201, cloned.text
+    mismatch = cloned.json()["retry_default_snapshot_mismatch"]
+    assert mismatch is not None
+    assert mismatch["source"]["max_attempts"] == 7
+    assert mismatch["source"]["retry_on"] == ["agent_timeout", "worker_crash"]
+    assert mismatch["source"]["backoff"] == {
+        "base_sec": 5.0, "max_sec": 60.0,
+        "multiplier": 3.0, "jitter": 0.5,
+    }
+    assert mismatch["current"]["max_attempts"] == 3
+    assert mismatch["current"]["retry_on"] == [
+        "gateway_error", "provider_transport_disconnect",
+    ]
 
 
 async def test_legacy_team_token_cannot_clone_run_library_batch(

@@ -546,6 +546,22 @@ export interface RunLibraryBatchList {
   next_cursor: string | null;
 }
 
+export interface RetryPolicyView {
+  max_attempts: number;
+  retry_on: string[];
+  backoff: {
+    base_sec: number;
+    max_sec: number;
+    multiplier: number;
+    jitter: number;
+  };
+}
+
+export interface RetryDefaultSnapshotMismatch {
+  source: RetryPolicyView;
+  current: RetryPolicyView;
+}
+
 export interface CloneRunLibraryBatchResult {
   batch_id: string;
   cloned_from_batch_id: string;
@@ -554,6 +570,7 @@ export interface CloneRunLibraryBatchResult {
   source_provenance: Record<string, unknown>[];
   state: string;
   created_at: string;
+  retry_default_snapshot_mismatch: RetryDefaultSnapshotMismatch | null;
 }
 
 export type OverviewStatus = "ready" | "needs_setup" | "blocked";
