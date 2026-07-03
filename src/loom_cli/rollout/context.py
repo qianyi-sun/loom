@@ -27,12 +27,12 @@ class RolloutContext:
     """Immutable run context passed to every step.
 
     Attributes:
-        image_tag: Target release image tag (e.g. ``public-beta-abc123``).
+        image_tag: Target release image tag (e.g. ``staging-abc123``).
         target_ref: Git ref the operator asked to roll out (e.g. ``origin/dev``).
         resolved_sha: Full 40-char git sha the ref resolved to at launch.
         cluster_name: Name of the target k8s cluster (kind cluster name).
         namespace: Kubernetes namespace for the release.
-        environment: Protected environment name (e.g. ``public-beta``).
+        environment: Protected environment name (e.g. ``staging``).
             Used by the backup verification and release-gate steps to bind
             evidence to the operator's declared environment.
         cluster_config_path: Path to the operator's cluster-config.toml.

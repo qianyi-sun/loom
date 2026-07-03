@@ -62,8 +62,8 @@ class TestBaseStepInputsHash:
 
     def test_changes_when_input_changes(self, tmp_path: Path) -> None:
         step = _NoOpStep()
-        ctx_a = make_ctx(tmp_path, image_tag="public-beta-a")
-        ctx_b = make_ctx(tmp_path, image_tag="public-beta-b")
+        ctx_a = make_ctx(tmp_path, image_tag="staging-a")
+        ctx_b = make_ctx(tmp_path, image_tag="staging-b")
         assert step.inputs_hash(ctx_a) != step.inputs_hash(ctx_b)
 
 

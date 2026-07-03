@@ -86,7 +86,7 @@ ARTIFACT_DOWNLOAD_BYTES = Counter(
 
 TEAM_EMERGENCY_ACTIONS_TOTAL = Counter(
     "loom_svc_team_emergency_actions_total",
-    "Emergency team controls invoked by public-beta operators",
+    "Emergency team controls invoked by staging operators",
     # action: disable / enable / pause_submissions / resume_submissions
     labelnames=("action",),
 )

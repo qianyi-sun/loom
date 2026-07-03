@@ -103,7 +103,7 @@ def test_report_node_includes_compose_source_git_provenance(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    repo = tmp_path / "loom-public-beta-76875ac"
+    repo = tmp_path / "loom-staging-76875ac"
     deploy_dir = repo / "deploy"
     deploy_dir.mkdir(parents=True)
     compose_file = deploy_dir / "docker-compose.remote-worker.yml"
@@ -136,18 +136,18 @@ def test_report_node_includes_compose_source_git_provenance(
     desired = DesiredState(
         environment="production",
         pool_name="gb10-arm64",
-        image_tag="public-beta-76875ac",
+        image_tag="staging-76875ac",
         max_concurrent=10,
-        env_config_version="public-beta-76875ac",
+        env_config_version="staging-76875ac",
         rollout_policy={"mode": "all"},
         env={},
     )
     local = LocalWorkerState(
         hostname="trt-gb10-1",
-        image_tag="public-beta-76875ac",
+        image_tag="staging-76875ac",
         pool_name="gb10-arm64",
         max_concurrent=10,
-        env_config_version="public-beta-76875ac",
+        env_config_version="staging-76875ac",
     )
     captured: dict[str, object] = {}
 

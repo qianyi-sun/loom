@@ -120,7 +120,7 @@ else:
 
 _DEPRECATED_TOP_LEVEL_KEYS: dict[str, str] = {
     "gateway_public_host": (
-        "gateway_public_host is no longer supported; public beta keeps "
+        "gateway_public_host is no longer supported; staging keeps "
         "loom-llm-gateway internal-only. Remove it and route all public "
         "clients through ingress_host + /api/v1."
     ),

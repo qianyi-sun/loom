@@ -101,7 +101,7 @@ def test_insert_succeeded_with_result_is_allowed(
 def test_insert_succeeded_with_null_result_is_blocked(
     seed: tuple[UUID, UUID, UUID], postgres_url: str,
 ) -> None:
-    """The bug shape from the public-beta evidence on #416. A trial
+    """The bug shape from the staging evidence on #416. A trial
     being persisted as `state=succeeded` without its `result` MUST
     error rather than silently succeed."""
     team_id, worker_id, trial_id = seed

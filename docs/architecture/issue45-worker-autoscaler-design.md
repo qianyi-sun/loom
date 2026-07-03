@@ -11,7 +11,7 @@ Date: 2026-06-27
 Complete #45 acceptance for shared OLDLAB and GB10 worker-pool autoscaling.
 The system must reconcile desired capacity, scale up under queued demand, scale
 down only after safe drain, keep minimum warm capacity, and expose decisions and
-state through API, CLI, Monitor, Prometheus, docs, and public-beta evidence.
+state through API, CLI, Monitor, Prometheus, docs, and staging evidence.
 
 ## Existing State
 
@@ -185,7 +185,7 @@ Prometheus:
 
 ## Public-Beta Validation
 
-Validation must use real public-beta capacity.
+Validation must use real staging capacity.
 
 OLDLAB:
 
@@ -225,7 +225,7 @@ missing architecture capacity are acceptable.
 - Monitor/resource summary tests for desired, pending, draining, and last
   decision fields.
 - Metrics refresher tests for autoscaler gauges and decision counters.
-- Public-beta smoke evidence for OLDLAB and GB10 full acceptance.
+- Staging smoke evidence for OLDLAB and GB10 full acceptance.
 
 ## Rollout And Safety
 
@@ -240,12 +240,12 @@ missing architecture capacity are acceptable.
 ## Acceptance Mapping
 
 - Scale up/down OLDLAB: Slurm actuator desired-capacity reconciliation and
-  public-beta evidence.
+  staging evidence.
 - Scale up/down GB10: Slurm actuator desired-capacity reconciliation on the
-  `gb10` partition plus public-beta evidence.
+  `gb10` partition plus staging evidence.
 - Min/max/cooldowns: policy model and decision tests.
 - Drain before termination: worker drain contract, claim exclusion, safe
-  release tests, public-beta evidence.
+  release tests, staging evidence.
 - API/CLI/Monitor/Prometheus: new endpoints, commands, resource fields, and
   metrics tests.
 - Failure validation: stale heartbeat, failed actuator, interrupted node-agent,

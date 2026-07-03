@@ -30,10 +30,10 @@ class TestSubcommandStep:
             seen["argv"] = list(argv)
             seen["kwargs"] = kwargs
             if kwargs.get("stdout_log"):
-                kwargs["stdout_log"].write_text("hello public-beta-abc123\n")
+                kwargs["stdout_log"].write_text("hello staging-abc123\n")
             return SubprocessResult(
                 argv=list(argv), returncode=0,
-                stdout="hello public-beta-abc123\n", stderr="",
+                stdout="hello staging-abc123\n", stderr="",
             )
 
         monkeypatch.setattr(
@@ -48,8 +48,8 @@ class TestSubcommandStep:
         result = step.run(ctx, step_dir)
         assert result.exit_code == 0
         assert "exited 0" in result.summary
-        assert seen["argv"] == ["echo", "hello", "public-beta-abc123"]
-        assert step_dir.stdout_path().read_text() == "hello public-beta-abc123\n"
+        assert seen["argv"] == ["echo", "hello", "staging-abc123"]
+        assert step_dir.stdout_path().read_text() == "hello staging-abc123\n"
 
     def test_run_propagates_nonzero_exit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

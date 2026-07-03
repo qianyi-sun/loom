@@ -23,7 +23,7 @@ class _FakeSession:
         {"internal": {"url": "http://loom-control-plane:8080/trials"}},
     ],
 )
-async def test_admin_audit_rejects_public_beta_secret_shapes(
+async def test_admin_audit_rejects_staging_secret_shapes(
     metadata: dict[str, object],
 ) -> None:
     with pytest.raises(

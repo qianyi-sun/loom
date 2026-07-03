@@ -6,7 +6,7 @@ Subcommands:
 - install <slug>
 - refresh-catalog
 - import <slug> [--db-url --minio-* --bucket --cache-dir --limit ...]
-- provision-public-beta-catalog [--source-db-url --target-db-url --source-minio-* --target-minio-*]
+- provision-catalog [--source-db-url --target-db-url --source-minio-* --target-minio-*]
 - publish-local <path> [--db-url --minio-* --bucket ...]
 - publish <slug> [--hf-org --hf-token --cache-dir --limit --private]
 - register <slug> [--hf-org --hf-token --db-url --revision --mirror-to-object-store --minio-*]
@@ -239,7 +239,7 @@ def _source_env(name: str) -> str | None:
     )
 
 
-def _add_provision_public_beta_catalog_args(p: argparse.ArgumentParser) -> None:
+def _add_provision_catalog_provision_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--source-db-url",
         default=_source_env("DB_URL"),
@@ -249,7 +249,7 @@ def _add_provision_public_beta_catalog_args(p: argparse.ArgumentParser) -> None:
         "--target-db-url",
         default=_target_db_url(),
         help=(
-            "Target public-beta Postgres URL (defaults to env LOOM_DB_URL, "
+            "Target staging Postgres URL (defaults to env LOOM_DB_URL, "
             "then LOOM_SVC_DB_URL inside deployed service pods)."
         ),
     )
@@ -281,7 +281,7 @@ def _add_provision_public_beta_catalog_args(p: argparse.ArgumentParser) -> None:
         "--target-bucket",
         default=os.environ.get("LOOM_BENCHMARK_BUCKET", "loom-benchmarks"),
     )
-    p.add_argument("--imported-by", default="public-beta-provision")
+    p.add_argument("--imported-by", default="staging-provision")
 
 
 def _add_validate_local_args(p: argparse.ArgumentParser) -> None:
@@ -410,11 +410,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "audit",
         help="Inspect benchmark readiness from registered catalog/task rows.",
     ))
-    _add_provision_public_beta_catalog_args(sub.add_parser(
-        "provision-public-beta-catalog",
+    _add_provision_catalog_provision_args(sub.add_parser(
+        "provision-catalog",
         help=(
             "Copy runnable benchmark/task rows, supported agent rows, and "
-            "their S3 bundles from a source environment into public beta."
+            "their S3 bundles from a source environment into staging."
         ),
     ))
 
@@ -852,8 +852,8 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_provision_public_beta_catalog(args: argparse.Namespace) -> int:
-    from loom_cli.public_beta_catalog import (
+def _cmd_provision_catalog_provision(args: argparse.Namespace) -> int:
+    from loom_cli.catalog_provision import (
         Boto3CatalogObjectStore,
         PostgresCatalogStore,
         provision_ready_benchmark_catalog,
@@ -904,7 +904,7 @@ def _cmd_provision_public_beta_catalog(args: argparse.Namespace) -> int:
     )
     if missing:
         print(
-            f"error: provision-public-beta-catalog requires: {', '.join(missing)}",
+            f"error: provision-catalog requires: {', '.join(missing)}",
             file=sys.stderr,
         )
         return 2
@@ -930,7 +930,7 @@ def _cmd_provision_public_beta_catalog(args: argparse.Namespace) -> int:
         imported_by=args.imported_by,
     ))
     print(
-        "public-beta-catalog: "
+        "staging-catalog: "
         f"ready_agents={stats.ready_agents} "
         f"ready_benchmarks={stats.ready_benchmarks} "
         f"ready_tasks={stats.ready_tasks} "
@@ -1159,7 +1159,7 @@ _DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "register": _cmd_register,
     "verify": _cmd_verify,
     "audit": _cmd_audit,
-    "provision-public-beta-catalog": _cmd_provision_public_beta_catalog,
+    "provision-catalog": _cmd_provision_catalog_provision,
     "validate-local": _cmd_validate_local,
     "validate": _cmd_validate_local,
     "publish-local": _cmd_publish_local,

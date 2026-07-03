@@ -92,9 +92,9 @@ tunnel instead of leaving a separate ad-hoc port-forward running:
 
 ```bash
 scripts/ops/worker_service_tunnels.py install-systemd \
-  --namespace loom-public-beta \
+  --namespace loom-staging \
   --kubectl /usr/local/bin/kubectl \
-  --kubeconfig /secure/path/public-beta.kubeconfig \
+  --kubeconfig /secure/path/staging.kubeconfig \
   --gateway-local-port 30444
 ```
 
@@ -105,9 +105,9 @@ Docker sandboxes use a separate host bridge such as
 
 ```bash
 scripts/ops/worker_service_tunnels.py install-systemd \
-  --namespace loom-public-beta \
+  --namespace loom-staging \
   --kubectl /usr/local/bin/kubectl \
-  --kubeconfig /secure/path/public-beta.kubeconfig \
+  --kubeconfig /secure/path/staging.kubeconfig \
   --subprocess-gateway-local-port 30444
 ```
 
@@ -119,18 +119,18 @@ Render units for review:
 ```bash
 scripts/ops/worker_service_tunnels.py render-systemd \
   --output-dir ./loom-remote-worker-tunnels \
-  --namespace loom-public-beta \
+  --namespace loom-staging \
   --kubectl /usr/local/bin/kubectl \
-  --kubeconfig /secure/path/public-beta.kubeconfig
+  --kubeconfig /secure/path/staging.kubeconfig
 ```
 
 Install and start them as user services on the control node:
 
 ```bash
 scripts/ops/worker_service_tunnels.py install-systemd \
-  --namespace loom-public-beta \
+  --namespace loom-staging \
   --kubectl /usr/local/bin/kubectl \
-  --kubeconfig /secure/path/public-beta.kubeconfig
+  --kubeconfig /secure/path/staging.kubeconfig
 ```
 
 Install the watchdog timer on the same host after the tunnels are installed.
@@ -286,19 +286,19 @@ The script does not scan a subnet. It only connects to the hosts listed
 in the hostfile and prints CPU, memory, disk, Docker status, and
 open-file limits plus reachability back to the control node endpoints.
 
-For production/public-beta capacity, the hostfile should include every
+For production/staging capacity, the hostfile should include every
 candidate worker node the operator is allowed to use. Exclude a node
 only with a recorded reason such as missing Docker, failed endpoint
 reachability, insufficient disk, or Slurm reservation policy.
 
-The staged OLDLAB public-beta manual plan is recorded under
+The staged OLDLAB staging manual plan is recorded under
 `deploy/worker-pools/oldlab/`. It intentionally requests only `12 CPU` and
 `58000M` per node with `LOOM_WORKER_MAX_CONCURRENT=6`, even when inventory
 shows more total host capacity. For normal shared OLDLAB capacity, prefer the
 worker-pool autoscaler policy described below; it can use live Slurm node
 resources instead of this fixed manual slice.
 
-The staged GB10 public-beta plan is recorded under
+The staged GB10 staging plan is recorded under
 `deploy/worker-pools/gb10/`. GB10 workers execute Docker sandboxes on ARM64
 hosts, but normal capacity management should still use the same Slurm
 autoscaler policy shape as OLDLAB: `actuator=slurm`, `pool_name=gb10-arm64`,
@@ -499,12 +499,12 @@ Desired state is stored per `(environment, pool_name)` and includes:
 - optional compatibility target slots and per-host intents:
   `active`, `draining`, or `stopped`.
 
-For public-beta and staging release rollouts, apply the repository
+For staging and staging release rollouts, apply the repository
 environment-state profile so the Slurm autoscaler policy and GB10 compatibility
-desired state converge together. The public-beta profile writes the existing
+desired state converge together. The staging profile writes the existing
 `production/gb10-arm64` CP key until GB10 node-agent environment names are
 renamed in a coordinated rollout. Run this from the Slurm submit host when the
-profile declares an external Slurm autoscaler supervisor; public-beta uses that
+profile declares an external Slurm autoscaler supervisor; staging uses that
 path to install and check the OLDLAB user timer, and the rendered service must
 call the repo one-shot with `--pool-name oldlab` so it cannot reconcile GB10 as
 a side effect. The check also compares the active environment worker token to
@@ -515,16 +515,16 @@ sha256-prefix output, so pass the token through `env:` or `file:` indirection:
 loom admin environment-state apply \
   --cp-url http://control-node.lan:18081 \
   --admin-token env:LOOM_ADMIN_TOKEN \
-  --environment public-beta \
-  --file deploy/environment-state/public-beta.toml \
+  --environment staging \
+  --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
 
 loom admin environment-state check \
   --cp-url http://control-node.lan:18081 \
   --admin-token env:LOOM_ADMIN_TOKEN \
-  --environment public-beta \
-  --file deploy/environment-state/public-beta.toml \
+  --environment staging \
+  --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
   --worker-token env:LOOM_WORKER_TOKEN
@@ -539,7 +539,7 @@ curl -sS -X PUT \
   -H 'Content-Type: application/json' \
   http://control-node.lan:18081/admin/gb10-worker-pools/production/gb10-arm64/desired-state \
   -d '{
-    "image_tag": "public-beta-<commit>",
+    "image_tag": "staging-<commit>",
     "max_concurrent": 10,
     "env_config_version": "gb10-env-2026-06-26",
     "rollout_policy": {
@@ -563,7 +563,7 @@ active GB10 node, or the desired state itself, is still on the previous target;
 capacity marked draining/stopped is ignored. Active nodes must also report
 source checkout provenance: the node-agent records `compose_project_dir`, the
 checkout's git commit, and whether the tree is dirty. If `--release-image-tag`
-ends in a short SHA such as `public-beta-76875ac`, the active node's source git
+ends in a short SHA such as `staging-76875ac`, the active node's source git
 commit must start with that SHA and the checkout must be clean. Missing
 provenance is a release-gate failure because it means the operator cannot prove
 that a local build fallback used the desired source tree.
@@ -1047,7 +1047,7 @@ available only on the OLDLAB submit host, mark the policy as externally run:
       "trt-eai-oldlab-4",
       "trt-eai-oldlab-5"
     ],
-    "env_file": "/shared_work/qianyi/loom-worker-capacity/public-beta-oldlab-worker-${IMAGE_TAG}.env",
+    "env_file": "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker-${IMAGE_TAG}.env",
     "repo_dir": "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}",
     "requested_cpus": 2,
     "requested_memory_mib": 8192,
@@ -1109,7 +1109,7 @@ per node policy has a theoretical ceiling of 150 slots:
       "trt-gb10-14",
       "trt-gb10-15"
     ],
-    "env_file": "/shared_work/qianyi/loom-worker-capacity/public-beta-gb10-worker-${IMAGE_TAG}.env",
+    "env_file": "/shared_work/qianyi/loom-worker-capacity/staging-gb10-worker-${IMAGE_TAG}.env",
     "repo_dir": "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}",
     "requested_cpus": 20,
     "requested_memory_mib": 115000,

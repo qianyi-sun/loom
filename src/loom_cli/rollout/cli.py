@@ -36,7 +36,7 @@ def build_parser(p: argparse.ArgumentParser) -> None:
         help=(
             "Target release image tag; the driver validates that the "
             "resolved --ref sha starts with the tag's `sha7` suffix "
-            "(convention: `public-beta-<sha7>`)."
+            "(convention: `staging-<sha7>`)."
         ),
     )
     p.add_argument(
@@ -53,7 +53,7 @@ def build_parser(p: argparse.ArgumentParser) -> None:
         "--environment",
         required=True,
         help=(
-            "Protected environment name (e.g. public-beta). Used by the "
+            "Protected environment name (e.g. staging). Used by the "
             "backup and release-gate steps to bind evidence to the "
             "operator's declared environment."
         ),

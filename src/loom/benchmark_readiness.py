@@ -65,7 +65,7 @@ UNSUPPORTED_RUNTIME_BENCHMARKS: dict[str, str] = {
 DEFERRED_SUPPORT_BENCHMARKS: dict[str, str] = {
     "gaia": (
         "GAIA requires a GAIA-authorized Hugging Face token and a published "
-        "public-beta task bundle before it can be selected."
+        "staging task bundle before it can be selected."
     ),
 }
 

@@ -198,7 +198,7 @@ def render_markdown(
         counts[result.status] = counts.get(result.status, 0) + 1
 
     lines = [
-        "# Loom public beta smoke evidence",
+        "# Loom staging smoke evidence",
         "",
         f"- Server: `{redact_text(report.server_url, secret_values)}`",
         f"- Checks: {counts.get('pass', 0)} pass, "
@@ -229,7 +229,7 @@ def render_console_summary(
         counts[result.status] = counts.get(result.status, 0) + 1
 
     lines = [
-        "Loom public beta smoke gate:",
+        "Loom staging smoke gate:",
         f"  {counts.get('pass', 0)} pass, "
         f"{counts.get('fail', 0)} fail, {counts.get('skip', 0)} skip",
         f"  response bytes scanned: {report.response_bytes_scanned}",
@@ -887,7 +887,7 @@ def _s3_put_delete_probes(
         client.put_object(
             Bucket=bucket,
             Key=key,
-            Body=b"loom public beta minio write probe\n",
+            Body=b"loom staging minio write probe\n",
         )
         client.delete_object(Bucket=bucket, Key=key)
         return key
@@ -1041,7 +1041,7 @@ def run_smoke(args: argparse.Namespace) -> SmokeReport:
                     f"claimed_without_started; got HTTP {batch_debug.status_code}: "
                     f"{batch_debug.text[:300]}"
                 ),
-                "Fix batch debug evidence loading before accepting public-beta stress runs.",
+                "Fix batch debug evidence loading before accepting staging stress runs.",
             ))
         elif claimed_without_started is None:
             results.append(CheckResult(
@@ -1235,7 +1235,7 @@ def _append_agent_catalog_checks(
                 else f"/api/v1/agents returned HTTP {agents.status_code}."
             ),
             (
-                "Run the public beta agent catalog provisioning step, then "
+                "Run the staging agent catalog provisioning step, then "
                 "rerun the smoke gate before New Batch/manual canary testing."
             ),
         ))
@@ -1277,7 +1277,7 @@ def _append_benchmark_catalog_checks(
                 else f"/api/v1/benchmarks returned HTTP {benchmarks.status_code}."
             ),
             (
-                "Run the public beta catalog provisioning step, then rerun "
+                "Run the staging catalog provisioning step, then rerun "
                 "the smoke gate before manual testing."
             ),
         ))
@@ -1920,8 +1920,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--private-trial-id", default=None)
     parser.add_argument("--private-artifact-key", default=None)
     parser.add_argument("--allow-mutating-checks", action="store_true")
-    parser.add_argument("--clone-name", default="public beta smoke clone")
-    parser.add_argument("--reuse-name", default="public beta smoke reuse")
+    parser.add_argument("--clone-name", default="staging smoke clone")
+    parser.add_argument("--reuse-name", default="staging smoke reuse")
     parser.add_argument("--clone-provider-connection-id", default=None)
     parser.add_argument("--clone-provider-model-id", default=None)
     parser.add_argument("--reuse-provider-connection-id", default=None)
@@ -1961,7 +1961,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--object-store-write-check-bucket", default="trajectories")
-    parser.add_argument("--object-store-write-check-prefix", default="_ops/public-beta-smoke")
+    parser.add_argument("--object-store-write-check-prefix", default="_ops/staging-smoke")
     parser.add_argument(
         "--object-store-write-check-count",
         type=int,

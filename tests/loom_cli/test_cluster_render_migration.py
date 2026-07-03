@@ -19,8 +19,8 @@ class TestRenderMigrationManifest:
 
     def test_yaml_parses_and_produces_a_job(self) -> None:
         text = render_migration_manifest(
-            image_tag="public-beta-05ab776",
-            namespace="loom-public-beta",
+            image_tag="staging-05ab776",
+            namespace="loom-staging",
             job_suffix="20260702t172540z",
         )
         docs = [d for d in yaml.safe_load_all(text) if d]
@@ -28,16 +28,16 @@ class TestRenderMigrationManifest:
         job = docs[0]
         assert job["apiVersion"] == "batch/v1"
         assert job["kind"] == "Job"
-        assert job["metadata"]["namespace"] == "loom-public-beta"
+        assert job["metadata"]["namespace"] == "loom-staging"
         # Deterministic job name — critical for idempotence.
-        assert "loom-migrate-public-beta-05ab776" in job["metadata"]["name"]
+        assert "loom-migrate-staging-05ab776" in job["metadata"]["name"]
         assert "20260702t172540z" in job["metadata"]["name"]
 
     def test_pod_template_carries_the_sanctioned_migration_label(self) -> None:
         """#332: `app: loom-migration` grants postgres netpol ingress."""
         text = render_migration_manifest(
-            image_tag="public-beta-05ab776",
-            namespace="loom-public-beta",
+            image_tag="staging-05ab776",
+            namespace="loom-staging",
             job_suffix="a",
         )
         job = next(d for d in yaml.safe_load_all(text) if d)
@@ -49,13 +49,13 @@ class TestRenderMigrationManifest:
 
     def test_container_uses_release_image_and_alembic_upgrade(self) -> None:
         text = render_migration_manifest(
-            image_tag="public-beta-05ab776",
-            namespace="loom-public-beta",
+            image_tag="staging-05ab776",
+            namespace="loom-staging",
             job_suffix="a",
         )
         job = next(d for d in yaml.safe_load_all(text) if d)
         container = job["spec"]["template"]["spec"]["containers"][0]
-        assert container["image"] == "loom-control-plane:public-beta-05ab776"
+        assert container["image"] == "loom-control-plane:staging-05ab776"
         assert container["command"] == [
             "alembic", "-c", "migrations/alembic.ini", "upgrade", "head",
         ]
@@ -67,8 +67,8 @@ class TestRenderMigrationManifest:
         separate migration credential would just be another rotation
         liability. See #364."""
         text = render_migration_manifest(
-            image_tag="public-beta-05ab776",
-            namespace="loom-public-beta",
+            image_tag="staging-05ab776",
+            namespace="loom-staging",
             job_suffix="a",
         )
         job = next(d for d in yaml.safe_load_all(text) if d)
@@ -90,8 +90,8 @@ class TestRenderMigrationManifest:
         blocks the next rollout's `kubectl apply -f -` because the
         Job's `spec.template` is immutable."""
         text = render_migration_manifest(
-            image_tag="public-beta-05ab776",
-            namespace="loom-public-beta",
+            image_tag="staging-05ab776",
+            namespace="loom-staging",
             job_suffix="a",
         )
         job = next(d for d in yaml.safe_load_all(text) if d)
@@ -104,7 +104,7 @@ class TestRenderMigrationManifest:
 
     def test_default_namespace(self) -> None:
         text = render_migration_manifest(
-            image_tag="public-beta-05ab776",
+            image_tag="staging-05ab776",
             namespace="loom",
             job_suffix="a",
         )
@@ -119,7 +119,7 @@ class TestRenderMigrationManifest:
             job_suffix="a",
         )
         job = next(d for d in yaml.safe_load_all(text) if d)
-        assert job["metadata"]["name"] == "loom-migrate-public-beta-05ab776-a"
+        assert job["metadata"]["name"] == "loom-migrate-public-beta-05ab776-a"  # DNS-normalization stress; keep literal
 
 
 class TestPostgresNetPolIncludesMigrationSelector:
@@ -154,8 +154,8 @@ class TestCLIDispatch:
     ) -> None:
         rc = main([
             "cluster", "render-migration",
-            "--image-tag", "public-beta-05ab776",
-            "--namespace", "loom-public-beta",
+            "--image-tag", "staging-05ab776",
+            "--namespace", "loom-staging",
         ])
         assert rc == 0
         out = capsys.readouterr().out
@@ -163,7 +163,7 @@ class TestCLIDispatch:
         docs = [d for d in yaml.safe_load_all(out) if d]
         assert len(docs) == 1
         assert docs[0]["kind"] == "Job"
-        assert docs[0]["metadata"]["namespace"] == "loom-public-beta"
+        assert docs[0]["metadata"]["namespace"] == "loom-staging"
 
     def test_requires_image_tag(
         self, capsys: pytest.CaptureFixture[str]
@@ -173,7 +173,7 @@ class TestCLIDispatch:
         with pytest.raises(SystemExit) as exc:
             main([
                 "cluster", "render-migration",
-                "--namespace", "loom-public-beta",
+                "--namespace", "loom-staging",
             ])
         assert exc.value.code == 2
         err = capsys.readouterr().err
@@ -184,7 +184,7 @@ class TestCLIDispatch:
     ) -> None:
         rc = main([
             "cluster", "render-migration",
-            "--image-tag", "public-beta-05ab776",
+            "--image-tag", "staging-05ab776",
         ])
         assert rc == 0
         out = capsys.readouterr().out
@@ -196,7 +196,7 @@ class TestCLIDispatch:
     ) -> None:
         rc = main([
             "cluster", "render-migration",
-            "--image-tag", "public-beta-05ab776",
+            "--image-tag", "staging-05ab776",
             "--job-suffix", "20260702t172540z",
         ])
         assert rc == 0

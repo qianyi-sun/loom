@@ -272,7 +272,7 @@ def test_collect_status_stale_deployment_generation_is_not_ready() -> None:
 def test_collect_status_stale_updated_replicas_is_not_ready() -> None:
     """#203 regression — the old-pods-still-serving state.
 
-    Observed on public-beta-7c0e222 rollout: Deployment desired=1, ready=1
+    Observed on staging-7c0e222 rollout: Deployment desired=1, ready=1
     (old pod still Ready), updated=0 (new pod not yet Ready). Previously
     the healthy check treated ready==desired as sufficient because it
     didn't gate on updated>=desired when updated is 0 (not None). That
@@ -624,7 +624,7 @@ def test_rendered_image_checks_capture_live_release_evidence() -> None:
     apps.deployments["loom-worker"] = _make_deployment(
         3,
         3,
-        image="loom-worker:public-beta-expected",
+        image="loom-worker:staging-expected",
     )
     rendered = """
 apiVersion: apps/v1
@@ -636,7 +636,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: loom-worker:public-beta-expected
+          image: loom-worker:staging-expected
 """
 
     checks = rendered_image_checks(apps, "loom", rendered)
@@ -645,15 +645,15 @@ spec:
         DeploymentImageCheck(
             deployment="loom-worker",
             container="app",
-            expected_image="loom-worker:public-beta-expected",
-            live_image="loom-worker:public-beta-expected",
+            expected_image="loom-worker:staging-expected",
+            live_image="loom-worker:staging-expected",
         ),
     ]
     assert not checks[0].drifted
     assert checks[0].evidence_line() == (
         "  - loom-worker/app: "
-        "rendered=loom-worker:public-beta-expected "
-        "live=loom-worker:public-beta-expected"
+        "rendered=loom-worker:staging-expected "
+        "live=loom-worker:staging-expected"
     )
 
 
@@ -674,14 +674,14 @@ spec:
     spec:
       containers:
         - name: app
-          image: loom-worker:public-beta-expected
+          image: loom-worker:staging-expected
 """
 
     drifts = rendered_image_drifts(apps, "loom", rendered)
 
     assert drifts == [
         "Deployment loom-worker container app image drift: "
-        "rendered loom-worker:public-beta-expected, live loom-worker:debug-tip",
+        "rendered loom-worker:staging-expected, live loom-worker:debug-tip",
     ]
 
 

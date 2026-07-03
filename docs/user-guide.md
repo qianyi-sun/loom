@@ -110,7 +110,7 @@ plugin; on macOS, install and start Docker Desktop, then verify
 When Loom is served as a web platform, the SPA uses browser user sessions.
 Users sign in with username and password. First-time users request an account
 from Settings by entering a username and selecting an existing team. If the
-team is missing, contact an admin to create it first. Public beta does not
+team is missing, contact an admin to create it first. Staging does not
 collect email and does not send automatic mail: an admin reviews the request,
 approves a team role, and manually shares the one-time password setup link.
 Forgot-password follows the same pattern: the user submits a reset request,
@@ -738,11 +738,11 @@ loom datasets list --json           # machine-readable output
 loom datasets show <slug>           # full detail for one adapter
 loom datasets install <slug>        # pip-install a catalog entry
 loom datasets refresh-catalog      # drop the 24h catalog HTTP cache
-loom datasets provision-public-beta-catalog
+loom datasets provision-staging-catalog
                                     # copy ready benchmark/task rows,
                                     # materialize supported agent rows,
                                     # and copy S3 bundles into a
-                                    # public-beta/release target
+                                    # staging/release target
 ```
 
 Discovery sources, in precedence order (builtin wins on slug
@@ -914,8 +914,8 @@ coverage, and benchmark-side verifier or environment failures fail the sweep.
 For a narrower diagnostic, add repeated `--expected-benchmark BENCHMARK_ID`
 arguments.
 
-For public-beta or release deployments, operators should provision the ready
-catalog before inviting users. Use `loom datasets provision-public-beta-catalog`
+For staging or release deployments, operators should provision the ready
+catalog before inviting users. Use `loom datasets provision-staging-catalog`
 when copying runnable benchmark/task rows, materializing supported service-mode
 agent rows, and copying referenced `s3://` bundles from a known-good source
 environment into the target database/object store. For

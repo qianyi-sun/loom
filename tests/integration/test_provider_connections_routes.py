@@ -1654,7 +1654,7 @@ def test_models_unhide_makes_operator_hidden_visible(
 def test_test_flips_status_invalid_when_stored_ref_is_malformed(
     app_setup, postgres_url: str,
 ) -> None:
-    """#423: legacy public-beta provider rows can hold an argv-style
+    """#423: legacy staging provider rows can hold an argv-style
     ref like `env:PUBLIC_BETA_SMOKE_OPENAI` in `encrypted_api_key_ref`
     instead of the runtime-supported `loom://<ns>/<uuid>` shape. The
     /test endpoint must surface this as an actionable failure AND flip

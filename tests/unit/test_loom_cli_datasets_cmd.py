@@ -154,7 +154,7 @@ def test_refresh_catalog_purges_cache(
     assert "purged" in capsys.readouterr().out.lower()
 
 
-def test_provision_public_beta_catalog_invokes_provisioner(
+def test_provision_catalog_provision_invokes_provisioner(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -169,7 +169,7 @@ def test_provision_public_beta_catalog_invokes_provisioner(
             captured.setdefault("stores", []).append(kwargs)
 
     async def fake_provision(**kwargs: object):
-        from loom_cli.public_beta_catalog import ProvisionStats
+        from loom_cli.catalog_provision import ProvisionStats
 
         captured.update(kwargs)
         return ProvisionStats(
@@ -185,20 +185,20 @@ def test_provision_public_beta_catalog_invokes_provisioner(
         )
 
     monkeypatch.setattr(
-        "loom_cli.public_beta_catalog.PostgresCatalogStore",
+        "loom_cli.catalog_provision.PostgresCatalogStore",
         FakeCatalog,
     )
     monkeypatch.setattr(
-        "loom_cli.public_beta_catalog.Boto3CatalogObjectStore",
+        "loom_cli.catalog_provision.Boto3CatalogObjectStore",
         FakeObjects,
     )
     monkeypatch.setattr(
-        "loom_cli.public_beta_catalog.provision_ready_benchmark_catalog",
+        "loom_cli.catalog_provision.provision_ready_benchmark_catalog",
         fake_provision,
     )
 
     rc = dispatch([
-        "provision-public-beta-catalog",
+        "provision-catalog",
         "--source-db-url",
         "postgresql://source/db",
         "--target-db-url",
@@ -218,7 +218,7 @@ def test_provision_public_beta_catalog_invokes_provisioner(
         "--target-bucket",
         "loom-benchmarks",
         "--imported-by",
-        "release:public-beta",
+        "release:staging",
     ])
 
     assert rc == 0
@@ -227,7 +227,7 @@ def test_provision_public_beta_catalog_invokes_provisioner(
         "postgresql://target/db",
     ]
     assert captured["target_bucket"] == "loom-benchmarks"
-    assert captured["imported_by"] == "release:public-beta"
+    assert captured["imported_by"] == "release:staging"
     out = capsys.readouterr().out
     assert "ready_agents=2" in out
     assert "ready_benchmarks=2" in out
@@ -238,7 +238,7 @@ def test_provision_public_beta_catalog_invokes_provisioner(
     assert "missing=0" in out
 
 
-def test_provision_public_beta_catalog_uses_service_target_env(
+def test_provision_catalog_provision_uses_service_target_env(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -266,7 +266,7 @@ def test_provision_public_beta_catalog_uses_service_target_env(
             captured.setdefault("stores", []).append(kwargs)
 
     async def fake_provision(**kwargs: object):
-        from loom_cli.public_beta_catalog import ProvisionStats
+        from loom_cli.catalog_provision import ProvisionStats
 
         captured.update(kwargs)
         return ProvisionStats(
@@ -282,19 +282,19 @@ def test_provision_public_beta_catalog_uses_service_target_env(
         )
 
     monkeypatch.setattr(
-        "loom_cli.public_beta_catalog.PostgresCatalogStore",
+        "loom_cli.catalog_provision.PostgresCatalogStore",
         FakeCatalog,
     )
     monkeypatch.setattr(
-        "loom_cli.public_beta_catalog.Boto3CatalogObjectStore",
+        "loom_cli.catalog_provision.Boto3CatalogObjectStore",
         FakeObjects,
     )
     monkeypatch.setattr(
-        "loom_cli.public_beta_catalog.provision_ready_benchmark_catalog",
+        "loom_cli.catalog_provision.provision_ready_benchmark_catalog",
         fake_provision,
     )
 
-    rc = dispatch(["provision-public-beta-catalog"])
+    rc = dispatch(["provision-catalog"])
 
     assert rc == 0
     assert captured["catalogs"] == [

@@ -1,6 +1,6 @@
 # OLDLAB Elastic Worker Pool
 
-This directory records the staged OLDLAB 1-5 worker policy for public-beta and
+This directory records the staged OLDLAB 1-5 worker policy for staging and
 production-like validation.
 
 - `inventory-2026-06-24.txt` records the include decision and evidence notes for
@@ -9,7 +9,7 @@ production-like validation.
   `scripts/ops/worker_pool_slurm_submit.sh`.
 - `dry-run-2026-06-24.txt` records generated `sbatch` commands for all included
   nodes using the shared checkout path validated during issue #435.
-- `smoke-evidence-2026-06-24.json` records the public-beta OLDLAB 4/5 worker
+- `smoke-evidence-2026-06-24.json` records the staging OLDLAB 4/5 worker
   smoke batch id, worker ids, Slurm job ids, runtime, trial counts, and failure
   count.
 - `controller.env.example` is the Control Plane override set for the native
@@ -56,9 +56,9 @@ load is already near the CPU count or free memory is low, the expected behavior
 is to keep the warm minimum and record the exclusion reason instead of forcing
 more Slurm jobs.
 
-For public-beta release gates, supervise OLDLAB through the
+For staging release gates, supervise OLDLAB through the
 `external_slurm_autoscaler_supervisors` section in
-`deploy/environment-state/public-beta.toml`. `loom admin environment-state
+`deploy/environment-state/staging.toml`. `loom admin environment-state
 apply` writes the user systemd service/timer on the Slurm submit host and
 `check` fails if the timer is inactive, the unit points at a stale rollout
 checkout, or the ExecStart command omits `--pool-name oldlab`. Do not leave a
@@ -69,7 +69,7 @@ The remote-worker env file and Loom checkout path must be readable from every
 included Slurm node. For OLDLAB 4/5, do not use a control-node-local checkout
 such as `/home/qianyi/dev/loom` unless a Slurm job on that node has verified it
 contains `deploy/docker-compose.remote-worker.yml`. Use a shared checkout path
-such as `/shared_work/<operator>/loom-remote-worker` for public-beta style
+such as `/shared_work/<operator>/loom-remote-worker` for staging style
 capacity. Keep `LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS` in the remote-worker env
 file so elastic jobs release the allocation after the Loom queue drains.
 The generated Slurm job script also traps `EXIT`, `INT`, and `TERM` and runs

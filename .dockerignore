@@ -6,7 +6,7 @@ __pycache__
 .pytest_cache
 .ruff_cache
 .mypy_cache
-.public-beta-staging
+.staging-staging
 .worktrees
 worktrees
 .env

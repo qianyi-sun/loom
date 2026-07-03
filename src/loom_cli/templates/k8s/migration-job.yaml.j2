@@ -10,7 +10,7 @@
 # service labels (loom-control-plane, loom-service, loom-llm-gateway)
 # would pollute the corresponding Service selector during rollout, which
 # is what forced the ad-hoc NetworkPolicy dance during the
-# public-beta-05ab776 rollout.
+# staging-05ab776 rollout.
 #
 # The Job runs the release image's `alembic upgrade head` against the
 # release-configured DB URL. On success, `ttlSecondsAfterFinished`
