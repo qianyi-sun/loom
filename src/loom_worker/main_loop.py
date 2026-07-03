@@ -80,6 +80,7 @@ from loom_worker.signal_handler import ShutdownState, install_signal_handlers
 from loom_worker.task_image import resolve_task_image
 from loom_worker.task_sidecars import DockerTaskSidecarRuntime
 from loom_worker.trial_cache import (
+    _daemon_build_slot,
     evict_stale_cache,
     resolve_trial_image,
 )
@@ -621,11 +622,20 @@ async def _spawn_trial(
                 timeout_sec=settings.task_materialize_timeout_sec,
             )
             validate_task_dir_compatibility(task_dir)
+            # #275: serialize concurrent task-image builds so a burst of
+            # trials cannot fan out unbounded apt-get / dpkg / build
+            # containers on a shared host Docker daemon (e.g. OLDLAB).
+            # `_daemon_build_slot` reuses the same slot pool that
+            # `_resolve_layered_trial_image` uses; when the tag is
+            # already cached, resolve_task_image never enters the slot.
             task_image = await resolve_task_image(
                 task_config=task_config,
                 task_dir=task_dir,
                 task_checksum=task_checksum,
                 docker_api_timeout_sec=settings.docker_api_timeout_sec,
+                build_slot_provider=lambda: _daemon_build_slot(
+                    cp_client, settings, worker_id,
+                ),
             )
             # #317 Phase 1: if the chosen agent declares an
             # install_script, layer the agent install onto the task

@@ -15,6 +15,7 @@ import os
 import platform
 import tempfile
 import threading
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -22,6 +23,12 @@ import docker
 from docker.errors import BuildError, ImageNotFound
 
 from loom.models.task import TaskConfig
+
+# Type alias for the optional build-slot provider a caller can pass to
+# `resolve_task_image` so a task-image build (apt-get / dpkg / etc.)
+# only proceeds while a daemon-wide semaphore slot is held. Callers
+# that don't care about node overload can pass None. #275.
+BuildSlotProvider = Callable[[], contextlib.AbstractAsyncContextManager[Any]]
 
 DEFAULT_TASK_IMAGE = "alpine"
 # Maximum trailing build-log lines (stdout+stderr from inside the
@@ -131,6 +138,7 @@ async def resolve_task_image(
     task_dir: Path,
     task_checksum: str,
     docker_api_timeout_sec: int | None = None,
+    build_slot_provider: BuildSlotProvider | None = None,
 ) -> str:
     """Return the Docker image a service worker should use for this task.
 
@@ -138,6 +146,13 @@ async def resolve_task_image(
     ``environment.dockerfile`` instead, build it from the materialized task
     bundle if the deterministic cache tag is absent. Tasks that declare neither
     keep the historic ``alpine`` fallback.
+
+    When ``build_slot_provider`` is supplied and a build is actually
+    required (deterministic tag not present in the local daemon), the
+    provider is entered as an async context manager so callers can
+    serialize concurrent apt-get / dpkg / build storms against a shared
+    host Docker daemon. Cache hits skip the slot entirely — the check
+    is a cheap `client.images.get(tag)` on the local daemon. #275.
     """
 
     if task_config.environment.docker_image:
@@ -155,21 +170,41 @@ async def resolve_task_image(
         docker_build_context=task_config.environment.docker_build_context,
     )
     tag = task_image_tag(task_config, task_checksum=task_checksum)
+
+    # Fast path: image already present locally, no build needed and no
+    # slot claim required. Keeps steady-state trial dispatch free of the
+    # slot-claim HTTP round-trip once a task's Dockerfile is cached.
+    if await asyncio.to_thread(
+        _task_image_locally_cached,
+        tag=tag,
+        docker_api_timeout_sec=docker_api_timeout_sec,
+    ):
+        return tag
+
     timeout = task_config.environment.build_timeout_sec
+    slot_ctx: contextlib.AbstractAsyncContextManager[Any] = (
+        build_slot_provider() if build_slot_provider is not None
+        else contextlib.nullcontext()
+    )
     try:
-        await asyncio.wait_for(
-            asyncio.to_thread(
-                _ensure_dockerfile_image,
-                tag=tag,
-                task_config=task_config,
-                task_checksum=task_checksum,
-                task_dir=task_dir,
-                dockerfile=dockerfile,
-                build_context=build_context,
-                docker_api_timeout_sec=docker_api_timeout_sec,
-            ),
-            timeout=timeout,
-        )
+        async with slot_ctx:
+            # `_ensure_dockerfile_image` itself does a `.get()` inside
+            # the slot, so a concurrent worker that built + pushed the
+            # tag while this worker waited still short-circuits without
+            # rebuilding.
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    _ensure_dockerfile_image,
+                    tag=tag,
+                    task_config=task_config,
+                    task_checksum=task_checksum,
+                    task_dir=task_dir,
+                    dockerfile=dockerfile,
+                    build_context=build_context,
+                    docker_api_timeout_sec=docker_api_timeout_sec,
+                ),
+                timeout=timeout,
+            )
     except TimeoutError as exc:
         raise TaskImageBuildError(
             f"building Docker image {tag!r} from "
@@ -177,6 +212,32 @@ async def resolve_task_image(
             f"{timeout:g}s",
         ) from exc
     return tag
+
+
+def _task_image_locally_cached(
+    *,
+    tag: str,
+    docker_api_timeout_sec: int | None,
+) -> bool:
+    """True iff the deterministic tag is already resident in the local
+    Docker daemon's image store. Kept as a sync helper so it can be
+    awaited via `asyncio.to_thread` from the async resolve path."""
+    client: Any = (
+        docker.from_env()
+        if docker_api_timeout_sec is None
+        else docker.from_env(timeout=docker_api_timeout_sec)
+    )
+    try:
+        client.images.get(tag)
+    except ImageNotFound:
+        return False
+    else:
+        return True
+    finally:
+        with contextlib.suppress(Exception):
+            client.close()
+
+
 
 
 def _resolve_dockerfile_path(*, task_dir: Path, dockerfile: PurePosixPath) -> Path:
