@@ -45,13 +45,17 @@ class TestRolloutCLIDryRun:
         fake = _FakeSubprocess()
         monkeypatch.setattr(subprocess, "run", fake)
 
+        backup = tmp_path / "backup-manifest.json"
+        backup.write_text("{}")
         rc = main([
             "cluster", "rollout",
             "--ref", "origin/dev",
             "--image-tag", "public-beta-aaaaaaa",
             "--cluster-name", "loom-public-beta",
             "--namespace", "loom-public-beta",
+            "--environment", "public-beta",
             "--cluster-config", str(cfg),
+            "--backup-manifest", str(backup),
             "--rollout-root", str(tmp_path),
             "--dry-run",
         ])
@@ -77,12 +81,16 @@ class TestRolloutCLIDryRun:
 
         monkeypatch.setattr(subprocess, "run", _FakeSubprocess())
 
+        backup = tmp_path / "backup-manifest.json"
+        backup.write_text("{}")
         rc = main([
             "cluster", "rollout",
             "--ref", "origin/dev",
             "--image-tag", "public-beta-aaaaaaa",
             "--cluster-name", "loom-public-beta",
+            "--environment", "public-beta",
             "--cluster-config", str(cfg),
+            "--backup-manifest", str(backup),
             "--rollout-root", str(tmp_path),
             "--scope", "full-cluster",
             "--exclude-oldlab",
@@ -103,12 +111,16 @@ class TestRolloutCLIRealRun:
         fake = _FakeSubprocess()
         monkeypatch.setattr(subprocess, "run", fake)
 
+        backup = tmp_path / "backup-manifest.json"
+        backup.write_text("{}")
         rc = main([
             "cluster", "rollout",
             "--ref", "origin/dev",
             "--image-tag", "public-beta-aaaaaaa",
             "--cluster-name", "loom-public-beta",
+            "--environment", "public-beta",
             "--cluster-config", str(tmp_path / "missing.toml"),
+            "--backup-manifest", str(backup),
             "--rollout-root", str(tmp_path),
             "--dry-run",
         ])

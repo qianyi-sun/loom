@@ -1,7 +1,14 @@
-"""Step 05 — protected backup snapshot (#340).
+"""Step 05 — verify protected backup manifest (#340, #363).
 
-Wraps ``loom cluster backup`` for the target namespace. Backup output
-(the bundle path + manifest) is captured in the step's evidence dir.
+The rollout driver does not create the backup itself: producing the
+Postgres dump, mirroring MinIO, and exporting Kubernetes secrets requires
+credentials and cluster access the driver doesn't hold. The operator
+follows the runbook procedure to produce a backup bundle + metadata
+manifest before invoking ``loom cluster rollout --backup-manifest ...``.
+
+This step wraps ``loom cluster backup check`` so the driver refuses to
+advance past step 05 without a fresh, verified manifest for the target
+environment + namespace.
 """
 
 from __future__ import annotations
@@ -18,10 +25,9 @@ class BackupStep(SubcommandStep):
     name = "backup"
 
     def argv(self, ctx: RolloutContext, step_dir: StepDir) -> Sequence[str]:
-        # `loom cluster backup` bundles Postgres + MinIO into the
-        # protected data dir. Its own idempotence handles repeat calls.
         return [
-            "loom", "cluster", "backup",
+            "loom", "cluster", "backup", "check",
+            "--environment", ctx.environment,
             "--namespace", ctx.namespace,
-            "--label", f"pre-rollout={ctx.image_tag}",
+            "--manifest", str(ctx.backup_manifest_path),
         ]

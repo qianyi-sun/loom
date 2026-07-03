@@ -19,7 +19,9 @@ def make_ctx(
     resolved_sha: str = "a" * 40,
     cluster_name: str = "loom-public-beta",
     namespace: str = "loom-public-beta",
+    environment: str = "public-beta",
     cluster_config_sha256: str = "b" * 64,
+    backup_manifest_path: Path | None = None,
     scope: str = "current-gb10",
     exclude_oldlab: bool = False,
     resume: bool = False,
@@ -27,15 +29,19 @@ def make_ctx(
     """Return a minimally-populated RolloutContext for tests."""
     cfg = tmp_path / "cluster-config.toml"
     cfg.write_text("image_tag = 'x'\n")
+    if backup_manifest_path is None:
+        backup_manifest_path = tmp_path / "backup-manifest.json"
     return RolloutContext(
         image_tag=image_tag,
         target_ref=target_ref,
         resolved_sha=resolved_sha,
         cluster_name=cluster_name,
         namespace=namespace,
+        environment=environment,
         cluster_config_path=cfg,
         cluster_config_sha256=cluster_config_sha256,
         rollout_root=tmp_path,
+        backup_manifest_path=backup_manifest_path,
         scope=scope,
         exclude_oldlab=exclude_oldlab,
         resume=resume,

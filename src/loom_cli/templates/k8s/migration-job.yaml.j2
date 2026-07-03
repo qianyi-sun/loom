@@ -48,13 +48,16 @@ spec:
             - upgrade
             - head
           env:
-            - name: LOOM_CP_DB_URL
+            # Alembic reads LOOM_DB_URL per migrations/env.py; the
+            # control-plane uses LOOM_CP_DB_URL. Reusing the same
+            # `cp-db-url` secret is intentional (Alembic needs the same
+            # permissions the control-plane needs at startup, and a
+            # separate migration credential would just be another key
+            # to rotate); the env var name is what the Alembic tool
+            # reads. #364.
+            - name: LOOM_DB_URL
               valueFrom:
                 secretKeyRef:
-                  # Reuses the control-plane's DB credential. Alembic
-                  # needs the same permissions the control-plane needs
-                  # at startup, and a separate migration credential
-                  # would just be another key to rotate.
                   name: loom-secrets
                   key: cp-db-url
           resources:

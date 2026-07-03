@@ -872,10 +872,19 @@ loom cluster rollout \
   --image-tag public-beta-abc1234 \
   --cluster-name loom-public-beta \
   --namespace loom-public-beta \
+  --environment public-beta \
   --cluster-config /operator/cluster-config.toml \
+  --backup-manifest /data/loom-public-beta/backups/latest/backup-manifest.json \
   --rollout-root /data/loom-public-beta \
   --scope current-gb10
 ```
+
+`--backup-manifest` is required. The driver does not create the backup
+itself — the operator produces the Postgres dump, MinIO snapshot, and
+secrets export per the runbook procedure (§ *Protected-environment
+backups*) and hands the resulting `backup-manifest.json` to the driver.
+Step 05 invokes `loom cluster backup check` and refuses to advance
+without a fresh, verified manifest.
 
 Optional flags:
 
@@ -943,10 +952,10 @@ observability and mutation contract:
 |---|---|---|
 | 00 | resolve-target | git rev-parse; validates image-tag ↔ sha7 |
 | 01 | worktree | `git worktree add` at target sha |
-| 02 | build-images | `docker build` × 5 rollout-critical images |
+| 02 | build-images | `docker build` × every rollout-critical image (#365) |
 | 03 | kind-load-images | `loom cluster load-images` (#96) |
 | 04 | gb10-prep | SSH ×N hosts: fetch, checkout, write env file, verify |
-| 05 | backup | `loom cluster backup` |
+| 05 | backup | `loom cluster backup check --manifest <path>` (#363) |
 | 06 | audit | `loom cluster audit` |
 | 07 | render | `loom cluster render` → `rendered.yaml` |
 | 08 | preflight | `loom cluster preflight` |
