@@ -165,3 +165,104 @@ def test_submit_rejects_missing_task_id(app, seed_team):  # type: ignore[no-unty
             json={"config": {"agent_name": "oracle", "agent_model": None}},
         )
         assert r.status_code == 400
+
+
+def _fetch_trial_config(postgres_url: str, trial_id: str) -> dict:
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as s:
+            row = s.execute(
+                Trial.__table__.select().where(Trial.id == UUID(trial_id)),
+            ).mappings().one()
+            return row["config"]
+    finally:
+        engine.dispose()
+
+
+def test_submit_snapshots_retry_defaults_when_absent(
+    app, seed_team, postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    """#401: submitter omits `retry` → deployment defaults snapshotted."""
+    _, raw = seed_team
+    with TestClient(app) as client:
+        r = client.post(
+            "/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "task_id": "hello",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
+        )
+        assert r.status_code == 201, r.text
+        cfg = _fetch_trial_config(postgres_url, r.json()["trial_id"])
+    retry = cfg["retry"]
+    assert retry["max_attempts"] == 3
+    assert set(retry["retry_on"]) == {
+        "gateway_error", "provider_transport_disconnect",
+    }
+    assert retry["backoff"] == {
+        "base_sec": 30.0, "max_sec": 600.0,
+        "multiplier": 2.0, "jitter": 0.2,
+    }
+
+
+def test_submit_clamps_max_attempts_to_team_ceiling(
+    app, seed_team, postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    """#401: submitter requests 10, team ceiling is 2 → snapshot stores 2."""
+    team_id, raw = seed_team
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as s:
+            s.execute(
+                TeamQuota.__table__.update()
+                .where(TeamQuota.team_id == team_id)
+                .values(max_attempts_ceiling=2),
+            )
+            s.commit()
+    finally:
+        engine.dispose()
+
+    with TestClient(app) as client:
+        r = client.post(
+            "/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "task_id": "hello",
+                "config": {
+                    "agent_name": "oracle",
+                    "agent_model": None,
+                    "retry": {"max_attempts": 10},
+                },
+            },
+        )
+        assert r.status_code == 201, r.text
+        cfg = _fetch_trial_config(postgres_url, r.json()["trial_id"])
+    assert cfg["retry"]["max_attempts"] == 2
+
+
+def test_submit_preserves_explicit_retry_below_ceiling(
+    app, seed_team, postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    """#401: submitter's explicit retry passes through when under ceiling."""
+    _, raw = seed_team
+    with TestClient(app) as client:
+        r = client.post(
+            "/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "task_id": "hello",
+                "config": {
+                    "agent_name": "oracle",
+                    "agent_model": None,
+                    "retry": {
+                        "max_attempts": 2,
+                        "retry_on": ["agent_timeout"],
+                    },
+                },
+            },
+        )
+        assert r.status_code == 201, r.text
+        cfg = _fetch_trial_config(postgres_url, r.json()["trial_id"])
+    assert cfg["retry"]["max_attempts"] == 2
+    assert cfg["retry"]["retry_on"] == ["agent_timeout"]

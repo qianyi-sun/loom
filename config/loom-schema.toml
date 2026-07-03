@@ -376,6 +376,55 @@ python_type = "float"
 default     = 60.0
 description = "Total wall-clock retry budget per request. We stop retrying once cumulative wait + elapsed exceeds this, even if attempts remain. Bumped from 30s to 60s in #416 Slice 3 to cover a full k8s rolling-restart window; well below TaskConfig.agent.timeout_sec (default 1800s)."
 
+# ─── Deployment-wide RetryPolicy defaults snapshotted at trial submit (#401) ───
+# Loom's trial retry defaults used to be Pydantic-model defaults, a Plan 3
+# artifact from before this schema existed. Moved here so operators can retune
+# per environment without a code change; the submit route snapshots the values
+# into TrialConfig.retry when the submitter didn't set an explicit policy, so
+# a saved trial is reproducible on any cluster regardless of subsequent retunes.
+
+[service_config.trial_retry_default_max_attempts]
+used_by     = ["control-plane", "loom-service"]
+python_type = "int"
+default     = 3
+description = "Default TrialConfig.retry.max_attempts snapshotted into the trial payload at submit time when the submitter didn't set an explicit RetryPolicy. Represents 'how many attempts does a well-behaved trial want?'. Clamped at submit to min(this, team_quota_max_attempts_ceiling_default). Semantically distinct from the team ceiling below."
+
+[service_config.trial_retry_default_retry_on]
+used_by     = ["control-plane", "loom-service"]
+python_type = "str_list"
+default     = ["gateway_error", "provider_transport_disconnect"]
+description = "Default TrialConfig.retry.retry_on snapshotted at submit time when unset. Members of the RetryReason enum (see src/loom/models/trial.py). Deployment-policy knob: CI dev might set [] (fail-fast, no wasted tokens); prod release-gate might add 'agent_timeout' to survive transient LLM slowdowns; sensitive prod might keep only ['provider_transport_disconnect']."
+
+[service_config.trial_retry_default_backoff_base_sec]
+used_by     = ["control-plane", "loom-service"]
+python_type = "float"
+default     = 30.0
+description = "Default BackoffSpec.base_sec snapshotted at submit time when unset. First-retry delay before exponential growth kicks in."
+
+[service_config.trial_retry_default_backoff_max_sec]
+used_by     = ["control-plane", "loom-service"]
+python_type = "float"
+default     = 600.0
+description = "Default BackoffSpec.max_sec snapshotted at submit time when unset. Cap on the exponential curve so retries don't stretch beyond a reasonable outer bound."
+
+[service_config.trial_retry_default_backoff_multiplier]
+used_by     = ["control-plane", "loom-service"]
+python_type = "float"
+default     = 2.0
+description = "Default BackoffSpec.multiplier snapshotted at submit time when unset. Exponential growth factor: attempt N waits base * multiplier^(N-1)."
+
+[service_config.trial_retry_default_backoff_jitter]
+used_by     = ["control-plane", "loom-service"]
+python_type = "float"
+default     = 0.2
+description = "Default BackoffSpec.jitter snapshotted at submit time when unset. Fractional jitter in [0, 1]: actual wait = curve * Uniform(1-jitter, 1+jitter) to spread thundering-herd across restarts."
+
+[service_config.team_quota_max_attempts_ceiling_default]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 3
+description = "Default value written to TeamQuota.max_attempts_ceiling at team creation. Represents 'how many attempts is this team allowed at most?' — the admin's ceiling, enforced by the scheduler at claim time. Semantically distinct from trial_retry_default_max_attempts (the submitter's requested count)."
+
 [service_config.egress_proxy_url]
 used_by     = ["llm-gateway"]
 python_type = "str"
