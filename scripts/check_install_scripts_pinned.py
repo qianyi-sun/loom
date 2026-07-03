@@ -187,6 +187,22 @@ def _scan_install_script(script: str) -> list[str]:
                             )
                     break
 
+        # gpg --dearmor -o /etc/apt/keyrings/... must be noninteractive
+        # and safe to rerun against task images that already have the
+        # same keyring file.
+        if (
+            "gpg" in tokens
+            and "--dearmor" in tokens
+            and "-o" in tokens
+            and any("/etc/apt/keyrings/" in token for token in tokens)
+            and ("--batch" not in tokens or "--yes" not in tokens)
+        ):
+            violations.append(
+                "gpg keyring writes must include `--batch --yes` so "
+                "adapter install_script values are noninteractive and "
+                "idempotent: " + stripped,
+            )
+
     return violations
 
 

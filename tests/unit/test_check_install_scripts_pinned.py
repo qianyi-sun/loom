@@ -62,6 +62,22 @@ def test_apk_ignored() -> None:
     assert _scan("apk add --no-cache python3 py3-pip") == []
 
 
+def test_gpg_keyring_write_requires_noninteractive_overwrite_flags() -> None:
+    violations = _scan(
+        "curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key "
+        "| gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg",
+    )
+    assert any("--batch --yes" in violation for violation in violations)
+
+
+def test_gpg_keyring_write_with_noninteractive_overwrite_flags_passes() -> None:
+    assert _scan(
+        "curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key "
+        "| gpg --batch --yes --dearmor "
+        "-o /etc/apt/keyrings/nodesource.gpg",
+    ) == []
+
+
 def test_pip_install_with_requirements_file_passes() -> None:
     """`-r requirements.txt` is acceptable — the file pins versions."""
     assert _scan("pip install -r requirements.txt") == []
