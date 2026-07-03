@@ -56,6 +56,173 @@ async def test_upload_task_dir_normal_prefix_works(tmp_path: Path) -> None:
     assert ("b", "humaneval/HumanEval/0/solution/s.py") in store.objects
 
 
+async def test_upload_task_dir_rejects_pytorch_index_as_sole_index_for_pypi_deps(
+    tmp_path: Path,
+) -> None:
+    dockerfile = tmp_path / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text(
+        "FROM python:3.13-bookworm\n"
+        "RUN pip install torch torchvision pyyaml "
+        "--index-url https://download.pytorch.org/whl/cpu\n",
+    )
+    (tmp_path / "task.toml").write_text("x = 1\n")
+
+    with pytest.raises(ValueError, match="package-specific pip index"):
+        await upload_task_dir(
+            store=FakeObjectStore(),
+            bucket="b",
+            prefix="source-useful/task/",
+            task_dir=tmp_path,
+        )
+
+
+async def test_upload_task_dir_allows_pytorch_extra_index_for_pypi_deps(
+    tmp_path: Path,
+) -> None:
+    dockerfile = tmp_path / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text(
+        "FROM python:3.13-bookworm\n"
+        "RUN pip install torch torchvision pyyaml "
+        "--extra-index-url https://download.pytorch.org/whl/cpu\n",
+    )
+    (tmp_path / "task.toml").write_text("x = 1\n")
+
+    count = await upload_task_dir(
+        store=FakeObjectStore(),
+        bucket="b",
+        prefix="source-useful/task/",
+        task_dir=tmp_path,
+    )
+
+    assert count == 2
+
+
+async def test_upload_task_dir_rejects_moving_npm_latest_with_fixed_node_major(
+    tmp_path: Path,
+) -> None:
+    dockerfile = tmp_path / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text(
+        "FROM node:18-bookworm\n"
+        "RUN npm install -g npm@latest\n",
+    )
+    (tmp_path / "task.toml").write_text("x = 1\n")
+
+    with pytest.raises(ValueError, match="npm@latest"):
+        await upload_task_dir(
+            store=FakeObjectStore(),
+            bucket="b",
+            prefix="source-useful/task/",
+            task_dir=tmp_path,
+        )
+
+
+async def test_upload_task_dir_rejects_moving_npm_latest_after_nodesource_setup(
+    tmp_path: Path,
+) -> None:
+    dockerfile = tmp_path / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text(
+        "FROM ubuntu:24.04\n"
+        "RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - "
+        "&& npm install -g npm@latest\n",
+    )
+    (tmp_path / "task.toml").write_text("x = 1\n")
+
+    with pytest.raises(ValueError, match="Node 18"):
+        await upload_task_dir(
+            store=FakeObjectStore(),
+            bucket="b",
+            prefix="source-useful/task/",
+            task_dir=tmp_path,
+        )
+
+
+async def test_upload_task_dir_rejects_setup_copy_without_app_parent(
+    tmp_path: Path,
+) -> None:
+    dockerfile = tmp_path / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text(
+        "FROM ubuntu:24.04\n"
+        "RUN mkdir -p /tmp/setup && cp -r /tmp/setup /app/project\n",
+    )
+    (tmp_path / "task.toml").write_text("x = 1\n")
+
+    with pytest.raises(ValueError, match="/app"):
+        await upload_task_dir(
+            store=FakeObjectStore(),
+            bucket="b",
+            prefix="source-useful/task/",
+            task_dir=tmp_path,
+        )
+
+
+async def test_upload_task_dir_rejects_setup_archive_without_app_parent(
+    tmp_path: Path,
+) -> None:
+    dockerfile = tmp_path / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text(
+        "FROM ubuntu:24.04\n"
+        "RUN tar -czf /app/base-fs.tar.gz /tmp/setup\n",
+    )
+    (tmp_path / "task.toml").write_text("x = 1\n")
+
+    with pytest.raises(ValueError, match="/app"):
+        await upload_task_dir(
+            store=FakeObjectStore(),
+            bucket="b",
+            prefix="source-useful/task/",
+            task_dir=tmp_path,
+        )
+
+
+async def test_upload_task_dir_rejects_broad_trailing_true_after_setup_chain(
+    tmp_path: Path,
+) -> None:
+    dockerfile = tmp_path / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text(
+        "FROM ubuntu:24.04\n"
+        "RUN mkdir -p /app && cp -r /tmp/setup /app/project "
+        "&& cd /app/project && git remote remove origin 2>/dev/null || true\n",
+    )
+    (tmp_path / "task.toml").write_text("x = 1\n")
+
+    with pytest.raises(ValueError, match=r"trailing .*\|\| true"):
+        await upload_task_dir(
+            store=FakeObjectStore(),
+            bucket="b",
+            prefix="source-useful/task/",
+            task_dir=tmp_path,
+        )
+
+
+async def test_upload_task_dir_allows_scoped_optional_git_remote_remove(
+    tmp_path: Path,
+) -> None:
+    dockerfile = tmp_path / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text(
+        "FROM ubuntu:24.04\n"
+        "RUN mkdir -p /app && cp -r /tmp/setup /app/project "
+        "&& cd /app/project && (git remote remove origin 2>/dev/null || true)\n",
+    )
+    (tmp_path / "task.toml").write_text("x = 1\n")
+
+    count = await upload_task_dir(
+        store=FakeObjectStore(),
+        bucket="b",
+        prefix="source-useful/task/",
+        task_dir=tmp_path,
+    )
+
+    assert count == 2
+
+
 def test_validate_instance_id_accepts_normal_ids() -> None:
     _validate_instance_id("HumanEval/0")
     _validate_instance_id("inst-1")
