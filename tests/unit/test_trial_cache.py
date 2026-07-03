@@ -618,3 +618,30 @@ def test_build_layered_image_wraps_build_error() -> None:
             install_script="echo will fail && false",
         )
     assert "failed to build layered image" in str(exc.value)
+
+
+def test_build_layered_image_preserves_full_diagnostic_detail() -> None:
+    from docker.errors import BuildError
+
+    client = MagicMock()
+    noise = [{"stream": f"layer noise line {idx}\n"} for idx in range(120)]
+    error = [{"stream": "LAYER_FINAL_ERROR: dpkg failed\n"}]
+    client.images.build.side_effect = BuildError(
+        reason="step 2 failed: exit code 1",
+        build_log=iter(noise + error),
+    )
+
+    with pytest.raises(trial_cache.TrialCacheError) as exc:
+        trial_cache._build_layered_image_sync(
+            client=client,
+            tag="loom-trial-cache:abc",
+            base_digest="sha256:base",
+            install_script="echo will fail && false",
+        )
+
+    msg = str(exc.value)
+    assert "LAYER_FINAL_ERROR" in msg
+    assert "layer noise line 0" not in msg
+    assert exc.value.diagnostic_detail is not None
+    assert "layer noise line 0" in exc.value.diagnostic_detail
+    assert "LAYER_FINAL_ERROR" in exc.value.diagnostic_detail

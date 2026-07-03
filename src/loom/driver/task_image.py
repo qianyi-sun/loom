@@ -85,6 +85,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
 class TaskImageBuildError(RuntimeError):
     """Raised when the worker cannot resolve a task sandbox image."""
 
+    def __init__(
+        self,
+        *args: object,
+        diagnostic_detail: str | None = None,
+    ) -> None:
+        super().__init__(*args)
+        self.diagnostic_detail = diagnostic_detail
+
 
 def task_image_tag(task_config: TaskConfig, *, task_checksum: str) -> str:
     """Stable local Docker tag for a task-bundle Dockerfile build."""
@@ -259,12 +267,18 @@ def _ensure_dockerfile_image(
         # the tail of the captured stdout/stderr so operators can see
         # pip's actual error output (e.g. "ERROR: No matching
         # distribution found for pytest-jsonreport"). #319.
-        tail = _format_build_log_tail(exc.build_log)
+        tail, full_log = _format_build_log_sections(exc.build_log)
+        diagnostic_detail = (
+            f"failed to build Docker image {tag!r} from "
+            f"{configured_dockerfile.as_posix()!r}: {exc}"
+            + (f"\nbuild log (full):\n{full_log}" if full_log else "")
+        )
         raise TaskImageBuildError(
             f"failed to build Docker image {tag!r} from "
             f"{configured_dockerfile.as_posix()!r}: {exc}"
             + (f"\nbuild log (last {_BUILD_LOG_TAIL_LINES} lines):\n{tail}"
                if tail else ""),
+            diagnostic_detail=diagnostic_detail,
         ) from exc
     except Exception as exc:
         raise TaskImageBuildError(
@@ -316,7 +330,12 @@ def _ensure_terminus_2_arm64_base_if_needed(
                     },
                 )
         except BuildError as exc:
-            tail = _format_build_log_tail(exc.build_log)
+            tail, full_log = _format_build_log_sections(exc.build_log)
+            diagnostic_detail = (
+                "failed to build managed arm64 Terminus 2 base image "
+                f"{TERMINUS_2_FULL_IMAGE!r}: {exc}"
+                + (f"\nbuild log (full):\n{full_log}" if full_log else "")
+            )
             raise TaskImageBuildError(
                 "failed to build managed arm64 Terminus 2 base image "
                 f"{TERMINUS_2_FULL_IMAGE!r}: {exc}"
@@ -324,6 +343,7 @@ def _ensure_terminus_2_arm64_base_if_needed(
                     f"\nbuild log (last {_BUILD_LOG_TAIL_LINES} lines):\n{tail}"
                     if tail else ""
                 ),
+                diagnostic_detail=diagnostic_detail,
             ) from exc
         except Exception as exc:
             raise TaskImageBuildError(
@@ -431,6 +451,30 @@ def _format_build_log_tail(build_log: Any) -> str:
     if not lines:
         return ""
     return "\n".join(lines[-_BUILD_LOG_TAIL_LINES:])
+
+
+def _format_build_log_sections(build_log: Any) -> tuple[str, str]:
+    """Return ``(tail, full)`` build-log strings from docker-py's iterator."""
+    if build_log is None:
+        return "", ""
+    lines: list[str] = []
+    try:
+        for chunk in build_log:
+            if isinstance(chunk, dict):
+                text = chunk.get("stream") or chunk.get("error") or ""
+            else:
+                text = str(chunk)
+            if not text:
+                continue
+            for line in text.splitlines():
+                stripped = line.rstrip()
+                if stripped:
+                    lines.append(stripped)
+    except Exception:
+        pass
+    if not lines:
+        return "", ""
+    return "\n".join(lines[-_BUILD_LOG_TAIL_LINES:]), "\n".join(lines)
 
 
 def _enforce_build_context_limits(task_dir: Path) -> None:

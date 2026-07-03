@@ -640,6 +640,10 @@ async def _spawn_trial(
                 trial_id=trial_id,
                 worker_id=worker_id,
                 detail=str(exc),
+                diagnostic_detail=getattr(exc, "diagnostic_detail", None),
+                setup_diagnostics_root=(
+                    settings.trajectory_cache_dir / "setup-diagnostics"
+                ),
             )
             return
 
@@ -778,6 +782,10 @@ async def _spawn_trial(
                 trial_id=trial_id,
                 worker_id=worker_id,
                 detail=str(exc),
+                diagnostic_detail=getattr(exc, "diagnostic_detail", None),
+                setup_diagnostics_root=(
+                    settings.trajectory_cache_dir / "setup-diagnostics"
+                ),
             )
         finally:
             shutil.rmtree(task_dir, ignore_errors=True)
@@ -819,8 +827,19 @@ async def _mark_setup_failed(
     trial_id: UUID,
     worker_id: UUID,
     detail: str,
+    diagnostic_detail: str | None = None,
+    setup_diagnostics_root: Path | None = None,
 ) -> None:
-    safe_detail = _format_setup_failure_detail(detail)
+    safe_diagnostic_detail = redact_text(diagnostic_detail or detail).strip()
+    diagnostic_path = _write_setup_failure_diagnostic(
+        safe_diagnostic_detail=safe_diagnostic_detail,
+        trial_id=trial_id,
+        setup_diagnostics_root=setup_diagnostics_root,
+    )
+    safe_detail = _format_setup_failure_detail(
+        detail,
+        diagnostic_path=diagnostic_path,
+    )
     failure_reason = _classify_setup_failure(safe_detail)
     logger.warning(
         "trial_setup_failed trial_id=%s worker_id=%s detail=%s",
@@ -850,9 +869,46 @@ async def _mark_setup_failed(
         )
 
 
-def _format_setup_failure_detail(detail: str) -> str:
+def _write_setup_failure_diagnostic(
+    *,
+    safe_diagnostic_detail: str,
+    trial_id: UUID,
+    setup_diagnostics_root: Path | None,
+) -> Path | None:
+    if setup_diagnostics_root is None:
+        return None
+    if len(safe_diagnostic_detail) <= _SETUP_FAILURE_MESSAGE_LIMIT:
+        return None
+
+    diagnostic_path = setup_diagnostics_root / f"{trial_id}.log"
+    try:
+        diagnostic_path.parent.mkdir(parents=True, exist_ok=True)
+        diagnostic_path.write_text(safe_diagnostic_detail + "\n", encoding="utf-8")
+    except OSError:
+        logger.warning(
+            "trial_setup_failed_diagnostic_write_failed trial_id=%s path=%s",
+            trial_id,
+            diagnostic_path,
+            exc_info=True,
+        )
+        return None
+    return diagnostic_path
+
+
+def _format_setup_failure_detail(
+    detail: str,
+    *,
+    diagnostic_path: Path | None = None,
+) -> str:
     safe_detail = redact_text(detail).strip()
-    if len(safe_detail) <= _SETUP_FAILURE_MESSAGE_LIMIT:
+    diagnostic_path_line = (
+        f"\nfull_setup_diagnostic_path: {diagnostic_path}"
+        if diagnostic_path is not None
+        else ""
+    )
+    if len(safe_detail) + len(diagnostic_path_line) <= _SETUP_FAILURE_MESSAGE_LIMIT:
+        if diagnostic_path_line:
+            return f"{safe_detail}{diagnostic_path_line}"
         return safe_detail
 
     max_head_budget = min(
@@ -860,6 +916,15 @@ def _format_setup_failure_detail(detail: str) -> str:
         _SETUP_FAILURE_MESSAGE_LIMIT - len(_SETUP_FAILURE_TRUNCATION_MARKER) - 1,
     )
     head = _setup_failure_diagnostic_head(safe_detail, max_head_budget)
+    if diagnostic_path_line:
+        head = f"{head}{diagnostic_path_line}"
+        if len(head) + len(_SETUP_FAILURE_TRUNCATION_MARKER) >= (
+            _SETUP_FAILURE_MESSAGE_LIMIT
+        ):
+            head_budget = _SETUP_FAILURE_MESSAGE_LIMIT - len(
+                _SETUP_FAILURE_TRUNCATION_MARKER
+            ) - 1
+            head = head[:head_budget].rstrip()
     tail_budget = _SETUP_FAILURE_MESSAGE_LIMIT - len(head) - len(
         _SETUP_FAILURE_TRUNCATION_MARKER
     )

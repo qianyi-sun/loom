@@ -444,6 +444,70 @@ async def test_task_image_setup_failure_records_diagnostic_message() -> None:
     } in cp.patch_calls
 
 
+async def test_long_setup_failure_writes_redacted_diagnostic_file(
+    tmp_path: Path,
+) -> None:
+    from loom_worker.task_image import TaskImageBuildError
+    from loom_worker.vllm_registry import WorkerVLLMRegistry
+
+    settings = _FakeSettings()
+    settings.trajectory_cache_dir = tmp_path / "trajectory-cache"
+    cp = _FakeCPClient()
+    pool = RunnerPool(max_concurrent=1)
+    trial_id = uuid4()
+    worker_id = uuid4()
+    decisive_error = (
+        "dpkg: error processing package nodejs (--configure): "
+        "post-installation script returned error exit status 1"
+    )
+    full_detail = (
+        "failed to build Docker image 'loom-task:abc123' from "
+        "'environment/Dockerfile': The command '/bin/sh -c apt-get install nodejs' "
+        "returned a non-zero code: 1\n"
+        "build log (last 200 lines):\n"
+        "Bearer super-secret-token\n"
+        + "\n".join(f"Removing noisy-package-{idx} (1.0) ..." for idx in range(160))
+        + f"\n{decisive_error}\n"
+        + "hf_abcdefghijklmnopqrstuvwxyz1234567890"
+    )
+
+    async def fail_resolve_task_image(**_kwargs: object) -> str:
+        raise TaskImageBuildError(full_detail)
+
+    with patch.object(ml, "resolve_task_image", fail_resolve_task_image):
+        await ml._spawn_trial(
+            pool=pool,
+            settings=settings,  # type: ignore[arg-type]
+            cp_client=cp,  # type: ignore[arg-type]
+            gateway_client=None,  # type: ignore[arg-type]
+            object_store=None,  # type: ignore[arg-type]
+            worker_id=worker_id,
+            payload={
+                "trial_id": str(trial_id),
+                "team_id": str(uuid4()),
+                "task_id": "fake",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
+            vllm_registry=WorkerVLLMRegistry(enabled=False),
+        )
+        await pool.wait_all(timeout=2.0)
+
+    diagnostic_path = (
+        settings.trajectory_cache_dir
+        / "setup-diagnostics"
+        / f"{trial_id}.log"
+    )
+    failure_message = str(cp.patch_calls[0]["failure_message"])
+    assert len(failure_message) <= 1000
+    assert str(diagnostic_path) in failure_message
+    artifact_text = diagnostic_path.read_text(encoding="utf-8")
+    assert decisive_error in artifact_text
+    assert "Bearer super-secret-token" not in artifact_text
+    assert "Bearer [REDACTED:bearer]" in artifact_text
+    assert "hf_abcdefghijklmnopqrstuvwxyz1234567890" not in artifact_text
+    assert "[REDACTED:hf-token]" in artifact_text
+
+
 async def test_tempdir_cleaned_on_cancellation() -> None:
     from loom_worker.vllm_registry import WorkerVLLMRegistry
 

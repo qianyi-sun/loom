@@ -58,6 +58,14 @@ HEARTBEAT_INTERVAL_SEC = 60.0
 class TrialCacheError(RuntimeError):
     """Raised when the worker cannot resolve a layered trial image."""
 
+    def __init__(
+        self,
+        *args: object,
+        diagnostic_detail: str | None = None,
+    ) -> None:
+        super().__init__(*args)
+        self.diagnostic_detail = diagnostic_detail
+
 
 def _normalize_install_script(raw: str | None) -> str | None:
     """Empty / whitespace-only scripts are treated as None (no install
@@ -185,10 +193,15 @@ def _build_layered_image_sync(
             # script failed. Walk build_log and surface the trailing
             # 40 lines so operators see pip's / apt's actual error.
             # Same shape as task_image._format_build_log_tail (#350).
-            tail = _format_build_log_tail(exc.build_log)
+            tail, full_log = _format_build_log_sections(exc.build_log)
+            diagnostic_detail = (
+                f"failed to build layered image {tag!r}: {exc}"
+                + (f"\nbuild log (full):\n{full_log}" if full_log else "")
+            )
             raise TrialCacheError(
                 f"failed to build layered image {tag!r}: {exc}"
                 + (f"\nbuild log (last lines):\n{tail}" if tail else ""),
+                diagnostic_detail=diagnostic_detail,
             ) from exc
         except APIError as exc:
             raise TrialCacheError(
@@ -222,6 +235,30 @@ def _format_build_log_tail(build_log: Any) -> str:
     if not lines:
         return ""
     return "\n".join(lines[-_BUILD_LOG_TAIL_LINES:])
+
+
+def _format_build_log_sections(build_log: Any) -> tuple[str, str]:
+    """Same shape as task_image._format_build_log_sections (#376)."""
+    if build_log is None:
+        return "", ""
+    lines: list[str] = []
+    try:
+        for chunk in build_log:
+            if isinstance(chunk, dict):
+                text = chunk.get("stream") or chunk.get("error") or ""
+            else:
+                text = str(chunk)
+            if not text:
+                continue
+            for line in text.splitlines():
+                stripped = line.rstrip()
+                if stripped:
+                    lines.append(stripped)
+    except Exception:
+        pass
+    if not lines:
+        return "", ""
+    return "\n".join(lines[-_BUILD_LOG_TAIL_LINES:]), "\n".join(lines)
 
 
 @contextlib.asynccontextmanager
