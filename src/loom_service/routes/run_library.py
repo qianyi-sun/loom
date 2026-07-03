@@ -1455,8 +1455,61 @@ async def update_run_library_batch_visibility(
     }
 
 
+def _current_retry_defaults(settings: Any) -> dict[str, Any]:
+    """Materialize the current deployment RetryPolicy defaults."""
+    return {
+        "max_attempts": settings.trial_retry_default_max_attempts,
+        "retry_on": sorted(settings.trial_retry_default_retry_on),
+        "backoff": {
+            "base_sec": settings.trial_retry_default_backoff_base_sec,
+            "max_sec": settings.trial_retry_default_backoff_max_sec,
+            "multiplier": settings.trial_retry_default_backoff_multiplier,
+            "jitter": settings.trial_retry_default_backoff_jitter,
+        },
+    }
+
+
+def _retry_default_snapshot_mismatch(
+    source_trial_config: dict[str, Any],
+    settings: Any,
+) -> dict[str, Any] | None:
+    """#401 PR-3: warn on clone when the source batch's explicit RetryPolicy
+    diverges from the current deployment defaults. Returns None when the
+    source had no explicit `retry` (clones will inherit current defaults at
+    submit) or when the source policy already matches."""
+    source_retry = source_trial_config.get("retry")
+    if not isinstance(source_retry, dict):
+        return None
+    current = _current_retry_defaults(settings)
+    source_backoff = source_retry.get("backoff") or {}
+    source_norm = {
+        "max_attempts": source_retry.get(
+            "max_attempts", current["max_attempts"],
+        ),
+        "retry_on": sorted(source_retry.get("retry_on", current["retry_on"])),
+        "backoff": {
+            "base_sec": source_backoff.get(
+                "base_sec", current["backoff"]["base_sec"],
+            ),
+            "max_sec": source_backoff.get(
+                "max_sec", current["backoff"]["max_sec"],
+            ),
+            "multiplier": source_backoff.get(
+                "multiplier", current["backoff"]["multiplier"],
+            ),
+            "jitter": source_backoff.get(
+                "jitter", current["backoff"]["jitter"],
+            ),
+        },
+    }
+    if source_norm == current:
+        return None
+    return {"source": source_norm, "current": current}
+
+
 @router.post("/run-library/batches/{batch_id}/clone-config", status_code=201)
 async def clone_run_library_batch_config(
+    request: Request,
     sc: SessionAndCtx,
     batch_id: UUID,
     payload: _CloneConfigRequest,
@@ -1510,6 +1563,9 @@ async def clone_run_library_batch_config(
     session.add(clone)
     await session.commit()
     await session.refresh(clone)
+    mismatch = _retry_default_snapshot_mismatch(
+        clone.trial_config, request.app.state.settings,
+    )
     return {
         "batch_id": str(clone.id),
         "cloned_from_batch_id": str(source.id),
@@ -1520,6 +1576,7 @@ async def clone_run_library_batch_config(
         "source_provenance": clone.source_provenance,
         "state": clone.state,
         "created_at": clone.created_at.isoformat(),
+        "retry_default_snapshot_mismatch": mismatch,
     }
 
 

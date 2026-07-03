@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, delete
+from sqlalchemy import create_engine, delete, insert, select
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import GB10WorkerNodeStatus, GB10WorkerPoolDesiredState, Token
+from loom.db.schema import (
+    GB10WorkerNodeStatus,
+    GB10WorkerPoolDesiredState,
+    Token,
+    Worker,
+)
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
@@ -57,6 +64,7 @@ def clean_gb10_lifecycle(postgres_url: str) -> Iterator[None]:
     with session_factory() as s:
         s.execute(delete(GB10WorkerNodeStatus))
         s.execute(delete(GB10WorkerPoolDesiredState))
+        s.execute(delete(Worker))
         s.execute(delete(Token))
         s.commit()
     try:
@@ -65,6 +73,7 @@ def clean_gb10_lifecycle(postgres_url: str) -> Iterator[None]:
         with session_factory() as s:
             s.execute(delete(GB10WorkerNodeStatus))
             s.execute(delete(GB10WorkerPoolDesiredState))
+            s.execute(delete(Worker))
             s.execute(delete(Token))
             s.commit()
         engine.dispose()
@@ -236,3 +245,238 @@ def test_node_report_redacts_secret_looking_status_text(app) -> None:
     assert "loom_w_secret" not in body
     assert "sk-secret" not in body
     assert "<redacted>" in body
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #368: stopped host intent must drain the worker registry
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _seed_worker(
+    postgres_url: str,
+    *,
+    hostname: str,
+    pool_name: str = "gb10-arm64",
+    max_concurrent: int = 10,
+) -> str:
+    """Insert an active worker row directly. Returns the worker id as
+    str (UUID) so tests can pass it back in as the report worker_id."""
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    worker_id = uuid4()
+    with session_factory() as s:
+        s.execute(
+            insert(Worker).values(
+                id=worker_id,
+                hostname=hostname,
+                version="test",
+                capabilities=[],
+                pool_name=pool_name,
+                max_concurrent=max_concurrent,
+                drain_state="active",
+                registered_at=datetime.now(UTC),
+                last_seen_at=datetime.now(UTC),
+                status="active",
+            )
+        )
+        s.commit()
+    engine.dispose()
+    return str(worker_id)
+
+
+def _fetch_worker(postgres_url: str, worker_id: str) -> dict[str, str | None]:
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    with session_factory() as s:
+        row = s.execute(
+            select(Worker).where(Worker.id == worker_id),
+        ).scalar_one()
+        out = {
+            "drain_state": row.drain_state,
+            "drain_reason": row.drain_reason,
+            "drain_owner": row.drain_owner,
+        }
+    engine.dispose()
+    return out
+
+
+def test_stopped_host_intent_forces_worker_drain_regardless_of_apply_result(
+    app,
+    postgres_url: str,
+) -> None:
+    """#368: a stopped host intent must drain the worker registry
+    even when the node-agent reports `apply_state=applied` /
+    `last_apply_result='already current'` — the operator has
+    expressed intent and the scheduler must not keep counting the
+    host as active capacity.
+    """
+    worker_id = _seed_worker(postgres_url, hostname="trt-gb10-15")
+    with TestClient(app) as client:
+        headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+        desired = client.put(
+            "/admin/gb10-worker-pools/production/gb10-arm64/desired-state",
+            headers=headers,
+            json={
+                "image_tag": "public-beta-6b76a48",
+                "max_concurrent": 10,
+                "env_config_version": "public-beta-6b76a48",
+                "host_intents": {"trt-gb10-15": "stopped"},
+            },
+        )
+        assert desired.status_code == 200, desired.text
+
+        # Node-agent bug: reports apply_state=applied /
+        # last_apply_result=already current, but container is still up
+        # (would still be heartbeating in production).
+        report = client.post(
+            "/admin/gb10-worker-pools/production/gb10-arm64/nodes/"
+            "trt-gb10-15/report",
+            headers=headers,
+            json={
+                "current_image_tag": "public-beta-6b76a48",
+                "current_max_concurrent": 10,
+                "current_env_config_version": "public-beta-6b76a48",
+                "current_intent": "stopped",
+                "apply_state": "applied",
+                "last_apply_result": "already current",
+                "worker_id": worker_id,
+            },
+        )
+        assert report.status_code == 200, report.text
+
+    worker_state = _fetch_worker(postgres_url, worker_id)
+    assert worker_state["drain_state"] == "drained", (
+        "Worker registry must reflect the stopped host intent; "
+        "otherwise `loom resources status` and the scheduler will "
+        "keep counting the host as active capacity (#368)."
+    )
+    assert worker_state["drain_owner"] == "gb10-lifecycle"
+    assert "desired_intent=stopped" in (worker_state["drain_reason"] or "")
+
+
+def test_stopped_intent_reconciliation_ignores_hosts_with_no_worker_id(
+    app,
+    postgres_url: str,
+) -> None:
+    """A node report with no linked worker_id (worker never
+    registered / already unlinked) must not blow up the reconciliation
+    path — the endpoint must still return 200 and the desired state
+    must still be recorded."""
+    with TestClient(app) as client:
+        headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+        assert (
+            client.put(
+                "/admin/gb10-worker-pools/production/gb10-arm64/desired-state",
+                headers=headers,
+                json={
+                    "image_tag": "public-beta-6b76a48",
+                    "max_concurrent": 10,
+                    "env_config_version": "public-beta-6b76a48",
+                    "host_intents": {"trt-gb10-15": "stopped"},
+                },
+            ).status_code
+            == 200
+        )
+        report = client.post(
+            "/admin/gb10-worker-pools/production/gb10-arm64/nodes/"
+            "trt-gb10-15/report",
+            headers=headers,
+            json={
+                "current_image_tag": "public-beta-6b76a48",
+                "current_max_concurrent": 10,
+                "current_env_config_version": "public-beta-6b76a48",
+                "current_intent": "stopped",
+                "apply_state": "applied",
+            },
+        )
+        assert report.status_code == 200, report.text
+
+
+def test_stopped_intent_reconciliation_is_idempotent_across_heartbeats(
+    app,
+    postgres_url: str,
+) -> None:
+    """Node heartbeats are periodic — the reconciliation must not
+    reset `drain_requested_at` on every report, and repeated
+    heartbeats must keep the worker drained (not flip back)."""
+    worker_id = _seed_worker(postgres_url, hostname="trt-gb10-15")
+    with TestClient(app) as client:
+        headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+        client.put(
+            "/admin/gb10-worker-pools/production/gb10-arm64/desired-state",
+            headers=headers,
+            json={
+                "image_tag": "public-beta-6b76a48",
+                "max_concurrent": 10,
+                "env_config_version": "public-beta-6b76a48",
+                "host_intents": {"trt-gb10-15": "stopped"},
+            },
+        )
+        report_body: dict[str, object] = {
+            "current_image_tag": "public-beta-6b76a48",
+            "current_max_concurrent": 10,
+            "current_env_config_version": "public-beta-6b76a48",
+            "current_intent": "stopped",
+            "apply_state": "applied",
+            "worker_id": worker_id,
+        }
+        assert (
+            client.post(
+                "/admin/gb10-worker-pools/production/gb10-arm64/nodes/"
+                "trt-gb10-15/report",
+                headers=headers,
+                json=report_body,
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/admin/gb10-worker-pools/production/gb10-arm64/nodes/"
+                "trt-gb10-15/report",
+                headers=headers,
+                json=report_body,
+            ).status_code
+            == 200
+        )
+    worker_state = _fetch_worker(postgres_url, worker_id)
+    assert worker_state["drain_state"] == "drained"
+
+
+def test_active_host_intent_does_not_touch_worker_drain_state(
+    app,
+    postgres_url: str,
+) -> None:
+    """The reconciliation must only trigger on `stopped` — an active
+    or default host intent must leave the worker registry alone."""
+    worker_id = _seed_worker(postgres_url, hostname="trt-gb10-1")
+    with TestClient(app) as client:
+        headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+        client.put(
+            "/admin/gb10-worker-pools/production/gb10-arm64/desired-state",
+            headers=headers,
+            json={
+                "image_tag": "public-beta-6b76a48",
+                "max_concurrent": 10,
+                "env_config_version": "public-beta-6b76a48",
+                "host_intents": {"trt-gb10-1": "active"},
+            },
+        )
+        assert (
+            client.post(
+                "/admin/gb10-worker-pools/production/gb10-arm64/nodes/"
+                "trt-gb10-1/report",
+                headers=headers,
+                json={
+                    "current_image_tag": "public-beta-6b76a48",
+                    "current_max_concurrent": 10,
+                    "current_env_config_version": "public-beta-6b76a48",
+                    "current_intent": "active",
+                    "apply_state": "applied",
+                    "worker_id": worker_id,
+                },
+            ).status_code
+            == 200
+        )
+    worker_state = _fetch_worker(postgres_url, worker_id)
+    assert worker_state["drain_state"] == "active"
+    assert worker_state["drain_reason"] is None

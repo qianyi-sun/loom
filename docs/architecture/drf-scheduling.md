@@ -34,7 +34,7 @@ SELECT t.id
   FROM trials t
   JOIN team_quotas q ON q.team_id = t.team_id
  WHERE t.state = 'queued'
-   AND t.attempt_count < q.max_attempts
+   AND t.attempt_count < q.max_attempts_ceiling
    AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= NOW())
    AND t.requires_caps->>'os'         = ANY(:worker_os)
    AND (
@@ -81,7 +81,12 @@ Quota knobs (`team_quotas` table):
   weight 3 saturate the cluster at 1:3 ratio when both are queued.
 - `in_flight_count` — maintained by the Control Plane on claim +
   release. The denominator in the DRF expression.
-- `max_attempts` — gates retries (see crash detector below).
+- `max_attempts_ceiling` — admin's per-team ceiling that gates
+  claim (`attempt_count < max_attempts_ceiling`). Seeded from the
+  `team_quota_max_attempts_ceiling_default` schema knob at team
+  creation. Semantically distinct from the trial's requested
+  `TrialConfig.retry.max_attempts` (submitter's ask), which is
+  clamped to this ceiling at submit time.
 
 ## Eligibility predicates (caps)
 
@@ -142,7 +147,7 @@ the trial id, previous worker id, `claimed_at`, expiry window, and
 `started_at=NULL`. That diagnostic is preserved if the row immediately
 exhausts retries; a later successful re-claim clears stale failure
 fields before the next attempt starts. The
-`attempt_count < max_attempts` predicate in the claim query then
+`attempt_count < max_attempts_ceiling` predicate in the claim query then
 caps total retries; over-quota trials end up in `failed_terminal`.
 
 ## Why one query (not "scheduler picks, then updates")

@@ -104,6 +104,18 @@ spec:
               value: "static_keys"
             - name: LOOM_CP_STORAGE_BACKEND
               value: "minio"
+            - name: LOOM_CP_TRIAL_RETRY_DEFAULT_BACKOFF_BASE_SEC
+              value: "30.0"
+            - name: LOOM_CP_TRIAL_RETRY_DEFAULT_BACKOFF_JITTER
+              value: "0.2"
+            - name: LOOM_CP_TRIAL_RETRY_DEFAULT_BACKOFF_MAX_SEC
+              value: "600.0"
+            - name: LOOM_CP_TRIAL_RETRY_DEFAULT_BACKOFF_MULTIPLIER
+              value: "2.0"
+            - name: LOOM_CP_TRIAL_RETRY_DEFAULT_MAX_ATTEMPTS
+              value: "3"
+            - name: LOOM_CP_TRIAL_RETRY_DEFAULT_RETRY_ON
+              value: "[\"gateway_error\", \"provider_transport_disconnect\"]"
             - name: LOOM_CP_WORKER_HEARTBEAT_EXPIRY_SEC
               value: "120"
             - name: LOOM_CP_WORKER_RECLAIM_SWEEP_INTERVAL_SEC

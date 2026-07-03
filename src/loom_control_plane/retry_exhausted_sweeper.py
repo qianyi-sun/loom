@@ -1,8 +1,9 @@
 """Background sweep that transitions queued trials to failed when they have
 exhausted their retry budget (spec §2.8).
 
-A trial's retry budget is exhausted when `attempt_count >= max_attempts`.
-The claim SQL already filters these out (workers will never receive them), but
+A trial's retry budget is exhausted when
+`attempt_count >= team_quotas.max_attempts_ceiling` — the admin's per-team
+ceiling. The claim SQL already filters these out (workers will never receive them), but
 nothing was transitioning them to a terminal state — they sat in `queued`
 forever, keeping their parent batch in `running` forever.
 
@@ -41,7 +42,7 @@ UPDATE trials
          FROM trials t
          JOIN team_quotas q ON q.team_id = t.team_id
         WHERE t.state        = 'queued'
-          AND t.attempt_count >= q.max_attempts
+          AND t.attempt_count >= q.max_attempts_ceiling
         LIMIT 100
    )
  RETURNING id;

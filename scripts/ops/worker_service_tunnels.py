@@ -456,8 +456,31 @@ def probe_health_urls(
         try:
             with urlopen(url, timeout=timeout_sec) as response:
                 status = getattr(response, "status", 200)
-                ok = 200 <= int(status) < 300
-                detail = f"http_status={status}"
+                # #18 fix: a stale `kubectl port-forward` can still
+                # accept the TCP connection and return HTTP 200 with a
+                # zero-byte body (or immediately FIN before writing a
+                # body). Reading the response and requiring non-empty
+                # content catches the stale-tunnel case that the pure
+                # status-code check would silently accept as healthy.
+                try:
+                    body = response.read(1024)
+                except (OSError, TimeoutError) as read_exc:
+                    ok = False
+                    detail = (
+                        f"http_status={status} read_error="
+                        f"{read_exc.__class__.__name__}"
+                    )
+                else:
+                    status_ok = 200 <= int(status) < 300
+                    if not status_ok:
+                        ok = False
+                        detail = f"http_status={status}"
+                    elif not body:
+                        ok = False
+                        detail = f"http_status={status} empty_response"
+                    else:
+                        ok = True
+                        detail = f"http_status={status}"
         except (OSError, URLError, TimeoutError) as exc:
             ok = False
             detail = exc.__class__.__name__

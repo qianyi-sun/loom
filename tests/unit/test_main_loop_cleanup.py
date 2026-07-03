@@ -33,6 +33,29 @@ def test_setup_failure_classifier_recognizes_task_image_build_timeout() -> None:
     assert ml._classify_setup_failure(detail) == FailureReason.TASK_IMAGE_BUILD_TIMEOUT
 
 
+def test_setup_failure_classifier_recognizes_task_dns_compatibility() -> None:
+    detail = (
+        "failed to build layered image 'loom-trial-cache:abc123': "
+        "The command '/bin/sh -c bash /tmp/install.sh' returned a non-zero code: 2\n"
+        "build log (last 20 lines):\n"
+        "Ign:1 http://deb.debian.org/debian bookworm InRelease\n"
+        "Err:1 http://deb.debian.org/debian bookworm InRelease\n"
+        "  Temporary failure resolving 'deb.debian.org'\n"
+    )
+
+    assert ml._classify_setup_failure(detail) == FailureReason.TASK_COMPATIBILITY
+
+
+def test_setup_failure_classifier_recognizes_preflight_task_compatibility() -> None:
+    detail = (
+        "TASK_COMPAT_DNS_MUTATION environment/Dockerfile:3: "
+        "Dockerfile mutates DNS/NSS configuration before Loom installs the "
+        "service-mode agent layer."
+    )
+
+    assert ml._classify_setup_failure(detail) == FailureReason.TASK_COMPATIBILITY
+
+
 async def test_setup_failure_patch_uses_task_image_build_timeout_reason() -> None:
     cp = _FakeCPClient()
     trial_id = uuid4()
@@ -259,6 +282,11 @@ class _FakeSettings:
     # reads it to construct the LocalTrialRunner.
     sandbox_step_jwt_ttl_sec = 600
     docker_api_timeout_sec = 1800
+    # #360 / #378: cancellation watchdog config. Fast poll and permissive
+    # deadline so tests don't trigger the backstop.
+    trial_cancel_poll_interval_sec = 0.05
+    trial_hard_deadline_multiplier = 3.0
+    trial_hard_deadline_grace_sec = 600.0
 
 
 async def _drive_spawn(runner_target: object) -> Path:

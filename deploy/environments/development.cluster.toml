@@ -3,3 +3,10 @@ ingress_host = "dev.yylx.world"
 ingress_tls_secret_name = "loom-dev-tls"
 trajectories_bucket = "loom-dev-trajectories"
 artifacts_bucket = "loom-dev-artifacts"
+
+# Local dev / kind clusters have no external Slurm capacity, so the
+# in-cluster loom-worker Deployment IS the trial execution path here.
+# See #383 for the OLDLAB-hosted-profile rationale that makes this
+# the odd one out.
+[k8s_worker]
+enabled = true

@@ -9,7 +9,10 @@ from docker.errors import ImageNotFound
 
 from loom.driver import task_image
 from loom.driver.task_image import (
+    RUNTIME_ARM64_FALLBACK_BASES,
+    TERMINUS_2_FULL_IMAGE,
     TaskImageBuildError,
+    dockerfile_uses_runtime_arm64_fallback_base,
     resolve_task_image,
     task_image_tag,
 )
@@ -131,7 +134,10 @@ async def test_resolve_task_image_builds_and_caches_dockerfile_image(
     )
 
     assert image == task_image_tag(cfg, task_checksum="abc123")
-    assert fake_images.get_calls == [image]
+    # First `.get()` is the fast-path cache probe (#275); second is
+    # `_ensure_dockerfile_image`'s own pre-build check once the slot
+    # has been claimed.
+    assert fake_images.get_calls == [image, image]
     assert fake_images.build_calls == [
         {
             "path": str(task_dir),
@@ -179,7 +185,10 @@ async def test_resolve_task_image_prewarms_terminus_2_base_on_arm64_linux(
         task_checksum="abc123",
     )
 
+    # Duplicate `image` entry is the pre-build cache probe (#275); the
+    # third element is the terminus-2 base pre-warm check.
     assert fake_images.get_calls == [
+        image,
         image,
         "mictern2/terminus2-full:latest",
     ]
@@ -302,7 +311,9 @@ async def test_resolve_task_image_passes_docker_api_timeout(
         docker_api_timeout_sec=900.0,
     )
 
-    assert from_env_timeouts == [900.0]
+    # The fast-path cache probe (#275) opens its own docker.from_env
+    # client with the same timeout, so we now see two clients created.
+    assert from_env_timeouts == [900.0, 900.0]
 
 
 async def test_resolve_task_image_builds_from_explicit_context(
@@ -549,3 +560,184 @@ async def test_resolve_task_image_empty_build_log_still_raises(
     msg = str(exc.value)
     assert "daemon rejected build" in msg
     assert "build log" not in msg.lower()
+
+
+class TestRuntimeArm64FallbackBases:
+    """Registry + Dockerfile probe for #342."""
+
+    def test_terminus_2_full_is_a_fallback_base(self) -> None:
+        assert TERMINUS_2_FULL_IMAGE in RUNTIME_ARM64_FALLBACK_BASES
+
+    def test_dockerfile_with_terminus_2_from_is_detected(self, tmp_path) -> None:
+        dockerfile = tmp_path / "Dockerfile"
+        dockerfile.write_text(
+            f"# comment\nFROM {TERMINUS_2_FULL_IMAGE}\nRUN echo ok\n",
+        )
+        assert dockerfile_uses_runtime_arm64_fallback_base(dockerfile) is True
+
+    def test_dockerfile_with_docker_io_qualifier_is_detected(
+        self, tmp_path,
+    ) -> None:
+        dockerfile = tmp_path / "Dockerfile"
+        dockerfile.write_text(
+            f"FROM docker.io/{TERMINUS_2_FULL_IMAGE}\n",
+        )
+        assert dockerfile_uses_runtime_arm64_fallback_base(dockerfile) is True
+
+    def test_dockerfile_with_unrelated_base_is_not_detected(
+        self, tmp_path,
+    ) -> None:
+        dockerfile = tmp_path / "Dockerfile"
+        dockerfile.write_text("FROM python:3.11-slim\nRUN echo ok\n")
+        assert dockerfile_uses_runtime_arm64_fallback_base(dockerfile) is False
+
+    def test_dockerfile_with_arg_before_from_still_detected(
+        self, tmp_path,
+    ) -> None:
+        dockerfile = tmp_path / "Dockerfile"
+        dockerfile.write_text(
+            "ARG VERSION=1\n"
+            f"FROM {TERMINUS_2_FULL_IMAGE}\n",
+        )
+        assert dockerfile_uses_runtime_arm64_fallback_base(dockerfile) is True
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #275: build slot serialization
+# ──────────────────────────────────────────────────────────────────────
+
+
+import contextlib as _contextlib  # noqa: E402
+
+
+class _TrackingSlot:
+    """Fake `BuildSlotProvider` returning an async context manager that
+    records enter/exit calls."""
+
+    def __init__(self) -> None:
+        self.enter_calls = 0
+        self.exit_calls = 0
+
+    def __call__(self) -> _contextlib.AbstractAsyncContextManager[None]:
+        outer = self
+
+        @_contextlib.asynccontextmanager
+        async def _ctx():
+            outer.enter_calls += 1
+            try:
+                yield
+            finally:
+                outer.exit_calls += 1
+
+        return _ctx()
+
+
+async def test_resolve_task_image_enters_build_slot_only_when_building(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """#275: on a cold task cache the daemon build slot must be
+    entered before the Docker build starts, so a burst of trials can
+    only run N=max_concurrent apt-get / dpkg operations at once."""
+    task_dir = tmp_path / "task"
+    dockerfile = task_dir / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM alpine:3.19\n")
+    fake_images = _FakeImages()
+    fake_client = _FakeDockerClient(fake_images)
+    monkeypatch.setattr(task_image.docker, "from_env", lambda: fake_client)
+    slot = _TrackingSlot()
+
+    image = await resolve_task_image(
+        task_config=_task_config(dockerfile="environment/Dockerfile"),
+        task_dir=task_dir,
+        task_checksum="abc123",
+        build_slot_provider=slot,
+    )
+
+    assert image.startswith("loom-task:")
+    assert slot.enter_calls == 1
+    assert slot.exit_calls == 1
+    assert fake_images.build_calls, (
+        "build should have run inside the slot"
+    )
+
+
+async def test_resolve_task_image_skips_slot_on_cache_hit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """#275 fast path: an already-cached task image must NOT enter the
+    build slot. Steady-state trial dispatch must not pay the slot HTTP
+    round-trip on every trial once the image is warm."""
+    task_dir = tmp_path / "task"
+    dockerfile = task_dir / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM alpine:3.19\n")
+    fake_images = _FakeImages(cached=True)
+    fake_client = _FakeDockerClient(fake_images)
+    monkeypatch.setattr(task_image.docker, "from_env", lambda: fake_client)
+    slot = _TrackingSlot()
+
+    await resolve_task_image(
+        task_config=_task_config(dockerfile="environment/Dockerfile"),
+        task_dir=task_dir,
+        task_checksum="abc123",
+        build_slot_provider=slot,
+    )
+
+    assert slot.enter_calls == 0
+    assert slot.exit_calls == 0
+    assert fake_images.build_calls == []
+
+
+async def test_resolve_task_image_skips_slot_when_docker_image_declared(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """A task declaring `environment.docker_image` never triggers a
+    build, so the slot must never be entered — the check must short-
+    circuit before any docker.from_env call happens."""
+    slot = _TrackingSlot()
+    result = await resolve_task_image(
+        task_config=_task_config(docker_image="alpine:3.19"),
+        task_dir=tmp_path,
+        task_checksum="abc123",
+        build_slot_provider=slot,
+    )
+    assert result == "alpine:3.19"
+    assert slot.enter_calls == 0
+    assert slot.exit_calls == 0
+
+
+async def test_resolve_task_image_releases_slot_on_build_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """Slot must be released even when the Docker build raises, so a
+    failed setup can't leak a daemon-wide build slot indefinitely and
+    starve subsequent trials."""
+    task_dir = tmp_path / "task"
+    dockerfile = task_dir / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM alpine:3.19\n")
+
+    class _RaisingImages(_FakeImages):
+        def build(self, **_kwargs: object) -> object:  # type: ignore[override]
+            from docker.errors import BuildError
+
+            raise BuildError("simulated", build_log=iter([]))
+
+    fake_client = _FakeDockerClient(_RaisingImages())
+    monkeypatch.setattr(task_image.docker, "from_env", lambda: fake_client)
+    slot = _TrackingSlot()
+
+    with pytest.raises(task_image.TaskImageBuildError):
+        await resolve_task_image(
+            task_config=_task_config(dockerfile="environment/Dockerfile"),
+            task_dir=task_dir,
+            task_checksum="abc123",
+            build_slot_provider=slot,
+        )
+
+    assert slot.enter_calls == 1
+    assert slot.exit_calls == 1, (
+        "slot must be released via the async-context exit path even "
+        "when the build raises"
+    )

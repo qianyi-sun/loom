@@ -30,6 +30,9 @@ trajectories_bucket = "trajectories"
 worker_subprocess_gateway_url = "http://host.docker.internal:30443/openai/v1"
 worker_trajectory_storage_gi = 100
 
+[k8s_worker]
+enabled = false
+
 [replicas]
 service = 2
 control_plane = 2

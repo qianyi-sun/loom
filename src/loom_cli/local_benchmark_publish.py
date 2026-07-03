@@ -8,6 +8,8 @@ materialize, and upsert benchmark/task rows into the service database.
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,11 +21,17 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import Benchmark
 from loom.db.schema import Task as TaskRow
+from loom.driver.task_image import (
+    dockerfile_uses_runtime_arm64_fallback_base,
+)
 from loom.models.task_checksum import task_checksum
 from loom.trajectory.storage import ObjectStore
 from loom_benchmark_tool.db_url import normalize_db_url
 from loom_benchmark_tool.upload import upload_task_dir
 from loom_cli.local_benchmark_validate import validate_local_benchmark
+from loom_cli.terminal_bench_normalize import (
+    normalize_terminal_bench_task_toml,
+)
 
 PUBLISH_IMPORTED_BY = "local-benchmark-publish"
 S3_FOLDER_KIND = "s3-folder"
@@ -107,16 +115,38 @@ async def publish_local_benchmark(
                 task_id = entry.id if rel == Path(".") else f"{entry.id}/{rel.as_posix()}"
                 prefix = _task_prefix(entry.id, rel)
                 source = f"s3://{bucket}/{prefix}"
-                uploaded_objects += await upload_task_dir(
-                    store=object_store,
-                    bucket=bucket,
-                    prefix=prefix,
-                    task_dir=bundle_dir,
-                )
 
-                with task_toml.open("rb") as f:
-                    raw_cfg: dict[str, Any] = tomllib.load(f)
-                checksum = task_checksum(bundle_dir)
+                # #369: bundles whose files live under `environment/` but
+                # whose Dockerfile does `COPY . /app/` and references
+                # `/app/<file>` need the tree flattened so the files land
+                # at `/app/<file>` and not `/app/environment/<file>`. We
+                # stage each bundle into a scratch dir, flatten there,
+                # and upload from the scratch dir. The operator's
+                # on-disk bundle stays untouched.
+                with tempfile.TemporaryDirectory(
+                    prefix="loom-publish-stage-",
+                ) as stage_root:
+                    staged = Path(stage_root) / "bundle"
+                    shutil.copytree(bundle_dir, staged, symlinks=False)
+                    _flatten_environment_subdir(staged)
+
+                    uploaded_objects += await upload_task_dir(
+                        store=object_store,
+                        bucket=bucket,
+                        prefix=prefix,
+                        task_dir=staged,
+                    )
+                    with (staged / task_toml.name).open("rb") as f:
+                        raw_cfg: dict[str, Any] = tomllib.load(f)
+                    # #341: normalize Terminal-Bench-shaped task.toml
+                    # to a Loom TaskConfig dict before persisting. The
+                    # S3-uploaded bundle preserves the operator's
+                    # original files (plus the flattened compat copies
+                    # from #369); the DB row's `config` JSONB carries
+                    # the Loom-schema form so the worker validates.
+                    raw_cfg = normalize_terminal_bench_task_toml(raw_cfg)
+                    _promote_cpu_arch_if_runtime_fallback(raw_cfg, staged)
+                    checksum = task_checksum(staged)
                 existing = await _get_task(session, task_id)
                 if existing is None:
                     inserted += 1
@@ -176,3 +206,57 @@ async def _get_task(session, task_id: str):  # type: ignore[no-untyped-def]
     return (await session.execute(
         select(TaskRow).where(TaskRow.id == task_id),
     )).scalar_one_or_none()
+
+
+def _flatten_environment_subdir(bundle_dir: Path) -> list[str]:
+    """Copy every file under ``bundle_dir/environment/`` up to
+    ``bundle_dir/`` in place so a Dockerfile that does ``COPY . /app/``
+    and expects ``/app/<file>`` finds the file even when the bundle
+    stores it as ``environment/<file>``.
+
+    Existing top-level files are preserved (name collisions skip the
+    copy — the operator's intent at the root wins). The
+    ``environment/`` tree itself is preserved after flattening so
+    Dockerfiles that DO expect ``environment/<file>`` at the build
+    context root still find it there. Returns the list of relative
+    paths that were flattened (empty when no ``environment/`` subdir
+    exists). #369.
+    """
+    env_dir = bundle_dir / "environment"
+    if not env_dir.is_dir():
+        return []
+    flattened: list[str] = []
+    for src in sorted(env_dir.rglob("*")):
+        if not src.is_file() or src.is_symlink():
+            continue
+        rel = src.relative_to(env_dir)
+        dst = bundle_dir / rel
+        if dst.exists():
+            continue  # top-level name wins on collision
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        flattened.append(rel.as_posix())
+    return flattened
+
+
+def _promote_cpu_arch_if_runtime_fallback(
+    raw_cfg: dict[str, Any], bundle_dir: Path,
+) -> None:
+    """If the bundle's Dockerfile uses a base image the worker will
+    substitute an arm64 build for at trial time, promote an unspecified
+    ``environment.cpu_arch`` to ``"any"`` so the scheduler routes trials
+    to arm64 pools too. Explicit user choices are respected. #342.
+    """
+    env = raw_cfg.get("environment")
+    if not isinstance(env, dict):
+        return
+    if "cpu_arch" in env:
+        return  # explicit choice — never override
+    dockerfile_rel = env.get("dockerfile")
+    if not isinstance(dockerfile_rel, str):
+        return
+    dockerfile_path = bundle_dir / dockerfile_rel
+    if not dockerfile_path.is_file():
+        return
+    if dockerfile_uses_runtime_arm64_fallback_base(dockerfile_path):
+        env["cpu_arch"] = "any"

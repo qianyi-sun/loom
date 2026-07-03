@@ -200,9 +200,14 @@ function jsonResponse(body: unknown, status = 200): Response {
 function mockRunLibrary({
   platformAdmin = false,
   truncatedSummary = false,
+  cloneRetryMismatch = null,
 }: {
   platformAdmin?: boolean;
   truncatedSummary?: boolean;
+  cloneRetryMismatch?: null | {
+    source: { max_attempts: number; retry_on: string[]; backoff: Record<string, number> };
+    current: { max_attempts: number; retry_on: string[]; backoff: Record<string, number> };
+  };
 } = {}): ReturnType<typeof vi.spyOn> {
   return vi
     .spyOn(globalThis, "fetch")
@@ -343,6 +348,7 @@ function mockRunLibrary({
               ],
               state: "submitted",
               created_at: "2026-06-22T20:04:00Z",
+              retry_default_snapshot_mismatch: cloneRetryMismatch,
             },
             201,
           ),
@@ -608,5 +614,49 @@ describe("RunLibraryBatchDetail", () => {
     expect(exportUrl.searchParams.get("scope")).toBe("all");
     expect(exportUrl.searchParams.get("source_batch_id")).toBe("batch-alpha");
     expect(exportUrl.searchParams.get("format")).toBe("jsonl");
+  });
+
+  it("warns when clone-config source RetryPolicy diverges from cluster defaults (#401)", async () => {
+    mockRunLibrary({
+      cloneRetryMismatch: {
+        source: {
+          max_attempts: 7,
+          retry_on: ["agent_timeout", "worker_crash"],
+          backoff: { base_sec: 5, max_sec: 60, multiplier: 3, jitter: 0.5 },
+        },
+        current: {
+          max_attempts: 3,
+          retry_on: ["gateway_error", "provider_transport_disconnect"],
+          backoff: { base_sec: 30, max_sec: 600, multiplier: 2, jitter: 0.2 },
+        },
+      },
+    });
+    const user = userEvent.setup();
+    renderWithProviders(
+      <Routes>
+        <Route path="/library/batches/:batchId" element={<RunLibraryBatchDetail />} />
+      </Routes>,
+      { route: "/library/batches/batch-alpha" },
+    );
+
+    expect(await screen.findByText("shared alpha run")).toBeInTheDocument();
+    await user.selectOptions(
+      screen.getByLabelText("Provider connection"),
+      "beta-provider",
+    );
+    await user.click(screen.getByRole("button", { name: "Clone config" }));
+
+    const warning = await screen.findByTestId(
+      "retry-default-snapshot-mismatch",
+    );
+    expect(warning).toHaveTextContent("Retry policy carried over");
+    expect(warning).toHaveTextContent("source max_attempts");
+    expect(warning).toHaveTextContent("7");
+    expect(warning).toHaveTextContent("current max_attempts");
+    expect(warning).toHaveTextContent("3");
+    expect(warning).toHaveTextContent("agent_timeout, worker_crash");
+    expect(warning).toHaveTextContent(
+      "gateway_error, provider_transport_disconnect",
+    );
   });
 });

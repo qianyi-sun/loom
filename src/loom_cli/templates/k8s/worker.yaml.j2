@@ -1,4 +1,9 @@
 {% import "_env.j2" as env_macros %}
+{# When k8s_worker.enabled is false the whole loom-worker Deployment
+   and its trajectories PVC are omitted from the rendered manifest.
+   Trial execution capacity for these profiles comes from external
+   Slurm-managed pools. See #383. #}
+{% if k8s_worker.enabled %}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -78,3 +83,4 @@ spec:
   volumeName: {{ worker_trajectories_pv_name }}
 {% endif %}
   resources: { requests: { storage: {{ worker_trajectory_storage_gi }}Gi } }
+{% endif %}

@@ -188,6 +188,24 @@ _REASON_META: dict[str, _ReasonMeta] = {
         ),
         actions=("inspect_sandbox", "rerun_failed"),
     ),
+    "trial.task_compatibility": _ReasonMeta(
+        label="Task compatibility failure",
+        category="task",
+        attribution="benchmark",
+        trial_summary=(
+            "The trial hit a task-bundle compatibility problem before model "
+            "execution."
+        ),
+        batch_summary=(
+            "The batch has task-bundle compatibility failures that should be "
+            "fixed in the task assets before rerun."
+        ),
+        impact=(
+            "The score is not model-quality evidence for affected tasks "
+            "because the task environment or agent layer could not be prepared."
+        ),
+        actions=("inspect_sandbox",),
+    ),
     "trial.agent_error": _ReasonMeta(
         label="Agent execution failure",
         category="agent",

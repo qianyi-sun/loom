@@ -376,6 +376,55 @@ python_type = "float"
 default     = 60.0
 description = "Total wall-clock retry budget per request. We stop retrying once cumulative wait + elapsed exceeds this, even if attempts remain. Bumped from 30s to 60s in #416 Slice 3 to cover a full k8s rolling-restart window; well below TaskConfig.agent.timeout_sec (default 1800s)."
 
+# ─── Deployment-wide RetryPolicy defaults snapshotted at trial submit (#401) ───
+# Loom's trial retry defaults used to be Pydantic-model defaults, a Plan 3
+# artifact from before this schema existed. Moved here so operators can retune
+# per environment without a code change; the submit route snapshots the values
+# into TrialConfig.retry when the submitter didn't set an explicit policy, so
+# a saved trial is reproducible on any cluster regardless of subsequent retunes.
+
+[service_config.trial_retry_default_max_attempts]
+used_by     = ["control-plane", "loom-service"]
+python_type = "int"
+default     = 3
+description = "Default TrialConfig.retry.max_attempts snapshotted into the trial payload at submit time when the submitter didn't set an explicit RetryPolicy. Represents 'how many attempts does a well-behaved trial want?'. Clamped at submit to min(this, team_quota_max_attempts_ceiling_default). Semantically distinct from the team ceiling below."
+
+[service_config.trial_retry_default_retry_on]
+used_by     = ["control-plane", "loom-service"]
+python_type = "str_list"
+default     = ["gateway_error", "provider_transport_disconnect"]
+description = "Default TrialConfig.retry.retry_on snapshotted at submit time when unset. Members of the RetryReason enum (see src/loom/models/trial.py). Deployment-policy knob: CI dev might set [] (fail-fast, no wasted tokens); prod release-gate might add 'agent_timeout' to survive transient LLM slowdowns; sensitive prod might keep only ['provider_transport_disconnect']."
+
+[service_config.trial_retry_default_backoff_base_sec]
+used_by     = ["control-plane", "loom-service"]
+python_type = "float"
+default     = 30.0
+description = "Default BackoffSpec.base_sec snapshotted at submit time when unset. First-retry delay before exponential growth kicks in."
+
+[service_config.trial_retry_default_backoff_max_sec]
+used_by     = ["control-plane", "loom-service"]
+python_type = "float"
+default     = 600.0
+description = "Default BackoffSpec.max_sec snapshotted at submit time when unset. Cap on the exponential curve so retries don't stretch beyond a reasonable outer bound."
+
+[service_config.trial_retry_default_backoff_multiplier]
+used_by     = ["control-plane", "loom-service"]
+python_type = "float"
+default     = 2.0
+description = "Default BackoffSpec.multiplier snapshotted at submit time when unset. Exponential growth factor: attempt N waits base * multiplier^(N-1)."
+
+[service_config.trial_retry_default_backoff_jitter]
+used_by     = ["control-plane", "loom-service"]
+python_type = "float"
+default     = 0.2
+description = "Default BackoffSpec.jitter snapshotted at submit time when unset. Fractional jitter in [0, 1]: actual wait = curve * Uniform(1-jitter, 1+jitter) to spread thundering-herd across restarts."
+
+[service_config.team_quota_max_attempts_ceiling_default]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 3
+description = "Default value written to TeamQuota.max_attempts_ceiling at team creation. Represents 'how many attempts is this team allowed at most?' — the admin's ceiling, enforced by the scheduler at claim time. Semantically distinct from trial_retry_default_max_attempts (the submitter's requested count)."
+
 [service_config.egress_proxy_url]
 used_by     = ["llm-gateway"]
 python_type = "str"
@@ -659,6 +708,24 @@ python_type = "float"
 default     = 300.0
 description = "Wall-clock timeout for pre-start task bundle materialization, including hf://, fixture://, and s3:// sources. Exceeding it fails the claimed trial through setup failure writeback instead of leaving it stuck claimed."
 
+[service_config.trial_cancel_poll_interval_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 30.0
+description = "Cancellation watchdog poll cadence (#360). The worker polls the CP for each in-flight trial's state every N seconds; if the CP reports `cancelled`, the worker cancels the running asyncio task so the in-container agent process stops instead of continuing to spend budget."
+
+[service_config.trial_hard_deadline_multiplier]
+used_by     = ["worker"]
+python_type = "float"
+default     = 3.0
+description = "Multiplier applied to `agent.timeout_sec` to derive the worker-side hard-deadline backstop (#378). If a trial exceeds `agent.timeout_sec * multiplier + trial_hard_deadline_grace_sec`, the cancellation watchdog force-cancels the runner so a stuck opencode/subprocess-agent doesn't keep the trial `running` for hours past its declared timeout. Set to 0 to disable the backstop (not recommended for production)."
+
+[service_config.trial_hard_deadline_grace_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 600.0
+description = "Additive grace on top of `agent.timeout_sec * trial_hard_deadline_multiplier` for the hard-deadline backstop (#378). Covers task setup, verifier, and artifact-collection budget so a legitimate long run doesn't trip the watchdog."
+
 [service_config.enable_worker_vllm]
 used_by     = ["worker"]
 python_type = "bool"
@@ -722,6 +789,12 @@ used_by     = ["worker"]
 python_type = "int"
 default     = 1
 description = "Maximum concurrent layered trial-cache image builds allowed for the same worker daemon group. Workers coordinate daemon-wide synthetic slots through active_trial_cache_builds using pool_name, hostname, and docker_socket as the daemon fingerprint. Keep 1 for shared OLDLAB/k8s Docker daemons; raise only for isolated daemon hosts."
+
+[service_config.k8s_worker_enabled]
+used_by     = ["loom-service"]
+python_type = "bool"
+default     = true
+description = "Whether the k8s loom-worker Deployment is rendered on this cluster (#383). When false, POST /api/v1/batches rejects submissions whose required_worker_pools list contains 'k8s-worker' because that pool cannot exist on this cluster. Rendered by cluster-render from k8s_worker.enabled in the profile config."
 
 # ─── non-codegen secrets: keys mounted from loom-secrets without Settings fields ───
 # Not Pydantic fields — bootstrap-secrets covers them, doctor verifies them,
@@ -834,3 +907,18 @@ python_type = "table"
 # scaled to zero. Operators flip both to 1+ when enabling sandbox-
 # isolated egress.
 fields      = { service = 2, control_plane = 2, gateway = 2, web = 0, worker = 3, egress_xds = 0, egress_proxy = 0 }
+
+[render_config.k8s_worker]
+python_type = "table"
+# enabled=false is the safe default so profiles that share OLDLAB
+# hosts with Slurm do not double-schedule the host Docker daemon
+# (#383). The `development` profile explicitly flips this back to
+# true because local kind clusters have no external Slurm capacity;
+# k8s workers ARE the trial execution path there. `staging`,
+# `production`, and public-beta ship with the default and rely on
+# Slurm-managed pools for x86 trial execution. Toggling this to
+# false omits the loom-worker Deployment YAML entirely from the
+# rendered manifest and causes `POST /api/v1/batches` to reject
+# submissions whose `required_worker_pools` list contains
+# `k8s-worker`.
+fields      = { enabled = false }

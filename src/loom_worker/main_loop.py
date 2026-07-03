@@ -56,6 +56,7 @@ from loom.startup_retry import (
     retry_startup_dependency,
     retry_startup_dependency_sync,
 )
+from loom.task_bundle_compat import validate_task_dir_compatibility
 from loom.trajectory.cp_event_sink import CpEventSink
 from loom.trajectory.storage import MinioObjectStore, ObjectStore
 from loom.verifier.base import Verifier
@@ -79,9 +80,11 @@ from loom_worker.signal_handler import ShutdownState, install_signal_handlers
 from loom_worker.task_image import resolve_task_image
 from loom_worker.task_sidecars import DockerTaskSidecarRuntime
 from loom_worker.trial_cache import (
+    _daemon_build_slot,
     evict_stale_cache,
     resolve_trial_image,
 )
+from loom_worker.trial_cancellation_watchdog import run_with_watchdog
 from loom_worker.trial_runner import AgentFactory, LocalTrialRunner
 from loom_worker.vllm_registry import WorkerVLLMRegistry
 
@@ -618,11 +621,21 @@ async def _spawn_trial(
                 benchmark_cache=settings.benchmark_cache,
                 timeout_sec=settings.task_materialize_timeout_sec,
             )
+            validate_task_dir_compatibility(task_dir)
+            # #275: serialize concurrent task-image builds so a burst of
+            # trials cannot fan out unbounded apt-get / dpkg / build
+            # containers on a shared host Docker daemon (e.g. OLDLAB).
+            # `_daemon_build_slot` reuses the same slot pool that
+            # `_resolve_layered_trial_image` uses; when the tag is
+            # already cached, resolve_task_image never enters the slot.
             task_image = await resolve_task_image(
                 task_config=task_config,
                 task_dir=task_dir,
                 task_checksum=task_checksum,
                 docker_api_timeout_sec=settings.docker_api_timeout_sec,
+                build_slot_provider=lambda: _daemon_build_slot(
+                    cp_client, settings, worker_id,
+                ),
             )
             # #317 Phase 1: if the chosen agent declares an
             # install_script, layer the agent install onto the task
@@ -775,8 +788,32 @@ async def _spawn_trial(
             ),
         )
 
+        # #360 + #378: wrap the runner with the cancellation watchdog so
+        # (a) operator-initiated CP cancellations propagate to the
+        # in-container subprocess-agent within one poll interval and
+        # (b) trials that hang past a generous multiple of
+        # agent.timeout_sec get force-cancelled instead of running
+        # indefinitely.
+        hard_deadline_sec: float | None = None
+        multiplier = settings.trial_hard_deadline_multiplier
+        if multiplier > 0:
+            hard_deadline_sec = (
+                task_config.agent.timeout_sec * multiplier
+                + settings.trial_hard_deadline_grace_sec
+            )
         try:
-            await runner.run()
+            await run_with_watchdog(
+                runner.run(),
+                trial_id=trial_id,
+                cp_client=cp_client,
+                poll_interval_sec=settings.trial_cancel_poll_interval_sec,
+                hard_deadline_sec=hard_deadline_sec,
+            )
+        except asyncio.CancelledError:
+            # Watchdog fired (cp_cancelled or hard_deadline). Trial.run's
+            # own CancelledError handler already recorded the terminal
+            # state; propagate so the outer task cleanup fires.
+            raise
         except Exception as exc:
             logger.exception(
                 "trial_runner_failed trial_id=%s worker_id=%s",
@@ -998,12 +1035,24 @@ def _setup_failure_diagnostic_head(detail: str, max_chars: int) -> str:
 
 
 def _classify_setup_failure(detail: str) -> FailureReason:
+    if "TASK_COMPAT_" in detail:
+        return FailureReason.TASK_COMPATIBILITY
     if (
         "building Docker image" in detail
         and " from " in detail
         and " exceeded " in detail
     ):
         return FailureReason.TASK_IMAGE_BUILD_TIMEOUT
+    lowered = detail.lower()
+    if (
+        "failed to build layered image" in lowered
+        and (
+            "temporary failure resolving" in lowered
+            or "could not resolve host" in lowered
+            or "name or service not known" in lowered
+        )
+    ):
+        return FailureReason.TASK_COMPATIBILITY
     return FailureReason.INTERNAL_ERROR
 
 

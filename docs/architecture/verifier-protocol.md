@@ -63,7 +63,7 @@ class CheckResult:
     passed: bool
     score: float | None = None
     message: str | None = None
-    detail: dict[str, Any] = {}
+    detail: Any = {}
     duration_sec: float | None = None
 
 
@@ -165,7 +165,14 @@ The script must write a `VerifierResult` JSON object to
 ```json
 {
   "rewards": {"score": 1.0},
-  "checks": [{"name": "answer", "passed": true, "score": 1.0}],
+  "checks": [
+    {
+      "name": "answer",
+      "passed": true,
+      "score": 1.0,
+      "detail": {"expected": "45", "got": "45"}
+    }
+  ],
   "structured": {"expected": "45", "got": "45"},
   "confidence": 1.0
 }
@@ -173,7 +180,13 @@ The script must write a `VerifierResult` JSON object to
 
 A wrong model answer should normally be `rewards.score = 0.0` with
 `checks[0].passed = false`, not a platform failure. Missing output or invalid
-JSON is a verifier infrastructure failure and makes the trial failed.
+JSON is a verifier infrastructure failure and makes the trial failed. For
+script verifiers, Loom preserves command diagnostics on `VerifierResult.error`
+when the script fails to write valid output, including return code,
+stdout/stderr tails, truncation status, duration, script path, and
+`LOOM_VERIFIER_OUTPUT` path. `CheckResult.detail` may contain any JSON value
+emitted by an upstream verifier, including string diagnostics from legacy
+tasks.
 
 ## Why each lives where it does
 

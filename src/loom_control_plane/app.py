@@ -129,7 +129,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             name="loom-cp-metrics-refresher",
         )
         # Background sweep that transitions queued trials with
-        # attempt_count >= max_attempts to state='failed' with
+        # attempt_count >= team_quotas.max_attempts_ceiling to state='failed' with
         # failure_reason='retry_exhausted'. Runs at the same cadence
         # as the crash detector so the two sweeps are in lock-step.
         retry_exhausted_task = asyncio.create_task(

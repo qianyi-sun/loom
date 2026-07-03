@@ -15,8 +15,10 @@ This renderer emits a Job with:
   Postgres NetworkPolicy grants ingress (see network-policies.yaml.j2).
 * The release image tag (`loom-control-plane:<tag>`) so alembic sees
   the same migrations directory the release rolls out.
-* `LOOM_CP_DB_URL` from `secretKeyRef: {name: loom-secrets, key: cp-db-url}`
-  — reuses control-plane's credential; alembic needs the same perms.
+* `LOOM_DB_URL` (the env var `migrations/env.py` reads) sourced from
+  `secretKeyRef: {name: loom-secrets, key: cp-db-url}` — reuses the
+  control-plane's credential because Alembic needs the same perms; the
+  var name matches the tool, not the consumer (#364).
 * `ttlSecondsAfterFinished` + `activeDeadlineSeconds` + `backoffLimit=1`
   so a completed or hung Job cleans itself up and doesn't block the
   next rollout's `kubectl apply -f -`.

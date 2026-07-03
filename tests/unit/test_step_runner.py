@@ -280,6 +280,49 @@ async def test_run_step_records_verifier_exception(context: TrialContext):
     assert EventKind.STEP_END in kinds
 
 
+async def test_run_step_records_verifier_timeout_as_structured_result(
+    context: TrialContext,
+):
+    class _HungVerifier:
+        name = "hung"
+
+        async def verify(self, *, task, env, artifacts_dir, trajectory):  # type: ignore[no-untyped-def]
+            import asyncio
+
+            await asyncio.sleep(1)
+
+    context.verifier = _HungVerifier()  # type: ignore[assignment]
+    context.trial_config = stub_trial_config(override_verifier_timeout_sec=0.01)
+    writer = TrajectoryWriter(
+        local_path=context.local_trajectory_path,
+        store=context.object_store,
+        bucket=context.trajectory_bucket, key=context.trajectory_key,
+        min_part_bytes=0,
+    )
+    async with writer:
+        sr = await run_step(
+            ctx=context, step=context.task_config.steps[0],
+            trajectory=writer, baseline_policy=Public(),
+        )
+
+    assert sr.error is not None
+    assert sr.error.phase == "verifier"
+    assert sr.error.reason == "timeout"
+    assert sr.verifier_result is not None
+    assert sr.verifier_result.error is not None
+    assert sr.verifier_result.error.kind == "timeout"
+    assert sr.verifier_result.error.detail["timeout_sec"] == 0.01
+    assert sr.verifier_result.error.detail["step_name"] == "main"
+    # #377: verifier-timeout evidence now includes elapsed_sec and a
+    # best-effort in-sandbox probe so operators can distinguish
+    # "stuck in a wait" from "task genuinely too slow" from "harness
+    # bug" without a rerun.
+    assert "elapsed_sec" in sr.verifier_result.error.detail
+    assert sr.verifier_result.error.detail["elapsed_sec"] >= 0.0
+    assert "post_mortem_probe" in sr.verifier_result.error.detail
+    assert isinstance(sr.verifier_result.error.detail["post_mortem_probe"], str)
+
+
 async def test_run_step_skip_verifier(context: TrialContext):
     """trial_config.skip_verifier=True omits the verifier phase entirely."""
     context.trial_config = stub_trial_config(skip_verifier=True)

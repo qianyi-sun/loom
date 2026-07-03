@@ -15,6 +15,8 @@ run in shared mode.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -24,6 +26,7 @@ from loom.models.result import ArtifactRef, FailureReason, StepError, StepResult
 from loom.models.task import StepConfig
 from loom.models.trajectory import AgentRetryEvent, StepEndEvent, StepStartEvent
 from loom.models.trial import RetryPolicy, RetryReason
+from loom.models.verifier import VerifierError, VerifierResult
 from loom.retry import next_attempt_at
 from loom.trajectory.reader import TrajectoryReader
 from loom.trajectory.writer import TrajectoryWriter
@@ -114,6 +117,7 @@ async def run_step(
             step.network.verifier_phase if step.network and step.network.verifier_phase
             else baseline_policy
         )
+        verifier_started = time.monotonic()
         try:
             async with phase_network(
                 ctx.driver, baseline=baseline_policy, phase=verifier_phase,
@@ -128,10 +132,33 @@ async def run_step(
                     timeout=verifier_timeout,
                 )
         except TimeoutError:
+            elapsed_sec = time.monotonic() - verifier_started
+            message = f"verifier exceeded {verifier_timeout}s"
+            # #377: run a best-effort post-mortem probe against the sandbox
+            # while the container is still up so operators can distinguish
+            # "verifier stuck in a wait" from "task genuinely too slow" from
+            # "harness bug" without a rerun. The probe is non-mutating and
+            # bounded by its own short timeout so we never let it turn a
+            # timeout into a hang.
+            probe_output = await _post_mortem_verifier_probe(ctx.driver)
+            verifier_result = VerifierResult(
+                rewards={},
+                error=VerifierError(
+                    kind="timeout",
+                    message=message,
+                    detail={
+                        "timeout_sec": verifier_timeout,
+                        "elapsed_sec": elapsed_sec,
+                        "step_name": step.name,
+                        "verifier_name": getattr(ctx.verifier, "name", None),
+                        "post_mortem_probe": probe_output,
+                    },
+                ),
+            )
             if sr_error is None:
                 sr_error = StepError(
                     phase="verifier", reason="timeout",
-                    message=f"verifier exceeded {verifier_timeout}s",
+                    message=message,
                     occurred_at=datetime.now(UTC),
                 )
         except Exception as exc:
@@ -180,6 +207,57 @@ def _resolve_instruction(ctx: TrialContext, step: StepConfig) -> str:
     if candidate.is_file():
         return candidate.read_text(encoding="utf-8")
     return ""
+
+
+_POST_MORTEM_PROBE_TIMEOUT_SEC = 10.0
+
+
+async def _post_mortem_verifier_probe(driver: object) -> str:
+    """Best-effort post-mortem probe when the verifier times out (#377).
+
+    Emits a single non-mutating shell that captures:
+
+    * ``ps`` snapshot so the operator can see what verifier/agent
+      processes are still running inside the sandbox.
+    * A listing of the standard verifier output directory (``/loom/verifier``)
+      to reveal whether the script wrote anything before the timeout hit.
+    * ``uptime`` so the operator can eyeball load / stall.
+
+    The probe runs with its own short wall-clock timeout so a hung
+    sandbox can't turn a verifier timeout into a step-runner hang. Any
+    failure is folded into the returned string so evidence is always a
+    single text field.
+    """
+    probe_cmd = (
+        "echo -- UPTIME ; uptime 2>&1 || true ; "
+        "echo -- PS ; ps aux 2>&1 | head -50 || true ; "
+        "echo -- LOOM_VERIFIER_DIR ; "
+        "ls -la /loom/verifier 2>&1 || true"
+    )
+    exec_ = getattr(driver, "exec", None)
+    if exec_ is None:
+        return "post-mortem probe unavailable: driver has no .exec()"
+    try:
+        async with asyncio.timeout(_POST_MORTEM_PROBE_TIMEOUT_SEC):
+            result = await exec_(probe_cmd, user="root")
+    except (TimeoutError, asyncio.CancelledError):
+        return (
+            f"post-mortem probe timed out after "
+            f"{_POST_MORTEM_PROBE_TIMEOUT_SEC:.0f}s (sandbox likely wedged)"
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return f"post-mortem probe raised {type(exc).__name__}: {exc}"
+
+    stdout = getattr(result, "stdout", b"") or b""
+    stderr = getattr(result, "stderr", b"") or b""
+    parts: list[str] = []
+    if stdout:
+        with contextlib.suppress(Exception):
+            parts.append(stdout.decode("utf-8", errors="replace"))
+    if stderr:
+        with contextlib.suppress(Exception):
+            parts.append("-- STDERR --\n" + stderr.decode("utf-8", errors="replace"))
+    return "\n".join(parts) or "(no probe output)"
 
 
 def _resolve_agent_timeout(ctx: TrialContext, step: StepConfig) -> float:

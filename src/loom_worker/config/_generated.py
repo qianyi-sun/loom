@@ -64,6 +64,9 @@ class WorkerSettings(BaseSettings):
     trial_cache_registry_pull_timeout_sec: float = 15.0
     trial_cache_registry_repo: str = ""
     trial_cache_ttl_hours: int = 168
+    trial_cancel_poll_interval_sec: float = 30.0
+    trial_hard_deadline_grace_sec: float = 600.0
+    trial_hard_deadline_multiplier: float = 3.0
     vllm_gpu_memory_utilization: float = 0.9
     vllm_tensor_parallel_size: int = 1
 

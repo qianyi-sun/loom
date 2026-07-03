@@ -758,7 +758,12 @@ def _patch_clients(
 
 
 def _rendered_deployment_env_names(deployment_name: str) -> set[str]:
-    docs = list(yaml.safe_load_all(render_manifests(ClusterConfig())))
+    # #383: default schema disables the k8s worker Deployment. This
+    # helper inspects the worker/service env for boundary checks, so
+    # opt into the worker-enabled shape used by development profile.
+    k8s_worker_cls = type(ClusterConfig().k8s_worker)
+    cfg = ClusterConfig(k8s_worker=k8s_worker_cls(enabled=True))
+    docs = list(yaml.safe_load_all(render_manifests(cfg)))
     deployment = next(
         doc
         for doc in docs

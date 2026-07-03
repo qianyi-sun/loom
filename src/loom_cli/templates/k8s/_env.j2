@@ -37,7 +37,14 @@ env:
     value: ""  # required, no schema default — operator must override
 {% elif entry.default is not none or entry.default_per_service is not none %}
   - name: {{ entry.env_var_for(service) }}
+{# List defaults must be JSON-encoded so Pydantic BaseSettings parses them
+   back into `list[str]`. Coercing via `string` yields Python's repr with
+   single quotes, which isn't valid JSON. #}
+{% if entry.python_type == "str_list" %}
+    value: {{ entry.value_for(service) | tojson | tojson }}
+{% else %}
     value: {{ entry.value_for(service) | string | tojson }}
+{% endif %}
 {% endif %}
 {% endif %}
 {% endfor %}

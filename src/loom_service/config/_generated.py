@@ -35,6 +35,7 @@ class LoomServiceSettings(BaseSettings):
     db_url: PostgresDsn
     dev_reload: bool = False
     gateway_url: HttpUrl = cast(HttpUrl, "http://loom-llm-gateway:9100")
+    k8s_worker_enabled: bool = True
     local_servers_json: str = "{}"
     log_level: LogLevel = "info"
     minio_access_key: SecretStr
@@ -54,8 +55,15 @@ class LoomServiceSettings(BaseSettings):
     taskset_materializer_transform_wall_timeout_sec: int = 30
     taskset_materializer_transforms_enabled: bool = False
     taskset_materializer_upstream_cache_root: Path = Path("/tmp/loom-taskset-upstream")
+    team_quota_max_attempts_ceiling_default: int = 3
     team_registration_open: bool = False
     trajectories_bucket: str = "trajectories"
+    trial_retry_default_backoff_base_sec: float = 30.0
+    trial_retry_default_backoff_jitter: float = 0.2
+    trial_retry_default_backoff_max_sec: float = 600.0
+    trial_retry_default_backoff_multiplier: float = 2.0
+    trial_retry_default_max_attempts: int = 3
+    trial_retry_default_retry_on: list[str] = ["gateway_error", "provider_transport_disconnect"]
 
 
 LoomServiceSettings.model_rebuild()

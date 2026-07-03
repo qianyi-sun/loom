@@ -55,6 +55,8 @@ spec:
               value: "False"
             - name: LOOM_SVC_GATEWAY_URL
               value: "http://loom-llm-gateway:9100"
+            - name: LOOM_SVC_K8S_WORKER_ENABLED
+              value: "True"
             - name: LOOM_SVC_LOCAL_SERVERS_JSON
               value: "{}"
             - name: LOOM_SVC_LOG_LEVEL
@@ -97,10 +99,24 @@ spec:
               value: "False"
             - name: LOOM_SVC_TASKSET_MATERIALIZER_UPSTREAM_CACHE_ROOT
               value: "/tmp/loom-taskset-upstream"
+            - name: LOOM_SVC_TEAM_QUOTA_MAX_ATTEMPTS_CEILING_DEFAULT
+              value: "3"
             - name: LOOM_SVC_TEAM_REGISTRATION_OPEN
               value: "False"
             - name: LOOM_SVC_TRAJECTORIES_BUCKET
               value: "trajectories"
+            - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_BACKOFF_BASE_SEC
+              value: "30.0"
+            - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_BACKOFF_JITTER
+              value: "0.2"
+            - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_BACKOFF_MAX_SEC
+              value: "600.0"
+            - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_BACKOFF_MULTIPLIER
+              value: "2.0"
+            - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_MAX_ATTEMPTS
+              value: "3"
+            - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_RETRY_ON
+              value: "[\"gateway_error\", \"provider_transport_disconnect\"]"
 
             - name: LOOM_SVC_ADMIN_SECRET_FILE
               value: "/var/run/loom/secrets/admin/secrets.toml"

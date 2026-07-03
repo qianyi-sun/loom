@@ -7,6 +7,9 @@ describe("humanizeFailureReason", () => {
     expect(humanizeFailureReason("artifact_upload_failed").label).toBe(
       "Artifact upload failed",
     );
+    expect(humanizeFailureReason("task_compatibility").label).toBe(
+      "Task compatibility failure",
+    );
   });
 
   it("preserves unknown codes for diagnostics", () => {
