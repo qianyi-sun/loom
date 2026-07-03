@@ -573,6 +573,36 @@ used_by     = ["loom-service"]
 python_type = "Path"
 default     = "/tmp/loom-taskset-upstream"
 
+[service_config.taskset_quota_max_count_per_team]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 50
+description = "Default maximum active (non-deleted) TaskSets allowed per team. Per-team overrides live in team_quotas.taskset_max_count."
+
+[service_config.taskset_quota_max_storage_bytes_per_team]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 21474836480
+description = "Default maximum total storage bytes for TaskSet blobs per team (20 GiB). Enforced at materialization time."
+
+[service_config.taskset_quota_max_bundle_bytes]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 5368709120
+description = "Maximum bytes a single TaskSet bundle may occupy (5 GiB). Materialization aborts with size_exceeded if exceeded."
+
+[service_config.taskset_gc_retention_days]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 7
+description = "Days after soft_deleted_at before GC purges TaskSet blobs and hard-deletes the row."
+
+[service_config.taskset_gc_poll_interval_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 3600
+description = "Poll interval in seconds for the TaskSet garbage collection background loop."
+
 [service_config.taskset_materializer_transforms_enabled]
 used_by     = ["loom-service"]
 python_type = "bool"

@@ -147,6 +147,7 @@ async def _materialize_claimed_job(
     artifacts_bucket: str,
     upstream_cache_root: Path,
     transform_config: TransformSandboxConfig,
+    max_bundle_bytes: int | None = None,
 ) -> None:
     async with session_factory() as session:
         job = await session.get(TaskSetMaterializationJob, job_id)
@@ -190,6 +191,7 @@ async def _materialize_claimed_job(
             minio_client=minio_client,
             artifacts_bucket=artifacts_bucket,
             upstream_cache_root=upstream_cache_root,
+            max_bundle_bytes=max_bundle_bytes,
         )
 
         if output.task_rows and not output.retry_source:
@@ -217,6 +219,7 @@ async def run_once(
     batch_size: int,
     claim_ttl_sec: int,
     transform_config: TransformSandboxConfig,
+    max_bundle_bytes: int | None = None,
 ) -> None:
     async with session_factory() as session:
         await reclaim_stale_jobs(session, claim_ttl_sec=claim_ttl_sec)
@@ -237,6 +240,7 @@ async def run_once(
                 artifacts_bucket=artifacts_bucket,
                 upstream_cache_root=upstream_cache_root,
                 transform_config=transform_config,
+                max_bundle_bytes=max_bundle_bytes,
             )
         except Exception:
             logger.exception(
@@ -271,6 +275,7 @@ async def run_loop(
     poll_interval_sec: int,
     claim_ttl_sec: int,
     transform_config: TransformSandboxConfig,
+    max_bundle_bytes: int | None = None,
 ) -> None:
     upstream_cache_root.mkdir(parents=True, exist_ok=True)
     while True:
@@ -283,6 +288,7 @@ async def run_loop(
                 batch_size=batch_size,
                 claim_ttl_sec=claim_ttl_sec,
                 transform_config=transform_config,
+                max_bundle_bytes=max_bundle_bytes,
             )
         except asyncio.CancelledError:
             raise

@@ -163,24 +163,41 @@ def _write_local_bundle(
         noop_path.write_bytes(_NOOP_VERIFIER)
 
 
+class _BundleSizeExceededError(Exception):
+    """Raised when cumulative bundle bytes exceed the configured limit."""
+
+    def __init__(self, cumulative: int, limit: int) -> None:
+        self.cumulative = cumulative
+        self.limit = limit
+        super().__init__(f"bundle size {cumulative} exceeds limit {limit}")
+
+
 def _upload_bundle_dir(
     client: Any,
     *,
     bucket: str,
     bundle_prefix: str,
     bundle_dir: Path,
-) -> None:
+    cumulative_bytes: int = 0,
+    max_bundle_bytes: int | None = None,
+) -> int:
+    """Upload a bundle directory; returns updated cumulative byte count."""
     for path in bundle_dir.rglob("*"):
         if not path.is_file():
             continue
+        data = path.read_bytes()
+        cumulative_bytes += len(data)
+        if max_bundle_bytes is not None and cumulative_bytes > max_bundle_bytes:
+            raise _BundleSizeExceededError(cumulative_bytes, max_bundle_bytes)
         rel = path.relative_to(bundle_dir).as_posix()
         _put_object(
             client,
             bucket=bucket,
             key=f"{bundle_prefix}/{rel}",
-            body=path.read_bytes(),
+            body=data,
             content_type="application/octet-stream",
         )
+    return cumulative_bytes
 
 
 def _compatibility_issue_error(
@@ -213,6 +230,7 @@ def materialize_task_set(
     minio_client: Any,
     artifacts_bucket: str,
     upstream_cache_root: Path,
+    max_bundle_bytes: int | None = None,
 ) -> MaterializeOutput:
     """Materialize one TaskSet synchronously. Caller owns DB writes."""
     slug = manifest.slug
@@ -270,6 +288,7 @@ def materialize_task_set(
     drafts: list[TaskRowDraft] = []
     skipped = 0
     attempted = 0
+    cumulative_bytes = 0
 
     try:
         for row in row_iter:
@@ -342,11 +361,13 @@ def materialize_task_set(
                         continue
                     checksum = task_checksum(bundle_dir)
                     bundle_prefix = f"{prefix}/tasks/{short_id}"
-                    _upload_bundle_dir(
+                    cumulative_bytes = _upload_bundle_dir(
                         minio_client,
                         bucket=artifacts_bucket,
                         bundle_prefix=bundle_prefix,
                         bundle_dir=bundle_dir,
+                        cumulative_bytes=cumulative_bytes,
+                        max_bundle_bytes=max_bundle_bytes,
                     )
                 source = f"s3://{artifacts_bucket}/{bundle_prefix}/"
                 drafts.append(
@@ -385,6 +406,16 @@ def materialize_task_set(
                     "code": "materialize_error",
                     "message": str(exc),
                 })
+    except _BundleSizeExceededError as exc:
+        return MaterializeOutput(
+            status="failed",
+            status_reason="size_exceeded",
+            job_failure_reason="size_exceeded",
+            job_failure_message=(
+                f"bundle size {exc.cumulative} bytes exceeds limit "
+                f"{exc.limit} bytes"
+            ),
+        )
     except UpstreamFetchError as exc:
         return MaterializeOutput(
             status="failed",

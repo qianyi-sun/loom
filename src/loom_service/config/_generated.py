@@ -53,6 +53,8 @@ class LoomServiceSettings(BaseSettings):
     stale_running_trial_timeout_multiplier: float = 3.0
     storage_auth_kind: str = "static_keys"
     storage_backend: str = "minio"
+    taskset_gc_poll_interval_sec: int = 3600
+    taskset_gc_retention_days: int = 7
     taskset_materializer_batch_size: int = 1
     taskset_materializer_claim_ttl_sec: int = 600
     taskset_materializer_poll_interval_sec: int = 5
@@ -62,6 +64,9 @@ class LoomServiceSettings(BaseSettings):
     taskset_materializer_transform_wall_timeout_sec: int = 30
     taskset_materializer_transforms_enabled: bool = False
     taskset_materializer_upstream_cache_root: Path = Path("/tmp/loom-taskset-upstream")
+    taskset_quota_max_bundle_bytes: int = 5368709120
+    taskset_quota_max_count_per_team: int = 50
+    taskset_quota_max_storage_bytes_per_team: int = 21474836480
     team_quota_max_attempts_ceiling_default: int = 3
     team_registration_open: bool = False
     trajectories_bucket: str = "trajectories"

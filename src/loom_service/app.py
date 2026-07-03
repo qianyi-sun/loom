@@ -69,6 +69,7 @@ from loom_service.routes import (
 from loom_service.storage import (
     create_minio_client,
 )
+from loom_service.taskset_gc import run_loop as taskset_gc_run_loop
 from loom_service.taskset_materializer import run_loop as taskset_materializer_run_loop
 
 
@@ -188,20 +189,36 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                     cpu_limit_sec=settings.taskset_materializer_transform_cpu_limit_sec,
                     memory_limit_mb=settings.taskset_materializer_transform_memory_limit_mb,
                 ),
+                max_bundle_bytes=settings.taskset_quota_max_bundle_bytes,
             ),
             name="loom-svc-taskset-materializer",
         )
         app.state.taskset_materializer_task = materializer_task
+
+        gc_task = asyncio.create_task(
+            taskset_gc_run_loop(
+                session_factory=session_factory,
+                minio_client=minio_client,
+                artifacts_bucket=settings.artifacts_bucket,
+                retention_days=settings.taskset_gc_retention_days,
+                poll_interval_sec=settings.taskset_gc_poll_interval_sec,
+            ),
+            name="loom-svc-taskset-gc",
+        )
+        app.state.taskset_gc_task = gc_task
 
         try:
             yield
         finally:
             runner_task.cancel()
             materializer_task.cancel()
+            gc_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await runner_task
             with contextlib.suppress(asyncio.CancelledError):
                 await materializer_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await gc_task
             with contextlib.suppress(Exception):
                 await gateway_client.aclose()
             with contextlib.suppress(Exception):
