@@ -659,6 +659,24 @@ python_type = "float"
 default     = 300.0
 description = "Wall-clock timeout for pre-start task bundle materialization, including hf://, fixture://, and s3:// sources. Exceeding it fails the claimed trial through setup failure writeback instead of leaving it stuck claimed."
 
+[service_config.trial_cancel_poll_interval_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 30.0
+description = "Cancellation watchdog poll cadence (#360). The worker polls the CP for each in-flight trial's state every N seconds; if the CP reports `cancelled`, the worker cancels the running asyncio task so the in-container agent process stops instead of continuing to spend budget."
+
+[service_config.trial_hard_deadline_multiplier]
+used_by     = ["worker"]
+python_type = "float"
+default     = 3.0
+description = "Multiplier applied to `agent.timeout_sec` to derive the worker-side hard-deadline backstop (#378). If a trial exceeds `agent.timeout_sec * multiplier + trial_hard_deadline_grace_sec`, the cancellation watchdog force-cancels the runner so a stuck opencode/subprocess-agent doesn't keep the trial `running` for hours past its declared timeout. Set to 0 to disable the backstop (not recommended for production)."
+
+[service_config.trial_hard_deadline_grace_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 600.0
+description = "Additive grace on top of `agent.timeout_sec * trial_hard_deadline_multiplier` for the hard-deadline backstop (#378). Covers task setup, verifier, and artifact-collection budget so a legitimate long run doesn't trip the watchdog."
+
 [service_config.enable_worker_vllm]
 used_by     = ["worker"]
 python_type = "bool"

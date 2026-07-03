@@ -107,6 +107,12 @@ spec:
           value: ''
         - name: LOOM_WORKER_TRIAL_CACHE_TTL_HOURS
           value: '168'
+        - name: LOOM_WORKER_TRIAL_CANCEL_POLL_INTERVAL_SEC
+          value: '30.0'
+        - name: LOOM_WORKER_TRIAL_HARD_DEADLINE_GRACE_SEC
+          value: '600.0'
+        - name: LOOM_WORKER_TRIAL_HARD_DEADLINE_MULTIPLIER
+          value: '3.0'
         - name: LOOM_WORKER_VLLM_GPU_MEMORY_UTILIZATION
           value: '0.9'
         - name: LOOM_WORKER_VLLM_TENSOR_PARALLEL_SIZE
