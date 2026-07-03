@@ -140,9 +140,12 @@ Attach these to the release issue or release PR:
   [`docs/full-max-slot-canary-runbook.md`](full-max-slot-canary-runbook.md).
   The canary must wait for a clean public-beta anchor, completed #190 targeted
   durability validation, and an explicit coordinator `GO`. The batch must use
-  repeated `--required-worker-pool` flags for `oldlab`, `k8s-worker`, and
+  repeated `--required-worker-pool` flags for `oldlab` and
   `gb10-arm64`; terminal evidence must include `runs.worker_pool_coverage`
-  and `runs.claimed_without_started` from the smoke gate.
+  and `runs.claimed_without_started` from the smoke gate. Public-beta
+  clusters run with `k8s_worker.enabled=false` (#383) so x86_64
+  coverage is delivered by the Slurm-managed `oldlab` pool, not by an
+  in-cluster `k8s-worker` Deployment.
 
 Generate a rollout release manifest before the protected apply. It is the
 machine-readable expected-state anchor for image/render convergence, DB revision
@@ -369,8 +372,10 @@ image on the ARM64 Docker daemon before building the task image, because the
 upstream tag is amd64-only.
 Do not rely on theoretical max-slot saturation to prove worker-pool coverage:
 create the release/acceptance batch with repeated `--required-worker-pool`
-flags, for example `--required-worker-pool oldlab --required-worker-pool
-k8s-worker --required-worker-pool gb10-arm64`. The service adds one
+flags, for example `--required-worker-pool oldlab
+--required-worker-pool gb10-arm64` on public-beta (`k8s_worker.enabled=false`,
+#383). On clusters that intentionally host a dedicated k8s worker
+node pool, add `--required-worker-pool k8s-worker` as well. The service adds one
 pool-pinned coverage trial per required pool while leaving the normal portable
 trials portable. When a target pool's CPU architecture is known from active
 workers or autoscaler policy, coverage uses a selected task compatible with that

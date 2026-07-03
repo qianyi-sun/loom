@@ -43,6 +43,20 @@ def _load_docs(yaml_text: str) -> list[dict]:
     return [d for d in yaml.safe_load_all(yaml_text) if d]
 
 
+# Schema default flipped k8s_worker.enabled to false (#383): profiles
+# that share OLDLAB hosts with Slurm must not double-schedule the host.
+# Render tests that exercise the worker Deployment / worker
+# NetworkPolicy must opt in explicitly. `_DEFAULT_CFG` mirrors the
+# development.cluster.toml profile (worker enabled) so the canonical
+# `deploy/k8s/*.yaml` golden files still apply.
+def _default_cfg(**kwargs: object) -> ClusterConfig:
+    k8s_worker_cls = type(ClusterConfig().k8s_worker)
+    return ClusterConfig(k8s_worker=k8s_worker_cls(enabled=True), **kwargs)
+
+
+_DEFAULT_CFG = _default_cfg()
+
+
 # ──────────────────────────────────────────────────────────────────────
 # ClusterConfig + load
 # ──────────────────────────────────────────────────────────────────────
@@ -211,7 +225,7 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     + 8 NetworkPolicies + 2 ConfigMaps (Grafana dashboards + egress-
     proxy bootstrap) expected by cluster-deploy.md §Component map +
     sandbox-isolation.md."""
-    text = render_manifests(ClusterConfig())
+    text = render_manifests(_DEFAULT_CFG)
     assert text.startswith("apiVersion: apps/v1\nkind: StatefulSet\n")
     docs = _load_docs(text)
     kinds = [d["kind"] for d in docs]
@@ -231,7 +245,7 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
 
 
 def test_worker_manifest_sets_subprocess_gateway_url_for_sandboxes() -> None:
-    cfg = ClusterConfig(
+    cfg = _default_cfg(
         worker_subprocess_gateway_url="http://host.docker.internal:30444/openai/v1",
     )
     docs = _load_docs(render_manifests(cfg))
@@ -252,7 +266,7 @@ def test_worker_manifest_injects_optional_hf_token_secret() -> None:
     standard HF_TOKEN env, but public-only deployments must still boot
     when the Secret key is absent.
     """
-    docs = _load_docs(render_manifests(ClusterConfig()))
+    docs = _load_docs(render_manifests(_DEFAULT_CFG))
     worker = next(
         d
         for d in docs
@@ -273,7 +287,7 @@ def test_worker_manifest_injects_optional_hf_token_secret() -> None:
 
 
 def test_worker_manifest_mounts_docker_registry_auth_config() -> None:
-    docs = _load_docs(render_manifests(ClusterConfig()))
+    docs = _load_docs(render_manifests(_DEFAULT_CFG))
     worker = next(
         d
         for d in docs
@@ -304,7 +318,7 @@ def test_worker_manifest_mounts_docker_registry_auth_config() -> None:
 
 def test_worker_manifest_renders_configured_capacity_and_resources() -> None:
     worker_capacity_cls = type(ClusterConfig().worker_capacity)
-    cfg = ClusterConfig(
+    cfg = _default_cfg(
         worker_capacity=worker_capacity_cls(
             max_concurrent=24,
             cpu_request="2",
@@ -349,7 +363,7 @@ def test_render_default_matches_deploy_k8s_yamls() -> None:
     someone edits a deploy/k8s/*.yaml without updating the matching
     template, this test fails. Same in reverse.
     """
-    rendered = _load_docs(render_manifests(ClusterConfig()))
+    rendered = _load_docs(render_manifests(_DEFAULT_CFG))
     expected: list[dict] = []
     for fn in _GOLDEN_FILES:
         expected.extend(_load_docs((_DEPLOY_DIR / fn).read_text()))
@@ -371,7 +385,7 @@ def test_render_default_matches_deploy_k8s_yamls() -> None:
 def test_render_with_custom_image_tag_applies_to_every_loom_image() -> None:
     """Configure a non-default image_tag; every loom-* image MUST pick
     it up. External images (postgres, minio) stay on their own tags."""
-    cfg = ClusterConfig(image_tag="2.0.0-rc1")
+    cfg = _default_cfg(image_tag="2.0.0-rc1")
     docs = _load_docs(render_manifests(cfg))
     loom_images = []
     for d in docs:
@@ -392,7 +406,7 @@ def test_render_injects_secret_store_master_key_for_provider_paths() -> None:
     gateway both use LocalEncryptedSecretStore. Cluster mode must wire
     the shared master key into both pods from loom-secrets.
     """
-    docs = _load_docs(render_manifests(ClusterConfig()))
+    docs = _load_docs(render_manifests(_DEFAULT_CFG))
     deployments = {
         d["metadata"]["name"]: d
         for d in docs
@@ -466,7 +480,7 @@ def test_render_allows_service_public_https_for_provider_discovery() -> None:
     the service pod needs the same public HTTPS/HTTP egress baseline as
     the gateway for ordinary hosted OpenAI-compatible `/models` APIs.
     """
-    docs = _load_docs(render_manifests(ClusterConfig()))
+    docs = _load_docs(render_manifests(_DEFAULT_CFG))
 
     assert {443, 80} <= _public_ipblock_ports(
         _network_policy_named(docs, "loom-service"),
@@ -481,7 +495,7 @@ def test_render_provider_egress_allowlist_adds_service_and_gateway_rules() -> No
     in cluster-config.toml; render must preserve that policy for both
     provider validation in loom-service and runtime calls in gateway.
     """
-    cfg = ClusterConfig(
+    cfg = _default_cfg(
         provider_egress_allowlist=(
             "202.78.161.51:18001",
             "203.0.113.0/24:8443",
@@ -571,7 +585,7 @@ def test_render_with_cert_manager_cluster_issuer_annotation() -> None:
 
 
 def test_render_ingress_routes_only_api_and_spa_backends() -> None:
-    docs = _load_docs(render_manifests(ClusterConfig()))
+    docs = _load_docs(render_manifests(_DEFAULT_CFG))
     ingress = next(d for d in docs if d["kind"] == "Ingress")
     assert [r["host"] for r in ingress["spec"]["rules"]] == ["loom.example.com"]
     paths = ingress["spec"]["rules"][0]["http"]["paths"]
@@ -590,7 +604,7 @@ def test_render_ingress_routes_only_api_and_spa_backends() -> None:
 
 
 def test_render_custom_storage_sizes() -> None:
-    cfg = ClusterConfig(
+    cfg = _default_cfg(
         postgres_storage_gi=200,
         minio_storage_gi=2000,
         worker_trajectory_storage_gi=500,
@@ -617,7 +631,7 @@ def test_render_custom_storage_sizes() -> None:
 
 
 def test_render_static_host_path_storage_binds_critical_state_to_retain_pvs() -> None:
-    cfg = ClusterConfig(
+    cfg = _default_cfg(
         namespace="loom-public-beta",
         persistent_storage_backend="static-host-path",
         persistent_storage_host_path_root="/data/loom-public-beta",
@@ -697,7 +711,7 @@ def test_render_worker_max_concurrent_schema_default() -> None:
     """LOOM_WORKER_MAX_CONCURRENT comes from render worker_capacity;
     it must appear exactly once so Kubernetes does not depend on
     duplicate env-var ordering."""
-    docs = _load_docs(render_manifests(ClusterConfig()))
+    docs = _load_docs(render_manifests(_DEFAULT_CFG))
     worker = next(
         d for d in docs
         if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
@@ -712,7 +726,7 @@ def test_render_worker_max_concurrent_schema_default() -> None:
 
 def test_render_worker_pool_name_schema_default() -> None:
     """Fixed Kubernetes workers should register under an explicit pool."""
-    docs = _load_docs(render_manifests(ClusterConfig()))
+    docs = _load_docs(render_manifests(_DEFAULT_CFG))
     worker = next(
         d for d in docs
         if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
@@ -825,3 +839,77 @@ def test_cli_render_invalid_provider_egress_allowlist_exits_2(
     err = capsys.readouterr().err
     assert "provider_egress_allowlist" in err
     assert "IP address or CIDR" in err
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #383: k8s_worker.enabled toggle
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_default_config_disables_k8s_worker() -> None:
+    """Schema default flipped to false so profiles that share OLDLAB
+    hosts with Slurm force intentional opt-in. See #383."""
+    cfg = ClusterConfig()
+    assert cfg.k8s_worker.enabled is False
+
+
+def test_render_omits_worker_deployment_when_disabled() -> None:
+    """Rendering with k8s_worker.enabled=false must omit the whole
+    loom-worker Deployment + trajectories PVC + worker NetworkPolicy,
+    not merely scale it to zero replicas — belt-and-suspenders against
+    `kubectl scale` drift."""
+    docs = _load_docs(render_manifests(ClusterConfig()))
+    kinds_names = {(d["kind"], d["metadata"]["name"]) for d in docs}
+    assert ("Deployment", "loom-worker") not in kinds_names
+    assert (
+        "PersistentVolumeClaim",
+        "loom-worker-trajectories",
+    ) not in kinds_names
+    assert ("NetworkPolicy", "loom-worker") not in kinds_names
+
+
+def test_render_includes_worker_when_enabled_via_profile() -> None:
+    """development.cluster.toml opts back in for local kind clusters."""
+    docs = _load_docs(render_manifests(_DEFAULT_CFG))
+    kinds_names = {(d["kind"], d["metadata"]["name"]) for d in docs}
+    assert ("Deployment", "loom-worker") in kinds_names
+    assert ("PersistentVolumeClaim", "loom-worker-trajectories") in kinds_names
+    assert ("NetworkPolicy", "loom-worker") in kinds_names
+
+
+def test_load_shipped_profile_files_have_explicit_k8s_worker_setting(
+) -> None:
+    """Every profile that ships in `deploy/environments/` must
+    declare k8s_worker.enabled explicitly — no silent inheritance
+    of the schema default. See #383 rationale."""
+    envs_dir = _REPO_ROOT / "deploy" / "environments"
+    expected = {
+        "development.cluster.toml": True,
+        "staging.cluster.toml": False,
+        "production.cluster.toml": False,
+    }
+    for filename, want_enabled in expected.items():
+        cfg = load_cluster_config(envs_dir / filename)
+        assert cfg.k8s_worker.enabled is want_enabled, (
+            f"{filename}: expected k8s_worker.enabled={want_enabled}, "
+            f"got {cfg.k8s_worker.enabled}"
+        )
+
+
+def test_loom_service_env_carries_k8s_worker_enabled_from_profile() -> None:
+    """The rendered loom-service Deployment must propagate the
+    profile's k8s_worker.enabled value into LOOM_SVC_K8S_WORKER_ENABLED
+    so the API rejection path (in `_reject_if_k8s_worker_unavailable`)
+    knows whether k8s-worker is available on this cluster."""
+    for enabled in (True, False):
+        k8s_worker_cls = type(ClusterConfig().k8s_worker)
+        cfg = ClusterConfig(k8s_worker=k8s_worker_cls(enabled=enabled))
+        docs = _load_docs(render_manifests(cfg))
+        svc = next(
+            d
+            for d in docs
+            if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-service"
+        )
+        env = svc["spec"]["template"]["spec"]["containers"][0]["env"]
+        by_name = {entry["name"]: entry for entry in env}
+        assert by_name["LOOM_SVC_K8S_WORKER_ENABLED"]["value"] == str(enabled)

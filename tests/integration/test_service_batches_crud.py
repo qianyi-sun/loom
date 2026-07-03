@@ -596,6 +596,74 @@ async def test_post_batch_required_worker_pools_adds_coverage_count(
     assert row.required_worker_pools == ["oldlab", "k8s-worker"]
 
 
+async def test_post_batch_rejects_k8s_worker_pool_when_disabled(
+    camp_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    """#383: On profiles with k8s_worker.enabled=false the k8s worker
+    Deployment is not rendered, so a submission that requires the
+    k8s-worker pool would queue a coverage trial no worker can claim.
+    The API must fail loudly at submit time instead of silently
+    accepting it."""
+    app, raw, _team_id = camp_setup
+    # Simulate rendering with k8s_worker.enabled=false by flipping the
+    # loom-service Settings that the renderer would have injected.
+    original = app.state.settings.k8s_worker_enabled
+    app.state.settings.k8s_worker_enabled = False
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://svc",
+        ) as ac:
+            r = await ac.post(
+                "/api/v1/batches",
+                headers={"Authorization": f"Bearer {raw}"},
+                json={
+                    "name": "coverage on disabled cluster",
+                    "task_filter": {"license": "MIT"},
+                    "trial_config": {},
+                    "required_worker_pools": ["oldlab", "k8s-worker"],
+                },
+            )
+    finally:
+        app.state.settings.k8s_worker_enabled = original
+
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "k8s-worker" in detail
+    assert "k8s_worker.enabled=false" in detail
+    assert "oldlab" in detail
+
+
+async def test_post_batch_without_k8s_worker_pool_still_works_when_disabled(
+    camp_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    """The rejection is targeted: a submission that only requires
+    `oldlab` on a k8s-worker-disabled cluster is unaffected."""
+    app, raw, _team_id = camp_setup
+    original = app.state.settings.k8s_worker_enabled
+    app.state.settings.k8s_worker_enabled = False
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://svc",
+        ) as ac:
+            r = await ac.post(
+                "/api/v1/batches",
+                headers={"Authorization": f"Bearer {raw}"},
+                json={
+                    "name": "oldlab-only coverage on disabled cluster",
+                    "task_filter": {"license": "MIT"},
+                    "trial_config": {},
+                    "required_worker_pools": ["oldlab"],
+                },
+            )
+    finally:
+        app.state.settings.k8s_worker_enabled = original
+    assert r.status_code == 201, r.text
+
+
 async def test_paused_team_rejects_batch_and_records_reason(
     camp_setup: tuple[FastAPI, str, UUID],
 ) -> None:
