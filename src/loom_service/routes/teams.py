@@ -96,7 +96,7 @@ async def _serialize_team(session: AsyncSession, team: Team) -> dict[str, Any]:
     if quota is not None:
         quota_payload = {
             "fair_share_weight": float(quota.fair_share_weight),
-            "max_attempts": quota.max_attempts,
+            "max_attempts_ceiling": quota.max_attempts_ceiling,
             "in_flight_count": quota.in_flight_count,
             "license_allowlist": list(quota.license_allowlist),
         }

@@ -262,7 +262,7 @@ async def test_final_pre_start_reclaim_keeps_retry_exhausted_diagnostic(
 
     async with session_factory() as s:
         await s.execute(insert(Team).values(id=team_id, name=f"f-{team_id}"))
-        await s.execute(insert(TeamQuota).values(team_id=team_id, max_attempts=3))
+        await s.execute(insert(TeamQuota).values(team_id=team_id, max_attempts_ceiling=3))
         await s.execute(
             insert(Worker).values(
                 id=worker_id,
@@ -607,7 +607,7 @@ async def test_reclaim_diagnostic_preserved_across_two_reclaim_cycles(
     async with session_factory() as s:
         await s.execute(insert(Team).values(id=team_id, name=f"multi-{team_id}"))
         # attempt_count 2 so the second reclaim tips into retry_exhausted.
-        await s.execute(insert(TeamQuota).values(team_id=team_id, max_attempts=3))
+        await s.execute(insert(TeamQuota).values(team_id=team_id, max_attempts_ceiling=3))
         await s.execute(
             insert(Worker).values(
                 id=worker_a_id,

@@ -925,7 +925,7 @@ export interface components {
     };
     TeamQuota: {
       fair_share_weight: number;
-      max_attempts: number;
+      max_attempts_ceiling: number;
       in_flight_count: number;
       license_allowlist: string[];
     };

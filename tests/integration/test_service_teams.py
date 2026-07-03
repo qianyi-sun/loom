@@ -170,7 +170,7 @@ async def test_get_own_team_with_quota_and_members(
     quota = body["quota"]
     assert quota is not None
     assert quota["fair_share_weight"] == 1.0
-    assert quota["max_attempts"] == 3
+    assert quota["max_attempts_ceiling"] == 3
     assert "MIT" in quota["license_allowlist"]
     # Both tokens (the caller + member-2) appear in members.
     assert len(body["members"]) == 2
