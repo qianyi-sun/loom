@@ -86,6 +86,11 @@ from loom_worker.vllm_registry import WorkerVLLMRegistry
 _DOCKER_HOST_GATEWAY_EXTRA_HOSTS: tuple[tuple[str, str], ...] = (
     ("host.docker.internal", "host-gateway"),
 )
+_SETUP_FAILURE_MESSAGE_LIMIT = 1000
+_SETUP_FAILURE_HEAD_CHARS = 360
+_SETUP_FAILURE_TRUNCATION_MARKER = (
+    "\n...[truncated setup diagnostic; preserved trailing output]...\n"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -635,6 +640,10 @@ async def _spawn_trial(
                 trial_id=trial_id,
                 worker_id=worker_id,
                 detail=str(exc),
+                diagnostic_detail=getattr(exc, "diagnostic_detail", None),
+                setup_diagnostics_root=(
+                    settings.trajectory_cache_dir / "setup-diagnostics"
+                ),
             )
             return
 
@@ -773,6 +782,10 @@ async def _spawn_trial(
                 trial_id=trial_id,
                 worker_id=worker_id,
                 detail=str(exc),
+                diagnostic_detail=getattr(exc, "diagnostic_detail", None),
+                setup_diagnostics_root=(
+                    settings.trajectory_cache_dir / "setup-diagnostics"
+                ),
             )
         finally:
             shutil.rmtree(task_dir, ignore_errors=True)
@@ -814,8 +827,19 @@ async def _mark_setup_failed(
     trial_id: UUID,
     worker_id: UUID,
     detail: str,
+    diagnostic_detail: str | None = None,
+    setup_diagnostics_root: Path | None = None,
 ) -> None:
-    safe_detail = redact_text(detail, limit=1000).strip()
+    safe_diagnostic_detail = redact_text(diagnostic_detail or detail).strip()
+    diagnostic_path = _write_setup_failure_diagnostic(
+        safe_diagnostic_detail=safe_diagnostic_detail,
+        trial_id=trial_id,
+        setup_diagnostics_root=setup_diagnostics_root,
+    )
+    safe_detail = _format_setup_failure_detail(
+        detail,
+        diagnostic_path=diagnostic_path,
+    )
     failure_reason = _classify_setup_failure(safe_detail)
     logger.warning(
         "trial_setup_failed trial_id=%s worker_id=%s detail=%s",
@@ -843,6 +867,82 @@ async def _mark_setup_failed(
             trial_id,
             worker_id,
         )
+
+
+def _write_setup_failure_diagnostic(
+    *,
+    safe_diagnostic_detail: str,
+    trial_id: UUID,
+    setup_diagnostics_root: Path | None,
+) -> Path | None:
+    if setup_diagnostics_root is None:
+        return None
+    if len(safe_diagnostic_detail) <= _SETUP_FAILURE_MESSAGE_LIMIT:
+        return None
+
+    diagnostic_path = setup_diagnostics_root / f"{trial_id}.log"
+    try:
+        diagnostic_path.parent.mkdir(parents=True, exist_ok=True)
+        diagnostic_path.write_text(safe_diagnostic_detail + "\n", encoding="utf-8")
+    except OSError:
+        logger.warning(
+            "trial_setup_failed_diagnostic_write_failed trial_id=%s path=%s",
+            trial_id,
+            diagnostic_path,
+            exc_info=True,
+        )
+        return None
+    return diagnostic_path
+
+
+def _format_setup_failure_detail(
+    detail: str,
+    *,
+    diagnostic_path: Path | None = None,
+) -> str:
+    safe_detail = redact_text(detail).strip()
+    diagnostic_path_line = (
+        f"\nfull_setup_diagnostic_path: {diagnostic_path}"
+        if diagnostic_path is not None
+        else ""
+    )
+    if len(safe_detail) + len(diagnostic_path_line) <= _SETUP_FAILURE_MESSAGE_LIMIT:
+        if diagnostic_path_line:
+            return f"{safe_detail}{diagnostic_path_line}"
+        return safe_detail
+
+    max_head_budget = min(
+        _SETUP_FAILURE_HEAD_CHARS,
+        _SETUP_FAILURE_MESSAGE_LIMIT - len(_SETUP_FAILURE_TRUNCATION_MARKER) - 1,
+    )
+    head = _setup_failure_diagnostic_head(safe_detail, max_head_budget)
+    if diagnostic_path_line:
+        head = f"{head}{diagnostic_path_line}"
+        if len(head) + len(_SETUP_FAILURE_TRUNCATION_MARKER) >= (
+            _SETUP_FAILURE_MESSAGE_LIMIT
+        ):
+            head_budget = _SETUP_FAILURE_MESSAGE_LIMIT - len(
+                _SETUP_FAILURE_TRUNCATION_MARKER
+            ) - 1
+            head = head[:head_budget].rstrip()
+    tail_budget = _SETUP_FAILURE_MESSAGE_LIMIT - len(head) - len(
+        _SETUP_FAILURE_TRUNCATION_MARKER
+    )
+    tail = safe_detail[-tail_budget:].lstrip()
+    first_newline = tail.find("\n")
+    if 0 < first_newline < len(tail) - 1:
+        tail = tail[first_newline + 1 :]
+    compact = f"{head}{_SETUP_FAILURE_TRUNCATION_MARKER}{tail.lstrip()}"
+    return compact[:_SETUP_FAILURE_MESSAGE_LIMIT].strip()
+
+
+def _setup_failure_diagnostic_head(detail: str, max_chars: int) -> str:
+    build_log_index = detail.lower().find("\nbuild log")
+    if build_log_index >= 0:
+        build_log_line_end = detail.find("\n", build_log_index + 1)
+        if 0 < build_log_line_end <= max_chars:
+            return detail[:build_log_line_end].rstrip()
+    return detail[:max_chars].rstrip()
 
 
 def _classify_setup_failure(detail: str) -> FailureReason:

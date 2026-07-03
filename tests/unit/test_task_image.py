@@ -517,6 +517,10 @@ async def test_resolve_task_image_truncates_build_log_to_tail(
     # Early noise shouldn't survive truncation
     assert "noise line 0" not in msg
     assert "noise line 50" not in msg
+    assert exc.value.diagnostic_detail is not None
+    assert "noise line 0" in exc.value.diagnostic_detail
+    assert "noise line 50" in exc.value.diagnostic_detail
+    assert "FINAL_ERROR" in exc.value.diagnostic_detail
 
 
 async def test_resolve_task_image_empty_build_log_still_raises(
