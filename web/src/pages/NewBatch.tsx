@@ -808,6 +808,11 @@ export default function NewBatch(): JSX.Element {
     queryFn: () => api.listBenchmarks({ limit: "200", include_empty: "true" }),
     staleTime: 5 * 60 * 1000,
   });
+  const evalTaskSets = useQuery({
+    queryKey: ["taskSets", "evaluation-ready"],
+    queryFn: () => api.listTaskSets(),
+    staleTime: 5 * 60 * 1000,
+  });
   const agents = useQuery({
     queryKey: ["agents"],
     queryFn: () => api.listAgents(),
@@ -1432,8 +1437,21 @@ export default function NewBatch(): JSX.Element {
                   Benchmarks
                 </FieldLabel>
                 <BenchmarkPicker
-                  items={(benchmarks.data?.items ?? []) as BenchmarkItem[]}
-                  loading={benchmarks.isPending}
+                  items={[
+                    ...((benchmarks.data?.items ?? []) as BenchmarkItem[]),
+                    ...((evalTaskSets.data?.items ?? [])
+                      .filter((ts) => ts.evaluation_ready && ts.status === "ready")
+                      .map((ts) => ({
+                        id: ts.task_set_id,
+                        display_name: ts.display_name,
+                        task_count: ts.task_count,
+                        readiness_state: "ready",
+                        readiness_label: "evaluation-ready",
+                        selectable: true,
+                        series: "User Task Sets",
+                      } satisfies BenchmarkItem))),
+                  ]}
+                  loading={benchmarks.isPending || evalTaskSets.isPending}
                   selected={selectedBenchmarks}
                   onChange={setSelectedBenchmarks}
                 />
