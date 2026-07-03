@@ -231,6 +231,11 @@ def _build_parser() -> argparse.ArgumentParser:
         add_help=False,
     )
     sub.add_parser(
+        "tasksets",
+        help="Manage team TaskSets (submit/status/rebuild/delete/list)",
+        add_help=False,
+    )
+    sub.add_parser(
         "inference",
         help=(
             "Prepare self-hosted OpenAI-compatible inference services "
@@ -348,6 +353,9 @@ def main(argv: list[str] | None = None) -> int:
     if raw and raw[0] == "providers":
         from loom_cli.providers_cmd import dispatch as providers_dispatch
         return providers_dispatch(raw[1:])
+    if raw and raw[0] == "tasksets":
+        from loom_cli.tasksets_cmd import dispatch as tasksets_dispatch
+        return tasksets_dispatch(raw[1:])
     if raw and raw[0] == "inference":
         from loom_cli.inference_cmd import dispatch as inference_dispatch
         return inference_dispatch(raw[1:])
