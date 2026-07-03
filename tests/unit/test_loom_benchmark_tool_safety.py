@@ -268,6 +268,46 @@ async def test_upload_task_dir_rejects_setup_copy_without_app_parent(
         )
 
 
+async def test_upload_task_dir_rejects_tmp_app_mkdir_before_app_copy(
+    tmp_path: Path,
+) -> None:
+    dockerfile = tmp_path / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text(
+        "FROM ubuntu:24.04\n"
+        "RUN mkdir -p /tmp/app && cp -r /tmp/setup /app/project\n",
+    )
+    (tmp_path / "task.toml").write_text("x = 1\n")
+
+    with pytest.raises(ValueError, match="before creating the /app"):
+        await upload_task_dir(
+            store=FakeObjectStore(),
+            bucket="b",
+            prefix="source-useful/task/",
+            task_dir=tmp_path,
+        )
+
+
+async def test_upload_task_dir_rejects_non_recursive_app_child_mkdir(
+    tmp_path: Path,
+) -> None:
+    dockerfile = tmp_path / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text(
+        "FROM ubuntu:24.04\n"
+        "RUN mkdir /app/project && cp -r /tmp/setup /app/project\n",
+    )
+    (tmp_path / "task.toml").write_text("x = 1\n")
+
+    with pytest.raises(ValueError, match="before creating the /app"):
+        await upload_task_dir(
+            store=FakeObjectStore(),
+            bucket="b",
+            prefix="source-useful/task/",
+            task_dir=tmp_path,
+        )
+
+
 async def test_upload_task_dir_rejects_setup_copy_before_late_app_mkdir(
     tmp_path: Path,
 ) -> None:

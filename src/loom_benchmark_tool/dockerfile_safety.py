@@ -20,7 +20,6 @@ _FROM_NODE_RE = re.compile(
 _NODESOURCE_MAJOR_RE = re.compile(r"\b(?:setup|node)_(\d+)\.x\b")
 _NPM_LATEST_RE = re.compile(r"\bnpm\s+(?:install|i)\b[^\n]*\bnpm@latest\b")
 _TRAILING_TRUE_RE = re.compile(r"(?:^|\s)\|\|\s*true\s*$")
-_MKDIR_APP_RE = re.compile(r"\bmkdir\s+(?:-[^\s]+\s+)*[^&;|]*?/app(?:/|\s|$)")
 _WORKDIR_APP_RE = re.compile(r"^\s*WORKDIR\s+/app(?:/|\s|$)", re.IGNORECASE)
 _APP_WRITE_RE = re.compile(
     r"(?P<cmd>\bcp\b[^&;|]*\s/app(?:/|\s|$)"
@@ -81,14 +80,20 @@ def validate_dockerfile_text(text: str, *, path: Path | None = None) -> None:
                 )
             for match in _APP_WRITE_RE.finditer(segment):
                 before = segment[:match.start()]
-                if app_dir_created or _MKDIR_APP_RE.search(before):
+                if app_dir_created or _mkdir_creates_app_root(
+                    before,
+                    app_dir_created=app_dir_created,
+                ):
                     continue
                 command = " ".join(match.group("cmd").split())
                 raise ValueError(
                     f"{label}:{line_no} writes to /app before creating the /app "
                     f"parent directory: {command}",
                 )
-            if _MKDIR_APP_RE.search(segment):
+            if _mkdir_creates_app_root(
+                segment,
+                app_dir_created=app_dir_created,
+            ):
                 app_dir_created = True
 
 
@@ -216,6 +221,43 @@ def _install_package_names(args: list[str]) -> list[str]:
         if match := re.match(r"([A-Za-z0-9_.-]+)", arg):
             names.append(match.group(1).lower().replace("_", "-"))
     return names
+
+
+def _mkdir_creates_app_root(segment: str, *, app_dir_created: bool) -> bool:
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        return False
+
+    for index, token in enumerate(tokens):
+        if token.rsplit("/", 1)[-1] != "mkdir":
+            continue
+        has_parents = False
+        targets: list[str] = []
+        remaining = tokens[index + 1:]
+        while remaining:
+            arg = remaining.pop(0)
+            if arg == "--":
+                targets.extend(remaining)
+                break
+            if arg == "--parents":
+                has_parents = True
+                continue
+            if arg.startswith("--"):
+                continue
+            if arg.startswith("-") and arg != "-":
+                if "p" in arg[1:]:
+                    has_parents = True
+                continue
+            targets.append(arg)
+
+        for target in targets:
+            normalized = target.rstrip("/") or target
+            if normalized == "/app":
+                return True
+            if normalized.startswith("/app/") and (has_parents or app_dir_created):
+                return True
+    return False
 
 
 def _broad_trailing_true(body: str) -> bool:
