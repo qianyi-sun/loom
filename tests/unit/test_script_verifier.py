@@ -75,3 +75,38 @@ async def test_script_verifier_invalid_json_returns_parse_error():
     )
     assert result.error is not None
     assert result.error.kind == "parse_failure"
+
+
+async def test_script_verifier_missing_output_preserves_exec_diagnostics():
+    captured_env = {}
+
+    def _failing_handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        captured_env.update(env or {})
+        return ExecResult(
+            return_code=2,
+            stdout=b"setup started\nlast stdout line\n",
+            stderr=b"permission denied\n",
+            truncated=False,
+            duration_sec=1.25,
+        )
+
+    fake = FakeDriver(exec_handler=_failing_handler)
+    await fake.start(options=StartOptions())
+    v = ScriptVerifier(script_path=PurePosixPath("/tests/check.sh"))
+
+    result = await v.verify(
+        task=None,  # type: ignore[arg-type]
+        env=fake,
+        artifacts_dir=PurePosixPath("/x"),
+        trajectory=None,  # type: ignore[arg-type]
+    )
+
+    assert captured_env["LOOM_VERIFIER_OUTPUT"] == "/loom/verifier/output.json"
+    assert result.error is not None
+    assert result.error.kind == "exec_failure"
+    assert result.error.detail["return_code"] == 2
+    assert result.error.detail["output_path"] == "/loom/verifier/output.json"
+    assert result.error.detail["script_path"] == "/tests/check.sh"
+    assert result.error.detail["stdout_tail"] == "setup started\nlast stdout line\n"
+    assert result.error.detail["stderr_tail"] == "permission denied\n"
+    assert result.error.detail["duration_sec"] == 1.25
