@@ -120,6 +120,10 @@ async def test_import_humaneval_with_fixture(
     body = await store.get_object(
         bucket=bucket, key="humaneval/HumanEval/0/solution/solution.py",
     )
+    assert b"NotImplementedError" in body
+    body = await store.get_object(
+        bucket=bucket, key="humaneval/HumanEval/0/solution/_reference.py",
+    )
     assert b"has_close_elements" in body
 
 

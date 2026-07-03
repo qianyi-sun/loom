@@ -94,6 +94,16 @@ diagnosable after the sandbox is removed. Instance ids are derived from the
 relative bundle path and sanitized so spaces or shell-significant characters
 in upstream folder names cannot create invalid catalog task ids.
 
+Benchmark import, publish, and object-store mirroring validate every converted
+`Dockerfile*` before accepting the task bundle as runnable data. Generated
+Dockerfiles must not use package-specific pip indexes, such as the PyTorch
+wheel index, as the sole index while installing ordinary PyPI packages; must
+not install moving `npm@latest` under a fixed Node major; and must create
+parent directories such as `/app` before copying or writing there.
+Multi-command setup `RUN` chains must not end in broad `|| true`; scope
+optional failures to the optional command, for example
+`(git remote remove origin 2>/dev/null || true)`.
+
 ## LiveCodeBench coverage
 
 The LiveCodeBench adapter targets the official Hugging Face dataset

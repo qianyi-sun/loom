@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from loom.trajectory.storage import ObjectStore
+from loom_benchmark_tool.dockerfile_safety import validate_task_dir_dockerfiles
 
 
 async def upload_task_dir(
@@ -30,6 +31,7 @@ async def upload_task_dir(
         )
     if not prefix.endswith("/"):
         prefix = prefix + "/"
+    validate_task_dir_dockerfiles(task_dir)
     count = 0
     for path in sorted(task_dir.rglob("*")):
         if path.is_dir():

@@ -33,6 +33,7 @@ from loom.db.schema import Task as TaskRow
 from loom.models.task import TaskConfig
 from loom.trajectory.storage import ObjectStore
 from loom_benchmark_tool.db_url import normalize_db_url
+from loom_benchmark_tool.dockerfile_safety import validate_task_dir_dockerfiles
 from loom_benchmark_tool.manifest import (
     read_manifest_from_hf,
     repo_id_for,
@@ -131,6 +132,7 @@ async def mirror_manifest_task_bundle(
             "HF bundle checksum mismatch for "
             f"{task_id}: manifest={checksum} actual={actual_checksum}",
         )
+    validate_task_dir_dockerfiles(bundle_dir)
 
     await object_store.ensure_bucket(bucket)
     target_prefix = _mirror_prefix(
