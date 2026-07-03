@@ -156,6 +156,10 @@ type BatchCreate =
   paths["/api/v1/batches"]["post"]["responses"][201]["content"]["application/json"];
 type BatchFailedRerun =
   paths["/api/v1/batches/{id}/rerun-failed"]["post"]["responses"][201]["content"]["application/json"];
+export type RerunPlan =
+  paths["/api/v1/batches/{id}/rerun-plan"]["get"]["responses"][200]["content"]["application/json"];
+export type DeliveryExport =
+  paths["/api/v1/batches/{id}/delivery-export"]["get"]["responses"][200]["content"]["application/json"];
 type Usage =
   paths["/api/v1/usage"]["get"]["responses"][200]["content"]["application/json"];
 type Team =
@@ -216,6 +220,9 @@ export interface CreateBatchBody {
   n_per_task?: number;
   provider_connection_id?: string;
   provider_model_id?: string;
+  budget_usd?: number;
+  budget_policy?: "none" | "soft" | "hard";
+  budget_confirmed?: boolean;
 }
 
 export interface ModelEntry {
@@ -548,6 +555,19 @@ export interface RunLibraryBatch {
   finished_at: string | null;
   trial_summary: Record<string, number>;
   aggregate_reward: number | null;
+  total_prompt_tokens?: number;
+  total_completion_tokens?: number;
+  total_tokens?: number;
+  llm_calls_count?: number;
+  estimated_cost_usd?: number | null;
+  cost_currency?: string | null;
+  cost_status?: string | null;
+  cost_estimate_source?: string | null;
+  cost_estimate_confidence?: string | null;
+  budget_usd?: number | null;
+  budget_policy?: string | null;
+  budget_remaining_usd?: number | null;
+  budget_status?: string | null;
   artifact_summary: ArtifactSummary;
   artifact_summary_truncated?: boolean;
   debug_evidence?: DebugEvidence;
@@ -1089,6 +1109,18 @@ export const api = {
     apiFetch<DebugEvidence>(`/api/v1/batches/${id}/debug`),
   getBatchDiagnosis: (id: string) =>
     apiFetch<DiagnosisReport>(`/api/v1/batches/${id}/diagnosis`),
+  getBatchDeliveryExport: (id: string) =>
+    apiFetch<DeliveryExport>(`/api/v1/batches/${id}/delivery-export`),
+  createBatchDeliveryExport: (
+    id: string,
+    body: { supplemental_batch_ids?: string[] | null } = {},
+  ) =>
+    apiFetch<DeliveryExport>(`/api/v1/batches/${id}/delivery-export`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  downloadBatchDeliveryExport: (downloadUrl: string, filename: string) =>
+    apiDownload(downloadUrl, filename),
   listRunLibraryBatches: (
     q: Record<string, string | undefined> = {},
   ) => apiFetch<RunLibraryBatchList>(`/api/v1/run-library/batches${qs(q)}`),
@@ -1154,6 +1186,18 @@ export const api = {
       `/api/v1/batches/${id}/cancel`,
       { method: "POST" },
     ),
+  getBatchRerunPlan: (
+    id: string,
+    q: { task_id?: string[]; include_operator_approval?: boolean } = {},
+  ) => {
+    const params = new URLSearchParams();
+    for (const taskId of q.task_id ?? []) params.append("task_id", taskId);
+    if (q.include_operator_approval !== undefined) {
+      params.set("include_operator_approval", String(q.include_operator_approval));
+    }
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    return apiFetch<RerunPlan>(`/api/v1/batches/${id}/rerun-plan${suffix}`);
+  },
   rerunFailedBatch: (id: string) =>
     apiFetch<BatchFailedRerun>(
       `/api/v1/batches/${id}/rerun-failed`,

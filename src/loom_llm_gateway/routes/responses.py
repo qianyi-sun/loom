@@ -39,12 +39,13 @@ from loom_llm_gateway.responses_probe import (
 )
 from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
-    compute_facade_cost_usd,
+    compute_facade_cost_estimate,
     decrypt_facade_api_key,
     http_failure_category,
     redact_api_key,
     resolve_facade_connection,
     resolve_provider_connection_id,
+    token_usage_with_cost_metadata,
     verify_facade_auth,
 )
 from loom_llm_gateway.routes.responses_chat_compat import (
@@ -194,12 +195,13 @@ async def _dispatch_via_chat_translator(
         stream=bool(payload.get("stream")),
     )
     usage = _extract_responses_usage(body_or_stream)
-    cost, rate_card_hash = await compute_facade_cost_usd(
+    cost_estimate = await compute_facade_cost_estimate(
         row,
         model_name,
         usage,
         rate_card_cache=request.app.state.rate_card_cache,
     )
+    usage = token_usage_with_cost_metadata(usage, cost_estimate)
     await _record_responses_call(
         request=request,
         team_id=team_id,
@@ -207,8 +209,8 @@ async def _dispatch_via_chat_translator(
         step_id=step_id,
         model_name=model_name,
         usage=usage,
-        cost_usd=cost,
-        rate_card_hash=rate_card_hash,
+        cost_usd=cost_estimate.cost_usd,
+        rate_card_hash=cost_estimate.rate_card_hash,
         provider=row.provider_type,
         attempt=attempt,
         request_payload=payload,
@@ -365,12 +367,13 @@ async def responses(
 
         body_or_stream = _decode_response_body(upstream_response)
         usage = _extract_responses_usage(body_or_stream)
-        cost, rate_card_hash = await compute_facade_cost_usd(
+        cost_estimate = await compute_facade_cost_estimate(
             row,
             model_name,
             usage,
             rate_card_cache=request.app.state.rate_card_cache,
         )
+        usage = token_usage_with_cost_metadata(usage, cost_estimate)
         await _record_responses_call(
             request=request,
             team_id=team_id,
@@ -378,8 +381,8 @@ async def responses(
             step_id=step_id,
             model_name=model_name,
             usage=usage,
-            cost_usd=cost,
-            rate_card_hash=rate_card_hash,
+            cost_usd=cost_estimate.cost_usd,
+            rate_card_hash=cost_estimate.rate_card_hash,
             provider=row.provider_type,
             attempt=attempt,
             request_payload=payload,

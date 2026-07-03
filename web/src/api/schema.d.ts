@@ -251,6 +251,9 @@ export interface paths {
             combinations?: components["schemas"]["Combination"][];
             provider_connection_id?: string | null;
             provider_model_id?: string | null;
+            budget_usd?: number | null;
+            budget_policy?: "none" | "soft" | "hard";
+            budget_confirmed?: boolean;
           };
         };
       };
@@ -263,6 +266,11 @@ export interface paths {
               expected_trial_count: number;
               state: string;
               created_at: string;
+              budget_usd?: number | null;
+              budget_policy?: string;
+              pre_run_estimated_cost_usd?: number | null;
+              budget_remaining_usd?: number | null;
+              budget_status?: string;
             };
           };
         };
@@ -340,6 +348,24 @@ export interface paths {
       };
     };
   };
+  "/api/v1/batches/{id}/rerun-plan": {
+    get: {
+      parameters: {
+        path: { id: string };
+        query?: {
+          task_id?: string[];
+          include_operator_approval?: boolean;
+        };
+      };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["RerunPlan"];
+          };
+        };
+      };
+    };
+  };
   "/api/v1/batches/{id}/cancel": {
     post: {
       parameters: { path: { id: string } };
@@ -365,7 +391,37 @@ export interface paths {
               state: string;
               created_at: string;
               rerun_target_count: number;
+              rerun_plan: components["schemas"]["RerunPlan"];
             };
+          };
+        };
+      };
+    };
+  };
+  "/api/v1/batches/{id}/delivery-export": {
+    get: {
+      parameters: { path: { id: string } };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["DeliveryExport"];
+          };
+        };
+      };
+    };
+    post: {
+      parameters: { path: { id: string } };
+      requestBody: {
+        content: {
+          "application/json": {
+            supplemental_batch_ids?: string[] | null;
+          };
+        };
+      };
+      responses: {
+        201: {
+          content: {
+            "application/json": components["schemas"]["DeliveryExport"];
           };
         };
       };
@@ -562,6 +618,8 @@ export interface components {
       estimated_cost_usd?: number | null;
       cost_currency?: string | null;
       cost_status?: components["schemas"]["UsageCostStatus"];
+      cost_estimate_source?: string | null;
+      cost_estimate_confidence?: string | null;
       pricing_modes?: components["schemas"]["UsagePricingMode"][];
       priced_llm_calls_count?: number;
       token_only_llm_calls_count?: number;
@@ -642,6 +700,14 @@ export interface components {
         category: string;
         attribution: string;
         message?: string | null;
+        failure_class?: string;
+        root_cause?: string;
+        platform_outcome?: string;
+        score_outcome?: string;
+        rerun_recommendation?: string;
+        rerunnable?: boolean;
+        requires_operator_approval?: boolean;
+        requires_task_change?: boolean;
       };
       task?: Record<string, unknown>;
       task_selection?: Record<string, unknown>;
@@ -784,6 +850,8 @@ export interface components {
       estimated_cost_usd?: number | null;
       cost_currency?: string | null;
       cost_status?: components["schemas"]["UsageCostStatus"];
+      cost_estimate_source?: string | null;
+      cost_estimate_confidence?: string | null;
       pricing_modes?: components["schemas"]["UsagePricingMode"][];
       priced_llm_calls_count?: number;
       token_only_llm_calls_count?: number;
@@ -792,6 +860,15 @@ export interface components {
       missing_usage_llm_calls_count?: number;
       usage_reporting_status?: components["schemas"]["UsageReportingStatus"];
       usage_estimate_confidence?: components["schemas"]["UsageEstimateConfidence"];
+      budget_usd?: number | null;
+      budget_policy?: string;
+      budget_remaining_usd?: number | null;
+      budget_consumed_usd?: number | null;
+      budget_status?: string;
+      pre_run_estimated_cost_usd?: number | null;
+      pre_run_cost_estimate_source?: string | null;
+      pre_run_cost_estimate_confidence?: string | null;
+      budget_diagnostics?: Record<string, unknown>[];
       no_call_trial_count?: number;
       llm_evidence_status?: string;
       model_backed_terminal_trial_count?: number;
@@ -819,6 +896,48 @@ export interface components {
       trial_summary: Record<string, number>;
       aggregate_reward: number | null;
     };
+    RerunTarget: {
+      task_id: string;
+      sample_idx: number;
+      combination_idx: number;
+      original_trial_id: string;
+      failure_reason?: string | null;
+      reason_code: string;
+      failure_class: string;
+      root_cause: string;
+      platform_outcome: string;
+      score_outcome: string;
+      rerun_recommendation: string;
+      requires_operator_approval: boolean;
+      requires_task_change: boolean;
+    };
+    FinalTrialSelection: {
+      task_id: string;
+      sample_idx: number;
+      combination_idx: number;
+      selected_trial_id: string;
+      selected_batch_id: string | null;
+      selected_source: "main" | "supplemental" | string;
+      original_trial_id: string;
+      original_failure_class: string;
+    };
+    RerunPlan: {
+      schema_version: "1";
+      batch_id: string;
+      rerun_of_batch_id: string;
+      supplemental_task_ids: string[];
+      summary: {
+        auto_safe: number;
+        operator_approval: number;
+        not_rerunnable: number;
+        already_covered: number;
+        selected_final_trials: number;
+      };
+      auto_safe: components["schemas"]["RerunTarget"][];
+      operator_approval: components["schemas"]["RerunTarget"][];
+      not_rerunnable: components["schemas"]["RerunTarget"][];
+      final_trial_selection: components["schemas"]["FinalTrialSelection"][];
+    };
     BatchDetail: components["schemas"]["Batch"] & {
       trial_summary: Record<string, number>;
       aggregate_reward: number | null;
@@ -833,6 +952,8 @@ export interface components {
         finished_at: string | null;
       }[];
       rerunnable_failed_count: number;
+      rerun_plan?: components["schemas"]["RerunPlan"];
+      final_trial_selection?: components["schemas"]["FinalTrialSelection"][];
       effective_trial_summary: Record<string, number>;
       effective_result_status: string | null;
       effective_aggregate_reward: number | null;
@@ -859,6 +980,37 @@ export interface components {
       debug_evidence?: components["schemas"]["DebugEvidence"];
       diagnosis?: components["schemas"]["DiagnosisReport"];
     };
+    DeliveryExport: {
+      id?: string;
+      status: "ready" | "not_ready" | string;
+      reason?: string | null;
+      archive_filename?: string;
+      sha256?: string;
+      download_url?: string;
+      manifest?: {
+        task_count?: number;
+        trial_count?: number;
+        reward_distribution?: Record<string, number>;
+        object_counts?: Record<string, number>;
+        archive_sha256?: string | null;
+        payload_checksums?: {
+          algorithm?: string;
+          file?: string;
+          scope?: string;
+        };
+        [key: string]: unknown;
+      };
+      object_validation?: {
+        checked?: number;
+        missing?: unknown[];
+      };
+      storage?: {
+        bucket?: string | null;
+        key?: string | null;
+        size_bytes?: number | null;
+      };
+      created_at?: string | null;
+    };
     UsageBatch: {
       batch_id: string;
       batch_name: string;
@@ -870,6 +1022,8 @@ export interface components {
       estimated_cost_usd: number | null;
       cost_currency: string | null;
       cost_status: components["schemas"]["UsageCostStatus"];
+      cost_estimate_source?: string | null;
+      cost_estimate_confidence?: string | null;
       pricing_modes: components["schemas"]["UsagePricingMode"][];
       priced_llm_calls_count?: number;
       token_only_llm_calls_count?: number;
@@ -891,6 +1045,8 @@ export interface components {
       estimated_cost_usd?: number | null;
       cost_currency?: string | null;
       cost_status?: components["schemas"]["UsageCostStatus"];
+      cost_estimate_source?: string | null;
+      cost_estimate_confidence?: string | null;
       pricing_modes?: components["schemas"]["UsagePricingMode"][];
       priced_llm_calls_count?: number;
       token_only_llm_calls_count?: number;

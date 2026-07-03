@@ -123,6 +123,20 @@ const BATCH_DIAGNOSIS = {
   ],
 };
 
+const READY_DELIVERY_EXPORT = {
+  id: "delivery-artifact",
+  status: "ready",
+  archive_filename: "source-useful-5003-delivery.tar.gz",
+  sha256: "fa54bda50a85eeec607d172588e1e600db0f2182ebd7cc601e7ebdb39689cd03",
+  download_url: `/api/v1/batches/${BATCH_ID}/delivery-export/delivery-artifact/download`,
+  manifest: {
+    task_count: 5003,
+    trial_count: 5003,
+    reward_distribution: { "0.0": 1139, "1.0": 3864 },
+    object_counts: { atif: 5003, trajectory: 5003 },
+  },
+};
+
 function mockBatch(
   body: BatchBody = BATCH_BODY,
   rerunBody: Record<string, unknown> | null = null,
@@ -130,11 +144,41 @@ function mockBatch(
     debugEvidence?: components["schemas"]["DebugEvidence"];
     diagnosis?: typeof BATCH_DIAGNOSIS;
   } = {},
+  deliveryExport: Record<string, unknown> | null = {
+    status: "not_ready",
+    reason: "no_delivery_export",
+  },
 ): ReturnType<typeof vi.spyOn> {
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : String(input);
+      if (
+        url.endsWith(`/api/v1/batches/${BATCH_ID}/delivery-export`) &&
+        init?.method === "POST"
+      ) {
+        return Promise.resolve(
+          new Response(JSON.stringify(deliveryExport ?? READY_DELIVERY_EXPORT), {
+            status: 201,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      if (url.endsWith(`/api/v1/batches/${BATCH_ID}/delivery-export`)) {
+        return Promise.resolve(
+          new Response(JSON.stringify(deliveryExport), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      if (
+        url.endsWith(
+          `/api/v1/batches/${BATCH_ID}/delivery-export/delivery-artifact/download`,
+        )
+      ) {
+        return Promise.resolve(new Response("bundle-bytes", { status: 200 }));
+      }
       if (
         url.endsWith(`/api/v1/batches/${BATCH_ID}/debug`) &&
         diagnostics.debugEvidence
@@ -223,6 +267,41 @@ describe("BatchDetail run plan", () => {
     expect(screen.getByText("team / pending_scan")).toBeInTheDocument();
     expect(screen.getByText("Provenance")).toBeInTheDocument();
     expect(screen.getByText(/cloned batch config/i)).toBeInTheDocument();
+  });
+
+  it("shows ready delivery bundle status and downloads the archive", async () => {
+    const fetchMock = mockBatch(
+      {
+        ...BATCH_BODY,
+        state: "finished",
+        result_status: "succeeded",
+        expected_trial_count: 5003,
+      },
+      null,
+      {},
+      READY_DELIVERY_EXPORT,
+    );
+    const createObjectURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:bundle");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    const user = userEvent.setup();
+    renderBatchDetail();
+
+    expect(await screen.findByText("Delivery bundle")).toBeInTheDocument();
+    expect(screen.getByText("ready")).toBeInTheDocument();
+    expect(await screen.findByText(/5003 trials/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/fa54bda50a85eeec607d172588e1e600db0f2182ebd7cc601e7ebdb39689cd03/),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Download bundle" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        `/api/v1/batches/${BATCH_ID}/delivery-export/delivery-artifact/download`,
+        expect.objectContaining({ credentials: "include" }),
+      );
+      expect(createObjectURL).toHaveBeenCalled();
+    });
   });
 
   it("renders timestamps in user local time and token usage with explicit labels", async () => {
@@ -476,5 +555,64 @@ describe("BatchDetail run plan", () => {
       );
     });
     expect(await screen.findByText(/Rerun queued/i)).toBeInTheDocument();
+  });
+
+  it("surfaces supplemental rerun recommendation buckets", async () => {
+    mockBatch({
+      ...BATCH_BODY,
+      state: "finished",
+      result_status: "partial_failed",
+      trial_summary: { succeeded: 1, failed: 3 },
+      rerunnable_failed_count: 1,
+      rerun_plan: {
+        schema_version: "1",
+        batch_id: BATCH_ID,
+        supplemental_task_ids: ["source-useful/task-auto"],
+        summary: {
+          auto_safe: 1,
+          operator_approval: 1,
+          not_rerunnable: 2,
+          already_covered: 0,
+          selected_final_trials: 4,
+        },
+        auto_safe: [
+          {
+            task_id: "source-useful/task-auto",
+            failure_class: "platform_failure",
+            root_cause: "provider_transport",
+          },
+        ],
+        operator_approval: [
+          {
+            task_id: "source-useful/task-verifier",
+            failure_class: "verifier_failure",
+            root_cause: "verifier_harness",
+          },
+        ],
+        not_rerunnable: [
+          {
+            task_id: "source-useful/task-score-zero",
+            failure_class: "score_failure",
+            platform_outcome: "success",
+          },
+          {
+            task_id: "source-useful/task-compat",
+            failure_class: "task_failure",
+            root_cause: "task_compatibility",
+          },
+        ],
+        final_trial_selection: [],
+      },
+    });
+    renderBatchDetail();
+
+    expect(
+      await screen.findByText("Supplemental rerun recommendation"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("1 auto-safe")).toBeInTheDocument();
+    expect(screen.getByText("1 needs approval")).toBeInTheDocument();
+    expect(screen.getByText("2 not rerunnable")).toBeInTheDocument();
+    expect(screen.getByText("source-useful/task-auto")).toBeInTheDocument();
+    expect(screen.getByText(/Reward 0 is platform success/i)).toBeInTheDocument();
   });
 });

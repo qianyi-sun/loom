@@ -2,7 +2,7 @@
 
 The worker's trial runner is long-lived (agent step + verifier + artifact
 collection can legitimately take minutes to hours). Two failure modes
-were surfaced by the 2026-07-02 / 2026-07-03 public-beta canaries and
+were surfaced by the 2026-07-02 / 2026-07-03 staging canaries and
 had no defense in place:
 
 * **#360 — operator-driven cancellation.** The control plane marks a
@@ -41,6 +41,8 @@ import time
 from collections.abc import Coroutine
 from typing import Any, Protocol
 from uuid import UUID
+
+from loom.trial.watchdog_cancellation import WatchdogCancellation, WatchdogTriggerReason
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +137,14 @@ async def _watch(
                 trial_id, elapsed, hard_deadline_sec,
             )
             trigger["reason"] = "hard_deadline"
-            task.cancel()
+            task.cancel(
+                WatchdogCancellation(
+                    reason=WatchdogTriggerReason.HARD_DEADLINE,
+                    message="worker hard deadline elapsed",
+                    elapsed_sec=elapsed,
+                    hard_deadline_sec=hard_deadline_sec,
+                )
+            )
             return
 
         try:
@@ -153,5 +162,28 @@ async def _watch(
                 trial_id,
             )
             trigger["reason"] = "cp_cancelled"
-            task.cancel()
+            task.cancel(
+                WatchdogCancellation(
+                    reason=WatchdogTriggerReason.CP_CANCELLED,
+                    message="control plane reported trial cancelled",
+                    cp_state=state,
+                )
+            )
+            return
+
+        if state in {"failed", "succeeded"}:
+            logger.info(
+                "trial_terminal_observed_by_watchdog trial_id=%s state=%s — "
+                "cancelling runner task",
+                trial_id,
+                state,
+            )
+            trigger["reason"] = "cp_terminal"
+            task.cancel(
+                WatchdogCancellation(
+                    reason=WatchdogTriggerReason.CP_TERMINAL,
+                    message="control plane reported trial terminal",
+                    cp_state=state,
+                )
+            )
             return

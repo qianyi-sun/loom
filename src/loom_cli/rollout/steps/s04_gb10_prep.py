@@ -37,8 +37,8 @@ class GB10Host:
     """One release-managed GB10 host."""
 
     ssh_target: str        # user@hostname or SSH alias
-    repo_path: str         # e.g. /srv/loom/public-beta
-    env_file_path: str     # e.g. /srv/loom/public-beta/.env
+    repo_path: str         # e.g. /srv/loom/staging
+    env_file_path: str     # e.g. /srv/loom/staging/.env
 
 
 def gb10_hosts_for(ctx: RolloutContext) -> list[GB10Host]:

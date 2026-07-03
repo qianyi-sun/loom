@@ -456,7 +456,7 @@ The approval response returns the raw invite code/link exactly once; the
 database stores only the invite code hash and safe prefix. The contact accepts
 the invite link to create or reuse a browser user, create the selected
 membership, and receive an HttpOnly browser session. Loom does not email the
-link in public beta; the admin copies and shares it manually. If the admin UI
+link in staging; the admin copies and shares it manually. If the admin UI
 loses the response, use invite resend to rotate and reveal a replacement link.
 
 `POST /api/v1/admin/team-registrations/{id}/reject`

@@ -14,7 +14,7 @@ boundary.
 - The Run Library is the only cross-team read/reuse surface for completed
   results. Cross-team sharing must not be implemented by weakening
   `require_team_or_admin()` on execution routes.
-- Quota and rate-limit enforcement is not part of the public-beta Run Library.
+- Quota and rate-limit enforcement is not part of the staging Run Library.
   Spend and abuse response remain operational controls until an explicit
   product policy exists.
 
@@ -127,7 +127,9 @@ export safe typed artifact metadata for the run. The same Diagnosis and Debug
 evidence cards used by Batch Detail appear on Run Library detail when the API
 includes `diagnosis` and `debug_evidence`; diagnosis shows the human-readable
 summary, primary cause, impact, reason clusters, and next actions first, while
-the exact redacted debug JSON remains collapsed.
+the exact redacted debug JSON remains collapsed. Reward `0` with verifier
+output is shown as a platform-successful score failure, not a platform failure
+or automatic supplemental rerun candidate.
 
 Existing Batch Detail and Trial Detail pages also show owner team, visibility,
 share status, and provenance when those fields are present, so cloned/reused

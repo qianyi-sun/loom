@@ -655,6 +655,31 @@ describe("NewBatch", () => {
     ]);
   });
 
+  it("includes confirmed soft budget fields in the batch request", async () => {
+    const spy = mockEndpoints({ matchingTasks: 12 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+    await pickBackend();
+    await pickBenchmark();
+    await pickDefaultModel(user);
+    await screen.findByText(/12 tasks match across 1 benchmark/i);
+
+    await user.type(screen.getByLabelText(/Budget USD/i), "1.25");
+    await user.selectOptions(screen.getByLabelText(/Budget policy/i), "soft");
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: /I understand this soft budget may require confirmation/i,
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
+    expect(batchCall(spy)!.body.budget_usd).toBe(1.25);
+    expect(batchCall(spy)!.body.budget_policy).toBe("soft");
+    expect(batchCall(spy)!.body.budget_confirmed).toBe(true);
+  });
+
   it("submits an optional suffix for the generated batch name", async () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();

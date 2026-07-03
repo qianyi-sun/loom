@@ -10,11 +10,11 @@ import pytest
 from botocore.exceptions import ClientError
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "scripts" / "public_beta_smoke_gate.py"
+SCRIPT = ROOT / "scripts" / "staging_smoke_gate.py"
 
 
 def _load_gate_module():
-    spec = importlib.util.spec_from_file_location("public_beta_smoke_gate", SCRIPT)
+    spec = importlib.util.spec_from_file_location("staging_smoke_gate", SCRIPT)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -42,7 +42,7 @@ def _empty_catalog_client(gate):
     return FakeClient
 
 
-def test_gate_declares_required_public_beta_checks() -> None:
+def test_gate_declares_required_staging_checks() -> None:
     gate = _load_gate_module()
 
     required = {
@@ -146,15 +146,15 @@ def test_console_summary_omits_check_details_and_secret_values() -> None:
 
     rendered = gate.render_console_summary(
         report,
-        markdown_output="public-beta-smoke.md",
-        json_output="public-beta-smoke.json",
+        markdown_output="staging-smoke.md",
+        json_output="staging-smoke.json",
     )
 
     assert "loom_api_should_not_print" not in rendered
     assert "raw token" not in rendered
     assert "1 fail" in rendered
-    assert "public-beta-smoke.md" in rendered
-    assert "public-beta-smoke.json" in rendered
+    assert "staging-smoke.md" in rendered
+    assert "staging-smoke.json" in rendered
 
 
 def test_resolve_smoke_secret_args_supports_env_file_and_stdin(
@@ -760,7 +760,7 @@ def test_run_smoke_fails_when_service_pod_reports_oom_restart(monkeypatch) -> No
         "--server-url", "https://loom.example.com",
         "--team-a-token", "loom_api_team_a",
         "--team-b-token", "loom_api_team_b",
-        "--k8s-namespace", "loom-public-beta",
+        "--k8s-namespace", "loom-staging",
     ])
 
     report = gate.run_smoke(args)
@@ -1154,7 +1154,7 @@ def test_run_smoke_can_run_only_minio_write_probe(monkeypatch) -> None:
 
     assert [r.check_id for r in report.results] == ["object_store.minio_write_probe"]
     assert report.results[0].status == "pass"
-    assert "trajectories/_ops/public-beta-smoke/probe-" in report.results[0].detail
+    assert "trajectories/_ops/staging-smoke/probe-" in report.results[0].detail
     assert s3.objects == {}
 
 

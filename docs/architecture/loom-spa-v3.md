@@ -343,7 +343,7 @@ The SPA reduces the old mixed navigation into a role-aware primary set:
   forgot-password request, and CLI setup guidance; signed-in current team,
   role, team switcher, joined browser members, role-aware setup links, and
   API-token summaries. Token-paste login is no longer the normal production SPA
-  auth path, and public beta does not collect email.
+  auth path, and staging does not collect email.
 - **InviteAccept** — invite lookup and acceptance states for pending, expired,
   revoked, and already-used links.
 - **Admin access** — team-owner invite create/list/revoke/resend, scoped

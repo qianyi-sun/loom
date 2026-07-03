@@ -22,8 +22,8 @@ def test_backup_manifest_records_components_without_secret_contents(tmp_path):
     manifest_path = tmp_path / "backup-manifest.json"
 
     manifest = write_backup_manifest(
-        environment="public-beta",
-        namespace="loom-public-beta",
+        environment="staging",
+        namespace="loom-staging",
         output_path=manifest_path,
         components={
             "postgres": postgres,
@@ -41,8 +41,8 @@ def test_backup_manifest_records_components_without_secret_contents(tmp_path):
     assert "secret-store-master-key" not in raw_manifest
     assert validate_backup_manifest(
         manifest_path,
-        environment="public-beta",
-        namespace="loom-public-beta",
+        environment="staging",
+        namespace="loom-staging",
         max_age_hours=24,
         now=datetime(2026, 6, 29, 12, 5, tzinfo=UTC),
     ) == []
@@ -51,8 +51,8 @@ def test_backup_manifest_records_components_without_secret_contents(tmp_path):
 def test_validate_backup_manifest_rejects_missing_secret_backup(tmp_path):
     manifest = {
         "schema_version": 1,
-        "environment": "public-beta",
-        "namespace": "loom-public-beta",
+        "environment": "staging",
+        "namespace": "loom-staging",
         "created_at": "2026-06-29T12:00:00+00:00",
         "components": {
             "postgres": {"path": str(tmp_path / "pg.dump"), "size_bytes": 1},
@@ -65,8 +65,8 @@ def test_validate_backup_manifest_rejects_missing_secret_backup(tmp_path):
 
     problems = validate_backup_manifest(
         path,
-        environment="public-beta",
-        namespace="loom-public-beta",
+        environment="staging",
+        namespace="loom-staging",
         max_age_hours=24,
         now=datetime(2026, 6, 29, 12, 5, tzinfo=UTC),
     )
@@ -118,8 +118,8 @@ def test_cli_backup_manifest_and_check_round_trip(tmp_path, capsys):
 
     rc = main([
         "cluster", "backup", "manifest",
-        "--environment", "public-beta",
-        "--namespace", "loom-public-beta",
+        "--environment", "staging",
+        "--namespace", "loom-staging",
         "--output", str(manifest_path),
         "--postgres-dump", str(postgres),
         "--minio-snapshot", str(minio),
@@ -132,8 +132,8 @@ def test_cli_backup_manifest_and_check_round_trip(tmp_path, capsys):
 
     rc = main([
         "cluster", "backup", "check",
-        "--environment", "public-beta",
-        "--namespace", "loom-public-beta",
+        "--environment", "staging",
+        "--namespace", "loom-staging",
         "--manifest", str(manifest_path),
     ])
 

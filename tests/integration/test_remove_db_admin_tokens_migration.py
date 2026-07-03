@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, delete, insert, select
+from sqlalchemy import create_engine, delete, insert, text
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import Token
@@ -19,6 +19,11 @@ def _alembic_cfg(postgres_url: str) -> Config:
     cfg = Config("migrations/alembic.ini")
     cfg.set_main_option("sqlalchemy.url", postgres_url)
     return cfg
+
+
+def _token_revoked_at(session: object) -> dict[bytes, object]:
+    rows = session.execute(text("SELECT token_hash, revoked_at FROM tokens")).all()  # type: ignore[attr-defined]
+    return {bytes(token_hash): revoked_at for token_hash, revoked_at in rows}
 
 
 @pytest.fixture
@@ -76,10 +81,9 @@ def test_migration_revokes_legacy_db_admin_tokens(
     engine = create_engine(postgres_url)
     sl = sessionmaker(engine)
     with sl() as s:
-        rows = s.execute(select(Token)).scalars().all()
-    by_hash = {row.token_hash: row for row in rows}
+        by_hash = _token_revoked_at(s)
 
-    assert by_hash[hashlib.sha256(b"legacy-admin").digest()].revoked_at is not None
-    assert by_hash[hashlib.sha256(b"team-admin-scope").digest()].revoked_at is not None
-    assert by_hash[hashlib.sha256(b"team-token").digest()].revoked_at is None
+    assert by_hash[hashlib.sha256(b"legacy-admin").digest()] is not None
+    assert by_hash[hashlib.sha256(b"team-admin-scope").digest()] is not None
+    assert by_hash[hashlib.sha256(b"team-token").digest()] is None
     engine.dispose()

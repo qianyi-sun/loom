@@ -21,6 +21,7 @@ machine with no server; `loom eval` submits to a deployed Loom
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shlex
 import sys
@@ -325,6 +326,41 @@ def _print_diagnosis_report(report: dict[str, Any]) -> None:
                 print(f"  {index}. {action}")
 
 
+def _print_rerun_plan(plan: dict[str, Any]) -> None:
+    summary = plan.get("summary") if isinstance(plan, dict) else {}
+    print("Supplemental rerun plan")
+    print(f"batch_id:            {plan.get('batch_id', '(unknown)')}")
+    if isinstance(summary, dict):
+        print(f"auto_safe:           {summary.get('auto_safe', 0)}")
+        print(f"operator_approval:   {summary.get('operator_approval', 0)}")
+        print(f"not_rerunnable:      {summary.get('not_rerunnable', 0)}")
+        print(f"already_covered:     {summary.get('already_covered', 0)}")
+    task_ids = plan.get("supplemental_task_ids")
+    if isinstance(task_ids, list) and task_ids:
+        print("supplemental_task_ids:")
+        for task_id in task_ids:
+            print(f"  - {task_id}")
+    else:
+        print("supplemental_task_ids: (none)")
+    for key, title in (
+        ("operator_approval", "Needs operator approval"),
+        ("not_rerunnable", "Not rerunnable"),
+    ):
+        rows = plan.get(key)
+        if not isinstance(rows, list) or not rows:
+            continue
+        print(title + ":")
+        for row in rows[:10]:
+            if not isinstance(row, dict):
+                continue
+            suffix = " / ".join(
+                str(row.get(field))
+                for field in ("failure_class", "root_cause")
+                if row.get(field)
+            )
+            print(f"  - {row.get('task_id')} ({suffix})")
+
+
 def _run(args: argparse.Namespace) -> int:
     def _body() -> int:
         cfg = require_logged_in()
@@ -605,6 +641,35 @@ def _batch_debug(args: argparse.Namespace) -> int:
     return _run_with_error_handling(_body)
 
 
+def _batch_rerun_plan(args: argparse.Namespace) -> int:
+    def _body() -> int:
+        cfg = require_logged_in()
+        params: list[tuple[str, str | int | float | bool | None]] = []
+        for task_id in args.task_id or []:
+            params.append(("task_id", task_id))
+        if args.include_operator_approval:
+            params.append(("include_operator_approval", True))
+        with authed_client(cfg) as c:
+            resp = c.get(
+                f"/api/v1/batches/{args.batch_id}/rerun-plan",
+                params=params,
+            )
+        body = assert_2xx(
+            resp,
+            action=f"fetch batch rerun plan {args.batch_id!r}",
+        )
+        if args.format == "json":
+            _dump_json(body)
+        elif args.format == "task-ids":
+            for task_id in body.get("supplemental_task_ids") or []:
+                print(task_id)
+        else:
+            _print_rerun_plan(body)
+        return 0
+
+    return _run_with_error_handling(_body)
+
+
 def _diagnose_batch(args: argparse.Namespace) -> int:
     def _body() -> int:
         cfg = require_logged_in()
@@ -633,6 +698,68 @@ def _batch_cancel(args: argparse.Namespace) -> int:
             f"Cancelled batch {body.get('batch_id', args.batch_id)} "
             f"(state={body.get('state', 'cancelled')}).",
         )
+        return 0
+
+    return _run_with_error_handling(_body)
+
+
+def _batch_delivery_bundle(args: argparse.Namespace) -> int:
+    def _body() -> int:
+        cfg = require_logged_in()
+        payload: dict[str, Any] = {}
+        if args.supplemental_batch_id:
+            payload["supplemental_batch_ids"] = list(args.supplemental_batch_id)
+        with authed_client(cfg, timeout=args.timeout) as c:
+            create_resp = c.post(
+                f"/api/v1/batches/{args.batch_id}/delivery-export",
+                json=payload,
+            )
+            body = assert_2xx(
+                create_resp,
+                action=f"create delivery bundle for batch {args.batch_id!r}",
+            )
+            download_url = body.get("download_url")
+            if not isinstance(download_url, str) or not download_url:
+                sys.stderr.write("error: server did not return a delivery download_url.\n")
+                return 1
+            download_resp = c.get(download_url)
+            assert_2xx_response(
+                download_resp,
+                action=f"download delivery bundle for batch {args.batch_id!r}",
+            )
+
+        expected_sha = str(body.get("sha256") or "")
+        archive_bytes = download_resp.content
+        actual_sha = hashlib.sha256(archive_bytes).hexdigest()
+        if expected_sha and actual_sha != expected_sha:
+            sys.stderr.write(
+                "error: downloaded delivery bundle checksum mismatch "
+                f"(expected {expected_sha}, got {actual_sha}).\n"
+            )
+            return 1
+
+        default_name = str(body.get("archive_filename") or f"{args.batch_id}-delivery.tar.gz")
+        output = Path(args.output) if args.output else Path(default_name)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(archive_bytes)
+        output.with_suffix(output.suffix + ".sha256").write_text(
+            f"{actual_sha}  {output.name}\n",
+            encoding="utf-8",
+        )
+        raw_manifest = body.get("manifest")
+        manifest = raw_manifest if isinstance(raw_manifest, dict) else {}
+        trial_count = manifest.get("trial_count") or manifest.get("task_count") or "unknown"
+        object_counts = manifest.get("object_counts")
+        object_text = ""
+        if isinstance(object_counts, dict):
+            object_text = (
+                f", {object_counts.get('trajectory', 0)} trajectories, "
+                f"{object_counts.get('atif', 0)} ATIF"
+            )
+        print(f"Delivery bundle ready: {trial_count} trials{object_text}")
+        print(f"archive: {output}")
+        print(f"sha256:  {actual_sha}")
+        print(f"sidecar: {output.with_suffix(output.suffix + '.sha256')}")
         return 0
 
     return _run_with_error_handling(_body)
@@ -1142,12 +1269,66 @@ def dispatch(argv: list[str]) -> int:
     p_bd.add_argument("--format", choices=["text", "json"], default="text")
     p_bd.set_defaults(handler=_batch_debug)
 
+    p_brp = batch_sub.add_parser(
+        "rerun-plan",
+        help="Generate a deterministic safe supplemental rerun plan.",
+    )
+    p_brp.add_argument("batch_id", help="Source batch UUID.")
+    p_brp.add_argument(
+        "--task-id",
+        action="append",
+        default=[],
+        help="Limit the plan to this task id. Repeat for an explicit task list.",
+    )
+    p_brp.add_argument(
+        "--include-operator-approval",
+        action="store_true",
+        help=(
+            "Include operator-approval rows in the supplemental task-id list. "
+            "Auto-safe rows are always included."
+        ),
+    )
+    p_brp.add_argument(
+        "--format",
+        choices=["text", "json", "task-ids"],
+        default="text",
+    )
+    p_brp.set_defaults(handler=_batch_rerun_plan)
+
     p_bx = batch_sub.add_parser(
         "cancel",
         help="Cancel a batch + cascade-cancel its still-active trials.",
     )
     p_bx.add_argument("batch_id", help="Batch UUID.")
     p_bx.set_defaults(handler=_batch_cancel)
+
+    p_bdel = batch_sub.add_parser(
+        "delivery-bundle",
+        help="Create and download a delivery bundle for a finished batch family.",
+    )
+    p_bdel.add_argument("batch_id", help="Main batch UUID.")
+    p_bdel.add_argument(
+        "--supplemental-batch-id",
+        action="append",
+        default=[],
+        help=(
+            "Supplemental rerun batch UUID in selection priority order. "
+            "Repeat for primary failed-case and targeted reruns. When omitted, "
+            "the service uses linked rerun descendants by created_at/id order."
+        ),
+    )
+    p_bdel.add_argument(
+        "--output",
+        default=None,
+        help="Destination archive path. Defaults to the server archive filename.",
+    )
+    p_bdel.add_argument(
+        "--timeout",
+        type=float,
+        default=120.0,
+        help="HTTP timeout in seconds for create/download operations.",
+    )
+    p_bdel.set_defaults(handler=_batch_delivery_bundle)
 
     # --- trial ---
     p_trial = sub.add_parser(

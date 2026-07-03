@@ -15,13 +15,13 @@ from loom_cli.rollout.evidence import (
 class TestNewRolloutId:
     def test_deterministic_from_timestamp(self) -> None:
         now = datetime(2026, 7, 2, 23, 59, 59, tzinfo=UTC)
-        rid = new_rollout_id(image_tag="public-beta-abc123", now=now)
-        assert rid == "20260702t235959z-public-beta-abc123"
+        rid = new_rollout_id(image_tag="staging-abc123", now=now)
+        assert rid == "20260702t235959z-staging-abc123"
 
     def test_normalises_image_tag_to_dns(self) -> None:
         now = datetime(2026, 7, 2, 0, 0, 0, tzinfo=UTC)
         rid = new_rollout_id(image_tag="Public.Beta.05ab776", now=now)
-        assert rid == "20260702t000000z-public-beta-05ab776"
+        assert rid == "20260702t000000z-public-beta-05ab776"  # DNS-normalization stress; keep literal
 
 
 class TestEvidenceDirectory:
@@ -51,9 +51,9 @@ class TestEvidenceDirectory:
         ev = EvidenceDirectory(tmp_path, "rid")
         ev.ensure()
         payload = {
-            "image_tag": "public-beta-abc",
+            "image_tag": "staging-abc",
             "resolved_sha": "abc123",
-            "cluster_name": "loom-public-beta",
+            "cluster_name": "loom-staging",
         }
         ev.write_inputs(payload)
         assert ev.read_inputs() == payload
@@ -92,50 +92,50 @@ class TestEvidenceDirectory:
 
 class TestFindInProgress:
     def test_finds_running_rollout_matching_tag(self, tmp_path: Path) -> None:
-        old_dir = tmp_path / "rollouts" / "20260701t000000z-public-beta-abc"
+        old_dir = tmp_path / "rollouts" / "20260701t000000z-staging-abc"
         old_dir.mkdir(parents=True)
         (old_dir / "state.json").write_text(json.dumps({
-            "version": 1, "rollout_id": "20260701t000000z-public-beta-abc",
+            "version": 1, "rollout_id": "20260701t000000z-staging-abc",
             "status": "done", "current_step": None, "steps": [],
         }))
-        new_dir = tmp_path / "rollouts" / "20260702t000000z-public-beta-abc"
+        new_dir = tmp_path / "rollouts" / "20260702t000000z-staging-abc"
         new_dir.mkdir(parents=True)
         (new_dir / "state.json").write_text(json.dumps({
-            "version": 1, "rollout_id": "20260702t000000z-public-beta-abc",
+            "version": 1, "rollout_id": "20260702t000000z-staging-abc",
             "status": "running", "current_step": 3, "steps": [],
         }))
         found = EvidenceDirectory.find_in_progress(
-            tmp_path, image_tag="public-beta-abc",
+            tmp_path, image_tag="staging-abc",
         )
         assert found is not None
-        assert found.rollout_id == "20260702t000000z-public-beta-abc"
+        assert found.rollout_id == "20260702t000000z-staging-abc"
 
     def test_returns_none_when_no_matching_dir(self, tmp_path: Path) -> None:
         (tmp_path / "rollouts").mkdir()
         assert EvidenceDirectory.find_in_progress(
-            tmp_path, image_tag="public-beta-abc",
+            tmp_path, image_tag="staging-abc",
         ) is None
 
     def test_returns_none_when_root_doesnt_exist(self, tmp_path: Path) -> None:
         assert EvidenceDirectory.find_in_progress(
-            tmp_path / "missing", image_tag="public-beta-abc",
+            tmp_path / "missing", image_tag="staging-abc",
         ) is None
 
     def test_skips_matching_but_done_rollouts(self, tmp_path: Path) -> None:
-        d = tmp_path / "rollouts" / "20260702t000000z-public-beta-abc"
+        d = tmp_path / "rollouts" / "20260702t000000z-staging-abc"
         d.mkdir(parents=True)
         (d / "state.json").write_text(json.dumps({
             "version": 1, "rollout_id": d.name,
             "status": "done", "current_step": None, "steps": [],
         }))
         assert EvidenceDirectory.find_in_progress(
-            tmp_path, image_tag="public-beta-abc",
+            tmp_path, image_tag="staging-abc",
         ) is None
 
     def test_skips_matching_but_corrupted_state(self, tmp_path: Path) -> None:
-        d = tmp_path / "rollouts" / "20260702t000000z-public-beta-abc"
+        d = tmp_path / "rollouts" / "20260702t000000z-staging-abc"
         d.mkdir(parents=True)
         (d / "state.json").write_text("{ not json")
         assert EvidenceDirectory.find_in_progress(
-            tmp_path, image_tag="public-beta-abc",
+            tmp_path, image_tag="staging-abc",
         ) is None

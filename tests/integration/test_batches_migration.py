@@ -28,12 +28,9 @@ def at_revision_0006(
 ) -> Iterator[None]:
     """Roll back to pre-Plan-19, yield, then bring back to head.
 
-    `migrations/env.py` reads LOOM_DB_URL from os.environ and
-    OVERWRITES whatever sqlalchemy.url we set on the Config. Earlier
-    modules in the suite (test_alembic_migrations.py) may have left a
-    stale URL in os.environ pointing at a since-shut-down container.
-    Force the env var to our live container's URL so env.py reads the
-    right one.
+    Older migration tests used to depend on `LOOM_DB_URL` in the process
+    environment. Keep this pin here so any legacy env-only path still points at
+    the live session container while Alembic now prefers the explicit Config URL.
     """
     monkeypatch.setenv("LOOM_DB_URL", postgres_url)
     cfg = _cfg(postgres_url)

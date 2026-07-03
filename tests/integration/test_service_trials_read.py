@@ -23,7 +23,7 @@ import httpx
 import pytest
 from botocore.config import Config
 from fastapi import FastAPI
-from sqlalchemy import create_engine, delete, insert, update
+from sqlalchemy import create_engine, delete, insert, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -38,7 +38,9 @@ from loom.db.schema import (
     TeamQuota,
     Token,
     Trial,
+    TrialEvent,
     User,
+    Worker,
 )
 from loom_llm_gateway.rate_card import RateCardTable, hash_table
 from loom_service.app import create_app
@@ -172,8 +174,10 @@ async def trials_setup(
         await app.state.http_client.aclose()
         await engine.dispose()
         with sl() as s:
+            s.execute(delete(TrialEvent))
             s.execute(delete(LlmCall))
             s.execute(delete(Trial))
+            s.execute(delete(Worker))
             s.execute(delete(Batch))
             s.execute(delete(RateCard))
             s.execute(delete(ProviderConnection))
@@ -668,9 +672,37 @@ async def test_trial_debug_evidence_is_structured_and_redacted(
     app, raw, team_id, trial_ids = trials_setup
     trial_id = trial_ids[1]
     artifact_key = f"{team_id}/{trial_id}/main/diagnostics.txt"
+    worker_id = uuid4()
+    now = datetime.now(UTC)
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
+        task_id = s.execute(
+            select(Trial.task_id).where(Trial.id == trial_id),
+        ).scalar_one()
+        s.execute(
+            update(Task)
+            .where(Task.id == task_id)
+            .values(
+                config={
+                    "task": {"id": task_id, "name": "t"},
+                    "agent": {"name": "opencode", "timeout_sec": 2400.0},
+                },
+            )
+        )
+        s.execute(
+            insert(Worker).values(
+                id=worker_id,
+                hostname="trt-gb10-debug",
+                version="test",
+                capabilities=[],
+                max_concurrent=1,
+                pool_name="gb10-arm64",
+                registered_at=now - timedelta(minutes=5),
+                last_seen_at=now - timedelta(seconds=5),
+                status="active",
+            )
+        )
         s.execute(
             update(Trial)
             .where(Trial.id == trial_id)
@@ -685,6 +717,12 @@ async def test_trial_debug_evidence_is_structured_and_redacted(
                     "http://loom-control-plane:8080/tasks with "
                     "Authorization: Bearer loom_api_supersecret"
                 ),
+                config={
+                    "agent_name": "opencode",
+                    "agent_timeout_multiplier": 1.0,
+                    "agent_model": {"provider": "openai", "name": "gpt-debug"},
+                },
+                worker_id=worker_id,
                 result={
                     "aggregate_reward": 0.0,
                     "reward": {"passed": 0.0},
@@ -723,6 +761,23 @@ async def test_trial_debug_evidence_is_structured_and_redacted(
                     ],
                 },
             ),
+        )
+        s.execute(
+            insert(TrialEvent).values(
+                id=uuid4(),
+                trial_id=trial_id,
+                seq=7,
+                kind="stdout",
+                source="worker",
+                schema_version=1,
+                payload={
+                    "kind": "stdout",
+                    "seq": 7,
+                    "step_id": "main",
+                    "emitted_at": (now - timedelta(seconds=30)).isoformat(),
+                },
+                created_at=now - timedelta(seconds=30),
+            )
         )
         s.execute(
             insert(LlmCall).values(
@@ -788,6 +843,16 @@ async def test_trial_debug_evidence_is_structured_and_redacted(
     assert body["provider"]["max_attempt"] == 3
     assert body["provider"]["models"] == ["openai/gpt-debug"]
     assert body["provider"]["request_params_status_counts"] == {"available": 1}
+    assert body["lifecycle"]["runtime_sec"] is not None
+    assert body["agent"]["timeout"]["agent_timeout_sec"] == 2400.0
+    assert body["worker"]["worker_id"] == str(worker_id)
+    assert body["worker"]["pool_name"] == "gb10-arm64"
+    assert body["worker"]["heartbeat_fresh"] is True
+    assert body["activity"]["last_trial_event"]["kind"] == "stdout"
+    assert body["activity"]["last_trial_event"]["seq"] == 7
+    assert body["activity"]["last_llm_call_at"] is not None
+    assert body["stale_running"]["decision"] == "keep"
+    assert body["stale_running"]["reason"] == "not_running"
     assert body["provider"]["request_params"] == [
         {
             "llm_call_id": body["provider"]["request_params"][0]["llm_call_id"],

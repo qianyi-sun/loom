@@ -29,13 +29,13 @@ def test_operator_runbook_staging_batch_smoke_matches_cli_contract() -> None:
     assert "--agent codex" in runbook
 
 
-def test_operator_runbook_public_beta_gate_matches_current_launch_scope() -> None:
+def test_operator_runbook_staging_gate_matches_current_launch_scope() -> None:
     runbook = _read("docs/operator-runbook.md")
     gate_section = runbook.split("## Staging smoke gate", maxsplit=1)[1].split(
         "## Capacity planning", maxsplit=1,
     )[0]
 
-    assert "scripts/public_beta_smoke_gate.py" in gate_section
+    assert "scripts/staging_smoke_gate.py" in gate_section
     assert "SPA Tasks page" not in gate_section
     assert "quota rejection" not in gate_section.lower()
     assert "rate-limit rejection" not in gate_section.lower()

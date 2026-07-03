@@ -1,6 +1,6 @@
 """One-off Alembic migration Job renderer (#332).
 
-The sanctioned way to run Alembic during a public-beta/staging rollout.
+The sanctioned way to run Alembic during a staging/staging rollout.
 
 The problem this solves: the standing `loom-postgres` NetworkPolicy only
 permits ingress from `app=loom-control-plane`, `app=loom-service`, and
@@ -58,7 +58,7 @@ def render_migration_manifest(
     """Render the migration Job manifest to a YAML string.
 
     Args:
-        image_tag: Release image tag (e.g. ``public-beta-05ab776``). The
+        image_tag: Release image tag (e.g. ``staging-05ab776``). The
             Job runs the ``loom-control-plane:<image_tag>`` image.
         namespace: Kubernetes namespace. Defaults to ``loom``.
         job_suffix: Uniqueness token appended to the Job name so a

@@ -1630,7 +1630,7 @@ def dispatch(argv: list[str]) -> int:
             required=True,
             help=(
                 "TOML desired-state profile, for example "
-                "deploy/environment-state/public-beta.toml."
+                "deploy/environment-state/staging.toml."
             ),
         )
         p.add_argument(

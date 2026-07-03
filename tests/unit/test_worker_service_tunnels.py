@@ -47,17 +47,17 @@ def test_systemd_unit_restarts_kubectl_port_forward_for_service() -> None:
 
     rendered = module.render_systemd_unit(
         spec,
-        namespace="loom-public-beta",
+        namespace="loom-staging",
         kubectl="/tmp/loom-kubectl",
-        kubeconfig="/tmp/loom-public-beta-kubeconfig",
+        kubeconfig="/tmp/loom-staging-kubeconfig",
         address="0.0.0.0",
     )
 
     assert "Description=Loom remote-worker tunnel: control-plane" in rendered
     assert "Restart=always" in rendered
     assert "RestartSec=5" in rendered
-    assert "--kubeconfig /tmp/loom-public-beta-kubeconfig" in rendered
-    assert "-n loom-public-beta" in rendered
+    assert "--kubeconfig /tmp/loom-staging-kubeconfig" in rendered
+    assert "-n loom-staging" in rendered
     assert "port-forward --address 0.0.0.0 svc/loom-control-plane 18081:8080" in rendered
     assert "WantedBy=default.target" in rendered
 
@@ -67,9 +67,9 @@ def test_systemd_unit_rendering_can_override_gateway_local_port(tmp_path: Path) 
 
     module.write_systemd_units(
         tmp_path,
-        namespace="loom-public-beta",
+        namespace="loom-staging",
         kubectl="/usr/local/bin/kubectl",
-        kubeconfig="/secure/public-beta.kubeconfig",
+        kubeconfig="/secure/staging.kubeconfig",
         address="0.0.0.0",
         local_port_overrides={"gateway": 30444},
     )
@@ -92,9 +92,9 @@ def test_systemd_unit_rendering_can_add_subprocess_gateway_tunnel(
 
     module.write_systemd_units(
         tmp_path,
-        namespace="loom-public-beta",
+        namespace="loom-staging",
         kubectl="/usr/local/bin/kubectl",
-        kubeconfig="/secure/public-beta.kubeconfig",
+        kubeconfig="/secure/staging.kubeconfig",
         address="0.0.0.0",
         subprocess_gateway_local_port=30444,
     )
@@ -227,20 +227,20 @@ def test_install_systemd_rejects_volatile_kubectl_paths_by_default() -> None:
     with pytest.raises(ValueError, match="durable path"):
         module.validate_install_paths(
             kubectl="/tmp/loom-kubectl",
-            kubeconfig="/secure/public-beta.kubeconfig",
+            kubeconfig="/secure/staging.kubeconfig",
             allow_volatile_paths=False,
         )
 
     with pytest.raises(ValueError, match="durable path"):
         module.validate_install_paths(
             kubectl="/usr/local/bin/kubectl",
-            kubeconfig="/tmp/public-beta.kubeconfig",
+            kubeconfig="/tmp/staging.kubeconfig",
             allow_volatile_paths=False,
         )
 
     module.validate_install_paths(
         kubectl="/usr/local/bin/kubectl",
-        kubeconfig="/secure/public-beta.kubeconfig",
+        kubeconfig="/secure/staging.kubeconfig",
         allow_volatile_paths=False,
     )
 
@@ -258,9 +258,9 @@ def test_install_systemd_restarts_existing_units_after_enable(tmp_path: Path, mo
     rc = module._run_install_systemd(
         Namespace(
             output_dir=str(tmp_path),
-            namespace="loom-public-beta",
+            namespace="loom-staging",
             kubectl="/usr/local/bin/kubectl",
-            kubeconfig="/secure/public-beta.kubeconfig",
+            kubeconfig="/secure/staging.kubeconfig",
             address="0.0.0.0",
             allow_volatile_paths=False,
         )

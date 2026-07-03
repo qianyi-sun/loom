@@ -49,13 +49,14 @@ from loom_llm_gateway.llm_calls import record_call
 from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
-    compute_facade_cost_usd,
+    compute_facade_cost_estimate,
     decrypt_facade_api_key,
     http_failure_category,
     record_facade_failed_call,
     redact_api_key,
     resolve_facade_connection,
     resolve_provider_connection_id,
+    token_usage_with_cost_metadata,
     verify_facade_auth,
 )
 
@@ -243,12 +244,13 @@ async def anthropic_messages_facade(
             ),
         )
 
-    cost_usd, rate_card_hash = await compute_facade_cost_usd(
+    cost_estimate = await compute_facade_cost_estimate(
         row,
         payload["model"],
         usage,
         rate_card_cache=request.app.state.rate_card_cache,
     )
+    usage = token_usage_with_cost_metadata(usage, cost_estimate)
 
     async with request.app.state.session_factory() as audit_session:
         await record_call(
@@ -259,8 +261,8 @@ async def anthropic_messages_facade(
             dialect=_FACADE_DIALECT,
             model=payload["model"],
             usage=usage,
-            cost_usd=cost_usd,
-            rate_card_hash=rate_card_hash,
+            cost_usd=cost_estimate.cost_usd,
+            rate_card_hash=cost_estimate.rate_card_hash,
             provider=row.provider_type,
             attempt=outcome.attempt,
             request_params=normalize_request_params(payload),
@@ -488,12 +490,13 @@ async def _record_anthropic_usage_from_stream(
         )
         return
 
-    cost_usd, rate_card_hash = await compute_facade_cost_usd(
+    cost_estimate = await compute_facade_cost_estimate(
         row,
         model,
         usage,
         rate_card_cache=request.app.state.rate_card_cache,
     )
+    usage = token_usage_with_cost_metadata(usage, cost_estimate)
 
     async with request.app.state.session_factory() as audit_session:
         await record_call(
@@ -504,8 +507,8 @@ async def _record_anthropic_usage_from_stream(
             dialect=_FACADE_DIALECT,
             model=model,
             usage=usage,
-            cost_usd=cost_usd,
-            rate_card_hash=rate_card_hash,
+            cost_usd=cost_estimate.cost_usd,
+            rate_card_hash=cost_estimate.rate_card_hash,
             provider=row.provider_type,
             attempt=1,
             request_params=normalize_request_params(request_payload),

@@ -969,7 +969,7 @@ def _normalise_static_host_path_root(config: ClusterConfig) -> str | None:
         raise ValueError(
             "persistent_storage_host_path_root must be an absolute host "
             "path below an operator-managed data directory, for example "
-            "/data/loom-public-beta"
+            "/data/loom-staging"
         )
     return root
 
@@ -2391,7 +2391,7 @@ def collect_preflight(
     checks.append(_check_ingress_class_installed(networking_v1))
     checks.append(_check_default_storage_class(storage_v1))
     env_name = infer_environment(environment=environment, namespace=namespace)
-    if env_name in {"public-beta", "staging", "production"}:
+    if env_name in {"staging", "production"}:
         checks.append(
             _check_protected_storage_boundary(
                 core_v1,
@@ -3672,7 +3672,7 @@ def dispatch(argv: list[str]) -> int:
         default=None,
         help=(
             "Logical environment name. Protected environments "
-            "(public-beta/staging/production) get storage and backup "
+            "(staging/staging/production) get storage and backup "
             "guard checks. If omitted, inferred from namespace when possible."
         ),
     )
@@ -3722,7 +3722,7 @@ def dispatch(argv: list[str]) -> int:
         "backup",
         help=(
             "Create or verify metadata manifests for protected "
-            "public-beta/staging backups."
+            "staging/staging backups."
         ),
     )
     backup_sub = p_backup.add_subparsers(dest="backup_cmd", required=True)
@@ -3867,7 +3867,7 @@ def dispatch(argv: list[str]) -> int:
         default=None,
         help=(
             "Logical environment name. Protected environments "
-            "(public-beta/staging/production) require a recent backup "
+            "(staging/staging/production) require a recent backup "
             "manifest and acknowledgement before --with-volumes or "
             "--delete-namespace."
         ),
@@ -3927,7 +3927,7 @@ def dispatch(argv: list[str]) -> int:
         help=(
             "Explicit acknowledgement required for protected "
             "--with-volumes/--delete-namespace operations. Value must match "
-            "the logical environment, for example `public-beta`."
+            "the logical environment, for example `staging`."
         ),
     )
     p_down.add_argument(
@@ -3977,7 +3977,7 @@ def dispatch(argv: list[str]) -> int:
     p_release_manifest.add_argument(
         "--environment",
         required=True,
-        help="Logical rollout environment, for example public-beta or staging.",
+        help="Logical rollout environment, for example staging or staging.",
     )
     p_release_manifest.add_argument(
         "--image-tag",
@@ -4186,7 +4186,7 @@ def dispatch(argv: list[str]) -> int:
         required=True,
         help=(
             "Absolute path to the environment data root (e.g. "
-            "/data/loom-public-beta)."
+            "/data/loom-staging)."
         ),
     )
     p_evidence.add_argument(
@@ -4288,7 +4288,7 @@ def dispatch(argv: list[str]) -> int:
     p_rollout = sub.add_parser(
         "rollout",
         help=(
-            "One-command public-beta rollout driver with state-machine "
+            "One-command staging rollout driver with state-machine "
             "resume (#340). Orchestrates 14 steps: resolve-target → "
             "worktree → build → kind-load → gb10-prep → backup → audit "
             "→ render → preflight → migrate → env-state → cluster-up "

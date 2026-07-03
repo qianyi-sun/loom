@@ -316,8 +316,8 @@ def test_cli_down_protected_volume_delete_requires_verified_backup(
     rc = main([
         "cluster", "down",
         "--yes",
-        "--namespace", "loom-public-beta",
-        "--environment", "public-beta",
+        "--namespace", "loom-staging",
+        "--environment", "staging",
         "--with-volumes",
     ])
 
@@ -326,7 +326,7 @@ def test_cli_down_protected_volume_delete_requires_verified_backup(
     assert captures["core"].deleted == []
     err = capsys.readouterr().err
     assert "backup manifest" in err
-    assert "public-beta" in err
+    assert "staging" in err
 
 
 def test_cli_down_protected_namespace_delete_requires_acknowledgement(
@@ -340,8 +340,8 @@ def test_cli_down_protected_namespace_delete_requires_acknowledgement(
     rc = main([
         "cluster", "down",
         "--yes",
-        "--namespace", "loom-public-beta",
-        "--environment", "public-beta",
+        "--namespace", "loom-staging",
+        "--environment", "staging",
         "--delete-namespace",
         "--backup-manifest", str(manifest),
     ])
@@ -350,7 +350,7 @@ def test_cli_down_protected_namespace_delete_requires_acknowledgement(
     assert "delete_ns" not in captures
     assert captures["core"].deleted_namespace is None
     err = capsys.readouterr().err
-    assert "--acknowledge-data-loss public-beta" in err
+    assert "--acknowledge-data-loss staging" in err
 
 
 def test_cli_down_protected_volume_delete_allows_recent_backup_and_ack(
@@ -365,17 +365,17 @@ def test_cli_down_protected_volume_delete_allows_recent_backup_and_ack(
     rc = main([
         "cluster", "down",
         "--yes",
-        "--namespace", "loom-public-beta",
-        "--environment", "public-beta",
+        "--namespace", "loom-staging",
+        "--environment", "staging",
         "--with-volumes",
         "--backup-manifest", str(manifest),
-        "--acknowledge-data-loss", "public-beta",
+        "--acknowledge-data-loss", "staging",
     ])
 
     assert rc == 0
-    assert captures["delete_ns"] == "loom-public-beta"
+    assert captures["delete_ns"] == "loom-staging"
     assert captures["core"].deleted == [
-        ("loom-public-beta", "data-loom-postgres-0"),
+        ("loom-staging", "data-loom-postgres-0"),
     ]
 
 
@@ -595,8 +595,8 @@ def _write_valid_backup_manifest(tmp_path: Any):
     secrets.write_text("redacted", encoding="utf-8")
     manifest = tmp_path / "backup-manifest.json"
     write_backup_manifest(
-        environment="public-beta",
-        namespace="loom-public-beta",
+        environment="staging",
+        namespace="loom-staging",
         output_path=manifest,
         components={
             "postgres": postgres,

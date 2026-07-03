@@ -2,7 +2,7 @@
 
 Ensures every rollout-critical Dockerfile that runs `pip install` also sets
 `PIP_RETRIES` and `PIP_DEFAULT_TIMEOUT` env vars so a single transient PyPI
-ReadTimeoutError (like the one that aborted `public-beta-92f0090`) doesn't
+ReadTimeoutError (like the one that aborted `staging-92f0090`) doesn't
 kill the rollout build. These env vars are honored by pip itself with no
 per-invocation flag surgery.
 """
@@ -17,7 +17,7 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEPLOY_DIR = _REPO_ROOT / "deploy"
 
-# Rollout-critical service images. These are the ones the public-beta driver
+# Rollout-critical service images. These are the ones the staging driver
 # builds + kind-loads before every rollout. Sandbox images (agent, gateway)
 # are built out-of-band and get the same treatment for consistency, but the
 # blast radius of a sandbox build failing during a rollout is lower.

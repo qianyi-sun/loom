@@ -167,7 +167,7 @@ spec:
 
 
 def test_audit_flags_gateway_when_not_opted_in() -> None:
-    """`loom-llm-gateway` is always internal-only in public beta."""
+    """`loom-llm-gateway` is always internal-only in staging."""
     yaml_text = """\
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -192,7 +192,7 @@ spec:
 
 
 def test_audit_rejects_gateway_even_with_deprecated_opt_in() -> None:
-    """The public-beta boundary no longer allows a public gateway host."""
+    """The staging boundary no longer allows a public gateway host."""
     yaml_text = """\
 apiVersion: networking.k8s.io/v1
 kind: Ingress

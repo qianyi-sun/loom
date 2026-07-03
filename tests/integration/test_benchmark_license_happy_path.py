@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, insert, text
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Benchmark, Team, TeamQuota, Token
+from loom.db.schema import Benchmark, Team, TeamQuota, Token, User
 from loom.db.schema import Task as TaskRow
 from loom.trajectory.storage import FakeObjectStore
 from loom_benchmark_tool.import_cmd import run_import
@@ -37,14 +37,22 @@ _AIME_FIXTURE = (
 
 @pytest.fixture
 def seed(postgres_url: str) -> Iterator[dict[str, object]]:
-    """Insert a team + submit-scoped token."""
+    """Insert a team + user-owned submit-scoped token."""
     engine = create_engine(postgres_url)
     session_local = sessionmaker(engine)
     team_id = uuid4()
+    user_id = uuid4()
     raw = f"team_{uuid4().hex}"
     now = datetime.now(UTC)
     with session_local() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+        s.execute(insert(User).values(
+            id=user_id,
+            username=f"LicenseSubmitter-{user_id.hex[:8]}",
+            username_normalized=f"license-submitter-{user_id.hex[:8]}",
+            status="active",
+            is_platform_admin=False,
+        ))
         s.execute(insert(TeamQuota).values(team_id=team_id))
         s.execute(
             insert(Token).values(
@@ -52,6 +60,7 @@ def seed(postgres_url: str) -> Iterator[dict[str, object]]:
                 type="team",
                 scopes=["submit"],
                 team_id=team_id,
+                created_by_user_id=user_id,
                 issued_at=now,
                 expires_at=None,
             )
@@ -68,6 +77,7 @@ def seed(postgres_url: str) -> Iterator[dict[str, object]]:
             s.execute(delete(TaskRow))
             s.execute(delete(Benchmark))
             s.execute(delete(TeamQuota))
+            s.execute(delete(User).where(User.id == user_id))
             s.execute(delete(Team))
             s.commit()
         engine.dispose()

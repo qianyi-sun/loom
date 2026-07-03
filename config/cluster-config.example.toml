@@ -18,7 +18,7 @@ minio_storage_gi = 500
 namespace = "loom"
 # Persistent storage binding mode for Postgres, MinIO, and worker trajectories. Use "dynamic" for the cluster default StorageClass, or "static-host-path" for explicit host-managed Retain PVs.
 persistent_storage_backend = "dynamic"
-# Absolute host path root used when persistent_storage_backend is "static-host-path", for example /data/loom-public-beta. Loom renders postgres, minio, and trajectories subdirectories under this root.
+# Absolute host path root used when persistent_storage_backend is "static-host-path", for example /data/loom-staging. Loom renders postgres, minio, and trajectories subdirectories under this root.
 persistent_storage_host_path_root = ""
 postgres_image = "postgres:16"
 postgres_storage_gi = 50

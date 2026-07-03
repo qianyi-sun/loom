@@ -46,8 +46,8 @@ covering sandbox executables/modules, provider dialect, env vars, and
 capture mode. The SPA disables unavailable agents with a setup-needed
 message, and service submit routes enforce the same readiness check so
 clients cannot create doomed batches by bypassing the browser.
-Public-beta and release restore drills materialize this same service catalog
-into the `agents` table through `loom datasets provision-public-beta-catalog`.
+Staging and release restore drills materialize this same service catalog
+into the `agents` table through `loom datasets provision-staging-catalog`.
 Those rows are an auditable restore snapshot with runtime contracts,
 compatibility metadata, and provisioner provenance; they are not maintained by
 manual SQL.
@@ -258,6 +258,14 @@ Workers can never both think they own a trial.
 `False` return (the Worker logs + abandons the trial). The trial
 stays in whatever state the new owner has put it in.
 
+Worker-side cancellation preserves its source in the trial lifecycle. A
+Control Plane or operator cancellation remains a `cancelled` trial. A worker
+watchdog hard-deadline cancellation, or the Control Plane stale-running reclaim
+for a still-heartbeating but silent worker, writes a terminal `failed` trial
+with `failure_reason=agent_timeout` and a diagnostic message containing the
+runtime, configured timeout, last event/LLM activity, and worker heartbeat
+freshness. This keeps GB10/opencode hangs distinct from user cancellation.
+
 After a successful trial finalizes, the Worker sends a fenced
 `PATCH /trials/{id}/trajectory_index` before reporting terminal
 `state=succeeded`. This ordering keeps Control Plane state atomic from
@@ -300,9 +308,15 @@ The same detail API also exposes user-facing diagnosis and debug evidence:
 - `GET /api/v1/batches/{batch_id}` is lightweight by default for large
   batches and omits `debug_evidence`; pass `include_debug=true` or call
   `GET /api/v1/batches/{batch_id}/debug` to load that object. Batch debug
-  evidence carries the same provider summary fields across its child calls and
-  is built from bounded trial projections instead of full `trajectory_index`
-  rows.
+  evidence carries the same provider summary fields across its child calls,
+  normalized failure classification summaries, and a failure ledger built from
+  bounded trial projections instead of full `trajectory_index` rows.
+- `GET /api/v1/batches/{batch_id}/rerun-plan` returns the deterministic
+  supplemental rerun plan for the batch family. It accepts repeated `task_id`
+  query parameters and separates coordinates into `auto_safe`,
+  `operator_approval`, `not_rerunnable`, and `already_covered` buckets. Batch
+  detail also includes `rerun_plan` and `final_trial_selection` so API clients
+  can preserve main/supplemental lineage without loading debug evidence.
 - Run Library batch detail stays lightweight on the default path: it uses
   bounded trial projections plus a capped typed-artifact preview and does not
   select full trial `trajectory_index` payloads or enumerate the complete typed
@@ -326,13 +340,22 @@ and ratios, and states whether the aggregate score is reliable for
 model-quality comparison.
 
 Debug evidence is schema-versioned and machine-readable. The stable fields are
-`entity`, `lifecycle`, `worker`, `agent`, `provider`, `failure`, `task` or
-`task_selection`, `reward`, `evidence_refs`, and `next_actions`. The
+`entity`, `lifecycle`, `worker`, `agent`, `provider`, `activity`,
+`stale_running`, `failure`, `task` or `task_selection`, `reward`,
+`evidence_refs`, and `next_actions`. The
 `failure.reason_code` is stable for API/CLI agents and uses prefixes such as
-`trial.verifier_error` or `batch.fanout_submit_failed`. The service redacts
-bearer tokens, provider keys, secret refs, internal service URLs, and signed
-object-store URLs before returning either the detail response or the direct
-debug endpoint.
+`trial.verifier_error` or `batch.fanout_submit_failed`. Trial failure objects
+also include normalized `failure_class`, `root_cause`, `platform_outcome`,
+`score_outcome`, `rerun_recommendation`, and booleans describing whether the
+coordinate is rerunnable, needs operator approval, or requires task changes.
+A successful trial with numeric reward `0` is classified as platform success
+and score failure, not platform failure. Trial debug evidence includes
+`activity.last_trial_event`, `activity.last_llm_call_at`,
+`worker.heartbeat_age_sec`, `agent.timeout.agent_timeout_sec`, and the
+stale-running keep/reclaim decision. Batch debug evidence lists up to 50
+stale-running candidates. The service redacts bearer tokens, provider keys,
+secret refs, internal service URLs, and signed object-store URLs before
+returning either the detail response or the direct debug endpoint.
 
 ## DRF scheduling
 
@@ -629,11 +652,15 @@ host ports bind to
   transport text such as "server disconnected without sending a response" as
   retryable transport failures, while provider `4xx` remains a non-retryable
   provider/config error. Batch Detail can create a linked rerun batch through
-  `POST /api/v1/batches/{id}/rerun-failed`; the child batch stores
+  `POST /api/v1/batches/{id}/rerun-failed`; the route first builds the same
+  supplemental rerun plan exposed by `GET /api/v1/batches/{id}/rerun-plan`.
+  By default it selects only auto-safe platform/transient failures. A caller can
+  include operator-approved rows explicitly, but task compatibility failures
+  and reward `0` score failures are not auto-rerun. The child batch stores
   `rerun_of_batch_id` and exact `rerun_targets` so the runner re-submits only
   those task/sample/combination coordinates. Detail views expose both original
-  rollups and effective rollups where successful reruns replace the original
-  transient failures.
+  rollups and effective rollups where successful supplemental trials replace
+  the original replaceable failures.
 - **Runnable task counts** — benchmark `task_count` and
   `POST /api/v1/tasks/count` are user-facing runnable counts, not raw
   task-table row counts. Placeholder rows with empty or incomplete

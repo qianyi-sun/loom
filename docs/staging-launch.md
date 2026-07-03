@@ -1,6 +1,6 @@
 # Public Beta Launch Gate
 
-This page is the release-owner checklist for Loom's public beta. It
+This page is the release-owner checklist for Loom's staging. It
 pulls together the deployment, onboarding, Run Library, security, and smoke
 evidence needed before `dev` can be promoted to `main`.
 
@@ -68,7 +68,7 @@ Attach these to the release issue or release PR:
   `loom eval batch show`, `loom eval trial show`, and
   `loom eval trial download`.
 - Benchmark catalog provisioning transcript showing either
-  `loom datasets provision-public-beta-catalog` with non-zero
+  `loom datasets provision-staging-catalog` with non-zero
   `ready_agents`, non-zero `ready_benchmarks`, non-zero `ready_tasks`, and
   `missing=0`, or
   `loom datasets register <benchmark>` against the published HF manifest with
@@ -84,16 +84,16 @@ Attach these to the release issue or release PR:
 - Environment desired-state transcript showing
   `loom admin environment-state apply` and
   `loom admin environment-state check` against
-  `deploy/environment-state/public-beta.toml` or
+  `deploy/environment-state/staging.toml` or
   `deploy/environment-state/staging.toml`, with the rollout `IMAGE_TAG` and
   `ENV_CONFIG_VERSION` variables supplied. This must converge worker-pool
   autoscaler policies, GB10 desired state, and any external Slurm autoscaler
   supervisor before Monitor/resource-pool screenshots are used as evidence. For
-  public-beta, the OLDLAB supervisor unit must point at the current rollout
+  staging, the OLDLAB supervisor unit must point at the current rollout
   checkout, include `--pool-name oldlab`, have an executable `ExecStart`
   Python path and existing autoscaler script, have no recent failed service
   result such as `status=203/EXEC`, and have its user timer active. The
-  public-beta profile targets the existing CP desired-state environment
+  staging profile targets the existing CP desired-state environment
   `production` until GB10 node agents are renamed in a coordinated rollout.
 - Benchmark reward acceptance transcript from
   `scripts/benchmark_reward_gate.py`: the readiness gate must pass against the
@@ -118,7 +118,7 @@ Attach these to the release issue or release PR:
   evidence must include the smoke batch id, runtime, failure count, and one
   `oldlab_worker_records` entry per OLDLAB worker with node name, Slurm job id,
   Loom worker id, configured concurrency, and claimed trial count.
-- `scripts/public_beta_smoke_gate.py` Markdown evidence with `--fail-on-skip`
+- `scripts/staging_smoke_gate.py` Markdown evidence with `--fail-on-skip`
   and `--allow-mutating-checks` against disposable staging data. The report
   must include the service restart/OOM row by passing `--k8s-namespace`, and
   the `auth.team_a_whoami` / `auth.team_b_whoami` rows must show non-admin
@@ -130,6 +130,14 @@ Attach these to the release issue or release PR:
   from a reclaimed pre-start claim, inspect the trial `failure_message` for the
   `claimed_without_started_reclaimed` diagnostic with the prior worker id and
   claim timing.
+- For GB10/opencode acceptance batches, preserve debug evidence for every
+  timeout or reclaimed trial. A worker hard deadline or CP stale-running reclaim
+  must appear as `state=failed`, `failure_reason=agent_timeout`, not generic
+  `cancelled`. The debug evidence must show `activity.last_trial_event`,
+  `activity.last_llm_call_at`, `worker.heartbeat_age_sec`,
+  `agent.timeout.agent_timeout_sec`, and `stale_running.reason` so operators can
+  distinguish a silent live worker from a dead-worker retry or explicit
+  operator cancellation.
 - For IP-address staging hosts, note the hostless Ingress rendering, attach
   evidence that the TLS Secret certificate includes the staging IP as a Subject
   Alternative Name, and verify the ingress controller serves that Secret as its
@@ -138,11 +146,11 @@ Attach these to the release issue or release PR:
   found in API responses, audit excerpts, or downloaded safe artifacts.
 - For the final #49/#129 full/max-slot three-cluster canary, use
   [`docs/full-max-slot-canary-runbook.md`](full-max-slot-canary-runbook.md).
-  The canary must wait for a clean public-beta anchor, completed #190 targeted
+  The canary must wait for a clean staging anchor, completed #190 targeted
   durability validation, and an explicit coordinator `GO`. The batch must use
   repeated `--required-worker-pool` flags for `oldlab` and
   `gb10-arm64`; terminal evidence must include `runs.worker_pool_coverage`
-  and `runs.claimed_without_started` from the smoke gate. Public-beta
+  and `runs.claimed_without_started` from the smoke gate. Staging
   clusters run with `k8s_worker.enabled=false` (#383) so x86_64
   coverage is delivered by the Slurm-managed `oldlab` pool, not by an
   in-cluster `k8s-worker` Deployment.
@@ -154,10 +162,10 @@ checks, and per-component release evidence:
 ```bash
 loom cluster release-manifest \
   --config "$CLUSTER_CONFIG" \
-  --environment public-beta \
+  --environment staging \
   --image-tag "$IMAGE_TAG" \
   --git-sha "$(git rev-parse HEAD)" \
-  --environment-state-file deploy/environment-state/public-beta.toml \
+  --environment-state-file deploy/environment-state/staging.toml \
   --env-config-version "${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
   --expected-image-identities-json "$ROLLOUT_DIR/image-identities-$IMAGE_TAG.json" \
   --output "$ROLLOUT_DIR/release-manifest-$IMAGE_TAG.json"
@@ -166,15 +174,15 @@ loom cluster release-manifest \
 The image identities JSON is build evidence keyed by Deployment and container,
 with `image`, and at least one immutable `repo_digest` or `image_id` per
 release-managed container. Before the first release-managed mutation, choose a
-shared lock directory that every public-beta operator on the host uses:
+shared lock directory that every staging operator on the host uses:
 
 ```bash
-export LOOM_ROLLOUT_LOCK_DIR=/data/loom-public-beta/rollout-locks
+export LOOM_ROLLOUT_LOCK_DIR=/data/loom-staging/rollout-locks
 
 loom cluster up \
   --config "$CLUSTER_CONFIG" \
   --namespace "$K8S_NAMESPACE" \
-  --environment public-beta \
+  --environment staging \
   --rollout-id "$IMAGE_TAG" \
   --rollout-lock-dir "$LOOM_ROLLOUT_LOCK_DIR" \
   --rollout-lock-evidence "$ROLLOUT_DIR/rollout-mutation-lock-$IMAGE_TAG.json" \
@@ -203,7 +211,7 @@ loom cluster release-gate \
   --rendered-manifest "$ROLLOUT_DIR/rendered.yaml" \
   --environment-state-check "$ROLLOUT_DIR/environment-state-check-$IMAGE_TAG.json" \
   --namespace "$K8S_NAMESPACE" \
-  --environment public-beta \
+  --environment staging \
   --format json \
   > "$ROLLOUT_DIR/release-gate-$IMAGE_TAG.json"
 
@@ -213,7 +221,7 @@ loom cluster release-gate \
   --rendered-manifest "$ROLLOUT_DIR/rendered.yaml" \
   --environment-state-check "$ROLLOUT_DIR/environment-state-check-$IMAGE_TAG.json" \
   --namespace "$K8S_NAMESPACE" \
-  --environment public-beta \
+  --environment staging \
   --format markdown \
   > "$ROLLOUT_DIR/release-gate-$IMAGE_TAG.md"
 ```
@@ -226,7 +234,7 @@ external-worker desired state. Generate the environment-state artifact with
 `environment-state apply`; `ok=false` or any non-empty `drift` array keeps the
 release-gate artifact red and blocks workload-validation anchors. For normal
 runtime image IDs, it compares the Ready pod `imageID` against the manifest
-digest or image ID. For kind-loaded public-beta images, Kubernetes may report
+digest or image ID. For kind-loaded staging images, Kubernetes may report
 `docker.io/library/import-YYYY-MM-DD@sha256:...`; in that case the gate accepts
 the target-generation pod only when its pod spec and Deployment template image
 match the release manifest, and records the kind-import identity plus any stale
@@ -261,11 +269,11 @@ Secret-bearing smoke-gate inputs (`--team-a-token`, `--team-b-token`,
 `--secret-needle`) accept `env:VAR`, `file:PATH`, or `-` sources. Do not expand
 raw secret values into argv.
 
-Before submitting public-beta canaries or supported-benchmark release trials,
+Before submitting staging canaries or supported-benchmark release trials,
 run the object-store write gate by itself:
 
 ```bash
-python scripts/public_beta_smoke_gate.py \
+python scripts/staging_smoke_gate.py \
   --server-url https://loom.example.com \
   --team-a-token env:TEAM_A_TOKEN \
   --team-b-token env:TEAM_B_TOKEN \
@@ -277,8 +285,8 @@ python scripts/public_beta_smoke_gate.py \
   --object-store-write-check-count 64 \
   --object-store-write-check-concurrency 16 \
   --fail-on-skip \
-  --markdown-output public-beta-object-store-preflight.md \
-  --json-output public-beta-object-store-preflight.json
+  --markdown-output staging-object-store-preflight.md \
+  --json-output staging-object-store-preflight.json
 ```
 
 The preflight must show `object_store.minio_write_probe` as `PASS` before any
@@ -289,7 +297,7 @@ pooling before workers start artifact and trajectory uploads.
 After browser setup and a completed Team A source run, run:
 
 ```bash
-python scripts/public_beta_smoke_gate.py \
+python scripts/staging_smoke_gate.py \
   --server-url https://loom.example.com \
   --team-a-token env:TEAM_A_TOKEN \
   --team-b-token env:TEAM_B_TOKEN \
@@ -311,14 +319,14 @@ python scripts/public_beta_smoke_gate.py \
   --object-store-write-check-bucket trajectories \
   --object-store-write-check-count 64 \
   --object-store-write-check-concurrency 16 \
-  --k8s-namespace loom-public-beta \
+  --k8s-namespace loom-staging \
   --required-worker-pool oldlab \
   --secret-needle env:PUBLIC_BETA_SECRET_NEEDLE \
   --internal-url-needle loom-minio.loom.svc.cluster.local \
   --allow-mutating-checks \
   --fail-on-skip \
-  --markdown-output public-beta-smoke.md \
-  --json-output public-beta-smoke.json
+  --markdown-output staging-smoke.md \
+  --json-output staging-smoke.json
 ```
 
 The script checks:
@@ -336,6 +344,9 @@ The script checks:
 - terminal trial coverage for required worker pools such as `oldlab` when
   `--required-worker-pool` is provided;
 - batch/trial detail and service-proxied ATIF/trajectory downloads;
+- trial and batch debug evidence containing last event/LLM activity, worker
+  heartbeat freshness, runtime, agent timeout config, and stale-running
+  keep/reclaim diagnostics;
 - Run Library My team and All teams visibility;
 - owner-team label;
 - cross-team safe artifact download through Run Library;
@@ -353,7 +364,7 @@ fake secrets, signed object-store URLs, and internal service URLs from its
 Markdown and JSON output. A timed-out API endpoint should produce a failed row
 with the HTTP method, endpoint, and timeout instead of a Python traceback.
 
-Before submitting a public-beta canary or supported-benchmark acceptance run,
+Before submitting a staging canary or supported-benchmark acceptance run,
 the `object_store.minio_write_probe` row must pass. If it fails with
 `XMinioStorageFull`, reclaim or provision storage for the MinIO-backed
 filesystem first; do not start the trial and wait for worker artifact upload to
@@ -373,7 +384,7 @@ upstream tag is amd64-only.
 Do not rely on theoretical max-slot saturation to prove worker-pool coverage:
 create the release/acceptance batch with repeated `--required-worker-pool`
 flags, for example `--required-worker-pool oldlab
---required-worker-pool gb10-arm64` on public-beta (`k8s_worker.enabled=false`,
+--required-worker-pool gb10-arm64` on staging (`k8s_worker.enabled=false`,
 #383). On clusters that intentionally host a dedicated k8s worker
 node pool, add `--required-worker-pool k8s-worker` as well. The service adds one
 pool-pinned coverage trial per required pool while leaving the normal portable
@@ -381,7 +392,7 @@ trials portable. When a target pool's CPU architecture is known from active
 workers or autoscaler policy, coverage uses a selected task compatible with that
 architecture; otherwise fanout records `required_worker_pool_incompatible`
 instead of submitting a permanently unclaimable coverage trial. The
-`scripts/public_beta_smoke_gate.py --required-worker-pool` check must later
+`scripts/staging_smoke_gate.py --required-worker-pool` check must later
 prove each required pool has terminal batch evidence.
 
 Run the benchmark reward gate after catalog provisioning and again after the
@@ -425,16 +436,16 @@ run.
 
 ## Remote Worker Tunnel Gate
 
-If the public beta uses extra remote workers outside the Kubernetes cluster,
+If the staging uses extra remote workers outside the Kubernetes cluster,
 run this private gate after every rollout and before load testing:
 
 ```bash
 scripts/ops/worker_service_tunnels.py watchdog-evidence \
   --expected-script-path "$PWD/scripts/ops/worker_service_tunnels.py" \
-  | tee public-beta-watchdog-evidence.json
+  | tee staging-watchdog-evidence.json
 
 export REMOTE_WORKER_ENV_FILE="$(
-  jq -r '.env_file.path' public-beta-watchdog-evidence.json
+  jq -r '.env_file.path' staging-watchdog-evidence.json
 )"
 
 scripts/ops/worker_service_tunnels.py check \
@@ -476,13 +487,13 @@ ad-hoc `kubectl port-forward`:
 
 ```bash
 scripts/ops/worker_service_tunnels.py install-systemd \
-  --namespace loom-public-beta \
+  --namespace loom-staging \
   --kubectl /usr/local/bin/kubectl \
-  --kubeconfig /secure/path/public-beta.kubeconfig \
+  --kubeconfig /secure/path/staging.kubeconfig \
   --subprocess-gateway-local-port 30444
 ```
 
-For GB10 and OLDLAB public-beta rollouts, gate the Slurm-managed capacity first
+For GB10 and OLDLAB staging rollouts, gate the Slurm-managed capacity first
 and then gate node-agent convergence only for compose rollout compatibility.
 Run `environment-state check` from the Slurm submit/shared-storage host so it
 can validate external runner env files, shared worker checkouts, and local
@@ -501,7 +512,7 @@ The external Slurm autoscaler also treats release-state drift as a hard blocked
 decision: stale pending/running jobs are not counted as healthy warm capacity,
 and `loom admin worker-pools autoscaler status` reports
 `last_blocked_reason=release_state_drift` with the affected Slurm job ids in
-`last_error`. Do not submit public-beta canaries until those jobs are replaced
+`last_error`. Do not submit staging canaries until those jobs are replaced
 or cancelled and `environment-state check` is clean.
 If OLDLAB resource-aware scale-up has no safe allowed node, status reports
 `last_blocked_reason=no_safe_slurm_nodes` and
@@ -515,7 +526,7 @@ environment-state convergence row while the blocker is active.
 
 ```bash
 LIVE_ADMIN_TOKEN_FINGERPRINT="$(
-  kubectl -n loom-public-beta get secret loom-admin-secret \
+  kubectl -n loom-staging get secret loom-admin-secret \
     -o jsonpath='{.data.secrets\.toml}' \
     | base64 -d \
     | python3 -c 'import hashlib,sys,tomllib; token=tomllib.loads(sys.stdin.read())["admin"]["token"]; print(f"sha256:{hashlib.sha256(token.encode()).hexdigest()[:12]} len={len(token)}")'
@@ -525,8 +536,8 @@ loom admin environment-state apply \
   --cp-url http://control-node.lan:18081 \
   --admin-token file:/secure/path/admin-token \
   --expect-admin-token-fingerprint "$LIVE_ADMIN_TOKEN_FINGERPRINT" \
-  --environment public-beta \
-  --file deploy/environment-state/public-beta.toml \
+  --environment staging \
+  --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
   --rollout-id "$IMAGE_TAG" \
@@ -537,8 +548,8 @@ loom admin environment-state check \
   --cp-url http://control-node.lan:18081 \
   --admin-token file:/secure/path/admin-token \
   --expect-admin-token-fingerprint "$LIVE_ADMIN_TOKEN_FINGERPRINT" \
-  --environment public-beta \
-  --file deploy/environment-state/public-beta.toml \
+  --environment staging \
+  --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
   --worker-token file:/secure/path/worker-token \
@@ -565,7 +576,7 @@ For GB10 node-agent compatibility workers, `gb10-workers status` proves the
 non-secret desired image/env-config state and source-checkout provenance. With
 `--release-image-tag`, active nodes must report a clean git checkout whose
 commit starts with the release tag's trailing SHA, for example
-`public-beta-76875ac` -> `76875ac`; missing provenance or a stale
+`staging-76875ac` -> `76875ac`; missing provenance or a stale
 `compose_project_dir` is a hard failure. During worker-token rotation, also run
 `loom worker gb10-agent plan/apply --worker-token file:/...` on each GB10 host,
 then verify `loom resources status --json` shows fresh `gb10-arm64` active
@@ -582,13 +593,13 @@ nodes.
 
 ## Release Decision
 
-The public beta launch gate passes only when:
+The staging launch gate passes only when:
 
 - every required manual evidence item is attached;
 - any attached remote-worker pool has passing private tunnel checks from both
   the control node and a worker-host context;
 - the ready benchmark catalog has been provisioned with `missing=0`;
-- `scripts/public_beta_smoke_gate.py` exits 0 with `--fail-on-skip`;
+- `scripts/staging_smoke_gate.py` exits 0 with `--fail-on-skip`;
 - the smoke report's `runs.claimed_without_started` row is `PASS` for the
   source batch used as launch evidence;
 - the smoke report's `service.no_oom_restarts` row is `PASS` for the deployed
@@ -597,6 +608,9 @@ The public beta launch gate passes only when:
   release-required worker pool such as `oldlab`; create the source batch with
   matching `loom eval batch create --required-worker-pool ...` flags instead
   of depending on max-slot pressure to assign work to the pool;
+- any GB10/opencode timeout or reclaim evidence is explicit
+  `agent_timeout` with stale-running/debug-evidence fields, and no batch is left
+  indefinitely `running` because a child trial exceeded its watchdog deadline;
 - no response, audit excerpt, log excerpt, or safe downloaded artifact contains
   seeded fake secrets or internal URLs;
 - unsafe artifacts are blocked and cannot be downloaded by another team;

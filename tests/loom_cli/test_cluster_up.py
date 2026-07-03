@@ -372,8 +372,8 @@ def test_cli_up_prints_deployment_image_convergence_evidence(
             DeploymentImageCheck(
                 deployment="loom-worker",
                 container="worker",
-                expected_image="loom-worker:public-beta-expected",
-                live_image="loom-worker:public-beta-expected",
+                expected_image="loom-worker:staging-expected",
+                live_image="loom-worker:staging-expected",
             ),
         ],
     )
@@ -385,8 +385,8 @@ def test_cli_up_prints_deployment_image_convergence_evidence(
     assert "Deployment image convergence verified" in out
     assert (
         "loom-worker/worker: "
-        "rendered=loom-worker:public-beta-expected "
-        "live=loom-worker:public-beta-expected"
+        "rendered=loom-worker:staging-expected "
+        "live=loom-worker:staging-expected"
     ) in out
 
 
@@ -487,7 +487,7 @@ spec:
     spec:
       containers:
         - name: worker
-          image: loom-worker:public-beta-expected
+          image: loom-worker:staging-expected
 """
     monkeypatch.setattr(
         "loom_cli.cluster_cmd.render_manifests",
@@ -501,7 +501,7 @@ spec:
             DeploymentImageCheck(
                 deployment="loom-worker",
                 container="worker",
-                expected_image="loom-worker:public-beta-expected",
+                expected_image="loom-worker:staging-expected",
                 live_image="loom-worker:debug-tip",
             ),
         ]
@@ -571,14 +571,14 @@ def test_cli_up_backup_guard_flags_thread_to_preflight(
 
     rc = main([
         "cluster", "up",
-        "--namespace", "loom-public-beta",
-        "--environment", "public-beta",
+        "--namespace", "loom-staging",
+        "--environment", "staging",
         "--backup-manifest", str(manifest),
         "--backup-max-age-hours", "12",
     ])
 
     assert rc == 0
-    assert captures["preflight_kwargs"]["environment"] == "public-beta"
+    assert captures["preflight_kwargs"]["environment"] == "staging"
     assert captures["preflight_kwargs"]["backup_manifest"] == manifest.resolve()
     assert captures["preflight_kwargs"]["backup_max_age_hours"] == 12
 
@@ -589,9 +589,9 @@ def test_cli_up_config_file_threads_static_host_path_to_preflight_and_render(
 ) -> None:
     cfg = tmp_path / "cluster.toml"
     cfg.write_text(
-        'namespace = "loom-public-beta"\n'
+        'namespace = "loom-staging"\n'
         'persistent_storage_backend = "static-host-path"\n'
-        'persistent_storage_host_path_root = "/data/loom-public-beta"\n',
+        'persistent_storage_host_path_root = "/data/loom-staging"\n',
         encoding="utf-8",
     )
     captures = _patch_full_up_path(monkeypatch)
@@ -604,7 +604,7 @@ def test_cli_up_config_file_threads_static_host_path_to_preflight_and_render(
         == "static-host-path"
     )
     assert "kind: PersistentVolume" in captures["apply_yaml_text"]
-    assert "path: \"/data/loom-public-beta/postgres\"" in captures["apply_yaml_text"]
+    assert "path: \"/data/loom-staging/postgres\"" in captures["apply_yaml_text"]
 
 
 def test_cli_up_config_file_invalid_returns_2(

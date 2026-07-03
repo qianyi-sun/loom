@@ -29,7 +29,7 @@ What you're looking for, where it lives:
 - **[operator-runbook.md](operator-runbook.md)** — deployment,
   upgrade/rollback, rate-card management, token rotation, alarm
   response, backup/restore, capacity planning
-- **[public-beta-launch.md](public-beta-launch.md)** — public beta release
+- **[staging-launch.md](staging-launch.md)** — staging release
   gate, username/password onboarding evidence, two-team Run Library smoke, and
   launch decision checklist
 - **[benchmark-score-alignment.md](benchmark-score-alignment.md)** — v1.0

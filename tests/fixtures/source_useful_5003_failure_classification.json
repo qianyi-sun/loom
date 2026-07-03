@@ -1,0 +1,319 @@
+{
+  "source": "Issue #388 Source Useful 5003 postmortem classification and supplemental rerun evidence",
+  "production_evidence": {
+    "rollout": "20260703T000303Z-staging-6b76a48",
+    "evidence_dir": "/data/loom-staging/rollouts/20260703T000303Z-staging-6b76a48/source-useful-5003-gb10-hotfix-20260703T010342Z",
+    "main_batch_id": "e488ca16-8b03-4ddd-9c3f-98737ff05eea",
+    "snapshot": "supplemental-target-classification-20260703T140115Z.tsv",
+    "main_failed_count": 28,
+    "main_cancelled_count": 4,
+    "supplemental_target_task_ids": [
+      "source-useful-frontier-5003/shard003__software_development__buildsqliteissuetrackercli",
+      "source-useful-frontier-5003/shard004__software_development__builddependencyresolvercli",
+      "source-useful-frontier-5003/shard008__software_development__buildkvstorecli",
+      "source-useful-frontier-5003/shard008__software_development__configvaultcli",
+      "source-useful-frontier-5003/shard014__software_development__buildcondaenvexporttool",
+      "source-useful-frontier-5003/shard014__system_operations__buildisolatedsandboxenvironment",
+      "source-useful-frontier-5003/shard015__software_development__typescriptjfmtjsoncli",
+      "source-useful-frontier-5003/shard016__environment_deployment__consulhaproxyservicediscovery",
+      "source-useful-frontier-5003/shard021__environment_deployment__nginxdeployurlconfiggenerator",
+      "source-useful-frontier-5003/shard021__software_development__hmacfilesignercli2",
+      "source-useful-frontier-5003/shard022__ml_systems__pytorchmodellayeranalysisreport",
+      "source-useful-frontier-5003/shard023__environment_deployment__servicemeshdeploymentvalidator",
+      "source-useful-frontier-5003/shard023__software_development__buildcsvstatscli",
+      "source-useful-frontier-5003/shard026__git_versioning__reconciledivergedgitremote",
+      "source-useful-frontier-5003/shard027__software_development__dependencytreeanalyzercli",
+      "source-useful-frontier-5003/shard029__software_development__builddepauditcli",
+      "source-useful-frontier-5003/shard031__software_development__depauditcli",
+      "source-useful-frontier-5003/shard035__software_development__buildandbenchmarkmatrixtranspose4",
+      "source-useful-frontier-5003/shard035__software_development__builddirectoryanalyzercli",
+      "source-useful-frontier-5003/shard037__software_development__buildhttpheaderparserlibrary",
+      "source-useful-frontier-5003/shard042__software_development__buildmarkdownlinkcheckercli",
+      "source-useful-frontier-5003/shard045__software_development__buildtasklogclitool2",
+      "source-useful-frontier-5003/shard047__software_development__shamirsecretsharingcli",
+      "source-useful-frontier-5003/shard049__environment_deployment__nginxreverseproxymultiservice3",
+      "source-useful-frontier-5003/shard049__software_development__csvqueryclitool5",
+      "source-useful-frontier-5003/shard049__system_operations__buildandvalidateredisfromsource",
+      "source-useful-frontier-5003/shard050__system_operations__diagnoseandfixdnsresolutionconfig",
+      "source-useful-frontier-5003/shard052__software_development__buildcustomcsvquerycli",
+      "source-useful-frontier-5003/shard056__software_development__benchrunnercliorchestrator",
+      "source-useful-frontier-5003/shard061__software_development__buildbenchmarkpipelinecli3",
+      "source-useful-frontier-5003/shard062__data_engineering__salesdbextractandnormalize",
+      "source-useful-frontier-5003/shard062__software_development__fixpythonpackagecompatibility"
+    ]
+  },
+  "items": [
+    {
+      "task_id": "source-useful-5003/final-ledger/reward-zero",
+      "state": "succeeded",
+      "result": { "aggregate_reward": 0.0 },
+      "manual_failure_class": "score_failure"
+    },
+    {
+      "task_id": "source-useful-5003/main/provider-transport",
+      "state": "failed",
+      "failure_reason": "provider_transport_disconnect",
+      "manual_failure_class": "platform_failure"
+    },
+    {
+      "task_id": "source-useful-5003/main/setup-gateway",
+      "state": "failed",
+      "failure_reason": "gateway_error",
+      "manual_failure_class": "platform_failure"
+    },
+    {
+      "task_id": "source-useful-5003/main/verifier-timeout",
+      "state": "failed",
+      "failure_reason": "verifier_timeout",
+      "manual_failure_class": "verifier_failure"
+    },
+    {
+      "task_id": "source-useful-5003/main/verifier-missing-output",
+      "state": "failed",
+      "failure_reason": "verifier_error",
+      "manual_failure_class": "verifier_failure"
+    },
+    {
+      "task_id": "source-useful-5003/main/task-compat",
+      "state": "failed",
+      "failure_reason": "task_compatibility",
+      "manual_failure_class": "task_failure"
+    },
+    {
+      "task_id": "source-useful-5003/main/operator-cancelled",
+      "state": "cancelled",
+      "manual_failure_class": "operator_cancelled"
+    },
+    {
+      "task_id": "source-useful-5003/main/stale-claimed",
+      "state": "claimed",
+      "manual_failure_class": "lifecycle_failure"
+    }
+  ],
+  "production_items": [
+    {
+      "task_id": "source-useful-frontier-5003/shard003__software_development__buildsqliteissuetrackercli",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "setup_disconnect"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard004__software_development__builddependencyresolvercli",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "setup_disconnect"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard008__software_development__buildkvstorecli",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "task_image_build"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard008__software_development__configvaultcli",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "setup_disconnect"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard014__software_development__buildcondaenvexporttool",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "task_image_build"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard014__system_operations__buildisolatedsandboxenvironment",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "task_image_build"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard015__software_development__typescriptjfmtjsoncli",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "agent_layer_build"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard016__environment_deployment__consulhaproxyservicediscovery",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "task_image_build"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard021__environment_deployment__nginxdeployurlconfiggenerator",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "setup_disconnect"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard021__software_development__hmacfilesignercli2",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "setup_disconnect"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard022__ml_systems__pytorchmodellayeranalysisreport",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "task_image_build"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard023__environment_deployment__servicemeshdeploymentvalidator",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "setup_disconnect"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard023__software_development__buildcsvstatscli",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "task_image_build"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard026__git_versioning__reconciledivergedgitremote",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "task_image_build"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard027__software_development__dependencytreeanalyzercli",
+      "state": "cancelled",
+      "failure_reason": "operator_cancelled_stale_running",
+      "manual_failure_class": "operator_cancelled",
+      "postmortem_failure_class": "cancelled"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard029__software_development__builddepauditcli",
+      "state": "cancelled",
+      "failure_reason": "operator_cancelled_stale_running",
+      "manual_failure_class": "operator_cancelled",
+      "postmortem_failure_class": "cancelled"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard031__software_development__depauditcli",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "setup_disconnect"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard035__software_development__buildandbenchmarkmatrixtranspose4",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "agent_layer_build"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard035__software_development__builddirectoryanalyzercli",
+      "state": "cancelled",
+      "failure_reason": "operator_cancelled_stale_running",
+      "manual_failure_class": "operator_cancelled",
+      "postmortem_failure_class": "cancelled"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard037__software_development__buildhttpheaderparserlibrary",
+      "state": "failed",
+      "failure_reason": "verifier_timeout",
+      "manual_failure_class": "verifier_failure",
+      "postmortem_failure_class": "verifier_timeout"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard042__software_development__buildmarkdownlinkcheckercli",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "setup_disconnect"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard045__software_development__buildtasklogclitool2",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "setup_disconnect"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard047__software_development__shamirsecretsharingcli",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "setup_disconnect"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard049__environment_deployment__nginxreverseproxymultiservice3",
+      "state": "failed",
+      "failure_reason": "verifier_error",
+      "manual_failure_class": "verifier_failure",
+      "postmortem_failure_class": "started_failure"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard049__software_development__csvqueryclitool5",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "setup_disconnect"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard049__system_operations__buildandvalidateredisfromsource",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "task_image_build"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard050__system_operations__diagnoseandfixdnsresolutionconfig",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "agent_layer_build"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard052__software_development__buildcustomcsvquerycli",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "task_image_build"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard056__software_development__benchrunnercliorchestrator",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "setup_disconnect"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard061__software_development__buildbenchmarkpipelinecli3",
+      "state": "cancelled",
+      "failure_reason": "operator_cancelled_stale_running",
+      "manual_failure_class": "operator_cancelled",
+      "postmortem_failure_class": "cancelled"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard062__data_engineering__salesdbextractandnormalize",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "setup_disconnect"
+    },
+    {
+      "task_id": "source-useful-frontier-5003/shard062__software_development__fixpythonpackagecompatibility",
+      "state": "failed",
+      "failure_reason": "internal_error",
+      "manual_failure_class": "platform_failure",
+      "postmortem_failure_class": "task_image_build"
+    }
+  ]
+}

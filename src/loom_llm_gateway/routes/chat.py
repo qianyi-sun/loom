@@ -42,10 +42,11 @@ from loom_llm_gateway.rate_card import (
 from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
-    compute_facade_cost_usd,
+    compute_facade_cost_estimate,
     decrypt_facade_api_key,
     redact_api_key,
     resolve_facade_connection,
+    token_usage_with_cost_metadata,
 )
 
 # Provider types the chat route accepts for BYO routing. All four
@@ -417,23 +418,36 @@ async def chat_completions(
     # which honors the connection's ``pricing_source``.
     parsed = litellm_wrapper.parse_litellm_response(raw, provider=provider)
     rate_card_hash: str
+    usage_for_audit = TokenUsage(
+        input_tokens=parsed.input_tokens,
+        output_tokens=parsed.output_tokens,
+        provider_extras=dict(parsed.provider_extras),
+    )
     if byo_row is not None:
         # TokenUsage's cached_input_tokens / cache_write_tokens are
         # computed properties summing dialect-specific extras keys;
         # feed them via provider_extras using Anthropic's canonical
         # names (matches the worker's parse_litellm_response output).
-        cost, rate_card_hash = await compute_facade_cost_usd(
+        usage_for_pricing = TokenUsage(
+            input_tokens=parsed.input_tokens,
+            output_tokens=parsed.output_tokens,
+            provider_extras={
+                **dict(parsed.provider_extras),
+                "cache_read_input_tokens": parsed.cached_input_tokens,
+                "cache_creation_input_tokens": parsed.cache_write_tokens,
+            },
+        )
+        cost_estimate = await compute_facade_cost_estimate(
             byo_row,
             model_name,
-            TokenUsage(
-                input_tokens=parsed.input_tokens,
-                output_tokens=parsed.output_tokens,
-                provider_extras={
-                    "cache_read_input_tokens": parsed.cached_input_tokens,
-                    "cache_creation_input_tokens": parsed.cache_write_tokens,
-                },
-            ),
+            usage_for_pricing,
             rate_card_cache=request.app.state.rate_card_cache,
+        )
+        cost = cost_estimate.cost_usd
+        rate_card_hash = cost_estimate.rate_card_hash
+        usage_for_audit = token_usage_with_cost_metadata(
+            usage_for_pricing,
+            cost_estimate,
         )
     elif entry is None:
         cost = 0.0
@@ -473,11 +487,7 @@ async def chat_completions(
             step_id=audit_step_id,
             dialect="openai_chat",
             model=model_name,
-            usage=TokenUsage(
-                input_tokens=parsed.input_tokens,
-                output_tokens=parsed.output_tokens,
-                provider_extras=parsed.provider_extras,
-            ),
+            usage=usage_for_audit,
             cost_usd=cost,
             rate_card_hash=rate_card_hash,
             provider=byo_row.provider_type if byo_row is not None else provider,

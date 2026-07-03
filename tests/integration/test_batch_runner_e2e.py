@@ -24,6 +24,7 @@ from sqlalchemy.orm import sessionmaker
 from loom.db.schema import (
     Batch,
     Benchmark,
+    LlmCall,
     ProviderConnection,
     Task,
     Team,
@@ -550,6 +551,94 @@ async def test_runner_is_idempotent(
         ).scalars().all()
     sync_engine.dispose()
     assert len(trials) == 5
+
+
+async def test_runner_hard_cancels_batch_when_live_usage_exceeds_budget(
+    runner_setup: tuple[
+        async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
+    ],
+    postgres_url: str,
+) -> None:
+    session_factory, http_client, team_id, task_ids, captured = runner_setup
+    batch_id = uuid4()
+    trial_id = uuid4()
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="budget stop",
+                task_filter={"license": "MIT"},
+                trial_config={},
+                state="running",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=5,
+                budget_usd=0.01,
+                budget_policy="hard",
+            )
+        )
+        s.execute(
+            insert(Trial).values(
+                id=trial_id,
+                task_id=task_ids[0],
+                team_id=team_id,
+                state="running",
+                config={},
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+                batch_id=batch_id,
+                sample_idx=0,
+                combination_idx=0,
+            )
+        )
+        s.execute(
+            insert(LlmCall).values(
+                id=uuid4(),
+                team_id=team_id,
+                trial_id=trial_id,
+                step_id="main",
+                model="glm-5.1-thinking",
+                dialect="openai",
+                input_tokens=1000,
+                output_tokens=100,
+                provider_extras={},
+                cost_usd=0.02,
+                rate_card_hash="facade:operator-supplied",
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    await run_once(
+        session_factory=session_factory,
+        http_client=http_client,
+        batch_size=10,
+        submit_rate_per_sec=100,
+    )
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        batch_row = s.execute(
+            select(Batch).where(Batch.id == batch_id),
+        ).scalar_one()
+        trial_row = s.execute(
+            select(Trial).where(Trial.id == trial_id),
+        ).scalar_one()
+    sync_engine.dispose()
+
+    assert captured == []
+    assert batch_row.state == "cancelled"
+    assert batch_row.result_status == "cancelled"
+    assert trial_row.state == "cancelled"
+    assert trial_row.failure_reason == "budget_hard_limit_exceeded"
+    assert batch_row.budget_diagnostics
+    diagnostic = batch_row.budget_diagnostics[-1]
+    assert diagnostic["reason"] == "budget_hard_limit_exceeded"
+    assert diagnostic["estimated_cost_usd"] == pytest.approx(0.02)
+    assert diagnostic["budget_usd"] == pytest.approx(0.01)
 
 
 async def test_runner_uses_rerun_targets_instead_of_original_filter(

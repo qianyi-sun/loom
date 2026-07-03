@@ -147,6 +147,6 @@ persisted team memberships instead of pasted bearer tokens. Scoped CLI/API
 tokens are hash-only at rest with one-time raw reveal and preserve submitting
 user attribution. Run Library sharing now uses explicit visibility/share-state
 checks and `username / team` owner labels instead of weakening execution
-routes. Remaining public-beta auth risk is concentrated in final staging smoke,
+routes. Remaining staging auth risk is concentrated in final staging smoke,
 documentation review, rate-limit tuning for public request endpoints, and
 operational incident practice before broad external exposure.

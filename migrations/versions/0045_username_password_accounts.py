@@ -387,6 +387,18 @@ def downgrade() -> None:
 
     op.drop_constraint("users_status_check", "users", type_="check")
     op.drop_constraint("users_username_normalized_uidx", "users", type_="unique")
+    op.execute(
+        """
+        UPDATE users
+           SET email = lower(
+                   COALESCE(
+                       NULLIF(username_normalized, ''),
+                       'user_' || replace(id::text, '-', '')
+                   )
+               ) || '+' || replace(id::text, '-', '') || '@downgrade.local'
+         WHERE email IS NULL
+        """,
+    )
     op.drop_column("users", "disabled_at")
     op.drop_column("users", "status")
     op.drop_column("users", "password_set_at")

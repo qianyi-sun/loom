@@ -1,6 +1,6 @@
 """Load local docker images into a kind cluster's node runtime (#96).
 
-Public-beta rollouts on kind clusters build images with host docker but the
+Staging rollouts on kind clusters build images with host docker but the
 kind node's containerd doesn't see host-local tags without an explicit
 `kind load docker-image` step. Missing that step causes ErrImagePull /
 ImagePullBackOff — the current recovery is a manual `kind load` sequence
@@ -217,7 +217,7 @@ def check_kind_image_loaded(
         return ImageStatus.UNKNOWN
     # crictl images output shape:
     #   IMAGE                                     TAG            IMAGE ID
-    #   docker.io/library/loom-worker             public-beta-a  abc
+    #   docker.io/library/loom-worker             staging-a  abc
     # Kind normalizes local `loom-worker:tag` to `docker.io/library/loom-worker:tag`
     # in some versions, and leaves it bare in others. Do a substring
     # match on the tag portion after prefix normalisation.

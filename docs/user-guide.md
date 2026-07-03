@@ -110,7 +110,7 @@ plugin; on macOS, install and start Docker Desktop, then verify
 When Loom is served as a web platform, the SPA uses browser user sessions.
 Users sign in with username and password. First-time users request an account
 from Settings by entering a username and selecting an existing team. If the
-team is missing, contact an admin to create it first. Public beta does not
+team is missing, contact an admin to create it first. Staging does not
 collect email and does not send automatic mail: an admin reviews the request,
 approves a team role, and manually shares the one-time password setup link.
 Forgot-password follows the same pattern: the user submits a reset request,
@@ -255,6 +255,7 @@ loom eval batch create \
 loom eval batch show <batch-id>
 loom eval diagnose batch <batch-id>
 loom eval batch debug <batch-id> --format json
+loom eval batch rerun-plan <batch-id> --format text
 loom resources status
 loom eval trial list --state succeeded --limit 5
 loom eval usage --start 2026-06-01 --end 2026-06-30 --include-batches
@@ -274,6 +275,48 @@ loom eval trial download <trial-id> --kind artifact \
   --artifact-key <artifact-key-from-trial-show> \
   --output artifact.bin
 ```
+
+For release handoff or customer delivery, create one deterministic bundle for a
+finished batch family instead of downloading trial objects one by one:
+
+```bash
+loom eval batch delivery-bundle <batch-id> \
+  --supplemental-batch-id <linked-rerun-batch-id> \
+  --output delivery-bundle.tar.gz
+```
+
+`delivery-bundle` asks the service to choose the final trial for each
+task/sample/combination coordinate across the main batch and any explicit
+supplemental rerun batches. Later linked reruns replace earlier failed attempts
+only at the same coordinate, so the manifest preserves the lineage from the
+selected trial back to its source batch. Before the archive is marked ready, the
+service verifies that every selected trajectory and ATIF object can be read
+through object storage. The command downloads the archive, verifies the exposed
+SHA-256, writes `<archive>.sha256`, and exits non-zero with the service's
+structured error if a referenced object is missing or a coordinate still has no
+successful final trial.
+
+Each archive contains:
+
+- `manifest.json` with source batch ids, selection rule, trial counts, object
+  counts, selected lineage, and storage/checksum evidence for referenced
+  objects. The archive SHA-256 is exposed by the API/CLI, artifact metadata,
+  and the `.sha256` sidecar rather than self-referentially inside the tarball.
+- `summary.json` with the same high-level delivery metadata for automation.
+- `ledger/trials.jsonl` and `ledger/trials.csv` for reviewer-friendly trial
+  lineage, rewards, object paths, and checksums.
+- `checksums/SHA256SUMS` with SHA-256 digests for the archive payload files.
+- `trajectories/<task>/<trial-id>.events.jsonl` and
+  `atif/<task>/<trial-id>.atif.json` for the selected final trials.
+
+The same flow is available in the SPA Batch Detail page through the **Delivery
+bundle** card. API clients can call
+`POST /api/v1/batches/{id}/delivery-export` with optional
+`supplemental_batch_ids`, poll `GET /api/v1/batches/{id}/delivery-export`, and
+download through the returned `/api/v1/batches/.../delivery-export/.../download`
+URL. Creating a bundle requires submit/admin scope; reading or downloading an
+existing bundle only requires normal read access. These routes are team-scoped
+and never expose raw MinIO/S3 URLs.
 
 `loom eval batch create` can omit `--name`; the service derives a concise
 name and description from the benchmark/subset, combinations, provider/model,
@@ -319,11 +362,25 @@ Use `loom eval batch debug <batch-id>` or
 evidence without scraping the web UI. The CLI calls
 `GET /api/v1/batches/{id}/debug` and
 `GET /api/v1/trials/{trial_id}/debug`. The response includes a stable
-`failure.reason_code`, `failure.category`, `failure.attribution`, lifecycle
-state/timestamps/attempts, safe backend/provider/model identifiers, token
-usage summaries, task/checksum/readiness metadata, verifier reward/error
-details, scoped ATIF/trajectory/artifact links, and `next_actions`. These
-payloads are team-scoped and redacted the same way as normal detail responses.
+`failure.reason_code`, `failure.category`, `failure.attribution`,
+`failure.failure_class`, `failure.root_cause`,
+`failure.platform_outcome`, `failure.score_outcome`, and
+`failure.rerun_recommendation`, plus lifecycle state/timestamps/attempts,
+safe backend/provider/model identifiers, token usage summaries,
+task/checksum/readiness metadata, verifier reward/error details, scoped
+ATIF/trajectory/artifact links, and `next_actions`. These payloads are
+team-scoped and redacted the same way as normal detail responses.
+
+Use `loom eval batch rerun-plan <batch-id>` or
+`GET /api/v1/batches/{id}/rerun-plan` before launching supplemental work. The
+plan is deterministic and separates failed coordinates into `auto_safe`,
+`operator_approval`, `not_rerunnable`, and `already_covered` buckets. Pass
+repeated `--task-id` values, or repeated `task_id` query parameters, to scope
+the plan to an explicit task list. By default, the supplemental task id list
+contains only auto-safe platform/transient failures. `--include-operator-approval`
+adds operator-approved coordinates, but task compatibility failures and reward
+`0` score failures remain excluded unless the task or scoring evidence changes
+under an explicit operator workflow.
 
 ## Run Library
 
@@ -397,10 +454,22 @@ another service-mode agent; choosing an agent that does not need a model hides
 the provider/model controls.
 
 When a finished batch has transient gateway failures, Batch Detail shows
-`Rerun failed cases`. That action creates a linked rerun batch containing
-only the failed task/sample/combination coordinates. The original batch
-keeps its original trial counts, and Batch Detail also shows the effective
-result after successful linked reruns replace those transient failures.
+`Rerun failed cases` and a supplemental rerun recommendation. The
+recommendation distinguishes auto-safe platform failures from failures that
+need operator approval and from failures that are not rerunnable. Reward `0`
+with verifier output is a platform success and a score failure, so Monitor and
+Run Library show it separately from platform failure and it is not selected for
+automatic supplemental reruns. The action creates a linked rerun batch
+containing only selected task/sample/combination coordinates. The original
+batch keeps its original trial counts, and Batch Detail also shows the
+effective result after successful linked reruns replace those transient
+failures. `GET /api/v1/batches/{id}` includes the same `rerun_plan` summary
+and `final_trial_selection` map so API agents can preserve main/supplemental
+lineage without scraping the UI.
+Use `loom eval batch delivery-bundle <original-batch-id>` after the reruns
+finish to export that effective result with the original and supplemental
+batch lineage recorded in the manifest, ledger, artifact metadata, and Batch
+Detail download status.
 
 Raw data is still available when you need to debug or reproduce an API
 request. Look for `Diagnostics`, `Raw event data`, or explicit
@@ -669,11 +738,11 @@ loom datasets list --json           # machine-readable output
 loom datasets show <slug>           # full detail for one adapter
 loom datasets install <slug>        # pip-install a catalog entry
 loom datasets refresh-catalog      # drop the 24h catalog HTTP cache
-loom datasets provision-public-beta-catalog
+loom datasets provision-staging-catalog
                                     # copy ready benchmark/task rows,
                                     # materialize supported agent rows,
                                     # and copy S3 bundles into a
-                                    # public-beta/release target
+                                    # staging/release target
 ```
 
 Discovery sources, in precedence order (builtin wins on slug
@@ -845,8 +914,8 @@ coverage, and benchmark-side verifier or environment failures fail the sweep.
 For a narrower diagnostic, add repeated `--expected-benchmark BENCHMARK_ID`
 arguments.
 
-For public-beta or release deployments, operators should provision the ready
-catalog before inviting users. Use `loom datasets provision-public-beta-catalog`
+For staging or release deployments, operators should provision the ready
+catalog before inviting users. Use `loom datasets provision-staging-catalog`
 when copying runnable benchmark/task rows, materializing supported service-mode
 agent rows, and copying referenced `s3://` bundles from a known-good source
 environment into the target database/object store. For

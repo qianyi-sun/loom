@@ -27,9 +27,9 @@ def test_catalog_is_a_versioned_object_with_entries_list() -> None:
     data = json.loads(REG_PATH.read_text())
     assert data["catalog_version"] == 1
     assert isinstance(data["entries"], list)
-    # Registry holds non-builtin entries only — currently just terminal-
-    # bench-2 ahead of Plan 25. Bump the floor as the slate grows.
-    assert len(data["entries"]) >= 1
+    # Registry holds non-builtin entries only. Terminal-Bench-2 now ships as
+    # an installed sibling package and must not be duplicated here.
+    assert data["entries"] == []
 
 
 def test_every_entry_has_required_fields() -> None:
@@ -39,11 +39,9 @@ def test_every_entry_has_required_fields() -> None:
         assert not missing, f"{entry.get('slug')!r} missing {missing}"
 
 
-def test_terminal_bench_2_entry_present_with_pip_spec() -> None:
+def test_terminal_bench_2_not_duplicated_in_default_catalog() -> None:
     data = json.loads(REG_PATH.read_text())
-    tb2 = next(e for e in data["entries"] if e["slug"] == "terminal-bench-2")
-    assert tb2["available"] == "loom-benchmark-terminal-bench-2"
-    assert tb2["license_spdx"] == "Apache-2.0"
+    assert all(entry["slug"] != "terminal-bench-2" for entry in data["entries"])
 
 
 def test_cli_list_includes_terminal_bench_2_from_default_catalog(

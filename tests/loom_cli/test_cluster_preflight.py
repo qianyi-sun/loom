@@ -282,7 +282,7 @@ def test_default_storage_class_check_fail_when_no_classes() -> None:
     assert check.remediation is not None
 
 
-def test_collect_preflight_flags_public_beta_local_path_delete_storage() -> None:
+def test_collect_preflight_flags_staging_local_path_delete_storage() -> None:
     core = _FakeCoreV1(
         secrets={"loom-secrets", "loom-admin-secret"},
     )
@@ -292,9 +292,9 @@ def test_collect_preflight_flags_public_beta_local_path_delete_storage() -> None
         _FakeStorageV1([
             ("standard", True, "rancher.io/local-path", "Delete"),
         ]),
-        "loom-public-beta",
+        "loom-staging",
         context=None,
-        environment="public-beta",
+        environment="staging",
         backup_manifest=None,
     )
 
@@ -354,10 +354,10 @@ def test_collect_preflight_passes_protected_storage_with_recent_manifest(
 def test_collect_preflight_passes_static_retain_pvs_despite_local_path_default(
     tmp_path: Path,
 ) -> None:
-    namespace = "loom-public-beta"
+    namespace = "loom-staging"
     manifest = _write_recent_manifest(
         tmp_path,
-        environment="public-beta",
+        environment="staging",
         namespace=namespace,
     )
     core = _FakeCoreV1(
@@ -365,35 +365,35 @@ def test_collect_preflight_passes_static_retain_pvs_despite_local_path_default(
         persistent_volume_claims=[
             _bound_pvc(
                 "data-loom-postgres-0",
-                "loom-public-beta-postgres-data",
+                "loom-staging-postgres-data",
             ),
             _bound_pvc(
                 "data-loom-minio-0",
-                "loom-public-beta-minio-data",
+                "loom-staging-minio-data",
             ),
             _bound_pvc(
                 "loom-worker-trajectories",
-                "loom-public-beta-worker-trajectories-data",
+                "loom-staging-worker-trajectories-data",
             ),
         ],
         persistent_volumes=[
             _host_path_pv(
-                name="loom-public-beta-postgres-data",
+                name="loom-staging-postgres-data",
                 namespace=namespace,
                 claim_name="data-loom-postgres-0",
-                path="/data/loom-public-beta/postgres",
+                path="/data/loom-staging/postgres",
             ),
             _host_path_pv(
-                name="loom-public-beta-minio-data",
+                name="loom-staging-minio-data",
                 namespace=namespace,
                 claim_name="data-loom-minio-0",
-                path="/data/loom-public-beta/minio",
+                path="/data/loom-staging/minio",
             ),
             _host_path_pv(
-                name="loom-public-beta-worker-trajectories-data",
+                name="loom-staging-worker-trajectories-data",
                 namespace=namespace,
                 claim_name="loom-worker-trajectories",
-                path="/data/loom-public-beta/trajectories",
+                path="/data/loom-staging/trajectories",
             ),
         ],
     )
@@ -406,7 +406,7 @@ def test_collect_preflight_passes_static_retain_pvs_despite_local_path_default(
         ]),
         namespace,
         context=None,
-        environment="public-beta",
+        environment="staging",
         backup_manifest=manifest,
     )
 
@@ -419,10 +419,10 @@ def test_collect_preflight_passes_static_retain_pvs_despite_local_path_default(
 def test_collect_preflight_passes_static_host_path_config_before_pvcs_exist(
     tmp_path: Path,
 ) -> None:
-    namespace = "loom-public-beta"
+    namespace = "loom-staging"
     manifest = _write_recent_manifest(
         tmp_path,
-        environment="public-beta",
+        environment="staging",
         namespace=namespace,
     )
     core = _FakeCoreV1(
@@ -431,7 +431,7 @@ def test_collect_preflight_passes_static_host_path_config_before_pvcs_exist(
     cfg = ClusterConfig(
         namespace=namespace,
         persistent_storage_backend="static-host-path",
-        persistent_storage_host_path_root="/data/loom-public-beta",
+        persistent_storage_host_path_root="/data/loom-staging",
     )
 
     report = collect_preflight(
@@ -442,7 +442,7 @@ def test_collect_preflight_passes_static_host_path_config_before_pvcs_exist(
         ]),
         namespace,
         context=None,
-        environment="public-beta",
+        environment="staging",
         backup_manifest=manifest,
         cluster_config=cfg,
     )
@@ -450,17 +450,17 @@ def test_collect_preflight_passes_static_host_path_config_before_pvcs_exist(
     by_name = {check.name: check for check in report.checks}
     assert by_name["protected-storage-boundary"].outcome == "pass"
     assert "static-host-path" in by_name["protected-storage-boundary"].detail
-    assert "/data/loom-public-beta" in by_name["protected-storage-boundary"].detail
+    assert "/data/loom-staging" in by_name["protected-storage-boundary"].detail
     assert not report.any_fail
 
 
 def test_collect_preflight_fails_kind_static_host_path_without_host_bind_mount(
     tmp_path: Path,
 ) -> None:
-    namespace = "loom-public-beta"
+    namespace = "loom-staging"
     manifest = _write_recent_manifest(
         tmp_path,
-        environment="public-beta",
+        environment="staging",
         namespace=namespace,
     )
     core = _FakeCoreV1(
@@ -469,7 +469,7 @@ def test_collect_preflight_fails_kind_static_host_path_without_host_bind_mount(
     cfg = ClusterConfig(
         namespace=namespace,
         persistent_storage_backend="static-host-path",
-        persistent_storage_host_path_root="/data/loom-public-beta",
+        persistent_storage_host_path_root="/data/loom-staging",
     )
 
     report = collect_preflight(
@@ -479,8 +479,8 @@ def test_collect_preflight_fails_kind_static_host_path_without_host_bind_mount(
             ("standard", True, "rancher.io/local-path", "Delete"),
         ]),
         namespace,
-        context="kind-loom-public-beta",
-        environment="public-beta",
+        context="kind-loom-staging",
+        environment="staging",
         backup_manifest=manifest,
         cluster_config=cfg,
         kind_node_mounts=[
@@ -490,17 +490,17 @@ def test_collect_preflight_fails_kind_static_host_path_without_host_bind_mount(
 
     by_name = {check.name: check for check in report.checks}
     assert by_name["kind-host-storage-mount"].outcome == "fail"
-    assert "/data/loom-public-beta" in by_name["kind-host-storage-mount"].detail
+    assert "/data/loom-staging" in by_name["kind-host-storage-mount"].detail
     assert report.any_fail
 
 
 def test_collect_preflight_passes_kind_static_host_path_with_host_bind_mount(
     tmp_path: Path,
 ) -> None:
-    namespace = "loom-public-beta"
+    namespace = "loom-staging"
     manifest = _write_recent_manifest(
         tmp_path,
-        environment="public-beta",
+        environment="staging",
         namespace=namespace,
     )
     core = _FakeCoreV1(
@@ -509,7 +509,7 @@ def test_collect_preflight_passes_kind_static_host_path_with_host_bind_mount(
     cfg = ClusterConfig(
         namespace=namespace,
         persistent_storage_backend="static-host-path",
-        persistent_storage_host_path_root="/data/loom-public-beta",
+        persistent_storage_host_path_root="/data/loom-staging",
     )
 
     report = collect_preflight(
@@ -519,32 +519,32 @@ def test_collect_preflight_passes_kind_static_host_path_with_host_bind_mount(
             ("standard", True, "rancher.io/local-path", "Delete"),
         ]),
         namespace,
-        context="kind-loom-public-beta",
-        environment="public-beta",
+        context="kind-loom-staging",
+        environment="staging",
         backup_manifest=manifest,
         cluster_config=cfg,
         kind_node_mounts=[
             {
                 "Type": "bind",
-                "Source": "/data/loom-public-beta",
-                "Destination": "/data/loom-public-beta",
+                "Source": "/data/loom-staging",
+                "Destination": "/data/loom-staging",
             },
         ],
     )
 
     by_name = {check.name: check for check in report.checks}
     assert by_name["kind-host-storage-mount"].outcome == "pass"
-    assert "/data/loom-public-beta" in by_name["kind-host-storage-mount"].detail
+    assert "/data/loom-staging" in by_name["kind-host-storage-mount"].detail
     assert not report.any_fail
 
 
 def test_collect_preflight_fails_when_critical_pv_uses_delete_reclaim(
     tmp_path: Path,
 ) -> None:
-    namespace = "loom-public-beta"
+    namespace = "loom-staging"
     manifest = _write_recent_manifest(
         tmp_path,
-        environment="public-beta",
+        environment="staging",
         namespace=namespace,
     )
     core = _FakeCoreV1(
@@ -559,20 +559,20 @@ def test_collect_preflight_fails_when_critical_pv_uses_delete_reclaim(
                 name="pv-postgres",
                 namespace=namespace,
                 claim_name="data-loom-postgres-0",
-                path="/data/loom-public-beta/postgres",
+                path="/data/loom-staging/postgres",
                 reclaim_policy="Delete",
             ),
             _host_path_pv(
                 name="pv-minio",
                 namespace=namespace,
                 claim_name="data-loom-minio-0",
-                path="/data/loom-public-beta/minio",
+                path="/data/loom-staging/minio",
             ),
             _host_path_pv(
                 name="pv-trajectories",
                 namespace=namespace,
                 claim_name="loom-worker-trajectories",
-                path="/data/loom-public-beta/trajectories",
+                path="/data/loom-staging/trajectories",
             ),
         ],
     )
@@ -583,7 +583,7 @@ def test_collect_preflight_fails_when_critical_pv_uses_delete_reclaim(
         _FakeStorageV1([("fast", True, "example.com/csi", "Retain")]),
         namespace,
         context=None,
-        environment="public-beta",
+        environment="staging",
         backup_manifest=manifest,
     )
 
@@ -977,17 +977,17 @@ def test_cli_preflight_config_allows_static_host_path_before_pvcs_exist(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    namespace = "loom-public-beta"
+    namespace = "loom-staging"
     manifest = _write_recent_manifest(
         tmp_path,
-        environment="public-beta",
+        environment="staging",
         namespace=namespace,
     )
     cfg = tmp_path / "cluster.toml"
     cfg.write_text(
-        'namespace = "loom-public-beta"\n'
+        'namespace = "loom-staging"\n'
         'persistent_storage_backend = "static-host-path"\n'
-        'persistent_storage_host_path_root = "/data/loom-public-beta"\n',
+        'persistent_storage_host_path_root = "/data/loom-staging"\n',
         encoding="utf-8",
     )
     _patch_clients(
@@ -1002,7 +1002,7 @@ def test_cli_preflight_config_allows_static_host_path_before_pvcs_exist(
     rc = main([
         "cluster", "preflight",
         "--namespace", namespace,
-        "--environment", "public-beta",
+        "--environment", "staging",
         "--backup-manifest", str(manifest),
         "--config", str(cfg),
         "--no-doctor",
@@ -1015,24 +1015,24 @@ def test_cli_preflight_threads_kind_node_mounts_for_static_host_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    namespace = "loom-public-beta"
+    namespace = "loom-staging"
     manifest = _write_recent_manifest(
         tmp_path,
-        environment="public-beta",
+        environment="staging",
         namespace=namespace,
     )
     cfg = tmp_path / "cluster.toml"
     cfg.write_text(
-        'namespace = "loom-public-beta"\n'
+        'namespace = "loom-staging"\n'
         'persistent_storage_backend = "static-host-path"\n'
-        'persistent_storage_host_path_root = "/data/loom-public-beta"\n',
+        'persistent_storage_host_path_root = "/data/loom-staging"\n',
         encoding="utf-8",
     )
     mounts = [
         {
             "Type": "bind",
-            "Source": "/data/loom-public-beta",
-            "Destination": "/data/loom-public-beta",
+            "Source": "/data/loom-staging",
+            "Destination": "/data/loom-staging",
         },
     ]
     captures: dict[str, Any] = {}
@@ -1068,9 +1068,9 @@ def test_cli_preflight_threads_kind_node_mounts_for_static_host_path(
 
     rc = main([
         "cluster", "preflight",
-        "--context", "kind-loom-public-beta",
+        "--context", "kind-loom-staging",
         "--namespace", namespace,
-        "--environment", "public-beta",
+        "--environment", "staging",
         "--backup-manifest", str(manifest),
         "--config", str(cfg),
         "--no-doctor",
@@ -1084,24 +1084,24 @@ def test_cli_preflight_uses_current_kind_context_for_static_host_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    namespace = "loom-public-beta"
+    namespace = "loom-staging"
     manifest = _write_recent_manifest(
         tmp_path,
-        environment="public-beta",
+        environment="staging",
         namespace=namespace,
     )
     cfg = tmp_path / "cluster.toml"
     cfg.write_text(
-        'namespace = "loom-public-beta"\n'
+        'namespace = "loom-staging"\n'
         'persistent_storage_backend = "static-host-path"\n'
-        'persistent_storage_host_path_root = "/data/loom-public-beta"\n',
+        'persistent_storage_host_path_root = "/data/loom-staging"\n',
         encoding="utf-8",
     )
     mounts = [
         {
             "Type": "bind",
-            "Source": "/data/loom-public-beta",
-            "Destination": "/data/loom-public-beta",
+            "Source": "/data/loom-staging",
+            "Destination": "/data/loom-staging",
         },
     ]
     captures: dict[str, Any] = {}
@@ -1115,7 +1115,7 @@ def test_cli_preflight_uses_current_kind_context_for_static_host_path(
     )
     monkeypatch.setattr(
         "loom_cli.cluster_cmd._effective_kube_context",
-        lambda context: "kind-loom-public-beta",
+        lambda context: "kind-loom-staging",
     )
     monkeypatch.setattr(
         "loom_cli.cluster_cmd._read_kind_node_mounts",
@@ -1142,14 +1142,14 @@ def test_cli_preflight_uses_current_kind_context_for_static_host_path(
     rc = main([
         "cluster", "preflight",
         "--namespace", namespace,
-        "--environment", "public-beta",
+        "--environment", "staging",
         "--backup-manifest", str(manifest),
         "--config", str(cfg),
         "--no-doctor",
     ])
 
     assert rc == 0
-    assert captures["preflight_kwargs"]["context"] == "kind-loom-public-beta"
+    assert captures["preflight_kwargs"]["context"] == "kind-loom-staging"
     assert captures["preflight_kwargs"]["kind_node_mounts"] == mounts
 
 
@@ -1157,24 +1157,24 @@ def test_cli_up_threads_kind_node_mounts_for_static_host_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    namespace = "loom-public-beta"
+    namespace = "loom-staging"
     manifest = _write_recent_manifest(
         tmp_path,
-        environment="public-beta",
+        environment="staging",
         namespace=namespace,
     )
     cfg = tmp_path / "cluster.toml"
     cfg.write_text(
-        'namespace = "loom-public-beta"\n'
+        'namespace = "loom-staging"\n'
         'persistent_storage_backend = "static-host-path"\n'
-        'persistent_storage_host_path_root = "/data/loom-public-beta"\n',
+        'persistent_storage_host_path_root = "/data/loom-staging"\n',
         encoding="utf-8",
     )
     mounts = [
         {
             "Type": "bind",
-            "Source": "/data/loom-public-beta",
-            "Destination": "/data/loom-public-beta",
+            "Source": "/data/loom-staging",
+            "Destination": "/data/loom-staging",
         },
     ]
     captures: dict[str, Any] = {}
@@ -1188,7 +1188,7 @@ def test_cli_up_threads_kind_node_mounts_for_static_host_path(
     )
     monkeypatch.setattr(
         "loom_cli.cluster_cmd._effective_kube_context",
-        lambda context: "kind-loom-public-beta",
+        lambda context: "kind-loom-staging",
     )
     monkeypatch.setattr(
         "loom_cli.cluster_cmd._read_kind_node_mounts",
@@ -1223,14 +1223,14 @@ def test_cli_up_threads_kind_node_mounts_for_static_host_path(
     rc = main([
         "cluster", "up",
         "--namespace", namespace,
-        "--environment", "public-beta",
+        "--environment", "staging",
         "--backup-manifest", str(manifest),
         "--config", str(cfg),
         "--no-wait",
     ])
 
     assert rc == 0
-    assert captures["preflight_kwargs"]["context"] == "kind-loom-public-beta"
+    assert captures["preflight_kwargs"]["context"] == "kind-loom-staging"
     assert captures["preflight_kwargs"]["kind_node_mounts"] == mounts
 
 

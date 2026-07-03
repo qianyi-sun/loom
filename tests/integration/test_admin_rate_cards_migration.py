@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, delete, insert, select
+from sqlalchemy import create_engine, delete, insert, text
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import Token
@@ -20,6 +20,11 @@ def _alembic_cfg(postgres_url: str) -> Config:
     cfg = Config("migrations/alembic.ini")
     cfg.set_main_option("sqlalchemy.url", postgres_url)
     return cfg
+
+
+def _token_scopes(session: object) -> dict[bytes, list[str]]:
+    rows = session.execute(text("SELECT token_hash, scopes FROM tokens")).all()  # type: ignore[attr-defined]
+    return {bytes(token_hash): list(scopes) for token_hash, scopes in rows}
 
 
 @pytest.fixture
@@ -67,8 +72,7 @@ def test_migration_grants_new_scope(
     engine = create_engine(postgres_url)
     sl = sessionmaker(engine)
     with sl() as s:
-        rows = s.execute(select(Token)).scalars().all()
-    by_hash = {r.token_hash: list(r.scopes) for r in rows}
+        by_hash = _token_scopes(s)
     a = hashlib.sha256(b"a").digest()
     b = hashlib.sha256(b"b").digest()
     c = hashlib.sha256(b"c").digest()
@@ -96,10 +100,10 @@ def test_migration_idempotent(
         )
     sl = sessionmaker(engine)
     with sl() as s:
-        rows = s.execute(select(Token)).scalars().all()
-    for r in rows:
-        if "admin:tokens" in r.scopes:
-            assert r.scopes.count("admin:rate_cards") == 1
+        rows = _token_scopes(s).values()
+    for scopes in rows:
+        if "admin:tokens" in scopes:
+            assert scopes.count("admin:rate_cards") == 1
     engine.dispose()
 
 
@@ -112,7 +116,7 @@ def test_migration_downgrade_removes_scope(
     engine = create_engine(postgres_url)
     sl = sessionmaker(engine)
     with sl() as s:
-        rows = s.execute(select(Token)).scalars().all()
-    for r in rows:
-        assert "admin:rate_cards" not in r.scopes
+        rows = _token_scopes(s).values()
+    for scopes in rows:
+        assert "admin:rate_cards" not in scopes
     engine.dispose()
