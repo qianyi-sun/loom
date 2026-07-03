@@ -83,6 +83,7 @@ from loom_worker.trial_cache import (
     evict_stale_cache,
     resolve_trial_image,
 )
+from loom_worker.trial_cancellation_watchdog import run_with_watchdog
 from loom_worker.trial_runner import AgentFactory, LocalTrialRunner
 from loom_worker.vllm_registry import WorkerVLLMRegistry
 
@@ -777,8 +778,32 @@ async def _spawn_trial(
             ),
         )
 
+        # #360 + #378: wrap the runner with the cancellation watchdog so
+        # (a) operator-initiated CP cancellations propagate to the
+        # in-container subprocess-agent within one poll interval and
+        # (b) trials that hang past a generous multiple of
+        # agent.timeout_sec get force-cancelled instead of running
+        # indefinitely.
+        hard_deadline_sec: float | None = None
+        multiplier = settings.trial_hard_deadline_multiplier
+        if multiplier > 0:
+            hard_deadline_sec = (
+                task_config.agent.timeout_sec * multiplier
+                + settings.trial_hard_deadline_grace_sec
+            )
         try:
-            await runner.run()
+            await run_with_watchdog(
+                runner.run(),
+                trial_id=trial_id,
+                cp_client=cp_client,
+                poll_interval_sec=settings.trial_cancel_poll_interval_sec,
+                hard_deadline_sec=hard_deadline_sec,
+            )
+        except asyncio.CancelledError:
+            # Watchdog fired (cp_cancelled or hard_deadline). Trial.run's
+            # own CancelledError handler already recorded the terminal
+            # state; propagate so the outer task cleanup fires.
+            raise
         except Exception as exc:
             logger.exception(
                 "trial_runner_failed trial_id=%s worker_id=%s",

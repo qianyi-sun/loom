@@ -282,6 +282,11 @@ class _FakeSettings:
     # reads it to construct the LocalTrialRunner.
     sandbox_step_jwt_ttl_sec = 600
     docker_api_timeout_sec = 1800
+    # #360 / #378: cancellation watchdog config. Fast poll and permissive
+    # deadline so tests don't trigger the backstop.
+    trial_cancel_poll_interval_sec = 0.05
+    trial_hard_deadline_multiplier = 3.0
+    trial_hard_deadline_grace_sec = 600.0
 
 
 async def _drive_spawn(runner_target: object) -> Path:

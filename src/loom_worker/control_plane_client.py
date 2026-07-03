@@ -177,6 +177,23 @@ class HttpControlPlaneClient:
             if owned:
                 await client.aclose()
 
+    async def get_trial_state(self, trial_id: UUID) -> str:
+        """Fetch the current CP-side state for ``trial_id``. Used by the
+        worker's cancellation watchdog (#360) to detect operator-driven
+        cancels and cascade an ``asyncio.CancelledError`` into the running
+        trial task."""
+        client, owned = self._http()
+        try:
+            r = await client.get(
+                f"/trials/{trial_id}", headers=self._headers,
+            )
+            r.raise_for_status()
+            body = r.json()
+            return str(body["state"])
+        finally:
+            if owned:
+                await client.aclose()
+
     async def get_task_bundle(self, task_id: str) -> dict[str, Any]:
         """Fetch full TaskConfig + checksum + source by `task_id`."""
         client, owned = self._http()
