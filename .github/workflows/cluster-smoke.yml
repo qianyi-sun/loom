@@ -120,16 +120,30 @@ jobs:
 
       - name: Verify expected workloads exist
         run: |
+          set -e
           kubectl --context kind-loom-smoke -n loom get deploy,sts,ds,svc,ingress
-          # Spot-check a few well-known objects. NOTE: loom-worker is
-          # currently a Deployment (not a DaemonSet); the
-          # cluster-deploy.md spec says DaemonSet — tracked as a
-          # follow-up in the pre-2026-06-26 carinrc/loom archive tracker
-          # (archive URL: https://github.com/carinrc/loom/issues/108).
+          # Platform services must always be present regardless of profile.
           kubectl --context kind-loom-smoke -n loom get deploy loom-service
           kubectl --context kind-loom-smoke -n loom get deploy loom-control-plane
           kubectl --context kind-loom-smoke -n loom get sts loom-postgres
-          kubectl --context kind-loom-smoke -n loom get deploy loom-worker
+
+          # loom-worker is conditional on k8s_worker.enabled in the
+          # profile that was rendered. #383 flipped the schema default
+          # to false; check whichever shape got rendered so the smoke
+          # test doesn't false-fail when the worker Deployment is
+          # legitimately absent (staging/production) and doesn't
+          # false-pass when it's legitimately present (development).
+          if grep -Fq "name: loom-worker" /tmp/manifests.yaml; then
+            echo "manifest includes loom-worker → verifying it exists in cluster"
+            kubectl --context kind-loom-smoke -n loom get deploy loom-worker
+          else
+            echo "manifest omits loom-worker (k8s_worker.enabled=false) → verifying absence"
+            if kubectl --context kind-loom-smoke -n loom get deploy loom-worker 2>/dev/null; then
+              echo "FAIL: loom-worker Deployment exists in cluster but was not in the rendered manifest" >&2
+              exit 1
+            fi
+            echo "PASS: loom-worker correctly absent"
+          fi
 
       - name: loom cluster status --format json
         run: |
@@ -139,19 +153,27 @@ jobs:
           # Sanity: the JSON shape carries the components list with
           # known names.
           python -c '
-          import json, sys
+          import json, os, sys
           d = json.load(open("/tmp/status.json"))
           names = {c["name"] for c in d["components"]}
+          # Components that must be present regardless of profile.
           expected = {
               "loom-service", "loom-control-plane", "loom-llm-gateway",
-              "loom-web", "loom-worker", "postgres", "minio",
+              "loom-web", "postgres", "minio",
           }
+          # loom-worker only expected when the rendered manifest
+          # included it (#383 made it conditional on
+          # k8s_worker.enabled).
+          manifest = open("/tmp/manifests.yaml").read()
+          if "name: loom-worker" in manifest:
+              expected.add("loom-worker")
           missing = expected - names
           if missing:
               print(f"FAIL: status missing components: {sorted(missing)}",
                     file=sys.stderr)
               sys.exit(1)
-          print(f"PASS: status reported {len(names)} components")
+          print(f"PASS: status reported {len(names)} components, "
+                f"including {sorted(expected)}")
           '
 
       - name: loom cluster down --yes
