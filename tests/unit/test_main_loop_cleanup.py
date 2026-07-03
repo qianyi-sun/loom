@@ -92,6 +92,7 @@ async def test_setup_failure_patch_preserves_long_docker_build_error_tail() -> N
 class _FakeCPClient:
     def __init__(self) -> None:
         self.patch_calls: list[dict[str, object]] = []
+        self.retry_calls: list[dict[str, object]] = []
         self.bundle = {
             "id": "fake",
             "checksum": "0" * 64,
@@ -130,6 +131,24 @@ class _FakeCPClient:
         if failure_message is not None:
             patch["failure_message"] = failure_message
         self.patch_calls.append(patch)
+        return True
+
+    async def requeue_trial_retry(
+        self,
+        *,
+        trial_id,
+        worker_id,
+        failure_reason: str,
+        failure_message: str | None,
+        retry_after_sec: float,
+    ) -> bool:  # type: ignore[no-untyped-def]
+        self.retry_calls.append({
+            "trial_id": trial_id,
+            "worker_id": worker_id,
+            "failure_reason": failure_reason,
+            "failure_message": failure_message,
+            "retry_after_sec": retry_after_sec,
+        })
         return True
 
 
@@ -506,6 +525,67 @@ async def test_long_setup_failure_writes_redacted_diagnostic_file(
     assert "Bearer [REDACTED:bearer]" in artifact_text
     assert "hf_abcdefghijklmnopqrstuvwxyz1234567890" not in artifact_text
     assert "[REDACTED:hf-token]" in artifact_text
+
+
+async def test_setup_transport_disconnect_requeues_when_trial_policy_allows() -> None:
+    from loom_worker.vllm_registry import WorkerVLLMRegistry
+
+    settings = _FakeSettings()
+    cp = _FakeCPClient()
+    pool = RunnerPool(max_concurrent=1)
+    trial_id = uuid4()
+    worker_id = uuid4()
+
+    async def fail_layered_image(**_kwargs: object) -> str:
+        raise httpx.RemoteProtocolError(
+            "Server disconnected without sending a response."
+        )
+
+    with patch.object(ml, "_resolve_layered_trial_image", fail_layered_image):
+        await ml._spawn_trial(
+            pool=pool,
+            settings=settings,  # type: ignore[arg-type]
+            cp_client=cp,  # type: ignore[arg-type]
+            gateway_client=None,  # type: ignore[arg-type]
+            object_store=None,  # type: ignore[arg-type]
+            worker_id=worker_id,
+            payload={
+                "trial_id": str(trial_id),
+                "team_id": str(uuid4()),
+                "task_id": "fake",
+                "attempt_count": 1,
+                "config": {
+                    "agent_name": "oracle",
+                    "agent_model": None,
+                    "retry": {
+                        "max_attempts": 3,
+                        "retry_on": ["provider_transport_disconnect"],
+                        "backoff": {
+                            "base_sec": 30,
+                            "max_sec": 600,
+                            "multiplier": 2.0,
+                            "jitter": 0.0,
+                        },
+                    },
+                },
+            },
+            vllm_registry=WorkerVLLMRegistry(enabled=False),
+        )
+        await pool.wait_all(timeout=2.0)
+
+    assert cp.patch_calls == []
+    assert cp.retry_calls == [
+        {
+            "trial_id": trial_id,
+            "worker_id": worker_id,
+            "failure_reason": FailureReason.PROVIDER_TRANSPORT_DISCONNECT.value,
+            "failure_message": (
+                "Provider transport disconnected before returning a response. "
+                "Server disconnected without sending a response."
+            ),
+            "retry_after_sec": 30.0,
+        }
+    ]
 
 
 async def test_tempdir_cleaned_on_cancellation() -> None:
