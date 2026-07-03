@@ -102,6 +102,47 @@ def test_validate_local_direct_layout_accepts_metadata_flags(
     assert "source_subdir" not in out.split("config snippet:", 1)[1]
 
 
+_TB_TASK_TOML = """\
+version = "1"
+
+[metadata]
+id = "{tid}"
+name = "TB task {tid}"
+
+[environment]
+cpus = 2
+memory = "4G"
+storage = "10G"
+dockerfile = "Dockerfile"
+"""
+
+
+def test_validate_local_accepts_terminal_bench_shape(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#341: TB-shaped bundles are auto-normalized before validation."""
+    root = tmp_path / "src-useful"
+    tasks_root = root / "tasks"
+    bundle = tasks_root / "task-1"
+    bundle.mkdir(parents=True)
+    (bundle / "task.toml").write_text(_TB_TASK_TOML.format(tid="task-1"))
+    (bundle / "instruction.md").write_text("do task-1\n")
+    (bundle / "Dockerfile").write_text("FROM alpine:3.19\n")
+    (root / "benchmark.toml").write_text(
+        "schema_version = 1\n"
+        "id = \"src-useful\"\n"
+        "display_name = \"Source Useful\"\n"
+        "series = \"internal\"\n"
+        "license_spdx = \"MIT\"\n",
+    )
+
+    rc = datasets_cmd.dispatch(["validate-local", str(root)])
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "invalid task.toml" not in err
+
+
 def test_validate_local_invalid_task_toml_exits_one(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:

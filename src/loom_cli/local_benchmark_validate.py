@@ -18,6 +18,9 @@ from loom.config.benchmarks import (
 )
 from loom.models.task import TaskConfig
 from loom_cli.benchmarks_sync import walk_task_tomls
+from loom_cli.terminal_bench_normalize import (
+    normalize_terminal_bench_task_toml,
+)
 
 
 class LocalBenchmarkValidationError(Exception):
@@ -173,7 +176,11 @@ def _validate_task_toml(path: Path) -> None:
     try:
         with path.open("rb") as f:
             raw = tomllib.load(f)
-        TaskConfig.model_validate(raw)
+        # #341: Terminal-Bench-shaped bundles are auto-normalized to
+        # Loom TaskConfig before validation so `publish-local` accepts
+        # user-provided TB imports without operator-side conversion.
+        normalized = normalize_terminal_bench_task_toml(raw)
+        TaskConfig.model_validate(normalized)
     except Exception as exc:
         raise LocalBenchmarkValidationError(
             f"invalid task.toml at {path}: {exc}", exit_code=1,

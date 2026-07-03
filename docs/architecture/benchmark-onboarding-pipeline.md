@@ -371,6 +371,35 @@ production trial execution: each discovered `task.toml` must validate before it
 can enter `sync-config`. Tasks configured with `agent.name = "oracle"` should
 ship an executable `solution/solve.sh` when the smoke path will use the oracle
 agent.
+
+### Terminal-Bench-shaped task.toml normalization (#341)
+
+User-provided task bundles that follow the Terminal-Bench schema — a top-level
+`[metadata]` section, no `[task]`, and TB-style
+`environment.{cpus,memory,storage}` resource hints — are auto-normalized before
+validation. The on-disk `task.toml` uploaded to S3 is preserved verbatim so
+audit and repro remain intact; the row's `config` JSONB carries the
+Loom-`TaskConfig` form so the worker validates when it fetches the bundle.
+
+Mapping (see `src/loom_cli/terminal_bench_normalize.py`):
+
+| Terminal-Bench field                     | Loom target                                  |
+|------------------------------------------|----------------------------------------------|
+| top-level `version`                      | dropped; Loom uses `schema_version = "1"`    |
+| `metadata.id`                            | `task.id`                                    |
+| `metadata.name` (or `metadata.id`)       | `task.name`                                  |
+| `metadata.description`                   | `task.description`                           |
+| `metadata.tags` (list of strings)        | `task.labels`                                |
+| `environment.cpus` / `memory` / `storage`| dropped (Loom uses `requires_caps` instead)  |
+| other `environment.*`                    | preserved verbatim                           |
+| `agent`                                  | preserved; defaults `{name="oracle", timeout_sec=360}` |
+| `verifier`                               | preserved; defaults `{name="script", timeout_sec=60, args.script_path="/app/verifier/run.sh"}` |
+
+Explicit user choices always win — a `verifier.args.script_path` in the source
+is preserved. If a required Loom field cannot be derived (e.g. `metadata.id`
+is missing so `task.id` cannot be filled), validation surfaces the Loom field
+name so the operator sees a consistent error surface regardless of source
+schema.
 For code benchmarks whose reference answer already lives in
 `solution/solution.py`, that script can be a no-op and the verifier
 tests provide the actual pass/fail signal.
