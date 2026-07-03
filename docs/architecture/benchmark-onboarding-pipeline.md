@@ -400,6 +400,24 @@ is preserved. If a required Loom field cannot be derived (e.g. `metadata.id`
 is missing so `task.id` cannot be filled), validation surfaces the Loom field
 name so the operator sees a consistent error surface regardless of source
 schema.
+
+### `environment/` subtree flattening (#369)
+
+Some user bundles (notably the Source Useful set) store auxiliary files
+like `inventory.csv` or `setup_repo.sh` under `environment/` in the task
+tree, but the accompanying Dockerfile does `COPY . /app/` and references
+those files as `/app/<name>` at build time. Without preprocessing, the
+files land at `/app/environment/<name>` and `RUN chmod`, `RUN
+./setup_repo.sh`, etc. fail.
+
+`publish-local` stages each bundle into a scratch directory and mirrors
+every file under `environment/` up to the bundle root before uploading.
+Top-level files always win on name collision, and the `environment/`
+tree is preserved so Dockerfiles that DO expect the nested layout still
+work. The operator's on-disk bundle is never modified.
+
+The DB checksum is computed on the staged (post-flatten) tree so the
+row matches the S3 content the worker will materialize.
 For code benchmarks whose reference answer already lives in
 `solution/solution.py`, that script can be a no-op and the verifier
 tests provide the actual pass/fail signal.
