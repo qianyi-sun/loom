@@ -30,7 +30,7 @@ WITH next AS (
     FROM trials t
     JOIN team_quotas q ON q.team_id = t.team_id
    WHERE t.state = 'queued'
-     AND t.attempt_count < q.max_attempts
+     AND t.attempt_count < q.max_attempts_ceiling
      AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= NOW())
      AND t.requires_caps->>'os' = ANY(:worker_os)
      AND (

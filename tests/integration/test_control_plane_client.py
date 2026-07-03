@@ -343,7 +343,7 @@ async def test_requeue_trial_retry_returns_false_when_team_attempt_budget_exhaus
         engine = create_engine(postgres_url)
         with engine.begin() as conn:
             conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
-            conn.execute(insert(TeamQuota).values(team_id=team_id, max_attempts=1))
+            conn.execute(insert(TeamQuota).values(team_id=team_id, max_attempts_ceiling=1))
             conn.execute(insert(Task).values(
                 id="t", checksum="0" * 64, config={},
             ))

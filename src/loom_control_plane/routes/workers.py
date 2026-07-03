@@ -36,7 +36,7 @@ UPDATE trials t
    AND t.state = 'claimed'
    AND t.started_at IS NULL
    AND q.team_id = t.team_id
-   AND t.attempt_count < q.max_attempts
+   AND t.attempt_count < q.max_attempts_ceiling
  RETURNING t.id;
 """)
 

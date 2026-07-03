@@ -63,7 +63,12 @@ class TeamQuota(Base):
         PgUUID(as_uuid=True), ForeignKey("teams.id"), primary_key=True,
     )
     fair_share_weight: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
-    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    # Admin's ceiling: the scheduler stops re-claiming a trial once
+    # `attempt_count >= max_attempts_ceiling`. Semantically distinct from
+    # TrialConfig.retry.max_attempts (submitter's requested count). See #401.
+    max_attempts_ceiling: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=3,
+    )
     in_flight_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Legacy per-team SPDX metadata. This field is retained for API/backfill
     # compatibility; license values no longer gate task selection or submit.

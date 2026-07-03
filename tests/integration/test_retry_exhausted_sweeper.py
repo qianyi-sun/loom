@@ -41,7 +41,7 @@ async def _make_session_factory(postgres_url: str):  # type: ignore[return]
     return async_sessionmaker(engine, expire_on_commit=False), engine
 
 
-async def _seed_baseline(session_factory, *, max_attempts: int = 3) -> tuple:
+async def _seed_baseline(session_factory, *, max_attempts_ceiling: int = 3) -> tuple:
     """Insert a team + task row and return (team_id, task_id)."""
     team_id = uuid4()
     task_id = f"t-{uuid4().hex[:8]}"
@@ -49,7 +49,7 @@ async def _seed_baseline(session_factory, *, max_attempts: int = 3) -> tuple:
         await s.execute(insert(Team).values(id=team_id, name=f"team-{team_id}"))
         await s.execute(insert(TeamQuota).values(
             team_id=team_id,
-            max_attempts=max_attempts,
+            max_attempts_ceiling=max_attempts_ceiling,
         ))
         await s.execute(insert(Task).values(
             id=task_id, checksum="0" * 64, config={},
@@ -65,7 +65,7 @@ async def test_transitions_exhausted_queued_trials_to_failed(
     should all be transitioned to failed='retry_exhausted'."""
     factory, engine = await _make_session_factory(postgres_url)
     try:
-        team_id, task_id = await _seed_baseline(factory, max_attempts=3)
+        team_id, task_id = await _seed_baseline(factory, max_attempts_ceiling=3)
         trial_ids = [uuid4(), uuid4(), uuid4()]
         async with factory() as s:
             for tid in trial_ids:
@@ -106,7 +106,7 @@ async def test_leaves_trials_with_attempts_remaining_untouched(
     not be touched by the sweep."""
     factory, engine = await _make_session_factory(postgres_url)
     try:
-        team_id, task_id = await _seed_baseline(factory, max_attempts=3)
+        team_id, task_id = await _seed_baseline(factory, max_attempts_ceiling=3)
         trial_id = uuid4()
         async with factory() as s:
             await s.execute(insert(Trial).values(
@@ -145,7 +145,7 @@ async def test_leaves_non_queued_trials_untouched(
     handles it if the worker dies."""
     factory, engine = await _make_session_factory(postgres_url)
     try:
-        team_id, task_id = await _seed_baseline(factory, max_attempts=3)
+        team_id, task_id = await _seed_baseline(factory, max_attempts_ceiling=3)
         trial_id = uuid4()
         async with factory() as s:
             await s.execute(insert(Trial).values(
@@ -180,7 +180,7 @@ async def test_sweep_is_idempotent(postgres_url: str) -> None:
     produces no changes on the second tick (they're already failed)."""
     factory, engine = await _make_session_factory(postgres_url)
     try:
-        team_id, task_id = await _seed_baseline(factory, max_attempts=2)
+        team_id, task_id = await _seed_baseline(factory, max_attempts_ceiling=2)
         trial_id = uuid4()
         async with factory() as s:
             await s.execute(insert(Trial).values(

@@ -69,7 +69,7 @@ describe("AdminAccess", () => {
             submissions_paused_reason: null,
             quota: {
               fair_share_weight: 1,
-              max_attempts: 3,
+              max_attempts_ceiling: 3,
               in_flight_count: 0,
               license_allowlist: [],
             },
@@ -91,7 +91,7 @@ describe("AdminAccess", () => {
             submissions_paused_reason: null,
             quota: {
               fair_share_weight: 1,
-              max_attempts: 3,
+              max_attempts_ceiling: 3,
               in_flight_count: 0,
               license_allowlist: [],
             },
@@ -112,7 +112,7 @@ describe("AdminAccess", () => {
                 submissions_paused_reason: null,
                 quota: {
                   fair_share_weight: 1,
-                  max_attempts: 3,
+                  max_attempts_ceiling: 3,
                   in_flight_count: 0,
                   license_allowlist: [],
                 },
@@ -435,7 +435,7 @@ describe("AdminAccess", () => {
                 submissions_paused_reason: null,
                 quota: {
                   fair_share_weight: 1,
-                  max_attempts: 3,
+                  max_attempts_ceiling: 3,
                   in_flight_count: 0,
                   license_allowlist: [],
                 },
@@ -590,7 +590,7 @@ describe("AdminAccess", () => {
                 submissions_paused_reason: null,
                 quota: {
                   fair_share_weight: 1,
-                  max_attempts: 3,
+                  max_attempts_ceiling: 3,
                   in_flight_count: 0,
                   license_allowlist: [],
                 },
