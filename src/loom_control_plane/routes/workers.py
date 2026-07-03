@@ -9,17 +9,36 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
-from sqlalchemy import insert, update
+from sqlalchemy import insert, text, update
 
 from loom.auth import verify_bearer_token
 from loom.db.schema import Worker
 from loom.models.capabilities import Capabilities
+from loom.models.result import FailureReason
 from loom_control_plane.metrics import CLAIM_LATENCY_SEC
 from loom_control_plane.scheduler.claim import claim_one
 
 router = APIRouter()
 
 _WORKER_HEARTBEAT_STATUSES = {"active", "idle-exit", "shutting-down"}
+
+_REQUEUE_TRIAL_RETRY_SQL = text("""
+UPDATE trials t
+   SET state = 'queued',
+       worker_id = NULL,
+       failure_reason = (:failure_reason)::text,
+       failure_message = (:failure_message)::text,
+       next_attempt_at = NOW() + (:retry_after_sec)::double precision
+                         * INTERVAL '1 second'
+  FROM team_quotas q
+ WHERE t.id = (:trial_id)::uuid
+   AND t.worker_id = (:worker_id)::uuid
+   AND t.state = 'claimed'
+   AND t.started_at IS NULL
+   AND q.team_id = t.team_id
+   AND t.attempt_count < q.max_attempts
+ RETURNING t.id;
+""")
 
 
 @router.post("/trials/claim")
@@ -79,6 +98,85 @@ async def claim_trial(
         ),
         "state": "claimed",
     })
+
+
+@router.post("/trials/{trial_id}/retry")
+async def requeue_trial_retry(
+    trial_id: UUID,
+    request: Request,
+    payload: dict[str, Any],
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    async with request.app.state.session_factory() as session:
+        ctx = await verify_bearer_token(session, authorization)
+    if ctx is None or "worker:report" not in ctx.scopes:
+        raise HTTPException(status_code=401, detail="not authorized to report")
+
+    try:
+        worker_id = UUID(payload["worker_id"])
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400, detail=f"worker_id required: {exc}",
+        ) from exc
+
+    failure_reason_str = payload.get("failure_reason")
+    if not isinstance(failure_reason_str, str):
+        raise HTTPException(
+            status_code=400,
+            detail="failure_reason must be a string",
+        )
+    try:
+        failure_reason = FailureReason(failure_reason_str)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid failure_reason {failure_reason_str!r}",
+        ) from exc
+
+    failure_message = payload.get("failure_message")
+    if failure_message is not None and not isinstance(failure_message, str):
+        raise HTTPException(
+            status_code=400,
+            detail="failure_message must be a string",
+        )
+
+    try:
+        retry_after_sec = float(payload["retry_after_sec"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"retry_after_sec required: {exc}",
+        ) from exc
+    if retry_after_sec < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="retry_after_sec must be >= 0",
+        )
+
+    async with request.app.state.session_factory() as session:
+        row = (
+            await session.execute(
+                _REQUEUE_TRIAL_RETRY_SQL,
+                {
+                    "trial_id": trial_id,
+                    "worker_id": worker_id,
+                    "failure_reason": failure_reason.value,
+                    "failure_message": failure_message,
+                    "retry_after_sec": retry_after_sec,
+                },
+            )
+        ).mappings().one_or_none()
+        await session.commit()
+
+    if row is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "worker lost claim, trial has started, or retry transition "
+                "is not allowed"
+            ),
+        )
+    return {"trial_id": str(row["id"]), "state": "queued"}
 
 
 @router.post("/workers/register")

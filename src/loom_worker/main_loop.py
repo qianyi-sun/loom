@@ -29,6 +29,7 @@ import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -42,11 +43,12 @@ from loom.agent.http_gateway_client import HttpLLMGatewayClient
 from loom.agent.litellm import LiteLLMAgent
 from loom.agent.oracle import OracleAgent
 from loom.driver.docker import DockerDriver
-from loom.errors import AgentError
+from loom.errors import AgentError, classify_failure_message
 from loom.models.result import FailureReason
 from loom.models.task import TaskConfig
-from loom.models.trial import TrialConfig
+from loom.models.trial import RetryPolicy, RetryReason, TrialConfig
 from loom.models.types import ModelSpec
+from loom.retry import next_attempt_at
 from loom.security.redaction import redact_text
 from loom.startup_retry import (
     DEFAULT_STARTUP_RETRY_CONFIG,
@@ -592,14 +594,16 @@ async def _spawn_trial(
 ) -> None:
     trial_id = UUID(str(payload["trial_id"]))
     team_id = UUID(str(payload["team_id"]))
+    attempt_count = int(payload.get("attempt_count") or 1)
 
     async def _setup_run_and_cleanup() -> None:
         task_dir: Path | None = None
+        trial_config: TrialConfig | None = None
         try:
+            trial_config = TrialConfig.model_validate(payload.get("config") or {})
             bundle = await cp_client.get_task_bundle(str(payload["task_id"]))
             task_config = TaskConfig.model_validate(bundle["config"])
             task_checksum = str(bundle["checksum"])
-            trial_config = TrialConfig.model_validate(payload.get("config") or {})
 
             # Plan 13 Task 3: materialize the fixture content from
             # bundle["source"] when it's an s3:// URL (benchmark-imported
@@ -644,6 +648,8 @@ async def _spawn_trial(
                 setup_diagnostics_root=(
                     settings.trajectory_cache_dir / "setup-diagnostics"
                 ),
+                retry_policy=trial_config.retry if trial_config is not None else None,
+                attempt_count=attempt_count,
             )
             return
 
@@ -786,6 +792,8 @@ async def _spawn_trial(
                 setup_diagnostics_root=(
                     settings.trajectory_cache_dir / "setup-diagnostics"
                 ),
+                retry_policy=trial_config.retry,
+                attempt_count=attempt_count,
             )
         finally:
             shutil.rmtree(task_dir, ignore_errors=True)
@@ -829,6 +837,8 @@ async def _mark_setup_failed(
     detail: str,
     diagnostic_detail: str | None = None,
     setup_diagnostics_root: Path | None = None,
+    retry_policy: RetryPolicy | None = None,
+    attempt_count: int | None = None,
 ) -> None:
     safe_diagnostic_detail = redact_text(diagnostic_detail or detail).strip()
     diagnostic_path = _write_setup_failure_diagnostic(
@@ -840,13 +850,55 @@ async def _mark_setup_failed(
         detail,
         diagnostic_path=diagnostic_path,
     )
-    failure_reason = _classify_setup_failure(safe_detail)
+    classified_text = classify_failure_message(safe_detail)
+    if classified_text is not None:
+        failure_reason, classified_message = classified_text
+        if classified_message:
+            safe_detail = classified_message
+    else:
+        failure_reason = _classify_setup_failure(safe_detail)
     logger.warning(
         "trial_setup_failed trial_id=%s worker_id=%s detail=%s",
         trial_id,
         worker_id,
         safe_detail,
     )
+    retry_after_sec = _setup_retry_after_seconds(
+        failure_reason=failure_reason,
+        retry_policy=retry_policy,
+        attempt_count=attempt_count,
+    )
+    if retry_after_sec is not None:
+        try:
+            ok = await cp_client.requeue_trial_retry(
+                trial_id=trial_id,
+                worker_id=worker_id,
+                failure_reason=failure_reason.value,
+                failure_message=safe_detail,
+                retry_after_sec=retry_after_sec,
+            )
+        except Exception:
+            logger.exception(
+                "trial_setup_retry_requeue_error trial_id=%s",
+                trial_id,
+            )
+            ok = False
+        if ok:
+            logger.info(
+                "trial_setup_retry_requeued trial_id=%s worker_id=%s "
+                "failure_reason=%s attempt_count=%s retry_after_sec=%.3f",
+                trial_id,
+                worker_id,
+                failure_reason.value,
+                attempt_count,
+                retry_after_sec,
+            )
+            return
+        logger.warning(
+            "trial_setup_retry_requeue_unaccepted trial_id=%s worker_id=%s",
+            trial_id,
+            worker_id,
+        )
     try:
         ok = await cp_client.patch_state(
             trial_id=trial_id,
@@ -953,6 +1005,38 @@ def _classify_setup_failure(detail: str) -> FailureReason:
     ):
         return FailureReason.TASK_IMAGE_BUILD_TIMEOUT
     return FailureReason.INTERNAL_ERROR
+
+
+def _setup_retry_reason_for_failure(reason: FailureReason) -> RetryReason | None:
+    if reason == FailureReason.PROVIDER_TRANSPORT_DISCONNECT:
+        return RetryReason.PROVIDER_TRANSPORT_DISCONNECT
+    if reason == FailureReason.GATEWAY_ERROR:
+        return RetryReason.GATEWAY_ERROR
+    return None
+
+
+def _setup_retry_after_seconds(
+    *,
+    failure_reason: FailureReason,
+    retry_policy: RetryPolicy | None,
+    attempt_count: int | None,
+) -> float | None:
+    if retry_policy is None or attempt_count is None:
+        return None
+    retry_reason = _setup_retry_reason_for_failure(failure_reason)
+    if retry_reason is None:
+        return None
+    if retry_reason not in retry_policy.retry_on:
+        return None
+    if attempt_count >= retry_policy.max_attempts:
+        return None
+    now = datetime.now(UTC)
+    retry_at = next_attempt_at(
+        attempt_count=attempt_count,
+        backoff=retry_policy.backoff,
+        now=now,
+    )
+    return max(0.0, (retry_at - now).total_seconds())
 
 
 async def _materialize_task_dir(

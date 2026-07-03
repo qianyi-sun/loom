@@ -146,6 +146,37 @@ class HttpControlPlaneClient:
             if owned:
                 await client.aclose()
 
+    async def requeue_trial_retry(
+        self,
+        *,
+        trial_id: UUID,
+        worker_id: UUID,
+        failure_reason: str,
+        failure_message: str | None,
+        retry_after_sec: float,
+    ) -> bool:
+        """True on accepted, False if the trial is no longer ours (409)."""
+        client, owned = self._http()
+        try:
+            payload: dict[str, Any] = {
+                "worker_id": str(worker_id),
+                "failure_reason": failure_reason,
+                "retry_after_sec": retry_after_sec,
+            }
+            if failure_message is not None:
+                payload["failure_message"] = failure_message
+            r = await client.post(
+                f"/trials/{trial_id}/retry", headers=self._headers,
+                json=payload,
+            )
+            if r.status_code == 409:
+                return False
+            r.raise_for_status()
+            return True
+        finally:
+            if owned:
+                await client.aclose()
+
     async def get_task_bundle(self, task_id: str) -> dict[str, Any]:
         """Fetch full TaskConfig + checksum + source by `task_id`."""
         client, owned = self._http()
