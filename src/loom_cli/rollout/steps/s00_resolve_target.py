@@ -20,9 +20,9 @@ from loom_cli.rollout.steps.subprocess_util import run_captured
 
 
 def expected_short_sha(image_tag: str) -> str | None:
-    """Extract the ``sha7`` suffix from a public-beta tag, else None.
+    """Extract the ``sha7`` suffix from a staging tag, else None.
 
-    Convention: ``public-beta-<sha7>``. Non-conforming tags return None
+    Convention: ``staging-<sha7>``. Non-conforming tags return None
     (the SHA cross-check is skipped rather than failing on custom tags).
     """
     if "-" not in image_tag:

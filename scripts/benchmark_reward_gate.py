@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Public-beta benchmark reward acceptance gate.
+"""Staging benchmark reward acceptance gate.
 
 This script is intentionally API-level. It checks the same benchmark/trial
 surface a user sees, without reading database credentials or object-store
@@ -164,7 +164,7 @@ def check_benchmark_readiness(items: list[dict[str, Any]]) -> list[CheckResult]:
                 check_id="benchmarks.all_displayed_runnable",
                 status="fail",
                 detail="benchmark API returned no displayed benchmarks",
-                remediation="Provision the supported benchmark catalog before public-beta validation.",
+                remediation="Provision the supported benchmark catalog before staging validation.",
             )
         ]
 

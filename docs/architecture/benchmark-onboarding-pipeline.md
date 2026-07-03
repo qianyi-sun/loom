@@ -2,7 +2,7 @@
 
 Status: shipped. Lifecycle, manifest contract, publish/register validation,
 readiness audit CLI, and user-owned benchmark onboarding are implemented;
-see `src/loom/benchmark_readiness.py`, `src/loom_cli/public_beta_catalog.py`,
+see `src/loom/benchmark_readiness.py`, `src/loom_cli/staging_catalog.py`,
 and `loom cluster benchmarks` commands.
 
 Historical tracking (pre-migration archive on the carinrc/loom tracker):
@@ -173,7 +173,7 @@ Source materialization stays behind the existing worker materializer boundary:
 
 - `hf://...`: fetch one bundle path from a HuggingFace dataset repo. This is
   acceptable for local development and short-lived validation, but it should not
-  be the public-beta/staging runtime boundary for private or gated benchmarks.
+  be the staging/staging runtime boundary for private or gated benchmarks.
 - `s3://...`: fetch one object-store prefix from S3-compatible storage.
 - `fixture://...`: dev/test fixture path only.
 - no `source`: allowed only for inline rows whose validated `TaskConfig` is

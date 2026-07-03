@@ -362,7 +362,7 @@ Legacy manifests without `task_config` remain metadata placeholders.
 They must be republished or backfilled before users can launch them
 from the batch UI.
 
-For public-beta/staging/production, `register --mirror-to-object-store` is the
+For staging/staging/production, `register --mirror-to-object-store` is the
 preferred path for HF-published benchmarks. It keeps Hugging Face as the
 publication/provenance source, mirrors each task bundle into internal object
 storage, stores `s3://...` runtime sources, and lets workers run without HF

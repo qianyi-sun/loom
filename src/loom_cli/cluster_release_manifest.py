@@ -1,4 +1,4 @@
-"""Public-beta release manifest helpers for cluster rollouts."""
+"""Staging release manifest helpers for cluster rollouts."""
 
 from __future__ import annotations
 

@@ -79,7 +79,7 @@ For public repository operation:
   provenance and must not copy source-team provider credentials.
 - Unsafe, secret-like, or policy-blocked artifacts must be denied to other teams
   and surfaced only with a safe blocked reason. Redaction/leak tests for shared
-  artifacts are part of the public-beta security gate.
+  artifacts are part of the staging security gate.
 
 ## Platform Security Topics To Resolve
 

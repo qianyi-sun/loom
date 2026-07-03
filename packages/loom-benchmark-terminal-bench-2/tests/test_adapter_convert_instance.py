@@ -160,7 +160,7 @@ def test_convert_rewrites_sidecar_dockerfile_heredoc_copy(
     """`src/loom_worker/task_image.py:185` uses `docker-py`'s
     `client.images.build` — the legacy builder — for sidecar images
     just as for the client image. A sidecar Dockerfile with a BuildKit
-    `COPY <<EOF` heredoc would fail at build time on the public-beta
+    `COPY <<EOF` heredoc would fail at build time on the staging
     worker; the adapter must rewrite sidecar Dockerfiles into ordinary
     `COPY` form too. Existing tests only cover the client Dockerfile,
     so this case is the explicit guard for the sidecar build path."""
@@ -211,7 +211,7 @@ def test_convert_rewrites_sidecar_dockerfile_heredoc_copy(
 def test_no_materialized_dockerfile_carries_buildkit_heredoc(
     fixtures_dir: Path, tmp_path: Path,
 ) -> None:
-    """Contract test for the public-beta image-build path: every
+    """Contract test for the staging image-build path: every
     Dockerfile materialized under `.loom-build/` must be consumable by
     `client.images.build` (docker-py legacy builder). Any `COPY <<` or
     `RUN <<` BuildKit heredoc that slips through `_rewrite_dockerfile_*`
@@ -345,7 +345,7 @@ def test_solve_sh_runs_reference_from_task_root_even_when_invoked_from_solution_
     fixtures_dir: Path, tmp_path: Path,
 ) -> None:
     """Regression for the cwd-mismatch bug observed against the
-    public-beta cluster: `OracleAgent` invokes
+    staging cluster: `OracleAgent` invokes
     `<workdir>/solution/solve.sh` with cwd=`<workdir>/solution`, but the
     TB-2 verifier (`run-tests.sh`) checks files relative to the task
     workdir itself (e.g. hello-world expects `hello.txt` at the task

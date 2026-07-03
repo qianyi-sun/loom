@@ -35,7 +35,7 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="Pool to reconcile. Repeat for multiple pools.",
     )
-    parser.add_argument("--namespace", default="loom-public-beta")
+    parser.add_argument("--namespace", default="loom-staging")
     parser.add_argument(
         "--kubeconfig",
         default=os.environ.get("KUBECONFIG", "/home/qianyi/.kube/config"),

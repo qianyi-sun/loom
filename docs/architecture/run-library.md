@@ -14,7 +14,7 @@ boundary.
 - The Run Library is the only cross-team read/reuse surface for completed
   results. Cross-team sharing must not be implemented by weakening
   `require_team_or_admin()` on execution routes.
-- Quota and rate-limit enforcement is not part of the public-beta Run Library.
+- Quota and rate-limit enforcement is not part of the staging Run Library.
   Spend and abuse response remain operational controls until an explicit
   product policy exists.
 

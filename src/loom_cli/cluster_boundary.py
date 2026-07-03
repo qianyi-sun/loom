@@ -83,7 +83,7 @@ def audit_boundary(
     """Walk rendered manifests and flag boundary violations.
 
     `gateway_public_host` is accepted for backwards-compatible callers
-    but no longer changes the allowlist: the public-beta boundary keeps
+    but no longer changes the allowlist: the staging boundary keeps
     the LLM Gateway internal-only.
 
     `require_network_policies` (default True, matching the CLI's

@@ -20,23 +20,23 @@ def test_acquire_writes_active_lease_and_release_evidence(tmp_path: Path) -> Non
     manager = RolloutLeaseManager(tmp_path, now=lambda: NOW)
 
     lease = manager.acquire(
-        environment="public-beta",
-        owner_id="rollout-public-beta-d46a16c",
+        environment="staging",
+        owner_id="rollout-staging-d46a16c",
         ttl_seconds=3600,
         command=["loom", "cluster", "up"],
         evidence_path=evidence_path,
     )
 
-    active = _read_json(tmp_path / "public-beta.lock")
-    assert active["environment"] == "public-beta"
-    assert active["owner_id"] == "rollout-public-beta-d46a16c"
+    active = _read_json(tmp_path / "staging.lock")
+    assert active["environment"] == "staging"
+    assert active["owner_id"] == "rollout-staging-d46a16c"
     assert active["expires_at"] == "2026-07-02T17:00:00+00:00"
     assert active["command"] == ["loom", "cluster", "up"]
     assert _read_json(evidence_path)["events"][0]["event"] == "acquired"
 
     lease.release(status="released")
 
-    released = _read_json(tmp_path / "public-beta.lock")
+    released = _read_json(tmp_path / "staging.lock")
     assert released["release_status"] == "released"
     assert released["released_at"]
     evidence = _read_json(evidence_path)
@@ -50,7 +50,7 @@ def test_acquire_writes_active_lease_and_release_evidence(tmp_path: Path) -> Non
 def test_same_environment_contention_reports_active_owner(tmp_path: Path) -> None:
     manager = RolloutLeaseManager(tmp_path, now=lambda: NOW)
     manager.acquire(
-        environment="public-beta",
+        environment="staging",
         owner_id="owner-a",
         ttl_seconds=3600,
         command=["loom", "cluster", "up"],
@@ -58,13 +58,13 @@ def test_same_environment_contention_reports_active_owner(tmp_path: Path) -> Non
 
     with pytest.raises(RolloutLeaseError) as exc_info:
         manager.acquire(
-            environment="public-beta",
+            environment="staging",
             owner_id="owner-b",
             ttl_seconds=3600,
             command=["loom", "admin", "environment-state", "apply"],
         )
 
-    assert exc_info.value.diagnostic["environment"] == "public-beta"
+    assert exc_info.value.diagnostic["environment"] == "staging"
     assert exc_info.value.diagnostic["active_owner_id"] == "owner-a"
     assert exc_info.value.diagnostic["reason"] == "active_rollout_lease"
     assert "owner-a" in str(exc_info.value)
@@ -73,29 +73,29 @@ def test_same_environment_contention_reports_active_owner(tmp_path: Path) -> Non
 def test_different_environments_acquire_independent_leases(tmp_path: Path) -> None:
     manager = RolloutLeaseManager(tmp_path, now=lambda: NOW)
 
-    public_beta = manager.acquire(
-        environment="public-beta",
-        owner_id="public-beta-owner",
-        ttl_seconds=3600,
-        command=["loom", "cluster", "up"],
-    )
     staging = manager.acquire(
         environment="staging",
         owner_id="staging-owner",
         ttl_seconds=3600,
         command=["loom", "cluster", "up"],
     )
+    production = manager.acquire(
+        environment="production",
+        owner_id="production-owner",
+        ttl_seconds=3600,
+        command=["loom", "cluster", "up"],
+    )
 
-    assert public_beta.lock_path == tmp_path / "public-beta.lock"
     assert staging.lock_path == tmp_path / "staging.lock"
-    assert public_beta.lock_path.exists()
+    assert production.lock_path == tmp_path / "production.lock"
     assert staging.lock_path.exists()
+    assert production.lock_path.exists()
 
 
 def test_expired_active_lease_still_blocks_until_owner_releases(tmp_path: Path) -> None:
     manager = RolloutLeaseManager(tmp_path, now=lambda: NOW)
     lease = manager.acquire(
-        environment="public-beta",
+        environment="staging",
         owner_id="slow-owner",
         ttl_seconds=60,
         command=["loom", "cluster", "up"],
@@ -107,7 +107,7 @@ def test_expired_active_lease_still_blocks_until_owner_releases(tmp_path: Path) 
 
     with pytest.raises(RolloutLeaseError) as exc_info:
         later.acquire(
-            environment="public-beta",
+            environment="staging",
             owner_id="fresh-owner",
             ttl_seconds=3600,
             command=["loom", "cluster", "up"],
@@ -119,11 +119,11 @@ def test_expired_active_lease_still_blocks_until_owner_releases(tmp_path: Path) 
 
 
 def test_abandoned_stale_record_can_be_replaced_with_diagnostic(tmp_path: Path) -> None:
-    lock_file = tmp_path / "public-beta.lock"
+    lock_file = tmp_path / "staging.lock"
     lock_file.write_text(
         json.dumps({
             "schema_version": 1,
-            "environment": "public-beta",
+            "environment": "staging",
             "owner_id": "stale-owner",
             "acquired_at": (NOW - timedelta(hours=2)).isoformat(),
             "expires_at": (NOW - timedelta(hours=1)).isoformat(),
@@ -133,14 +133,14 @@ def test_abandoned_stale_record_can_be_replaced_with_diagnostic(tmp_path: Path) 
     )
 
     replacement = RolloutLeaseManager(tmp_path, now=lambda: NOW).acquire(
-        environment="public-beta",
+        environment="staging",
         owner_id="fresh-owner",
         ttl_seconds=3600,
         command=["loom", "cluster", "up"],
     )
 
     assert replacement.stale_owner_id == "stale-owner"
-    active = _read_json(tmp_path / "public-beta.lock")
+    active = _read_json(tmp_path / "staging.lock")
     assert active["owner_id"] == "fresh-owner"
     assert active["replaced_stale_owner_id"] == "stale-owner"
     replacement.release()
@@ -149,7 +149,7 @@ def test_abandoned_stale_record_can_be_replaced_with_diagnostic(tmp_path: Path) 
 def test_force_does_not_bypass_active_process_lock(tmp_path: Path) -> None:
     manager = RolloutLeaseManager(tmp_path, now=lambda: NOW)
     lease = manager.acquire(
-        environment="public-beta",
+        environment="staging",
         owner_id="owner-a",
         ttl_seconds=3600,
         command=["loom", "cluster", "up"],
@@ -157,7 +157,7 @@ def test_force_does_not_bypass_active_process_lock(tmp_path: Path) -> None:
 
     with pytest.raises(RolloutLeaseError) as exc_info:
         manager.acquire(
-            environment="public-beta",
+            environment="staging",
             owner_id="owner-b",
             ttl_seconds=3600,
             command=["loom", "cluster", "up"],
@@ -175,7 +175,7 @@ def test_evidence_write_failure_releases_process_lock(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="could not write rollout lock evidence"):
         manager.acquire(
-            environment="public-beta",
+            environment="staging",
             owner_id="owner-a",
             ttl_seconds=3600,
             command=["loom", "cluster", "up"],
@@ -183,7 +183,7 @@ def test_evidence_write_failure_releases_process_lock(tmp_path: Path) -> None:
         )
 
     lease = manager.acquire(
-        environment="public-beta",
+        environment="staging",
         owner_id="owner-b",
         ttl_seconds=3600,
         command=["loom", "cluster", "up"],

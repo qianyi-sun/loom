@@ -58,20 +58,20 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
 ) -> None:
     config_path = tmp_path / "cluster-config.toml"
     config_path.write_text(
-        'image_tag = "public-beta-abc123"\n'
-        'namespace = "loom-public-beta"\n'
-        'ingress_host = "public-beta.example.com"\n',
+        'image_tag = "staging-abc123"\n'
+        'namespace = "loom-staging"\n'
+        'ingress_host = "staging.example.com"\n',
         encoding="utf-8",
     )
-    environment_state_path = tmp_path / "public-beta.toml"
+    environment_state_path = tmp_path / "staging.toml"
     environment_state_path.write_text(
-        'environment = "public-beta"\n'
+        'environment = "staging"\n'
         'secret_example = "super-secret-token"\n'
         "[[worker_pool_autoscaler_policies]]\n"
         'pool_name = "oldlab"\n'
         'actuator = "slurm"\n'
         "[worker_pool_autoscaler_policies.actuator_config]\n"
-        'env_file = "/secure/public-beta-oldlab-${IMAGE_TAG}.env"\n'
+        'env_file = "/secure/staging-oldlab-${IMAGE_TAG}.env"\n'
         'repo_dir = "/srv/loom-${IMAGE_TAG}"\n'
         "external_runner = true\n"
         "[[gb10_worker_pool_desired_states]]\n"
@@ -87,11 +87,11 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
         config=config,
         config_path=config_path,
         rendered_manifests=rendered,
-        environment="public-beta",
-        image_tag="public-beta-abc123",
+        environment="staging",
+        image_tag="staging-abc123",
         git_sha="a" * 40,
         environment_state_path=environment_state_path,
-        env_config_version="public-beta-abc123",
+        env_config_version="staging-abc123",
         generated_at="2026-07-01T00:00:00Z",
         loom_cli_version="test-version",
     )
@@ -99,9 +99,9 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
 
     assert manifest["schema_version"] == 1
     assert manifest["release"] == {
-        "environment": "public-beta",
+        "environment": "staging",
         "git_sha": "a" * 40,
-        "image_tag": "public-beta-abc123",
+        "image_tag": "staging-abc123",
         "generated_at": "2026-07-01T00:00:00Z",
     }
     assert manifest["tooling"]["loom_cli_version"] == "test-version"
@@ -115,18 +115,18 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
     assert manifest["rendered_manifest"]["sha256"] == _sha256_text(rendered)
     assert manifest["rendered_manifest"]["deployment_images"]["loom-service"][
         "loom-service"
-    ].endswith(":public-beta-abc123")
+    ].endswith(":staging-abc123")
     manifest_with_identities = build_release_manifest(
         config=config,
         config_path=config_path,
         rendered_manifests=rendered,
-        environment="public-beta",
-        image_tag="public-beta-abc123",
+        environment="staging",
+        image_tag="staging-abc123",
         git_sha="a" * 40,
         expected_image_identities={
             "loom-service": {
                 "loom-service": {
-                    "image": "loom-service:public-beta-abc123",
+                    "image": "loom-service:staging-abc123",
                     "repo_digest": (
                         "loom-service@sha256:"
                         + "1" * 64
@@ -143,7 +143,7 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
     ] == {
         "loom-service": {
             "loom-service": {
-                "image": "loom-service:public-beta-abc123",
+                "image": "loom-service:staging-abc123",
                 "repo_digest": "loom-service@sha256:" + "1" * 64,
                 "image_id": "sha256:" + "2" * 64,
             },
@@ -160,15 +160,15 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
             "pool_name": "oldlab",
             "actuator": "slurm",
             "external_runner": True,
-            "env_file": "/secure/public-beta-oldlab-public-beta-abc123.env",
-            "repo_dir": "/srv/loom-public-beta-abc123",
+            "env_file": "/secure/staging-oldlab-staging-abc123.env",
+            "repo_dir": "/srv/loom-staging-abc123",
         },
     ]
     assert manifest["external_workers"]["gb10_desired_states"] == [
         {
             "pool_name": "gb10-arm64",
-            "image_tag": "public-beta-abc123",
-            "env_config_version": "public-beta-abc123",
+            "image_tag": "staging-abc123",
+            "env_config_version": "staging-abc123",
         },
     ]
     assert "super-secret-token" not in rendered_json
@@ -178,10 +178,10 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
 def test_cluster_release_manifest_cli_writes_manifest(tmp_path: Path) -> None:
     config_path = tmp_path / "cluster-config.toml"
     config_path.write_text(
-        'image_tag = "public-beta-def456"\nnamespace = "loom-public-beta"\n',
+        'image_tag = "staging-def456"\nnamespace = "loom-staging"\n',
         encoding="utf-8",
     )
-    output_path = tmp_path / "release-manifest-public-beta-def456.json"
+    output_path = tmp_path / "release-manifest-staging-def456.json"
 
     rc = main(
         [
@@ -190,9 +190,9 @@ def test_cluster_release_manifest_cli_writes_manifest(tmp_path: Path) -> None:
             "--config",
             str(config_path),
             "--environment",
-            "public-beta",
+            "staging",
             "--image-tag",
-            "public-beta-def456",
+            "staging-def456",
             "--git-sha",
             "b" * 40,
             "--generated-at",
@@ -205,7 +205,7 @@ def test_cluster_release_manifest_cli_writes_manifest(tmp_path: Path) -> None:
     assert rc == 0
     manifest = json.loads(output_path.read_text(encoding="utf-8"))
     assert manifest["release"]["git_sha"] == "b" * 40
-    assert manifest["release"]["image_tag"] == "public-beta-def456"
+    assert manifest["release"]["image_tag"] == "staging-def456"
     assert manifest["cluster_config"]["path"] == str(config_path)
 
 
@@ -214,7 +214,7 @@ def test_cluster_release_manifest_cli_accepts_expected_image_identities(
 ) -> None:
     config_path = tmp_path / "cluster-config.toml"
     config_path.write_text(
-        'image_tag = "public-beta-def456"\nnamespace = "loom-public-beta"\n',
+        'image_tag = "staging-def456"\nnamespace = "loom-staging"\n',
         encoding="utf-8",
     )
     identities_path = tmp_path / "image-identities.json"
@@ -222,14 +222,14 @@ def test_cluster_release_manifest_cli_accepts_expected_image_identities(
         json.dumps({
             "loom-service": {
                 "loom-service": {
-                    "image": "loom-service:public-beta-def456",
+                    "image": "loom-service:staging-def456",
                     "repo_digest": "loom-service@sha256:" + "3" * 64,
                 },
             },
         }),
         encoding="utf-8",
     )
-    output_path = tmp_path / "release-manifest-public-beta-def456.json"
+    output_path = tmp_path / "release-manifest-staging-def456.json"
 
     rc = main(
         [
@@ -238,9 +238,9 @@ def test_cluster_release_manifest_cli_accepts_expected_image_identities(
             "--config",
             str(config_path),
             "--environment",
-            "public-beta",
+            "staging",
             "--image-tag",
-            "public-beta-def456",
+            "staging-def456",
             "--git-sha",
             "b" * 40,
             "--expected-image-identities-json",

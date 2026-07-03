@@ -145,14 +145,14 @@ class TestRunRollout:
         steps = [_AlwaysOKStep(0, "resolve")]
         run_rollout(ctx, steps, ev, io.StringIO())
         assert ev.inputs_path().is_file()
-        assert ev.read_inputs()["image_tag"] == "public-beta-abc123"
+        assert ev.read_inputs()["image_tag"] == "staging-abc123"
 
     def test_refuses_when_inputs_json_conflicts(self, tmp_path: Path) -> None:
         ctx = make_ctx(tmp_path)
         ev = EvidenceDirectory(tmp_path, "test-rid")
         ev.ensure()
         # Pre-existing inputs.json for a DIFFERENT target.
-        ev.write_inputs({"image_tag": "public-beta-other", "resolved_sha": "z" * 40})
+        ev.write_inputs({"image_tag": "staging-other", "resolved_sha": "z" * 40})
         steps = [_AlwaysOKStep(0, "resolve")]
         with pytest.raises(DriverError, match=r"inputs\.json"):
             run_rollout(ctx, steps, ev, io.StringIO())

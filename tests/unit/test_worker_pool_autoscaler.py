@@ -873,11 +873,11 @@ async def test_load_observation_excludes_release_drift_slurm_jobs() -> None:
                         redacted_env={
                             "LOOM_REMOTE_WORKER_ENV_FILE": (
                                 "/shared_work/qianyi/loom-worker-capacity/"
-                                "public-beta-oldlab-worker-public-beta-a88e33a4.env"
+                                "staging-oldlab-worker-staging-a88e33a4.env"
                             ),
                             "LOOM_REMOTE_WORKER_REPO_DIR": (
                                 "/shared_work/qianyi/"
-                                "loom-remote-worker-public-beta-a88e33a4"
+                                "loom-remote-worker-staging-a88e33a4"
                             ),
                         },
                     ),
@@ -895,11 +895,11 @@ async def test_load_observation_excludes_release_drift_slurm_jobs() -> None:
                 "allowed_nodes": ["TRT-EAI-OLDLAB-1"],
                 "env_file": (
                     "/shared_work/qianyi/loom-worker-capacity/"
-                    "public-beta-oldlab-worker-public-beta-a232312f.env"
+                    "staging-oldlab-worker-staging-a232312f.env"
                 ),
                 "repo_dir": (
                     "/shared_work/qianyi/"
-                    "loom-remote-worker-public-beta-a232312f"
+                    "loom-remote-worker-staging-a232312f"
                 ),
                 "requested_concurrency": 1,
                 "requested_cpus": 2,

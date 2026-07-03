@@ -317,9 +317,9 @@ def test_stopped_host_intent_forces_worker_drain_regardless_of_apply_result(
             "/admin/gb10-worker-pools/production/gb10-arm64/desired-state",
             headers=headers,
             json={
-                "image_tag": "public-beta-6b76a48",
+                "image_tag": "staging-6b76a48",
                 "max_concurrent": 10,
-                "env_config_version": "public-beta-6b76a48",
+                "env_config_version": "staging-6b76a48",
                 "host_intents": {"trt-gb10-15": "stopped"},
             },
         )
@@ -333,9 +333,9 @@ def test_stopped_host_intent_forces_worker_drain_regardless_of_apply_result(
             "trt-gb10-15/report",
             headers=headers,
             json={
-                "current_image_tag": "public-beta-6b76a48",
+                "current_image_tag": "staging-6b76a48",
                 "current_max_concurrent": 10,
-                "current_env_config_version": "public-beta-6b76a48",
+                "current_env_config_version": "staging-6b76a48",
                 "current_intent": "stopped",
                 "apply_state": "applied",
                 "last_apply_result": "already current",
@@ -369,9 +369,9 @@ def test_stopped_intent_reconciliation_ignores_hosts_with_no_worker_id(
                 "/admin/gb10-worker-pools/production/gb10-arm64/desired-state",
                 headers=headers,
                 json={
-                    "image_tag": "public-beta-6b76a48",
+                    "image_tag": "staging-6b76a48",
                     "max_concurrent": 10,
-                    "env_config_version": "public-beta-6b76a48",
+                    "env_config_version": "staging-6b76a48",
                     "host_intents": {"trt-gb10-15": "stopped"},
                 },
             ).status_code
@@ -382,9 +382,9 @@ def test_stopped_intent_reconciliation_ignores_hosts_with_no_worker_id(
             "trt-gb10-15/report",
             headers=headers,
             json={
-                "current_image_tag": "public-beta-6b76a48",
+                "current_image_tag": "staging-6b76a48",
                 "current_max_concurrent": 10,
-                "current_env_config_version": "public-beta-6b76a48",
+                "current_env_config_version": "staging-6b76a48",
                 "current_intent": "stopped",
                 "apply_state": "applied",
             },
@@ -406,16 +406,16 @@ def test_stopped_intent_reconciliation_is_idempotent_across_heartbeats(
             "/admin/gb10-worker-pools/production/gb10-arm64/desired-state",
             headers=headers,
             json={
-                "image_tag": "public-beta-6b76a48",
+                "image_tag": "staging-6b76a48",
                 "max_concurrent": 10,
-                "env_config_version": "public-beta-6b76a48",
+                "env_config_version": "staging-6b76a48",
                 "host_intents": {"trt-gb10-15": "stopped"},
             },
         )
         report_body: dict[str, object] = {
-            "current_image_tag": "public-beta-6b76a48",
+            "current_image_tag": "staging-6b76a48",
             "current_max_concurrent": 10,
-            "current_env_config_version": "public-beta-6b76a48",
+            "current_env_config_version": "staging-6b76a48",
             "current_intent": "stopped",
             "apply_state": "applied",
             "worker_id": worker_id,
@@ -455,9 +455,9 @@ def test_active_host_intent_does_not_touch_worker_drain_state(
             "/admin/gb10-worker-pools/production/gb10-arm64/desired-state",
             headers=headers,
             json={
-                "image_tag": "public-beta-6b76a48",
+                "image_tag": "staging-6b76a48",
                 "max_concurrent": 10,
-                "env_config_version": "public-beta-6b76a48",
+                "env_config_version": "staging-6b76a48",
                 "host_intents": {"trt-gb10-1": "active"},
             },
         )
@@ -467,9 +467,9 @@ def test_active_host_intent_does_not_touch_worker_drain_state(
                 "trt-gb10-1/report",
                 headers=headers,
                 json={
-                    "current_image_tag": "public-beta-6b76a48",
+                    "current_image_tag": "staging-6b76a48",
                     "current_max_concurrent": 10,
-                    "current_env_config_version": "public-beta-6b76a48",
+                    "current_env_config_version": "staging-6b76a48",
                     "current_intent": "active",
                     "apply_state": "applied",
                     "worker_id": worker_id,

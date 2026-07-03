@@ -192,7 +192,7 @@ rolled back:
 
 ```bash
 # Example: production image rollback only.
-PREVIOUS_IMAGE_TAG=public-beta-known-good
+PREVIOUS_IMAGE_TAG=staging-known-good
 tmp_config="$(mktemp)"
 cp deploy/environments/production.cluster.toml "$tmp_config"
 python - "$tmp_config" "$PREVIOUS_IMAGE_TAG" <<'PY'
@@ -221,7 +221,7 @@ environments. Remote OLDLAB/Lux capacity attaches behind the environment's own
 worker token and service URLs; it does not own production control-plane state.
 
 **OLDLAB x86 execution capacity is Slurm-managed, not in-cluster.**
-Public-beta, staging, and production profiles render with
+Staging, staging, and production profiles render with
 `k8s_worker.enabled=false` (#383). On these clusters, the in-cluster
 `loom-worker` Deployment is not present and `POST /api/v1/batches`
 rejects submissions whose `required_worker_pools` list contains
@@ -277,12 +277,12 @@ Each verb:
 | Command | What it does | Exit codes |
 |---|---|---|
 | `loom cluster preflight` | API-side checks: namespace exists, required Secrets present, IngressClass installed, default StorageClass available, PSS labels OK, and schema-doctor reconciliation for rendered env/Secret drift. With `--config`, preflight validates live `loom-secrets` but checks env vars against the target rendered Deployments so rollouts that add schema-backed env vars are not blocked by old live pods. Protected environments also check the live critical PVC/PV storage boundary and a recent backup manifest; pass `--config cluster-config.toml` so first deploys can prove static host-path Retain PVs before the PVCs exist. Optional runtime-derived worker env such as hostname, idle-exit, fixtures root, benchmark cache, and blocking-I/O executor override may stay unset. | 0 pass / 1 fail / 2 cluster unreachable |
-| `loom cluster backup manifest/check` | Write or verify metadata-only backup manifests for public-beta/staging destructive-operation guards | 0 verified / 1 invalid manifest / 2 bad input |
+| `loom cluster backup manifest/check` | Write or verify metadata-only backup manifests for staging/staging destructive-operation guards | 0 verified / 1 invalid manifest / 2 bad input |
 | `loom cluster render` | Print the rendered YAML to stdout (no cluster contact) | 0 / 2 on bad config |
 | `loom cluster release-manifest` | Write a safe pre-apply rollout artifact with the candidate git SHA/image tag, CLI version, cluster-config and rendered-manifest hashes, intended Deployment images, optional expected image digests/IDs from `--expected-image-identities-json`, Alembic heads, and environment-state worker desired-state fingerprints | 0 written / 2 bad input |
 | `loom cluster release-gate` | Compare the release manifest against the saved rendered/config hashes, live target-generation image evidence, live DB Alembic heads queried through `deploy/loom-control-plane`, and the `loom admin environment-state check --format json` artifact when the manifest records external-worker desired state. Running Deployments use exact Ready-pod runtime digest/image-ID comparison when available; kind-loaded `import-YYYY-MM-DD@sha256:...` runtime identities are accepted only with matching target-generation pod spec and Deployment template images; zero-replica managed Deployments use template-image convergence evidence. JSON output includes `component_evidence`; `--format markdown` writes the pasteable per-component release evidence table for issue comments. | 0 pass / 1 hard-check fail / 2 bad input or unreachable |
 | `loom cluster audit` | Static public/internal boundary check on rendered manifests: TLS ingress, only `/api/v1` → `loom-service` and `/` → `loom-web`, no LoadBalancer/NodePort, no unsafe hostPort, required NetworkPolicies present | 0 clean / 1 violation / 2 bad config |
-| `loom cluster up` | Preflight → render → protected-environment rollout mutation lease acquisition → `kubectl apply` → wait for components ready, Deployment generations observed, updated replicas converged, managed Deployment pods inspectable and free of blocking CrashLoop/image/config/start failures, kube-system rollout controllers healthy, and live Deployment images matching the rendered manifests; prints rendered/live image evidence for managed Deployments. For public-beta/staging/production, pass `--rollout-id` and `--rollout-lock-evidence` so evidence records acquisition and release/failure state. | 0 ready / 1 lock contention, not-ready, or image drift / 2 unreachable or kubectl missing |
+| `loom cluster up` | Preflight → render → protected-environment rollout mutation lease acquisition → `kubectl apply` → wait for components ready, Deployment generations observed, updated replicas converged, managed Deployment pods inspectable and free of blocking CrashLoop/image/config/start failures, kube-system rollout controllers healthy, and live Deployment images matching the rendered manifests; prints rendered/live image evidence for managed Deployments. For staging/staging/production, pass `--rollout-id` and `--rollout-lock-evidence` so evidence records acquisition and release/failure state. | 0 ready / 1 lock contention, not-ready, or image drift / 2 unreachable or kubectl missing |
 | `loom cluster status` | Live readiness snapshot with ingress endpoints; marks stale Deployment generations, incomplete updated replicas, failed managed-pod inspection, managed Deployment pod CrashLoop/image/config/start failures, and visible kube-system controller/scheduler/etcd/API pod failures as not-ready | 0 all-ready / 1 not-ready / 2 unreachable |
 | `loom cluster down` | `kubectl delete` of the rendered manifests; opt-in `--with-volumes` (PVCs) and `--delete-namespace` for full teardown. Protected environments require `--backup-manifest` and `--acknowledge-data-loss` before destructive flags. | 0 / 1 on failure, invalid backup guard, or operator-cancelled prompt |
 
@@ -303,9 +303,9 @@ knob you need.
    docker build -f deploy/Dockerfile.worker        -t loom-worker:0.7        .
    docker build -f deploy/Dockerfile.web           -t loom-web:0.7           .
    ```
-   Keep operator-local directories such as `.public-beta-staging` and
+   Keep operator-local directories such as `.staging-staging` and
    `.worktrees` out of the Docker context; the repository `.dockerignore`
-   excludes them so public-beta evidence, benchmark caches, and local worktrees
+   excludes them so staging evidence, benchmark caches, and local worktrees
    do not make image builds hang while sending context.
    `Dockerfile.web` is multi-stage (node-slim builds the Vite bundle
    → nginx-alpine serves it). Push to your registry, then update
@@ -492,8 +492,8 @@ knob you need.
      --cp-url http://localhost:8080 \
      --admin-token env:ADMIN_TOKEN \
      --expect-admin-token-fingerprint "$ADMIN_TOKEN_FINGERPRINT" \
-     --environment public-beta \
-     --file deploy/environment-state/public-beta.toml \
+     --environment staging \
+     --file deploy/environment-state/staging.toml \
      --var IMAGE_TAG="$IMAGE_TAG" \
      --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
      --rollout-id "$IMAGE_TAG" \
@@ -503,8 +503,8 @@ knob you need.
      --cp-url http://localhost:8080 \
      --admin-token env:ADMIN_TOKEN \
      --expect-admin-token-fingerprint "$ADMIN_TOKEN_FINGERPRINT" \
-     --environment public-beta \
-     --file deploy/environment-state/public-beta.toml \
+     --environment staging \
+     --file deploy/environment-state/staging.toml \
      --var IMAGE_TAG="$IMAGE_TAG" \
      --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
      --worker-token file:/secure/path/worker-token \
@@ -523,9 +523,9 @@ knob you need.
    patch. If `admin_token_fingerprint` fails, refresh the operator token
    source from the canonical protected-environment secret before rerunning;
    do not work around it by switching to an untracked token.
-   The public-beta profile currently targets the legacy Control Plane
+   The staging profile currently targets the legacy Control Plane
    environment name `production` because existing GB10 node agents read that
-   desired-state key; the CLI still requires `--environment public-beta` so
+   desired-state key; the CLI still requires `--environment staging` so
    operators do not accidentally apply the staging profile.
    When a release manifest records this profile, pass the JSON check artifact
    to `loom cluster release-gate --environment-state-check`; a missing artifact,
@@ -535,7 +535,7 @@ knob you need.
    rollout lease as `loom cluster up`, defaulting to
    `$LOOM_ROLLOUT_LOCK_DIR` or `~/.loom/rollout-locks`. Set a shared
    `LOOM_ROLLOUT_LOCK_DIR` on hosts where multiple operators or Codex threads
-   can mutate the same public-beta/staging target. If the command reports an
+   can mutate the same staging/staging target. If the command reports an
    active owner, do not force it until the recorded owner is proven stale and
    that evidence is saved in the rollout directory; then rerun with
    `--force-rollout-lock` and keep the lock evidence JSON with the release
@@ -616,7 +616,7 @@ knob you need.
    The approval response reveals a raw `loom_invite_...` code and browser invite
    link exactly once. Deliver the link to the requested contact; the contact
    accepts it to create their user session and the selected team membership
-   without seeing raw API credentials. Loom does not email the link in public beta.
+   without seeing raw API credentials. Loom does not email the link in staging.
    If the link is lost, resend the invite to rotate the stored hash and reveal a
    replacement:
    ```bash
@@ -633,7 +633,7 @@ knob you need.
    Audit rows include the operator-attested actor and safe metadata such as
    invite prefixes, never raw bearer or invite tokens.
 
-10. **Public-beta incident controls.** Use the same admin token plus an
+10. **Staging incident controls.** Use the same admin token plus an
     operator-attested `X-Loom-Admin-Actor` for every emergency mutation:
     ```bash
     # Revoke a leaked or overused API token by hash prefix.
@@ -748,7 +748,7 @@ knob you need.
 
 ## Release migrations against protected Postgres (#332)
 
-Public-beta and staging Postgres is fronted by a NetworkPolicy that only
+Staging and staging Postgres is fronted by a NetworkPolicy that only
 permits ingress from three service labels (`app=loom-control-plane`,
 `app=loom-service`, `app=loom-llm-gateway`) plus — as of #332 — the
 sanctioned migration label `app=loom-migration`. Any generic migration
@@ -766,8 +766,8 @@ would receive real traffic during rollout.
 
 ```bash
 loom cluster render-migration \
-  --image-tag public-beta-05ab776 \
-  --namespace loom-public-beta \
+  --image-tag staging-05ab776 \
+  --namespace loom-staging \
   | kubectl apply -f -
 ```
 
@@ -781,11 +781,11 @@ evidence directory.
 Watch it complete:
 
 ```bash
-kubectl -n loom-public-beta wait \
+kubectl -n loom-staging wait \
   --for=condition=complete \
   --timeout=300s \
-  job -l app=loom-migration,loom.image-tag=public-beta-05ab776
-kubectl -n loom-public-beta logs -l app=loom-migration \
+  job -l app=loom-migration,loom.image-tag=staging-05ab776
+kubectl -n loom-staging logs -l app=loom-migration \
   --tail=-1 --prefix=true
 ```
 
@@ -818,11 +818,11 @@ The most common failure modes:
 
 ## Rollout build resilience (#199)
 
-Public-beta and staging rollout builds run `pip install` inside each service
+Staging and staging rollout builds run `pip install` inside each service
 image (`Dockerfile.control-plane`, `Dockerfile.gateway`, `Dockerfile.service`,
 `Dockerfile.worker`, `Dockerfile.egress-xds`). A single transient PyPI
 `ReadTimeoutError` used to fail the whole rollout — observed during
-`public-beta-92f0090` where `loom-service` aborted mid-build even though CI
+`staging-92f0090` where `loom-service` aborted mid-build even though CI
 and the preceding `loom-control-plane` image had built cleanly.
 
 Each rollout-critical Dockerfile now sets:
@@ -862,7 +862,7 @@ that drops the env vars breaks CI before the rollout does.
 
 ## One-command rollout driver (#340)
 
-`loom cluster rollout` orchestrates the full public-beta rollout: resolve
+`loom cluster rollout` orchestrates the full staging rollout: resolve
 target ref → worktree → build → kind-load → GB10 prep → backup → audit →
 render → preflight → migrate → env-state → cluster up → release-gate →
 smoke → summary. Every step writes evidence into a per-rollout directory
@@ -874,13 +874,13 @@ step.
 ```bash
 loom cluster rollout \
   --ref origin/dev \
-  --image-tag public-beta-abc1234 \
-  --cluster-name loom-public-beta \
-  --namespace loom-public-beta \
-  --environment public-beta \
+  --image-tag staging-abc1234 \
+  --cluster-name loom-staging \
+  --namespace loom-staging \
+  --environment staging \
   --cluster-config /operator/cluster-config.toml \
-  --backup-manifest /data/loom-public-beta/backups/latest/backup-manifest.json \
-  --rollout-root /data/loom-public-beta \
+  --backup-manifest /data/loom-staging/backups/latest/backup-manifest.json \
+  --rollout-root /data/loom-staging \
   --scope current-gb10
 ```
 
@@ -909,7 +909,7 @@ Optional flags:
 Each invocation gets a directory under `<rollout-root>/rollouts/`:
 
 ```
-20260702t235959z-public-beta-abc1234/
+20260702t235959z-staging-abc1234/
 ├── state.json               # driver's state machine snapshot
 ├── inputs.json              # resolved CLI args + config sha
 ├── logs/driver.log
@@ -973,10 +973,10 @@ observability and mutation contract:
 
 ## Kind cluster: loading local images before rollout (#96)
 
-When a public-beta or staging cluster runs on top of `kind`, images built with
+When a staging or staging cluster runs on top of `kind`, images built with
 host docker are **not automatically visible** to the kind node's containerd. A
 plain `kubectl apply` against a Deployment that references a local tag
-(`loom-worker:public-beta-<sha7>`) will hit `ErrImagePull` / `ImagePullBackOff`
+(`loom-worker:staging-<sha7>`) will hit `ErrImagePull` / `ImagePullBackOff`
 because containerd tries the default registry (`docker.io/library/...`) and
 finds nothing.
 
@@ -987,11 +987,11 @@ Load images explicitly:
 
 ```bash
 loom cluster load-images \
-  --cluster-name loom-public-beta \
-  --image loom-control-plane:public-beta-1bbc323 \
-  --image loom-service:public-beta-1bbc323 \
-  --image loom-llm-gateway:public-beta-1bbc323 \
-  --image loom-worker:public-beta-1bbc323
+  --cluster-name loom-staging \
+  --image loom-control-plane:staging-1bbc323 \
+  --image loom-service:staging-1bbc323 \
+  --image loom-llm-gateway:staging-1bbc323 \
+  --image loom-worker:staging-1bbc323
 ```
 
 Or extract the image set directly from a rendered manifest so nothing drifts
@@ -1000,7 +1000,7 @@ between what `loom cluster render` emits and what gets loaded:
 ```bash
 loom cluster render > /tmp/rendered.yaml
 loom cluster load-images \
-  --cluster-name loom-public-beta \
+  --cluster-name loom-staging \
   --from-manifest /tmp/rendered.yaml
 ```
 
@@ -1013,7 +1013,7 @@ rollout driver before `kubectl apply`:
 
 ```bash
 loom cluster load-images \
-  --cluster-name loom-public-beta \
+  --cluster-name loom-staging \
   --from-manifest /tmp/rendered.yaml \
   --check-only
 ```
@@ -1095,7 +1095,7 @@ loom cluster status
 
 Use `--skip-preflight` only for same-storage-boundary image rollbacks where
 Secrets, IngressClass, and critical PVC/PV bindings are already known-good. Do
-not skip preflight during public-beta/staging storage migration or restore
+not skip preflight during staging/staging storage migration or restore
 work; pass `--config`, `--environment`, and `--backup-manifest` instead.
 
 Migration rollbacks: `alembic downgrade -1` from a Control Plane pod or
@@ -1174,9 +1174,9 @@ and install a durable managed subprocess Gateway tunnel from `30444` to
 
 ```bash
 scripts/ops/worker_service_tunnels.py install-systemd \
-  --namespace loom-public-beta \
+  --namespace loom-staging \
   --kubectl /usr/local/bin/kubectl \
-  --kubeconfig /secure/path/public-beta.kubeconfig \
+  --kubeconfig /secure/path/staging.kubeconfig \
   --subprocess-gateway-local-port 30444
 ```
 
@@ -1362,8 +1362,8 @@ kubectl rollout restart deploy/loom-worker
 loom admin environment-state check \
   --cp-url http://localhost:8080 \
   --admin-token env:LOOM_ADMIN_TOKEN \
-  --environment public-beta \
-  --file deploy/environment-state/public-beta.toml \
+  --environment staging \
+  --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
   --worker-token file:/secure/path/worker-token
@@ -2351,7 +2351,7 @@ workload shape. Halve the `for:` durations for staging.
 Migration `0039_trials_succeeded_has_result.py` ships a `CHECK
 (state != 'succeeded' OR result IS NOT NULL)` constraint as
 `NOT VALID` — new writes are blocked, but pre-existing legacy rows
-(present in public-beta DBs from before #416 ships) are not
+(present in staging DBs from before #416 ships) are not
 re-checked at apply time. Apply the migration and inspect the
 NOTICE for the violation count; the count is also surfaced by:
 
@@ -2437,7 +2437,7 @@ following bounds:
 
 ## Rollout evidence path setup (#174)
 
-Public-beta and staging environments back host-mounted service data (Postgres,
+Staging and staging environments back host-mounted service data (Postgres,
 MinIO, backups, trajectories) under `/data/<environment-name>/`. That root
 directory is `root:root 755` so the operator user cannot create new siblings
 without sudo. Operator rollout/evidence workflows expect a stable set of
@@ -2451,7 +2451,7 @@ that establishes the operator-writable set idempotently:
 
 ```bash
 loom cluster bootstrap-evidence-paths \
-  --rollout-root /data/loom-public-beta \
+  --rollout-root /data/loom-staging \
   --operator-user qianyi
 ```
 
@@ -2466,7 +2466,7 @@ Review the emitted script before running it:
 
 ```bash
 loom cluster bootstrap-evidence-paths \
-  --rollout-root /data/loom-public-beta \
+  --rollout-root /data/loom-staging \
   --operator-user qianyi \
   > /tmp/bootstrap-evidence.sh
 $EDITOR /tmp/bootstrap-evidence.sh
@@ -2480,19 +2480,19 @@ subsequent rollout evidence dirs (per-SHA subdirectories under
 
 ## Backup + restore
 
-Public-beta and staging are protected environments. Before any operation that
+Staging and staging are protected environments. Before any operation that
 can destroy or orphan cluster state, create a fresh backup bundle and metadata
 manifest. The first-phase guard is intentionally conservative: `loom cluster
 down --with-volumes` or `--delete-namespace` refuses to run against
-`public-beta`, `staging`, or `production` unless a recent verified manifest is
+`staging`, `staging`, or `production` unless a recent verified manifest is
 provided and the operator passes an explicit acknowledgement.
 
 Backup bundle layout:
 
 ```bash
-export ENVIRONMENT=public-beta
-export NAMESPACE=loom-public-beta
-export BACKUP_ROOT=/data/loom-public-beta/backups/$(date -u +%Y%m%dT%H%M%SZ)
+export ENVIRONMENT=staging
+export NAMESPACE=loom-staging
+export BACKUP_ROOT=/data/loom-staging/backups/$(date -u +%Y%m%dT%H%M%SZ)
 install -d -m 700 "$BACKUP_ROOT"/{postgres,minio,secrets}
 ```
 
@@ -2501,9 +2501,9 @@ of the kind/local-path default. Keep the data root outside the kind node's
 Docker volume boundary:
 
 ```toml
-namespace = "loom-public-beta"
+namespace = "loom-staging"
 persistent_storage_backend = "static-host-path"
-persistent_storage_host_path_root = "/data/loom-public-beta"
+persistent_storage_host_path_root = "/data/loom-staging"
 ```
 
 For kind-backed protected environments, the kind control-plane node must also
@@ -2517,21 +2517,21 @@ show a bind mount covering `/data` or the exact environment root:
 nodes:
   - role: control-plane
     extraMounts:
-      - hostPath: /data/loom-public-beta
-        containerPath: /data/loom-public-beta
+      - hostPath: /data/loom-staging
+        containerPath: /data/loom-staging
 ```
 
 Create the host directories before first apply:
 
 ```bash
 install -d -m 700 \
-  /data/loom-public-beta/postgres \
-  /data/loom-public-beta/minio \
-  /data/loom-public-beta/trajectories \
-  /data/loom-public-beta/backups
+  /data/loom-staging/postgres \
+  /data/loom-staging/minio \
+  /data/loom-staging/trajectories \
+  /data/loom-staging/backups
 ```
 
-For an existing public-beta/staging namespace that already has local-path PVCs,
+For an existing staging/staging namespace that already has local-path PVCs,
 do not assume changing `cluster-config.toml` is enough: StatefulSet
 `volumeClaimTemplates` and PVC binding fields are effectively immutable. Take a
 fresh backup, pause writers, and treat the move to static PVs as a restore or
@@ -2615,7 +2615,7 @@ loom cluster down \
 ```
 
 Do not use unbacked `kind delete cluster`, namespace deletion, PVC deletion,
-Docker volume cleanup, or `loom cluster down --with-volumes` for public-beta or
+Docker volume cleanup, or `loom cluster down --with-volumes` for staging or
 staging. Ordinary pod/service restarts and `loom cluster down --yes` without
 `--with-volumes` or `--delete-namespace` preserve PVCs and do not require the
 destructive-operation acknowledgement.
@@ -2637,14 +2637,14 @@ Restore drill checklist:
 
 ## Staging smoke gate
 
-Before promoting a release from `dev` to `main`, exercise the public beta
+Before promoting a release from `dev` to `main`, exercise the staging
 account flow on a staging cluster and attach the evidence to the release issue or
 PR. The gate has two parts:
 
 - **Operator/browser evidence** for DNS/TLS, account request approval, password
   setup/reset, SPA submission, and visual checks that require a real browser
   session.
-- **Repeatable API evidence** from `scripts/public_beta_smoke_gate.py`, which
+- **Repeatable API evidence** from `scripts/staging_smoke_gate.py`, which
   verifies public API auth, provider discovery, service-proxied downloads, Run
   Library sharing, cross-team denials, provenance, claimed-without-started
   batch diagnostics, and leak scanning.
@@ -2675,15 +2675,15 @@ separate product policy exists.
 - One canonical task fixture registered. `hello-world` is enough for the gate;
   another tiny task is fine if it produces ATIF, trajectory, and at least one
   safe artifact.
-- A ready benchmark catalog provisioned into the staging/public-beta database
+- A ready benchmark catalog provisioned into the staging/staging database
   and object store. This is release data, not test fixture data, and must not
   be created through `scripts/seed_test_data.py`.
-- If the staging/public-beta deployment has a remote-worker pool outside the
+- If the staging/staging deployment has a remote-worker pool outside the
   Kubernetes cluster, durable private tunnels are installed for Control Plane,
   Gateway, and MinIO. See [remote-worker-pool.md](remote-worker-pool.md).
 - One seeded blocked artifact on the source trial, marked
   `share_status=blocked`, whose raw object body contains a fake secret such as
-  `seeded-public-beta-secret`. The release evidence should prove Team B cannot
+  `seeded-staging-secret`. The release evidence should prove Team B cannot
   download it and that the fake secret does not appear in API responses.
 - One private source trial or batch with a safe artifact that Team A can read
   and Team B cannot read through Run Library.
@@ -2692,7 +2692,7 @@ separate product policy exists.
 
 Before inviting beta users or starting manual New Batch testing, restore the
 ready benchmark catalog through one of the official catalog paths below. Do not
-insert benchmark/task rows manually, patch JSON in SQL, or seed public-beta
+insert benchmark/task rows manually, patch JSON in SQL, or seed staging
 with `scripts/seed_test_data.py`; missing credentials or source artifacts are
 release blockers that should be fixed through the deployment Secret/profile and
 tracked in the launch issue.
@@ -2714,7 +2714,7 @@ export LOOM_MINIO_SECRET_KEY="$PUBLIC_BETA_MINIO_SECRET_KEY"
 
 # Inside a deployed loom-service pod, the command also accepts the service
 # Secret names LOOM_SVC_DB_URL and LOOM_SVC_MINIO_* for target values.
-loom datasets provision-public-beta-catalog \
+loom datasets provision-staging-catalog \
   --target-bucket loom-benchmarks \
   --imported-by "release:${IMAGE_TAG:-manual}"
 ```
@@ -2922,7 +2922,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    scopes, never raw passwords. Then mint short-lived smoke API tokens from the
    logged-in non-admin user session, not from an admin bearer or manual DB write:
    ```bash
-   export SMOKE_TOKEN_NAME="public-beta-team-a-$(date -u +%Y%m%dT%H%M%SZ)"
+   export SMOKE_TOKEN_NAME="staging-team-a-$(date -u +%Y%m%dT%H%M%SZ)"
    python - <<'PY'
    import json
    import os
@@ -2962,7 +2962,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
        response.raise_for_status()
    PY
    ```
-7. **Provider connection create + test.** As Team A, create the public-beta
+7. **Provider connection create + test.** As Team A, create the staging
    smoke provider through the CLI (or `POST /api/v1/provider-connections`),
    then probe. The release fixture uses YibuAPI through Loom's
    OpenAI-compatible provider path so the same connection can run the Codex
@@ -2994,7 +2994,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     CLI. Before submitting either canary, run the object-store write gate by
     itself so MinIO free-space failures are caught before trial execution:
     ```bash
-    python scripts/public_beta_smoke_gate.py \
+    python scripts/staging_smoke_gate.py \
       --server-url https://loom.example.com \
       --team-a-token env:TEAM_A_TOKEN \
       --team-b-token env:TEAM_B_TOKEN \
@@ -3006,8 +3006,8 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
       --object-store-write-check-count 64 \
       --object-store-write-check-concurrency 16 \
       --fail-on-skip \
-      --markdown-output public-beta-object-store-preflight.md \
-      --json-output public-beta-object-store-preflight.json
+      --markdown-output staging-object-store-preflight.md \
+      --json-output staging-object-store-preflight.json
     ```
     The `object_store.minio_write_probe` row must be `PASS`. Keep the probe at
     a nontrivial count/concurrency for full100 or remote-worker acceptance so
@@ -3053,7 +3053,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    `loom eval batch create` validates local built-in agents first, but falls
    back to the deployed `/api/v1/agents` catalog when local `loom-launcher`
    adapters are absent. A fresh rollout/operator venv can therefore submit a
-   service-mode `codex` batch as long as the target public-beta service catalog
+   service-mode `codex` batch as long as the target staging service catalog
    lists `codex` as ready.
    Re-run `batch show` until `state` reaches a terminal value.
 11. **Live progress visibility.** While the batch runs, the SPA Monitor page
@@ -3195,7 +3195,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     needles as `env:VAR`, `file:PATH`, or `-` sources; do not expand raw secret
     values into argv:
     ```bash
-    python scripts/public_beta_smoke_gate.py \
+    python scripts/staging_smoke_gate.py \
       --server-url https://loom.example.com \
       --team-a-token env:TEAM_A_TOKEN \
       --team-b-token env:TEAM_B_TOKEN \
@@ -3217,17 +3217,17 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
       --object-store-write-check-bucket trajectories \
       --object-store-write-check-count 64 \
       --object-store-write-check-concurrency 16 \
-      --k8s-namespace loom-public-beta \
+      --k8s-namespace loom-staging \
       --required-worker-pool oldlab \
       --secret-needle env:PUBLIC_BETA_SECRET_NEEDLE \
       --internal-url-needle loom-minio.loom.svc.cluster.local \
       --allow-mutating-checks \
       --fail-on-skip \
-      --markdown-output public-beta-smoke.md \
-      --json-output public-beta-smoke.json
+      --markdown-output staging-smoke.md \
+      --json-output staging-smoke.json
     ```
-    Attach `public-beta-smoke.md` or paste its table into the release comment.
-    Store `public-beta-smoke.json` with release artifacts if the environment has
+    Attach `staging-smoke.md` or paste its table into the release comment.
+    Store `staging-smoke.json` with release artifacts if the environment has
     a private artifact store. The script redacts raw API tokens, seeded fake
     secrets, provider-key-like values, signed object-store URLs, and internal
     service URLs before writing evidence. The `auth.team_a_whoami` and
@@ -3253,7 +3253,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     is a deterministic gate rather than a post-hoc DB distribution check.
 19. **Teardown clean.** `loom cluster down --yes` removes every applied
     object; PVCs survive (verify via `kubectl get pvc -n loom`). For
-    public-beta or staging, pass `--with-volumes` or `--delete-namespace` only
+    staging or staging, pass `--with-volumes` or `--delete-namespace` only
     with a fresh `loom cluster backup manifest` and
     `--acknowledge-data-loss <environment>`.
 
@@ -3263,7 +3263,7 @@ Capture artifact links + a brief note for each pass in the
 
 ### Automation status
 
-Two CI workflows plus the public-beta smoke script automate parts of this
+Two CI workflows plus the staging smoke script automate parts of this
 checklist:
 
 - **`cluster-smoke`** (kind, label-gated `cluster-smoke`) — covers
@@ -3273,7 +3273,7 @@ checklist:
   REAL images, applies them, waits for every pod to reach Ready,
   probes `/healthz` + `/metrics` on every component. Closes the
   cold-start regression gap (~15-20 min).
-- **`scripts/public_beta_smoke_gate.py`** — covers public health, logged-out SPA
+- **`scripts/staging_smoke_gate.py`** — covers public health, logged-out SPA
   reachability, two-team non-admin user-owned API-token auth, provider/model
   discovery, runnable benchmark catalog presence, sampled ready benchmark bundle objects,
   concurrent object-store write/delete probing, service pod restart/OOM status,
@@ -3297,17 +3297,17 @@ Browser-only invite acceptance, SPA visual submission, and provider-error UI
 screenshots remain manual release evidence unless the staging environment adds a
 mock provider and browser automation job.
 
-For the final public-beta #49/#129 full/max-slot three-cluster canary, use
+For the final staging #49/#129 full/max-slot three-cluster canary, use
 [`docs/full-max-slot-canary-runbook.md`](full-max-slot-canary-runbook.md).
 That runbook is GO-gated: prepare the commands, preflight checklist, stop
 conditions, and evidence directory up front, but do not submit the canary until
 the coordinator confirms the clean anchor and #190 targeted durability evidence.
 
-## Terminal-Bench 2.0 public-beta readiness
+## Terminal-Bench 2.0 staging readiness
 
 The TB-2 adapter (`packages/loom-benchmark-terminal-bench-2`) and its 86-task
 pinned bundle (`terminal-bench-core` v0.1.1, commit
-`91e10457b5410f16c44364da1a34cb6de8c488a5`) ship with the public-beta
+`91e10457b5410f16c44364da1a34cb6de8c488a5`) ship with the staging
 catalog. The exercises in this section are the cluster-side acceptance gates
 for issue #217 that cannot be covered by unit CI: real worker image builds,
 provider trials, MinIO mirroring, sidecar plumbing, and resource-budget
@@ -3333,7 +3333,7 @@ saturates the worker setup budget. Publish once, register, mirror, and audit:
 
 ```bash
 # Replace the env vars below with the target environment's values.
-export LOOM_HF_ORG=loom-public-beta
+export LOOM_HF_ORG=loom-staging
 export LOOM_DB_URL="postgresql+psycopg://loom:$LOOM_DB_PASS@dev-db.yylx.world:5432/loom_dev"
 export LOOM_MINIO_ENDPOINT=https://minio.dev.yylx.world
 export LOOM_MINIO_ACCESS_KEY=...
@@ -3407,7 +3407,7 @@ Acceptance:
 Archive the ATIFs under `docs/evidence/issue-217/` and link them in the
 closing comment on #217.
 
-### G4 — Sidecar tasks against the public-beta sandbox
+### G4 — Sidecar tasks against the staging sandbox
 
 Three pinned tasks declare compose sidecars (`security-vulhub-minio`,
 `simple-sheets-put`, `simple-web-scraper`). Run each individually so the
@@ -3433,12 +3433,12 @@ Acceptance:
 
 ### G6 — Provider × Terminal-Bench-2 matrix
 
-The public-beta agent catalog (PR #177) ships Claude Opus 4.7, Sonnet 4.6,
+The staging agent catalog (PR #177) ships Claude Opus 4.7, Sonnet 4.6,
 and Haiku 4.5. Run one TB-2 task per provider to confirm tool-loop reach to
 verifier output. Use `hello-world` for cost discipline.
 
 ```bash
-# Replace --provider/--model with the public-beta connection name for each
+# Replace --provider/--model with the staging connection name for each
 # Claude SKU; `loom providers list` shows what's configured.
 for agent_model in \
   "claude-code|anthropic|claude-opus-4-7-20260101" \
@@ -3466,7 +3466,7 @@ Acceptance:
 
 TB-2 inherits `max_agent_timeout_sec` and `max_test_timeout_sec` from
 upstream task YAML. Some tasks reserve 30-minute agent budgets, which
-collide with the default per-trial wall-clock on the public-beta sandbox
+collide with the default per-trial wall-clock on the staging sandbox
 class.
 
 Profile a representative slice (one short, one medium, one long task):
@@ -3541,7 +3541,7 @@ link it from #217; do not merge incomplete evidence.
   `LOOM_CP_STALE_RUNNING_TRIAL_TIMEOUT_MULTIPLIER=3.0`,
   `LOOM_CP_STALE_RUNNING_TRIAL_GRACE_SEC=900.0`, and
   `LOOM_CP_STALE_RUNNING_TRIAL_SILENCE_SEC=900.0`. Lower these only for a
-  controlled validation batch; keep public-beta defaults conservative. The
+  controlled validation batch; keep staging defaults conservative. The
   service debug/diagnosis projection uses the corresponding
   `LOOM_SVC_WORKER_HEARTBEAT_EXPIRY_SEC` and `LOOM_SVC_STALE_RUNNING_*`
   settings, so tune service and Control Plane values together when validating
@@ -3613,7 +3613,7 @@ link it from #217; do not merge incomplete evidence.
   concurrency only after CPU, RAM, Docker cleanup, MinIO throughput,
   Gateway/provider error rate, and Control Plane state-patch health are clean.
   The remote-worker env file and `REPO_DIR` must be readable from every
-  included Slurm node. For OLDLAB public-beta capacity, use a shared checkout
+  included Slurm node. For OLDLAB staging capacity, use a shared checkout
   path such as `/shared_work/<operator>/loom-remote-worker-${IMAGE_TAG}`; a
   control-node `/home` checkout can be incomplete on OLDLAB 4/5 and must not be
   assumed valid without a Slurm-side check.
@@ -3647,7 +3647,7 @@ link it from #217; do not merge incomplete evidence.
         "trt-eai-oldlab-4",
         "trt-eai-oldlab-5"
       ],
-      "env_file": "/shared_work/qianyi/loom-worker-capacity/public-beta-oldlab-worker-${IMAGE_TAG}.env",
+      "env_file": "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker-${IMAGE_TAG}.env",
       "repo_dir": "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}",
       "requested_cpus": 2,
       "requested_memory_mib": 8192,
@@ -3701,7 +3701,7 @@ link it from #217; do not merge incomplete evidence.
   workers to physical hosts. Set `LOOM_WORKER_POOL_NAME=gb10-arm64` so slot
   summaries and metrics group the hosts together. Keep Docker data-root, worker
   trajectory cache, benchmark cache, and trial scratch on each node's local
-  ext4 disk; do not put those hot paths on `/shared_work`. Current public-beta
+  ext4 disk; do not put those hot paths on `/shared_work`. Current staging
   validation uses `trt-gb10-1..15` at `LOOM_WORKER_MAX_CONCURRENT=10`, for 150
   configured ARM64 slots. After every rollout, first apply and check the
   versioned environment profile so DB-backed policy converges with the image
@@ -3713,16 +3713,16 @@ link it from #217; do not merge incomplete evidence.
     --cp-url http://control-node.lan:18081 \
     --admin-token file:/secure/path/admin-token \
     --expect-admin-token-fingerprint "$ADMIN_TOKEN_FINGERPRINT" \
-    --environment public-beta \
-    --file deploy/environment-state/public-beta.toml \
+    --environment staging \
+    --file deploy/environment-state/staging.toml \
     --var IMAGE_TAG="$IMAGE_TAG" \
     --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
   loom admin environment-state check \
     --cp-url http://control-node.lan:18081 \
     --admin-token file:/secure/path/admin-token \
     --expect-admin-token-fingerprint "$ADMIN_TOKEN_FINGERPRINT" \
-    --environment public-beta \
-    --file deploy/environment-state/public-beta.toml \
+    --environment staging \
+    --file deploy/environment-state/staging.toml \
     --var IMAGE_TAG="$IMAGE_TAG" \
     --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
     --worker-token file:/secure/path/worker-token
@@ -3791,7 +3791,7 @@ link it from #217; do not merge incomplete evidence.
   `actual_slots`; the autoscaler records a hard `release_state_drift` blocked
   decision instead of treating the stale job as warm capacity. Replace or
   cancel those jobs and rerun `environment-state check` before submitting
-  public-beta/full100 validation batches.
+  staging/full100 validation batches.
   Use `--format json` for release evidence or automation. If Loom backlog has
   drained but Slurm still has pending elastic jobs, cancel those Slurm job ids
   with `scancel`; the controller will record cancellation on its next

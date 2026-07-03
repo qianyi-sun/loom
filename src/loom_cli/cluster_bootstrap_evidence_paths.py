@@ -1,8 +1,8 @@
 """Emit `sudo install -d` script for operator-writable rollout evidence paths.
 
-Fixes #174. During #160/#158/#161 public-beta rollout validation after the
+Fixes #174. During #160/#158/#161 staging rollout validation after the
 #139 storage migration, the operator user could not create rollout evidence
-directories under `/data/loom-public-beta` because the top-level directory is
+directories under `/data/loom-staging` because the top-level directory is
 `root:root 755`. Operators worked around it with ad-hoc `sudo install -d`
 invocations, which is not repeatable across environments.
 
@@ -47,7 +47,7 @@ RESERVED_SERVICE_DIRS: frozenset[str] = frozenset({
 # injection at the boundary before we splice into a script.
 _USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
-# Default set of operator-writable evidence directories that a public-beta
+# Default set of operator-writable evidence directories that a staging
 # or staging rollout expects to exist under the rollout root.
 DEFAULT_EVIDENCE_PATHS: tuple[str, ...] = ("rollouts", "evidence", "logs")
 
@@ -88,7 +88,7 @@ def render_bootstrap_script(
     if not rollout_root.is_absolute():
         raise ValueError(
             f"rollout_root must be absolute; got {rollout_root!r}. "
-            "Pass a full path like /data/loom-public-beta."
+            "Pass a full path like /data/loom-staging."
         )
     if not operator_user:
         raise ValueError("operator_user must be non-empty")

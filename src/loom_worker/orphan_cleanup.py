@@ -11,7 +11,7 @@ file is the only forensic record of. Reclaim re-queues the trial; the
 new attempt writes its own JSONL. Deleting the old one mid-rollout
 killed the only data available to triage the previous attempt and
 manifested as `trajectory_flush_failed` rows with no message in the
-public-beta evidence on this issue.
+staging evidence on this issue.
 """
 
 from __future__ import annotations

@@ -61,7 +61,7 @@ _SUMMARY = {
                 "last_autoscaler_error": None,
             },
             {
-                "pool_name": "public-beta-x86",
+                "pool_name": "staging-x86",
                 "backend": "docker",
                 "cpu_arch": "x86_64",
                 "autoscaler_environment": "production",
@@ -246,7 +246,7 @@ def test_resources_status_text_shows_slots_and_pool_breakdown(
     assert "40" in out
     assert "request_drain" in out
     assert "idle_excess_capacity" in out
-    assert "public-beta-x86" in out
+    assert "staging-x86" in out
     assert "2/2" in out
     assert "scale_up" in out
     assert "pending_cap" in out

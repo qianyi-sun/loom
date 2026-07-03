@@ -34,7 +34,7 @@ connections, but it does not run vLLM jobs or serve checkpoints for users.
 └─────────────────────────────────────────────────┘    └─────────────────────────────────────────┘
 ```
 
-Storage is an orthogonal flag: `--storage embedded` (in-cluster Postgres + MinIO; the default) or `--storage external` (managed Postgres + S3). External is the only HA path; embedded is intentionally simple. For public-beta, staging, and production-like evidence environments, kind node-local `local-path` volumes are not a durable boundary by themselves; protected environments need host-managed/external storage or a fresh verified backup manifest before any operation that can delete PVCs, namespaces, kind clusters, or Docker volumes.
+Storage is an orthogonal flag: `--storage embedded` (in-cluster Postgres + MinIO; the default) or `--storage external` (managed Postgres + S3). External is the only HA path; embedded is intentionally simple. For staging, staging, and production-like evidence environments, kind node-local `local-path` volumes are not a durable boundary by themselves; protected environments need host-managed/external storage or a fresh verified backup manifest before any operation that can delete PVCs, namespaces, kind clusters, or Docker volumes.
 
 The short-term durable embedded path is explicit static host storage. Set
 `persistent_storage_backend = "static-host-path"` and
@@ -186,7 +186,7 @@ MinIO bucket lifecycle: `AbortIncompleteMultipartUpload after 7 days` for non-tr
 The `loom-worker` component below is optional and controlled by the
 render toggle `k8s_worker.enabled` in `config/cluster-config.toml`.
 Profiles that share OLDLAB hosts with Slurm (`staging`, `production`,
-public-beta) ship with `enabled=false` — the loom-worker Deployment
+staging) ship with `enabled=false` — the loom-worker Deployment
 and its NetworkPolicy are omitted, and trial execution capacity comes
 from the Slurm-managed `oldlab` pool instead. See #383 for the
 rationale (avoiding double-scheduling of the host Docker daemon
@@ -640,23 +640,23 @@ loom cluster up --nodes hostfile --import /tmp/loom-export.tar.gz.age \
 
 Same encrypted-tarball format as the backup CronJob's output, so DR and migration share a code path. Passphrase is operator-owned; loss = loss of the encrypted bundle.
 
-For the current public-beta/staging first-phase durability guard, operators
+For the current staging/staging first-phase durability guard, operators
 create component backups first, then write a metadata-only manifest:
 
 ```bash
 loom cluster backup manifest \
-  --environment public-beta \
-  --namespace loom-public-beta \
-  --postgres-dump /data/loom-public-beta/backups/20260629T120000Z/postgres/loom.dump \
-  --minio-snapshot /data/loom-public-beta/backups/20260629T120000Z/minio \
-  --k8s-secrets /data/loom-public-beta/backups/20260629T120000Z/secrets \
-  --output /data/loom-public-beta/backups/20260629T120000Z/backup-manifest.json
+  --environment staging \
+  --namespace loom-staging \
+  --postgres-dump /data/loom-staging/backups/20260629T120000Z/postgres/loom.dump \
+  --minio-snapshot /data/loom-staging/backups/20260629T120000Z/minio \
+  --k8s-secrets /data/loom-staging/backups/20260629T120000Z/secrets \
+  --output /data/loom-staging/backups/20260629T120000Z/backup-manifest.json
 
 loom cluster preflight \
-  --environment public-beta \
-  --namespace loom-public-beta \
+  --environment staging \
+  --namespace loom-staging \
   --config cluster-config.toml \
-  --backup-manifest /data/loom-public-beta/backups/20260629T120000Z/backup-manifest.json
+  --backup-manifest /data/loom-staging/backups/20260629T120000Z/backup-manifest.json
 ```
 
 `loom cluster up` accepts the same environment and backup-manifest flags and

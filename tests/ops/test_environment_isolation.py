@@ -102,6 +102,6 @@ def test_dockerignore_excludes_operator_local_artifacts_from_image_context() -> 
         if line.strip() and not line.startswith("#")
     }
 
-    assert ".public-beta-staging" in patterns
+    assert ".staging-staging" in patterns
     assert ".worktrees" in patterns
     assert "worktrees" in patterns

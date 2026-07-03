@@ -24,7 +24,7 @@ class TestRenderBootstrapScript:
 
     def test_emits_install_command_for_each_default_path(self) -> None:
         script = render_bootstrap_script(
-            rollout_root=Path("/data/loom-public-beta"),
+            rollout_root=Path("/data/loom-staging"),
             operator_user="qianyi",
             evidence_paths=["rollouts", "evidence", "logs"],
         )
@@ -32,7 +32,7 @@ class TestRenderBootstrapScript:
         for name in ("rollouts", "evidence", "logs"):
             expected = (
                 f"sudo install -d -o qianyi -g qianyi -m 755 "
-                f"/data/loom-public-beta/{name}"
+                f"/data/loom-staging/{name}"
             )
             assert expected in script, (
                 f"missing install line for {name}; script was:\n{script}"
@@ -40,18 +40,18 @@ class TestRenderBootstrapScript:
 
     def test_emits_header_documenting_intent(self) -> None:
         script = render_bootstrap_script(
-            rollout_root=Path("/data/loom-public-beta"),
+            rollout_root=Path("/data/loom-staging"),
             operator_user="qianyi",
             evidence_paths=["rollouts"],
         )
         assert "#!/bin/bash" in script.splitlines()[0]
         assert "operator: qianyi" in script
-        assert "rollout_root: /data/loom-public-beta" in script
+        assert "rollout_root: /data/loom-staging" in script
         assert "#174" in script  # cite the issue for future readers
 
     def test_emits_idempotence_note(self) -> None:
         script = render_bootstrap_script(
-            rollout_root=Path("/data/loom-public-beta"),
+            rollout_root=Path("/data/loom-staging"),
             operator_user="qianyi",
             evidence_paths=["rollouts"],
         )
@@ -62,7 +62,7 @@ class TestRenderBootstrapScript:
         for name in sorted(RESERVED_SERVICE_DIRS):
             with pytest.raises(ServiceDirCollisionError) as exc:
                 render_bootstrap_script(
-                    rollout_root=Path("/data/loom-public-beta"),
+                    rollout_root=Path("/data/loom-staging"),
                     operator_user="qianyi",
                     evidence_paths=["rollouts", name],
                 )
@@ -81,7 +81,7 @@ class TestRenderBootstrapScript:
     def test_absolute_rollout_root_required(self) -> None:
         with pytest.raises(ValueError, match="absolute"):
             render_bootstrap_script(
-                rollout_root=Path("loom-public-beta"),
+                rollout_root=Path("loom-staging"),
                 operator_user="qianyi",
                 evidence_paths=["rollouts"],
             )
@@ -89,7 +89,7 @@ class TestRenderBootstrapScript:
     def test_operator_user_must_not_be_empty(self) -> None:
         with pytest.raises(ValueError, match="operator_user"):
             render_bootstrap_script(
-                rollout_root=Path("/data/loom-public-beta"),
+                rollout_root=Path("/data/loom-staging"),
                 operator_user="",
                 evidence_paths=["rollouts"],
             )
@@ -98,7 +98,7 @@ class TestRenderBootstrapScript:
         """POSIX username rules: [a-z_][a-z0-9_-]*  (approximate)."""
         with pytest.raises(ValueError, match="invalid"):
             render_bootstrap_script(
-                rollout_root=Path("/data/loom-public-beta"),
+                rollout_root=Path("/data/loom-staging"),
                 operator_user="qianyi;rm -rf /",  # injection attempt
                 evidence_paths=["rollouts"],
             )
@@ -106,7 +106,7 @@ class TestRenderBootstrapScript:
     def test_evidence_paths_must_not_be_empty(self) -> None:
         with pytest.raises(ValueError, match="evidence_paths"):
             render_bootstrap_script(
-                rollout_root=Path("/data/loom-public-beta"),
+                rollout_root=Path("/data/loom-staging"),
                 operator_user="qianyi",
                 evidence_paths=[],
             )
@@ -115,7 +115,7 @@ class TestRenderBootstrapScript:
         """Only leaf names allowed; no traversal / nesting."""
         with pytest.raises(ValueError, match="leaf"):
             render_bootstrap_script(
-                rollout_root=Path("/data/loom-public-beta"),
+                rollout_root=Path("/data/loom-staging"),
                 operator_user="qianyi",
                 evidence_paths=["rollouts", "../rogue"],
             )
@@ -129,7 +129,7 @@ class TestCLIDispatch:
     ) -> None:
         rc = main([
             "cluster", "bootstrap-evidence-paths",
-            "--rollout-root", "/data/loom-public-beta",
+            "--rollout-root", "/data/loom-staging",
             "--operator-user", "qianyi",
         ])
         assert rc == 0
@@ -137,29 +137,29 @@ class TestCLIDispatch:
         assert "install -d -o qianyi -g qianyi -m 755" in out
         # Default evidence paths cover the three the issue names.
         for name in ("rollouts", "evidence", "logs"):
-            assert f"/data/loom-public-beta/{name}" in out
+            assert f"/data/loom-staging/{name}" in out
 
     def test_custom_evidence_paths(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         rc = main([
             "cluster", "bootstrap-evidence-paths",
-            "--rollout-root", "/data/loom-public-beta",
+            "--rollout-root", "/data/loom-staging",
             "--operator-user", "qianyi",
             "--evidence-paths", "rollouts,extra",
         ])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "/data/loom-public-beta/rollouts" in out
-        assert "/data/loom-public-beta/extra" in out
-        assert "/data/loom-public-beta/logs" not in out  # not in override
+        assert "/data/loom-staging/rollouts" in out
+        assert "/data/loom-staging/extra" in out
+        assert "/data/loom-staging/logs" not in out  # not in override
 
     def test_refuses_service_dir_collision_at_cli(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         rc = main([
             "cluster", "bootstrap-evidence-paths",
-            "--rollout-root", "/data/loom-public-beta",
+            "--rollout-root", "/data/loom-staging",
             "--operator-user", "qianyi",
             "--evidence-paths", "rollouts,postgres",
         ])
@@ -173,7 +173,7 @@ class TestCLIDispatch:
     ) -> None:
         rc = main([
             "cluster", "bootstrap-evidence-paths",
-            "--rollout-root", "loom-public-beta",
+            "--rollout-root", "loom-staging",
             "--operator-user", "qianyi",
         ])
         assert rc == 2
@@ -188,7 +188,7 @@ class TestCLIDispatch:
         monkeypatch.setenv("USER", "carbon")
         rc = main([
             "cluster", "bootstrap-evidence-paths",
-            "--rollout-root", "/data/loom-public-beta",
+            "--rollout-root", "/data/loom-staging",
         ])
         assert rc == 0
         out = capsys.readouterr().out
