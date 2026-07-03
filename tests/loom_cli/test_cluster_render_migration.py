@@ -61,9 +61,11 @@ class TestRenderMigrationManifest:
         ]
 
     def test_db_url_is_pulled_from_the_control_plane_secret_key(self) -> None:
-        """Reuse cp-db-url — alembic needs the same DB perms as CP.
-        Adding a separate migration credential would just be one more
-        rotation liability."""
+        """Alembic reads LOOM_DB_URL per `migrations/env.py`; the
+        secret key we source it from is still `cp-db-url` because
+        Alembic needs the same DB perms as the control plane and a
+        separate migration credential would just be another rotation
+        liability. See #364."""
         text = render_migration_manifest(
             image_tag="public-beta-05ab776",
             namespace="loom-public-beta",
@@ -74,8 +76,12 @@ class TestRenderMigrationManifest:
             e["name"]: e for e in
             job["spec"]["template"]["spec"]["containers"][0]["env"]
         }
-        assert "LOOM_CP_DB_URL" in env_by_name
-        secret_ref = env_by_name["LOOM_CP_DB_URL"]["valueFrom"]["secretKeyRef"]
+        assert "LOOM_DB_URL" in env_by_name, (
+            "Alembic requires LOOM_DB_URL; the migration Job must not "
+            "set LOOM_CP_DB_URL (that's what the control-plane reads)."
+        )
+        assert "LOOM_CP_DB_URL" not in env_by_name
+        secret_ref = env_by_name["LOOM_DB_URL"]["valueFrom"]["secretKeyRef"]
         assert secret_ref["name"] == "loom-secrets"
         assert secret_ref["key"] == "cp-db-url"
 

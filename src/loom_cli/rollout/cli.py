@@ -50,9 +50,28 @@ def build_parser(p: argparse.ArgumentParser) -> None:
         help="Kubernetes namespace. Defaults to `loom`.",
     )
     p.add_argument(
+        "--environment",
+        required=True,
+        help=(
+            "Protected environment name (e.g. public-beta). Used by the "
+            "backup and release-gate steps to bind evidence to the "
+            "operator's declared environment."
+        ),
+    )
+    p.add_argument(
         "--cluster-config",
         required=True,
         help="Path to the operator's cluster-config.toml.",
+    )
+    p.add_argument(
+        "--backup-manifest",
+        required=True,
+        help=(
+            "Path to a pre-existing backup manifest for --environment. "
+            "The dumps are produced by the operator per the runbook; the "
+            "driver verifies via `loom cluster backup check` and refuses "
+            "to advance without a fresh manifest."
+        ),
     )
     p.add_argument(
         "--rollout-root",
@@ -152,9 +171,11 @@ def handle(args: argparse.Namespace) -> int:
         resolved_sha=resolved_sha,
         cluster_name=args.cluster_name,
         namespace=args.namespace,
+        environment=args.environment,
         cluster_config_path=cluster_config_path,
         cluster_config_sha256=cfg_sha,
         rollout_root=rollout_root,
+        backup_manifest_path=Path(args.backup_manifest),
         scope=args.scope,
         exclude_oldlab=args.exclude_oldlab,
         resume=args.resume,

@@ -32,9 +32,19 @@ class RolloutContext:
         resolved_sha: Full 40-char git sha the ref resolved to at launch.
         cluster_name: Name of the target k8s cluster (kind cluster name).
         namespace: Kubernetes namespace for the release.
+        environment: Protected environment name (e.g. ``public-beta``).
+            Used by the backup verification and release-gate steps to bind
+            evidence to the operator's declared environment.
         cluster_config_path: Path to the operator's cluster-config.toml.
         cluster_config_sha256: sha256 of cluster_config_path contents at launch.
         rollout_root: Root of the evidence directory tree (#174 model).
+        backup_manifest_path: Path to a pre-existing backup manifest for the
+            protected environment. The dumps themselves are produced by the
+            operator per the runbook (needs Postgres/MinIO credentials the
+            driver doesn't have); the backup step verifies the manifest via
+            ``loom cluster backup check``. Not part of ``inputs_hash`` — the
+            manifest changes between rollouts and stale-checks are handled
+            by ``backup check`` itself.
         scope: Rollout scope classification.
             One of ``"current-gb10"``, ``"full-cluster"``. Full-cluster asks
             for release-critical acceptance evidence across every managed
@@ -50,9 +60,11 @@ class RolloutContext:
     resolved_sha: str
     cluster_name: str
     namespace: str
+    environment: str
     cluster_config_path: Path
     cluster_config_sha256: str
     rollout_root: Path
+    backup_manifest_path: Path
     scope: str = "current-gb10"
     exclude_oldlab: bool = False
     resume: bool = False
@@ -71,6 +83,7 @@ class RolloutContext:
             "resolved_sha": self.resolved_sha,
             "cluster_name": self.cluster_name,
             "namespace": self.namespace,
+            "environment": self.environment,
             "cluster_config_path": str(self.cluster_config_path),
             "cluster_config_sha256": self.cluster_config_sha256,
             "rollout_root": str(self.rollout_root),

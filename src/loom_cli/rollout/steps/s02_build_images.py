@@ -1,9 +1,15 @@
-"""Step 02 — docker build the 5 rollout-critical images (#340).
+"""Step 02 — docker build the rollout-critical images (#340, #365).
 
 Builds each of the release-critical service images:
-control-plane, gateway, service, worker, egress-xds. Uses the worktree
-created by :mod:`s01_worktree` as the docker build context so the
-operator's main checkout is untouched.
+control-plane, gateway, service, web, worker, egress-xds. Uses the
+worktree created by :mod:`s01_worktree` as the docker build context so
+the operator's main checkout is untouched.
+
+The set must cover every locally-tagged image referenced by a rendered
+managed Deployment; ``tests/loom_cli/rollout/steps/test_s02_build_images.py``
+diffs :data:`ROLLOUT_IMAGES` against the deploy manifests to catch a
+future omission (#365 was exactly this — loom-web was left out and the
+web pod failed with ImagePullBackOff after cluster-up).
 
 Pip retry resilience (#199) is baked into the Dockerfiles via
 ``ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60``, so this step's transient
@@ -17,12 +23,14 @@ from loom_cli.rollout.evidence import StepDir
 from loom_cli.rollout.steps.base import BaseStep, RunResult, VerifyOutcome
 from loom_cli.rollout.steps.subprocess_util import run_captured
 
-#: The 5 images the driver builds. Kept as a module-level constant so a
-#: test can parametrize over the same list.
+#: Rollout-critical images. Kept as a module-level constant so a test
+#: can parametrize over the same list AND diff it against the rendered
+#: deploy manifests.
 ROLLOUT_IMAGES: tuple[tuple[str, str], ...] = (
     ("loom-control-plane", "deploy/Dockerfile.control-plane"),
     ("loom-llm-gateway",   "deploy/Dockerfile.gateway"),
     ("loom-service",       "deploy/Dockerfile.service"),
+    ("loom-web",           "deploy/Dockerfile.web"),
     ("loom-worker",        "deploy/Dockerfile.worker"),
     ("loom-egress-xds",    "deploy/Dockerfile.egress-xds"),
 )
