@@ -20,6 +20,20 @@ from loom.worker_token import (
 
 _PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
+# Matches the git-SHA suffix in a release tag like `public-beta-c72f50d`.
+# Kept in sync with the copy in `loom_cli.admin_cmd` — both derive the
+# expected node-agent source_git_commit prefix from the same tag shape.
+# See #356 for why the drift check must include per-node source_git_commit,
+# not just DB-side image_tag / env_config_version convergence.
+_RELEASE_TAG_SHA_RE = re.compile(r"(?:^|[-_])([0-9a-f]{7,40})$")
+
+
+def _release_source_prefix(image_tag: Any) -> str | None:
+    if not isinstance(image_tag, str) or not image_tag:
+        return None
+    match = _RELEASE_TAG_SHA_RE.search(image_tag)
+    return match.group(1) if match else None
+
 _AUTOSCALER_DEFAULTS: dict[str, Any] = {
     "enabled": False,
     "min_slots": 0,
@@ -441,6 +455,103 @@ def _external_slurm_policies(
     ]
 
 
+_GB10_NODE_SOURCE_DRIFT_IGNORED_INTENTS = frozenset(
+    {"stopped", "draining", "drained", "unavailable"},
+)
+_GB10_NODE_SOURCE_DRIFT_IGNORED_APPLY_STATES = frozenset(
+    {"stopped", "draining", "unavailable"},
+)
+
+
+def _append_gb10_node_source_drift(
+    drift: list[StateDrift],
+    *,
+    desired_states: list[dict[str, Any]],
+    nodes: object,
+) -> None:
+    """Detect per-node GB10 source-code drift (#356).
+
+    DB-side `desired_states` / node-reported `image_tag` +
+    `env_config_version` can converge while node-agents still run
+    from a stale host-local checkout — e.g. `image=public-beta-c72f50d`
+    but `source_git_commit=ce55a358d847...`. That path produced silent
+    release-gate passes on `public-beta-baa1d327` / `public-beta-c72f50d`
+    while GB10 workers actually ran pre-#350 code.
+
+    For each desired state whose `image_tag` embeds a git-SHA suffix,
+    verify every active node in the same (environment, pool) reports
+    a `source_git_commit` starting with that SHA prefix and
+    `source_git_dirty is False`. Otherwise emit a StateDrift so the
+    same `environment-state check` artifact consumed by the release
+    gate fails hard instead of silently passing.
+    """
+    if not isinstance(nodes, list):
+        return
+
+    desired_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for desired in desired_states:
+        env = desired.get("environment")
+        pool = desired.get("pool_name")
+        if not isinstance(env, str) or not isinstance(pool, str):
+            continue
+        desired_by_key[(env, pool)] = desired
+
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        intent = node.get("desired_intent") or node.get("current_intent")
+        apply_state = node.get("apply_state")
+        if (
+            intent in _GB10_NODE_SOURCE_DRIFT_IGNORED_INTENTS
+            or apply_state in _GB10_NODE_SOURCE_DRIFT_IGNORED_APPLY_STATES
+        ):
+            continue
+        env = node.get("environment")
+        pool = node.get("pool_name")
+        hostname = node.get("hostname")
+        if not (
+            isinstance(env, str)
+            and isinstance(pool, str)
+            and isinstance(hostname, str)
+        ):
+            continue
+        desired = desired_by_key.get((env, pool))
+        if desired is None:
+            continue
+        expected_source = _release_source_prefix(desired.get("image_tag"))
+        if expected_source is None:
+            continue
+        source_commit = node.get("source_git_commit")
+        source_dirty = node.get("source_git_dirty")
+        source_commit_bad = (
+            not isinstance(source_commit, str)
+            or not source_commit.startswith(expected_source)
+        )
+        source_dirty_bad = source_dirty is not False
+        if source_commit_bad:
+            drift.append(
+                StateDrift(
+                    path=(
+                        f"gb10_worker_node_status[{env}/{pool}/{hostname}]"
+                        ".source_git_commit"
+                    ),
+                    desired=f"{expected_source}*",
+                    live=source_commit,
+                ),
+            )
+        elif source_dirty_bad:
+            drift.append(
+                StateDrift(
+                    path=(
+                        f"gb10_worker_node_status[{env}/{pool}/{hostname}]"
+                        ".source_git_dirty"
+                    ),
+                    desired=False,
+                    live=source_dirty,
+                ),
+            )
+
+
 _TERMINAL_SLURM_JOB_STATES = {"completed", "failed", "cancelled", "stale"}
 
 
@@ -554,6 +665,14 @@ def diff_environment_state(
             fields=_GB10_COMPARE_FIELDS,
             live_defaults=_GB10_DEFAULTS,
         )
+    _append_gb10_node_source_drift(
+        drift,
+        desired_states=profile.gb10_desired_states,
+        nodes=_as_dict(live.get("gb10_status", {}), "gb10_status").get(
+            "nodes",
+            [],
+        ),
+    )
     _append_active_slurm_job_drift(
         drift,
         desired_policies={
