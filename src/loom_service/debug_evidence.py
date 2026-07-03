@@ -54,6 +54,11 @@ _TRIAL_FAILURE_META: dict[str, tuple[str, str, list[str]]] = {
         "platform",
         ["Prebuild or warm the task image for this architecture before rerun."],
     ),
+    "task_compatibility": (
+        "task",
+        "benchmark",
+        ["Fix the task bundle compatibility issue before rerunning."],
+    ),
     "verifier_error": (
         "verifier",
         "benchmark",

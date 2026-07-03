@@ -572,6 +572,18 @@ When a task declares `environment.dockerfile`, the worker runs
 `docker build` against the materialized bundle directory. Authors of
 benchmark Dockerfiles should know:
 
+- **The build context layout is literal.** Loom preserves the uploaded or
+  mirrored object tree. With the default root build context, `COPY . /app/`
+  maps `environment/setup_repo.sh` to `/app/environment/setup_repo.sh`; it does
+  not create `/app/setup_repo.sh`. Put files at the build-context root, set
+  `docker_build_context` to the directory whose layout the Dockerfile expects,
+  or reference the preserved path explicitly.
+- **Compatibility preflight is diagnostic, not corrective.** Publish/import,
+  protected mirror, TaskSet materialization, and worker setup all use the same
+  task-bundle compatibility rules. Hard issues fail with structured diagnostics
+  such as `TASK_COMPAT_APP_PATH_MISSING` or `TASK_COMPAT_DNS_MUTATION`; Loom
+  does not patch Dockerfiles, flatten `environment/`, restore DNS files, or
+  run hidden bridges to make a bad bundle pass.
 - **Network access during build is not guaranteed.** Some worker
   deployments build behind a restrictive egress policy; benchmark
   Dockerfiles that need to `pip install` / `npm install` from the

@@ -33,6 +33,11 @@ const FAILURE_REASON_HELP: Record<string, Omit<FailureReasonSummary, "code">> = 
     label: "Retries exhausted",
     description: "The trial used all configured attempts and still did not complete.",
   },
+  task_compatibility: {
+    label: "Task compatibility failure",
+    description:
+      "The task bundle is incompatible with the selected platform/runtime and must be fixed before rerun.",
+  },
   trajectory_flush_failed: {
     label: "Trajectory flush failed",
     description: "The worker could not persist the trial trajectory log.",
