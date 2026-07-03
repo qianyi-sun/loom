@@ -15,8 +15,8 @@ class TestBackupStepArgv:
         manifest.write_text("{}")
         ctx = make_ctx(
             tmp_path,
-            environment="public-beta",
-            namespace="loom-public-beta",
+            environment="staging",
+            namespace="loom-staging",
             backup_manifest_path=manifest,
         )
         ev = EvidenceDirectory(tmp_path, "test-rid")
@@ -27,8 +27,8 @@ class TestBackupStepArgv:
 
         assert argv == [
             "loom", "cluster", "backup", "check",
-            "--environment", "public-beta",
-            "--namespace", "loom-public-beta",
+            "--environment", "staging",
+            "--namespace", "loom-staging",
             "--manifest", str(manifest),
         ]
 

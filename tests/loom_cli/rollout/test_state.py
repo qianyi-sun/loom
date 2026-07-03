@@ -91,10 +91,10 @@ class TestRolloutState:
 
     def test_new_starts_all_not_started(self) -> None:
         state = RolloutState.new(
-            rollout_id="20260702t235959z-public-beta-abc",
+            rollout_id="20260702t235959z-staging-abc",
             steps=[(0, "resolve-target"), (1, "worktree")],
         )
-        assert state.rollout_id == "20260702t235959z-public-beta-abc"
+        assert state.rollout_id == "20260702t235959z-staging-abc"
         assert state.status == "running"
         assert state.current_step is None
         assert [s.name for s in state.steps] == ["resolve-target", "worktree"]

@@ -8,7 +8,7 @@ from loom.security.redaction import (
 )
 
 
-def test_redact_text_covers_public_beta_secret_shapes() -> None:
+def test_redact_text_covers_staging_secret_shapes() -> None:
     raw = (
         "Authorization: Bearer loom_api_abcdefghijklmnopqrstuvwxyz012345 "
         "Cookie: loom_session=loom_session_secret123; loom_csrf=loom_csrf_abc "

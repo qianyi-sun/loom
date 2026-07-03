@@ -4,8 +4,8 @@ from dataclasses import replace
 
 import pytest
 
-import loom_cli.public_beta_catalog as public_beta_catalog
-from loom_cli.public_beta_catalog import (
+import loom_cli.catalog_provision as catalog_provision
+from loom_cli.catalog_provision import (
     POSTGRES_CATALOG_UPSERT_BATCH_SIZE,
     AgentRow,
     BenchmarkRow,
@@ -112,12 +112,12 @@ async def test_postgres_catalog_store_batches_large_task_upserts(monkeypatch: py
     session = FakeSession()
 
     monkeypatch.setattr(
-        public_beta_catalog,
+        catalog_provision,
         "create_async_engine",
         lambda _db_url: engine,
     )
     monkeypatch.setattr(
-        public_beta_catalog,
+        catalog_provision,
         "async_sessionmaker",
         lambda *_args, **_kwargs: lambda: session,
     )
@@ -147,8 +147,8 @@ async def test_postgres_catalog_store_batches_large_task_upserts(monkeypatch: py
 
 
 def test_agent_rows_from_service_catalog_include_contract_and_provenance() -> None:
-    rows = public_beta_catalog.agent_rows_from_service_catalog(
-        imported_by="release:public-beta",
+    rows = catalog_provision.agent_rows_from_service_catalog(
+        imported_by="release:staging",
     )
 
     by_name = {row.name: row for row in rows}
@@ -163,7 +163,7 @@ def test_agent_rows_from_service_catalog_include_contract_and_provenance() -> No
     assert oracle.spec["catalog_provenance"] == {
         "source": "loom_service.agent_catalog",
         "schema_version": 1,
-        "provisioned_by": "release:public-beta",
+        "provisioned_by": "release:staging",
     }
 
 
@@ -247,7 +247,7 @@ async def test_provision_ready_catalog_filters_blocked_rows_and_copies_missing_o
         source_objects=source_objects,
         target_objects=target_objects,
         target_bucket="loom-benchmarks",
-        imported_by="public-beta-provision",
+        imported_by="staging-provision",
     )
 
     assert stats.ready_agents >= 2
@@ -263,7 +263,7 @@ async def test_provision_ready_catalog_filters_blocked_rows_and_copies_missing_o
     assert {"oracle", "litellm"}.issubset({row.name for row in target.rows.agents})
     assert all(row.version == "service-catalog-v1" for row in target.rows.agents)
     assert target.rows.benchmarks == [
-        replace(source.rows.benchmarks[0], imported_by="public-beta-provision"),
+        replace(source.rows.benchmarks[0], imported_by="staging-provision"),
     ]
     assert [row.id for row in target.rows.tasks] == ["humaneval/HumanEval/0"]
     assert target.rows.tasks[0].source == "s3://loom-benchmarks/humaneval/HumanEval/0/"
@@ -275,7 +275,7 @@ async def test_provision_ready_catalog_filters_blocked_rows_and_copies_missing_o
         source_objects=source_objects,
         target_objects=target_objects,
         target_bucket="loom-benchmarks",
-        imported_by="public-beta-provision",
+        imported_by="staging-provision",
     )
 
     assert second.target_objects_uploaded == 0
@@ -384,7 +384,7 @@ async def test_provision_ready_catalog_preserves_existing_agent_rows_on_second_r
         source_objects=source_objects,
         target_objects=FakeObjects(),
         target_bucket="loom-benchmarks",
-        imported_by="public-beta-provision",
+        imported_by="staging-provision",
     )
     second = await provision_ready_benchmark_catalog(
         source_catalog=source,
@@ -394,7 +394,7 @@ async def test_provision_ready_catalog_preserves_existing_agent_rows_on_second_r
             ("loom-benchmarks", "humaneval/HumanEval/0/task.toml"): b"task",
         }),
         target_bucket="loom-benchmarks",
-        imported_by="public-beta-provision",
+        imported_by="staging-provision",
     )
 
     assert first.ready_agents >= 2
@@ -402,5 +402,5 @@ async def test_provision_ready_catalog_preserves_existing_agent_rows_on_second_r
     by_name = {row.name: row for row in target.rows.agents}
     assert "stale" not in by_name["oracle"].spec
     assert by_name["oracle"].spec["catalog_provenance"]["provisioned_by"] == (
-        "public-beta-provision"
+        "staging-provision"
     )

@@ -692,10 +692,10 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_nodes(
                     {
                         "environment": "production",
                         "pool_name": "gb10-arm64",
-                        "image_tag": "public-beta-new",
+                        "image_tag": "staging-new",
                         "max_concurrent": 10,
                         "env_config_version": "env-new",
-                        "previous_image_tag": "public-beta-old",
+                        "previous_image_tag": "staging-old",
                     },
                 ],
                 "nodes": [
@@ -704,8 +704,8 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_nodes(
                         "pool_name": "gb10-arm64",
                         "hostname": "trt-gb10-1",
                         "apply_state": "applied",
-                        "current_image_tag": "public-beta-old",
-                        "desired_image_tag": "public-beta-new",
+                        "current_image_tag": "staging-old",
+                        "desired_image_tag": "staging-new",
                         "current_max_concurrent": 10,
                         "desired_max_concurrent": 10,
                         "current_env_config_version": "env-old",
@@ -732,7 +732,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_nodes(
             "--pool-name",
             "gb10-arm64",
             "--release-image-tag",
-            "public-beta-new",
+            "staging-new",
             "--release-env-config-version",
             "env-new",
         ]
@@ -742,7 +742,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_nodes(
     err = capsys.readouterr().err
     assert "GB10 rollout target mismatch" in err
     assert "trt-gb10-1" in err
-    assert "public-beta-old" in err
+    assert "staging-old" in err
     assert "env-old" in err
 
 
@@ -758,10 +758,10 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_source_checkout(
                     {
                         "environment": "production",
                         "pool_name": "gb10-arm64",
-                        "image_tag": "public-beta-76875ac",
+                        "image_tag": "staging-76875ac",
                         "max_concurrent": 10,
-                        "env_config_version": "public-beta-76875ac",
-                        "previous_image_tag": "public-beta-b453057",
+                        "env_config_version": "staging-76875ac",
+                        "previous_image_tag": "staging-b453057",
                     },
                 ],
                 "nodes": [
@@ -770,19 +770,19 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_source_checkout(
                         "pool_name": "gb10-arm64",
                         "hostname": "trt-gb10-1",
                         "apply_state": "applied",
-                        "current_image_tag": "public-beta-76875ac",
-                        "desired_image_tag": "public-beta-76875ac",
+                        "current_image_tag": "staging-76875ac",
+                        "desired_image_tag": "staging-76875ac",
                         "current_max_concurrent": 10,
                         "desired_max_concurrent": 10,
-                        "current_env_config_version": "public-beta-76875ac",
-                        "desired_env_config_version": "public-beta-76875ac",
+                        "current_env_config_version": "staging-76875ac",
+                        "desired_env_config_version": "staging-76875ac",
                         "current_intent": "active",
                         "desired_intent": "active",
                         "last_apply_result": "already current",
                         "error_message": None,
                         "compose_project_dir": (
                             "/home/trt/loom-remote-worker/"
-                            "loom-public-beta-b453057/deploy"
+                            "loom-staging-b453057/deploy"
                         ),
                         "source_git_commit": (
                             "b45305709414b1e88cbb1f3d92e5f28375ee93b9"
@@ -802,9 +802,9 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_source_checkout(
             "gb10-workers",
             "status",
             "--release-image-tag",
-            "public-beta-76875ac",
+            "staging-76875ac",
             "--release-env-config-version",
-            "public-beta-76875ac",
+            "staging-76875ac",
         ]
     )
 
@@ -814,7 +814,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_source_checkout(
     assert "trt-gb10-1" in err
     assert "source=b45305709414" in err
     assert "expected_source=76875ac" in err
-    assert "loom-public-beta-b453057/deploy" in err
+    assert "loom-staging-b453057/deploy" in err
 
 
 def test_gb10_workers_status_release_target_gate_fails_without_source_provenance(
@@ -829,9 +829,9 @@ def test_gb10_workers_status_release_target_gate_fails_without_source_provenance
                     {
                         "environment": "production",
                         "pool_name": "gb10-arm64",
-                        "image_tag": "public-beta-76875ac",
+                        "image_tag": "staging-76875ac",
                         "max_concurrent": 10,
-                        "env_config_version": "public-beta-76875ac",
+                        "env_config_version": "staging-76875ac",
                     },
                 ],
                 "nodes": [
@@ -840,19 +840,19 @@ def test_gb10_workers_status_release_target_gate_fails_without_source_provenance
                         "pool_name": "gb10-arm64",
                         "hostname": "trt-gb10-1",
                         "apply_state": "applied",
-                        "current_image_tag": "public-beta-76875ac",
-                        "desired_image_tag": "public-beta-76875ac",
+                        "current_image_tag": "staging-76875ac",
+                        "desired_image_tag": "staging-76875ac",
                         "current_max_concurrent": 10,
                         "desired_max_concurrent": 10,
-                        "current_env_config_version": "public-beta-76875ac",
-                        "desired_env_config_version": "public-beta-76875ac",
+                        "current_env_config_version": "staging-76875ac",
+                        "desired_env_config_version": "staging-76875ac",
                         "current_intent": "active",
                         "desired_intent": "active",
                         "last_apply_result": "already current",
                         "error_message": None,
                         "compose_project_dir": (
                             "/home/trt/loom-remote-worker/"
-                            "loom-public-beta-b453057/deploy"
+                            "loom-staging-b453057/deploy"
                         ),
                     },
                 ],
@@ -868,9 +868,9 @@ def test_gb10_workers_status_release_target_gate_fails_without_source_provenance
             "gb10-workers",
             "status",
             "--release-image-tag",
-            "public-beta-76875ac",
+            "staging-76875ac",
             "--release-env-config-version",
-            "public-beta-76875ac",
+            "staging-76875ac",
         ]
     )
 
@@ -878,7 +878,7 @@ def test_gb10_workers_status_release_target_gate_fails_without_source_provenance
     err = capsys.readouterr().err
     assert "trt-gb10-1" in err
     assert "source=-/expected_source=76875ac" in err
-    assert "loom-public-beta-b453057/deploy" in err
+    assert "loom-staging-b453057/deploy" in err
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1023,7 +1023,7 @@ def test_worker_pool_autoscaler_status_json_format_emits_raw_json(
 def _write_environment_state_profile(path: Path) -> None:
     path.write_text(
         """
-environment = "public-beta"
+environment = "staging"
 
 [[worker_pool_autoscaler_policies]]
 pool_name = "gb10-arm64"
@@ -1067,7 +1067,7 @@ def test_environment_state_apply_puts_profile_resources(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     _write_environment_state_profile(profile_path)
     captured: list[dict[str, Any]] = []
 
@@ -1088,24 +1088,24 @@ def test_environment_state_apply_puts_profile_resources(
             "--file",
             str(profile_path),
             "--environment",
-            "public-beta",
+            "staging",
             "--var",
-            "IMAGE_TAG=public-beta-57a7509",
+            "IMAGE_TAG=staging-57a7509",
             "--var",
-            "ENV_CONFIG_VERSION=public-beta-57a7509",
+            "ENV_CONFIG_VERSION=staging-57a7509",
         ]
     )
 
     assert rc == 0
     assert [item["url"] for item in captured] == [
-        "http://cp:8080/admin/worker-pool-autoscaler-policies/public-beta/gb10-arm64",
-        "http://cp:8080/admin/gb10-worker-pools/public-beta/gb10-arm64/desired-state",
+        "http://cp:8080/admin/worker-pool-autoscaler-policies/staging/gb10-arm64",
+        "http://cp:8080/admin/gb10-worker-pools/staging/gb10-arm64/desired-state",
     ]
     assert captured[0]["headers"]["Authorization"] == "Bearer admin-secret"
     assert captured[0]["json"]["actuator"] == "slurm"
     assert captured[0]["json"]["actuator_config"]["partition"] == "gb10"
-    assert captured[1]["json"]["image_tag"] == "public-beta-57a7509"
-    assert "Applied environment state public-beta" in capsys.readouterr().out
+    assert captured[1]["json"]["image_tag"] == "staging-57a7509"
+    assert "Applied environment state staging" in capsys.readouterr().out
 
 
 def test_environment_state_check_fails_with_actionable_drift(
@@ -1113,7 +1113,7 @@ def test_environment_state_check_fails_with_actionable_drift(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     _write_environment_state_profile(profile_path)
 
     def _fake_get(url, *, headers, timeout):  # type: ignore[no-untyped-def]
@@ -1123,7 +1123,7 @@ def test_environment_state_check_fails_with_actionable_drift(
                 json_data={
                     "policies": [
                         {
-                            "environment": "public-beta",
+                            "environment": "staging",
                             "pool_name": "gb10-arm64",
                             "actuator": "gb10",
                             "enabled": True,
@@ -1146,11 +1146,11 @@ def test_environment_state_check_fails_with_actionable_drift(
                 json_data={
                     "desired_states": [
                         {
-                            "environment": "public-beta",
+                            "environment": "staging",
                             "pool_name": "gb10-arm64",
-                            "image_tag": "public-beta-old",
+                            "image_tag": "staging-old",
                             "max_concurrent": 10,
-                            "env_config_version": "public-beta-old",
+                            "env_config_version": "staging-old",
                             "target_slots": 150,
                             "host_intents": {},
                             "rollout_policy": {"mode": "all"},
@@ -1174,20 +1174,20 @@ def test_environment_state_check_fails_with_actionable_drift(
             "--file",
             str(profile_path),
             "--environment",
-            "public-beta",
+            "staging",
             "--var",
-            "IMAGE_TAG=public-beta-57a7509",
+            "IMAGE_TAG=staging-57a7509",
             "--var",
-            "ENV_CONFIG_VERSION=public-beta-57a7509",
+            "ENV_CONFIG_VERSION=staging-57a7509",
         ]
     )
 
     assert rc == 1
     err = capsys.readouterr().err
-    assert "Environment state drift for public-beta" in err
-    assert "worker_pool_autoscaler_policies[public-beta/gb10-arm64].actuator" in err
+    assert "Environment state drift for staging" in err
+    assert "worker_pool_autoscaler_policies[staging/gb10-arm64].actuator" in err
     assert "desired='slurm' live='gb10'" in err
-    assert "gb10_worker_pool_desired_states[public-beta/gb10-arm64].image_tag" in err
+    assert "gb10_worker_pool_desired_states[staging/gb10-arm64].image_tag" in err
 
 
 def test_environment_state_check_json_reports_autoscaler_blockers(
@@ -1195,7 +1195,7 @@ def test_environment_state_check_json_reports_autoscaler_blockers(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     _write_environment_state_profile(profile_path)
 
     def _fake_get(url, *, headers, timeout):  # type: ignore[no-untyped-def]
@@ -1205,7 +1205,7 @@ def test_environment_state_check_json_reports_autoscaler_blockers(
                 json_data={
                     "policies": [
                         {
-                            "environment": "public-beta",
+                            "environment": "staging",
                             "pool_name": "gb10-arm64",
                             "actuator": "slurm",
                             "enabled": True,
@@ -1248,11 +1248,11 @@ def test_environment_state_check_json_reports_autoscaler_blockers(
                 json_data={
                     "desired_states": [
                         {
-                            "environment": "public-beta",
+                            "environment": "staging",
                             "pool_name": "gb10-arm64",
-                            "image_tag": "public-beta-57a7509",
+                            "image_tag": "staging-57a7509",
                             "max_concurrent": 10,
-                            "env_config_version": "public-beta-57a7509",
+                            "env_config_version": "staging-57a7509",
                             "target_slots": 150,
                             "host_intents": {},
                             "rollout_policy": {"mode": "all"},
@@ -1276,11 +1276,11 @@ def test_environment_state_check_json_reports_autoscaler_blockers(
             "--file",
             str(profile_path),
             "--environment",
-            "public-beta",
+            "staging",
             "--var",
-            "IMAGE_TAG=public-beta-57a7509",
+            "IMAGE_TAG=staging-57a7509",
             "--var",
-            "ENV_CONFIG_VERSION=public-beta-57a7509",
+            "ENV_CONFIG_VERSION=staging-57a7509",
             "--format",
             "json",
         ]
@@ -1292,7 +1292,7 @@ def test_environment_state_check_json_reports_autoscaler_blockers(
     assert body["drift"] == []
     assert body["autoscaler_blockers"] == [
         {
-            "environment": "public-beta",
+            "environment": "staging",
             "pool_name": "gb10-arm64",
             "actuator": "slurm",
             "last_decision": "blocked",
@@ -1316,7 +1316,7 @@ def test_environment_state_check_fetches_slurm_jobs_and_reports_external_prereq_
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     _write_environment_state_profile(profile_path)
     called_urls: list[str] = []
 
@@ -1328,7 +1328,7 @@ def test_environment_state_check_fetches_slurm_jobs_and_reports_external_prereq_
                 json_data={
                     "policies": [
                         {
-                            "environment": "public-beta",
+                            "environment": "staging",
                             "pool_name": "gb10-arm64",
                             "actuator": "slurm",
                             "enabled": True,
@@ -1359,11 +1359,11 @@ def test_environment_state_check_fetches_slurm_jobs_and_reports_external_prereq_
                 json_data={
                     "desired_states": [
                         {
-                            "environment": "public-beta",
+                            "environment": "staging",
                             "pool_name": "gb10-arm64",
-                            "image_tag": "public-beta-57a7509",
+                            "image_tag": "staging-57a7509",
                             "max_concurrent": 10,
-                            "env_config_version": "public-beta-57a7509",
+                            "env_config_version": "staging-57a7509",
                             "target_slots": 150,
                             "host_intents": {},
                             "rollout_policy": {"mode": "all"},
@@ -1383,7 +1383,7 @@ def test_environment_state_check_fetches_slurm_jobs_and_reports_external_prereq_
         lambda profile, **kwargs: [
             StateDrift(
                 path="external_slurm_runner_prerequisites[production/oldlab].env_file",
-                desired="/shared_work/qianyi/loom-worker-capacity/public-beta-oldlab-worker.env",
+                desired="/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker.env",
                 live="missing",
             ),
         ],
@@ -1398,11 +1398,11 @@ def test_environment_state_check_fetches_slurm_jobs_and_reports_external_prereq_
             "--file",
             str(profile_path),
             "--environment",
-            "public-beta",
+            "staging",
             "--var",
-            "IMAGE_TAG=public-beta-57a7509",
+            "IMAGE_TAG=staging-57a7509",
             "--var",
-            "ENV_CONFIG_VERSION=public-beta-57a7509",
+            "ENV_CONFIG_VERSION=staging-57a7509",
         ]
     )
 
@@ -1417,7 +1417,7 @@ def test_environment_state_check_fails_before_cp_when_admin_token_fingerprint_dr
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     _write_environment_state_profile(profile_path)
     stale_admin_token = "loom_admin_operator_stale_secret"
     stale_fingerprint = (
@@ -1440,11 +1440,11 @@ def test_environment_state_check_fails_before_cp_when_admin_token_fingerprint_dr
             "--file",
             str(profile_path),
             "--environment",
-            "public-beta",
+            "staging",
             "--var",
-            "IMAGE_TAG=public-beta-57a7509",
+            "IMAGE_TAG=staging-57a7509",
             "--var",
-            "ENV_CONFIG_VERSION=public-beta-57a7509",
+            "ENV_CONFIG_VERSION=staging-57a7509",
             "--expect-admin-token-fingerprint",
             "sha256:liveexpected len=36",
         ]
@@ -1463,7 +1463,7 @@ def test_environment_state_check_passes_worker_token_without_leaking_secret(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     _write_environment_state_profile(profile_path)
     active_token = "loom_w_current_environment_secret"
 
@@ -1474,7 +1474,7 @@ def test_environment_state_check_passes_worker_token_without_leaking_secret(
                 json_data={
                     "policies": [
                         {
-                            "environment": "public-beta",
+                            "environment": "staging",
                             "pool_name": "gb10-arm64",
                             "actuator": "slurm",
                             "enabled": True,
@@ -1505,11 +1505,11 @@ def test_environment_state_check_passes_worker_token_without_leaking_secret(
                 json_data={
                     "desired_states": [
                         {
-                            "environment": "public-beta",
+                            "environment": "staging",
                             "pool_name": "gb10-arm64",
-                            "image_tag": "public-beta-57a7509",
+                            "image_tag": "staging-57a7509",
                             "max_concurrent": 10,
-                            "env_config_version": "public-beta-57a7509",
+                            "env_config_version": "staging-57a7509",
                             "target_slots": 150,
                             "host_intents": {},
                             "rollout_policy": {"mode": "all"},
@@ -1528,7 +1528,7 @@ def test_environment_state_check_passes_worker_token_without_leaking_secret(
             StateDrift(
                 path=(
                     "external_slurm_runner_prerequisites"
-                    "[public-beta/gb10-arm64].worker_token_fingerprint"
+                    "[staging/gb10-arm64].worker_token_fingerprint"
                 ),
                 desired="sha256:active123456 len=33",
                 live="sha256:stale1234567 len=28",
@@ -1552,11 +1552,11 @@ def test_environment_state_check_passes_worker_token_without_leaking_secret(
             "--file",
             str(profile_path),
             "--environment",
-            "public-beta",
+            "staging",
             "--var",
-            "IMAGE_TAG=public-beta-57a7509",
+            "IMAGE_TAG=staging-57a7509",
             "--var",
-            "ENV_CONFIG_VERSION=public-beta-57a7509",
+            "ENV_CONFIG_VERSION=staging-57a7509",
             "--worker-token",
             "env:LOOM_WORKER_TOKEN",
         ]

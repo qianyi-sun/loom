@@ -20,7 +20,6 @@ REQUIRED_BACKUP_COMPONENTS: tuple[str, ...] = (
     "k8s_secrets",
 )
 PROTECTED_ENVIRONMENTS: frozenset[str] = frozenset({
-    "public-beta",
     "staging",
     "production",
 })
@@ -35,8 +34,8 @@ def infer_environment(
     if environment:
         return environment
     lowered = namespace.lower()
-    if "public-beta" in lowered:
-        return "public-beta"
+    if "staging" in lowered:
+        return "staging"
     if "staging" in lowered or "stage" in lowered:
         return "staging"
     if "prod" in lowered:

@@ -46,8 +46,8 @@ covering sandbox executables/modules, provider dialect, env vars, and
 capture mode. The SPA disables unavailable agents with a setup-needed
 message, and service submit routes enforce the same readiness check so
 clients cannot create doomed batches by bypassing the browser.
-Public-beta and release restore drills materialize this same service catalog
-into the `agents` table through `loom datasets provision-public-beta-catalog`.
+Staging and release restore drills materialize this same service catalog
+into the `agents` table through `loom datasets provision-staging-catalog`.
 Those rows are an auditable restore snapshot with runtime contracts,
 compatibility metadata, and provisioner provenance; they are not maintained by
 manual SQL.

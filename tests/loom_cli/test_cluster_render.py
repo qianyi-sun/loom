@@ -86,7 +86,7 @@ def test_default_replicas_match_spec() -> None:
 
 
 def test_default_worker_capacity_is_above_single_worker_baseline() -> None:
-    """Production render must not silently regress to the public-beta
+    """Production render must not silently regress to the staging
     incident shape: one worker with five execution slots.
     """
     cfg = ClusterConfig()
@@ -104,7 +104,7 @@ def test_load_config_from_toml(tmp_path: Path) -> None:
         'ingress_tls_secret_name = "loom-acme-tls"\n'
         'ingress_cert_manager_cluster_issuer = "letsencrypt-prod"\n'
         'persistent_storage_backend = "static-host-path"\n'
-        'persistent_storage_host_path_root = "/data/loom-public-beta"\n'
+        'persistent_storage_host_path_root = "/data/loom-staging"\n'
         'provider_egress_allowlist = ["202.78.161.51:18001"]\n'
         '[replicas]\n'
         'service = 5\n'
@@ -118,7 +118,7 @@ def test_load_config_from_toml(tmp_path: Path) -> None:
     assert cfg.ingress_tls_secret_name == "loom-acme-tls"
     assert cfg.ingress_cert_manager_cluster_issuer == "letsencrypt-prod"
     assert cfg.persistent_storage_backend == "static-host-path"
-    assert cfg.persistent_storage_host_path_root == "/data/loom-public-beta"
+    assert cfg.persistent_storage_host_path_root == "/data/loom-staging"
     assert cfg.provider_egress_allowlist == ("202.78.161.51:18001",)
     assert cfg.replicas.service == 5
     assert cfg.replicas.worker == 10
@@ -163,7 +163,7 @@ def test_load_config_from_toml_accepts_worker_subprocess_gateway_url(
 def test_load_config_rejects_deprecated_gateway_public_host(
     tmp_path: Path,
 ) -> None:
-    """The public-beta boundary no longer allows a public LLM Gateway
+    """The staging boundary no longer allows a public LLM Gateway
     host; old configs must fail instead of silently exposing it."""
     cfg_path = tmp_path / "cluster.toml"
     cfg_path.write_text('gateway_public_host = "gw.acme.example"\n', encoding="utf-8")
@@ -632,9 +632,9 @@ def test_render_custom_storage_sizes() -> None:
 
 def test_render_static_host_path_storage_binds_critical_state_to_retain_pvs() -> None:
     cfg = _default_cfg(
-        namespace="loom-public-beta",
+        namespace="loom-staging",
         persistent_storage_backend="static-host-path",
-        persistent_storage_host_path_root="/data/loom-public-beta",
+        persistent_storage_host_path_root="/data/loom-staging",
     )
 
     docs = _load_docs(render_manifests(cfg))
@@ -644,25 +644,25 @@ def test_render_static_host_path_storage_binds_critical_state_to_retain_pvs() ->
         if d["kind"] == "PersistentVolume"
     }
 
-    assert pvs["loom-public-beta-postgres-data"]["spec"] == {
+    assert pvs["loom-staging-postgres-data"]["spec"] == {
         "capacity": {"storage": "50Gi"},
         "accessModes": ["ReadWriteOnce"],
         "persistentVolumeReclaimPolicy": "Retain",
         "storageClassName": "",
         "hostPath": {
-            "path": "/data/loom-public-beta/postgres",
+            "path": "/data/loom-staging/postgres",
             "type": "DirectoryOrCreate",
         },
         "claimRef": {
-            "namespace": "loom-public-beta",
+            "namespace": "loom-staging",
             "name": "data-loom-postgres-0",
         },
     }
-    assert pvs["loom-public-beta-minio-data"]["spec"]["hostPath"]["path"] == (
-        "/data/loom-public-beta/minio"
+    assert pvs["loom-staging-minio-data"]["spec"]["hostPath"]["path"] == (
+        "/data/loom-staging/minio"
     )
-    assert pvs["loom-public-beta-worker-trajectories-data"]["spec"]["hostPath"]["path"] == (
-        "/data/loom-public-beta/trajectories"
+    assert pvs["loom-staging-worker-trajectories-data"]["spec"]["hostPath"]["path"] == (
+        "/data/loom-staging/trajectories"
     )
 
     postgres = next(
@@ -671,7 +671,7 @@ def test_render_static_host_path_storage_binds_critical_state_to_retain_pvs() ->
     )
     postgres_claim = postgres["spec"]["volumeClaimTemplates"][0]["spec"]
     assert postgres_claim["storageClassName"] == ""
-    assert postgres_claim["volumeName"] == "loom-public-beta-postgres-data"
+    assert postgres_claim["volumeName"] == "loom-staging-postgres-data"
 
     minio = next(
         d for d in docs
@@ -679,7 +679,7 @@ def test_render_static_host_path_storage_binds_critical_state_to_retain_pvs() ->
     )
     minio_claim = minio["spec"]["volumeClaimTemplates"][0]["spec"]
     assert minio_claim["storageClassName"] == ""
-    assert minio_claim["volumeName"] == "loom-public-beta-minio-data"
+    assert minio_claim["volumeName"] == "loom-staging-minio-data"
 
     worker_pvc = next(
         d for d in docs
@@ -688,7 +688,7 @@ def test_render_static_host_path_storage_binds_critical_state_to_retain_pvs() ->
     )
     assert worker_pvc["spec"]["storageClassName"] == ""
     assert worker_pvc["spec"]["volumeName"] == (
-        "loom-public-beta-worker-trajectories-data"
+        "loom-staging-worker-trajectories-data"
     )
 
 
@@ -701,7 +701,7 @@ def test_render_rejects_unknown_persistent_storage_backend() -> None:
 def test_render_static_host_path_requires_absolute_host_root() -> None:
     cfg = ClusterConfig(
         persistent_storage_backend="static-host-path",
-        persistent_storage_host_path_root="data/loom-public-beta",
+        persistent_storage_host_path_root="data/loom-staging",
     )
     with pytest.raises(ValueError, match="absolute host path"):
         render_manifests(cfg)

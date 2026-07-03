@@ -18,7 +18,7 @@ because:
   (different class identities). A Protocol would force every caller
   to import that Protocol; the function signature does the same job
   with less ceremony.
-- The CLI public-beta-catalog caller doesn't have a Settings object at
+- The CLI staging-catalog caller doesn't have a Settings object at
   all; it builds the client from CLI arguments.
 
 Caller pattern:

@@ -20,12 +20,12 @@ def test_docker_image_evidence_reads_repo_tags_without_repository_field() -> Non
             {
                 "Id": "sha256:" + ("a" * 64),
                 "RepoTags": [
-                    "ghcr.io/qianyi-sun/loom-service:public-beta-cb6af75",
+                    "ghcr.io/qianyi-sun/loom-service:staging-cb6af75",
                 ],
             },
         ],
         expected_repo_tags=[
-            "ghcr.io/qianyi-sun/loom-service:public-beta-cb6af75",
+            "ghcr.io/qianyi-sun/loom-service:staging-cb6af75",
         ],
     )
 
@@ -35,7 +35,7 @@ def test_docker_image_evidence_reads_repo_tags_without_repository_field() -> Non
         {
             "id": "sha256:" + ("a" * 64),
             "repo_tags": [
-                "ghcr.io/qianyi-sun/loom-service:public-beta-cb6af75",
+                "ghcr.io/qianyi-sun/loom-service:staging-cb6af75",
             ],
             "repo_digests": [],
         },
@@ -48,12 +48,12 @@ def test_docker_image_evidence_reports_structured_missing_tag() -> None:
             {
                 "Id": "sha256:" + ("b" * 64),
                 "RepoTags": [
-                    "ghcr.io/qianyi-sun/loom-worker:public-beta-cb6af75",
+                    "ghcr.io/qianyi-sun/loom-worker:staging-cb6af75",
                 ],
             },
         ],
         expected_repo_tags=[
-            "ghcr.io/qianyi-sun/loom-service:public-beta-cb6af75",
+            "ghcr.io/qianyi-sun/loom-service:staging-cb6af75",
         ],
     )
 
@@ -66,7 +66,7 @@ def test_docker_image_evidence_reports_structured_missing_tag() -> None:
                 "RepoTags."
             ),
             "expected_repo_tag": (
-                "ghcr.io/qianyi-sun/loom-service:public-beta-cb6af75"
+                "ghcr.io/qianyi-sun/loom-service:staging-cb6af75"
             ),
         },
     ]
@@ -77,7 +77,7 @@ def test_docker_image_evidence_omits_config_env_secrets() -> None:
         [
             {
                 "Id": "sha256:" + ("c" * 64),
-                "RepoTags": ["loom-service:public-beta-cb6af75"],
+                "RepoTags": ["loom-service:staging-cb6af75"],
                 "Config": {
                     "Env": [
                         "LOOM_ADMIN_TOKEN=should_not_print",
@@ -86,7 +86,7 @@ def test_docker_image_evidence_omits_config_env_secrets() -> None:
                 },
             },
         ],
-        expected_repo_tags=["loom-service:public-beta-cb6af75"],
+        expected_repo_tags=["loom-service:staging-cb6af75"],
     )
 
     rendered = json.dumps(evidence)
@@ -121,7 +121,7 @@ def test_rollout_evidence_docker_images_cli_returns_structured_failure(
         json.dumps([
             {
                 "Id": "sha256:" + ("d" * 64),
-                "RepoTags": ["loom-worker:public-beta-cb6af75"],
+                "RepoTags": ["loom-worker:staging-cb6af75"],
                 "Config": {"Env": ["LOOM_WORKER_TOKEN=should_not_print"]},
             },
         ]),
@@ -135,7 +135,7 @@ def test_rollout_evidence_docker_images_cli_returns_structured_failure(
         "--inspect-json",
         str(inspect_json),
         "--expect-repo-tag",
-        "loom-service:public-beta-cb6af75",
+        "loom-service:staging-cb6af75",
     ])
 
     assert rc == 1

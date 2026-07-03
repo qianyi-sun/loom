@@ -941,7 +941,7 @@ description = "Persistent storage binding mode for Postgres, MinIO, and worker t
 [render_config.persistent_storage_host_path_root]
 python_type = "str"
 default     = ""
-description = "Absolute host path root used when persistent_storage_backend is \"static-host-path\", for example /data/loom-public-beta. Loom renders postgres, minio, and trajectories subdirectories under this root."
+description = "Absolute host path root used when persistent_storage_backend is \"static-host-path\", for example /data/loom-staging. Loom renders postgres, minio, and trajectories subdirectories under this root."
 
 [render_config.provider_egress_allowlist]
 python_type = "str_list"
@@ -987,7 +987,7 @@ python_type = "table"
 # (#383). The `development` profile explicitly flips this back to
 # true because local kind clusters have no external Slurm capacity;
 # k8s workers ARE the trial execution path there. `staging`,
-# `production`, and public-beta ship with the default and rely on
+# `production`, and staging ship with the default and rely on
 # Slurm-managed pools for x86 trial execution. Toggling this to
 # false omits the loom-worker Deployment YAML entirely from the
 # rendered manifest and causes `POST /api/v1/batches` to reject

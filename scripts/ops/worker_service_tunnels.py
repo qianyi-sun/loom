@@ -891,7 +891,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Render systemd user units without installing them.",
     )
     render.add_argument("--output-dir", required=True)
-    render.add_argument("--namespace", default="loom-public-beta")
+    render.add_argument("--namespace", default="loom-staging")
     render.add_argument("--kubectl", default="kubectl")
     render.add_argument("--kubeconfig", required=True)
     render.add_argument("--address", default="0.0.0.0")
@@ -918,7 +918,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         default="~/.config/systemd/user",
     )
-    install.add_argument("--namespace", default="loom-public-beta")
+    install.add_argument("--namespace", default="loom-staging")
     install.add_argument("--kubectl", default="kubectl")
     install.add_argument("--kubeconfig", required=True)
     install.add_argument("--address", default="0.0.0.0")

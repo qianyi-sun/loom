@@ -66,7 +66,7 @@ def _patch_cluster_up_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _empty_environment_profile() -> EnvironmentStateProfile:
     return EnvironmentStateProfile(
-        environment="public-beta",
+        environment="staging",
         control_plane_environment="production",
         autoscaler_policies=[],
         gb10_desired_states=[],
@@ -82,7 +82,7 @@ def test_cluster_up_protected_conflict_fails_before_loading_clients(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     RolloutLeaseManager(tmp_path).acquire(
-        environment="public-beta",
+        environment="staging",
         owner_id="owner-a",
         ttl_seconds=3600,
         command=["loom", "cluster", "up"],
@@ -97,9 +97,9 @@ def test_cluster_up_protected_conflict_fails_before_loading_clients(
         "cluster",
         "up",
         "--environment",
-        "public-beta",
+        "staging",
         "--namespace",
-        "loom-public-beta",
+        "loom-staging",
         "--rollout-lock-dir",
         str(tmp_path),
     ])
@@ -122,26 +122,26 @@ def test_cluster_up_protected_records_lock_evidence(
         "cluster",
         "up",
         "--environment",
-        "public-beta",
+        "staging",
         "--namespace",
-        "loom-public-beta",
+        "loom-staging",
         "--rollout-lock-dir",
         str(tmp_path),
         "--rollout-id",
-        "public-beta-d46a16c",
+        "staging-d46a16c",
         "--rollout-lock-evidence",
         str(evidence_path),
     ])
 
     assert rc == 0
-    active_record = json.loads((tmp_path / "public-beta.lock").read_text(encoding="utf-8"))
+    active_record = json.loads((tmp_path / "staging.lock").read_text(encoding="utf-8"))
     assert active_record["release_status"] == "released"
     evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
     assert [event["event"] for event in evidence["events"]] == [
         "acquired",
         "released",
     ]
-    assert evidence["events"][0]["owner_id"] == "public-beta-d46a16c"
+    assert evidence["events"][0]["owner_id"] == "staging-d46a16c"
 
 
 def test_environment_state_apply_protected_conflict_reports_owner(
@@ -150,7 +150,7 @@ def test_environment_state_apply_protected_conflict_reports_owner(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     RolloutLeaseManager(tmp_path).acquire(
-        environment="public-beta",
+        environment="staging",
         owner_id="cluster-owner",
         ttl_seconds=3600,
         command=["loom", "cluster", "up"],
@@ -166,9 +166,9 @@ def test_environment_state_apply_protected_conflict_reports_owner(
         "environment-state",
         "apply",
         "--file",
-        "deploy/environment-state/public-beta.toml",
+        "deploy/environment-state/staging.toml",
         "--environment",
-        "public-beta",
+        "staging",
         "--rollout-lock-dir",
         str(tmp_path),
     ])
@@ -207,11 +207,11 @@ def test_environment_state_check_records_lock_evidence(
         "environment-state",
         "check",
         "--file",
-        "deploy/environment-state/public-beta.toml",
+        "deploy/environment-state/staging.toml",
         "--environment",
-        "public-beta",
+        "staging",
         "--rollout-id",
-        "env-state-check-public-beta-d46a16c",
+        "env-state-check-staging-d46a16c",
         "--rollout-lock-dir",
         str(tmp_path),
         "--rollout-lock-evidence",
@@ -225,7 +225,7 @@ def test_environment_state_check_records_lock_evidence(
     assert output["ok"] is True
     events = json.loads(evidence_path.read_text(encoding="utf-8"))["events"]
     assert events[0]["event"] == "acquired"
-    assert events[0]["owner_id"] == "env-state-check-public-beta-d46a16c"
+    assert events[0]["owner_id"] == "env-state-check-staging-d46a16c"
     assert events[1]["event"] == "released"
 
 

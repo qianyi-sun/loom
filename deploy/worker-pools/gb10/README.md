@@ -1,7 +1,7 @@
 # GB10 Remote Worker Pool
 
-This directory records the public-beta GB10 worker-pool policy validated for
-issue #518. The pool attaches ARM64 GB10 hosts to the OLDLAB-1 public-beta
+This directory records the staging GB10 worker-pool policy validated for
+issue #518. The pool attaches ARM64 GB10 hosts to the OLDLAB-1 staging
 control plane as Slurm-managed Docker workers. Slurm owns normal capacity
 request/release; Docker Compose and the node-agent remain documented here for
 host-local worker execution, rollout validation, legacy compatibility, and
@@ -11,7 +11,7 @@ break-glass operation.
 
 - Control plane host: OLDLAB-1, reached by the operator as `platform-dev`,
   `oldlab-1`, or `oldlab1`.
-- Kubernetes namespace: `loom-public-beta` in the `kind-loom-public-beta`
+- Kubernetes namespace: `loom-staging` in the `kind-loom-staging`
   cluster.
 - Worker hosts: `trt-gb10-1` through `trt-gb10-15`.
 - Slurm partition: `gb10`.
@@ -69,19 +69,19 @@ On OLDLAB-1, install the durable private service tunnels with the shared
 remote-worker tunnel helper. Use durable paths for `kubectl` and `kubeconfig`;
 do not install units that depend on files under `/tmp`. Install the watchdog
 timer after the tunnel units so stale active-looking port-forwards are restarted
-automatically after host restarts, pod recreation, or public-beta rollouts.
+automatically after host restarts, pod recreation, or staging rollouts.
 
 ```bash
 scripts/ops/worker_service_tunnels.py install-systemd \
-  --namespace loom-public-beta \
+  --namespace loom-staging \
   --kubectl /usr/local/bin/kubectl \
-  --kubeconfig /secure/path/public-beta.kubeconfig
+  --kubeconfig /secure/path/staging.kubeconfig
 
 scripts/ops/worker_service_tunnels.py install-watchdog-systemd \
   --env-file /secure/path/.env.remote-worker
 ```
 
-After every public-beta rollout, check the OLDLAB-1 tunnel units, watchdog
+After every staging rollout, check the OLDLAB-1 tunnel units, watchdog
 timer, and worker-facing health URLs. Manual restart is a fallback when the
 watchdog reports repeated failures instead of a normal first step.
 
@@ -120,7 +120,7 @@ Evidence date: 2026-06-25.
 - Every host runs one Docker Compose worker container.
 - Historical issue #518 smoke used per-host trial concurrency
   `LOOM_WORKER_MAX_CONCURRENT=2`.
-- Current public-beta capacity after the node-agent/autoscaler rollout uses
+- Current staging capacity after the node-agent/autoscaler rollout uses
   `LOOM_WORKER_MAX_CONCURRENT=10`.
 - Every host advertises `LOOM_WORKER_POOL_NAME=gb10-arm64`.
 - Total configured GB10 trial capacity is therefore `15 * 10 = 150` slots.
@@ -197,7 +197,7 @@ services:
 Keep `.env.remote-worker` untracked and mode `600`. Required non-secret shape:
 
 ```bash
-LOOM_IMAGE_TAG=public-beta-cbbe6ff
+LOOM_IMAGE_TAG=staging-cbbe6ff
 LOOM_WORKER_CONTROL_PLANE_URL=http://127.0.0.1:18081
 LOOM_WORKER_GATEWAY_URL=http://127.0.0.1:19100
 LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://host.docker.internal:19100
@@ -228,8 +228,8 @@ active Slurm job `LOOM_WORKER_AUTH_FINGERPRINT` values with:
 loom admin environment-state check \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_ADMIN_TOKEN \
-  --environment public-beta \
-  --file deploy/environment-state/public-beta.toml \
+  --environment staging \
+  --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
   --worker-token file:/secure/path/worker-token
@@ -349,10 +349,10 @@ commands that would run. Dry-run output does not print the full
 `.env.remote-worker` file because that file also contains worker and MinIO
 credentials.
 
-For normal public-beta and staging rollouts, apply the repository
+For normal staging and staging rollouts, apply the repository
 environment-state profile instead of hand-patching Control Plane rows with
 one-off SQL or `curl`. The profile converges the GB10 Slurm autoscaler policy
-and the GB10 node-agent desired state together. The public-beta profile still
+and the GB10 node-agent desired state together. The staging profile still
 writes the existing `production/gb10-arm64` CP desired-state key because that
 is what deployed GB10 node agents read today:
 
@@ -360,16 +360,16 @@ is what deployed GB10 node agents read today:
 loom admin environment-state apply \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_ADMIN_TOKEN \
-  --environment public-beta \
-  --file deploy/environment-state/public-beta.toml \
+  --environment staging \
+  --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
 
 loom admin environment-state check \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_ADMIN_TOKEN \
-  --environment public-beta \
-  --file deploy/environment-state/public-beta.toml \
+  --environment staging \
+  --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
   --worker-token file:/secure/path/worker-token
@@ -388,7 +388,7 @@ curl -sS -X PUT \
   -H 'Content-Type: application/json' \
   http://127.0.0.1:18081/admin/gb10-worker-pools/production/gb10-arm64/desired-state \
   -d '{
-    "image_tag": "public-beta-<commit>",
+    "image_tag": "staging-<commit>",
     "max_concurrent": 10,
     "env_config_version": "gb10-env-2026-06-26",
     "rollout_policy": {

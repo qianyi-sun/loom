@@ -1,7 +1,7 @@
-"""Public-beta benchmark and agent catalog provisioning.
+"""Staging benchmark and agent catalog provisioning.
 
 Copies the production-ready benchmark/task catalog from a known-good source
-environment into the public-beta target and reconciles the S3 task bundles the
+environment into the staging target and reconciles the S3 task bundles the
 worker needs at runtime. It also materializes the service-mode agent catalog
 into the target `agents` table as an auditable restore snapshot. This is
 intentionally separate from seed_test_data: it does not create teams, invites,
@@ -468,7 +468,7 @@ def agent_rows_from_service_catalog(
     """Materialize the service-mode agent catalog into DB rows.
 
     `loom_service.agent_catalog` remains the source of truth for supported
-    agents. Public-beta/staging provisioning writes an auditable DB snapshot so
+    agents. Staging/staging provisioning writes an auditable DB snapshot so
     restore drills can prove benchmarks, tasks, and agents were restored
     through the same official operator path.
     """

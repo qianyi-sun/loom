@@ -21,7 +21,7 @@ from loom_cli.environment_state import (
 def _write_profile(path: Path) -> None:
     path.write_text(
         """
-environment = "public-beta"
+environment = "staging"
 
 [[worker_pool_autoscaler_policies]]
 pool_name = "gb10-arm64"
@@ -61,7 +61,7 @@ mode = "all"
 
 [catalog_provisioning]
 required = true
-command = "loom datasets provision-public-beta-catalog"
+command = "loom datasets provision-catalog"
 """.strip()
         + "\n",
         encoding="utf-8",
@@ -71,23 +71,23 @@ command = "loom datasets provision-public-beta-catalog"
 def test_load_environment_state_profile_normalizes_payloads_and_variables(
     tmp_path: Path,
 ) -> None:
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     _write_profile(profile_path)
 
     profile = load_environment_state_profile(
         profile_path,
         variables={
-            "IMAGE_TAG": "public-beta-57a7509",
-            "ENV_CONFIG_VERSION": "public-beta-57a7509",
+            "IMAGE_TAG": "staging-57a7509",
+            "ENV_CONFIG_VERSION": "staging-57a7509",
         },
-        expected_environment="public-beta",
+        expected_environment="staging",
     )
 
-    assert profile.environment == "public-beta"
-    assert profile.control_plane_environment == "public-beta"
+    assert profile.environment == "staging"
+    assert profile.control_plane_environment == "staging"
     assert profile.autoscaler_policies == [
         {
-            "environment": "public-beta",
+            "environment": "staging",
             "pool_name": "gb10-arm64",
             "actuator": "slurm",
             "enabled": True,
@@ -110,13 +110,13 @@ def test_load_environment_state_profile_normalizes_payloads_and_variables(
             },
         },
     ]
-    assert profile.gb10_desired_states[0]["image_tag"] == "public-beta-57a7509"
-    assert profile.gb10_desired_states[0]["env_config_version"] == "public-beta-57a7509"
+    assert profile.gb10_desired_states[0]["image_tag"] == "staging-57a7509"
+    assert profile.gb10_desired_states[0]["env_config_version"] == "staging-57a7509"
     assert profile.catalog_provisioning["required"] is True
 
 
 def test_load_environment_state_profile_requires_placeholder_values(tmp_path: Path) -> None:
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     _write_profile(profile_path)
 
     with pytest.raises(EnvironmentStateProfileError, match="IMAGE_TAG"):
@@ -126,13 +126,13 @@ def test_load_environment_state_profile_requires_placeholder_values(tmp_path: Pa
 def test_diff_environment_state_reports_policy_and_desired_state_drift(
     tmp_path: Path,
 ) -> None:
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     _write_profile(profile_path)
     profile = load_environment_state_profile(
         profile_path,
         variables={
-            "IMAGE_TAG": "public-beta-57a7509",
-            "ENV_CONFIG_VERSION": "public-beta-57a7509",
+            "IMAGE_TAG": "staging-57a7509",
+            "ENV_CONFIG_VERSION": "staging-57a7509",
         },
     )
 
@@ -140,7 +140,7 @@ def test_diff_environment_state_reports_policy_and_desired_state_drift(
         "autoscaler_status": {
             "policies": [
                 {
-                    "environment": "public-beta",
+                    "environment": "staging",
                     "pool_name": "gb10-arm64",
                     "actuator": "gb10",
                     "enabled": True,
@@ -159,11 +159,11 @@ def test_diff_environment_state_reports_policy_and_desired_state_drift(
         "gb10_status": {
             "desired_states": [
                 {
-                    "environment": "public-beta",
+                    "environment": "staging",
                     "pool_name": "gb10-arm64",
-                    "image_tag": "public-beta-old",
+                    "image_tag": "staging-old",
                     "max_concurrent": 10,
-                    "env_config_version": "public-beta-old",
+                    "env_config_version": "staging-old",
                     "target_slots": 150,
                     "host_intents": {
                         "trt-gb10-1": "active",
@@ -179,10 +179,10 @@ def test_diff_environment_state_reports_policy_and_desired_state_drift(
     drift = diff_environment_state(profile, live)
 
     assert [item.path for item in drift] == [
-        "worker_pool_autoscaler_policies[public-beta/gb10-arm64].actuator",
-        "worker_pool_autoscaler_policies[public-beta/gb10-arm64].actuator_config",
-        "gb10_worker_pool_desired_states[public-beta/gb10-arm64].image_tag",
-        "gb10_worker_pool_desired_states[public-beta/gb10-arm64].env_config_version",
+        "worker_pool_autoscaler_policies[staging/gb10-arm64].actuator",
+        "worker_pool_autoscaler_policies[staging/gb10-arm64].actuator_config",
+        "gb10_worker_pool_desired_states[staging/gb10-arm64].image_tag",
+        "gb10_worker_pool_desired_states[staging/gb10-arm64].env_config_version",
     ]
     assert drift[0].desired == "slurm"
     assert drift[0].live == "gb10"
@@ -204,7 +204,7 @@ def _gb10_live_with_node_source(
         "autoscaler_status": {
             "policies": [
                 {
-                    "environment": "public-beta",
+                    "environment": "staging",
                     "pool_name": "gb10-arm64",
                     "actuator": "slurm",
                     "enabled": True,
@@ -231,7 +231,7 @@ def _gb10_live_with_node_source(
         "gb10_status": {
             "desired_states": [
                 {
-                    "environment": "public-beta",
+                    "environment": "staging",
                     "pool_name": "gb10-arm64",
                     "image_tag": image_tag,
                     "max_concurrent": 10,
@@ -247,7 +247,7 @@ def _gb10_live_with_node_source(
             ],
             "nodes": [
                 {
-                    "environment": "public-beta",
+                    "environment": "staging",
                     "pool_name": "gb10-arm64",
                     "hostname": hostname,
                     "current_intent": intent,
@@ -269,21 +269,21 @@ def test_diff_environment_state_reports_gb10_node_source_git_commit_drift(
     """#356 regression: DB-side image_tag/env_config_version can converge
     while a node still runs stale source. environment-state check must
     fail hard so the release gate does not silently pass."""
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     _write_profile(profile_path)
     profile = load_environment_state_profile(
         profile_path,
         variables={
-            "IMAGE_TAG": "public-beta-c72f50d",
-            "ENV_CONFIG_VERSION": "public-beta-c72f50d",
+            "IMAGE_TAG": "staging-c72f50d",
+            "ENV_CONFIG_VERSION": "staging-c72f50d",
         },
     )
 
     # Node reports converged image/env tags but a stale source_git_commit
-    # (the exact pathology from `public-beta-c72f50d` on 2026-07-02).
+    # (the exact pathology from `staging-c72f50d` on 2026-07-02).
     live = _gb10_live_with_node_source(
-        image_tag="public-beta-c72f50d",
-        env_config_version="public-beta-c72f50d",
+        image_tag="staging-c72f50d",
+        env_config_version="staging-c72f50d",
         source_git_commit="ce55a358d8472bce4b580a363806993678d8f116",
         source_git_dirty=False,
     )
@@ -297,7 +297,7 @@ def test_diff_environment_state_reports_gb10_node_source_git_commit_drift(
         f"expected exactly one source_git_commit drift entry, got {drift}"
     )
     assert source_drift[0].path == (
-        "gb10_worker_node_status[public-beta/gb10-arm64/trt-gb10-1]"
+        "gb10_worker_node_status[staging/gb10-arm64/trt-gb10-1]"
         ".source_git_commit"
     )
     assert source_drift[0].desired == "c72f50d*"
@@ -311,19 +311,19 @@ def test_diff_environment_state_reports_gb10_node_dirty_source(
     dirty runner directory means a human patched files locally and the
     release gate cannot vouch for what code the workers are actually
     running."""
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     _write_profile(profile_path)
     profile = load_environment_state_profile(
         profile_path,
         variables={
-            "IMAGE_TAG": "public-beta-c72f50d",
-            "ENV_CONFIG_VERSION": "public-beta-c72f50d",
+            "IMAGE_TAG": "staging-c72f50d",
+            "ENV_CONFIG_VERSION": "staging-c72f50d",
         },
     )
 
     live = _gb10_live_with_node_source(
-        image_tag="public-beta-c72f50d",
-        env_config_version="public-beta-c72f50d",
+        image_tag="staging-c72f50d",
+        env_config_version="staging-c72f50d",
         source_git_commit="c72f50d67f0d571fef55a9abbbced4e37752ca0e",
         source_git_dirty=True,
     )
@@ -343,19 +343,19 @@ def test_diff_environment_state_accepts_matching_gb10_node_source(
 ) -> None:
     """No source drift when the node reports a commit that starts with
     the release-tag SHA prefix AND the checkout is clean."""
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     _write_profile(profile_path)
     profile = load_environment_state_profile(
         profile_path,
         variables={
-            "IMAGE_TAG": "public-beta-c72f50d",
-            "ENV_CONFIG_VERSION": "public-beta-c72f50d",
+            "IMAGE_TAG": "staging-c72f50d",
+            "ENV_CONFIG_VERSION": "staging-c72f50d",
         },
     )
 
     live = _gb10_live_with_node_source(
-        image_tag="public-beta-c72f50d",
-        env_config_version="public-beta-c72f50d",
+        image_tag="staging-c72f50d",
+        env_config_version="staging-c72f50d",
         source_git_commit="c72f50d67f0d571fef55a9abbbced4e37752ca0e",
         source_git_dirty=False,
     )
@@ -375,19 +375,19 @@ def test_diff_environment_state_ignores_source_drift_on_stopped_gb10_node(
 ) -> None:
     """A node whose intent is 'stopped' or 'draining' is not part of
     active capacity — the release cannot demand it be fresh."""
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     _write_profile(profile_path)
     profile = load_environment_state_profile(
         profile_path,
         variables={
-            "IMAGE_TAG": "public-beta-c72f50d",
-            "ENV_CONFIG_VERSION": "public-beta-c72f50d",
+            "IMAGE_TAG": "staging-c72f50d",
+            "ENV_CONFIG_VERSION": "staging-c72f50d",
         },
     )
 
     live = _gb10_live_with_node_source(
-        image_tag="public-beta-c72f50d",
-        env_config_version="public-beta-c72f50d",
+        image_tag="staging-c72f50d",
+        env_config_version="staging-c72f50d",
         source_git_commit="stalesha11111111111111111111111111111111",
         source_git_dirty=True,
         intent="stopped",
@@ -406,7 +406,7 @@ def test_diff_environment_state_ignores_source_drift_when_image_tag_has_no_sha(
     """A tag without an embedded SHA (e.g. 'latest', '0.7') can't be
     used to derive an expected source prefix, so source drift is
     unenforceable and must not spuriously fire."""
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     _write_profile(profile_path)
     profile = load_environment_state_profile(
         profile_path,
@@ -431,13 +431,13 @@ def test_diff_environment_state_ignores_source_drift_when_image_tag_has_no_sha(
 
 
 def test_diff_environment_state_reports_missing_live_policy(tmp_path: Path) -> None:
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     _write_profile(profile_path)
     profile = load_environment_state_profile(
         profile_path,
         variables={
-            "IMAGE_TAG": "public-beta-57a7509",
-            "ENV_CONFIG_VERSION": "public-beta-57a7509",
+            "IMAGE_TAG": "staging-57a7509",
+            "ENV_CONFIG_VERSION": "staging-57a7509",
         },
     )
 
@@ -446,19 +446,19 @@ def test_diff_environment_state_reports_missing_live_policy(tmp_path: Path) -> N
         {"autoscaler_status": {"policies": []}, "gb10_status": {"desired_states": []}},
     )
 
-    assert drift[0].path == "worker_pool_autoscaler_policies[public-beta/gb10-arm64]"
+    assert drift[0].path == "worker_pool_autoscaler_policies[staging/gb10-arm64]"
     assert drift[0].live is None
-    assert drift[1].path == "gb10_worker_pool_desired_states[public-beta/gb10-arm64]"
+    assert drift[1].path == "gb10_worker_pool_desired_states[staging/gb10-arm64]"
     assert drift[1].live is None
 
 
 def test_diff_environment_state_reports_active_slurm_job_runtime_drift(
     tmp_path: Path,
 ) -> None:
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     profile_path.write_text(
         """
-environment = "public-beta"
+environment = "staging"
 control_plane_environment = "production"
 
 [[worker_pool_autoscaler_policies]]
@@ -471,7 +471,7 @@ max_slots = 40
 [worker_pool_autoscaler_policies.actuator_config]
 backend = "docker"
 cpu_arch = "x86_64"
-env_file = "/shared_work/qianyi/loom-worker-capacity/public-beta-oldlab-worker.env"
+env_file = "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker.env"
 repo_dir = "/shared_work/qianyi/loom-remote-worker"
 requested_cpus = 2
 requested_memory_mib = 8192
@@ -504,7 +504,7 @@ external_runner = true
                         "actuator_config": {
                             "backend": "docker",
                             "cpu_arch": "x86_64",
-                            "env_file": "/shared_work/qianyi/loom-worker-capacity/public-beta-oldlab-worker.env",
+                            "env_file": "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker.env",
                             "repo_dir": "/shared_work/qianyi/loom-remote-worker",
                             "requested_cpus": 2,
                             "requested_memory_mib": 8192,
@@ -537,7 +537,7 @@ external_runner = true
         "slurm_worker_jobs[production/oldlab/14893].LOOM_REMOTE_WORKER_ENV_FILE",
         "slurm_worker_jobs[production/oldlab/14893].LOOM_REMOTE_WORKER_REPO_DIR",
     ]
-    assert drift[0].desired.endswith("public-beta-oldlab-worker.env")
+    assert drift[0].desired.endswith("staging-oldlab-worker.env")
     assert drift[0].live.endswith("issue45-oldlab-4-warm-1608b05.env")
 
 
@@ -546,10 +546,10 @@ def test_diff_environment_state_reports_active_slurm_job_worker_token_fingerprin
 ) -> None:
     active_token = "loom_w_current_environment_token"
     stale_token = "loom_w_stale_slurm_job_token"
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     profile_path.write_text(
         """
-environment = "public-beta"
+environment = "staging"
 control_plane_environment = "production"
 
 [[worker_pool_autoscaler_policies]]
@@ -560,7 +560,7 @@ min_slots = 1
 max_slots = 40
 
 [worker_pool_autoscaler_policies.actuator_config]
-env_file = "/shared_work/qianyi/loom-worker-capacity/public-beta-oldlab-worker.env"
+env_file = "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker.env"
 repo_dir = "/shared_work/qianyi/loom-remote-worker"
 requested_concurrency = 1
 external_runner = true
@@ -583,7 +583,7 @@ external_runner = true
                         "job_id": "14893",
                         "state": "running",
                         "redacted_env": {
-                            "LOOM_REMOTE_WORKER_ENV_FILE": "/shared_work/qianyi/loom-worker-capacity/public-beta-oldlab-worker.env",
+                            "LOOM_REMOTE_WORKER_ENV_FILE": "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker.env",
                             "LOOM_REMOTE_WORKER_REPO_DIR": "/shared_work/qianyi/loom-remote-worker",
                             "LOOM_WORKER_AUTH_FINGERPRINT": (
                                 f"sha256:{hashlib.sha256(stale_token.encode()).hexdigest()[:12]} "
@@ -619,10 +619,10 @@ def test_external_slurm_runner_prerequisite_check_reports_missing_env_and_dirty_
     repo_dir = tmp_path / "loom-remote-worker"
     repo_dir.mkdir()
     (repo_dir / ".git").mkdir()
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     profile_path.write_text(
         f"""
-environment = "public-beta"
+environment = "staging"
 control_plane_environment = "production"
 
 [[worker_pool_autoscaler_policies]]
@@ -641,7 +641,7 @@ requested_concurrency = 1
 external_runner = true
 
 [external_slurm_runner_prerequisites]
-expected_repo_ref = "public-beta-57a7509"
+expected_repo_ref = "staging-57a7509"
 require_clean_repo = true
 """.strip()
         + "\n",
@@ -666,7 +666,7 @@ require_clean_repo = true
     ]
     assert drift[0].desired == str(tmp_path / "missing.env")
     assert drift[0].live == "missing"
-    assert drift[1].desired == "public-beta-57a7509"
+    assert drift[1].desired == "staging-57a7509"
     assert drift[1].live.startswith("62eb0a6")
     assert drift[2].desired == "clean"
     assert "step_runner.py" in drift[2].live
@@ -685,10 +685,10 @@ def test_external_slurm_runner_prerequisite_check_reports_worker_token_fingerpri
     repo_dir = tmp_path / "loom-remote-worker"
     repo_dir.mkdir()
     (repo_dir / ".git").mkdir()
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     profile_path.write_text(
         f"""
-environment = "public-beta"
+environment = "staging"
 control_plane_environment = "production"
 
 [[worker_pool_autoscaler_policies]]
@@ -740,10 +740,10 @@ def test_external_slurm_runner_prerequisite_requires_worker_token_when_parity_en
     env_file.write_text("LOOM_WORKER_TOKEN=loom_w_remote\n", encoding="utf-8")
     repo_dir = tmp_path / "loom-remote-worker"
     repo_dir.mkdir()
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     profile_path.write_text(
         f"""
-environment = "public-beta"
+environment = "staging"
 control_plane_environment = "production"
 
 [[worker_pool_autoscaler_policies]]
@@ -785,10 +785,10 @@ def test_external_slurm_runner_prerequisite_reports_missing_worker_token_key(
     env_file.write_text("LOOM_WORKER_POOL_NAME=oldlab\n", encoding="utf-8")
     repo_dir = tmp_path / "loom-remote-worker"
     repo_dir.mkdir()
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     profile_path.write_text(
         f"""
-environment = "public-beta"
+environment = "staging"
 control_plane_environment = "production"
 
 [[worker_pool_autoscaler_policies]]
@@ -836,10 +836,10 @@ def test_external_slurm_runner_prerequisite_reads_exported_quoted_worker_token(
     )
     repo_dir = tmp_path / "loom-remote-worker"
     repo_dir.mkdir()
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     profile_path.write_text(
         f"""
-environment = "public-beta"
+environment = "staging"
 control_plane_environment = "production"
 
 [[worker_pool_autoscaler_policies]]
@@ -875,10 +875,10 @@ require_worker_token_parity = true
 def test_external_slurm_autoscaler_supervisor_profile_is_normalized(
     tmp_path: Path,
 ) -> None:
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     profile_path.write_text(
         """
-environment = "public-beta"
+environment = "staging"
 
 [[external_slurm_autoscaler_supervisors]]
 name = "oldlab"
@@ -888,8 +888,8 @@ timer_name = "loom-oldlab-autoscaler.timer"
 working_directory = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}"
 python_path = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}/.venv/bin/python"
 script_path = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}/scripts/ops/worker_pool_autoscaler_external_once.py"
-args = ["--pool-name", "oldlab", "--namespace", "loom-public-beta"]
-requires = ["network-online.target", "loom-public-beta-postgres-port-forward.service"]
+args = ["--pool-name", "oldlab", "--namespace", "loom-staging"]
+requires = ["network-online.target", "loom-staging-postgres-port-forward.service"]
 timer_on_boot_sec = "45"
 timer_on_unit_active_sec = "30"
 timer_accuracy_sec = "5"
@@ -902,29 +902,29 @@ active = true
 
     profile = load_environment_state_profile(
         profile_path,
-        variables={"IMAGE_TAG": "public-beta-052e420"},
+        variables={"IMAGE_TAG": "staging-052e420"},
     )
 
     assert profile.external_slurm_autoscaler_supervisors == [
         {
-            "environment": "public-beta",
+            "environment": "staging",
             "name": "oldlab",
             "pool_name": "oldlab",
             "service_name": "loom-oldlab-autoscaler.service",
             "timer_name": "loom-oldlab-autoscaler.timer",
-            "working_directory": "/home/qianyi/dev/loom-worktrees/public-beta-052e420",
+            "working_directory": "/home/qianyi/dev/loom-worktrees/staging-052e420",
             "python_path": (
                 "/home/qianyi/dev/loom-worktrees/"
-                "public-beta-052e420/.venv/bin/python"
+                "staging-052e420/.venv/bin/python"
             ),
             "script_path": (
-                "/home/qianyi/dev/loom-worktrees/public-beta-052e420/"
+                "/home/qianyi/dev/loom-worktrees/staging-052e420/"
                 "scripts/ops/worker_pool_autoscaler_external_once.py"
             ),
-            "args": ["--pool-name", "oldlab", "--namespace", "loom-public-beta"],
+            "args": ["--pool-name", "oldlab", "--namespace", "loom-staging"],
             "requires": [
                 "network-online.target",
-                "loom-public-beta-postgres-port-forward.service",
+                "loom-staging-postgres-port-forward.service",
             ],
             "timer_on_boot_sec": "45",
             "timer_on_unit_active_sec": "30",
@@ -946,10 +946,10 @@ def test_external_slurm_autoscaler_supervisor_check_reports_stale_inactive_unit(
     python_path.write_text("#!/bin/sh\n", encoding="utf-8")
     script.write_text("print('ok')\n", encoding="utf-8")
     python_path.chmod(0o755)
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     profile_path.write_text(
         f"""
-environment = "public-beta"
+environment = "staging"
 
 [[external_slurm_autoscaler_supervisors]]
 name = "oldlab"
@@ -959,8 +959,8 @@ timer_name = "loom-oldlab-autoscaler.timer"
 working_directory = "{workdir}"
 python_path = "{python_path}"
 script_path = "{script}"
-args = ["--pool-name", "oldlab", "--namespace", "loom-public-beta"]
-requires = ["network-online.target", "loom-public-beta-postgres-port-forward.service"]
+args = ["--pool-name", "oldlab", "--namespace", "loom-staging"]
+requires = ["network-online.target", "loom-staging-postgres-port-forward.service"]
 timer_on_boot_sec = "45"
 timer_on_unit_active_sec = "30"
 timer_accuracy_sec = "5"
@@ -974,9 +974,9 @@ active = true
     stale_service_unit = """
 [Service]
 Type=oneshot
-WorkingDirectory=/home/qianyi/dev/loom-worktrees/public-beta-b453057
-Environment=PYTHONPATH=/home/qianyi/dev/loom-worktrees/public-beta-b453057/src
-ExecStart=/home/qianyi/dev/loom-worktrees/public-beta-b453057/.venv/bin/python /home/qianyi/dev/loom-ops/oldlab_autoscaler_external_once.py
+WorkingDirectory=/home/qianyi/dev/loom-worktrees/staging-b453057
+Environment=PYTHONPATH=/home/qianyi/dev/loom-worktrees/staging-b453057/src
+ExecStart=/home/qianyi/dev/loom-worktrees/staging-b453057/.venv/bin/python /home/qianyi/dev/loom-ops/oldlab_autoscaler_external_once.py
 """.strip()
     desired_timer_unit = """
 [Unit]
@@ -1018,11 +1018,11 @@ WantedBy=timers.target
     drift = diff_external_slurm_autoscaler_supervisors(profile, runner=_runner)
 
     assert [item.path for item in drift] == [
-        "external_slurm_autoscaler_supervisors[public-beta/oldlab].service_unit",
-        "external_slurm_autoscaler_supervisors[public-beta/oldlab].timer_active",
+        "external_slurm_autoscaler_supervisors[staging/oldlab].service_unit",
+        "external_slurm_autoscaler_supervisors[staging/oldlab].timer_active",
     ]
     assert "--pool-name oldlab" in drift[0].desired
-    assert "public-beta-b453057" in drift[0].live
+    assert "staging-b453057" in drift[0].live
     assert drift[1].desired == "active"
     assert drift[1].live == "inactive"
 
@@ -1036,10 +1036,10 @@ def test_external_slurm_autoscaler_supervisor_check_reports_unusable_execstart(
     script.parent.mkdir(parents=True)
     script.write_text("print('ok')\n", encoding="utf-8")
     python_path = workdir / ".venv" / "bin" / "python"
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     profile_path.write_text(
         f"""
-environment = "public-beta"
+environment = "staging"
 
 [[external_slurm_autoscaler_supervisors]]
 name = "oldlab"
@@ -1049,7 +1049,7 @@ timer_name = "loom-oldlab-autoscaler.timer"
 working_directory = "{workdir}"
 python_path = "{python_path}"
 script_path = "{script}"
-args = ["--pool-name", "oldlab", "--namespace", "loom-public-beta"]
+args = ["--pool-name", "oldlab", "--namespace", "loom-staging"]
 enabled = true
 active = true
 """.strip()
@@ -1085,7 +1085,7 @@ active = true
     drift = diff_external_slurm_autoscaler_supervisors(profile, runner=_runner)
 
     assert [item.path for item in drift] == [
-        "external_slurm_autoscaler_supervisors[public-beta/oldlab].exec_start.python_path",
+        "external_slurm_autoscaler_supervisors[staging/oldlab].exec_start.python_path",
     ]
     assert drift[0].desired == str(python_path)
     assert drift[0].live == "missing"
@@ -1102,10 +1102,10 @@ def test_external_slurm_autoscaler_supervisor_check_reports_unexecutable_python(
     python_path.write_text("#!/bin/sh\n", encoding="utf-8")
     script.write_text("print('ok')\n", encoding="utf-8")
     python_path.chmod(0o644)
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     profile_path.write_text(
         f"""
-environment = "public-beta"
+environment = "staging"
 
 [[external_slurm_autoscaler_supervisors]]
 name = "oldlab"
@@ -1151,7 +1151,7 @@ active = true
     drift = diff_external_slurm_autoscaler_supervisors(profile, runner=_runner)
 
     assert [item.path for item in drift] == [
-        "external_slurm_autoscaler_supervisors[public-beta/oldlab].exec_start.python_path",
+        "external_slurm_autoscaler_supervisors[staging/oldlab].exec_start.python_path",
     ]
     assert drift[0].desired == str(python_path)
     assert drift[0].live == "not executable"
@@ -1168,10 +1168,10 @@ def test_external_slurm_autoscaler_supervisor_check_reports_failed_service_statu
     python_path.write_text("#!/bin/sh\n", encoding="utf-8")
     script.write_text("print('ok')\n", encoding="utf-8")
     python_path.chmod(0o755)
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     profile_path.write_text(
         f"""
-environment = "public-beta"
+environment = "staging"
 
 [[external_slurm_autoscaler_supervisors]]
 name = "oldlab"
@@ -1181,7 +1181,7 @@ timer_name = "loom-oldlab-autoscaler.timer"
 working_directory = "{workdir}"
 python_path = "{python_path}"
 script_path = "{script}"
-args = ["--pool-name", "oldlab", "--namespace", "loom-public-beta"]
+args = ["--pool-name", "oldlab", "--namespace", "loom-staging"]
 enabled = true
 active = true
 """.strip()
@@ -1222,7 +1222,7 @@ active = true
     drift = diff_external_slurm_autoscaler_supervisors(profile, runner=_runner)
 
     assert [item.path for item in drift] == [
-        "external_slurm_autoscaler_supervisors[public-beta/oldlab].service_status",
+        "external_slurm_autoscaler_supervisors[staging/oldlab].service_status",
     ]
     assert drift[0].desired == "service result success"
     assert drift[0].live == {
@@ -1237,19 +1237,19 @@ active = true
 def test_external_slurm_autoscaler_supervisor_apply_writes_units_and_starts_timer(
     tmp_path: Path,
 ) -> None:
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     profile_path.write_text(
         """
-environment = "public-beta"
+environment = "staging"
 
 [[external_slurm_autoscaler_supervisors]]
 name = "oldlab"
 pool_name = "oldlab"
 service_name = "loom-oldlab-autoscaler.service"
 timer_name = "loom-oldlab-autoscaler.timer"
-working_directory = "/srv/loom/public-beta-052e420"
-python_path = "/srv/loom/public-beta-052e420/.venv/bin/python"
-script_path = "/srv/loom/public-beta-052e420/scripts/ops/worker_pool_autoscaler_external_once.py"
+working_directory = "/srv/loom/staging-052e420"
+python_path = "/srv/loom/staging-052e420/.venv/bin/python"
+script_path = "/srv/loom/staging-052e420/scripts/ops/worker_pool_autoscaler_external_once.py"
 args = ["--pool-name", "oldlab"]
 requires = ["network-online.target"]
 timer_on_boot_sec = "45"
@@ -1281,7 +1281,7 @@ active = true
     timer_unit = (unit_dir / "loom-oldlab-autoscaler.timer").read_text(
         encoding="utf-8",
     )
-    assert "WorkingDirectory=/srv/loom/public-beta-052e420" in service_unit
+    assert "WorkingDirectory=/srv/loom/staging-052e420" in service_unit
     assert "--pool-name oldlab" in service_unit
     assert "Unit=loom-oldlab-autoscaler.service" in timer_unit
     assert commands == [
@@ -1310,19 +1310,19 @@ def test_external_slurm_autoscaler_supervisor_apply_disables_when_enabled_false(
     submitting Slurm jobs. Fix: negative desired state must produce
     negative systemctl calls (stop + disable), idempotently.
     """
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     profile_path.write_text(
         """
-environment = "public-beta"
+environment = "staging"
 
 [[external_slurm_autoscaler_supervisors]]
 name = "oldlab"
 pool_name = "oldlab"
 service_name = "loom-oldlab-autoscaler.service"
 timer_name = "loom-oldlab-autoscaler.timer"
-working_directory = "/srv/loom/public-beta-052e420"
-python_path = "/srv/loom/public-beta-052e420/.venv/bin/python"
-script_path = "/srv/loom/public-beta-052e420/scripts/ops/worker_pool_autoscaler_external_once.py"
+working_directory = "/srv/loom/staging-052e420"
+python_path = "/srv/loom/staging-052e420/.venv/bin/python"
+script_path = "/srv/loom/staging-052e420/scripts/ops/worker_pool_autoscaler_external_once.py"
 args = ["--pool-name", "oldlab"]
 requires = ["network-online.target"]
 timer_on_boot_sec = "45"
@@ -1372,19 +1372,19 @@ def test_external_slurm_autoscaler_supervisor_apply_active_false_only_stops(
     Useful for a temporary pause where the operator wants systemd to
     remember the timer for the next boot but doesn't want it firing now.
     """
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     profile_path.write_text(
         """
-environment = "public-beta"
+environment = "staging"
 
 [[external_slurm_autoscaler_supervisors]]
 name = "oldlab"
 pool_name = "oldlab"
 service_name = "loom-oldlab-autoscaler.service"
 timer_name = "loom-oldlab-autoscaler.timer"
-working_directory = "/srv/loom/public-beta-052e420"
-python_path = "/srv/loom/public-beta-052e420/.venv/bin/python"
-script_path = "/srv/loom/public-beta-052e420/scripts/ops/worker_pool_autoscaler_external_once.py"
+working_directory = "/srv/loom/staging-052e420"
+python_path = "/srv/loom/staging-052e420/.venv/bin/python"
+script_path = "/srv/loom/staging-052e420/scripts/ops/worker_pool_autoscaler_external_once.py"
 args = ["--pool-name", "oldlab"]
 requires = ["network-online.target"]
 timer_on_boot_sec = "45"
@@ -1426,19 +1426,19 @@ def test_external_slurm_autoscaler_supervisor_apply_idempotent_when_unit_missing
     an environment where the supervisor was never installed, and calling
     disable/stop on a nothing is a legitimate no-op. Must NOT raise.
     """
-    profile_path = tmp_path / "public-beta.state.toml"
+    profile_path = tmp_path / "staging.state.toml"
     profile_path.write_text(
         """
-environment = "public-beta"
+environment = "staging"
 
 [[external_slurm_autoscaler_supervisors]]
 name = "oldlab"
 pool_name = "oldlab"
 service_name = "loom-oldlab-autoscaler.service"
 timer_name = "loom-oldlab-autoscaler.timer"
-working_directory = "/srv/loom/public-beta-052e420"
-python_path = "/srv/loom/public-beta-052e420/.venv/bin/python"
-script_path = "/srv/loom/public-beta-052e420/scripts/ops/worker_pool_autoscaler_external_once.py"
+working_directory = "/srv/loom/staging-052e420"
+python_path = "/srv/loom/staging-052e420/.venv/bin/python"
+script_path = "/srv/loom/staging-052e420/scripts/ops/worker_pool_autoscaler_external_once.py"
 args = ["--pool-name", "oldlab"]
 requires = ["network-online.target"]
 timer_on_boot_sec = "45"
@@ -1469,7 +1469,7 @@ active = false
 @pytest.mark.parametrize(
     ("path", "environment"),
     [
-        (Path("deploy/environment-state/public-beta.toml"), "public-beta"),
+        (Path("deploy/environment-state/staging.toml"), "staging"),
         (Path("deploy/environment-state/staging.toml"), "staging"),
     ],
 )
@@ -1480,8 +1480,8 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     profile = load_environment_state_profile(
         path,
         variables={
-            "IMAGE_TAG": "public-beta-test",
-            "ENV_CONFIG_VERSION": "public-beta-test",
+            "IMAGE_TAG": "staging-test",
+            "ENV_CONFIG_VERSION": "staging-test",
         },
         expected_environment=environment,
     )
@@ -1491,7 +1491,7 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
         for policy in profile.autoscaler_policies
         if policy["pool_name"] == "gb10-arm64"
     )
-    expected_cp_environment = "production" if environment == "public-beta" else environment
+    expected_cp_environment = "production" if environment == "staging" else environment
     assert profile.environment == environment
     assert gb10_policy["environment"] == expected_cp_environment
     assert gb10_policy["actuator"] == "slurm"
@@ -1502,12 +1502,12 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert len(gb10_policy["actuator_config"]["allowed_nodes"]) == 15
     assert (
         gb10_policy["actuator_config"]["env_file"]
-        == f"/shared_work/qianyi/loom-worker-capacity/{environment}-gb10-worker-public-beta-test.env"
+        == f"/shared_work/qianyi/loom-worker-capacity/{environment}-gb10-worker-staging-test.env"
     )
     suffix = (
-        "loom-remote-worker-public-beta-test"
-        if environment == "public-beta"
-        else "loom-remote-worker-staging-public-beta-test"
+        "loom-remote-worker-staging-test"
+        if environment == "staging"
+        else "loom-remote-worker-staging-staging-test"
     )
     assert gb10_policy["actuator_config"]["repo_dir"].endswith(suffix)
 
@@ -1517,13 +1517,13 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
         if state["pool_name"] == "gb10-arm64"
     )
     assert gb10_state["environment"] == expected_cp_environment
-    assert gb10_state["image_tag"] == "public-beta-test"
-    assert gb10_state["env_config_version"] == "public-beta-test"
+    assert gb10_state["image_tag"] == "staging-test"
+    assert gb10_state["env_config_version"] == "staging-test"
     assert gb10_state["max_concurrent"] == 10
     assert gb10_state["target_slots"] == 150
     assert profile.catalog_provisioning["required"] is True
     command = profile.catalog_provisioning["command"]
-    assert "loom datasets provision-public-beta-catalog" in command
+    assert "loom datasets provision-catalog" in command
     assert "loom datasets register skilllearnbench" in command
     assert "--mirror-to-object-store" in command
     assert "loom datasets audit --all --verify-bundles" in command
@@ -1544,14 +1544,14 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     )
 
 
-def test_public_beta_oldlab_policy_allows_all_five_oldlab_submit_nodes() -> None:
+def test_staging_oldlab_policy_allows_all_five_oldlab_submit_nodes() -> None:
     profile = load_environment_state_profile(
-        Path("deploy/environment-state/public-beta.toml"),
+        Path("deploy/environment-state/staging.toml"),
         variables={
-            "IMAGE_TAG": "public-beta-test",
-            "ENV_CONFIG_VERSION": "public-beta-test",
+            "IMAGE_TAG": "staging-test",
+            "ENV_CONFIG_VERSION": "staging-test",
         },
-        expected_environment="public-beta",
+        expected_environment="staging",
     )
 
     oldlab_policy = next(

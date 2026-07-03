@@ -1,11 +1,11 @@
 # Full/Max-Slot Three-Cluster Canary Runbook
 
-This runbook prepares the unified public-beta canary for #49/#129 with the
+This runbook prepares the unified staging canary for #49/#129 with the
 current #188/#193/#190/#271 blocker set. It is a preparation artifact only:
 do not submit the canary until the coordinating thread gives an explicit
 `GO` for the full/max-slot three-cluster canary.
 
-The canary must prove that a current public-beta release can execute a
+The canary must prove that a current staging release can execute a
 SkillLearnBench full/max-slot workload across all three release-managed pools:
 
 - `oldlab` - x86_64 elastic Slurm workers.
@@ -17,14 +17,14 @@ SkillLearnBench full/max-slot workload across all three release-managed pools:
 Stop before submitting any workload unless every item in this section is true.
 
 1. The coordinator has posted an explicit `GO` for this canary.
-2. The public-beta anchor is clean at execution time. A clean anchor requires
+2. The staging anchor is clean at execution time. A clean anchor requires
    the latest `environment-state check` for the chosen rollout to report
    `ok=true` and `drift=[]`, with no active Slurm jobs, GB10 node-agent
    reports, worker env files, worker repo paths from an older `IMAGE_TAG`,
    missing or unexecutable external autoscaler `ExecStart` paths, or recent
    failed external autoscaler service results such as `status=203/EXEC`.
    Historical drift such as stale OLDLAB Slurm job `17972` on
-   `public-beta-ce55a35` is a stop condition until the follow-up check proves
+   `staging-ce55a35` is a stop condition until the follow-up check proves
    the replacement state is clean.
 3. #190 targeted durability validation has completed on the clean anchor.
    Do not use the full/max-slot canary as the first proof of the #190 S3
@@ -41,20 +41,20 @@ Stop before submitting any workload unless every item in this section is true.
    unclaimable coverage trial when it cannot satisfy a pool.
 6. #193 coverage expectations are explicit. The current canary covers the
    release-gate observable `claimed_without_started=0` through batch debug
-   evidence and `scripts/public_beta_smoke_gate.py`. It does not replace a
+   evidence and `scripts/staging_smoke_gate.py`. It does not replace a
    deliberate #193 fault-injection/reclaim test unless #193 has separately
    landed that diagnostic hook and the coordinator adds it to GO scope.
 
 ## Operator Inputs
 
 Set these values in the shell that will run the canary. Use paths from the
-clean public-beta rollout, not from an older rollout.
+clean staging rollout, not from an older rollout.
 
 ```bash
 export RELEASE_SHA=<clean-anchor-git-sha>
-export IMAGE_TAG=public-beta-<clean-anchor-sha7>
+export IMAGE_TAG=staging-<clean-anchor-sha7>
 export ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
-export ROLLOUT_DIR=/data/loom-public-beta/rollouts/<clean-anchor-dir>
+export ROLLOUT_DIR=/data/loom-staging/rollouts/<clean-anchor-dir>
 export RUN_ID=full-max-slot-three-cluster-$(date -u +%Y%m%dT%H%M%SZ)
 export CANARY_DIR="$ROLLOUT_DIR/$RUN_ID"
 export CLUSTER_CONFIG=<path-to-clean-anchor-cluster-config.toml>
@@ -63,7 +63,7 @@ export PUBLIC_URL=https://loom.example.com
 export CP_URL=http://control-node.lan:18081
 export ADMIN_TOKEN_FILE=/secure/path/admin-token
 export WORKER_TOKEN_FILE=/secure/path/worker-token
-export K8S_NAMESPACE=loom-public-beta
+export K8S_NAMESPACE=loom-staging
 
 export TEAM_A_TOKEN=<team-a-user-owned-api-token>
 export TEAM_B_TOKEN=<team-b-user-owned-api-token>
@@ -102,10 +102,10 @@ test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
 
 loom cluster release-manifest \
   --config "$CLUSTER_CONFIG" \
-  --environment public-beta \
+  --environment staging \
   --image-tag "$IMAGE_TAG" \
   --git-sha "$RELEASE_SHA" \
-  --environment-state-file deploy/environment-state/public-beta.toml \
+  --environment-state-file deploy/environment-state/staging.toml \
   --env-config-version "$ENV_CONFIG_VERSION" \
   --expected-image-identities-json "$CANARY_DIR/00-anchor/image-identities-$IMAGE_TAG.json" \
   --output "$CANARY_DIR/00-anchor/release-manifest-$IMAGE_TAG.json"
@@ -115,7 +115,7 @@ loom cluster release-gate \
   --config "$CLUSTER_CONFIG" \
   --rendered-manifest "$CANARY_DIR/00-anchor/rendered.yaml" \
   --namespace "$K8S_NAMESPACE" \
-  --environment public-beta \
+  --environment staging \
   --format json \
   | tee "$CANARY_DIR/01-clean-anchor/release-gate-$IMAGE_TAG.json"
 
@@ -135,8 +135,8 @@ loom admin environment-state apply \
   --cp-url "$CP_URL" \
   --admin-token "file:$ADMIN_TOKEN_FILE" \
   --expect-admin-token-fingerprint "$LIVE_ADMIN_TOKEN_FINGERPRINT" \
-  --environment public-beta \
-  --file deploy/environment-state/public-beta.toml \
+  --environment staging \
+  --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="$ENV_CONFIG_VERSION" \
   | tee "$CANARY_DIR/01-clean-anchor/environment-state-apply.txt"
@@ -145,8 +145,8 @@ loom admin environment-state check \
   --cp-url "$CP_URL" \
   --admin-token "file:$ADMIN_TOKEN_FILE" \
   --expect-admin-token-fingerprint "$LIVE_ADMIN_TOKEN_FINGERPRINT" \
-  --environment public-beta \
-  --file deploy/environment-state/public-beta.toml \
+  --environment staging \
+  --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="$ENV_CONFIG_VERSION" \
   --worker-token "file:$WORKER_TOKEN_FILE" \
@@ -196,7 +196,7 @@ credentials, and explicit secret needles as `env:VAR`, `file:PATH`, or `-`
 sources; do not expand raw secret values into argv.
 
 ```bash
-uv run python scripts/public_beta_smoke_gate.py \
+uv run python scripts/staging_smoke_gate.py \
   --server-url "$PUBLIC_URL" \
   --team-a-token env:TEAM_A_TOKEN \
   --team-b-token env:TEAM_B_TOKEN \
@@ -380,7 +380,7 @@ Only cancel the batch after an explicit operator/coordinator decision.
   download failures, `XMinioStorageFull`, `trajectory_flush_failed`, or ATIF
   projection failures. Treat these as #190 blockers, not benchmark scores.
 - `runs.claimed_without_started` becomes nonzero in batch debug evidence or
-  `scripts/public_beta_smoke_gate.py`. Treat this as #193 evidence requiring
+  `scripts/staging_smoke_gate.py`. Treat this as #193 evidence requiring
   diagnosis/reclaim follow-up. If the row later becomes terminal with
   `retry_exhausted`, inspect the trial `failure_message` for the
   `claimed_without_started_reclaimed` diagnostic and prior worker id.
@@ -409,7 +409,7 @@ loom eval batch debug "$CANARY_BATCH_ID" --format json \
 loom eval diagnose batch "$CANARY_BATCH_ID" --format json \
   | tee "$CANARY_DIR/06-terminal/batch-diagnosis-final.json"
 
-uv run python scripts/public_beta_smoke_gate.py \
+uv run python scripts/staging_smoke_gate.py \
   --server-url "$PUBLIC_URL" \
   --team-a-token env:TEAM_A_TOKEN \
   --team-b-token env:TEAM_B_TOKEN \
@@ -431,8 +431,8 @@ uv run python scripts/public_beta_smoke_gate.py \
   --secret-needle env:PUBLIC_BETA_SECRET_NEEDLE \
   --internal-url-needle loom-minio.loom.svc.cluster.local \
   --fail-on-skip \
-  --markdown-output "$CANARY_DIR/06-terminal/public-beta-smoke.md" \
-  --json-output "$CANARY_DIR/06-terminal/public-beta-smoke.json"
+  --markdown-output "$CANARY_DIR/06-terminal/staging-smoke.md" \
+  --json-output "$CANARY_DIR/06-terminal/staging-smoke.json"
 
 uv run python scripts/benchmark_reward_gate.py readiness \
   --server-url "$PUBLIC_URL" \
@@ -503,8 +503,8 @@ $CANARY_DIR/
     batch-final.json
     batch-debug-final.json
     batch-diagnosis-final.json
-    public-beta-smoke.md
-    public-beta-smoke.json
+    staging-smoke.md
+    staging-smoke.json
     benchmark-readiness.txt
     benchmark-sweep.txt
   07-summary/

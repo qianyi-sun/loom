@@ -1,5 +1,5 @@
 FROM python:3.11-slim
-# #199: transient PyPI ReadTimeouts during public-beta rollout builds
+# #199: transient PyPI ReadTimeouts during staging rollout builds
 # used to fail the whole rollout. These env vars tell pip to retry each
 # request 10 times and wait 60s per attempt instead of the 5-retry /
 # 15s defaults. See docs/operator-runbook.md#kind-cluster-loading-local-images

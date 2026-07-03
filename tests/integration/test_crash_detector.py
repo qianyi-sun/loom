@@ -604,7 +604,7 @@ async def test_reclaim_stale_claimed_keeps_started_trial_on_fresh_worker(
 # tests below stress the actual production races that motivated #193:
 # reclaim happening concurrent with a worker's belated state PATCH, a
 # single dead worker holding many stuck claims (the "6 stuck trials on
-# public-beta-b453057" evidence), and multi-cycle reclaim attribution
+# staging-b453057" evidence), and multi-cycle reclaim attribution
 # through retry_exhausted.
 # ──────────────────────────────────────────────────────────────────────
 
@@ -716,7 +716,7 @@ async def test_reclaim_then_worker_patch_returns_zero_rows(
 async def test_batch_reclaim_of_multiple_stuck_claims_from_same_worker(
     postgres_url: str,
 ):
-    """Reproduces the six-stuck-trials evidence from #193 (public-beta-
+    """Reproduces the six-stuck-trials evidence from #193 (staging-
     b453057 batch `19e825da-...`). One dead worker held six claimed
     trials with `started_at=NULL`; a single crash-detector sweep must
     reclaim ALL six with distinct diagnostic messages tagging each

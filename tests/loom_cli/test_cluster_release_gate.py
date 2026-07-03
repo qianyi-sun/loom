@@ -93,21 +93,21 @@ def _manifest(
     manifest = {
         "schema_version": 1,
         "release": {
-            "environment": "public-beta",
+            "environment": "staging",
             "git_sha": "a" * 40,
-            "image_tag": "public-beta-abc123",
+            "image_tag": "staging-abc123",
             "generated_at": "2026-07-01T00:00:00Z",
         },
         "cluster_config": {"sha256": "config-sha", "namespace": "loom"},
         "rendered_manifest": {
             "sha256": "rendered-sha",
             "deployment_images": {
-                "loom-service": {"app": "loom-service:public-beta-abc123"},
+                "loom-service": {"app": "loom-service:staging-abc123"},
             },
             "deployment_image_identities": {
                 "loom-service": {
                     "app": {
-                        "image": "loom-service:public-beta-abc123",
+                        "image": "loom-service:staging-abc123",
                         "repo_digest": f"loom-service@{expected_digest}",
                         "image_id": "sha256:" + "2" * 64,
                     },
@@ -127,7 +127,7 @@ def _manifest(
 def _external_workers_manifest_section() -> dict[str, Any]:
     return {
         "environment_state_file": {
-            "path": "deploy/environment-state/public-beta.toml",
+            "path": "deploy/environment-state/staging.toml",
             "sha256": "state-sha",
         },
         "slurm_pools": [
@@ -137,16 +137,16 @@ def _external_workers_manifest_section() -> dict[str, Any]:
                 "external_runner": True,
                 "env_file": (
                     "/shared_work/qianyi/loom-worker-capacity/"
-                    "public-beta-oldlab-worker-public-beta-abc123.env"
+                    "staging-oldlab-worker-staging-abc123.env"
                 ),
-                "repo_dir": "/shared_work/qianyi/loom-remote-worker-public-beta-abc123",
+                "repo_dir": "/shared_work/qianyi/loom-remote-worker-staging-abc123",
             },
         ],
         "gb10_desired_states": [
             {
                 "pool_name": "gb10-arm64",
-                "image_tag": "public-beta-abc123",
-                "env_config_version": "public-beta-abc123",
+                "image_tag": "staging-abc123",
+                "env_config_version": "staging-abc123",
             },
         ],
     }
@@ -157,14 +157,14 @@ def test_release_gate_passes_when_ready_pod_image_id_matches_expected_digest() -
     apps = _FakeAppsV1({
         "loom-service": _deployment(
             name="loom-service",
-            image="loom-service:public-beta-abc123",
+            image="loom-service:staging-abc123",
         ),
     })
     core = _FakeCoreV1([
         _ready_pod(
             name="loom-service-abc",
             app="loom-service",
-            image="loom-service:public-beta-abc123",
+            image="loom-service:staging-abc123",
             image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
         ),
     ])
@@ -194,14 +194,14 @@ def test_release_gate_fails_when_ready_pod_image_id_does_not_match_manifest() ->
     apps = _FakeAppsV1({
         "loom-service": _deployment(
             name="loom-service",
-            image="loom-service:public-beta-abc123",
+            image="loom-service:staging-abc123",
         ),
     })
     core = _FakeCoreV1([
         _ready_pod(
             name="loom-service-abc",
             app="loom-service",
-            image="loom-service:public-beta-abc123",
+            image="loom-service:staging-abc123",
             image_id="docker-pullable://loom-service@sha256:" + "9" * 64,
         ),
     ])
@@ -234,14 +234,14 @@ def test_release_gate_accepts_kind_import_runtime_identity_when_template_matches
     apps = _FakeAppsV1({
         "loom-service": _deployment(
             name="loom-service",
-            image="loom-service:public-beta-abc123",
+            image="loom-service:staging-abc123",
         ),
     })
     core = _FakeCoreV1([
         _ready_pod(
             name="loom-service-kind",
             app="loom-service",
-            image="loom-service:public-beta-abc123",
+            image="loom-service:staging-abc123",
             image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
         ),
     ])
@@ -271,28 +271,28 @@ def test_release_gate_accepts_kind_import_runtime_identity_when_template_matches
 def test_release_gate_rejects_stale_status_image_on_kind_import_pod() -> None:
     """#339 regression — kind-import must not mask a stale status image.
 
-    Deployment template image says `public-beta-abc123` (the release target),
-    but the container status still reports the old `public-beta-old` tag.
+    Deployment template image says `staging-abc123` (the release target),
+    but the container status still reports the old `staging-old` tag.
     The pod's runtime image ID has the kind-import shape, so the previous
     implementation would pass on `identity_strategy=kind-import-template-image`
-    regardless of the tag drift. The operator observation on `public-beta-2eef3bf9`
+    regardless of the tag drift. The operator observation on `staging-2eef3bf9`
     was that the release gate said "pass" while `loom-web` was still serving
-    `public-beta-05ab776`. The gate must fail here so the operator waits for
+    `staging-05ab776`. The gate must fail here so the operator waits for
     a fresh pod (or restarts the Deployment) before accepting the release.
     """
     manifest = _manifest(expected_digest="sha256:" + "1" * 64)
     apps = _FakeAppsV1({
         "loom-service": _deployment(
             name="loom-service",
-            image="loom-service:public-beta-abc123",
+            image="loom-service:staging-abc123",
         ),
     })
     core = _FakeCoreV1([
         _ready_pod(
             name="loom-service-kind",
             app="loom-service",
-            image="loom-service:public-beta-abc123",
-            status_image="loom-service:public-beta-old",
+            image="loom-service:staging-abc123",
+            status_image="loom-service:staging-old",
             image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
         ),
     ])
@@ -320,7 +320,7 @@ def test_release_gate_rejects_stale_status_image_on_kind_import_pod() -> None:
     assert check.evidence["status_image_stale"] is True
     assert check.evidence["status_image_matches_template"] is False
     assert check.evidence["identity_strategy"] == "kind-import-template-image"
-    assert check.evidence["live_image"] == "loom-service:public-beta-old"
+    assert check.evidence["live_image"] == "loom-service:staging-old"
     # Remediation should point at rolling / waiting for pod refresh, not at
     # rebuilding image digests (that's the wrong lever for kind-import drift).
     assert check.remediation is not None
@@ -332,15 +332,15 @@ def test_release_gate_does_not_mark_default_docker_prefix_status_image_stale() -
     apps = _FakeAppsV1({
         "loom-service": _deployment(
             name="loom-service",
-            image="loom-service:public-beta-abc123",
+            image="loom-service:staging-abc123",
         ),
     })
     core = _FakeCoreV1([
         _ready_pod(
             name="loom-service-kind",
             app="loom-service",
-            image="loom-service:public-beta-abc123",
-            status_image="docker.io/library/loom-service:public-beta-abc123",
+            image="loom-service:staging-abc123",
+            status_image="docker.io/library/loom-service:staging-abc123",
             image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
         ),
     ])
@@ -360,7 +360,7 @@ def test_release_gate_does_not_mark_default_docker_prefix_status_image_stale() -
         check for check in report.checks
         if check.name == "image-identity:loom-service/app"
     )
-    assert check.evidence["live_image"] == "docker.io/library/loom-service:public-beta-abc123"
+    assert check.evidence["live_image"] == "docker.io/library/loom-service:staging-abc123"
     assert check.evidence["status_image_matches_template"] is True
     assert check.evidence["status_image_stale"] is False
 
@@ -369,7 +369,7 @@ def test_release_gate_passes_zero_replica_deployment_when_template_matches() -> 
     manifest = _manifest(expected_digest="sha256:" + "1" * 64)
     deployment = _deployment(
         name="loom-service",
-        image="loom-service:public-beta-abc123",
+        image="loom-service:staging-abc123",
         replicas=0,
     )
     apps = _FakeAppsV1({"loom-service": deployment})
@@ -431,7 +431,7 @@ def test_release_gate_ignores_ready_pods_not_from_deployment_template() -> None:
     apps = _FakeAppsV1({
         "loom-service": _deployment(
             name="loom-service",
-            image="loom-service:public-beta-abc123",
+            image="loom-service:staging-abc123",
         ),
     })
     core = _FakeCoreV1([
@@ -460,7 +460,7 @@ def test_release_gate_ignores_ready_pods_not_from_deployment_template() -> None:
     )
     assert check.outcome == "fail"
     assert check.detail == "no target-generation Ready pods found for managed Deployment"
-    assert check.evidence["pod_template_image"] == "loom-service:public-beta-abc123"
+    assert check.evidence["pod_template_image"] == "loom-service:staging-abc123"
 
 
 def test_release_gate_fails_when_target_generation_pod_lacks_runtime_image_id() -> None:
@@ -468,14 +468,14 @@ def test_release_gate_fails_when_target_generation_pod_lacks_runtime_image_id() 
     apps = _FakeAppsV1({
         "loom-service": _deployment(
             name="loom-service",
-            image="loom-service:public-beta-abc123",
+            image="loom-service:staging-abc123",
         ),
     })
     core = _FakeCoreV1([
         _ready_pod(
             name="loom-service-new",
             app="loom-service",
-            image="loom-service:public-beta-abc123",
+            image="loom-service:staging-abc123",
             image_id=None,
         ),
     ])
@@ -505,14 +505,14 @@ def test_release_gate_rejects_stale_kind_import_pod_from_old_template() -> None:
     apps = _FakeAppsV1({
         "loom-service": _deployment(
             name="loom-service",
-            image="loom-service:public-beta-abc123",
+            image="loom-service:staging-abc123",
         ),
     })
     core = _FakeCoreV1([
         _ready_pod(
             name="loom-service-old",
             app="loom-service",
-            image="loom-service:public-beta-old",
+            image="loom-service:staging-old",
             image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
         ),
     ])
@@ -534,7 +534,7 @@ def test_release_gate_rejects_stale_kind_import_pod_from_old_template() -> None:
     )
     assert check.outcome == "fail"
     assert check.detail == "no target-generation Ready pods found for managed Deployment"
-    assert check.evidence["pod_template_image"] == "loom-service:public-beta-abc123"
+    assert check.evidence["pod_template_image"] == "loom-service:staging-abc123"
 
 
 def test_release_gate_fails_when_deployment_generation_is_not_observed() -> None:
@@ -542,7 +542,7 @@ def test_release_gate_fails_when_deployment_generation_is_not_observed() -> None
     apps = _FakeAppsV1({
         "loom-service": _deployment(
             name="loom-service",
-            image="loom-service:public-beta-abc123",
+            image="loom-service:staging-abc123",
             generation=8,
             observed_generation=7,
         ),
@@ -551,7 +551,7 @@ def test_release_gate_fails_when_deployment_generation_is_not_observed() -> None
         _ready_pod(
             name="loom-service-new",
             app="loom-service",
-            image="loom-service:public-beta-abc123",
+            image="loom-service:staging-abc123",
             image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
         ),
     ])
@@ -581,7 +581,7 @@ def test_release_gate_fails_when_deployment_updated_replicas_are_partial() -> No
     manifest = _manifest(expected_digest="sha256:" + "1" * 64)
     deployment = _deployment(
         name="loom-service",
-        image="loom-service:public-beta-abc123",
+        image="loom-service:staging-abc123",
     )
     deployment.spec.replicas = 2
     deployment.status.updated_replicas = 1
@@ -591,7 +591,7 @@ def test_release_gate_fails_when_deployment_updated_replicas_are_partial() -> No
         _ready_pod(
             name="loom-service-new",
             app="loom-service",
-            image="loom-service:public-beta-abc123",
+            image="loom-service:staging-abc123",
             image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
         ),
     ])
@@ -672,14 +672,14 @@ def test_release_gate_requires_environment_state_check_when_manifest_records_ext
         apps_v1=_FakeAppsV1({
             "loom-service": _deployment(
                 name="loom-service",
-                image="loom-service:public-beta-abc123",
+                image="loom-service:staging-abc123",
             ),
         }),
         core_v1=_FakeCoreV1([
             _ready_pod(
                 name="loom-service-new",
                 app="loom-service",
-                image="loom-service:public-beta-abc123",
+                image="loom-service:staging-abc123",
                 image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
             ),
         ]),
@@ -696,7 +696,7 @@ def test_release_gate_requires_environment_state_check_when_manifest_records_ext
     )
     assert check.outcome == "fail"
     assert check.detail == "environment-state check artifact is required"
-    assert check.evidence["expected_profile"] == "deploy/environment-state/public-beta.toml"
+    assert check.evidence["expected_profile"] == "deploy/environment-state/staging.toml"
     assert check.evidence["expected_profile_sha256"] == "state-sha"
 
 
@@ -706,14 +706,14 @@ def test_release_gate_fails_when_environment_state_check_reports_drift() -> None
         apps_v1=_FakeAppsV1({
             "loom-service": _deployment(
                 name="loom-service",
-                image="loom-service:public-beta-abc123",
+                image="loom-service:staging-abc123",
             ),
         }),
         core_v1=_FakeCoreV1([
             _ready_pod(
                 name="loom-service-new",
                 app="loom-service",
-                image="loom-service:public-beta-abc123",
+                image="loom-service:staging-abc123",
                 image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
             ),
         ]),
@@ -722,9 +722,9 @@ def test_release_gate_fails_when_environment_state_check_reports_drift() -> None
         cluster_config_sha256="config-sha",
         live_alembic_heads=["0050"],
         environment_state_check_artifact={
-            "environment": "public-beta",
+            "environment": "staging",
             "control_plane_environment": "production",
-            "profile": "deploy/environment-state/public-beta.toml",
+            "profile": "deploy/environment-state/staging.toml",
             "ok": False,
             "drift": [
                 {
@@ -732,13 +732,13 @@ def test_release_gate_fails_when_environment_state_check_reports_drift() -> None
                         "slurm_worker_jobs[production/oldlab/18186]."
                         "LOOM_REMOTE_WORKER_ENV_FILE"
                     ),
-                    "desired": "public-beta-d46a16c",
-                    "live": "public-beta-cb6af75",
+                    "desired": "staging-d46a16c",
+                    "live": "staging-cb6af75",
                 },
             ],
         },
         environment_state_check_path=(
-            "/data/loom-public-beta/rollouts/20260702T055745Z-public-beta-d46a16c/"
+            "/data/loom-staging/rollouts/20260702T055745Z-staging-d46a16c/"
             "environment-state-check-live-secrets.json"
         ),
     )
@@ -751,7 +751,7 @@ def test_release_gate_fails_when_environment_state_check_reports_drift() -> None
     assert check.outcome == "fail"
     assert check.detail == "live environment-state check reports drift"
     assert check.evidence["drift_count"] == 1
-    assert check.evidence["drift"][0]["live"] == "public-beta-cb6af75"
+    assert check.evidence["drift"][0]["live"] == "staging-cb6af75"
     assert "environment-state apply/check" in (check.remediation or "")
 
 
@@ -761,14 +761,14 @@ def test_release_gate_passes_when_environment_state_check_is_clean() -> None:
         apps_v1=_FakeAppsV1({
             "loom-service": _deployment(
                 name="loom-service",
-                image="loom-service:public-beta-abc123",
+                image="loom-service:staging-abc123",
             ),
         }),
         core_v1=_FakeCoreV1([
             _ready_pod(
                 name="loom-service-new",
                 app="loom-service",
-                image="loom-service:public-beta-abc123",
+                image="loom-service:staging-abc123",
                 image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
             ),
         ]),
@@ -777,9 +777,9 @@ def test_release_gate_passes_when_environment_state_check_is_clean() -> None:
         cluster_config_sha256="config-sha",
         live_alembic_heads=["0050"],
         environment_state_check_artifact={
-            "environment": "public-beta",
+            "environment": "staging",
             "control_plane_environment": "production",
-            "profile": "deploy/environment-state/public-beta.toml",
+            "profile": "deploy/environment-state/staging.toml",
             "ok": True,
             "drift": [],
         },
@@ -800,7 +800,7 @@ def test_release_gate_passes_when_environment_state_check_is_clean() -> None:
 def test_release_gate_evidence_includes_autoscaler_blockers() -> None:
     blockers = [
         {
-            "environment": "public-beta",
+            "environment": "staging",
             "pool_name": "oldlab",
             "actuator": "slurm",
             "last_decision": "blocked",
@@ -820,14 +820,14 @@ def test_release_gate_evidence_includes_autoscaler_blockers() -> None:
         apps_v1=_FakeAppsV1({
             "loom-service": _deployment(
                 name="loom-service",
-                image="loom-service:public-beta-abc123",
+                image="loom-service:staging-abc123",
             ),
         }),
         core_v1=_FakeCoreV1([
             _ready_pod(
                 name="loom-service-new",
                 app="loom-service",
-                image="loom-service:public-beta-abc123",
+                image="loom-service:staging-abc123",
                 image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
             ),
         ]),
@@ -836,9 +836,9 @@ def test_release_gate_evidence_includes_autoscaler_blockers() -> None:
         cluster_config_sha256="config-sha",
         live_alembic_heads=["0050"],
         environment_state_check_artifact={
-            "environment": "public-beta",
+            "environment": "staging",
             "control_plane_environment": "production",
-            "profile": "deploy/environment-state/public-beta.toml",
+            "profile": "deploy/environment-state/staging.toml",
             "ok": False,
             "drift": [],
             "autoscaler_blockers": blockers,
@@ -864,7 +864,7 @@ def test_release_gate_report_includes_component_evidence_rows() -> None:
         apps_v1=_FakeAppsV1({
             "loom-service": _deployment(
                 name="loom-service",
-                image="loom-service:public-beta-abc123",
+                image="loom-service:staging-abc123",
                 generation=9,
                 observed_generation=9,
             ),
@@ -873,7 +873,7 @@ def test_release_gate_report_includes_component_evidence_rows() -> None:
             _ready_pod(
                 name="loom-service-new",
                 app="loom-service",
-                image="loom-service:public-beta-abc123",
+                image="loom-service:staging-abc123",
                 image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
             ),
         ]),
@@ -882,9 +882,9 @@ def test_release_gate_report_includes_component_evidence_rows() -> None:
         cluster_config_sha256="config-sha",
         live_alembic_heads=["0050"],
         environment_state_check_artifact={
-            "environment": "public-beta",
+            "environment": "staging",
             "control_plane_environment": "production",
-            "profile": "deploy/environment-state/public-beta.toml",
+            "profile": "deploy/environment-state/staging.toml",
             "ok": True,
             "drift": [],
         },
@@ -896,8 +896,8 @@ def test_release_gate_report_includes_component_evidence_rows() -> None:
 
     k8s_row = next(row for row in rows if row["component"] == "loom-service/app")
     assert k8s_row["surface"] == "kubernetes"
-    assert k8s_row["expected_release"] == "loom-service:public-beta-abc123"
-    assert k8s_row["live_release"] == "loom-service:public-beta-abc123"
+    assert k8s_row["expected_release"] == "loom-service:staging-abc123"
+    assert k8s_row["live_release"] == "loom-service:staging-abc123"
     assert k8s_row["expected_digest"] == "loom-service@sha256:" + "1" * 64
     assert k8s_row["live_digest"].endswith("sha256:" + "1" * 64)
     assert k8s_row["generation"] == 9
@@ -906,7 +906,7 @@ def test_release_gate_report_includes_component_evidence_rows() -> None:
 
     oldlab_row = next(row for row in rows if row["component"] == "oldlab")
     assert oldlab_row["surface"] == "external-worker"
-    assert oldlab_row["expected_release"] == "deploy/environment-state/public-beta.toml"
+    assert oldlab_row["expected_release"] == "deploy/environment-state/staging.toml"
     assert oldlab_row["live_release"] == "environment-state-check-live-secrets.json"
     assert oldlab_row["readiness"] == "environment-state converged"
     assert oldlab_row["outcome"] == "pass"
@@ -918,7 +918,7 @@ def test_release_gate_report_includes_component_evidence_rows() -> None:
 
 def test_release_gate_markdown_formats_pasteable_component_table() -> None:
     report = ReleaseGateReport(
-        environment="public-beta",
+        environment="staging",
         namespace="loom",
         checks=[
             ReleaseGateCheck(
@@ -928,13 +928,13 @@ def test_release_gate_markdown_formats_pasteable_component_table() -> None:
                 evidence={
                     "deployment": "loom-service",
                     "container": "app",
-                    "expected_image": "loom-service:public-beta-abc123",
+                    "expected_image": "loom-service:staging-abc123",
                     "expected_repo_digest": "loom-service@sha256:" + "1" * 64,
                     "generation": 7,
                     "observed_generation": 7,
                     "desired_replicas": 1,
                     "ready_replicas": 1,
-                    "live_image": "loom-service:public-beta-abc123",
+                    "live_image": "loom-service:staging-abc123",
                     "live_image_id": "docker-pullable://loom-service@sha256:" + "1" * 64,
                     "pod": "loom-service-new",
                 },
@@ -947,9 +947,9 @@ def test_release_gate_markdown_formats_pasteable_component_table() -> None:
     assert "| Surface | Component | Expected | Live | Generation/job | Readiness | Restart/crash | Evidence | Result |" in markdown
     assert (
         "| kubernetes | loom-service/app | "
-        "`loom-service:public-beta-abc123 / loom-service@sha256:"
+        "`loom-service:staging-abc123 / loom-service@sha256:"
         + "1" * 64
-        + "` | `loom-service:public-beta-abc123 / docker-pullable://loom-service@sha256:"
+        + "` | `loom-service:staging-abc123 / docker-pullable://loom-service@sha256:"
         + "1" * 64
         + "` | `7` | 1/1 ready |  | `pod=loom-service-new` | PASS |"
     ) in markdown
@@ -1021,7 +1021,7 @@ def test_cluster_release_gate_cli_dry_run_reports_structured_failure(
     monkeypatch.setattr(
         "loom_cli.cluster_cmd.collect_release_gate_report",
         lambda **_kwargs: ReleaseGateReport(
-            environment="public-beta",
+            environment="staging",
             namespace="loom",
             checks=[
                 ReleaseGateCheck(
@@ -1046,7 +1046,7 @@ def test_cluster_release_gate_cli_dry_run_reports_structured_failure(
         "--namespace",
         "loom",
         "--environment",
-        "public-beta",
+        "staging",
         "--dry-run",
         "--format",
         "json",
@@ -1070,9 +1070,9 @@ def test_cluster_release_gate_cli_passes_environment_state_check_artifact(
     environment_state_check_path = tmp_path / "environment-state-check.json"
     environment_state_check_path.write_text(
         json.dumps({
-            "environment": "public-beta",
+            "environment": "staging",
             "control_plane_environment": "production",
-            "profile": "deploy/environment-state/public-beta.toml",
+            "profile": "deploy/environment-state/staging.toml",
             "ok": True,
             "drift": [],
         }),
@@ -1088,7 +1088,7 @@ def test_cluster_release_gate_cli_passes_environment_state_check_artifact(
     def _fake_collect_release_gate_report(**kwargs: Any) -> ReleaseGateReport:
         captured.update(kwargs)
         return ReleaseGateReport(
-            environment="public-beta",
+            environment="staging",
             namespace="loom",
             checks=[
                 ReleaseGateCheck(
@@ -1113,7 +1113,7 @@ def test_cluster_release_gate_cli_passes_environment_state_check_artifact(
         "--namespace",
         "loom",
         "--environment",
-        "public-beta",
+        "staging",
         "--environment-state-check",
         str(environment_state_check_path),
         "--dry-run",

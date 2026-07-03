@@ -20,7 +20,7 @@ from loom.worker_token import (
 
 _PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
-# Matches the git-SHA suffix in a release tag like `public-beta-c72f50d`.
+# Matches the git-SHA suffix in a release tag like `staging-c72f50d`.
 # Kept in sync with the copy in `loom_cli.admin_cmd` — both derive the
 # expected node-agent source_git_commit prefix from the same tag shape.
 # See #356 for why the drift check must include per-node source_git_commit,
@@ -473,9 +473,9 @@ def _append_gb10_node_source_drift(
 
     DB-side `desired_states` / node-reported `image_tag` +
     `env_config_version` can converge while node-agents still run
-    from a stale host-local checkout — e.g. `image=public-beta-c72f50d`
+    from a stale host-local checkout — e.g. `image=staging-c72f50d`
     but `source_git_commit=ce55a358d847...`. That path produced silent
-    release-gate passes on `public-beta-baa1d327` / `public-beta-c72f50d`
+    release-gate passes on `staging-baa1d327` / `staging-c72f50d`
     while GB10 workers actually ran pre-#350 code.
 
     For each desired state whose `image_tag` embeds a git-SHA suffix,

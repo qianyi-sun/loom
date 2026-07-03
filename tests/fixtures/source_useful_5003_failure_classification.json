@@ -1,8 +1,8 @@
 {
   "source": "Issue #388 Source Useful 5003 postmortem classification and supplemental rerun evidence",
   "production_evidence": {
-    "rollout": "20260703T000303Z-public-beta-6b76a48",
-    "evidence_dir": "/data/loom-public-beta/rollouts/20260703T000303Z-public-beta-6b76a48/source-useful-5003-gb10-hotfix-20260703T010342Z",
+    "rollout": "20260703T000303Z-staging-6b76a48",
+    "evidence_dir": "/data/loom-staging/rollouts/20260703T000303Z-staging-6b76a48/source-useful-5003-gb10-hotfix-20260703T010342Z",
     "main_batch_id": "e488ca16-8b03-4ddd-9c3f-98737ff05eea",
     "snapshot": "supplemental-target-classification-20260703T140115Z.tsv",
     "main_failed_count": 28,

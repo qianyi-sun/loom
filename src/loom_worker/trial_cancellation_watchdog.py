@@ -2,7 +2,7 @@
 
 The worker's trial runner is long-lived (agent step + verifier + artifact
 collection can legitimately take minutes to hours). Two failure modes
-were surfaced by the 2026-07-02 / 2026-07-03 public-beta canaries and
+were surfaced by the 2026-07-02 / 2026-07-03 staging canaries and
 had no defense in place:
 
 * **#360 — operator-driven cancellation.** The control plane marks a

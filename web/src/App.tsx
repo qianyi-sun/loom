@@ -17,6 +17,9 @@ import RateCardsAdmin from "./pages/RateCardsAdmin";
 import RunLibrary from "./pages/RunLibrary";
 import RunLibraryBatchDetail from "./pages/RunLibraryBatchDetail";
 import Settings from "./pages/Settings";
+import TaskSetDetail from "./pages/TaskSetDetail";
+import TaskSetsList from "./pages/TaskSetsList";
+import TaskSetSubmit from "./pages/TaskSetSubmit";
 import Tasks from "./pages/Tasks";
 import TrialCompare from "./pages/TrialCompare";
 import TrialDetail from "./pages/TrialDetail";
@@ -42,6 +45,9 @@ export default function App(): JSX.Element {
         <Route path="tasks" element={<Tasks />} />
         <Route path="benchmarks" element={<Benchmarks />} />
         <Route path="usage" element={<UsageDashboard />} />
+        <Route path="task-sets/new" element={<TaskSetSubmit />} />
+        <Route path="task-sets/:id" element={<TaskSetDetail />} />
+        <Route path="task-sets" element={<TaskSetsList />} />
         <Route path="providers/new" element={<ProviderCreate />} />
         <Route path="providers/:id" element={<ProviderDetail />} />
         <Route path="providers" element={<ProvidersList />} />

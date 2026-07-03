@@ -402,7 +402,7 @@ spec:
                 - Inspect the Gateway cost dashboard by team_id.
                 - Check recent batches for the affected team.
                 - If spend is unintended, disable the team or rotate the
-                  provider connection secret from the public-beta runbook.
+                  provider connection secret from the staging runbook.
 
     - name: loom.service.health
       interval: 30s
