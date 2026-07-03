@@ -161,6 +161,49 @@ async def test_upload_task_dir_rejects_moving_npm_latest_with_fixed_node_major(
         )
 
 
+async def test_upload_task_dir_rejects_dns_runtime_mutation(
+    tmp_path: Path,
+) -> None:
+    dockerfile = tmp_path / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text(
+        "FROM debian:bookworm\n"
+        "COPY broken_resolv.conf /app/broken_resolv.conf\n"
+        "RUN cp /app/broken_resolv.conf /etc/resolv.conf\n",
+    )
+    (tmp_path / "task.toml").write_text("x = 1\n")
+
+    with pytest.raises(ValueError, match="TASK_COMPAT_DNS_MUTATION"):
+        await upload_task_dir(
+            store=FakeObjectStore(),
+            bucket="b",
+            prefix="source-useful/task/",
+            task_dir=tmp_path,
+        )
+
+
+async def test_upload_task_dir_rejects_environment_app_path_mismatch(
+    tmp_path: Path,
+) -> None:
+    dockerfile = tmp_path / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text(
+        "FROM debian:bookworm\n"
+        "COPY . /app/\n"
+        "RUN chmod +x /app/setup_repo.sh && /app/setup_repo.sh\n",
+    )
+    (tmp_path / "environment" / "setup_repo.sh").write_text("#!/bin/sh\n")
+    (tmp_path / "task.toml").write_text("x = 1\n")
+
+    with pytest.raises(ValueError, match="TASK_COMPAT_APP_PATH_MISSING"):
+        await upload_task_dir(
+            store=FakeObjectStore(),
+            bucket="b",
+            prefix="source-useful/task/",
+            task_dir=tmp_path,
+        )
+
+
 async def test_upload_task_dir_rejects_moving_npm_latest_after_nodesource_setup(
     tmp_path: Path,
 ) -> None:

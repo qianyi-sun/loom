@@ -201,6 +201,17 @@ aggregate is computed from the steps that completed.
   set `docker_build_context` to that directory when those files should be
   available to Docker but hidden from the agent workspace. `build_timeout_sec`
   controls the per-task image build timeout and defaults to 1200 seconds.
+  Loom does not flatten or rewrite bundle directories: if the build context is
+  the bundle root and the Dockerfile says `COPY . /app/`, a file stored at
+  `environment/setup_repo.sh` lands at `/app/environment/setup_repo.sh`, not
+  `/app/setup_repo.sh`. Move files to the declared build-context root, update
+  the Dockerfile path, or set `docker_build_context` to a directory whose layout
+  matches the Dockerfile.
+  Compatibility preflight rejects known platform-breaking patterns before
+  expensive fanout, including Dockerfiles that mutate `/etc/resolv.conf`,
+  `/etc/nsswitch.conf`, or `/etc/hosts` before the service-mode agent layer is
+  installed. Use task-owned setup/runtime steps for DNS/NSS experiments instead
+  of breaking agent installation or model connectivity in the base task image.
   Workers also enforce operator-owned build context limits before calling
   Docker: `LOOM_TASK_IMAGE_BUILD_MAX_FILES` defaults to 2000 files and
   `LOOM_TASK_IMAGE_BUILD_MAX_BYTES` defaults to 536870912 bytes. If either

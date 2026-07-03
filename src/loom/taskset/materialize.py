@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import tempfile
 from dataclasses import dataclass, field
@@ -14,6 +15,11 @@ from pydantic import ValidationError
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.task_checksum import task_checksum
 from loom.models.taskset import TaskSetVerifier, UserTaskSetManifest
+from loom.task_bundle_compat import (
+    CompatibilitySeverity,
+    TaskBundleCompatibilityIssue,
+    collect_task_dir_compatibility_issues,
+)
 from loom.taskset.instance_mapping import MappingError, resolve_mapping
 from loom.taskset.status import cap_error_summary, compute_task_set_status
 from loom.taskset.template_render import render_task_template
@@ -177,6 +183,24 @@ def _upload_bundle_dir(
         )
 
 
+def _compatibility_issue_error(
+    *,
+    row_index: int,
+    issue: TaskBundleCompatibilityIssue,
+) -> dict[str, str]:
+    return {
+        "row": str(row_index),
+        "code": issue.code,
+        "severity": issue.severity.value,
+        "path": issue.path,
+        "line": str(issue.line),
+        "phase": issue.phase,
+        "message": issue.message,
+        "hint": issue.hint,
+        "evidence": json.dumps(issue.evidence, sort_keys=True, separators=(",", ":")),
+    }
+
+
 def materialize_task_set(
     *,
     manifest: UserTaskSetManifest,
@@ -301,6 +325,21 @@ def materialize_task_set(
                         manifest_verifier=manifest.verifier,
                         has_evaluation_intent=has_evaluation,
                     )
+                    compatibility_issues = [
+                        issue
+                        for issue in collect_task_dir_compatibility_issues(bundle_dir)
+                        if issue.severity == CompatibilitySeverity.ERROR
+                    ]
+                    if compatibility_issues:
+                        skipped += 1
+                        errors.extend(
+                            _compatibility_issue_error(
+                                row_index=row_index,
+                                issue=issue,
+                            )
+                            for issue in compatibility_issues
+                        )
+                        continue
                     checksum = task_checksum(bundle_dir)
                     bundle_prefix = f"{prefix}/tasks/{short_id}"
                     _upload_bundle_dir(
@@ -360,6 +399,11 @@ def materialize_task_set(
         materialized=materialized,
         skipped=skipped,
     )
+    if materialized == 0 and any(
+        error.get("code", "").startswith("TASK_COMPAT_")
+        for error in errors
+    ):
+        status_reason = "bundle_compatibility_error"
     evaluation_ready = (
         has_evaluation
         and manifest.verifier is not None
@@ -374,4 +418,7 @@ def materialize_task_set(
         status_reason=status_reason,
         evaluation_ready=evaluation_ready,
         error_summary=cap_error_summary(errors),
+        job_failure_reason=(
+            status_reason if status == "failed" and status_reason else None
+        ),
     )

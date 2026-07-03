@@ -33,6 +33,7 @@ class FailureReason(StrEnum):
     ARTIFACT_UPLOAD_FAILED = "artifact_upload_failed"
     TRAJECTORY_FLUSH_FAILED = "trajectory_flush_failed"
     TASK_IMAGE_BUILD_TIMEOUT = "task_image_build_timeout"
+    TASK_COMPATIBILITY = "task_compatibility"
     EXHAUSTED_RETRIES = "exhausted_retries"
     WORKER_LOST_CLAIM = "worker_lost_claim"
     INTERNAL_ERROR = "internal_error"

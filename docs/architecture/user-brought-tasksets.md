@@ -296,11 +296,17 @@ A background job-queue consumer:
    `instance_mapping`.
 6. Validate via `TaskConfig` (`extra="forbid"`) - per-row failure is a skip,
    not an abort.
-7. Write the bundle (`task.toml`, `instruction.md`, optional
+7. Run task-bundle compatibility preflight on the rendered local bundle before
+   upload. Hard failures are recorded in `error_summary` with structured fields
+   (`code`, `severity`, `path`, `line`, `phase`, `message`, `hint`,
+   `evidence`) and no runnable task row is inserted. The platform reports
+   issues such as DNS/NSS mutation before agent setup or Dockerfile/build
+   context path drift; it does not flatten or silently repair user bundles.
+8. Write the bundle (`task.toml`, `instruction.md`, optional
    `verifier/<name>`, declared artifacts) to object storage under the TaskSet
    prefix.
-8. Insert `tasks` rows linked to the TaskSet and owning team.
-9. On completion, update `task_sets.status` to `ready`, `partial`, or
+9. Insert `tasks` rows linked to the TaskSet and owning team.
+10. On completion, update `task_sets.status` to `ready`, `partial`, or
    `failed`; set `evaluation_ready=true` only when verifier/scoring config is
    valid and at least one task materialized.
 
