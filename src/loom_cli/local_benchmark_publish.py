@@ -27,6 +27,9 @@ from loom.trajectory.storage import ObjectStore
 from loom_benchmark_tool.db_url import normalize_db_url
 from loom_benchmark_tool.upload import upload_task_dir
 from loom_cli.local_benchmark_validate import validate_local_benchmark
+from loom_cli.terminal_bench_normalize import (
+    normalize_terminal_bench_task_toml,
+)
 
 PUBLISH_IMPORTED_BY = "local-benchmark-publish"
 S3_FOLDER_KIND = "s3-folder"
@@ -119,6 +122,12 @@ async def publish_local_benchmark(
 
                 with task_toml.open("rb") as f:
                     raw_cfg: dict[str, Any] = tomllib.load(f)
+                # #341: normalize Terminal-Bench-shaped task.toml to a
+                # Loom TaskConfig dict before persisting. The on-disk
+                # bundle uploaded to S3 above is unchanged (audit /
+                # repro remains intact); the DB row's `config` JSONB
+                # carries the Loom-schema form so the worker validates.
+                raw_cfg = normalize_terminal_bench_task_toml(raw_cfg)
                 _promote_cpu_arch_if_runtime_fallback(raw_cfg, bundle_dir)
                 checksum = task_checksum(bundle_dir)
                 existing = await _get_task(session, task_id)
