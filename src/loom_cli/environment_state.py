@@ -515,10 +515,10 @@ def _append_gb10_node_source_drift(
             and isinstance(hostname, str)
         ):
             continue
-        desired = desired_by_key.get((env, pool))
-        if desired is None:
+        matched_desired = desired_by_key.get((env, pool))
+        if matched_desired is None:
             continue
-        expected_source = _release_source_prefix(desired.get("image_tag"))
+        expected_source = _release_source_prefix(matched_desired.get("image_tag"))
         if expected_source is None:
             continue
         source_commit = node.get("source_git_commit")
