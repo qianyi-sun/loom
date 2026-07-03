@@ -36,6 +36,12 @@ data/
 /artifacts/
 outputs/
 logs/
+# CLI-mode default per-trial output: `loom run --output-dir` defaults
+# to `./runs`, and its `_tasks/` scratch subdirectory can hold
+# hundreds of MB per trial. Anchored at the repo root so a
+# `docs/architecture/foo/runs` path (unlikely but possible) still
+# tracks normally.
+/runs/
 
 # IDE
 .idea/
