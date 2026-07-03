@@ -61,6 +61,34 @@ async def test_setup_failure_patch_uses_task_image_build_timeout_reason() -> Non
     ]
 
 
+async def test_setup_failure_patch_preserves_long_docker_build_error_tail() -> None:
+    cp = _FakeCPClient()
+    trial_id = uuid4()
+    worker_id = uuid4()
+    decisive_error = "dpkg: error processing package nodejs (--configure): post-installation script returned error exit status 1"
+    build_lines = [f"Removing noisy-package-{idx} (1.0) ..." for idx in range(120)]
+    build_lines.append(decisive_error)
+    detail = (
+        "failed to build layered image 'loom-trial-cache:abc123': "
+        "The command '/bin/sh -c bash /tmp/install.sh' returned a non-zero code: 1\n"
+        "build log (last 121 lines):\n"
+        + "\n".join(build_lines)
+    )
+
+    await ml._mark_setup_failed(
+        cp_client=cp,  # type: ignore[arg-type]
+        trial_id=trial_id,
+        worker_id=worker_id,
+        detail=detail,
+    )
+
+    failure_message = str(cp.patch_calls[0]["failure_message"])
+    assert len(failure_message) <= 1000
+    assert "failed to build layered image" in failure_message
+    assert decisive_error in failure_message
+    assert "Removing noisy-package-0" not in failure_message
+
+
 class _FakeCPClient:
     def __init__(self) -> None:
         self.patch_calls: list[dict[str, object]] = []

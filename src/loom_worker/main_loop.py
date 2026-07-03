@@ -86,6 +86,11 @@ from loom_worker.vllm_registry import WorkerVLLMRegistry
 _DOCKER_HOST_GATEWAY_EXTRA_HOSTS: tuple[tuple[str, str], ...] = (
     ("host.docker.internal", "host-gateway"),
 )
+_SETUP_FAILURE_MESSAGE_LIMIT = 1000
+_SETUP_FAILURE_HEAD_CHARS = 360
+_SETUP_FAILURE_TRUNCATION_MARKER = (
+    "\n...[truncated setup diagnostic; preserved trailing output]...\n"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -815,7 +820,7 @@ async def _mark_setup_failed(
     worker_id: UUID,
     detail: str,
 ) -> None:
-    safe_detail = redact_text(detail, limit=1000).strip()
+    safe_detail = _format_setup_failure_detail(detail)
     failure_reason = _classify_setup_failure(safe_detail)
     logger.warning(
         "trial_setup_failed trial_id=%s worker_id=%s detail=%s",
@@ -843,6 +848,36 @@ async def _mark_setup_failed(
             trial_id,
             worker_id,
         )
+
+
+def _format_setup_failure_detail(detail: str) -> str:
+    safe_detail = redact_text(detail).strip()
+    if len(safe_detail) <= _SETUP_FAILURE_MESSAGE_LIMIT:
+        return safe_detail
+
+    max_head_budget = min(
+        _SETUP_FAILURE_HEAD_CHARS,
+        _SETUP_FAILURE_MESSAGE_LIMIT - len(_SETUP_FAILURE_TRUNCATION_MARKER) - 1,
+    )
+    head = _setup_failure_diagnostic_head(safe_detail, max_head_budget)
+    tail_budget = _SETUP_FAILURE_MESSAGE_LIMIT - len(head) - len(
+        _SETUP_FAILURE_TRUNCATION_MARKER
+    )
+    tail = safe_detail[-tail_budget:].lstrip()
+    first_newline = tail.find("\n")
+    if 0 < first_newline < len(tail) - 1:
+        tail = tail[first_newline + 1 :]
+    compact = f"{head}{_SETUP_FAILURE_TRUNCATION_MARKER}{tail.lstrip()}"
+    return compact[:_SETUP_FAILURE_MESSAGE_LIMIT].strip()
+
+
+def _setup_failure_diagnostic_head(detail: str, max_chars: int) -> str:
+    build_log_index = detail.lower().find("\nbuild log")
+    if build_log_index >= 0:
+        build_log_line_end = detail.find("\n", build_log_index + 1)
+        if 0 < build_log_line_end <= max_chars:
+            return detail[:build_log_line_end].rstrip()
+    return detail[:max_chars].rstrip()
 
 
 def _classify_setup_failure(detail: str) -> FailureReason:

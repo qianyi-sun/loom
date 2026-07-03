@@ -599,7 +599,10 @@ surfaces the failing RUN command **plus the last 40 lines of the
 build log** (pip's stderr, apt's error, etc.) in the trial's
 `failure_message`. That is usually enough to diagnose the failure
 without ssh access to the worker; check `/api/v1/trials/{id}` or the
-SPA's trial-detail view.
+SPA's trial-detail view. If the pre-start diagnostic is still longer
+than the persisted message budget, Loom keeps the build summary and
+trailing log output with a `truncated setup diagnostic` marker instead
+of preserving only the prefix.
 
 Sync (UPSERT into the `benchmarks` + `tasks` tables) runs:
 
