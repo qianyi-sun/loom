@@ -643,3 +643,127 @@ def test_tunnel_script_has_no_environment_specific_hosts() -> None:
         "platform" + "-dev",
     )
     assert not any(marker in text for marker in forbidden)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #18: stale-tunnel detection — empty body must fail the probe
+# ──────────────────────────────────────────────────────────────────────
+
+
+class _FakeResponse:
+    """Minimal `urlopen`-style response used to exercise probe_health_urls.
+    Supports the context-manager + `.status` + `.read(n)` surface the
+    probe actually calls."""
+
+    def __init__(self, *, status: int, body: bytes) -> None:
+        self.status = status
+        self._body = body
+
+    def read(self, _n: int) -> bytes:
+        return self._body
+
+    def __enter__(self) -> _FakeResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+
+def test_probe_health_urls_treats_empty_body_as_failed_probe(
+    monkeypatch,
+) -> None:
+    """#18: a stale `kubectl port-forward` can accept the TCP
+    connection and return HTTP 200 with an empty body. The probe must
+    treat that as a failed check so the watchdog can restart the
+    tunnel — not silently accept it as healthy just because the
+    status line was 200."""
+    module = _load_module()
+    monkeypatch.setattr(
+        module,
+        "urlopen",
+        lambda _url, timeout: _FakeResponse(status=200, body=b""),
+    )
+
+    results = module.probe_health_urls(
+        [("control-plane", "http://oldlab-1:18081/healthz")],
+        timeout_sec=5.0,
+    )
+
+    assert len(results) == 1
+    assert results[0].ok is False
+    assert "empty_response" in results[0].detail
+
+
+def test_probe_health_urls_accepts_nonempty_body_as_healthy(
+    monkeypatch,
+) -> None:
+    """Positive control: healthy tunnels return a non-empty body and
+    must NOT trip the empty-body defense."""
+    module = _load_module()
+    monkeypatch.setattr(
+        module,
+        "urlopen",
+        lambda _url, timeout: _FakeResponse(
+            status=200,
+            body=b'{"status":"ok"}',
+        ),
+    )
+
+    results = module.probe_health_urls(
+        [("control-plane", "http://oldlab-1:18081/healthz")],
+        timeout_sec=5.0,
+    )
+    assert len(results) == 1
+    assert results[0].ok is True
+    assert results[0].detail == "http_status=200"
+
+
+def test_probe_health_urls_treats_read_timeout_as_failed(
+    monkeypatch,
+) -> None:
+    """A stale tunnel that returns status 200 but then times out
+    mid-read (empty write-then-FIN pattern) must also count as
+    failed. Prevents indefinite hangs when the far side has half-
+    closed the socket."""
+    module = _load_module()
+
+    class _HangingResponse(_FakeResponse):
+        def read(self, _n: int) -> bytes:
+            raise TimeoutError("read timed out")
+
+    monkeypatch.setattr(
+        module,
+        "urlopen",
+        lambda _url, timeout: _HangingResponse(status=200, body=b""),
+    )
+
+    results = module.probe_health_urls(
+        [("control-plane", "http://oldlab-1:18081/healthz")],
+        timeout_sec=5.0,
+    )
+    assert results[0].ok is False
+    assert "read_error=TimeoutError" in results[0].detail
+
+
+def test_probe_health_urls_treats_non_2xx_status_as_failed(
+    monkeypatch,
+) -> None:
+    """A non-2xx status must still fail the probe — the new body
+    check must not accidentally accept a 500 with a non-empty error
+    payload as healthy."""
+    module = _load_module()
+    monkeypatch.setattr(
+        module,
+        "urlopen",
+        lambda _url, timeout: _FakeResponse(
+            status=503,
+            body=b'{"detail":"unavailable"}',
+        ),
+    )
+
+    results = module.probe_health_urls(
+        [("control-plane", "http://oldlab-1:18081/healthz")],
+        timeout_sec=5.0,
+    )
+    assert results[0].ok is False
+    assert "http_status=503" in results[0].detail
