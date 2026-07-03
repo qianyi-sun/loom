@@ -140,6 +140,18 @@ function mockMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
                   name: "human-readable-batch",
                   state: "submitted",
                   expected_trial_count: 164,
+                  total_prompt_tokens: 1000,
+                  total_completion_tokens: 200,
+                  total_tokens: 1200,
+                  llm_calls_count: 1,
+                  estimated_cost_usd: null,
+                  cost_currency: null,
+                  cost_status: "price_unknown",
+                  cost_estimate_source: "unpriced",
+                  cost_estimate_confidence: "unavailable",
+                  budget_usd: 1,
+                  budget_policy: "hard",
+                  budget_remaining_usd: null,
                   created_at: "2026-06-19T20:23:00Z",
                   created_by_token_prefix: "test:web",
                   team_id: "team-a",
@@ -228,7 +240,13 @@ function mockFilteredMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
                   aggregate_reward: null,
                   total_prompt_tokens: 1,
                   total_completion_tokens: 2,
+                  total_tokens: 3,
                   llm_calls_count: 1,
+                  estimated_cost_usd: null,
+                  cost_currency: null,
+                  cost_status: "price_unknown",
+                  cost_estimate_source: "unpriced",
+                  cost_estimate_confidence: "unavailable",
                   submitted_at: "2026-06-19T20:23:00Z",
                   team_id: "team-a",
                   team_name: "EAI",
@@ -347,6 +365,29 @@ function mockFailureMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
                   },
                   model: { provider: "openai-compatible", name: "qwen" },
                 },
+                {
+                  id: "trial-score-zero",
+                  task_id: "mbpp/3",
+                  state: "succeeded",
+                  agent_name: "litellm",
+                  aggregate_reward: 0,
+                  total_prompt_tokens: 10,
+                  total_completion_tokens: 4,
+                  llm_calls_count: 1,
+                  submitted_at: "2026-06-19T20:25:00Z",
+                  failure_reason: null,
+                  failure_message: null,
+                  team_id: "team-a",
+                  team_name: "EAI",
+                  owner_team: { id: "team-a", name: "EAI" },
+                  submitted_by_user: {
+                    id: "user-ada",
+                    username: "Ada",
+                    team_id: "team-dev",
+                    team_name: "Dev",
+                  },
+                  model: { provider: "openai-compatible", name: "qwen" },
+                },
               ],
               next_cursor: null,
             }),
@@ -374,6 +415,7 @@ describe("Monitor human-readable labels", () => {
     expect(await screen.findByText("human-readable-batch")).toBeInTheDocument();
     expect(screen.getByText("Ada / Dev")).toBeInTheDocument();
     expect(screen.getByText("Monitor quick actions")).toBeInTheDocument();
+    expect(screen.getByText("unknown/unpriced")).toBeInTheDocument();
     expect(screen.getByText("loom eval batch show batch-1")).toBeInTheDocument();
     expect(screen.getByText("Planned trials")).toBeInTheDocument();
     expect(screen.queryByText("Expected")).not.toBeInTheDocument();
@@ -416,6 +458,7 @@ describe("Monitor human-readable labels", () => {
       "11111111-1111-4111-8111-111111111111",
     );
     expect(screen.getByLabelText("filter by provider model")).toHaveValue("qwen");
+    expect(screen.getByText("unknown/unpriced")).toBeInTheDocument();
 
     await waitFor(() => {
       const trialRequest = fetchMock.mock.calls.find(([input]) =>
@@ -503,5 +546,17 @@ describe("Monitor human-readable labels", () => {
     ).toHaveAttribute("href", "/trials/trial-provider");
     expect(screen.getByText("no LLM calls")).toBeInTheDocument();
     expect(screen.getByText(/invalid evidence/i)).toBeInTheDocument();
+  });
+
+  it("labels reward zero successes as score failures, not platform failures", async () => {
+    mockFailureMonitorEndpoints();
+    renderWithProviders(<Monitor />, {
+      route: "/monitor?view=trials",
+    });
+
+    expect(await screen.findByText("trial-sc")).toBeInTheDocument();
+    expect(screen.getByText("0.000")).toBeInTheDocument();
+    expect(screen.getByText(/Score failed/i)).toBeInTheDocument();
+    expect(screen.getByText(/Platform succeeded/i)).toBeInTheDocument();
   });
 });

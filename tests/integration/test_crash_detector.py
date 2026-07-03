@@ -1,13 +1,17 @@
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import delete, insert, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from loom.db.schema import Task, Team, TeamQuota, Trial, Worker
+from loom.db.schema import LlmCall, Task, Team, TeamQuota, Trial, TrialEvent, Worker
 from loom_control_plane.retry_exhausted_sweeper import sweep_retry_exhausted
-from loom_control_plane.scheduler.crash_detector import reclaim_expired_workers
+from loom_control_plane.scheduler.crash_detector import (
+    reclaim_expired_workers,
+    reclaim_stale_running_trials,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -16,6 +20,8 @@ async def _cleanup_db(postgres_url: str):  # type: ignore[no-untyped-def]
     engine = create_async_engine(postgres_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as s:
+        await s.execute(delete(TrialEvent))
+        await s.execute(delete(LlmCall))
         await s.execute(delete(Trial))
         await s.execute(delete(Worker))
         await s.execute(delete(TeamQuota))
@@ -116,6 +122,214 @@ async def test_reclaim_leaves_fresh_workers_alone(postgres_url: str):
         n = await reclaim_expired_workers(s, expiry_sec=15)
         await s.commit()
     assert n == 0
+
+    await engine.dispose()
+
+
+async def test_reclaim_stale_running_trial_on_fresh_worker_records_timeout_diagnostic(
+    postgres_url: str,
+):
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    team_id = uuid4()
+    worker_id = uuid4()
+    trial_id = uuid4()
+    task_id = f"stale-running-{trial_id.hex}"
+
+    async with session_factory() as s:
+        await s.execute(insert(Team).values(id=team_id, name=f"sr-{team_id}"))
+        await s.execute(
+            insert(Worker).values(
+                id=worker_id,
+                hostname="trt-gb10-4",
+                version="v",
+                capabilities=[],
+                registered_at=now - timedelta(hours=2),
+                last_seen_at=now - timedelta(seconds=5),
+                status="active",
+                pool_name="gb10-arm64",
+            )
+        )
+        await s.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="0" * 64,
+                config={
+                    "task": {"id": task_id},
+                    "agent": {"name": "opencode", "timeout_sec": 10.0},
+                },
+            )
+        )
+        await s.execute(
+            insert(Trial).values(
+                id=trial_id,
+                team_id=team_id,
+                task_id=task_id,
+                config={
+                    "schema_version": "1",
+                    "agent_name": "opencode",
+                    "agent_model": {"provider": "openai", "name": "glm"},
+                    "agent_timeout_multiplier": 1.0,
+                },
+                requires_caps={},
+                state="running",
+                worker_id=worker_id,
+                claimed_at=now - timedelta(seconds=100),
+                started_at=now - timedelta(seconds=100),
+            )
+        )
+        await s.execute(
+            insert(TrialEvent).values(
+                trial_id=trial_id,
+                seq=1,
+                kind="thought",
+                source="worker",
+                created_at=now - timedelta(seconds=80),
+                payload={
+                    "kind": "thought",
+                    "emitted_at": (now - timedelta(seconds=80)).isoformat(),
+                    "trial_id": str(trial_id),
+                    "step_id": "main",
+                    "seq": 1,
+                    "content": "working",
+                },
+            )
+        )
+        await s.execute(
+            insert(LlmCall).values(
+                id=uuid4(),
+                team_id=team_id,
+                trial_id=trial_id,
+                step_id="main",
+                model="glm",
+                dialect="openai_facade",
+                input_tokens=10,
+                output_tokens=5,
+                provider_extras={},
+                cost_usd=Decimal("0.001"),
+                rate_card_hash="rate",
+                captured_at=now - timedelta(seconds=75),
+            )
+        )
+        await s.commit()
+
+    async with session_factory() as s:
+        n = await reclaim_stale_running_trials(
+            s,
+            now=now,
+            worker_heartbeat_expiry_sec=120,
+            timeout_multiplier=2.0,
+            grace_sec=10.0,
+            silence_sec=10.0,
+        )
+        await s.commit()
+    assert n == 1
+
+    async with session_factory() as s:
+        row = (
+            await s.execute(select(Trial).where(Trial.id == trial_id))
+        ).scalar_one()
+        assert row.state == "failed"
+        assert row.worker_id == worker_id
+        assert row.failure_reason == "agent_timeout"
+        assert row.finished_at is not None
+        assert row.failure_message is not None
+        assert "stale_running_reclaimed" in row.failure_message
+        assert "runtime_sec=100" in row.failure_message
+        assert "agent_timeout_sec=10" in row.failure_message
+        assert "worker_heartbeat_status=fresh" in row.failure_message
+        assert "last_event_at=" in row.failure_message
+        assert "last_llm_call_at=" in row.failure_message
+
+    await engine.dispose()
+
+
+async def test_reclaim_stale_running_trial_skips_recent_activity(
+    postgres_url: str,
+):
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    team_id = uuid4()
+    worker_id = uuid4()
+    trial_id = uuid4()
+    task_id = f"recent-running-{trial_id.hex}"
+
+    async with session_factory() as s:
+        await s.execute(insert(Team).values(id=team_id, name=f"ra-{team_id}"))
+        await s.execute(
+            insert(Worker).values(
+                id=worker_id,
+                hostname="trt-gb10-8",
+                version="v",
+                capabilities=[],
+                registered_at=now - timedelta(hours=2),
+                last_seen_at=now - timedelta(seconds=5),
+                status="active",
+                pool_name="gb10-arm64",
+            )
+        )
+        await s.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="0" * 64,
+                config={
+                    "task": {"id": task_id},
+                    "agent": {"name": "opencode", "timeout_sec": 10.0},
+                },
+            )
+        )
+        await s.execute(
+            insert(Trial).values(
+                id=trial_id,
+                team_id=team_id,
+                task_id=task_id,
+                config={"agent_timeout_multiplier": 1.0},
+                requires_caps={},
+                state="running",
+                worker_id=worker_id,
+                claimed_at=now - timedelta(seconds=100),
+                started_at=now - timedelta(seconds=100),
+            )
+        )
+        await s.execute(
+            insert(TrialEvent).values(
+                trial_id=trial_id,
+                seq=1,
+                kind="thought",
+                source="worker",
+                created_at=now - timedelta(seconds=3),
+                payload={
+                    "kind": "thought",
+                    "emitted_at": (now - timedelta(seconds=3)).isoformat(),
+                    "trial_id": str(trial_id),
+                    "step_id": "main",
+                    "seq": 1,
+                    "content": "still active",
+                },
+            )
+        )
+        await s.commit()
+
+    async with session_factory() as s:
+        n = await reclaim_stale_running_trials(
+            s,
+            now=now,
+            worker_heartbeat_expiry_sec=120,
+            timeout_multiplier=2.0,
+            grace_sec=10.0,
+            silence_sec=10.0,
+        )
+        await s.commit()
+    assert n == 0
+
+    async with session_factory() as s:
+        row = (
+            await s.execute(select(Trial).where(Trial.id == trial_id))
+        ).scalar_one()
+        assert row.state == "running"
+        assert row.failure_reason is None
 
     await engine.dispose()
 

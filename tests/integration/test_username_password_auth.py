@@ -33,6 +33,54 @@ ADA_PASSWORD = "ada-passphrase-1"
 ADA_NEW_PASSWORD = "ada-new-passphrase-1"
 
 
+def _ensure_admin_seed(session) -> UUID:  # type: ignore[no-untyped-def]
+    admin_team = session.execute(
+        select(Team).where(text("lower(name) = 'admin'")),
+    ).scalar_one_or_none()
+    if admin_team is None:
+        admin_team = Team(name="admin")
+        session.add(admin_team)
+        session.flush()
+    if session.get(TeamQuota, admin_team.id) is None:
+        session.add(TeamQuota(team_id=admin_team.id))
+
+    for username in ("Qianyi", "Hongjian"):
+        normalized = username.lower()
+        user = session.execute(
+            select(User).where(User.username_normalized == normalized),
+        ).scalar_one_or_none()
+        if user is None:
+            user = User(
+                id=uuid4(),
+                email=None,
+                username=username,
+                username_normalized=normalized,
+                display_name=username,
+                is_platform_admin=True,
+                created_at=datetime.now(UTC),
+                status="pending_setup",
+            )
+            session.add(user)
+            session.flush()
+        else:
+            user.username = username
+            user.display_name = username
+            user.is_platform_admin = True
+        membership = session.execute(
+            select(TeamMembership).where(
+                TeamMembership.team_id == admin_team.id,
+                TeamMembership.user_id == user.id,
+            ),
+        ).scalar_one_or_none()
+        if membership is None:
+            session.add(
+                TeamMembership(team_id=admin_team.id, user_id=user.id, role="owner"),
+            )
+        else:
+            membership.role = "owner"
+    return admin_team.id
+
+
 def _extract_token(link: str) -> str:
     parsed = urlparse(link)
     values = parse_qs(parsed.query).get("token")
@@ -64,9 +112,7 @@ async def username_auth_app(
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as session:
-        admin_team_id = session.execute(
-            select(Team.id).where(text("lower(name) = 'admin'")),
-        ).scalar_one()
+        admin_team_id = _ensure_admin_seed(session)
         research_team_name = f"Research-{uuid4().hex[:8]}"
         research_team = Team(name=research_team_name)
         session.add(research_team)
@@ -117,6 +163,7 @@ async def username_auth_app(
                     disabled_at=None,
                 ),
             )
+            _ensure_admin_seed(session)
             session.commit()
         sync_engine.dispose()
 

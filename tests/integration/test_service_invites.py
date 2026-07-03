@@ -19,6 +19,7 @@ from loom.db.schema import (
     LoginChallenge,
     Team,
     TeamMembership,
+    TeamQuota,
     User,
     UserSession,
 )
@@ -65,7 +66,10 @@ async def invite_app(
         s.execute(insert(User).values(
             id=owner_id,
             email="owner@example.com",
+            username="owner",
+            username_normalized="owner",
             display_name="Owner Example",
+            status="active",
             is_platform_admin=False,
             created_at=datetime.now(UTC),
         ))
@@ -89,6 +93,7 @@ async def invite_app(
             s.execute(delete(UserSession))
             s.execute(delete(LoginChallenge))
             s.execute(delete(TeamMembership))
+            s.execute(delete(TeamQuota))
             s.execute(delete(User))
             s.execute(delete(Team))
             s.commit()

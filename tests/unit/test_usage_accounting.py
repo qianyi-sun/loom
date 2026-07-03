@@ -122,3 +122,41 @@ def test_incomplete_provider_usage_marks_estimate_confidence() -> None:
     assert summary["missing_usage_llm_calls_count"] == 1
     assert summary["usage_reporting_status"] == "partial"
     assert summary["usage_estimate_confidence"] == "partial"
+
+
+def test_cost_projection_carries_source_and_confidence_metadata() -> None:
+    summary = summarize_usage_counts(
+        llm_calls_count=2,
+        total_prompt_tokens=1000,
+        total_completion_tokens=400,
+        total_cost_usd=Decimal("0.012345"),
+        priced_llm_calls_count=2,
+        token_only_llm_calls_count=0,
+        price_unknown_llm_calls_count=0,
+        cost_source_counts={"operator-supplied": 2},
+        cost_confidence_counts={"configured": 2},
+    )
+
+    assert summary["estimated_cost_usd"] == 0.012345
+    assert summary["cost_status"] == "estimated"
+    assert summary["cost_estimate_source"] == "operator-supplied"
+    assert summary["cost_estimate_confidence"] == "configured"
+
+
+def test_unpriced_projection_is_unknown_not_zero_confidence() -> None:
+    summary = summarize_usage_counts(
+        llm_calls_count=1,
+        total_prompt_tokens=500,
+        total_completion_tokens=50,
+        total_cost_usd=Decimal("0"),
+        priced_llm_calls_count=0,
+        token_only_llm_calls_count=0,
+        price_unknown_llm_calls_count=1,
+        cost_source_counts={"unpriced": 1},
+        cost_confidence_counts={"unavailable": 1},
+    )
+
+    assert summary["estimated_cost_usd"] is None
+    assert summary["cost_status"] == "price_unknown"
+    assert summary["cost_estimate_source"] == "unpriced"
+    assert summary["cost_estimate_confidence"] == "unavailable"

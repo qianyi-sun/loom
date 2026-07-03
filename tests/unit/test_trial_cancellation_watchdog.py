@@ -7,6 +7,10 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from loom.trial.watchdog_cancellation import (
+    WatchdogTriggerReason,
+    extract_watchdog_cancellation,
+)
 from loom_worker.trial_cancellation_watchdog import run_with_watchdog
 
 
@@ -94,6 +98,50 @@ async def test_cancels_when_hard_deadline_exceeded():
             poll_interval_sec=0.01,
             hard_deadline_sec=0.03,
         )
+
+
+async def test_hard_deadline_cancellation_carries_watchdog_reason():
+    cp = _FakeCPClient(state="running")
+
+    async def _runner() -> None:
+        await asyncio.sleep(5.0)
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await run_with_watchdog(
+            _runner(),
+            trial_id=uuid4(),
+            cp_client=cp,
+            poll_interval_sec=0.01,
+            hard_deadline_sec=0.03,
+        )
+
+    cancellation = extract_watchdog_cancellation(exc_info.value)
+    assert cancellation is not None
+    assert cancellation.reason == WatchdogTriggerReason.HARD_DEADLINE
+    assert cancellation.hard_deadline_sec == 0.03
+    assert cancellation.elapsed_sec is not None
+    assert cancellation.elapsed_sec >= 0.03
+
+
+async def test_cp_cancel_cancellation_carries_distinct_watchdog_reason():
+    cp = _FakeCPClient(state="cancelled")
+
+    async def _runner() -> None:
+        await asyncio.sleep(5.0)
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await run_with_watchdog(
+            _runner(),
+            trial_id=uuid4(),
+            cp_client=cp,
+            poll_interval_sec=0.01,
+            hard_deadline_sec=None,
+        )
+
+    cancellation = extract_watchdog_cancellation(exc_info.value)
+    assert cancellation is not None
+    assert cancellation.reason == WatchdogTriggerReason.CP_CANCELLED
+    assert cancellation.cp_state == "cancelled"
 
 
 async def test_cp_poll_errors_do_not_abort_watchdog():

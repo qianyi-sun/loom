@@ -46,6 +46,7 @@ from loom_service.routes import (
     backends,
     batches,
     benchmarks,
+    delivery_exports,
     health,
     invites,
     local_servers,
@@ -243,6 +244,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(benchmarks.router, prefix="/api/v1")
     app.include_router(tasksets.router, prefix="/api/v1")
     app.include_router(batches.router, prefix="/api/v1")
+    app.include_router(delivery_exports.router, prefix="/api/v1")
     app.include_router(run_library.router, prefix="/api/v1")
     app.include_router(rate_cards.router, prefix="/api/v1")
     app.include_router(admin_audit.router, prefix="/api/v1")

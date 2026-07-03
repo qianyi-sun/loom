@@ -95,6 +95,14 @@ spec:
               value: "300"
             - name: LOOM_CP_SLURM_WORKER_CONTROLLER_TIME_LIMIT
               value: "7-00:00:00"
+            - name: LOOM_CP_STALE_RUNNING_TRIAL_GRACE_SEC
+              value: "900.0"
+            - name: LOOM_CP_STALE_RUNNING_TRIAL_RECLAIM_ENABLED
+              value: "True"
+            - name: LOOM_CP_STALE_RUNNING_TRIAL_SILENCE_SEC
+              value: "900.0"
+            - name: LOOM_CP_STALE_RUNNING_TRIAL_TIMEOUT_MULTIPLIER
+              value: "3.0"
             - name: LOOM_CP_STEP_JWT_SIGNING_KEY
               valueFrom:
                 secretKeyRef:

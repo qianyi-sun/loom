@@ -427,15 +427,24 @@ def test_cross_team_idempotency_key_does_not_leak(
     _, raw_a = seed_team
 
     team_b = uuid4()
+    user_b = uuid4()
     raw_b = f"loom_team_{uuid4().hex}"
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
         s.execute(insert(Team).values(id=team_b, name=f"b-{team_b}"))
+        s.execute(insert(User).values(
+            id=user_b,
+            username=f"CpSubmitUserB-{team_b.hex[:8]}",
+            username_normalized=f"cp-submit-user-b-{team_b.hex[:8]}",
+            status="active",
+            is_platform_admin=False,
+        ))
         s.execute(insert(TeamQuota).values(team_id=team_b))
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(raw_b.encode()).digest(),
             type="team", scopes=["submit"], team_id=team_b,
+            created_by_user_id=user_b,
             issued_at=datetime.now(UTC),
         ))
         s.commit()
@@ -471,6 +480,7 @@ def test_cross_team_idempotency_key_does_not_leak(
             s.execute(delete(Trial))
             s.execute(delete(Token).where(Token.team_id == team_b))
             s.execute(delete(TeamQuota).where(TeamQuota.team_id == team_b))
+            s.execute(delete(User).where(User.id == user_b))
             s.execute(delete(Team).where(Team.id == team_b))
             s.commit()
         sync_engine.dispose()

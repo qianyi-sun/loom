@@ -572,10 +572,15 @@ knob you need.
    Every returned URL should stay on the Loom API host, and a normal authorized
    `curl -L` against those URLs should return the object body without opening a
    separate MinIO tunnel. The CLI should print download commands rather than
-   raw MinIO/S3 signed URLs. The debug command should return a stable
-   `failure.reason_code`, lifecycle state, token usage summary, scoped evidence
-   links, and redacted next actions without bearer tokens, provider keys,
-   internal service URLs, or signed object-store URLs.
+   raw MinIO/S3 signed URLs. The debug command should return stable failure
+   taxonomy fields, including `failure.reason_code`,
+   `failure.failure_class`, `failure.root_cause`,
+   `failure.platform_outcome`, `failure.score_outcome`, and
+   `failure.rerun_recommendation`, plus lifecycle state, token usage summary,
+   scoped evidence links, agent timeout config, last trial event, last LLM call,
+   worker heartbeat freshness, stale-running keep/reclaim decision, and
+   redacted next actions without bearer tokens, provider keys, internal service
+   URLs, or signed object-store URLs.
 
 9. **Approve account requests into fixed teams.** Public registration is
    default-closed. A researcher can submit an account request without a bearer
@@ -2104,7 +2109,21 @@ loom providers update together-prod --rate-card-provider together
 Then switch `pricing_source` to `rate-card` only after the Gateway's
 `rate_cards` table has matching `(provider, model)` entries. Facade calls
 with a missing entry still record tokens and use
-`rate_card_hash='facade:rate-card:missing'` with `cost_usd=0`.
+`rate_card_hash='facade:rate-card:missing'` with `cost_usd=0`, but the
+service projection reports `estimated_cost_usd=null`,
+`cost_status=price_unknown`, `cost_estimate_source=unpriced`, and
+`cost_estimate_confidence=unavailable`. Do not treat this as free usage:
+either sync/add the rate-card row or switch the connection to
+operator-supplied pricing with `input_usd_per_1m` and
+`output_usd_per_1m` in `pricing_data`.
+
+Batch submissions may include `budget_usd` with `budget_policy=hard` or
+`soft`. Hard budgets reject pre-run estimates above the cap and cancel
+running batches once recorded provider usage exceeds the cap; the
+cancel diagnostic is stored in `batches.budget_diagnostics` with reason
+`budget_hard_limit_exceeded`. Soft budgets return a confirmation error
+when the pre-run estimate is above the cap or unknown/unpriced unless
+the client resubmits with `budget_confirmed=true`.
 
 ## BYO provider model selection
 
@@ -3050,7 +3069,9 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    Artifact rows include `share_status` and a safe `blocked_reason`
    when org-wide sharing is blocked. Trial and batch detail responses
    carry local token and cost projections (`estimated_cost_usd`,
-   `cost_status`, `pricing_modes`, `usage_estimate_confidence`); use
+   `cost_status`, `cost_estimate_source`,
+   `cost_estimate_confidence`, `pricing_modes`,
+   `usage_estimate_confidence`); use
    `/api/v1/usage` with optional `include_batches=true` for admin totals
    and per-batch drilldown. Failed upstream audit rows surface as
    `pricing_mode=failed-upstream` and `cost_status=failed_upstream`, not as
@@ -3063,6 +3084,13 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    gateway call records. `loom eval batch show <id>` prints
    `no_call_trials` and an invalid-evidence warning for this case, and
    diagnosis uses `batch.no_llm_calls` when a finished batch has zero calls.
+   For opencode/subprocess timeout investigation, confirm a worker watchdog
+   hard deadline or control-plane stale-running reclaim produces
+   `state=failed`, `failure_reason=agent_timeout`, and a failure message that
+   includes runtime, effective agent timeout, hard deadline, last event/LLM
+   silence, and worker heartbeat freshness. Operator or Control Plane
+   cancellation should remain `state=cancelled` and must not be conflated with
+   timeout reclaim.
    Default `GET /api/v1/batches/{id}` is intentionally lightweight for large
    runs: it uses aggregate LLM-call counts and omits heavyweight
    `debug_evidence` and `diagnosis`. Use
@@ -3089,6 +3117,14 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    projections instead of fetching full trial `trajectory_index` rows or
    enumerating complete artifact inventories. Click
    **Load diagnostics** before checking the same diagnosis/debug order.
+   Also verify `GET /api/v1/batches/{id}/rerun-plan` and
+   `loom eval batch rerun-plan <id>` before launching supplemental work. The
+   plan must keep auto-safe platform/transient failures separate from
+   operator-approval rows and not-rerunnable rows, support explicit repeated
+   `task_id` filters, and exclude task compatibility failures and reward `0`
+   score failures from automatic reruns. Monitor and Run Library should label
+   reward `0` verifier-output rows as platform-successful score failures, not
+   platform failures.
 13. **Trajectory + artifact download.** `GET /api/v1/trials/{id}/trajectory`
     streams event pages; `GET /api/v1/trials/{id}/trajectory/download`
     returns raw JSONL; `GET /api/v1/trials/{id}/atif` returns the ATIF JSON;
@@ -3097,13 +3133,45 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     cross-team callers must not be able to use owner-team artifact proxy URLs.
     Verify the public CLI path with `loom eval trial download ...`; it should
     write the object body locally without printing internal object-store URLs.
-14. **Run Library sharing.** Confirm the completed source run appears in Run
+14. **Batch-family delivery bundle.** For a release or customer handoff, create
+    the one-command delivery archive from the finished source batch:
+    ```bash
+    loom eval batch delivery-bundle "$TEAM_A_BATCH_ID" \
+      --output "$ROLLOUT_DIR/team-a-delivery-bundle.tar.gz"
+    ```
+    If transient failures were repaired in linked rerun batches, pass each
+    supplemental batch explicitly with repeated
+    `--supplemental-batch-id "$RERUN_BATCH_ID"` flags. The service also follows
+    linked rerun descendants when no explicit list is provided, but explicit ids
+    make the rollout evidence auditable. Confirm the CLI prints the SHA-256,
+    writes a `.sha256` sidecar, and exits only after verifying the downloaded
+    archive against the service checksum.
+
+    The corresponding API path is
+    `POST /api/v1/batches/{id}/delivery-export`, followed by
+    `GET /api/v1/batches/{id}/delivery-export` and the returned
+    `/api/v1/batches/{id}/delivery-export/{artifact_id}/download` URL. The SPA
+    Batch Detail page should show the same Delivery bundle status, selected
+    trial count, object counts, checksum, and download action.
+
+    Inspect `manifest.json`, `summary.json`, `ledger/trials.jsonl`,
+    `ledger/trials.csv`, `checksums/SHA256SUMS`, `atif/`, and
+    `trajectories/` inside the archive. The
+    manifest must list the main batch, supplemental batch lineage, deterministic
+    selection rule, final selected trial per task/sample/combination, object
+    storage evidence, and the payload checksum file. The archive checksum is
+    exposed outside the tarball by the API/CLI, artifact metadata, and `.sha256`
+    sidecar rather than self-referentially in `manifest.json`. Preparing the
+    bundle requires submit/admin scope and must fail with a structured message
+    before upload if any selected trajectory or ATIF object is unreadable, or if
+    a task/sample/combination has no successful final trial after reruns.
+15. **Run Library sharing.** Confirm the completed source run appears in Run
     Library -> My team for Team A and Run Library -> All teams for Team B.
     Evidence must include the owner-team label, completed state, score/cost
     summary, task/agent/model summary, bounded artifact badges, diagnosis,
     debug evidence, and artifact groups. Team B must be able to download a safe
     artifact only through the Run Library service URL.
-15. **Clone and reuse.** From Team B, clone config from Team A's completed run.
+16. **Clone and reuse.** From Team B, clone config from Team A's completed run.
     If the source run used a provider connection, select a Team B-owned
     provider connection before cloning. Then reuse a safe artifact from the
     source trial. Both created records must belong to Team B and show
@@ -3463,6 +3531,21 @@ link it from #217; do not merge incomplete evidence.
   node name before startup. Otherwise Docker Compose workers may register with
   container hostnames, which makes Monitor and capacity evidence harder to map
   back to GB10/OLDLAB hosts.
+- The Control Plane crash detector has two reclaim paths. Dead or stale worker
+  heartbeat ownership requeues or retries the trial as before. The #378
+  stale-running path is intentionally more conservative: it only fails a
+  `running` trial when the worker heartbeat is still fresh, runtime exceeds the
+  effective agent timeout backstop, and both trial events and LLM calls have
+  been silent beyond the silence window. Defaults are
+  `LOOM_CP_STALE_RUNNING_TRIAL_RECLAIM_ENABLED=true`,
+  `LOOM_CP_STALE_RUNNING_TRIAL_TIMEOUT_MULTIPLIER=3.0`,
+  `LOOM_CP_STALE_RUNNING_TRIAL_GRACE_SEC=900.0`, and
+  `LOOM_CP_STALE_RUNNING_TRIAL_SILENCE_SEC=900.0`. Lower these only for a
+  controlled validation batch; keep public-beta defaults conservative. The
+  service debug/diagnosis projection uses the corresponding
+  `LOOM_SVC_WORKER_HEARTBEAT_EXPIRY_SEC` and `LOOM_SVC_STALE_RUNNING_*`
+  settings, so tune service and Control Plane values together when validating
+  non-default reclaim behavior.
 - Example higher-capacity render config:
 
   ```toml

@@ -447,7 +447,10 @@ async def test_responses_routes_provider_connection_from_step_jwt(
     assert row["model"] == "qwen2.5-coder-7b-instruct"
     assert row["input_tokens"] == 21
     assert row["output_tokens"] == 7
-    assert row["provider_extras"] == {"reasoning_tokens": 3}
+    assert row["provider_extras"]["reasoning_tokens"] == 3
+    assert row["provider_extras"]["_loom_cost_source"] == "tokens-only"
+    assert row["provider_extras"]["_loom_cost_confidence"] == "not_applicable"
+    assert row["provider_extras"]["_loom_pricing_source"] == "tokens-only"
     assert row["trial_id"] == trial_id
     assert row["team_id"] == team_id
 
@@ -563,7 +566,10 @@ async def test_responses_provider_connection_stream_passthrough(
     assert row["model"] == "qwen2.5-coder-7b-instruct"
     assert row["input_tokens"] == 12
     assert row["output_tokens"] == 4
-    assert row["provider_extras"] == {"reasoning_tokens": 2}
+    assert row["provider_extras"]["reasoning_tokens"] == 2
+    assert row["provider_extras"]["_loom_cost_source"] == "tokens-only"
+    assert row["provider_extras"]["_loom_cost_confidence"] == "not_applicable"
+    assert row["provider_extras"]["_loom_pricing_source"] == "tokens-only"
     assert row["trial_id"] == trial_id
     assert row["team_id"] == team_id
 
@@ -750,7 +756,9 @@ async def test_responses_facade_falls_back_to_chat_completions_for_chat_only_pro
     assert row["model"] == "qwen3.6-35b-a3b"
     assert row["input_tokens"] == 11
     assert row["output_tokens"] == 7
-    assert row["provider_extras"] == {}
+    assert row["provider_extras"]["_loom_cost_source"] == "tokens-only"
+    assert row["provider_extras"]["_loom_cost_confidence"] == "not_applicable"
+    assert row["provider_extras"]["_loom_pricing_source"] == "tokens-only"
     assert row["trial_id"] == trial_id
     assert row["team_id"] == team_id
 

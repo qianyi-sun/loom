@@ -183,4 +183,144 @@ def test_trial_debug_evidence_classifies_provider_transport_disconnect() -> None
     assert evidence["failure"]["reason_code"] == "trial.provider_transport_disconnect"
     assert evidence["failure"]["category"] == "gateway"
     assert evidence["failure"]["attribution"] == "provider"
+    assert evidence["failure"]["failure_class"] == "platform_failure"
+    assert evidence["failure"]["root_cause"] == "provider_transport"
+    assert evidence["failure"]["rerun_recommendation"] == "auto_safe"
     assert "provider preflight" in " ".join(evidence["next_actions"]).lower()
+
+
+def test_trial_debug_evidence_distinguishes_reward_zero_score_failure() -> None:
+    now = datetime.now(UTC)
+    trial = SimpleNamespace(
+        id=uuid4(),
+        team_id=uuid4(),
+        batch_id=None,
+        task_id="source-useful-frontier/reward-zero",
+        state="succeeded",
+        failure_reason=None,
+        failure_message=None,
+        result={"aggregate_reward": 0.0},
+        config={},
+        trajectory_index={},
+        provider_connection_id=None,
+        provider_model_id=None,
+        submitted_at=now - timedelta(minutes=2),
+        claimed_at=now - timedelta(minutes=2),
+        started_at=now - timedelta(minutes=1),
+        finished_at=now,
+        cancellation_requested_at=None,
+        cancellation_observed_at=None,
+        attempt_count=1,
+        next_attempt_at=None,
+        worker_id=None,
+        requires_caps={},
+    )
+
+    evidence = build_trial_debug_evidence(
+        _Request(),  # type: ignore[arg-type]
+        trial,  # type: ignore[arg-type]
+        task=None,
+        llm_calls=[],
+    )
+
+    assert evidence["failure"]["reason_code"] == "trial.score_failure"
+    assert evidence["failure"]["failure_class"] == "score_failure"
+    assert evidence["failure"]["platform_outcome"] == "success"
+    assert evidence["failure"]["score_outcome"] == "failed"
+    assert evidence["failure"]["rerun_recommendation"] == "not_rerunnable"
+
+
+def test_batch_debug_evidence_includes_failure_taxonomy_summary() -> None:
+    team_id = uuid4()
+    batch_id = uuid4()
+    now = datetime.now(UTC)
+    batch = SimpleNamespace(
+        id=batch_id,
+        team_id=team_id,
+        state="finished",
+        result_status="partial_failed",
+        failure_reason=None,
+        failure_message=None,
+        created_at=now,
+        finished_at=now,
+        backend="docker",
+        trial_config={},
+        combinations=[],
+        provider_connection_id=None,
+        provider_model_id=None,
+        task_filter={"benchmark_id": "source-useful-frontier"},
+        expected_trial_count=3,
+        n_per_task=1,
+        fanout_errors=None,
+    )
+    trials = [
+        SimpleNamespace(
+            id=uuid4(),
+            task_id="source-useful-frontier/reward-zero",
+            state="succeeded",
+            failure_reason=None,
+            failure_message=None,
+            result={"aggregate_reward": 0.0},
+            config={},
+            provider_connection_id=None,
+            provider_model_id=None,
+            worker_id=None,
+            claimed_at=now - timedelta(minutes=2),
+            started_at=now - timedelta(minutes=1),
+            sample_idx=0,
+            combination_idx=0,
+        ),
+        SimpleNamespace(
+            id=uuid4(),
+            task_id="source-useful-frontier/gateway",
+            state="failed",
+            failure_reason="gateway_error",
+            failure_message="gateway 503",
+            result=None,
+            config={},
+            provider_connection_id=None,
+            provider_model_id=None,
+            worker_id=None,
+            claimed_at=now - timedelta(minutes=2),
+            started_at=now - timedelta(minutes=1),
+            sample_idx=0,
+            combination_idx=0,
+        ),
+        SimpleNamespace(
+            id=uuid4(),
+            task_id="source-useful-frontier/task-compat",
+            state="failed",
+            failure_reason="task_compatibility",
+            failure_message="task bundle cannot run",
+            result=None,
+            config={},
+            provider_connection_id=None,
+            provider_model_id=None,
+            worker_id=None,
+            claimed_at=now - timedelta(minutes=2),
+            started_at=now - timedelta(minutes=1),
+            sample_idx=0,
+            combination_idx=0,
+        ),
+    ]
+
+    evidence = build_batch_debug_evidence(
+        batch,  # type: ignore[arg-type]
+        trials=trials,  # type: ignore[list-item]
+        llm_calls=[],
+    )
+
+    assert evidence["trials"]["classification_summary"] == {
+        "platform_failure": 1,
+        "score_failure": 1,
+        "task_failure": 1,
+    }
+    assert evidence["trials"]["rerun_recommendation_summary"] == {
+        "auto_safe": 1,
+        "not_rerunnable": 2,
+    }
+    assert [row["failure_class"] for row in evidence["trials"]["failure_ledger"]] == [
+        "platform_failure",
+        "score_failure",
+        "task_failure",
+    ]

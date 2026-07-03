@@ -139,6 +139,8 @@ interface BatchRow {
   expected_trial_count: number;
   created_at: string;
   created_by_token_prefix: string;
+  cost_status?: string | null;
+  cost_estimate_source?: string | null;
 }
 interface TrialRow {
   id: string;
@@ -156,6 +158,8 @@ interface TrialRow {
   llm_calls_count: number;
   llm_evidence_status?: string | null;
   no_call?: boolean | null;
+  cost_status?: string | null;
+  cost_estimate_source?: string | null;
   failure_reason?: string | null;
   failure_message?: string | null;
   submitted_at: string;
@@ -174,6 +178,18 @@ function plural(value: number, singular: string, pluralLabel?: string): string {
 
 function stateCount(value: number, label: string): string {
   return `${value} ${label}`;
+}
+
+function compactCostLabel(item: {
+  cost_status?: string | null;
+  cost_estimate_source?: string | null;
+}): string {
+  const status =
+    item.cost_status === "price_unknown"
+      ? "unknown"
+      : (item.cost_status ?? "unknown");
+  const source = item.cost_estimate_source ?? "unknown";
+  return `${status}/${source}`;
 }
 
 function queueStatusVariant(status: string): StatusVariant {
@@ -677,7 +693,10 @@ function BatchesView({
                       {formatLocalDateTime(c.created_at)}
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-slate-500">
-                      {c.created_by_token_prefix}
+                      <div>{c.created_by_token_prefix}</div>
+                      <div className="font-sans text-slate-500">
+                        {compactCostLabel(c)}
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -937,9 +956,21 @@ function TrialsView({
                       {t.agent_name ?? "—"}
                     </td>
                     <td className="px-4 py-3 text-slate-700">
-                      {t.aggregate_reward != null
-                        ? t.aggregate_reward.toFixed(3)
-                        : "—"}
+                      {t.state === "succeeded" && t.aggregate_reward === 0 ? (
+                        <>
+                          <div>0.000</div>
+                          <div className="text-xs font-medium text-amber-700">
+                            Score failed
+                          </div>
+                          <div className="text-xs text-emerald-700">
+                            Platform succeeded
+                          </div>
+                        </>
+                      ) : (
+                        t.aggregate_reward != null
+                          ? t.aggregate_reward.toFixed(3)
+                          : "—"
+                      )}
                     </td>
                     <td className="px-4 py-3 text-slate-700">
                       {t.llm_evidence_status === "no_calls_invalid" ||
@@ -960,6 +991,9 @@ function TrialsView({
                               t.total_prompt_tokens,
                               t.total_completion_tokens,
                             )}
+                          </div>
+                          <div className="text-xs text-slate-500">
+                            {compactCostLabel(t)}
                           </div>
                         </>
                       )}

@@ -39,6 +39,18 @@ const sharedBatch = {
   finished_at: "2026-06-22T20:03:00Z",
   trial_summary: { succeeded: 1 },
   aggregate_reward: 1,
+  total_prompt_tokens: 1000,
+  total_completion_tokens: 200,
+  total_tokens: 1200,
+  llm_calls_count: 1,
+  estimated_cost_usd: null,
+  cost_currency: null,
+  cost_status: "price_unknown",
+  cost_estimate_source: "unpriced",
+  cost_estimate_confidence: "unavailable",
+  budget_usd: 1,
+  budget_policy: "hard",
+  budget_remaining_usd: null,
   artifact_summary: {
     reports: 1,
     trajectories: 0,
@@ -201,14 +213,25 @@ function mockRunLibrary({
   platformAdmin = false,
   truncatedSummary = false,
   cloneRetryMismatch = null,
+  detailOverride = null,
 }: {
   platformAdmin?: boolean;
   truncatedSummary?: boolean;
   cloneRetryMismatch?: null | {
-    source: { max_attempts: number; retry_on: string[]; backoff: Record<string, number> };
-    current: { max_attempts: number; retry_on: string[]; backoff: Record<string, number> };
+    source: {
+      max_attempts: number;
+      retry_on: string[];
+      backoff: Record<string, number>;
+    };
+    current: {
+      max_attempts: number;
+      retry_on: string[];
+      backoff: Record<string, number>;
+    };
   };
+  detailOverride?: Record<string, unknown> | null;
 } = {}): ReturnType<typeof vi.spyOn> {
+  const selectedDetail = detailOverride ?? detailBatch;
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
@@ -302,9 +325,9 @@ function mockRunLibrary({
         return Promise.resolve(
           jsonResponse(
             parsed.searchParams.get("include_debug") === "true"
-              ? detailBatch
+              ? selectedDetail
               : {
-                  ...detailBatch,
+                  ...selectedDetail,
                   debug_evidence: undefined,
                   diagnosis: undefined,
                 },
@@ -405,6 +428,7 @@ describe("RunLibrary", () => {
     expect(screen.getByText("Reuse guide")).toBeInTheDocument();
     expect(screen.getByText(/Provider credentials are not copied/i)).toBeInTheDocument();
     expect(screen.getAllByText("Ada / Dev").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("unknown/unpriced").length).toBeGreaterThan(0);
     expect(screen.getAllByText("org / shared").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Reports 1").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Raw/internal 1").length).toBeGreaterThan(0);
@@ -658,5 +682,30 @@ describe("RunLibraryBatchDetail", () => {
     expect(warning).toHaveTextContent(
       "gateway_error, provider_transport_disconnect",
     );
+  });
+
+  it("distinguishes reward zero score failure from platform failure", async () => {
+    mockRunLibrary({
+      detailOverride: {
+        ...detailBatch,
+        result_status: "succeeded",
+        trial_summary: { succeeded: 1, failed: 0 },
+        aggregate_reward: 0,
+        diagnosis: undefined,
+        debug_evidence: undefined,
+      },
+    });
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/library/batches/:batchId" element={<RunLibraryBatchDetail />} />
+      </Routes>,
+      { route: "/library/batches/batch-alpha" },
+    );
+
+    expect(await screen.findByText("shared alpha run")).toBeInTheDocument();
+    expect(screen.getByText(/Platform succeeded/i)).toBeInTheDocument();
+    expect(screen.getByText(/Score failed/i)).toBeInTheDocument();
+    expect(screen.getByText(/No supplemental rerun recommended/i)).toBeInTheDocument();
   });
 });

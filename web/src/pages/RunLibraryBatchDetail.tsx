@@ -266,6 +266,10 @@ export default function RunLibraryBatchDetail(): JSX.Element {
     batch.debug_evidence ?? diagnosticsQuery.data?.debug_evidence ?? null;
   const hasDiagnostics = Boolean(diagnosis || debugEvidence);
   const artifactInventoryTruncated = batch.artifact_inventory_truncated === true;
+  const rewardZeroPlatformSuccess =
+    batch.aggregate_reward === 0 &&
+    (batch.trial_summary.failed ?? 0) === 0 &&
+    (batch.result_status === "succeeded" || batch.state === "finished");
 
   return (
     <div className="space-y-6">
@@ -315,6 +319,16 @@ export default function RunLibraryBatchDetail(): JSX.Element {
               value={formatLocalDateTime(batch.created_at)}
             />
           </div>
+
+          {rewardZeroPlatformSuccess ? (
+            <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-950">
+              <div className="font-semibold">Platform succeeded</div>
+              <div className="mt-1 text-xs text-emerald-800">
+                Score failed with reward 0.000. No supplemental rerun
+                recommended for score failures.
+              </div>
+            </div>
+          ) : null}
 
           <div className="grid gap-4 md:grid-cols-2">
             <div>

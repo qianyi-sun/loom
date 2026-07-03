@@ -127,7 +127,9 @@ export safe typed artifact metadata for the run. The same Diagnosis and Debug
 evidence cards used by Batch Detail appear on Run Library detail when the API
 includes `diagnosis` and `debug_evidence`; diagnosis shows the human-readable
 summary, primary cause, impact, reason clusters, and next actions first, while
-the exact redacted debug JSON remains collapsed.
+the exact redacted debug JSON remains collapsed. Reward `0` with verifier
+output is shown as a platform-successful score failure, not a platform failure
+or automatic supplemental rerun candidate.
 
 Existing Batch Detail and Trial Detail pages also show owner team, visibility,
 share status, and provenance when those fields are present, so cloned/reused

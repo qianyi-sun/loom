@@ -130,6 +130,14 @@ Attach these to the release issue or release PR:
   from a reclaimed pre-start claim, inspect the trial `failure_message` for the
   `claimed_without_started_reclaimed` diagnostic with the prior worker id and
   claim timing.
+- For GB10/opencode acceptance batches, preserve debug evidence for every
+  timeout or reclaimed trial. A worker hard deadline or CP stale-running reclaim
+  must appear as `state=failed`, `failure_reason=agent_timeout`, not generic
+  `cancelled`. The debug evidence must show `activity.last_trial_event`,
+  `activity.last_llm_call_at`, `worker.heartbeat_age_sec`,
+  `agent.timeout.agent_timeout_sec`, and `stale_running.reason` so operators can
+  distinguish a silent live worker from a dead-worker retry or explicit
+  operator cancellation.
 - For IP-address staging hosts, note the hostless Ingress rendering, attach
   evidence that the TLS Secret certificate includes the staging IP as a Subject
   Alternative Name, and verify the ingress controller serves that Secret as its
@@ -336,6 +344,9 @@ The script checks:
 - terminal trial coverage for required worker pools such as `oldlab` when
   `--required-worker-pool` is provided;
 - batch/trial detail and service-proxied ATIF/trajectory downloads;
+- trial and batch debug evidence containing last event/LLM activity, worker
+  heartbeat freshness, runtime, agent timeout config, and stale-running
+  keep/reclaim diagnostics;
 - Run Library My team and All teams visibility;
 - owner-team label;
 - cross-team safe artifact download through Run Library;
@@ -597,6 +608,9 @@ The public beta launch gate passes only when:
   release-required worker pool such as `oldlab`; create the source batch with
   matching `loom eval batch create --required-worker-pool ...` flags instead
   of depending on max-slot pressure to assign work to the pool;
+- any GB10/opencode timeout or reclaim evidence is explicit
+  `agent_timeout` with stale-running/debug-evidence fields, and no batch is left
+  indefinitely `running` because a child trial exceeded its watchdog deadline;
 - no response, audit excerpt, log excerpt, or safe downloaded artifact contains
   seeded fake secrets or internal URLs;
 - unsafe artifacts are blocked and cannot be downloaded by another team;

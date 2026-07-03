@@ -20,6 +20,12 @@ from fastapi import Request
 from loom.db.schema import Batch, LlmCall, Task, Trial
 from loom.request_params import coerce_request_params
 from loom.security.redaction import redact_mapping
+from loom.trial.stale_running import effective_agent_timeout_sec
+from loom_service.failure_taxonomy import (
+    classification_counts,
+    classify_trial_outcome,
+    rerun_recommendation_counts,
+)
 from loom_service.usage_accounting import (
     llm_call_counts_by_trial_id,
     project_trial_llm_evidence,
@@ -126,6 +132,34 @@ def _iso(value: Any) -> str | None:
     return str(value)
 
 
+def _dt(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    return None
+
+
+def _seconds_between(later: datetime, earlier: datetime | None) -> float | None:
+    if earlier is None:
+        return None
+    return round(max(0.0, (later - earlier).total_seconds()), 3)
+
+
+def _runtime_sec(trial: Trial, *, now: datetime) -> float | None:
+    started_at = _dt(getattr(trial, "started_at", None))
+    if started_at is None:
+        return None
+    finished_at = _dt(getattr(trial, "finished_at", None))
+    return _seconds_between(finished_at or now, started_at)
+
+
 def _extract_agent(config: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(config, dict):
         return {"name": None, "model": None}
@@ -203,50 +237,7 @@ def _verifier_steps(result: dict[str, Any] | None) -> list[dict[str, Any]]:
 
 
 def _failure_for_trial(trial: Trial) -> dict[str, Any]:
-    reason = trial.failure_reason
-    if reason:
-        category, attribution, _actions = _TRIAL_FAILURE_META.get(
-            reason,
-            ("unknown", "unknown", ["Inspect trajectory and artifacts."]),
-        )
-        return {
-            "reason_code": f"trial.{reason}",
-            "reason": reason,
-            "category": category,
-            "attribution": attribution,
-            "message": trial.failure_message,
-        }
-    if trial.state == "succeeded":
-        return {
-            "reason_code": "trial.succeeded",
-            "reason": None,
-            "category": "none",
-            "attribution": "none",
-            "message": None,
-        }
-    if trial.state == "cancelled":
-        return {
-            "reason_code": "trial.cancelled",
-            "reason": "cancelled",
-            "category": "cancelled",
-            "attribution": "user_or_platform",
-            "message": trial.failure_message,
-        }
-    if trial.state in _ACTIVE_STATES:
-        return {
-            "reason_code": f"trial.{trial.state}",
-            "reason": None,
-            "category": "active",
-            "attribution": "pending",
-            "message": None,
-        }
-    return {
-        "reason_code": "trial.failed_unknown",
-        "reason": reason,
-        "category": "unknown",
-        "attribution": "unknown",
-        "message": trial.failure_message,
-    }
+    return classify_trial_outcome(trial)
 
 
 def _next_actions_for_trial(trial: Trial) -> list[str]:
@@ -359,6 +350,116 @@ def _request_params_summary(call: LlmCall) -> dict[str, Any]:
     }
 
 
+def _latest_llm_call_at(llm_calls: Sequence[LlmCall]) -> datetime | None:
+    captured = [_dt(call.captured_at) for call in llm_calls]
+    return max((value for value in captured if value is not None), default=None)
+
+
+def _event_value(last_event: Any, key: str) -> Any:
+    if last_event is None:
+        return None
+    if isinstance(last_event, Mapping):
+        return last_event.get(key)
+    return getattr(last_event, key, None)
+
+
+def _last_event_projection(last_event: Any) -> dict[str, Any] | None:
+    if last_event is None:
+        return None
+    payload = _event_value(last_event, "payload")
+    if not isinstance(payload, Mapping):
+        payload = {}
+    created_at = _dt(_event_value(last_event, "created_at"))
+    return {
+        "kind": _event_value(last_event, "kind"),
+        "created_at": _iso(created_at),
+        "emitted_at": _iso(payload.get("emitted_at")),
+        "step_id": payload.get("step_id"),
+        "seq": _event_value(last_event, "seq") or payload.get("seq"),
+        "source": _event_value(last_event, "source"),
+    }
+
+
+def _activity_projection(
+    trial: Trial,
+    *,
+    llm_calls: Sequence[LlmCall],
+    last_event: Any,
+    now: datetime,
+) -> dict[str, Any]:
+    started_at = _dt(getattr(trial, "started_at", None))
+    last_event_at = _dt(_event_value(last_event, "created_at"))
+    last_llm_at = _latest_llm_call_at(llm_calls)
+    last_activity_values = [
+        item for item in (started_at, last_event_at, last_llm_at) if item is not None
+    ]
+    last_activity_at = max(last_activity_values) if last_activity_values else None
+    return {
+        "last_trial_event": _last_event_projection(last_event),
+        "last_llm_call_at": _iso(last_llm_at),
+        "last_activity_at": _iso(last_activity_at),
+        "silence_sec": _seconds_between(now, last_activity_at),
+    }
+
+
+def _worker_projection(worker: Any, *, now: datetime) -> dict[str, Any]:
+    if worker is None:
+        return {
+            "hostname": None,
+            "pool_name": None,
+            "status": None,
+            "last_heartbeat_at": None,
+            "heartbeat_age_sec": None,
+            "heartbeat_fresh": None,
+        }
+    last_seen_at = _dt(getattr(worker, "last_seen_at", None))
+    heartbeat_age_sec = _seconds_between(now, last_seen_at)
+    return {
+        "hostname": getattr(worker, "hostname", None),
+        "pool_name": getattr(worker, "pool_name", None),
+        "status": getattr(worker, "status", None),
+        "last_heartbeat_at": _iso(last_seen_at),
+        "heartbeat_age_sec": heartbeat_age_sec,
+        "heartbeat_fresh": (
+            heartbeat_age_sec <= 120.0 if heartbeat_age_sec is not None else None
+        ),
+    }
+
+
+def _timeout_projection(trial: Trial, task: Task | None) -> dict[str, Any]:
+    agent_timeout = effective_agent_timeout_sec(
+        trial_config=getattr(trial, "config", None),
+        task_config=(getattr(task, "config", None) if task is not None else None),
+    )
+    return {
+        "agent_timeout_sec": agent_timeout,
+        "source": "trial_or_task_config" if agent_timeout is not None else "unknown",
+    }
+
+
+def _stale_decision_projection(stale_running_decision: Any) -> dict[str, Any]:
+    if stale_running_decision is None:
+        return {
+            "decision": "not_evaluated",
+            "reason": "stale_running_policy_not_provided",
+            "reclaimable": None,
+        }
+    if hasattr(stale_running_decision, "to_dict"):
+        value = stale_running_decision.to_dict()
+    elif isinstance(stale_running_decision, Mapping):
+        value = dict(stale_running_decision)
+    else:
+        return {
+            "decision": "not_evaluated",
+            "reason": "unrecognized_decision_payload",
+            "reclaimable": None,
+        }
+    return {
+        key: _iso(item) if isinstance(item, datetime) else item
+        for key, item in value.items()
+    }
+
+
 def _task_materialization_state(task: Task | None) -> str:
     if task is None:
         return "missing"
@@ -373,7 +474,12 @@ def build_trial_debug_evidence(
     *,
     task: Task | None,
     llm_calls: Sequence[LlmCall],
+    worker: Any | None = None,
+    last_event: Any | None = None,
+    stale_running_decision: Any | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
+    generated_at = now or datetime.now(UTC)
     trajectory_index = trial.trajectory_index or {}
     is_terminal = trial.state in {"succeeded", "failed", "cancelled"}
     atif_ready = bool(trajectory_index.get("atif_uri")) or (
@@ -402,10 +508,18 @@ def build_trial_debug_evidence(
             "category": "gateway",
             "attribution": "platform",
             "message": ("Terminal model-backed trial did not record any LLM calls."),
+            "failure_class": "platform_failure",
+            "root_cause": "no_llm_calls",
+            "platform_outcome": "failed",
+            "score_outcome": "unscored",
+            "rerun_recommendation": "operator_approval",
+            "rerunnable": True,
+            "requires_operator_approval": True,
+            "requires_task_change": False,
         }
     evidence = {
         "schema_version": "1",
-        "generated_at": datetime.now(UTC).isoformat(),
+        "generated_at": generated_at.isoformat(),
         "entity": {
             "type": "trial",
             "id": str(trial.id),
@@ -418,6 +532,7 @@ def build_trial_debug_evidence(
             "claimed_at": _iso(trial.claimed_at),
             "started_at": _iso(trial.started_at),
             "finished_at": _iso(trial.finished_at),
+            "runtime_sec": _runtime_sec(trial, now=generated_at),
             "cancellation_requested_at": _iso(trial.cancellation_requested_at),
             "cancellation_observed_at": _iso(trial.cancellation_observed_at),
             "attempt_count": trial.attempt_count,
@@ -427,9 +542,20 @@ def build_trial_debug_evidence(
         "worker": {
             "worker_id": str(trial.worker_id) if trial.worker_id else None,
             "requires_caps": trial.requires_caps,
+            **_worker_projection(worker, now=generated_at),
         },
-        "agent": _extract_agent(trial.config),
+        "agent": {
+            **_extract_agent(trial.config),
+            "timeout": _timeout_projection(trial, task),
+        },
         "provider": provider_summary,
+        "activity": _activity_projection(
+            trial,
+            llm_calls=llm_calls,
+            last_event=last_event,
+            now=generated_at,
+        ),
+        "stale_running": _stale_decision_projection(stale_running_decision),
         "failure": failure,
         "task": {
             "task_id": trial.task_id,
@@ -580,6 +706,47 @@ def _failure_for_batch(batch: Batch) -> dict[str, Any]:
     }
 
 
+def _failure_ledger(trials: Sequence[Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for trial in trials:
+        classification = classify_trial_outcome(trial)
+        if classification["failure_class"] == "platform_success":
+            continue
+        rows.append(
+            {
+                "id": str(trial.id),
+                "task_id": trial.task_id,
+                "state": trial.state,
+                "failure_reason": trial.failure_reason,
+                "failure_message": trial.failure_message,
+                "reason_code": classification["reason_code"],
+                "failure_class": classification["failure_class"],
+                "root_cause": classification["root_cause"],
+                "platform_outcome": classification["platform_outcome"],
+                "score_outcome": classification["score_outcome"],
+                "rerun_recommendation": classification["rerun_recommendation"],
+                "requires_operator_approval": classification[
+                    "requires_operator_approval"
+                ],
+                "requires_task_change": classification["requires_task_change"],
+            }
+        )
+    recommendation_order = {
+        "auto_safe": 0,
+        "operator_approval": 1,
+        "not_rerunnable": 2,
+    }
+    return sorted(
+        rows,
+        key=lambda row: (
+            recommendation_order.get(str(row["rerun_recommendation"]), 9),
+            str(row["failure_class"]),
+            str(row["task_id"]),
+            str(row["id"]),
+        ),
+    )
+
+
 def _next_actions_for_batch(batch: Batch) -> list[str]:
     if batch.failure_reason == "fanout_submit_failed":
         return [
@@ -598,13 +765,51 @@ def _next_actions_for_batch(batch: Batch) -> list[str]:
     return ["Use reward and per-benchmark rollups to interpret model quality."]
 
 
+def _batch_stale_running_trials(
+    trials: Sequence[Any],
+    *,
+    stale_running_decisions_by_trial_id: Mapping[Any, Any] | None,
+) -> list[dict[str, Any]]:
+    if not stale_running_decisions_by_trial_id:
+        return []
+    decisions = stale_running_decisions_by_trial_id
+    out: list[dict[str, Any]] = []
+    for trial in trials:
+        raw = decisions.get(getattr(trial, "id", None))
+        if raw is None:
+            raw = decisions.get(str(getattr(trial, "id", "")))
+        if raw is None:
+            continue
+        decision = _stale_decision_projection(raw)
+        if decision.get("decision") != "reclaim" and decision.get("reclaimable") is not True:
+            continue
+        out.append(
+            {
+                "id": str(trial.id),
+                "task_id": trial.task_id,
+                "state": trial.state,
+                "decision": decision.get("decision"),
+                "reason": decision.get("reason"),
+                "runtime_sec": decision.get("runtime_sec"),
+                "silence_sec": decision.get("silence_sec"),
+                "agent_timeout_sec": decision.get("agent_timeout_sec"),
+                "hard_deadline_sec": decision.get("hard_deadline_sec"),
+                "last_activity_at": decision.get("last_activity_at"),
+            }
+        )
+    return out
+
+
 def build_batch_debug_evidence(
     batch: Batch,
     *,
     trials: Sequence[Any],
     llm_calls: Sequence[LlmCall],
     worker_pool_names_by_id: Mapping[Any, str] | None = None,
+    stale_running_decisions_by_trial_id: Mapping[Any, Any] | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
+    generated_at = now or datetime.now(UTC)
     llm_call_counts = llm_call_counts_by_trial_id(llm_calls)
     llm_evidence = summarize_llm_evidence_for_trials(
         trials,
@@ -644,12 +849,17 @@ def build_batch_debug_evidence(
         failed_trials.extend(
             trial for trial in no_call_trials if trial["id"] not in seen_failed_ids
         )
+    failure_ledger = _failure_ledger(trials)
     rewards = [
         reward for trial in trials if (reward := _aggregate_reward(trial.result)) is not None
     ]
+    stale_running = _batch_stale_running_trials(
+        trials,
+        stale_running_decisions_by_trial_id=stale_running_decisions_by_trial_id,
+    )
     evidence = {
         "schema_version": "1",
-        "generated_at": datetime.now(UTC).isoformat(),
+        "generated_at": generated_at.isoformat(),
         "entity": {
             "type": "batch",
             "id": str(batch.id),
@@ -686,6 +896,12 @@ def build_batch_debug_evidence(
             "worker_pools": _worker_pool_coverage(trials, worker_pool_names_by_id),
             "failed": failed_trials[:50],
             "failed_count": len(failed_trials),
+            "failure_ledger": failure_ledger[:50],
+            "failure_ledger_count": len(failure_ledger),
+            "classification_summary": classification_counts(trials),
+            "rerun_recommendation_summary": rerun_recommendation_counts(trials),
+            "stale_running": stale_running[:50],
+            "stale_running_count": len(stale_running),
         },
         "reward": {
             "aggregate_reward": (sum(rewards) / len(rewards) if rewards else None),

@@ -2,11 +2,54 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.exc import IntegrityError
+
+_CREATED_TASK_SET_IDS: set[str] = set()
+_CREATED_TEAM_IDS: set[UUID] = set()
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_created_tasksets(postgres_url: str) -> Iterator[None]:
+    """Keep the session-scoped integration DB clean for later FK teardowns."""
+    task_set_before = set(_CREATED_TASK_SET_IDS)
+    team_before = set(_CREATED_TEAM_IDS)
+    try:
+        yield
+    finally:
+        task_set_ids = tuple(sorted(_CREATED_TASK_SET_IDS - task_set_before))
+        team_ids = tuple(_CREATED_TEAM_IDS - team_before)
+        if task_set_ids or team_ids:
+            engine = create_engine(postgres_url)
+            with engine.begin() as conn:
+                if task_set_ids:
+                    task_set_param = bindparam("task_set_ids", expanding=True)
+                    for statement in (
+                        text(
+                            "DELETE FROM task_set_materialization_jobs "
+                            "WHERE task_set_id IN :task_set_ids",
+                        ).bindparams(task_set_param),
+                        text(
+                            "DELETE FROM task_set_manifests "
+                            "WHERE task_set_id IN :task_set_ids",
+                        ).bindparams(task_set_param),
+                        text(
+                            "DELETE FROM task_sets WHERE id IN :task_set_ids",
+                        ).bindparams(task_set_param),
+                    ):
+                        conn.execute(statement, {"task_set_ids": task_set_ids})
+                if team_ids:
+                    conn.execute(
+                        text("DELETE FROM teams WHERE id IN :team_ids").bindparams(
+                            bindparam("team_ids", expanding=True),
+                        ),
+                        {"team_ids": team_ids},
+                    )
+            engine.dispose()
 
 
 def _insert_team(conn, team_id: UUID | None = None) -> UUID:
@@ -15,6 +58,7 @@ def _insert_team(conn, team_id: UUID | None = None) -> UUID:
         text("INSERT INTO teams (id, name) VALUES (:id, :name)"),
         {"id": tid, "name": f"t-{tid}"},
     )
+    _CREATED_TEAM_IDS.add(tid)
     return tid
 
 
@@ -48,6 +92,7 @@ def _insert_task_set(
             "intents": intents or ["trajectory_generation"],
         },
     )
+    _CREATED_TASK_SET_IDS.add(ts_id)
     return ts_id
 
 

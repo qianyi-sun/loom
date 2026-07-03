@@ -20,7 +20,7 @@ from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Task, Team, TeamQuota, Token, Trial
+from loom.db.schema import Task, Team, TeamMembership, TeamQuota, Token, Trial, User
 from loom_service import agent_catalog
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
@@ -86,18 +86,36 @@ async def fwd_setup(
     )
 
     team_id = uuid4()
+    user_id = uuid4()
     raw = f"loom_team_{uuid4().hex}"
+    now = datetime.now(UTC)
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+        username = f"submitter-{user_id.hex[:8]}"
+        s.execute(insert(User).values(
+            id=user_id,
+            username=username,
+            username_normalized=username,
+            status="active",
+            is_platform_admin=False,
+            created_at=now,
+        ))
+        s.execute(insert(TeamMembership).values(
+            team_id=team_id,
+            user_id=user_id,
+            role="member",
+            created_at=now,
+        ))
         s.execute(
             insert(Token).values(
                 token_hash=hashlib.sha256(raw.encode()).digest(),
                 type="team",
                 scopes=["submit"],
                 team_id=team_id,
-                issued_at=datetime.now(UTC),
+                created_by_user_id=user_id,
+                issued_at=now,
             )
         )
         s.commit()
@@ -109,8 +127,10 @@ async def fwd_setup(
         with sl() as s:
             s.execute(delete(Trial))
             s.execute(delete(Token))
+            s.execute(delete(TeamMembership))
             s.execute(delete(Task))
             s.execute(delete(TeamQuota))
+            s.execute(delete(User))
             s.execute(delete(Team))
             s.commit()
         sync_engine.dispose()
@@ -149,16 +169,34 @@ async def test_post_trial_no_scope_403(
     round-trip."""
     app, _raw, team_id, captured = fwd_setup
     other = f"loom_team_{uuid4().hex}"
+    other_user_id = uuid4()
+    now = datetime.now(UTC)
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
+        username = f"read-user-{other_user_id.hex[:8]}"
+        s.execute(insert(User).values(
+            id=other_user_id,
+            username=username,
+            username_normalized=username,
+            status="active",
+            is_platform_admin=False,
+            created_at=now,
+        ))
+        s.execute(insert(TeamMembership).values(
+            team_id=team_id,
+            user_id=other_user_id,
+            role="member",
+            created_at=now,
+        ))
         s.execute(
             insert(Token).values(
                 token_hash=hashlib.sha256(other.encode()).digest(),
                 type="team",
                 scopes=["read:own"],
                 team_id=team_id,
-                issued_at=datetime.now(UTC),
+                created_by_user_id=other_user_id,
+                issued_at=now,
             )
         )
         s.commit()

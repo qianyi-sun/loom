@@ -38,6 +38,7 @@ from loom_llm_gateway.dialect import TokenUsage
 from loom_llm_gateway.errors import RateCardNotFoundError
 from loom_llm_gateway.llm_calls import record_failed_call
 from loom_llm_gateway.rate_card import (
+    CostEstimate,
     RateCardCache,
     compute_cost_usd,
     hash_table,
@@ -210,13 +211,26 @@ async def resolve_facade_connection(
     return row
 
 
-async def compute_facade_cost_usd(
+def token_usage_with_cost_metadata(
+    usage: TokenUsage,
+    estimate: CostEstimate,
+) -> TokenUsage:
+    extras = dict(usage.provider_extras)
+    extras.update(estimate.provider_extras())
+    return TokenUsage(
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        provider_extras=extras,
+    )
+
+
+async def compute_facade_cost_estimate(
     row: ProviderConnection,
     model_name: str,
     usage: TokenUsage,
     *,
     rate_card_cache: RateCardCache | None,
-) -> tuple[float, str]:
+) -> CostEstimate:
     """Compute facade call cost and the audit hash/marker.
 
     `operator-supplied` and `tokens-only` keep the existing marker
@@ -231,19 +245,50 @@ async def compute_facade_cost_usd(
             in_per_1m = float(data.get("input_usd_per_1m", 0) or 0)
             out_per_1m = float(data.get("output_usd_per_1m", 0) or 0)
         except (TypeError, ValueError):
-            return 0.0, "facade:operator-supplied"
+            return CostEstimate(
+                cost_usd=0.0,
+                rate_card_hash="facade:operator-supplied:invalid",
+                source="unpriced",
+                confidence="unavailable",
+                currency=None,
+                pricing_source="operator-supplied",
+                unpriced_reason="invalid_operator_pricing",
+            )
         cost = (usage.input_tokens / 1_000_000.0) * in_per_1m
         cost += (usage.output_tokens / 1_000_000.0) * out_per_1m
-        return cost, "facade:operator-supplied"
+        return CostEstimate(
+            cost_usd=cost,
+            rate_card_hash="facade:operator-supplied",
+            source="operator-supplied",
+            confidence="configured",
+            currency="USD",
+            pricing_source="operator-supplied",
+        )
 
     if row.pricing_source != "rate-card":
-        return 0.0, f"facade:{row.pricing_source}"
+        return CostEstimate(
+            cost_usd=0.0,
+            rate_card_hash=f"facade:{row.pricing_source}",
+            source="tokens-only",
+            confidence="not_applicable",
+            currency=None,
+            pricing_source=row.pricing_source,
+        )
 
     lookup_provider = row.rate_card_provider or _TYPE_TO_DEFAULT_RATE_CARD_PROVIDER.get(
         row.provider_type
     )
     if lookup_provider is None or rate_card_cache is None:
-        return 0.0, "facade:rate-card:missing"
+        return CostEstimate(
+            cost_usd=0.0,
+            rate_card_hash="facade:rate-card:missing",
+            source="unpriced",
+            confidence="unavailable",
+            currency=None,
+            pricing_source="rate-card",
+            rate_card_provider=lookup_provider,
+            unpriced_reason="rate_card_unavailable",
+        )
 
     try:
         table = await rate_card_cache.get()
@@ -257,7 +302,16 @@ async def compute_facade_cost_usd(
             ModelSpec(provider=lookup_provider, name=lookup_model),
         )
     except RateCardNotFoundError:
-        return 0.0, "facade:rate-card:missing"
+        return CostEstimate(
+            cost_usd=0.0,
+            rate_card_hash="facade:rate-card:missing",
+            source="unpriced",
+            confidence="unavailable",
+            currency=None,
+            pricing_source="rate-card",
+            rate_card_provider=lookup_provider,
+            unpriced_reason="missing_rate_card_entry",
+        )
 
     cost = compute_cost_usd(
         entry,
@@ -266,7 +320,31 @@ async def compute_facade_cost_usd(
         cached_input_tokens=usage.cached_input_tokens,
         cache_write_tokens=usage.cache_write_tokens,
     )
-    return cost, hash_table(table)
+    return CostEstimate(
+        cost_usd=cost,
+        rate_card_hash=hash_table(table),
+        source="rate-card",
+        confidence="configured",
+        currency=entry.currency or table.currency or "USD",
+        pricing_source="rate-card",
+        rate_card_provider=lookup_provider,
+    )
+
+
+async def compute_facade_cost_usd(
+    row: ProviderConnection,
+    model_name: str,
+    usage: TokenUsage,
+    *,
+    rate_card_cache: RateCardCache | None,
+) -> tuple[float, str]:
+    estimate = await compute_facade_cost_estimate(
+        row,
+        model_name,
+        usage,
+        rate_card_cache=rate_card_cache,
+    )
+    return estimate.cost_usd, estimate.rate_card_hash
 
 
 async def decrypt_facade_api_key(

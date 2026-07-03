@@ -1046,6 +1046,16 @@ class Batch(Base):
     (Task / Trial / Batch / Benchmark) without per-layer translation.
     """
     __tablename__ = "batches"
+    __table_args__ = (
+        CheckConstraint(
+            "budget_policy IN ('none', 'soft', 'hard')",
+            name="batches_budget_policy_check",
+        ),
+        CheckConstraint(
+            "budget_usd IS NULL OR budget_usd >= 0",
+            name="batches_budget_usd_nonnegative_check",
+        ),
+    )
     id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True), primary_key=True,
         server_default=text("gen_random_uuid()"),
@@ -1136,6 +1146,27 @@ class Batch(Base):
     )
     provider_model_id: Mapped[str | None] = mapped_column(
         Text, nullable=True,
+    )
+    budget_usd: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 6), nullable=True,
+    )
+    budget_policy: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'none'"), default="none",
+    )
+    budget_confirmed_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    pre_run_estimated_cost_usd: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 6), nullable=True,
+    )
+    pre_run_cost_estimate_source: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+    )
+    pre_run_cost_estimate_confidence: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+    )
+    budget_diagnostics: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
     )
     # Issue #336: completed-run sharing is org-visible by default.
     # Team/private keeps the run in the owner team's boundary; org +

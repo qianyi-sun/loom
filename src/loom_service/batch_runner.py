@@ -27,19 +27,28 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 import httpx
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from loom.db.schema import Batch, Task, Trial, Worker, WorkerPoolAutoscalerPolicy
+from loom.db.schema import (
+    Batch,
+    LlmCall,
+    Task,
+    Trial,
+    Worker,
+    WorkerPoolAutoscalerPolicy,
+)
 from loom_service.task_config_validation import (
     expected_trial_count,
     split_valid_task_configs,
 )
 from loom_service.task_filter import resolve_task_filter
+from loom_service.usage_accounting import hard_budget_exceeded_diagnostic
 
 logger = logging.getLogger(__name__)
 
@@ -588,6 +597,80 @@ async def _advance_batch_state(
         )
 
 
+async def _cancel_batch_for_hard_budget(
+    session: AsyncSession,
+    batch: Batch,
+) -> bool:
+    if batch.state == "cancelled":
+        return True
+    if str(getattr(batch, "budget_policy", "none") or "none") != "hard":
+        return False
+    if batch.budget_usd is None:
+        return False
+
+    row = (
+        await session.execute(
+            select(
+                func.coalesce(func.sum(LlmCall.cost_usd), 0).label("cost_usd"),
+                func.count(LlmCall.id).label("llm_calls_count"),
+            )
+            .join(Trial, Trial.id == LlmCall.trial_id)
+            .where(Trial.batch_id == batch.id),
+        )
+    ).one()
+    if int(row.llm_calls_count or 0) == 0:
+        return False
+
+    consumed = Decimal(str(row.cost_usd or 0))
+    budget = Decimal(str(batch.budget_usd))
+    if consumed <= budget:
+        return False
+
+    diagnostic = hard_budget_exceeded_diagnostic(
+        batch_id=batch.id,
+        budget_usd=float(budget),
+        estimated_cost_usd=float(consumed),
+    )
+    diagnostics = [
+        item
+        for item in (batch.budget_diagnostics or [])
+        if isinstance(item, dict)
+    ]
+    await session.execute(
+        update(Batch)
+        .where(Batch.id == batch.id)
+        .values(
+            state="cancelled",
+            result_status="cancelled",
+            finished_at=datetime.now(UTC),
+            budget_diagnostics=[*diagnostics, diagnostic],
+        ),
+    )
+    await session.execute(
+        update(Trial)
+        .where(
+            Trial.batch_id == batch.id,
+            Trial.state.in_(list(_IN_FLIGHT)),
+        )
+        .values(
+            state="cancelled",
+            failure_reason="budget_hard_limit_exceeded",
+            failure_message=(
+                "batch hard budget was exceeded by recorded provider usage"
+            ),
+            cancellation_requested_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
+        ),
+    )
+    logger.warning(
+        "batch %s cancelled after hard budget exceeded: cost=%s budget=%s",
+        batch.id,
+        consumed,
+        budget,
+    )
+    return True
+
+
 async def run_once(
     *,
     session_factory: async_sessionmaker[AsyncSession],
@@ -640,6 +723,8 @@ async def run_once(
             .with_for_update(skip_locked=True),
         )).scalars().all()
         for b in batches_to_process:
+            if await _cancel_batch_for_hard_budget(s, b):
+                continue
             existing_fanout_errors = _fanout_errors(b)
             failed_fanout_keys = _fanout_error_keys(existing_fanout_errors)
             targets = _rerun_targets(b)

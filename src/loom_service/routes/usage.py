@@ -32,6 +32,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_llm_gateway.dialect import USAGE_STATUS_KEY
+from loom_llm_gateway.rate_card import (
+    COST_META_CONFIDENCE_KEY,
+    COST_META_SOURCE_KEY,
+)
 from loom_service.auth_guards import (
     is_admin,
     require_team_or_admin,
@@ -46,6 +50,8 @@ _PRICING_MODES: frozenset[str] = frozenset(
     {"priced", "tokens-only", "price-unknown", "failed-upstream"},
 )
 _USAGE_STATUS_SQL = f"l.provider_extras ->> '{USAGE_STATUS_KEY}'"
+_COST_SOURCE_SQL = f"l.provider_extras ->> '{COST_META_SOURCE_KEY}'"
+_COST_CONFIDENCE_SQL = f"l.provider_extras ->> '{COST_META_CONFIDENCE_KEY}'"
 _BREAKDOWN_FIELDS: dict[str, tuple[str, str]] = {
     "team": ("t.team_id::text", "tm.name"),
     "user": ("tok.created_by_user_id::text", "usr.display_name"),
@@ -66,10 +72,28 @@ def _pricing_mode_expr() -> str:
         "CASE "
         "WHEN l.rate_card_hash LIKE 'facade:tokens-only%%' THEN 'tokens-only' "
         "WHEN l.rate_card_hash LIKE 'facade:rate-card:missing%%' "
+        f"OR {_COST_SOURCE_SQL} = 'unpriced' "
         "THEN 'price-unknown' "
         "WHEN l.rate_card_hash = 'failed-upstream' THEN 'failed-upstream' "
         "ELSE 'priced' END"
     )
+
+
+def _cost_source_counts(row: Any) -> dict[str, int]:
+    return {
+        "operator-supplied": int(row.cost_source_operator_supplied_count or 0),
+        "rate-card": int(row.cost_source_rate_card_count or 0),
+        "tokens-only": int(row.cost_source_tokens_only_count or 0),
+        "unpriced": int(row.cost_source_unpriced_count or 0),
+    }
+
+
+def _cost_confidence_counts(row: Any) -> dict[str, int]:
+    return {
+        "configured": int(row.cost_confidence_configured_count or 0),
+        "not_applicable": int(row.cost_confidence_not_applicable_count or 0),
+        "unavailable": int(row.cost_confidence_unavailable_count or 0),
+    }
 
 
 def _llm_usage_from_sql() -> str:
@@ -278,6 +302,7 @@ async def get_usage(
                         FILTER (
                             WHERE l.rate_card_hash NOT LIKE 'facade:tokens-only%%'
                               AND l.rate_card_hash NOT LIKE 'facade:rate-card:missing%%'
+                              AND COALESCE({_COST_SOURCE_SQL}, '') != 'unpriced'
                               AND l.rate_card_hash != 'failed-upstream'
                         ) AS priced_llm_calls_count,
                     COUNT(l.id)
@@ -287,11 +312,40 @@ async def get_usage(
                     COUNT(l.id)
                         FILTER (
                             WHERE l.rate_card_hash LIKE 'facade:rate-card:missing%%'
+                               OR {_COST_SOURCE_SQL} = 'unpriced'
                         ) AS price_unknown_llm_calls_count,
                     COUNT(l.id)
                         FILTER (
                             WHERE l.rate_card_hash = 'failed-upstream'
                         ) AS failed_upstream_llm_calls_count,
+                    COUNT(l.id)
+                        FILTER (
+                            WHERE {_COST_SOURCE_SQL} = 'operator-supplied'
+                        ) AS cost_source_operator_supplied_count,
+                    COUNT(l.id)
+                        FILTER (
+                            WHERE {_COST_SOURCE_SQL} = 'rate-card'
+                        ) AS cost_source_rate_card_count,
+                    COUNT(l.id)
+                        FILTER (
+                            WHERE {_COST_SOURCE_SQL} = 'tokens-only'
+                        ) AS cost_source_tokens_only_count,
+                    COUNT(l.id)
+                        FILTER (
+                            WHERE {_COST_SOURCE_SQL} = 'unpriced'
+                        ) AS cost_source_unpriced_count,
+                    COUNT(l.id)
+                        FILTER (
+                            WHERE {_COST_CONFIDENCE_SQL} = 'configured'
+                        ) AS cost_confidence_configured_count,
+                    COUNT(l.id)
+                        FILTER (
+                            WHERE {_COST_CONFIDENCE_SQL} = 'not_applicable'
+                        ) AS cost_confidence_not_applicable_count,
+                    COUNT(l.id)
+                        FILTER (
+                            WHERE {_COST_CONFIDENCE_SQL} = 'unavailable'
+                        ) AS cost_confidence_unavailable_count,
                     COUNT(l.id)
                         FILTER (
                             WHERE {_USAGE_STATUS_SQL} = 'partial'
@@ -353,6 +407,20 @@ async def get_usage(
                     AS price_unknown_llm_calls_count,
                 COALESCE(l.failed_upstream_llm_calls_count, 0)
                     AS failed_upstream_llm_calls_count,
+                COALESCE(l.cost_source_operator_supplied_count, 0)
+                    AS cost_source_operator_supplied_count,
+                COALESCE(l.cost_source_rate_card_count, 0)
+                    AS cost_source_rate_card_count,
+                COALESCE(l.cost_source_tokens_only_count, 0)
+                    AS cost_source_tokens_only_count,
+                COALESCE(l.cost_source_unpriced_count, 0)
+                    AS cost_source_unpriced_count,
+                COALESCE(l.cost_confidence_configured_count, 0)
+                    AS cost_confidence_configured_count,
+                COALESCE(l.cost_confidence_not_applicable_count, 0)
+                    AS cost_confidence_not_applicable_count,
+                COALESCE(l.cost_confidence_unavailable_count, 0)
+                    AS cost_confidence_unavailable_count,
                 COALESCE(l.partial_usage_llm_calls_count, 0)
                     AS partial_usage_llm_calls_count,
                 COALESCE(l.missing_usage_llm_calls_count, 0)
@@ -389,6 +457,7 @@ async def get_usage(
                     FILTER (
                         WHERE l.rate_card_hash NOT LIKE 'facade:tokens-only%%'
                           AND l.rate_card_hash NOT LIKE 'facade:rate-card:missing%%'
+                          AND COALESCE({_COST_SOURCE_SQL}, '') != 'unpriced'
                           AND l.rate_card_hash != 'failed-upstream'
                     ) AS priced_llm_calls_count,
                 COUNT(l.id)
@@ -398,11 +467,40 @@ async def get_usage(
                 COUNT(l.id)
                     FILTER (
                         WHERE l.rate_card_hash LIKE 'facade:rate-card:missing%%'
+                           OR {_COST_SOURCE_SQL} = 'unpriced'
                     ) AS price_unknown_llm_calls_count,
                 COUNT(l.id)
                     FILTER (
                         WHERE l.rate_card_hash = 'failed-upstream'
                     ) AS failed_upstream_llm_calls_count,
+                COUNT(l.id)
+                    FILTER (
+                        WHERE {_COST_SOURCE_SQL} = 'operator-supplied'
+                    ) AS cost_source_operator_supplied_count,
+                COUNT(l.id)
+                    FILTER (
+                        WHERE {_COST_SOURCE_SQL} = 'rate-card'
+                    ) AS cost_source_rate_card_count,
+                COUNT(l.id)
+                    FILTER (
+                        WHERE {_COST_SOURCE_SQL} = 'tokens-only'
+                    ) AS cost_source_tokens_only_count,
+                COUNT(l.id)
+                    FILTER (
+                        WHERE {_COST_SOURCE_SQL} = 'unpriced'
+                    ) AS cost_source_unpriced_count,
+                COUNT(l.id)
+                    FILTER (
+                        WHERE {_COST_CONFIDENCE_SQL} = 'configured'
+                    ) AS cost_confidence_configured_count,
+                COUNT(l.id)
+                    FILTER (
+                        WHERE {_COST_CONFIDENCE_SQL} = 'not_applicable'
+                    ) AS cost_confidence_not_applicable_count,
+                COUNT(l.id)
+                    FILTER (
+                        WHERE {_COST_CONFIDENCE_SQL} = 'unavailable'
+                    ) AS cost_confidence_unavailable_count,
                 COUNT(l.id)
                     FILTER (
                         WHERE {_USAGE_STATUS_SQL} = 'partial'
@@ -455,6 +553,8 @@ async def get_usage(
             missing_usage_llm_calls_count=int(
                 r.missing_usage_llm_calls_count or 0,
             ),
+            cost_source_counts=_cost_source_counts(r),
+            cost_confidence_counts=_cost_confidence_counts(r),
         )
         bucket = {
             "start_at": bs.isoformat(),
@@ -468,6 +568,8 @@ async def get_usage(
             "estimated_cost_usd": usage["estimated_cost_usd"],
             "cost_currency": usage["cost_currency"],
             "cost_status": usage["cost_status"],
+            "cost_estimate_source": usage["cost_estimate_source"],
+            "cost_estimate_confidence": usage["cost_estimate_confidence"],
             "pricing_modes": usage["pricing_modes"],
             "priced_llm_calls_count": usage["priced_llm_calls_count"],
             "token_only_llm_calls_count": usage["token_only_llm_calls_count"],
@@ -518,6 +620,7 @@ async def _batch_usage_rollups(
                 FILTER (
                     WHERE l.rate_card_hash NOT LIKE 'facade:tokens-only%%'
                       AND l.rate_card_hash NOT LIKE 'facade:rate-card:missing%%'
+                      AND COALESCE({_COST_SOURCE_SQL}, '') != 'unpriced'
                       AND l.rate_card_hash != 'failed-upstream'
                 ) AS priced_llm_calls_count,
             COUNT(l.id)
@@ -527,11 +630,40 @@ async def _batch_usage_rollups(
             COUNT(l.id)
                 FILTER (
                     WHERE l.rate_card_hash LIKE 'facade:rate-card:missing%%'
+                       OR {_COST_SOURCE_SQL} = 'unpriced'
                 ) AS price_unknown_llm_calls_count,
             COUNT(l.id)
                 FILTER (
                     WHERE l.rate_card_hash = 'failed-upstream'
                 ) AS failed_upstream_llm_calls_count,
+            COUNT(l.id)
+                FILTER (
+                    WHERE {_COST_SOURCE_SQL} = 'operator-supplied'
+                ) AS cost_source_operator_supplied_count,
+            COUNT(l.id)
+                FILTER (
+                    WHERE {_COST_SOURCE_SQL} = 'rate-card'
+                ) AS cost_source_rate_card_count,
+            COUNT(l.id)
+                FILTER (
+                    WHERE {_COST_SOURCE_SQL} = 'tokens-only'
+                ) AS cost_source_tokens_only_count,
+            COUNT(l.id)
+                FILTER (
+                    WHERE {_COST_SOURCE_SQL} = 'unpriced'
+                ) AS cost_source_unpriced_count,
+            COUNT(l.id)
+                FILTER (
+                    WHERE {_COST_CONFIDENCE_SQL} = 'configured'
+                ) AS cost_confidence_configured_count,
+            COUNT(l.id)
+                FILTER (
+                    WHERE {_COST_CONFIDENCE_SQL} = 'not_applicable'
+                ) AS cost_confidence_not_applicable_count,
+            COUNT(l.id)
+                FILTER (
+                    WHERE {_COST_CONFIDENCE_SQL} = 'unavailable'
+                ) AS cost_confidence_unavailable_count,
             COUNT(l.id)
                 FILTER (
                     WHERE {_USAGE_STATUS_SQL} = 'partial'
@@ -573,6 +705,8 @@ async def _batch_usage_rollups(
             missing_usage_llm_calls_count=int(
                 row.missing_usage_llm_calls_count or 0,
             ),
+            cost_source_counts=_cost_source_counts(row),
+            cost_confidence_counts=_cost_confidence_counts(row),
         )
         item = {
             "batch_id": str(row.batch_id),

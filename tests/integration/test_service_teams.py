@@ -80,14 +80,20 @@ async def teams_setup(
         s.execute(insert(User).values(
             id=owner_id,
             email="owner@example.com",
+            username="owner",
+            username_normalized="owner",
             display_name="Owner Example",
+            status="active",
             is_platform_admin=False,
             created_at=now,
         ))
         s.execute(insert(User).values(
             id=member_id,
             email="member@example.com",
+            username="member",
+            username_normalized="member",
             display_name=None,
+            status="active",
             is_platform_admin=False,
             created_at=now,
         ))

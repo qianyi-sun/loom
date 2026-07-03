@@ -13,6 +13,9 @@ from loom.db.schema import (
     ArtifactLineageEdge,
     Batch,
     Task,
+    TaskSet,
+    TaskSetManifest,
+    TaskSetMaterializationJob,
     Team,
     TeamQuota,
     Token,
@@ -58,6 +61,9 @@ def traj_seed(postgres_url: str) -> Iterator[tuple[UUID, UUID, str]]:
             s.execute(delete(ArtifactLineageEdge))
             s.execute(delete(Artifact))
             s.execute(delete(Batch))
+            s.execute(delete(TaskSetMaterializationJob))
+            s.execute(delete(TaskSetManifest))
+            s.execute(delete(TaskSet))
             s.execute(delete(Worker))
             s.execute(delete(Token))
             s.execute(delete(TeamQuota))
