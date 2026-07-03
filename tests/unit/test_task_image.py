@@ -9,7 +9,10 @@ from docker.errors import ImageNotFound
 
 from loom.driver import task_image
 from loom.driver.task_image import (
+    RUNTIME_ARM64_FALLBACK_BASES,
+    TERMINUS_2_FULL_IMAGE,
     TaskImageBuildError,
+    dockerfile_uses_runtime_arm64_fallback_base,
     resolve_task_image,
     task_image_tag,
 )
@@ -549,3 +552,43 @@ async def test_resolve_task_image_empty_build_log_still_raises(
     msg = str(exc.value)
     assert "daemon rejected build" in msg
     assert "build log" not in msg.lower()
+
+
+class TestRuntimeArm64FallbackBases:
+    """Registry + Dockerfile probe for #342."""
+
+    def test_terminus_2_full_is_a_fallback_base(self) -> None:
+        assert TERMINUS_2_FULL_IMAGE in RUNTIME_ARM64_FALLBACK_BASES
+
+    def test_dockerfile_with_terminus_2_from_is_detected(self, tmp_path) -> None:
+        dockerfile = tmp_path / "Dockerfile"
+        dockerfile.write_text(
+            f"# comment\nFROM {TERMINUS_2_FULL_IMAGE}\nRUN echo ok\n",
+        )
+        assert dockerfile_uses_runtime_arm64_fallback_base(dockerfile) is True
+
+    def test_dockerfile_with_docker_io_qualifier_is_detected(
+        self, tmp_path,
+    ) -> None:
+        dockerfile = tmp_path / "Dockerfile"
+        dockerfile.write_text(
+            f"FROM docker.io/{TERMINUS_2_FULL_IMAGE}\n",
+        )
+        assert dockerfile_uses_runtime_arm64_fallback_base(dockerfile) is True
+
+    def test_dockerfile_with_unrelated_base_is_not_detected(
+        self, tmp_path,
+    ) -> None:
+        dockerfile = tmp_path / "Dockerfile"
+        dockerfile.write_text("FROM python:3.11-slim\nRUN echo ok\n")
+        assert dockerfile_uses_runtime_arm64_fallback_base(dockerfile) is False
+
+    def test_dockerfile_with_arg_before_from_still_detected(
+        self, tmp_path,
+    ) -> None:
+        dockerfile = tmp_path / "Dockerfile"
+        dockerfile.write_text(
+            "ARG VERSION=1\n"
+            f"FROM {TERMINUS_2_FULL_IMAGE}\n",
+        )
+        assert dockerfile_uses_runtime_arm64_fallback_base(dockerfile) is True
