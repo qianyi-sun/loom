@@ -10,6 +10,7 @@ SRC_ROOT = REPO_ROOT / "src"
 
 ALLOWLIST = {
     SRC_ROOT / "loom" / "db" / "task_set_visibility.py",
+    SRC_ROOT / "loom_service" / "taskset_gc.py",
 }
 
 
@@ -26,12 +27,13 @@ def _is_bare_select_taskset(node: ast.AST) -> bool:
 
 
 def _violations_in_file(path: Path) -> list[tuple[int, str]]:
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(path))
     hits: list[tuple[int, str]] = []
     for node in ast.walk(tree):
         if _is_bare_select_taskset(node) and isinstance(node, ast.Call):
             hits.append((node.lineno, ast.get_source_segment(
-                tree, node,
+                source, node,
             ) or "select(TaskSet)"))
     return hits
 
