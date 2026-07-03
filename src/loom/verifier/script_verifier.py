@@ -61,8 +61,18 @@ class ScriptVerifier:
             try:
                 await env.download(_OUTPUT_PATH, local)
             except FileNotFoundError:
-                kind: Literal["exec_failure", "missing_tests"] = (
-                    "exec_failure" if exec_result.return_code != 0 else "missing_tests"
+                # #380: enrich the diagnostic with the post-mortem state
+                # of the output directory so an operator can tell script
+                # bug vs. permission bug vs. env-var bug apart without
+                # rerunning. Runs a single non-mutating exec.
+                diagnostic = {
+                    **diagnostic,
+                    **await _output_dir_post_mortem(env, _OUTPUT_PATH),
+                }
+                kind: Literal["exec_failure", "missing_output"] = (
+                    "exec_failure"
+                    if exec_result.return_code != 0
+                    else "missing_output"
                 )
                 return VerifierResult(
                     rewards={},
@@ -90,6 +100,37 @@ class ScriptVerifier:
             structured=data.get("structured"),
             confidence=data.get("confidence"),
         )
+
+
+async def _output_dir_post_mortem(
+    env: Driver, output_path: PurePosixPath,
+) -> dict[str, object]:
+    """Return a small dict describing the state of ``output_path.parent``.
+
+    Used only in the missing-output failure path (#380) to help operators
+    distinguish a script-side bug (wrote nothing) from a permission bug
+    (dir wasn't writable) or an env-var bug (script wrote to a different
+    path) without a repro run. Single, non-mutating exec.
+    """
+    output_dir = output_path.parent.as_posix()
+    probe = (
+        # `stat` prints one line per requested field; `ls -la` gives us
+        # the sibling listing so the operator sees what DID land in the
+        # dir (e.g. an output.json.tmp the script forgot to rename).
+        f"echo -- MODE ; stat -c %a {output_dir!s} 2>/dev/null || echo MISSING ; "
+        f"echo -- OWNER ; stat -c %U:%G {output_dir!s} 2>/dev/null || echo MISSING ; "
+        f"echo -- LISTING ; ls -la {output_dir!s} 2>&1 || true"
+    )
+    try:
+        probe_result = await env.exec(probe, user="root")
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"output_dir_post_mortem_error": repr(exc)}
+    text = probe_result.stdout.decode("utf-8", errors="replace")
+    return {
+        "output_dir": output_dir,
+        "output_dir_probe": text,
+        "output_dir_probe_return_code": probe_result.return_code,
+    }
 
 
 def _exec_diagnostic(
