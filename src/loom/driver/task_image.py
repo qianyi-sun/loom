@@ -35,6 +35,18 @@ ENV_BUILD_CONTEXT_MAX_FILES = "LOOM_TASK_IMAGE_BUILD_MAX_FILES"
 ENV_BUILD_CONTEXT_MAX_BYTES = "LOOM_TASK_IMAGE_BUILD_MAX_BYTES"
 TERMINUS_2_FULL_IMAGE = "mictern2/terminus2-full:latest"
 _TERMINUS_2_BASE_LOCK = threading.Lock()
+
+#: Base images the worker materializes an arm64 substitute for at trial
+#: start (see :func:`_ensure_terminus_2_arm64_base_if_needed`). Task
+#: bundles whose Dockerfile ``FROM`` targets one of these can safely
+#: declare ``cpu_arch = "any"`` — the worker will produce a working
+#: arm64 tag on demand even though the upstream is amd64-only.
+#:
+#: When a new base image joins the runtime-fallback set, adapters and
+#: the publish-local promotion in
+#: :mod:`loom_cli.local_benchmark_publish` will automatically start
+#: routing matching tasks to arm64 pools too. #342.
+RUNTIME_ARM64_FALLBACK_BASES: frozenset[str] = frozenset({TERMINUS_2_FULL_IMAGE})
 _TERMINUS_2_ARM64_BASE_DOCKERFILE = """\
 FROM python:3.13-slim
 
@@ -407,6 +419,20 @@ def _dockerfile_uses_base_image(dockerfile: Path, image: str) -> bool:
         if not from_args:
             return False
         return _normalize_docker_image_name(from_args[0]) == normalized_image
+    return False
+
+
+def dockerfile_uses_runtime_arm64_fallback_base(dockerfile: Path) -> bool:
+    """True if the Dockerfile's first ``FROM`` targets a base image the
+    worker will substitute an arm64 build for at trial start.
+
+    Used by adapters and the publish-local pipeline to decide whether a
+    task can safely claim ``cpu_arch = "any"`` even though the declared
+    base image only ships an amd64 manifest. #342.
+    """
+    for base in RUNTIME_ARM64_FALLBACK_BASES:
+        if _dockerfile_uses_base_image(dockerfile, base):
+            return True
     return False
 
 

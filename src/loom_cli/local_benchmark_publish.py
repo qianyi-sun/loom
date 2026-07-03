@@ -19,6 +19,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import Benchmark
 from loom.db.schema import Task as TaskRow
+from loom.driver.task_image import (
+    dockerfile_uses_runtime_arm64_fallback_base,
+)
 from loom.models.task_checksum import task_checksum
 from loom.trajectory.storage import ObjectStore
 from loom_benchmark_tool.db_url import normalize_db_url
@@ -116,6 +119,7 @@ async def publish_local_benchmark(
 
                 with task_toml.open("rb") as f:
                     raw_cfg: dict[str, Any] = tomllib.load(f)
+                _promote_cpu_arch_if_runtime_fallback(raw_cfg, bundle_dir)
                 checksum = task_checksum(bundle_dir)
                 existing = await _get_task(session, task_id)
                 if existing is None:
@@ -176,3 +180,26 @@ async def _get_task(session, task_id: str):  # type: ignore[no-untyped-def]
     return (await session.execute(
         select(TaskRow).where(TaskRow.id == task_id),
     )).scalar_one_or_none()
+
+
+def _promote_cpu_arch_if_runtime_fallback(
+    raw_cfg: dict[str, Any], bundle_dir: Path,
+) -> None:
+    """If the bundle's Dockerfile uses a base image the worker will
+    substitute an arm64 build for at trial time, promote an unspecified
+    ``environment.cpu_arch`` to ``"any"`` so the scheduler routes trials
+    to arm64 pools too. Explicit user choices are respected. #342.
+    """
+    env = raw_cfg.get("environment")
+    if not isinstance(env, dict):
+        return
+    if "cpu_arch" in env:
+        return  # explicit choice — never override
+    dockerfile_rel = env.get("dockerfile")
+    if not isinstance(dockerfile_rel, str):
+        return
+    dockerfile_path = bundle_dir / dockerfile_rel
+    if not dockerfile_path.is_file():
+        return
+    if dockerfile_uses_runtime_arm64_fallback_base(dockerfile_path):
+        env["cpu_arch"] = "any"

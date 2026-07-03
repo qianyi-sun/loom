@@ -23,6 +23,9 @@ from loom_benchmarks.base import (
     UpstreamSource,
 )
 
+from loom.driver.task_image import (
+    dockerfile_uses_runtime_arm64_fallback_base as _uses_runtime_arm64_fallback_base,
+)
 from loom_benchmark_terminal_bench_2.upstream import (
     TASK_SUBDIR,
     UPSTREAM_SOURCE,
@@ -162,6 +165,14 @@ class TerminalBench2Adapter:
             "docker_build_context": ".loom-build/client",
             "workdir": "/app",
         }
+        # #342: many upstream Terminal-Bench-2 tasks use an amd64-only
+        # base image (mictern2/terminus2-full). The worker materializes
+        # an arm64 substitute automatically at trial start, so tasks
+        # whose Dockerfile uses a runtime-fallback base can safely
+        # advertise cpu_arch=any and drain onto GB10 arm64 pools.
+        staged_client_dockerfile = client_context / rel_client_dockerfile
+        if _uses_runtime_arm64_fallback_base(staged_client_dockerfile):
+            environment["cpu_arch"] = "any"
         client_environment = self._parse_environment(
             client_service.get("environment")
             if isinstance(client_service, dict) else None,

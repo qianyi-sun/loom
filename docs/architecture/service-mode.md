@@ -380,6 +380,24 @@ rows without `requires_caps.cpu_arch` are treated as `x86_64`. ARM64 remote
 workers therefore only claim tasks explicitly submitted with
 `environment.cpu_arch = "arm64"` or `"any"`.
 
+### Runtime-fallback base image registry (#342)
+
+A small set of amd64-only base images have known arm64 substitutes the
+worker can materialize on demand at trial start (currently just
+`mictern2/terminus2-full:latest` — see
+`_ensure_terminus_2_arm64_base_if_needed` in
+`src/loom/driver/task_image.py`, tag-shadowed by a Debian slim +
+Python 3.13 + Terminus 2 toolchain build).
+
+Because the worker guarantees an arm64-compatible base at build time,
+task bundles whose Dockerfile `FROM`s an image in
+`RUNTIME_ARM64_FALLBACK_BASES` are safe to route to arm64 pools. Both
+the canonical Terminal-Bench-2 adapter and `loom datasets publish-local`
+detect this and promote an unspecified `environment.cpu_arch` to
+`"any"` at import time so the scheduler's claim query includes GB10
+workers. Explicit user choices (`cpu_arch = "x86_64"`) are never
+overridden.
+
 Ordering, most-important to least:
 1. Lowest `in_flight_count / fair_share_weight` (Dominant Resource
    Fairness — the team with the smallest current share of the fleet

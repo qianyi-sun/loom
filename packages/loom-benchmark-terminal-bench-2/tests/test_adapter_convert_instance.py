@@ -64,6 +64,35 @@ def test_convert_writes_task_toml_with_required_fields(
     assert cfg.verifier.name == "script"
     assert cfg.verifier.args["script_path"] == "/app/verifier/run.sh"
     assert cfg.agent.name == "oracle"
+    # Fixture Dockerfile does NOT use a runtime-fallback base, so the
+    # adapter must not fabricate a cpu_arch override (#342).
+    assert cfg.environment.cpu_arch == "x86_64"
+
+
+def test_convert_marks_cpu_arch_any_for_runtime_fallback_base(
+    fixtures_dir: Path, tmp_path: Path,
+) -> None:
+    """Terminal-Bench tasks whose client Dockerfile uses the amd64-only
+    ``mictern2/terminus2-full:latest`` base can safely run on GB10
+    arm64 workers because the worker materializes an arm64 substitute
+    at trial start. The adapter emits ``cpu_arch = any`` so the
+    scheduler routes those trials to arm64 pools too. #342."""
+    staged = tmp_path / "tasks" / "terminus2-hello"
+    shutil.copytree(fixtures_dir / "tb2-task-hello-world", staged)
+    (staged / "Dockerfile").write_text(
+        "FROM mictern2/terminus2-full:latest\n"
+        "RUN echo ready\n",
+    )
+    adapter = TerminalBench2Adapter()
+    (only,) = list(adapter.list_instances(source_dir=tmp_path, split="test"))
+
+    out = tmp_path / "out"
+    adapter.convert_instance(only, out_dir=out)
+
+    cfg = TaskConfig.model_validate(
+        tomllib.loads((out / "task.toml").read_text()),
+    )
+    assert cfg.environment.cpu_arch == "any"
 
 
 def test_convert_stages_build_context_without_exposing_it_to_workspace(
