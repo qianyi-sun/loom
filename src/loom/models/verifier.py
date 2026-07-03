@@ -24,7 +24,14 @@ class VerifierError(BaseModel):
     than opaque crashes (spec §2.4 wart-fix).
     """
     model_config = ConfigDict(frozen=True, extra="forbid")
-    kind: Literal["missing_tests", "parse_failure", "exec_failure", "timeout", "internal"]
+    kind: Literal[
+        "missing_tests",
+        "missing_output",
+        "parse_failure",
+        "exec_failure",
+        "timeout",
+        "internal",
+    ]
     message: str
     detail: dict[str, Any] = {}
 

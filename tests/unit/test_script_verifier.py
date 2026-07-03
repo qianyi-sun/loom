@@ -60,7 +60,15 @@ async def test_script_verifier_missing_output_returns_error(tmp_path: Path):
         trajectory=None,  # type: ignore[arg-type]
     )
     assert result.error is not None
-    assert result.error.kind == "missing_tests"
+    # #380: script exited 0 but no output.json → distinct kind so
+    # operators can filter for this specific failure mode.
+    assert result.error.kind == "missing_output"
+    # #380: post-mortem includes the output-dir path + probe output so
+    # operators can distinguish script-side no-op from a permission or
+    # env-var bug without a rerun.
+    assert result.error.detail["output_dir"] == "/loom/verifier"
+    assert "output_dir_probe" in result.error.detail
+    assert "output_dir_probe_return_code" in result.error.detail
 
 
 async def test_script_verifier_invalid_json_returns_parse_error():
