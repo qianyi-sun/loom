@@ -78,6 +78,14 @@ class TeamQuota(Base):
             "ARRAY['MIT', 'Apache-2.0', 'BSD-3-Clause', 'CC-BY-4.0']::text[]",
         ),
     )
+    # TaskSet quota columns (#242 sub-plan 7). NULL means "use global
+    # default from loom-schema.toml"; non-NULL overrides per-team.
+    taskset_max_count: Mapped[int | None] = mapped_column(
+        Integer, nullable=True,
+    )
+    taskset_max_storage_bytes: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True,
+    )
     # SSRF defense layer 3 opt-in (cluster-deploy.md §Secrets/SSRF).
     # When False (default for `loom cluster`), `POST /provider-connections`
     # rejects RFC1918 / IPv6 ULA / loopback / link-local IPs. When True

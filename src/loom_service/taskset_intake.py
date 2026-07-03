@@ -15,6 +15,7 @@ from uuid import UUID
 import yaml  # type: ignore[import-untyped]
 from fastapi import HTTPException, UploadFile
 from pydantic import ValidationError
+from sqlalchemy import func as sa_func
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +24,7 @@ from loom.db.schema import (
     TaskSet,
     TaskSetManifest,
     TaskSetMaterializationJob,
+    TeamQuota,
 )
 from loom.db.task_set_visibility import visible_task_sets
 from loom.models.taskset import (
@@ -115,6 +117,36 @@ def _upload_object(
     )
 
 
+async def check_taskset_count_quota(
+    session: AsyncSession,
+    *,
+    team_id: UUID,
+    default_max_count: int,
+) -> None:
+    """Reject if team has hit their active TaskSet count quota."""
+    quota_row = (await session.execute(
+        select(TeamQuota).where(TeamQuota.team_id == team_id),
+    )).scalar_one_or_none()
+    max_count = (
+        quota_row.taskset_max_count
+        if quota_row is not None and quota_row.taskset_max_count is not None
+        else default_max_count
+    )
+
+    active_count_result = await session.execute(
+        select(sa_func.count()).select_from(TaskSet).where(
+            TaskSet.owning_team_id == team_id,
+            TaskSet.soft_deleted_at.is_(None),
+        ),
+    )
+    active_count = active_count_result.scalar_one()
+    if active_count >= max_count:
+        raise HTTPException(
+            status_code=429,
+            detail="taskset_quota_exceeded",
+        )
+
+
 async def submit_task_set(
     session: AsyncSession,
     *,
@@ -124,7 +156,11 @@ async def submit_task_set(
     manifest_upload: UploadFile,
     verifier_upload: UploadFile | None,
     transform_upload: UploadFile | None,
+    taskset_quota_max_count: int = 50,
 ) -> TaskSetIntakeResult:
+    await check_taskset_count_quota(
+        session, team_id=team_id, default_max_count=taskset_quota_max_count,
+    )
     manifest_model, raw_manifest = await parse_manifest_upload(manifest_upload)
     slug = manifest_model.slug
     task_set_id = task_set_id_for(team_id=str(team_id), slug=slug)
