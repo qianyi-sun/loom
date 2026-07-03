@@ -359,6 +359,9 @@ async def test_admin_can_list_create_and_rename_internal_teams(
     assert created.status_code == 201, created.text
     assert created.json()["name"] == "Research Platform"
     assert created.json()["quota"] is not None
+    # #401: TeamQuota.max_attempts_ceiling is seeded from the schema knob
+    # `team_quota_max_attempts_ceiling_default` (default 3).
+    assert created.json()["quota"]["max_attempts_ceiling"] == 3
     assert renamed.status_code == 200, renamed.text
     assert renamed.json()["name"] == "Research Platform Core"
     assert duplicate.status_code == 409, duplicate.text

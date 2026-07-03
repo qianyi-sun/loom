@@ -147,8 +147,25 @@ async def submit_trial(
             status_code=400,
             detail=f"invalid task config for {task_id}: {exc}",
         ) from exc
+    # Snapshot deployment RetryPolicy defaults into the trial payload at submit
+    # time when the submitter didn't set an explicit `retry` block (#401). Persisting
+    # the resolved policy keeps clone/re-run reproducible after an operator retunes
+    # the deployment defaults.
+    settings = request.app.state.settings
+    raw_config = dict(payload.get("config") or {})
+    if "retry" not in raw_config:
+        raw_config["retry"] = {
+            "max_attempts": settings.trial_retry_default_max_attempts,
+            "retry_on": list(settings.trial_retry_default_retry_on),
+            "backoff": {
+                "base_sec": settings.trial_retry_default_backoff_base_sec,
+                "max_sec": settings.trial_retry_default_backoff_max_sec,
+                "multiplier": settings.trial_retry_default_backoff_multiplier,
+                "jitter": settings.trial_retry_default_backoff_jitter,
+            },
+        }
     try:
-        trial_config = TrialConfig.model_validate(payload.get("config") or {})
+        trial_config = TrialConfig.model_validate(raw_config)
     except ValidationError as exc:
         raise HTTPException(
             status_code=400,
@@ -172,6 +189,23 @@ async def submit_trial(
             .values(team_id=submit_team_id)
             .on_conflict_do_nothing(index_elements=["team_id"]),
         )
+        # Clamp requested max_attempts to the team's admin-set ceiling (#401).
+        # The scheduler's claim query enforces this too, but persisting the
+        # clamped value keeps the snapshot honest: what the trial payload says
+        # matches what will actually run.
+        ceiling = (
+            await session.execute(
+                select(TeamQuota.max_attempts_ceiling).where(
+                    TeamQuota.team_id == submit_team_id,
+                ),
+            )
+        ).scalar_one()
+        if trial_config.retry.max_attempts > ceiling:
+            trial_config = trial_config.model_copy(update={
+                "retry": trial_config.retry.model_copy(update={
+                    "max_attempts": ceiling,
+                }),
+            })
         # Plan 19: batch_id + idempotency_key are optional. When
         # `idempotency_key` is set we use pg_insert + ON CONFLICT DO
         # NOTHING so a concurrent race (two runner instances picking

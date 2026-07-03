@@ -235,7 +235,13 @@ async def create_admin_team(
     team = Team(id=uuid4(), name=payload.name, created_at=now)
     session.add(team)
     await session.flush()
-    session.add(TeamQuota(team_id=team.id))
+    # #401: seed the admin ceiling from the schema-driven default so operators
+    # can retune per environment without touching code or the DB default.
+    settings = request.app.state.settings
+    session.add(TeamQuota(
+        team_id=team.id,
+        max_attempts_ceiling=settings.team_quota_max_attempts_ceiling_default,
+    ))
     await write_admin_audit_event(
         session,
         actor=actor,
