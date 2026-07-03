@@ -96,7 +96,9 @@ jobs:
 
       - name: loom cluster render — manifests parse + match schema
         run: |
-          uv run python -m loom_cli cluster render > /tmp/manifests.yaml
+          uv run python -m loom_cli cluster render \
+            --config deploy/environments/development.cluster.toml \
+            > /tmp/manifests.yaml
           wc -l /tmp/manifests.yaml
           # Server-side dry-run validates schema against the live API.
           kubectl --context kind-loom-smoke -n loom apply \
@@ -115,6 +117,7 @@ jobs:
         # contract, not pod readiness.
         run: |
           uv run python -m loom_cli cluster up \
+            --config deploy/environments/development.cluster.toml \
             --context kind-loom-smoke --namespace loom \
             --skip-preflight --no-wait
 
@@ -134,6 +137,7 @@ jobs:
       - name: loom cluster status --format json
         run: |
           uv run python -m loom_cli cluster status \
+            --config deploy/environments/development.cluster.toml \
             --context kind-loom-smoke --namespace loom \
             --format json | tee /tmp/status.json
           # Sanity: the JSON shape carries the components list with
@@ -157,6 +161,7 @@ jobs:
       - name: loom cluster down --yes
         run: |
           uv run python -m loom_cli cluster down \
+            --config deploy/environments/development.cluster.toml \
             --context kind-loom-smoke --namespace loom --yes
 
       - name: Verify teardown
