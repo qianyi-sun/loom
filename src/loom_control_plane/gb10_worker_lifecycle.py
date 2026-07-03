@@ -15,7 +15,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom.db.schema import GB10WorkerNodeStatus, GB10WorkerPoolDesiredState
+from loom.db.schema import GB10WorkerNodeStatus, GB10WorkerPoolDesiredState, Worker
 
 _SECRET_KEY_PARTS = (
     "TOKEN",
@@ -322,8 +322,57 @@ async def record_node_report(
     elif report.apply_state in {"applied", "failed", "blocked", "rolled_back"}:
         row.last_apply_at = now
     row.updated_at = now
+
+    await _reconcile_worker_drain_state_for_stopped_host(
+        session,
+        row,
+        now=now,
+    )
+
     await session.flush()
     return row
+
+
+async def _reconcile_worker_drain_state_for_stopped_host(
+    session: AsyncSession,
+    row: GB10WorkerNodeStatus,
+    *,
+    now: datetime,
+) -> None:
+    """#368 defense: force the worker registry to reflect a stopped
+    host intent, even if the node-agent's "applied" report was a no-op
+    (env file already matched, container never actually stopped) and
+    the worker keeps heartbeating.
+
+    Without this reconciliation, the scheduler sees `Worker.drain_state
+    = 'active'` and continues claiming trials on a host the lifecycle
+    layer says is stopped. `loom resources status` also reports the
+    host in `active_workers` / `total_slots`.
+
+    Two triggers force the worker to `drained`:
+    1. Desired + current + apply all report `stopped` → the node has
+       affirmatively confirmed shutdown. Worker registry should match.
+    2. Desired = `stopped` and the row has an attached `worker_id` →
+       even if apply_state is `already current` (the #368 bug), the
+       operator has expressed intent and the CP must not treat the
+       host as active capacity.
+    """
+    if row.worker_id is None:
+        return
+    desired_intent = row.desired_intent
+    if desired_intent != "stopped":
+        return
+    worker_row = await session.get(Worker, row.worker_id)
+    if worker_row is None or worker_row.drain_state == "drained":
+        return
+    worker_row.drain_state = "drained"
+    worker_row.drain_requested_at = worker_row.drain_requested_at or now
+    worker_row.drain_reason = (
+        f"gb10 host {row.hostname} desired_intent=stopped "
+        f"(current_intent={row.current_intent or '-'}, "
+        f"apply_state={row.apply_state})"
+    )
+    worker_row.drain_owner = "gb10-lifecycle"
 
 
 async def fetch_lifecycle_status(
