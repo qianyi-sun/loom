@@ -90,6 +90,24 @@ export async function apiFetch<T>(
   return (await resp.json()) as T;
 }
 
+export async function apiUpload<T>(
+  path: string,
+  formData: FormData,
+): Promise<T> {
+  const headers: Record<string, string> = authHeaders(undefined, "POST");
+
+  const resp = await fetch(`${apiBase()}${path}`, {
+    method: "POST",
+    headers,
+    body: formData,
+    credentials: "include",
+  });
+
+  await throwIfApiError(resp);
+  if (resp.status === 204) return undefined as T;
+  return (await resp.json()) as T;
+}
+
 export async function apiDownload(
   path: string,
   filename: string,
@@ -643,6 +661,55 @@ export interface ReuseRunLibraryArtifactResult {
   created_at: string;
 }
 
+// --- TaskSet types (matching Pydantic models in routes/tasksets.py) ---
+
+export interface TaskSetWarning {
+  code: string;
+  message: string;
+}
+
+export interface TaskSetSubmitResponse {
+  task_set_id: string;
+  status: string;
+  intents: string[];
+  manifest_intents: string[];
+  inferred_intents: string[];
+  capabilities: string[];
+  warnings: TaskSetWarning[];
+  evaluation_ready: boolean;
+  task_count: number;
+  materialization_job_id: string;
+}
+
+export interface TaskSetDetailResponse {
+  task_set_id: string;
+  status: string;
+  status_reason: string | null;
+  intents: string[];
+  manifest_intents: string[];
+  inferred_intents: string[];
+  capabilities: string[];
+  warnings: TaskSetWarning[];
+  evaluation_ready: boolean;
+  task_count: number;
+  error_summary: { instance_index: number; code: string; message: string }[];
+  materialization_job_state: string | null;
+}
+
+export interface TaskSetListItem {
+  task_set_id: string;
+  display_name: string;
+  status: string;
+  intents: string[];
+  evaluation_ready: boolean;
+  task_count: number;
+  created_at: string;
+}
+
+export interface TaskSetListResponse {
+  items: TaskSetListItem[];
+}
+
 function qs(
   params: Record<string, string | number | boolean | undefined>,
 ): string {
@@ -1091,4 +1158,18 @@ export const api = {
   }) => apiFetch<Usage>(`/api/v1/usage${qs(q)}`),
   getTeam: (teamId: string) =>
     apiFetch<Team>(`/api/v1/teams/${teamId}`),
+
+  // --- TaskSets ---
+  listTaskSets: () =>
+    apiFetch<TaskSetListResponse>("/api/v1/tasksets"),
+  getTaskSet: (id: string) =>
+    apiFetch<TaskSetDetailResponse>(`/api/v1/tasksets/${id}`),
+  submitTaskSet: (formData: FormData) =>
+    apiUpload<TaskSetSubmitResponse>("/api/v1/tasksets", formData),
+  rebuildTaskSet: (id: string) =>
+    apiFetch<TaskSetSubmitResponse>(`/api/v1/tasksets/${id}/rebuild`, {
+      method: "POST",
+    }),
+  deleteTaskSet: (id: string) =>
+    apiFetch<void>(`/api/v1/tasksets/${id}`, { method: "DELETE" }),
 };
