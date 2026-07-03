@@ -188,6 +188,248 @@ def test_diff_environment_state_reports_policy_and_desired_state_drift(
     assert drift[0].live == "gb10"
 
 
+def _gb10_live_with_node_source(
+    *,
+    image_tag: str,
+    env_config_version: str,
+    source_git_commit: str | None,
+    source_git_dirty: bool | None,
+    hostname: str = "trt-gb10-1",
+    apply_state: str = "applied",
+    intent: str = "active",
+) -> dict[str, Any]:
+    """Live-state payload shape matching a converged desired_state plus
+    one node report. Only the node-level source fields change per test."""
+    return {
+        "autoscaler_status": {
+            "policies": [
+                {
+                    "environment": "public-beta",
+                    "pool_name": "gb10-arm64",
+                    "actuator": "slurm",
+                    "enabled": True,
+                    "min_slots": 0,
+                    "max_slots": 150,
+                    "scale_up_threshold_slots": 1,
+                    "scale_down_idle_seconds": 600,
+                    "scale_up_cooldown_seconds": 60,
+                    "scale_down_cooldown_seconds": 300,
+                    "drain_timeout_seconds": 600,
+                    "force": False,
+                    "actuator_config": {
+                        "backend": "docker",
+                        "cpu_arch": "arm64",
+                        "partition": "gb10",
+                        "allowed_nodes": ["trt-gb10-1", "trt-gb10-2"],
+                        "requested_concurrency": 10,
+                        "max_jobs": 15,
+                        "pending_job_cap": 2,
+                    },
+                },
+            ],
+        },
+        "gb10_status": {
+            "desired_states": [
+                {
+                    "environment": "public-beta",
+                    "pool_name": "gb10-arm64",
+                    "image_tag": image_tag,
+                    "max_concurrent": 10,
+                    "env_config_version": env_config_version,
+                    "target_slots": 150,
+                    "host_intents": {
+                        "trt-gb10-1": "active",
+                        "trt-gb10-2": "active",
+                    },
+                    "rollout_policy": {"mode": "all"},
+                    "env": {},
+                },
+            ],
+            "nodes": [
+                {
+                    "environment": "public-beta",
+                    "pool_name": "gb10-arm64",
+                    "hostname": hostname,
+                    "current_intent": intent,
+                    "desired_intent": intent,
+                    "apply_state": apply_state,
+                    "current_image_tag": image_tag,
+                    "current_env_config_version": env_config_version,
+                    "source_git_commit": source_git_commit,
+                    "source_git_dirty": source_git_dirty,
+                },
+            ],
+        },
+    }
+
+
+def test_diff_environment_state_reports_gb10_node_source_git_commit_drift(
+    tmp_path: Path,
+) -> None:
+    """#356 regression: DB-side image_tag/env_config_version can converge
+    while a node still runs stale source. environment-state check must
+    fail hard so the release gate does not silently pass."""
+    profile_path = tmp_path / "public-beta.state.toml"
+    _write_profile(profile_path)
+    profile = load_environment_state_profile(
+        profile_path,
+        variables={
+            "IMAGE_TAG": "public-beta-c72f50d",
+            "ENV_CONFIG_VERSION": "public-beta-c72f50d",
+        },
+    )
+
+    # Node reports converged image/env tags but a stale source_git_commit
+    # (the exact pathology from `public-beta-c72f50d` on 2026-07-02).
+    live = _gb10_live_with_node_source(
+        image_tag="public-beta-c72f50d",
+        env_config_version="public-beta-c72f50d",
+        source_git_commit="ce55a358d8472bce4b580a363806993678d8f116",
+        source_git_dirty=False,
+    )
+
+    drift = diff_environment_state(profile, live)
+
+    source_drift = [
+        item for item in drift if "source_git_commit" in item.path
+    ]
+    assert len(source_drift) == 1, (
+        f"expected exactly one source_git_commit drift entry, got {drift}"
+    )
+    assert source_drift[0].path == (
+        "gb10_worker_node_status[public-beta/gb10-arm64/trt-gb10-1]"
+        ".source_git_commit"
+    )
+    assert source_drift[0].desired == "c72f50d*"
+    assert source_drift[0].live == "ce55a358d8472bce4b580a363806993678d8f116"
+
+
+def test_diff_environment_state_reports_gb10_node_dirty_source(
+    tmp_path: Path,
+) -> None:
+    """Dirty host-local checkout is drift even if the SHA matches: a
+    dirty runner directory means a human patched files locally and the
+    release gate cannot vouch for what code the workers are actually
+    running."""
+    profile_path = tmp_path / "public-beta.state.toml"
+    _write_profile(profile_path)
+    profile = load_environment_state_profile(
+        profile_path,
+        variables={
+            "IMAGE_TAG": "public-beta-c72f50d",
+            "ENV_CONFIG_VERSION": "public-beta-c72f50d",
+        },
+    )
+
+    live = _gb10_live_with_node_source(
+        image_tag="public-beta-c72f50d",
+        env_config_version="public-beta-c72f50d",
+        source_git_commit="c72f50d67f0d571fef55a9abbbced4e37752ca0e",
+        source_git_dirty=True,
+    )
+
+    drift = diff_environment_state(profile, live)
+
+    dirty_drift = [
+        item for item in drift if item.path.endswith(".source_git_dirty")
+    ]
+    assert len(dirty_drift) == 1, drift
+    assert dirty_drift[0].desired is False
+    assert dirty_drift[0].live is True
+
+
+def test_diff_environment_state_accepts_matching_gb10_node_source(
+    tmp_path: Path,
+) -> None:
+    """No source drift when the node reports a commit that starts with
+    the release-tag SHA prefix AND the checkout is clean."""
+    profile_path = tmp_path / "public-beta.state.toml"
+    _write_profile(profile_path)
+    profile = load_environment_state_profile(
+        profile_path,
+        variables={
+            "IMAGE_TAG": "public-beta-c72f50d",
+            "ENV_CONFIG_VERSION": "public-beta-c72f50d",
+        },
+    )
+
+    live = _gb10_live_with_node_source(
+        image_tag="public-beta-c72f50d",
+        env_config_version="public-beta-c72f50d",
+        source_git_commit="c72f50d67f0d571fef55a9abbbced4e37752ca0e",
+        source_git_dirty=False,
+    )
+
+    drift = diff_environment_state(profile, live)
+    source_related = [
+        item for item in drift if "source_git" in item.path
+    ]
+    assert source_related == [], (
+        f"fresh source with matching prefix should not produce drift; "
+        f"got {source_related}"
+    )
+
+
+def test_diff_environment_state_ignores_source_drift_on_stopped_gb10_node(
+    tmp_path: Path,
+) -> None:
+    """A node whose intent is 'stopped' or 'draining' is not part of
+    active capacity — the release cannot demand it be fresh."""
+    profile_path = tmp_path / "public-beta.state.toml"
+    _write_profile(profile_path)
+    profile = load_environment_state_profile(
+        profile_path,
+        variables={
+            "IMAGE_TAG": "public-beta-c72f50d",
+            "ENV_CONFIG_VERSION": "public-beta-c72f50d",
+        },
+    )
+
+    live = _gb10_live_with_node_source(
+        image_tag="public-beta-c72f50d",
+        env_config_version="public-beta-c72f50d",
+        source_git_commit="stalesha11111111111111111111111111111111",
+        source_git_dirty=True,
+        intent="stopped",
+    )
+
+    drift = diff_environment_state(profile, live)
+    source_related = [
+        item for item in drift if "source_git" in item.path
+    ]
+    assert source_related == []
+
+
+def test_diff_environment_state_ignores_source_drift_when_image_tag_has_no_sha(
+    tmp_path: Path,
+) -> None:
+    """A tag without an embedded SHA (e.g. 'latest', '0.7') can't be
+    used to derive an expected source prefix, so source drift is
+    unenforceable and must not spuriously fire."""
+    profile_path = tmp_path / "public-beta.state.toml"
+    _write_profile(profile_path)
+    profile = load_environment_state_profile(
+        profile_path,
+        variables={
+            "IMAGE_TAG": "latest",
+            "ENV_CONFIG_VERSION": "latest",
+        },
+    )
+
+    live = _gb10_live_with_node_source(
+        image_tag="latest",
+        env_config_version="latest",
+        source_git_commit="ce55a358d8472bce4b580a363806993678d8f116",
+        source_git_dirty=False,
+    )
+
+    drift = diff_environment_state(profile, live)
+    source_related = [
+        item for item in drift if "source_git" in item.path
+    ]
+    assert source_related == []
+
+
 def test_diff_environment_state_reports_missing_live_policy(tmp_path: Path) -> None:
     profile_path = tmp_path / "public-beta.state.toml"
     _write_profile(profile_path)
