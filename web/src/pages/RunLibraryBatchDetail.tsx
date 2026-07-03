@@ -385,6 +385,39 @@ export default function RunLibraryBatchDetail(): JSX.Element {
               </Link>
             ) : null}
           </div>
+          {clone.data?.retry_default_snapshot_mismatch ? (
+            <div
+              className="mt-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900"
+              data-testid="retry-default-snapshot-mismatch"
+            >
+              <p className="font-medium">
+                Retry policy carried over from source batch
+              </p>
+              <p className="mt-1">
+                This batch was submitted with an explicit retry policy that
+                differs from the current cluster defaults. Cloned trials will
+                follow the source policy, not the defaults.
+              </p>
+              <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 font-mono">
+                <dt className="text-amber-700">source max_attempts</dt>
+                <dd>
+                  {clone.data.retry_default_snapshot_mismatch.source.max_attempts}
+                </dd>
+                <dt className="text-amber-700">current max_attempts</dt>
+                <dd>
+                  {clone.data.retry_default_snapshot_mismatch.current.max_attempts}
+                </dd>
+                <dt className="text-amber-700">source retry_on</dt>
+                <dd>
+                  {clone.data.retry_default_snapshot_mismatch.source.retry_on.join(", ") || "∅"}
+                </dd>
+                <dt className="text-amber-700">current retry_on</dt>
+                <dd>
+                  {clone.data.retry_default_snapshot_mismatch.current.retry_on.join(", ") || "∅"}
+                </dd>
+              </dl>
+            </div>
+          ) : null}
           {clone.isError ? <ErrorState error={clone.error} /> : null}
         </Card.Body>
       </Card>
