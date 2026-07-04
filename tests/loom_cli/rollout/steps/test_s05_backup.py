@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from loom_cli.rollout.base_context_fixture import make_ctx
@@ -26,10 +27,18 @@ class TestBackupStepArgv:
         argv = list(BackupStep().argv(ctx, step_dir))
 
         assert argv == [
-            "loom", "cluster", "backup", "check",
-            "--environment", "staging",
-            "--namespace", "loom-staging",
-            "--manifest", str(manifest),
+            sys.executable,
+            "-m",
+            "loom_cli",
+            "cluster",
+            "backup",
+            "check",
+            "--environment",
+            "staging",
+            "--namespace",
+            "loom-staging",
+            "--manifest",
+            str(manifest),
         ]
 
     def test_rejects_obsolete_flags(self, tmp_path: Path) -> None:
@@ -44,4 +53,11 @@ class TestBackupStepArgv:
         argv = list(BackupStep().argv(ctx, step_dir))
 
         assert "--label" not in argv
-        assert argv[:4] == ["loom", "cluster", "backup", "check"]
+        assert argv[:6] == [
+            sys.executable,
+            "-m",
+            "loom_cli",
+            "cluster",
+            "backup",
+            "check",
+        ]

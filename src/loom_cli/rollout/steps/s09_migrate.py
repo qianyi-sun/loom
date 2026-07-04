@@ -14,6 +14,12 @@ import hashlib
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
 from loom_cli.rollout.steps.base import BaseStep, RunResult
+from loom_cli.rollout.steps.candidate_source import (
+    CandidateToolingError,
+    candidate_loom_argv,
+    candidate_loom_cwd,
+    candidate_loom_env,
+)
 from loom_cli.rollout.steps.subprocess_util import run_captured
 
 
@@ -41,14 +47,23 @@ class MigrateStep(BaseStep):
 
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:
         suffix = _deterministic_job_suffix(ctx)
+        try:
+            cwd = candidate_loom_cwd(step_dir)
+            env = candidate_loom_env(step_dir)
+        except CandidateToolingError as exc:
+            step_dir.stderr_path().write_text(str(exc) + "\n")
+            return RunResult(exit_code=2, error=str(exc))
+
         # Render the migration manifest.
         render = run_captured(
-            [
-                "loom", "cluster", "render-migration",
+            candidate_loom_argv(
+                "cluster", "render-migration",
                 "--image-tag", ctx.image_tag,
                 "--namespace", ctx.namespace,
                 "--job-suffix", suffix,
-            ],
+            ),
+            cwd=cwd,
+            env=env,
         )
         if render.returncode != 0:
             step_dir.stderr_path().write_text(render.stderr)

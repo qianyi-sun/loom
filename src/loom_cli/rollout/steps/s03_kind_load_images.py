@@ -11,6 +11,12 @@ from __future__ import annotations
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
 from loom_cli.rollout.steps.base import BaseStep, RunResult, VerifyOutcome
+from loom_cli.rollout.steps.candidate_source import (
+    CandidateToolingError,
+    candidate_loom_argv,
+    candidate_loom_cwd,
+    candidate_loom_env,
+)
 from loom_cli.rollout.steps.s02_build_images import (
     ROLLOUT_IMAGES,
     image_tag,
@@ -19,12 +25,16 @@ from loom_cli.rollout.steps.subprocess_util import run_captured
 
 
 def _loom_cluster_load_images_argv(
-    ctx: RolloutContext, *, check_only: bool,
+    ctx: RolloutContext,
+    *,
+    check_only: bool,
 ) -> list[str]:
-    argv = [
-        "loom", "cluster", "load-images",
-        "--cluster-name", ctx.cluster_name,
-    ]
+    argv = candidate_loom_argv(
+        "cluster",
+        "load-images",
+        "--cluster-name",
+        ctx.cluster_name,
+    )
     for image, _ in ROLLOUT_IMAGES:
         argv += ["--image", image_tag(image, ctx)]
     if check_only:
@@ -44,12 +54,19 @@ class KindLoadImagesStep(BaseStep):
         }
 
     def _verify_impl(
-        self, ctx: RolloutContext, step_dir: StepDir,
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
     ) -> VerifyOutcome:
         # Cheap: call --check-only. Zero exit → all present.
-        check = run_captured(
-            _loom_cluster_load_images_argv(ctx, check_only=True),
-        )
+        try:
+            check = run_captured(
+                _loom_cluster_load_images_argv(ctx, check_only=True),
+                cwd=candidate_loom_cwd(step_dir),
+                env=candidate_loom_env(step_dir),
+            )
+        except CandidateToolingError:
+            return VerifyOutcome.UNKNOWN
         if check.returncode == 0:
             return VerifyOutcome.MATCH
         if check.returncode == 1:
@@ -57,11 +74,20 @@ class KindLoadImagesStep(BaseStep):
         return VerifyOutcome.UNKNOWN
 
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:
+        try:
+            cwd = candidate_loom_cwd(step_dir)
+            env = candidate_loom_env(step_dir)
+        except CandidateToolingError as exc:
+            step_dir.stderr_path().write_text(str(exc) + "\n")
+            return RunResult(exit_code=2, error=str(exc))
+
         # Try check-only first; skip the load if everything's already there.
         check = run_captured(
             _loom_cluster_load_images_argv(ctx, check_only=True),
             stdout_log=step_dir.artifact_path("check-only.stdout"),
             stderr_log=step_dir.artifact_path("check-only.stderr"),
+            cwd=cwd,
+            env=env,
         )
         if check.returncode == 0:
             step_dir.stdout_path().write_text(
@@ -77,14 +103,16 @@ class KindLoadImagesStep(BaseStep):
             _loom_cluster_load_images_argv(ctx, check_only=False),
             stdout_log=step_dir.stdout_path(),
             stderr_log=step_dir.stderr_path(),
+            cwd=cwd,
+            env=env,
         )
         if result.returncode != 0:
             return RunResult(
                 exit_code=result.returncode,
                 error=(
                     result.stderr.strip().splitlines()[-1]
-                    if result.stderr.strip() else
-                    f"loom cluster load-images exited {result.returncode}"
+                    if result.stderr.strip()
+                    else f"loom cluster load-images exited {result.returncode}"
                 ),
             )
         return RunResult(

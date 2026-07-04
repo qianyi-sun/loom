@@ -8,9 +8,18 @@ declared path) and then runs the check to confirm convergence. The
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
 from loom_cli.rollout.steps.base import BaseStep, RunResult
+from loom_cli.rollout.steps.candidate_source import (
+    CandidateToolingError,
+    candidate_loom_argv,
+    candidate_loom_cwd,
+    candidate_loom_env,
+    candidate_relative_path,
+)
 from loom_cli.rollout.steps.subprocess_util import run_captured
 
 
@@ -48,14 +57,30 @@ class EnvStateStep(BaseStep):
                 summary="no env-state profile; step is a no-op",
             )
 
-        apply_ = run_captured([
-            "loom", "admin", "environment-state", "apply",
-            "--file", profile,
-        ])
-        check = run_captured([
-            "loom", "admin", "environment-state", "check",
-            "--file", profile,
-        ])
+        try:
+            cwd = candidate_loom_cwd(step_dir)
+            env = candidate_loom_env(step_dir)
+        except CandidateToolingError as exc:
+            step_dir.stderr_path().write_text(str(exc) + "\n")
+            return RunResult(exit_code=2, error=str(exc))
+
+        profile_path = candidate_relative_path(Path(profile), step_dir)
+        apply_ = run_captured(
+            candidate_loom_argv(
+                "admin", "environment-state", "apply",
+                "--file", str(profile_path),
+            ),
+            cwd=cwd,
+            env=env,
+        )
+        check = run_captured(
+            candidate_loom_argv(
+                "admin", "environment-state", "check",
+                "--file", str(profile_path),
+            ),
+            cwd=cwd,
+            env=env,
+        )
         step_dir.stdout_path().write_text(
             f"# apply\n{apply_.stdout}\n"
             f"# check\n{check.stdout}\n"
