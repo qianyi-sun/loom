@@ -13,6 +13,7 @@ placeholders that get formatted against the RolloutContext at run time.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
@@ -31,9 +32,18 @@ class SubcommandStep(BaseStep):
 
     def argv(self, ctx: RolloutContext, step_dir: StepDir) -> Sequence[str]:
         raise NotImplementedError(
-            f"step {self.name!r}: subclass must implement argv() "
-            "or override _run_impl directly"
+            f"step {self.name!r}: subclass must implement argv() or override _run_impl directly"
         )
+
+    def cwd(self, ctx: RolloutContext, step_dir: StepDir) -> Path | None:
+        return None
+
+    def env(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+    ) -> dict[str, str] | None:
+        return None
 
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:
         cmd = list(self.argv(ctx, step_dir))
@@ -41,21 +51,21 @@ class SubcommandStep(BaseStep):
             cmd,
             stdout_log=step_dir.stdout_path(),
             stderr_log=step_dir.stderr_path(),
+            cwd=self.cwd(ctx, step_dir),
+            env=self.env(ctx, step_dir),
             timeout_sec=self.timeout_sec,
         )
         if result.returncode == 0:
             return RunResult(
                 exit_code=0,
-                summary=(
-                    f"{format_command(cmd)} exited 0"
-                ),
+                summary=(f"{format_command(cmd)} exited 0"),
             )
         return RunResult(
             exit_code=result.returncode,
             summary=f"{format_command(cmd)} exited {result.returncode}",
             error=(
                 result.stderr.strip().splitlines()[-1]
-                if result.stderr.strip() else
-                f"non-zero exit: {result.returncode}"
+                if result.stderr.strip()
+                else f"non-zero exit: {result.returncode}"
             ),
         )

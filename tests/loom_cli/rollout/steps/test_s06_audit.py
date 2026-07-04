@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+import tomllib
 from pathlib import Path
 
 from loom_cli.rollout.base_context_fixture import make_ctx
@@ -20,11 +22,17 @@ class TestAuditStepArgv:
         step_dir = ev.step_dir(6, "audit")
 
         argv = list(AuditStep().argv(ctx, step_dir))
+        config_path = Path(argv[argv.index("--config") + 1])
 
-        assert argv == [
-            "loom", "cluster", "audit",
-            "--config", str(ctx.cluster_config_path),
+        assert argv[:5] == [
+            sys.executable,
+            "-m",
+            "loom_cli",
+            "cluster",
+            "audit",
         ]
+        assert config_path != ctx.cluster_config_path
+        assert tomllib.loads(config_path.read_text())["image_tag"] == ctx.image_tag
 
     def test_does_not_pass_unsupported_namespace_flag(self, tmp_path: Path) -> None:
         ctx = make_ctx(tmp_path, namespace="loom-public-beta")

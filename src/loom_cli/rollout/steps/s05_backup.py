@@ -14,9 +14,15 @@ environment + namespace.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
+from loom_cli.rollout.steps.candidate_source import (
+    candidate_loom_argv,
+    candidate_loom_cwd,
+    candidate_loom_env,
+)
 from loom_cli.rollout.steps.subcommand_step import SubcommandStep
 
 
@@ -25,9 +31,24 @@ class BackupStep(SubcommandStep):
     name = "backup"
 
     def argv(self, ctx: RolloutContext, step_dir: StepDir) -> Sequence[str]:
-        return [
-            "loom", "cluster", "backup", "check",
-            "--environment", ctx.environment,
-            "--namespace", ctx.namespace,
-            "--manifest", str(ctx.backup_manifest_path),
-        ]
+        return candidate_loom_argv(
+            "cluster",
+            "backup",
+            "check",
+            "--environment",
+            ctx.environment,
+            "--namespace",
+            ctx.namespace,
+            "--manifest",
+            str(ctx.backup_manifest_path),
+        )
+
+    def cwd(self, ctx: RolloutContext, step_dir: StepDir) -> Path:
+        return candidate_loom_cwd(step_dir)
+
+    def env(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+    ) -> dict[str, str]:
+        return candidate_loom_env(step_dir)

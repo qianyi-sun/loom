@@ -904,6 +904,32 @@ Optional flags:
 - `--dry-run` — print the planned step list + resolved SHA and exit
   without touching anything. Safe to run any time.
 
+### Candidate-source tooling contract
+
+The one-command driver resolves `--ref` once, creates
+`01-worktree/src` at that exact SHA, and uses that candidate checkout for
+rollout-owned Loom subcommands whose output becomes release evidence.
+Steps that delegate to `loom ...` run `python -m loom_cli` with
+`01-worktree/src/src` first on `PYTHONPATH`, so child subprocesses do not
+depend on a globally installed `loom` executable or an operator wrapper's
+ambient `PATH`.
+
+If the candidate checkout does not contain importable Loom CLI source at
+`01-worktree/src/src/loom_cli/__main__.py`, these steps fail instead of
+falling back to ambient tooling. Re-run step 01 by resuming after fixing
+the worktree, or choose a candidate ref that contains compatible rollout
+tooling. Prefer a repo-relative `--cluster-config` path when invoking
+the driver; repo-local absolute config paths are mapped back into the
+candidate worktree when the same path exists there, while operator-owned
+evidence paths such as backup manifests remain outside the worktree.
+
+For cluster render/apply/gate subcommands, the driver also writes a
+rollout-owned `rollout-cluster-config.toml` artifact under the rollout
+evidence directory. This synthesized config copies the operator's source
+config and pins `image_tag` to the invocation's `--image-tag`, so stale
+long-lived config files cannot silently render or gate an older image. The
+operator's original `cluster-config.toml` is not modified.
+
 ### Evidence layout
 
 Each invocation gets a directory under `<rollout-root>/rollouts/`:
@@ -958,16 +984,16 @@ observability and mutation contract:
 | 00 | resolve-target | git rev-parse; validates image-tag ↔ sha7 |
 | 01 | worktree | `git worktree add` at target sha |
 | 02 | build-images | `docker build` × every rollout-critical image (#365) |
-| 03 | kind-load-images | `loom cluster load-images` (#96) |
+| 03 | kind-load-images | candidate-source `loom cluster load-images` (#96) |
 | 04 | gb10-prep | SSH ×N hosts: fetch, checkout, write env file, verify |
-| 05 | backup | `loom cluster backup check --manifest <path>` (#363) |
-| 06 | audit | `loom cluster audit` |
-| 07 | render | `loom cluster render` → `rendered.yaml` |
-| 08 | preflight | `loom cluster preflight` |
-| 09 | migrate | `loom cluster render-migration` + `kubectl wait` (#332) |
-| 10 | env-state | apply + check (#331 fix for stop-on-disable) |
-| 11 | cluster-up | `loom cluster up --wait` (#203 fix for updated replicas) |
-| 12 | release-gate | `loom cluster release-gate` (#339 fix for stale kind-import) |
+| 05 | backup | candidate-source `loom cluster backup check --manifest <path>` (#363) |
+| 06 | audit | candidate-source `loom cluster audit` |
+| 07 | render | candidate-source `loom cluster render` → `rendered.yaml` |
+| 08 | preflight | candidate-source `loom cluster preflight` |
+| 09 | migrate | candidate-source `loom cluster render-migration` + `kubectl wait` (#332) |
+| 10 | env-state | candidate-source apply + check (#331 fix for stop-on-disable) |
+| 11 | cluster-up | candidate-source `loom cluster up` (#203 fix for updated replicas) |
+| 12 | release-gate | candidate-source `loom cluster release-manifest` → `release-manifest-<image-tag>.json`, then `loom cluster release-gate --manifest <that file>` (#339 fix for stale kind-import) |
 | 13 | smoke | HTTP health + benchmarks + trial submit + poll + trajectory HEAD |
 | 99 | summary | write `summary.md` from every prior step's result.json |
 
