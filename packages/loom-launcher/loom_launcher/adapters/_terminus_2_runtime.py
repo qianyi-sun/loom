@@ -2,8 +2,8 @@
 
 Same shape as `_openhands_runtime.py`: pin upstream + loom-launcher,
 provision into a dedicated venv so we don't tangle with the task
-image's site-packages, and install the tmux system binary that
-upstream `TmuxSession` shells out to.
+image's site-packages, and install the tmux/asciinema system binaries
+that upstream `TmuxSession` shells out to.
 """
 
 from __future__ import annotations
@@ -38,11 +38,11 @@ TERMINUS_2_PYTHON = "/opt/loom-agents/terminus-2/bin/python"
 TERMINUS_2_INSTALL_SCRIPT = f"""\
 set -euo pipefail
 if command -v apk >/dev/null 2>&1; then
-  apk add --no-cache ca-certificates curl git tmux
+  apk add --no-cache ca-certificates curl git tmux asciinema
 elif command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y --no-install-recommends ca-certificates curl git tmux
+  apt-get install -y --no-install-recommends ca-certificates curl git tmux asciinema
 else
   echo "no supported package manager (apk/apt-get); cannot install terminus-2" >&2
   exit 1

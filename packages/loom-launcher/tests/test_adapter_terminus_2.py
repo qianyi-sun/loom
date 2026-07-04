@@ -65,9 +65,10 @@ def test_install_script_pins_terminal_bench_core() -> None:
     # so the agent prompt + verifier semantics stay aligned.
     assert "91e10457b5410f16c44364da1a34cb6de8c488a5" in adapter.install_script
     assert "terminal-bench@git+" in adapter.install_script
-    # tmux is the only system dep beyond ca-certificates/curl/git
-    # (upstream TmuxSession shells out to tmux).
+    # Upstream TmuxSession shells out to tmux and requires asciinema
+    # whenever Terminal-Bench recording is enabled.
     assert "tmux" in adapter.install_script
+    assert "asciinema" in adapter.install_script
 
 
 async def test_capture_via_stdout_jsonl(make_handle) -> None:
