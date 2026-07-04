@@ -69,6 +69,13 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
             "batch_id": "batch-reward-gate",
             "benchmarks": ["mbpp", "humaneval"],
         },
+        "score_positive_canary": {
+            "status": "pass",
+            "url": "https://github.com/qianyi-sun/loom/issues/445#issuecomment-score-positive",
+            "batch_id": "batch-score-positive-canary",
+            "positive_reward_trial_count": 1,
+            "scored_trial_count": 7,
+        },
         "benchmark_score_alignment": {
             "status": "pass",
             "url": "https://github.com/qianyi-sun/loom/actions/runs/1010",
@@ -181,6 +188,7 @@ def test_release_gate_accepts_complete_manifest_and_writes_artifacts(tmp_path: P
     markdown = markdown_out.read_text(encoding="utf-8")
     assert "Release Gate Evidence" in markdown
     assert "benchmark_reward_gate" in markdown
+    assert "score_positive_canary" in markdown
     assert "benchmark_score_alignment" in markdown
     assert "worker_capacity_smoke" in markdown
 
@@ -188,6 +196,7 @@ def test_release_gate_accepts_complete_manifest_and_writes_artifacts(tmp_path: P
 def test_release_gate_rejects_missing_required_checks_and_secret_leaks(tmp_path: Path) -> None:
     manifest = _passing_evidence()
     manifest["checks"].pop("benchmark_reward_gate")
+    manifest["checks"].pop("score_positive_canary")
     manifest["checks"].pop("benchmark_score_alignment")
     manifest["checks"]["public_api_spa_smoke"]["artifact_url"] = (
         "https://loom-minio.loom.svc.cluster.local/bucket/object"
@@ -207,6 +216,7 @@ def test_release_gate_rejects_missing_required_checks_and_secret_leaks(tmp_path:
 
     assert result.returncode == 1
     assert "missing required check 'benchmark_reward_gate'" in result.stderr
+    assert "missing required check 'score_positive_canary'" in result.stderr
     assert "missing required check 'benchmark_score_alignment'" in result.stderr
     assert "forbidden evidence value" in result.stderr
     assert "public_api_spa_smoke.artifact_url" in result.stderr

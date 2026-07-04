@@ -32,6 +32,7 @@ REQUIRED_CHECKS: dict[str, tuple[str, ...]] = {
     "secret_redaction": ("url",),
     "provider_smoke": ("url", "provider_path"),
     "benchmark_reward_gate": ("url", "batch_id", "benchmarks"),
+    "score_positive_canary": ("url", "batch_id"),
     "benchmark_score_alignment": ("url", "manifest", "benchmarks"),
     "worker_capacity_smoke": ("url", "batch_id", "k8s_workers", "oldlab_workers"),
     "rollback_plan": (
@@ -154,7 +155,26 @@ def _validate_checks(manifest: dict[str, Any]) -> list[str]:
 
         if check_name == "worker_capacity_smoke":
             errors.extend(_validate_worker_capacity_smoke(check))
+        if check_name == "score_positive_canary":
+            errors.extend(_validate_score_positive_canary(check))
 
+    return errors
+
+
+def _validate_score_positive_canary(check: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    scored = check.get("scored_trial_count")
+    positive = check.get("positive_reward_trial_count")
+    if not isinstance(scored, int) or scored <= 0:
+        errors.append("score_positive_canary.scored_trial_count must be an integer > 0")
+    if not isinstance(positive, int) or positive <= 0:
+        errors.append(
+            "score_positive_canary.positive_reward_trial_count must be an integer > 0",
+        )
+    if isinstance(scored, int) and isinstance(positive, int) and positive > scored:
+        errors.append(
+            "score_positive_canary.positive_reward_trial_count must be <= scored_trial_count",
+        )
     return errors
 
 

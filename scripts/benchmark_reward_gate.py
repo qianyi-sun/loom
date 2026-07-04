@@ -285,6 +285,260 @@ def check_batch_rewards(
     ]
 
 
+def _reward_key(reward: float) -> str:
+    if reward.is_integer():
+        return f"{reward:.1f}"
+    return format(reward, ".12g")
+
+
+def _safe_str(value: object) -> str | None:
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _trial_base(trial: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "trial_id": str(trial.get("id") or "<unknown>"),
+        "task_id": str(trial.get("task_id") or "<unknown>"),
+        "state": str(trial.get("state") or "<missing>"),
+        "failure_reason": _safe_str(trial.get("failure_reason")),
+        "llm_evidence_status": _safe_str(trial.get("llm_evidence_status")),
+    }
+
+
+def _extract_baseline(batch: dict[str, Any]) -> dict[str, Any]:
+    trial_config = batch.get("trial_config")
+    if not isinstance(trial_config, dict):
+        trial_config = {}
+    agent_model = trial_config.get("agent_model")
+    if not isinstance(agent_model, dict):
+        agent_model = None
+    task_filter = batch.get("task_filter")
+    if not isinstance(task_filter, dict):
+        task_filter = None
+    return {
+        "batch_id": str(batch.get("id") or "<unknown>"),
+        "batch_name": _safe_str(batch.get("name")),
+        "batch_state": _safe_str(batch.get("state")),
+        "expected_trial_count": batch.get("expected_trial_count")
+        if isinstance(batch.get("expected_trial_count"), int)
+        else None,
+        "agent_name": _safe_str(trial_config.get("agent_name")),
+        "agent_model": agent_model,
+        "provider_connection_id": _safe_str(batch.get("provider_connection_id")),
+        "provider_model_id": _safe_str(batch.get("provider_model_id")),
+        "task_filter": task_filter,
+    }
+
+
+def _canary_summary(
+    *,
+    hard_failures: list[str],
+    scored_count: int,
+    positive_count: int,
+) -> str:
+    if hard_failures:
+        return "; ".join(hard_failures)
+    if scored_count == 0:
+        return "blocked: no scored trials with numeric aggregate_reward"
+    if positive_count == 0:
+        return "blocked: no positive reward among scored trials"
+    return f"passed: {positive_count}/{scored_count} scored trials have reward > 0"
+
+
+def build_score_positive_canary_report(
+    *,
+    batch: dict[str, Any],
+    trials: list[dict[str, Any]],
+    override_issue: str | None = None,
+    override_rationale: str | None = None,
+) -> dict[str, Any]:
+    """Build operator evidence for the pre-production score-positive canary.
+
+    The gate is intentionally narrower than the full reward sweep: it accepts a
+    representative canary batch only when at least one scored trial has reward
+    above zero. Platform success with all-zero scores stays blocked because it
+    does not prove the production runner/provider mix can solve any task.
+    """
+    reward_distribution: dict[str, int] = {}
+    failure_taxonomy: dict[str, int] = {}
+    scored_trials: list[dict[str, Any]] = []
+    unscored_trials: list[dict[str, Any]] = []
+    positive_count = 0
+
+    for trial in trials:
+        reward = trial.get("aggregate_reward")
+        if _is_numeric_reward(reward):
+            reward_f = float(reward)
+            key = _reward_key(reward_f)
+            reward_distribution[key] = reward_distribution.get(key, 0) + 1
+            scored = _trial_base(trial)
+            scored["reward"] = reward_f
+            scored_trials.append(scored)
+            if reward_f > 0:
+                positive_count += 1
+                taxonomy_key = "score_positive"
+            else:
+                taxonomy_key = "score_zero"
+            failure_taxonomy[taxonomy_key] = failure_taxonomy.get(taxonomy_key, 0) + 1
+            continue
+
+        unscored = _trial_base(trial)
+        unscored_trials.append(unscored)
+        reason = unscored["failure_reason"] or "missing_reward"
+        taxonomy_key = f"unscored:{reason}"
+        failure_taxonomy[taxonomy_key] = failure_taxonomy.get(taxonomy_key, 0) + 1
+
+    hard_failures: list[str] = []
+    batch_state = str(batch.get("state") or "")
+    if batch_state not in TERMINAL_BATCH_STATES:
+        hard_failures.append(f"batch state is not terminal: {batch_state or '<missing>'}")
+    expected = batch.get("expected_trial_count")
+    if isinstance(expected, int) and len(trials) != expected:
+        hard_failures.append(f"trial count {len(trials)} != expected {expected}")
+
+    scored_count = len(scored_trials)
+    summary = _canary_summary(
+        hard_failures=hard_failures,
+        scored_count=scored_count,
+        positive_count=positive_count,
+    )
+    raw_status = "pass" if not hard_failures and scored_count > 0 and positive_count > 0 else "fail"
+    override: dict[str, str] | None = None
+    status = raw_status
+    if raw_status == "fail" and override_issue and override_rationale:
+        status = "override"
+        override = {"issue": override_issue, "rationale": override_rationale}
+
+    return {
+        "gate": "score_positive_canary",
+        "status": status,
+        "raw_status": raw_status,
+        "summary": summary,
+        "batch_id": str(batch.get("id") or "<unknown>"),
+        "batch_state": batch_state or None,
+        "expected_trial_count": expected if isinstance(expected, int) else None,
+        "trial_count": len(trials),
+        "scored_trial_count": scored_count,
+        "positive_reward_trial_count": positive_count,
+        "reward_distribution": dict(sorted(reward_distribution.items())),
+        "failure_taxonomy": dict(sorted(failure_taxonomy.items())),
+        "scored_trials": scored_trials,
+        "unscored_trials": unscored_trials,
+        "baseline": _extract_baseline(batch),
+        "override": override,
+    }
+
+
+def render_score_positive_canary_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# Score-positive canary gate",
+        "",
+        f"- Status: `{report.get('status')}`",
+        f"- Batch: `{report.get('batch_id')}`",
+        f"- Summary: {report.get('summary')}",
+        "",
+        "| Metric | Value |",
+        "|---|---:|",
+        f"| trial_count | {report.get('trial_count', 0)} |",
+        f"| scored_trials | {report.get('scored_trial_count', 0)} |",
+        f"| positive_reward_trials | {report.get('positive_reward_trial_count', 0)} |",
+        "",
+        "## Reward Distribution",
+        "",
+        "| Reward | Count |",
+        "|---|---:|",
+    ]
+    distribution = report.get("reward_distribution")
+    if isinstance(distribution, dict) and distribution:
+        for reward, count in distribution.items():
+            lines.append(f"| {reward} | {count} |")
+    else:
+        lines.append("| none | 0 |")
+
+    lines.extend(["", "## Failure Taxonomy", "", "| Class | Count |", "|---|---:|"])
+    taxonomy = report.get("failure_taxonomy")
+    if isinstance(taxonomy, dict) and taxonomy:
+        for key, count in taxonomy.items():
+            lines.append(f"| {key} | {count} |")
+    else:
+        lines.append("| none | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Scored Trials",
+            "",
+            "| Trial | Task | Reward | State | Failure reason | LLM evidence |",
+            "|---|---|---:|---|---|---|",
+        ]
+    )
+    scored_trials = report.get("scored_trials")
+    if isinstance(scored_trials, list) and scored_trials:
+        for trial in scored_trials:
+            if not isinstance(trial, dict):
+                continue
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(trial.get("trial_id")),
+                        str(trial.get("task_id")),
+                        str(trial.get("reward")),
+                        str(trial.get("state")),
+                        str(trial.get("failure_reason") or ""),
+                        str(trial.get("llm_evidence_status") or ""),
+                    ]
+                )
+                + " |"
+            )
+    else:
+        lines.append("| none | none |  |  |  |  |")
+
+    unscored_trials = report.get("unscored_trials")
+    if isinstance(unscored_trials, list) and unscored_trials:
+        lines.extend(
+            [
+                "",
+                "## Unscored Trials",
+                "",
+                "| Trial | Task | State | Failure reason | LLM evidence |",
+                "|---|---|---|---|---|",
+            ]
+        )
+        for trial in unscored_trials:
+            if not isinstance(trial, dict):
+                continue
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(trial.get("trial_id")),
+                        str(trial.get("task_id")),
+                        str(trial.get("state")),
+                        str(trial.get("failure_reason") or ""),
+                        str(trial.get("llm_evidence_status") or ""),
+                    ]
+                )
+                + " |"
+            )
+
+    override = report.get("override")
+    if isinstance(override, dict):
+        lines.extend(
+            [
+                "",
+                "## Operator Override",
+                "",
+                f"- Issue: {override.get('issue')}",
+                f"- Rationale: {override.get('rationale')}",
+            ]
+        )
+
+    return "\n".join(lines) + "\n"
+
+
 def _trial_benchmark_id(trial: dict[str, Any]) -> str | None:
     benchmark_id = trial.get("benchmark_id")
     if isinstance(benchmark_id, str) and benchmark_id:
@@ -501,6 +755,39 @@ def _print_results(results: list[CheckResult]) -> int:
     return 1 if failed else 0
 
 
+def _write_text(path: str | None, text: str) -> None:
+    if not path:
+        return
+    Path(path).write_text(text, encoding="utf-8")
+
+
+def _print_score_positive_canary_report(
+    report: dict[str, Any],
+    *,
+    output_format: str,
+) -> None:
+    if output_format == "json":
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return
+    if output_format == "markdown":
+        print(render_score_positive_canary_markdown(report), end="")
+        return
+    print(
+        "benchmarks.score_positive_canary: "
+        f"{report['status']} - {report['summary']}"
+    )
+    print(
+        "  scored_trials="
+        f"{report['scored_trial_count']} "
+        "positive_reward_trials="
+        f"{report['positive_reward_trial_count']} "
+        "reward_distribution="
+        f"{json.dumps(report['reward_distribution'], sort_keys=True)}"
+    )
+    if report.get("override"):
+        print(f"  override: {json.dumps(report['override'], sort_keys=True)}")
+
+
 def _api_page_limit(value: str) -> int:
     try:
         limit = int(value)
@@ -582,6 +869,30 @@ def _run_sweep(args: argparse.Namespace) -> int:
     )
 
 
+def _run_score_positive_canary(args: argparse.Namespace) -> int:
+    if bool(args.override_issue) != bool(args.override_rationale):
+        raise SystemExit(
+            "--override-issue and --override-rationale must be supplied together"
+        )
+    client = ApiClient(
+        args.server_url,
+        _read_token(args.token),
+        timeout=args.request_timeout,
+    )
+    batch = client.get_json(f"/api/v1/batches/{args.batch_id}")
+    trials = collect_batch_trials(client, args.batch_id, page_limit=args.limit)
+    report = build_score_positive_canary_report(
+        batch=batch,
+        trials=trials,
+        override_issue=args.override_issue,
+        override_rationale=args.override_rationale,
+    )
+    _write_text(args.json_output, json.dumps(report, indent=2, sort_keys=True) + "\n")
+    _write_text(args.markdown_output, render_score_positive_canary_markdown(report))
+    _print_score_positive_canary_report(report, output_format=args.format)
+    return 0 if report["status"] in {"pass", "override"} else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Check benchmark readiness and reward-production acceptance.",
@@ -643,6 +954,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only require at least one numeric-reward task per expected benchmark.",
     )
     sweep.set_defaults(func=_run_sweep)
+
+    canary = sub.add_parser(
+        "score-positive-canary",
+        help=(
+            "Fail unless a terminal canary batch has at least one scored trial "
+            "with reward > 0."
+        ),
+    )
+    canary.add_argument("--server-url", required=True)
+    canary.add_argument("--token", required=True, help="Bearer token, env:NAME, or file:PATH.")
+    canary.add_argument("--batch-id", required=True)
+    canary.add_argument(
+        "--limit",
+        type=_api_page_limit,
+        default=200,
+        help="API page size for trial pagination, 1-200.",
+    )
+    canary.add_argument(
+        "--request-timeout",
+        type=_request_timeout,
+        default=120.0,
+        help="Per-request timeout in seconds.",
+    )
+    canary.add_argument(
+        "--format",
+        choices=("text", "json", "markdown"),
+        default="text",
+        help="Stdout evidence format.",
+    )
+    canary.add_argument(
+        "--json-output",
+        help="Optional path for structured JSON evidence.",
+    )
+    canary.add_argument(
+        "--markdown-output",
+        help="Optional path for pasteable Markdown evidence.",
+    )
+    canary.add_argument(
+        "--override-issue",
+        help="Issue or PR reference documenting an explicit operator override.",
+    )
+    canary.add_argument(
+        "--override-rationale",
+        help="Operator rationale for proceeding despite a failing score-positive gate.",
+    )
+    canary.set_defaults(func=_run_score_positive_canary)
     return parser
 
 
