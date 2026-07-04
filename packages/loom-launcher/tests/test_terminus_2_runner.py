@@ -382,14 +382,23 @@ def test_local_container_exec_run_missing_binary_returns_127() -> None:
 def test_runner_emits_start_and_end_on_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    events: list[str] = []
     fake_session = MagicMock(name="TmuxSession")
+    fake_session.start.side_effect = lambda: events.append("start")
+    fake_session.stop.side_effect = lambda: events.append("stop")
     fake_agent = MagicMock(name="Terminus")
-    fake_agent.perform_task.return_value = MagicMock(
-        total_input_tokens=408,
-        total_output_tokens=62,
-        failure_mode="FailureMode.NONE",
-        timestamped_markers=[(0.1, "marker-1"), (0.2, "marker-2")],
-    )
+
+    def _perform_task(**_: object) -> MagicMock:
+        assert events == ["start"]
+        events.append("perform")
+        return MagicMock(
+            total_input_tokens=408,
+            total_output_tokens=62,
+            failure_mode="FailureMode.NONE",
+            timestamped_markers=[(0.1, "marker-1"), (0.2, "marker-2")],
+        )
+
+    fake_agent.perform_task.side_effect = _perform_task
 
     monkeypatch.setattr(
         terminus_2_runner, "_setup_tmux_session", lambda: fake_session,
@@ -410,6 +419,9 @@ def test_runner_emits_start_and_end_on_success(
     ])
 
     assert rc == 0
+    assert events == ["start", "perform", "stop"]
+    fake_session.start.assert_called_once_with()
+    fake_session.stop.assert_called_once_with()
     lines = [json.loads(line) for line in buf.getvalue().splitlines() if line]
     assert lines[0] == {
         "kind": "terminus2_start",
@@ -457,6 +469,40 @@ def test_runner_emits_error_on_setup_failure(
     error_event = next(e for e in lines if e["kind"] == "terminus2_error")
     assert error_event["error_type"] == "RuntimeError"
     assert error_event["message"] == "tmux not installed"
+
+
+def test_runner_stops_started_session_after_agent_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_session = MagicMock(name="TmuxSession")
+    fake_agent = MagicMock(name="Terminus")
+    fake_agent.perform_task.side_effect = RuntimeError("agent crashed")
+
+    monkeypatch.setattr(
+        terminus_2_runner, "_setup_tmux_session", lambda: fake_session,
+    )
+    monkeypatch.setattr(
+        terminus_2_runner,
+        "_build_agent",
+        lambda model, max_episodes: fake_agent,
+    )
+
+    buf = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", buf)
+
+    rc = terminus_2_runner.main([
+        "--model", "openai/x",
+        "--task", "t",
+        "--workdir", "/app",
+    ])
+
+    assert rc == 1
+    fake_session.start.assert_called_once_with()
+    fake_session.stop.assert_called_once_with()
+    lines = [json.loads(line) for line in buf.getvalue().splitlines() if line]
+    error_event = next(e for e in lines if e["kind"] == "terminus2_error")
+    assert error_event["error_type"] == "RuntimeError"
+    assert error_event["message"] == "agent crashed"
 
 
 def test_propagate_dialect_env_mirrors_base_url(

@@ -538,8 +538,12 @@ def main(argv: list[str] | None = None) -> int:
         "workdir": args.workdir,
     })
 
+    session: Any | None = None
+    session_started = False
     try:
         session = _setup_tmux_session()
+        session.start()
+        session_started = True
         agent = _build_agent(args.model, args.max_episodes)
         result = agent.perform_task(
             task_description=args.task,
@@ -553,6 +557,16 @@ def main(argv: list[str] | None = None) -> int:
             "traceback": traceback.format_exc()[-2000:],
         })
         return 1
+    finally:
+        if session_started and session is not None:
+            try:
+                session.stop()
+            except Exception as exc:
+                _emit({
+                    "kind": "terminus2_session_stop_error",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc)[:1000],
+                })
 
     _emit({
         "kind": "terminus2_end",
