@@ -3091,6 +3091,12 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    For score-zero or timeout diagnosis, inspect `terminus2_exec_run` events:
    they record bounded command metadata (`cmd_excerpt`, `exit_code`,
    `output_len`, and `duration_sec`) without storing command output content.
+   A healthy `terminus-2` trajectory should show the runner creating the
+   upstream tmux session, including a `tmux new-session ... -s
+   loom-terminus-2` command before model-driven terminal commands. If the
+   initial probes such as `tmux -V` succeed but every later tmux command exits
+   non-zero, treat it as a session-bootstrap/runtime issue rather than a model
+   quality result until the session lifecycle is verified.
    For opencode/subprocess timeout investigation, confirm a worker watchdog
    hard deadline or control-plane stale-running reclaim produces
    `state=failed`, `failure_reason=agent_timeout`, and a failure message that
