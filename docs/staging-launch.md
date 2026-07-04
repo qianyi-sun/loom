@@ -102,6 +102,16 @@ Attach these to the release issue or release PR:
   runnable task. A model answer scored `0` is a valid evaluator result; missing
   reward, verifier error, task-image failure, benchmark-side timeout, or missing
   allowlist coverage is not.
+- Score-positive canary transcript from
+  `scripts/benchmark_reward_gate.py score-positive-canary` before any full
+  production benchmark batch that changes the agent, provider, model, runtime,
+  worker pool, or task-family mix. This gate is separate from platform success:
+  it fails when all scored canary trials have reward `0` or when no trial was
+  scored. Preserve both JSON and Markdown evidence with task ids, reward
+  distribution, unscored-trial taxonomy, and baseline agent/model/provider
+  fields. Proceeding despite a failing gate requires an explicit operator
+  override with an issue or PR reference plus rationale; otherwise do not submit
+  the full production batch.
 - Layer 1 score-credibility transcript from
   `scripts/benchmark_score_alignment_gate.py manifest --manifest
   docs/benchmark-score-alignment.json`, proving that every v1.0-supported
@@ -408,6 +418,41 @@ python scripts/benchmark_reward_gate.py sweep \
   --token env:TEAM_A_TOKEN \
   --batch-id "$SUPPORTED_BENCHMARK_ACCEPTANCE_BATCH_ID"
 ```
+
+Before a full production benchmark batch, first run a small canary with the
+same agent, provider/model, runtime, worker-pool, and representative task-family
+mix. A canary that only proves provider calls and platform-succeeded trials is
+not enough. The score-positive canary gate is mandatory and must show at least
+one scored trial with reward greater than `0`:
+
+```bash
+python scripts/benchmark_reward_gate.py score-positive-canary \
+  --server-url https://loom.example.com \
+  --token env:TEAM_A_TOKEN \
+  --batch-id "$CANARY_BATCH_ID" \
+  --json-output "$EVIDENCE_DIR/score-positive-canary.json" \
+  --markdown-output "$EVIDENCE_DIR/score-positive-canary.md"
+```
+
+If the command exits nonzero, do not submit the full production batch. The
+report records task ids, reward distribution, unscored-trial taxonomy, and
+baseline batch fields so the operator can decide whether to fix the
+agent/provider/runtime configuration or choose a different accepted path.
+Operator override is intentionally explicit and auditable:
+
+```bash
+python scripts/benchmark_reward_gate.py score-positive-canary \
+  --server-url https://loom.example.com \
+  --token env:TEAM_A_TOKEN \
+  --batch-id "$CANARY_BATCH_ID" \
+  --json-output "$EVIDENCE_DIR/score-positive-canary.json" \
+  --markdown-output "$EVIDENCE_DIR/score-positive-canary.md" \
+  --override-issue "#445" \
+  --override-rationale "Coordinator accepted an alternate score-positive path; keep the failed agent/provider issue open."
+```
+
+Use override only when the referenced issue or PR comment records the operator
+decision and rationale. Without both fields, the CLI refuses to override.
 
 The readiness command uses the same full benchmark surface as New Batch,
 including `include_empty=true` pending rows. It must fail while required

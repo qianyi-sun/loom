@@ -72,16 +72,18 @@ Normal flow:
 3. Deploy that exact image tag to `staging` using the staging GitHub
    Environment.
 4. Run the staging smoke checklist below, including migration dry-run,
-   public API/SPA smoke, provider smoke, benchmark reward gate, benchmark
-   score-alignment gate, redaction scan, worker-capacity smoke, and rollback
-   evidence.
+   public API/SPA smoke, provider smoke, benchmark reward gate,
+   score-positive canary gate before any full production benchmark batch,
+   benchmark score-alignment gate, redaction scan, worker-capacity smoke, and
+   rollback evidence.
 5. Write a JSON manifest with `schema_version=1`, `candidate_sha`,
    `image_tag`, `staging_url`, image digests for every Loom image, and pass
    records for every required check:
    `repository_ci`, `image_build`, `cluster_render_audit`,
    `migration_dry_run`, `public_api_spa_smoke`, `secret_redaction`,
-   `provider_smoke`, `benchmark_reward_gate`, `benchmark_score_alignment`,
-   `worker_capacity_smoke`, `rollback_plan`, and `release_owner_approval`.
+   `provider_smoke`, `benchmark_reward_gate`, `score_positive_canary`,
+   `benchmark_score_alignment`, `worker_capacity_smoke`, `rollback_plan`, and
+   `release_owner_approval`.
 6. Run the release gate workflow:
    ```bash
    base64_manifest="$(base64 < release-gate-input.json | tr -d '\n')"
@@ -2881,6 +2883,41 @@ failure is rerun in a later batch and the same task gets a numeric reward, the
 later result supplies the task coverage. Missing rewards without rerun coverage,
 benchmark-side verifier errors, task-image/environment failures, incomplete
 fan-out, or missing allowlist benchmark coverage fail the gate.
+
+Before submitting any full production benchmark batch, run a small canary with
+the exact production agent/provider/model/runtime/worker-pool mix and a
+representative task-family subset. A canary that reaches the provider and
+records platform-succeeded trials still does not prove score viability if every
+scored trial has reward `0`. The score-positive gate is mandatory and blocks
+full production submission unless at least one scored canary trial has reward
+greater than `0`:
+
+```bash
+python scripts/benchmark_reward_gate.py score-positive-canary \
+  --server-url "$PUBLIC_SERVER_URL" \
+  --token env:TEAM_A_TOKEN \
+  --batch-id "$CANARY_BATCH_ID" \
+  --json-output "$EVIDENCE_DIR/score-positive-canary.json" \
+  --markdown-output "$EVIDENCE_DIR/score-positive-canary.md"
+```
+
+The JSON/Markdown evidence records the canary batch id, baseline agent/model
+and provider fields, scored task ids, reward distribution, unscored-trial
+taxonomy, and override metadata when present. If the command exits nonzero, fix
+the runner/provider/task configuration or choose another accepted path before
+submitting production scale work. An override is only valid when the operator
+records both an issue or PR reference and rationale:
+
+```bash
+python scripts/benchmark_reward_gate.py score-positive-canary \
+  --server-url "$PUBLIC_SERVER_URL" \
+  --token env:TEAM_A_TOKEN \
+  --batch-id "$CANARY_BATCH_ID" \
+  --json-output "$EVIDENCE_DIR/score-positive-canary.json" \
+  --markdown-output "$EVIDENCE_DIR/score-positive-canary.md" \
+  --override-issue "#445" \
+  --override-rationale "Coordinator accepted an alternate score-positive path; keep the failed agent/provider issue open."
+```
 
 Score credibility has a separate Layer 1 gate that is independent of live model
 quality. Before using benchmark scores as release evidence, verify that every

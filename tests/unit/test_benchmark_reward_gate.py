@@ -208,6 +208,199 @@ def test_batch_reward_gate_accepts_finished_service_batches() -> None:
     assert "1 trials have numeric rewards" in results[0].detail
 
 
+def test_score_positive_canary_blocks_all_zero_rewards() -> None:
+    gate = _load_module()
+
+    report = gate.build_score_positive_canary_report(
+        batch={
+            "id": "batch-zero",
+            "state": "finished",
+            "expected_trial_count": 2,
+            "trial_config": {
+                "agent_name": "terminus-2",
+                "agent_model": {"provider": "openai", "name": "glm-5.1-thinking"},
+            },
+            "provider_model_id": "glm-5.1-thinking",
+        },
+        trials=[
+            {
+                "id": "trial-1",
+                "task_id": "source-useful/1",
+                "state": "succeeded",
+                "failure_reason": None,
+                "aggregate_reward": 0.0,
+                "llm_evidence_status": "calls_observed",
+            },
+            {
+                "id": "trial-2",
+                "task_id": "source-useful/2",
+                "state": "succeeded",
+                "failure_reason": None,
+                "aggregate_reward": 0,
+                "llm_evidence_status": "calls_observed",
+            },
+        ],
+    )
+
+    assert report["status"] == "fail"
+    assert report["positive_reward_trial_count"] == 0
+    assert report["scored_trial_count"] == 2
+    assert report["reward_distribution"] == {"0.0": 2}
+    assert report["failure_taxonomy"] == {"score_zero": 2}
+    assert report["scored_trials"] == [
+        {
+            "trial_id": "trial-1",
+            "task_id": "source-useful/1",
+            "reward": 0.0,
+            "state": "succeeded",
+            "failure_reason": None,
+            "llm_evidence_status": "calls_observed",
+        },
+        {
+            "trial_id": "trial-2",
+            "task_id": "source-useful/2",
+            "reward": 0.0,
+            "state": "succeeded",
+            "failure_reason": None,
+            "llm_evidence_status": "calls_observed",
+        },
+    ]
+    assert report["baseline"]["agent_name"] == "terminus-2"
+    assert report["baseline"]["agent_model"] == {
+        "provider": "openai",
+        "name": "glm-5.1-thinking",
+    }
+    assert "no positive reward" in report["summary"]
+
+
+def test_score_positive_canary_passes_with_one_positive_reward() -> None:
+    gate = _load_module()
+
+    report = gate.build_score_positive_canary_report(
+        batch={"id": "batch-positive", "state": "finished", "expected_trial_count": 2},
+        trials=[
+            {
+                "id": "trial-1",
+                "task_id": "source-useful/1",
+                "state": "succeeded",
+                "failure_reason": None,
+                "aggregate_reward": 0.0,
+            },
+            {
+                "id": "trial-2",
+                "task_id": "source-useful/2",
+                "state": "succeeded",
+                "failure_reason": None,
+                "aggregate_reward": 1.0,
+            },
+        ],
+    )
+
+    assert report["status"] == "pass"
+    assert report["positive_reward_trial_count"] == 1
+    assert report["scored_trial_count"] == 2
+    assert report["reward_distribution"] == {"0.0": 1, "1.0": 1}
+
+
+def test_score_positive_canary_blocks_no_scored_trials() -> None:
+    gate = _load_module()
+
+    report = gate.build_score_positive_canary_report(
+        batch={"id": "batch-unscored", "state": "failed", "expected_trial_count": 2},
+        trials=[
+            {
+                "id": "trial-1",
+                "task_id": "source-useful/1",
+                "state": "failed",
+                "failure_reason": "agent_timeout",
+                "aggregate_reward": None,
+            },
+            {
+                "id": "trial-2",
+                "task_id": "source-useful/2",
+                "state": "cancelled",
+                "failure_reason": "operator_cancelled",
+                "aggregate_reward": None,
+            },
+        ],
+    )
+
+    assert report["status"] == "fail"
+    assert report["scored_trial_count"] == 0
+    assert report["positive_reward_trial_count"] == 0
+    assert report["failure_taxonomy"] == {
+        "unscored:agent_timeout": 1,
+        "unscored:operator_cancelled": 1,
+    }
+    assert report["unscored_trials"] == [
+        {
+            "trial_id": "trial-1",
+            "task_id": "source-useful/1",
+            "state": "failed",
+            "failure_reason": "agent_timeout",
+            "llm_evidence_status": None,
+        },
+        {
+            "trial_id": "trial-2",
+            "task_id": "source-useful/2",
+            "state": "cancelled",
+            "failure_reason": "operator_cancelled",
+            "llm_evidence_status": None,
+        },
+    ]
+    assert "no scored trials" in report["summary"]
+
+
+def test_score_positive_canary_markdown_evidence_is_clear() -> None:
+    gate = _load_module()
+
+    report = gate.build_score_positive_canary_report(
+        batch={"id": "batch-zero", "state": "finished", "expected_trial_count": 1},
+        trials=[
+            {
+                "id": "trial-1",
+                "task_id": "source-useful/1",
+                "state": "succeeded",
+                "failure_reason": None,
+                "aggregate_reward": 0.0,
+            },
+        ],
+    )
+
+    markdown = gate.render_score_positive_canary_markdown(report)
+
+    assert "Score-positive canary gate" in markdown
+    assert "| scored_trials | 1 |" in markdown
+    assert "| positive_reward_trials | 0 |" in markdown
+    assert "| 0.0 | 1 |" in markdown
+    assert "source-useful/1" in markdown
+
+
+def test_score_positive_canary_override_requires_issue_and_rationale() -> None:
+    gate = _load_module()
+
+    report = gate.build_score_positive_canary_report(
+        batch={"id": "batch-zero", "state": "finished", "expected_trial_count": 1},
+        trials=[
+            {
+                "id": "trial-1",
+                "task_id": "source-useful/1",
+                "state": "succeeded",
+                "failure_reason": None,
+                "aggregate_reward": 0.0,
+            },
+        ],
+        override_issue="#445",
+        override_rationale="Operator accepted opencode path; keep terminus issue open.",
+    )
+
+    assert report["status"] == "override"
+    assert report["override"] == {
+        "issue": "#445",
+        "rationale": "Operator accepted opencode path; keep terminus issue open.",
+    }
+
+
 def test_batch_reward_gate_flags_benchmark_side_failure_reasons() -> None:
     gate = _load_module()
 
