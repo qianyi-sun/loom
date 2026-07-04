@@ -242,7 +242,11 @@ environment-state convergence evidence when the release manifest records
 external-worker desired state. Generate the environment-state artifact with
 `loom admin environment-state check --format json` after the matching
 `environment-state apply`; `ok=false` or any non-empty `drift` array keeps the
-release-gate artifact red and blocks workload-validation anchors. For normal
+release-gate artifact red and blocks workload-validation anchors. When the
+manifest records GB10 desired state, also pass
+`loom admin gb10-workers status --format json` via
+`--gb10-workers-status`; stale, missing, unreachable, non-applied, dirty, or
+capacity-mismatched active GB10 nodes keep the release gate red. For normal
 runtime image IDs, it compares the Ready pod `imageID` against the manifest
 digest or image ID. For kind-loaded staging images, Kubernetes may report
 `docker.io/library/import-YYYY-MM-DD@sha256:...`; in that case the gate accepts
@@ -614,7 +618,9 @@ loom admin gb10-workers status \
   --environment production \
   --pool-name gb10-arm64 \
   --release-image-tag "$IMAGE_TAG" \
-  --release-env-config-version "$ENV_CONFIG_VERSION"
+  --release-env-config-version "$ENV_CONFIG_VERSION" \
+  --format json \
+  > "$ROLLOUT_DIR/gb10-workers-status-$IMAGE_TAG.json"
 ```
 
 For GB10 node-agent compatibility workers, `gb10-workers status` proves the

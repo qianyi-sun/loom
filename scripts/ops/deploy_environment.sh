@@ -123,6 +123,13 @@ PY
 )"
 
 if [[ "${LOOM_RELEASE_GATE_HARD_CHECKS:-false}" == "true" ]]; then
+  uv run loom admin gb10-workers status \
+    --environment "${LOOM_DEPLOY_ENVIRONMENT}" \
+    --release-image-tag "${LOOM_IMAGE_TAG}" \
+    --release-env-config-version "${LOOM_ENV_CONFIG_VERSION:-${LOOM_IMAGE_TAG}}" \
+    --format json \
+    > "${evidence_dir}/gb10-workers-status-${LOOM_IMAGE_TAG}.json"
+
   release_gate_common_args=(
     cluster
     release-gate
@@ -131,6 +138,7 @@ if [[ "${LOOM_RELEASE_GATE_HARD_CHECKS:-false}" == "true" ]]; then
     --rendered-manifest "${evidence_dir}/rendered.yaml"
     --namespace "${namespace}"
     --environment "${LOOM_DEPLOY_ENVIRONMENT}"
+    --gb10-workers-status "${evidence_dir}/gb10-workers-status-${LOOM_IMAGE_TAG}.json"
   )
   if [[ -n "${LOOM_ENVIRONMENT_STATE_CHECK_JSON:-}" ]]; then
     release_gate_common_args+=(

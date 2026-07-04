@@ -746,6 +746,180 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_nodes(
     assert "env-old" in err
 
 
+def test_gb10_workers_status_release_target_gate_fails_on_missing_active_host(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _fake_get(url, **kwargs):  # type: ignore[no-untyped-def]
+        return _StubResponse(
+            200,
+            json_data={
+                "desired_states": [
+                    {
+                        "environment": "production",
+                        "pool_name": "gb10-arm64",
+                        "image_tag": "staging-76875ac",
+                        "max_concurrent": 10,
+                        "env_config_version": "staging-76875ac",
+                        "host_intents": {
+                            "trt-gb10-14": "active",
+                        },
+                    },
+                ],
+                "nodes": [],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+
+    rc = main(
+        [
+            "admin",
+            "gb10-workers",
+            "status",
+            "--environment",
+            "production",
+            "--pool-name",
+            "gb10-arm64",
+            "--release-image-tag",
+            "staging-76875ac",
+            "--release-env-config-version",
+            "staging-76875ac",
+        ]
+    )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "GB10 rollout target mismatch" in err
+    assert "trt-gb10-14" in err
+    assert "missing active node report" in err
+
+
+def test_gb10_workers_status_release_target_gate_fails_on_unhealthy_active_node(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _fake_get(url, **kwargs):  # type: ignore[no-untyped-def]
+        return _StubResponse(
+            200,
+            json_data={
+                "desired_states": [
+                    {
+                        "environment": "production",
+                        "pool_name": "gb10-arm64",
+                        "image_tag": "staging-76875ac",
+                        "max_concurrent": 10,
+                        "env_config_version": "staging-76875ac",
+                        "host_intents": {"trt-gb10-14": "active"},
+                    },
+                ],
+                "nodes": [
+                    {
+                        "environment": "production",
+                        "pool_name": "gb10-arm64",
+                        "hostname": "trt-gb10-14",
+                        "apply_state": "unavailable",
+                        "current_image_tag": "staging-76875ac",
+                        "desired_image_tag": "staging-76875ac",
+                        "current_max_concurrent": 10,
+                        "desired_max_concurrent": 10,
+                        "current_env_config_version": "staging-76875ac",
+                        "desired_env_config_version": "staging-76875ac",
+                        "current_intent": "active",
+                        "desired_intent": "active",
+                        "source_git_commit": (
+                            "76875ac6d38c91c947c44b22788348db27a8d45b"
+                        ),
+                        "source_git_dirty": False,
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+
+    rc = main(
+        [
+            "admin",
+            "gb10-workers",
+            "status",
+            "--release-image-tag",
+            "staging-76875ac",
+            "--release-env-config-version",
+            "staging-76875ac",
+        ]
+    )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "trt-gb10-14" in err
+    assert "apply_state=unavailable" in err
+
+
+def test_gb10_workers_status_release_target_gate_fails_on_capacity_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _fake_get(url, **kwargs):  # type: ignore[no-untyped-def]
+        return _StubResponse(
+            200,
+            json_data={
+                "desired_states": [
+                    {
+                        "environment": "production",
+                        "pool_name": "gb10-arm64",
+                        "image_tag": "staging-76875ac",
+                        "max_concurrent": 10,
+                        "env_config_version": "staging-76875ac",
+                        "host_intents": {"trt-gb10-1": "active"},
+                    },
+                ],
+                "nodes": [
+                    {
+                        "environment": "production",
+                        "pool_name": "gb10-arm64",
+                        "hostname": "trt-gb10-1",
+                        "apply_state": "applied",
+                        "current_image_tag": "staging-76875ac",
+                        "desired_image_tag": "staging-76875ac",
+                        "current_max_concurrent": 4,
+                        "desired_max_concurrent": 10,
+                        "current_env_config_version": "staging-76875ac",
+                        "desired_env_config_version": "staging-76875ac",
+                        "current_intent": "active",
+                        "desired_intent": "active",
+                        "source_git_commit": (
+                            "76875ac6d38c91c947c44b22788348db27a8d45b"
+                        ),
+                        "source_git_dirty": False,
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+
+    rc = main(
+        [
+            "admin",
+            "gb10-workers",
+            "status",
+            "--release-image-tag",
+            "staging-76875ac",
+            "--release-env-config-version",
+            "staging-76875ac",
+        ]
+    )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "trt-gb10-1" in err
+    assert "max=4/10" in err
+
+
 def test_gb10_workers_status_release_target_gate_fails_on_stale_source_checkout(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

@@ -23,7 +23,7 @@ from loom_cli.rollout.steps.candidate_source import (
 from loom_cli.rollout.steps.subprocess_util import run_captured
 
 
-def _profile_path_for(ctx: RolloutContext) -> str | None:
+def _profile_path_for(ctx: RolloutContext, config_path: Path | None = None) -> str | None:
     """Locate the environment-state TOML for the target scope.
 
     Convention: cluster-config declares ``env_state_profile`` (a path
@@ -33,7 +33,7 @@ def _profile_path_for(ctx: RolloutContext) -> str | None:
     from loom_cli.cluster_config import load_cluster_config
 
     try:
-        cfg = load_cluster_config(ctx.cluster_config_path)
+        cfg = load_cluster_config(config_path or ctx.cluster_config_path)
     except Exception:
         return None
     profile = getattr(cfg, "env_state_profile", None)
@@ -77,9 +77,14 @@ class EnvStateStep(BaseStep):
             candidate_loom_argv(
                 "admin", "environment-state", "check",
                 "--file", str(profile_path),
+                "--format", "json",
             ),
             cwd=cwd,
             env=env,
+        )
+        step_dir.artifact_path("environment-state-check.json").write_text(
+            check.stdout,
+            encoding="utf-8",
         )
         step_dir.stdout_path().write_text(
             f"# apply\n{apply_.stdout}\n"
@@ -102,4 +107,9 @@ class EnvStateStep(BaseStep):
         return RunResult(
             exit_code=0,
             summary="env-state apply + check clean",
+            artifacts={
+                "environment_state_check": str(
+                    step_dir.artifact_path("environment-state-check.json")
+                ),
+            },
         )

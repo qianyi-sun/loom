@@ -8,6 +8,8 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from loom_cli.gb10_release_gate import gb10_release_target_mismatches
+
 _Outcome = Literal["pass", "fail"]
 
 
@@ -734,6 +736,104 @@ def _environment_state_check(
     )
 
 
+def _gb10_worker_check(
+    *,
+    manifest: dict[str, Any],
+    artifact: dict[str, Any] | None,
+    artifact_path: str | None,
+    artifact_error: str | None,
+) -> ReleaseGateCheck | None:
+    external_workers = manifest.get("external_workers")
+    if not isinstance(external_workers, dict):
+        external_workers = {}
+    desired_states = external_workers.get("gb10_desired_states")
+    if not isinstance(desired_states, list):
+        desired_states = []
+    if not desired_states and artifact is None and artifact_error is None:
+        return None
+
+    release = manifest.get("release", {})
+    image_tag = release.get("image_tag")
+    release_image_tag = str(image_tag) if image_tag else None
+    manifest_env_versions = [
+        str(row.get("env_config_version"))
+        for row in desired_states
+        if isinstance(row, dict) and row.get("env_config_version")
+    ]
+    release_env_config_version = (
+        manifest_env_versions[0]
+        if len(set(manifest_env_versions)) == 1
+        else release_image_tag
+    )
+    evidence = {
+        "artifact": artifact_path,
+        "manifest_desired_state_count": len(desired_states),
+        "release_image_tag": release_image_tag,
+        "release_env_config_version": release_env_config_version,
+    }
+    remediation = (
+        "run `loom admin gb10-workers status --format json "
+        "--release-image-tag <image-tag> --release-env-config-version "
+        "<env-config-version>` for the release and pass the JSON artifact to "
+        "`loom cluster release-gate --gb10-workers-status`"
+    )
+    if artifact_error is not None:
+        return ReleaseGateCheck(
+            name="gb10-worker-convergence",
+            outcome="fail",
+            detail="GB10 worker status artifact is unreadable",
+            evidence={**evidence, "error": artifact_error},
+            remediation=remediation,
+        )
+    if artifact is None:
+        return ReleaseGateCheck(
+            name="gb10-worker-convergence",
+            outcome="fail",
+            detail="GB10 worker status artifact is required",
+            evidence=evidence,
+            remediation=remediation,
+        )
+    if not isinstance(artifact.get("desired_states"), list) or not isinstance(
+        artifact.get("nodes"),
+        list,
+    ):
+        return ReleaseGateCheck(
+            name="gb10-worker-convergence",
+            outcome="fail",
+            detail="GB10 worker status artifact is invalid",
+            evidence={
+                **evidence,
+                "has_desired_states": isinstance(artifact.get("desired_states"), list),
+                "has_nodes": isinstance(artifact.get("nodes"), list),
+            },
+            remediation=remediation,
+        )
+
+    mismatches = gb10_release_target_mismatches(
+        artifact,
+        release_image_tag=release_image_tag,
+        release_env_config_version=release_env_config_version,
+    )
+    if mismatches:
+        return ReleaseGateCheck(
+            name="gb10-worker-convergence",
+            outcome="fail",
+            detail="GB10 worker status reports release-target drift",
+            evidence={**evidence, "mismatches": mismatches},
+            remediation="drain or repair stale/unreachable GB10 hosts before release",
+        )
+    return ReleaseGateCheck(
+        name="gb10-worker-convergence",
+        outcome="pass",
+        detail="GB10 worker status matches release target",
+        evidence={
+            **evidence,
+            "desired_state_count": len(artifact.get("desired_states", [])),
+            "node_count": len(artifact.get("nodes", [])),
+        },
+    )
+
+
 def collect_release_gate_report(
     *,
     manifest: dict[str, Any],
@@ -749,6 +849,9 @@ def collect_release_gate_report(
     environment_state_check_artifact: dict[str, Any] | None = None,
     environment_state_check_path: str | None = None,
     environment_state_check_error: str | None = None,
+    gb10_workers_status_artifact: dict[str, Any] | None = None,
+    gb10_workers_status_path: str | None = None,
+    gb10_workers_status_error: str | None = None,
 ) -> ReleaseGateReport:
     environment = str(manifest.get("release", {}).get("environment") or "")
     expected_rendered = manifest.get("rendered_manifest", {}).get("sha256")
@@ -794,6 +897,14 @@ def collect_release_gate_report(
     )
     if environment_state_check is not None:
         checks.append(environment_state_check)
+    gb10_worker_check = _gb10_worker_check(
+        manifest=manifest,
+        artifact=gb10_workers_status_artifact,
+        artifact_path=gb10_workers_status_path,
+        artifact_error=gb10_workers_status_error,
+    )
+    if gb10_worker_check is not None:
+        checks.append(gb10_worker_check)
     return ReleaseGateReport(
         environment=environment,
         namespace=namespace,
