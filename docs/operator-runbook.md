@@ -3088,6 +3088,9 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    `terminus2_error` events before debugging provider credentials; upstream
    Terminal-Bench starts a tmux/asciinema recording session before the first
    model call, so missing sandbox dependencies can produce `no_calls_invalid`.
+   For score-zero or timeout diagnosis, inspect `terminus2_exec_run` events:
+   they record bounded command metadata (`cmd_excerpt`, `exit_code`,
+   `output_len`, and `duration_sec`) without storing command output content.
    For opencode/subprocess timeout investigation, confirm a worker watchdog
    hard deadline or control-plane stale-running reclaim produces
    `state=failed`, `failure_reason=agent_timeout`, and a failure message that

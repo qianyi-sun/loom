@@ -48,6 +48,27 @@ def test_local_container_exec_run_string_cmd_uses_bash() -> None:
     assert b"LOOM-MARKER" in result.output
 
 
+def test_local_container_exec_run_emits_bounded_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timeout / reward-0 canaries need command-level evidence, but
+    command stdout may contain sensitive task output. Emit only bounded
+    metadata about each local exec."""
+    buf = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", buf)
+
+    container = terminus_2_runner.LocalContainer()
+    result = container.exec_run("echo diagnostic")
+
+    assert result.exit_code == 0
+    event = json.loads(buf.getvalue().splitlines()[-1])
+    assert event["kind"] == "terminus2_exec_run"
+    assert event["cmd_excerpt"] == "echo diagnostic"
+    assert event["exit_code"] == 0
+    assert event["output_len"] == len(result.output)
+    assert isinstance(event["duration_sec"], float)
+
+
 def test_patch_asciinema_timestamp_replaces_method() -> None:
     """Upstream `TmuxSession.get_asciinema_timestamp` reads from a
     `.cast` file recorded by asciinema, which the Loom sandbox does
@@ -121,6 +142,78 @@ def test_try_extract_json_object_ignores_braces_inside_strings() -> None:
 def test_try_extract_json_object_returns_none_when_no_object() -> None:
     assert terminus_2_runner._try_extract_json_object("just plain text") is None
     assert terminus_2_runner._try_extract_json_object("") is None
+
+
+def test_normalize_command_batch_response_keeps_valid_batch() -> None:
+    text = (
+        '{"state_analysis": "ready", "explanation": "inspect", '
+        '"commands": [{"keystrokes": "ls", "is_blocking": true, "timeout_sec": 5}], '
+        '"is_task_complete": false}'
+    )
+
+    assert terminus_2_runner._normalize_command_batch_response_json(text) == text
+
+
+def test_normalize_command_batch_response_defaults_missing_completion() -> None:
+    """GLM sometimes returns a nearly-valid CommandBatchResponse but
+    omits `is_task_complete`, which makes upstream Terminus abort with
+    a Pydantic validation error. Treat that as an incomplete step so
+    the agent can continue instead of failing the trial."""
+    result = terminus_2_runner._normalize_command_batch_response_json(
+        '{"state_analysis": "need inspect", "explanation": "list files", '
+        '"commands": [{"keystrokes": "ls -la /app", "is_blocking": true, '
+        '"timeout_sec": 5}]}',
+    )
+
+    assert json.loads(result) == {
+        "state_analysis": "need inspect",
+        "explanation": "list files",
+        "commands": [{
+            "keystrokes": "ls -la /app",
+            "is_blocking": True,
+            "timeout_sec": 5,
+        }],
+        "is_task_complete": False,
+    }
+
+
+def test_normalize_command_batch_response_wraps_single_command() -> None:
+    """The failed 5005 run saw GLM return a single Command-shaped
+    object at the top level (`keystrokes`, `is_blocking`,
+    `timeout_sec`) instead of a CommandBatchResponse. Wrap it as one
+    incomplete command batch so Terminus can execute it."""
+    result = terminus_2_runner._normalize_command_batch_response_json(
+        '{"keystrokes": "pytest -q", "is_blocking": true, "timeout_sec": 30}',
+    )
+
+    assert json.loads(result) == {
+        "state_analysis": "Model returned a single command object.",
+        "explanation": "Executing the command returned by the model.",
+        "commands": [{
+            "keystrokes": "pytest -q",
+            "is_blocking": True,
+            "timeout_sec": 30,
+        }],
+        "is_task_complete": False,
+    }
+
+
+def test_normalize_command_batch_response_wraps_command_strings() -> None:
+    result = terminus_2_runner._normalize_command_batch_response_json(
+        '{"state_analysis": "need tests", "explanation": "run tests", '
+        '"commands": ["pytest -q"], "is_task_complete": false}',
+    )
+
+    assert json.loads(result) == {
+        "state_analysis": "need tests",
+        "explanation": "run tests",
+        "commands": [{
+            "keystrokes": "pytest -q",
+            "is_blocking": True,
+            "timeout_sec": 5,
+        }],
+        "is_task_complete": False,
+    }
 
 
 def test_patch_litellm_extracts_tool_use_when_content_empty() -> None:

@@ -25,8 +25,10 @@ import argparse
 import importlib
 import json
 import os
+import shlex
 import subprocess
 import sys
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,6 +70,7 @@ class LocalContainer:
         *_: Any,
         **__: Any,
     ) -> _ExecResult:
+        started = time.monotonic()
         if isinstance(cmd, str):
             argv: list[str] = ["bash", "-lc", cmd]
         else:
@@ -79,11 +82,22 @@ class LocalContainer:
                 check=False,
             )
         except FileNotFoundError as exc:
-            return _ExecResult(exit_code=127, output=str(exc).encode())
-        return _ExecResult(
-            exit_code=int(result.returncode),
-            output=(result.stdout or b"") + (result.stderr or b""),
+            exec_result = _ExecResult(exit_code=127, output=str(exc).encode())
+        else:
+            exec_result = _ExecResult(
+                exit_code=int(result.returncode),
+                output=(result.stdout or b"") + (result.stderr or b""),
+            )
+        _emit(
+            {
+                "kind": "terminus2_exec_run",
+                "cmd_excerpt": _command_excerpt(cmd),
+                "exit_code": exec_result.exit_code,
+                "output_len": len(exec_result.output),
+                "duration_sec": round(time.monotonic() - started, 3),
+            },
         )
+        return exec_result
 
     @staticmethod
     def put_archive(
@@ -121,6 +135,16 @@ def _json_default(value: object) -> object:
     if isinstance(value, Path):
         return str(value)
     return repr(value)
+
+
+def _command_excerpt(cmd: list[str] | str, limit: int = 240) -> str:
+    if isinstance(cmd, str):
+        text = cmd
+    else:
+        text = shlex.join(str(part) for part in cmd)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
 
 
 def _propagate_dialect_env() -> None:
@@ -239,6 +263,105 @@ def _try_extract_json_object(text: str) -> str | None:
     return None
 
 
+def _normalize_command_batch_response_json(text: str) -> str:
+    """Normalize common GLM structured-output slips into Terminus's
+    expected CommandBatchResponse JSON shape.
+
+    This is intentionally conservative: if `text` is not JSON, or if it
+    is a JSON value that does not look like either a command batch or a
+    single terminal command, return it unchanged and let upstream
+    Terminus raise its normal parse error.
+    """
+    try:
+        payload = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return text
+    if not isinstance(payload, dict):
+        return text
+
+    changed = False
+
+    if _looks_like_command(payload):
+        command, command_changed = _normalize_command(payload)
+        if command is None:
+            return text
+        return json.dumps({
+            "state_analysis": "Model returned a single command object.",
+            "explanation": "Executing the command returned by the model.",
+            "commands": [command],
+            "is_task_complete": False,
+        })
+
+    commands = payload.get("commands")
+    if isinstance(commands, list):
+        normalized_commands: list[dict[str, object]] = []
+        for command_raw in commands:
+            command, command_changed = _normalize_command(command_raw)
+            if command is None:
+                return text
+            normalized_commands.append(command)
+            changed = changed or command_changed
+        if normalized_commands != commands:
+            payload = dict(payload)
+            payload["commands"] = normalized_commands
+            changed = True
+
+    if "commands" in payload and "is_task_complete" not in payload:
+        payload = dict(payload)
+        payload["is_task_complete"] = False
+        changed = True
+
+    if "is_task_complete" in payload and isinstance(payload["is_task_complete"], str):
+        lowered = payload["is_task_complete"].strip().lower()
+        if lowered in {"true", "false"}:
+            payload = dict(payload)
+            payload["is_task_complete"] = lowered == "true"
+            changed = True
+
+    return json.dumps(payload) if changed else text
+
+
+def _looks_like_command(value: dict[str, object]) -> bool:
+    return "keystrokes" in value and "commands" not in value
+
+
+def _normalize_command(raw: object) -> tuple[dict[str, object] | None, bool]:
+    if isinstance(raw, str):
+        return {
+            "keystrokes": raw,
+            "is_blocking": True,
+            "timeout_sec": 5,
+        }, True
+    if not isinstance(raw, dict):
+        return None, False
+    if "keystrokes" not in raw:
+        return None, False
+
+    command = dict(raw)
+    changed = False
+
+    if "is_blocking" not in command:
+        command["is_blocking"] = False
+        changed = True
+    if "timeout_sec" not in command:
+        command["timeout_sec"] = 5
+        changed = True
+    if isinstance(command.get("is_blocking"), str):
+        lowered = str(command["is_blocking"]).strip().lower()
+        if lowered in {"true", "false"}:
+            command["is_blocking"] = lowered == "true"
+            changed = True
+
+    return command, changed
+
+
+def _prepare_litellm_response_text(text: str) -> str:
+    unwrapped = _try_extract_json_object(text)
+    if unwrapped is not None:
+        text = unwrapped
+    return _normalize_command_batch_response_json(text)
+
+
 def _patch_litellm_response_extraction(litellm_mod: Any) -> None:
     """Monkey-patch upstream `LiteLLM.call` so it extracts tool-use
     arguments when the assistant's `content` is empty. This makes
@@ -273,9 +396,14 @@ def _patch_litellm_response_extraction(litellm_mod: Any) -> None:
 
         litellm_mod.completion = _wrapper
         try:
-            content = _original_call(self, prompt, *args, **kwargs)
+            raw_content = _original_call(self, prompt, *args, **kwargs)
         finally:
             litellm_mod.completion = completion_fn
+        content = (
+            raw_content
+            if isinstance(raw_content, str)
+            else "" if raw_content is None else str(raw_content)
+        )
 
         # Even when content is non-empty, Anthropic Haiku (and other
         # models under LiteLLM's prompt-based structured-output
@@ -286,9 +414,7 @@ def _patch_litellm_response_extraction(litellm_mod: Any) -> None:
         # obvious wrappers so the parse succeeds when the underlying
         # JSON is actually present.
         if content:
-            unwrapped = _try_extract_json_object(content)
-            if unwrapped is not None:
-                content = unwrapped
+            content = _prepare_litellm_response_text(content)
 
         # Emit diagnostic so operators can see whether the patch fired
         # for this call. Written to stdout as a JSONL line so the
@@ -363,10 +489,10 @@ def _patch_litellm_response_extraction(litellm_mod: Any) -> None:
         arguments = _get(function, "arguments") if function is not None else None
 
         if isinstance(arguments, str) and arguments.strip():
-            return arguments
+            return _prepare_litellm_response_text(arguments)
         if arguments is not None:
             import json as _json
-            return _json.dumps(arguments)
+            return _prepare_litellm_response_text(_json.dumps(arguments))
         return content
 
     litellm_cls.call = _patched_call
