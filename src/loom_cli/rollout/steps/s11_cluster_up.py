@@ -19,7 +19,6 @@ class ClusterUpStep(SubcommandStep):
     def argv(self, ctx: RolloutContext, step_dir: StepDir) -> Sequence[str]:
         return [
             "loom", "cluster", "up",
-            "--wait",
             "--namespace", ctx.namespace,
             "--config", str(ctx.cluster_config_path),
         ]
