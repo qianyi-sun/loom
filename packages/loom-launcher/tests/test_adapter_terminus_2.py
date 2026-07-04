@@ -14,6 +14,10 @@ from uuid import uuid4
 
 from loom_launcher import get_adapter
 from loom_launcher.adapter import ModelSpec
+from loom_launcher.adapters._terminus_2_runtime import (
+    LOOM_LAUNCHER_REF,
+    LOOM_LAUNCHER_REQUIREMENT,
+)
 
 
 def test_terminus_2_is_registered() -> None:
@@ -69,6 +73,14 @@ def test_install_script_pins_terminal_bench_core() -> None:
     # whenever Terminal-Bench recording is enabled.
     assert "tmux" in adapter.install_script
     assert "asciinema" in adapter.install_script
+
+
+def test_install_script_pins_current_public_loom_launcher_ref() -> None:
+    # This SHA must be reachable from qianyi-sun/loom so fresh GB10
+    # agent-layer builds can install loom-launcher without relying on
+    # a warm local cache.
+    assert LOOM_LAUNCHER_REF == "4ce8225bf67e88d12dd86e4e1ab3f009f9d4eee2"
+    assert f"qianyi-sun/loom.git@{LOOM_LAUNCHER_REF}" in LOOM_LAUNCHER_REQUIREMENT
 
 
 async def test_capture_via_stdout_jsonl(make_handle) -> None:
