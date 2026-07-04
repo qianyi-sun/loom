@@ -311,7 +311,7 @@ def test_runner_emits_start_and_end_on_success(
     monkeypatch.setattr(sys, "stdout", buf)
 
     rc = terminus_2_runner.main([
-        "--model", "anthropic/claude-haiku-4-5",
+        "--model", "openai/glm-5.1-thinking",
         "--task", "make hello.txt",
         "--workdir", "/app",
     ])
@@ -320,7 +320,7 @@ def test_runner_emits_start_and_end_on_success(
     lines = [json.loads(line) for line in buf.getvalue().splitlines() if line]
     assert lines[0] == {
         "kind": "terminus2_start",
-        "model": "anthropic/claude-haiku-4-5",
+        "model": "openai/glm-5.1-thinking",
         "max_episodes": 50,
         "workdir": "/app",
     }

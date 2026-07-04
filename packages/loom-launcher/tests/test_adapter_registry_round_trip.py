@@ -32,6 +32,14 @@ _TABLE: list[tuple[str, str, str, str, str, bool]] = [
         "openai/{model_id}",
         False,
     ),
+    (
+        "terminus-2",
+        "openai_chat",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "openai/{model_id}",
+        False,
+    ),
     # ANTHROPIC_AUTH_TOKEN (not API_KEY) — makes Claude Code CLI send
     # `Authorization: Bearer <token>` instead of `x-api-key`, which is what
     # Loom's gateway routes verify. See claude_code adapter for the why.
