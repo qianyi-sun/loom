@@ -149,6 +149,54 @@ def test_claim_clears_stale_failure_diagnostic(
     assert row.failure_message is None
 
 
+def test_pre_start_heartbeat_updates_claimed_unstarted_trial(
+    app,
+    claim_seed,
+    postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    worker_id, raw_worker, _ = claim_seed
+    with TestClient(app) as client:
+        claim = client.post(
+            "/trials/claim",
+            headers={"Authorization": f"Bearer {raw_worker}"},
+            json={"worker_id": str(worker_id), "caps": [_LINUX_PUBLIC_CAP]},
+        )
+        assert claim.status_code == 200, claim.text
+        trial_id = UUID(claim.json()["trial_id"])
+
+        heartbeat = client.post(
+            f"/trials/{trial_id}/pre-start-heartbeat",
+            headers={"Authorization": f"Bearer {raw_worker}"},
+            json={"worker_id": str(worker_id)},
+        )
+        assert heartbeat.status_code == 200, heartbeat.text
+        assert heartbeat.json()["trial_id"] == str(trial_id)
+        assert heartbeat.json()["pre_start_heartbeat_at"]
+
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    with session_factory() as session:
+        row = session.execute(
+            select(Trial).where(Trial.id == trial_id),
+        ).scalar_one()
+        assert row.pre_start_heartbeat_at is not None
+        session.execute(
+            update(Trial)
+            .where(Trial.id == trial_id)
+            .values(started_at=datetime.now(UTC)),
+        )
+        session.commit()
+    engine.dispose()
+
+    with TestClient(app) as client:
+        fenced = client.post(
+            f"/trials/{trial_id}/pre-start-heartbeat",
+            headers={"Authorization": f"Bearer {raw_worker}"},
+            json={"worker_id": str(worker_id)},
+        )
+        assert fenced.status_code == 409
+
+
 def test_claim_no_match_returns_204(app, claim_seed):  # type: ignore[no-untyped-def]
     worker_id, raw_worker, _ = claim_seed
     with TestClient(app) as client:

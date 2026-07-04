@@ -25,7 +25,7 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch):
     assert s.bind_port == 8080
     assert s.worker_heartbeat_expiry_sec == 120
     assert s.worker_reclaim_sweep_interval_sec == 30
-    assert s.claimed_without_start_expiry_sec == 300
+    assert s.claimed_without_start_expiry_sec == 3600
     assert s.db_pool_size == 20
     assert s.db_max_overflow == 40
     assert s.db_pool_timeout_sec == 30.0

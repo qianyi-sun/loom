@@ -117,6 +117,7 @@ class _FakeCPClient:
     def __init__(self) -> None:
         self.patch_calls: list[dict[str, object]] = []
         self.retry_calls: list[dict[str, object]] = []
+        self.pre_start_heartbeat_calls: list[dict[str, object]] = []
         self.bundle = {
             "id": "fake",
             "checksum": "0" * 64,
@@ -136,6 +137,13 @@ class _FakeCPClient:
 
     async def get_trial_llm_calls(self, _trial_id) -> list:  # type: ignore[no-untyped-def]
         return []
+
+    async def pre_start_heartbeat(self, *, trial_id, worker_id) -> bool:  # type: ignore[no-untyped-def]
+        self.pre_start_heartbeat_calls.append({
+            "trial_id": trial_id,
+            "worker_id": worker_id,
+        })
+        return True
 
     async def patch_state(
         self,
@@ -287,6 +295,7 @@ class _FakeSettings:
     trial_cancel_poll_interval_sec = 0.05
     trial_hard_deadline_multiplier = 3.0
     trial_hard_deadline_grace_sec = 600.0
+    pre_start_heartbeat_interval_sec = 0.01
 
 
 async def _drive_spawn(runner_target: object) -> Path:
@@ -837,6 +846,47 @@ async def test_claimed_trial_counts_in_flight_before_setup_finishes() -> None:
         )
         await cp.bundle_requested.wait()
         assert pool.in_flight == 1
+        cp.release_bundle.set()
+        await spawn_task
+        await pool.wait_all(timeout=2.0)
+
+
+async def test_pre_start_heartbeat_runs_while_setup_waits() -> None:
+    from loom_worker.vllm_registry import WorkerVLLMRegistry
+
+    settings = _FakeSettings()
+    cp = _BlockingBundleCPClient()
+    pool = RunnerPool(max_concurrent=1)
+    trial_id = uuid4()
+    worker_id = uuid4()
+
+    with patch.object(ml, "LocalTrialRunner") as fake_runner_cls:
+        fake_runner_cls.return_value = _SucceedingRunner()
+        spawn_task = asyncio.create_task(
+            ml._spawn_trial(
+                pool=pool,
+                settings=settings,  # type: ignore[arg-type]
+                cp_client=cp,  # type: ignore[arg-type]
+                gateway_client=None,  # type: ignore[arg-type]
+                object_store=None,  # type: ignore[arg-type]
+                worker_id=worker_id,
+                payload={
+                    "trial_id": str(trial_id),
+                    "team_id": str(uuid4()),
+                    "task_id": "fake",
+                    "config": {"agent_name": "oracle", "agent_model": None},
+                },
+                vllm_registry=WorkerVLLMRegistry(enabled=False),
+            )
+        )
+        await cp.bundle_requested.wait()
+        for _ in range(100):
+            if cp.pre_start_heartbeat_calls:
+                break
+            await asyncio.sleep(0.005)
+        assert cp.pre_start_heartbeat_calls == [
+            {"trial_id": trial_id, "worker_id": worker_id}
+        ]
         cp.release_bundle.set()
         await spawn_task
         await pool.wait_all(timeout=2.0)

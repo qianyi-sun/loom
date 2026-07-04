@@ -177,6 +177,28 @@ class HttpControlPlaneClient:
             if owned:
                 await client.aclose()
 
+    async def pre_start_heartbeat(
+        self,
+        *,
+        trial_id: UUID,
+        worker_id: UUID,
+    ) -> bool:
+        """True on accepted, False if the trial is no longer in pre-start setup."""
+        client, owned = self._http()
+        try:
+            r = await client.post(
+                f"/trials/{trial_id}/pre-start-heartbeat",
+                headers=self._headers,
+                json={"worker_id": str(worker_id)},
+            )
+            if r.status_code == 409:
+                return False
+            r.raise_for_status()
+            return True
+        finally:
+            if owned:
+                await client.aclose()
+
     async def get_trial_state(self, trial_id: UUID) -> str:
         """Fetch the current CP-side state for ``trial_id``. Used by the
         worker's cancellation watchdog (#360) to detect operator-driven

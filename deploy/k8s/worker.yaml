@@ -66,6 +66,8 @@ spec:
             secretKeyRef:
               name: loom-secrets
               key: minio-secret-key
+        - name: LOOM_WORKER_PRE_START_HEARTBEAT_INTERVAL_SEC
+          value: '60.0'
         - name: LOOM_WORKER_SANDBOX_ISOLATION
           value: 'False'
         - name: LOOM_WORKER_SANDBOX_SINGLETON_IMAGE

@@ -16,7 +16,7 @@
   },
   "claimed_without_start_expiry_sec": {
     "annotation": "<class 'int'>",
-    "default": "300",
+    "default": "3600",
     "required": false
   },
   "db_max_overflow": {
@@ -184,6 +184,26 @@
     "default": "'7-00:00:00'",
     "required": false
   },
+  "stale_running_trial_grace_sec": {
+    "annotation": "<class 'float'>",
+    "default": "900.0",
+    "required": false
+  },
+  "stale_running_trial_reclaim_enabled": {
+    "annotation": "<class 'bool'>",
+    "default": "True",
+    "required": false
+  },
+  "stale_running_trial_silence_sec": {
+    "annotation": "<class 'float'>",
+    "default": "900.0",
+    "required": false
+  },
+  "stale_running_trial_timeout_multiplier": {
+    "annotation": "<class 'float'>",
+    "default": "3.0",
+    "required": false
+  },
   "step_jwt_signing_key": {
     "annotation": "<class 'pydantic.types.SecretStr'>",
     "default": "PydanticUndefined",
@@ -197,6 +217,36 @@
   "storage_backend": {
     "annotation": "<class 'str'>",
     "default": "'minio'",
+    "required": false
+  },
+  "trial_retry_default_backoff_base_sec": {
+    "annotation": "<class 'float'>",
+    "default": "30.0",
+    "required": false
+  },
+  "trial_retry_default_backoff_jitter": {
+    "annotation": "<class 'float'>",
+    "default": "0.2",
+    "required": false
+  },
+  "trial_retry_default_backoff_max_sec": {
+    "annotation": "<class 'float'>",
+    "default": "600.0",
+    "required": false
+  },
+  "trial_retry_default_backoff_multiplier": {
+    "annotation": "<class 'float'>",
+    "default": "2.0",
+    "required": false
+  },
+  "trial_retry_default_max_attempts": {
+    "annotation": "<class 'int'>",
+    "default": "3",
+    "required": false
+  },
+  "trial_retry_default_retry_on": {
+    "annotation": "list[str]",
+    "default": "['gateway_error', 'provider_transport_disconnect']",
     "required": false
   },
   "worker_heartbeat_expiry_sec": {

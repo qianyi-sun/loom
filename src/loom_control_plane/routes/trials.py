@@ -377,6 +377,11 @@ async def get_trial(
         "failure_reason": row.failure_reason,
         "submitted_at": row.submitted_at.isoformat(),
         "claimed_at": row.claimed_at.isoformat() if row.claimed_at else None,
+        "pre_start_heartbeat_at": (
+            row.pre_start_heartbeat_at.isoformat()
+            if row.pre_start_heartbeat_at
+            else None
+        ),
         "started_at": row.started_at.isoformat() if row.started_at else None,
         "finished_at": row.finished_at.isoformat() if row.finished_at else None,
         "attempt_count": row.attempt_count,

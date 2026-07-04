@@ -48,6 +48,7 @@ def test_batch_debug_evidence_counts_claimed_without_started_trials() -> None:
         provider_connection_id=None,
         provider_model_id=None,
         claimed_at=now - timedelta(minutes=10),
+        pre_start_heartbeat_at=now - timedelta(seconds=30),
         started_at=None,
     )
     running_trial = SimpleNamespace(
@@ -61,6 +62,7 @@ def test_batch_debug_evidence_counts_claimed_without_started_trials() -> None:
         provider_connection_id=None,
         provider_model_id=None,
         claimed_at=now - timedelta(minutes=10),
+        pre_start_heartbeat_at=None,
         started_at=now - timedelta(minutes=9),
     )
 
@@ -73,6 +75,12 @@ def test_batch_debug_evidence_counts_claimed_without_started_trials() -> None:
     assert evidence["trials"]["summary"]["claimed"] == 1
     assert evidence["trials"]["summary"]["running"] == 1
     assert evidence["trials"]["summary"]["claimed_without_started"] == 1
+    assert (
+        evidence["trials"]["summary"][
+            "claimed_without_started_with_pre_start_heartbeat"
+        ]
+        == 1
+    )
 
 
 def test_batch_debug_evidence_reports_terminal_worker_pool_coverage() -> None:

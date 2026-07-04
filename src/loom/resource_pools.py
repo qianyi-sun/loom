@@ -47,6 +47,8 @@ class ResourcePoolSnapshot(TypedDict):
     free_slots: int
     running_tasks: int
     starting_tasks: int
+    pre_start_heartbeat_fresh_tasks: int
+    oldest_starting_task_age_sec: int | None
     queued_tasks: int
     last_autoscaler_decision: str | None
     last_autoscaler_reason: str | None
@@ -72,6 +74,8 @@ class ResourcePoolAggregate(TypedDict):
     free_slots: int
     running_tasks: int
     starting_tasks: int
+    pre_start_heartbeat_fresh_tasks: int
+    oldest_starting_task_age_sec: int | None
     queued_tasks: int
 
 
@@ -99,6 +103,8 @@ class _MutablePool:
     claimable_occupied_slots: int = 0
     running_tasks: int = 0
     starting_tasks: int = 0
+    pre_start_heartbeat_fresh_tasks: int = 0
+    oldest_starting_task_age_sec: int | None = None
     queued_tasks: int = 0
     last_autoscaler_decision: str | None = None
     last_autoscaler_reason: str | None = None
@@ -142,6 +148,8 @@ class _MutablePool:
             "free_slots": self.free_slots,
             "running_tasks": self.running_tasks,
             "starting_tasks": self.starting_tasks,
+            "pre_start_heartbeat_fresh_tasks": self.pre_start_heartbeat_fresh_tasks,
+            "oldest_starting_task_age_sec": self.oldest_starting_task_age_sec,
             "queued_tasks": self.queued_tasks,
             "last_autoscaler_decision": self.last_autoscaler_decision,
             "last_autoscaler_reason": self.last_autoscaler_reason,
@@ -215,6 +223,14 @@ def _aggregate(
     total_slots = sum(pool["total_slots"] for pool in pools)
     draining_slots = sum(pool["draining_slots"] for pool in pools)
     occupied_slots = sum(pool["occupied_slots"] for pool in pools)
+    oldest_starting_task_age_sec = max(
+        (
+            age
+            for age in (pool["oldest_starting_task_age_sec"] for pool in pools)
+            if age is not None
+        ),
+        default=None,
+    )
     return {
         "desired_slots": desired_slots,
         "pending_slots": pending_slots,
@@ -229,6 +245,10 @@ def _aggregate(
         "free_slots": sum(pool["free_slots"] for pool in pools),
         "running_tasks": sum(pool["running_tasks"] for pool in pools),
         "starting_tasks": sum(pool["starting_tasks"] for pool in pools),
+        "pre_start_heartbeat_fresh_tasks": sum(
+            pool["pre_start_heartbeat_fresh_tasks"] for pool in pools
+        ),
+        "oldest_starting_task_age_sec": oldest_starting_task_age_sec,
         "queued_tasks": queued_tasks,
     }
 
@@ -322,11 +342,13 @@ async def get_resource_pool_summary(
             Trial.state,
             Trial.worker_id,
             Trial.requires_caps,
+            Trial.claimed_at,
+            Trial.pre_start_heartbeat_at,
         ).where(Trial.state.in_(("queued", "claimed", "running")))
 
     trial_rows = (await session.execute(trial_stmt)).all()
     queued_tasks = 0
-    for state, worker_id, requires_caps in trial_rows:
+    for state, worker_id, requires_caps, claimed_at, pre_start_heartbeat_at in trial_rows:
         if state == "queued":
             queued_tasks += 1
             for key, pool in pools_by_key.items():
@@ -345,6 +367,18 @@ async def get_resource_pool_summary(
             pool.claimable_occupied_slots += 1
         if state == "claimed":
             pool.starting_tasks += 1
+            if claimed_at is not None:
+                age_sec = max(0, int((now - claimed_at).total_seconds()))
+                if (
+                    pool.oldest_starting_task_age_sec is None
+                    or age_sec > pool.oldest_starting_task_age_sec
+                ):
+                    pool.oldest_starting_task_age_sec = age_sec
+            if (
+                pre_start_heartbeat_at is not None
+                and pre_start_heartbeat_at >= cutoff
+            ):
+                pool.pre_start_heartbeat_fresh_tasks += 1
         elif state == "running":
             pool.running_tasks += 1
 

@@ -134,6 +134,11 @@
     "default": "'default'",
     "required": false
   },
+  "pre_start_heartbeat_interval_sec": {
+    "annotation": "<class 'float'>",
+    "default": "60.0",
+    "required": false
+  },
   "sandbox_isolation": {
     "annotation": "<class 'bool'>",
     "default": "False",
@@ -232,6 +237,21 @@
   "trial_cache_ttl_hours": {
     "annotation": "<class 'int'>",
     "default": "168",
+    "required": false
+  },
+  "trial_cancel_poll_interval_sec": {
+    "annotation": "<class 'float'>",
+    "default": "30.0",
+    "required": false
+  },
+  "trial_hard_deadline_grace_sec": {
+    "annotation": "<class 'float'>",
+    "default": "600.0",
+    "required": false
+  },
+  "trial_hard_deadline_multiplier": {
+    "annotation": "<class 'float'>",
+    "default": "3.0",
     "required": false
   },
   "vllm_gpu_memory_utilization": {

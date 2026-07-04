@@ -608,10 +608,20 @@ def _summary_from_trials(trials: Sequence[Any]) -> dict[str, int]:
     claimed_without_started = sum(
         1 for trial in trials if trial.state == "claimed" and trial.started_at is None
     )
+    claimed_without_started_with_pre_start_heartbeat = sum(
+        1
+        for trial in trials
+        if trial.state == "claimed"
+        and trial.started_at is None
+        and getattr(trial, "pre_start_heartbeat_at", None) is not None
+    )
     return {
         "queued": counts.get("queued", 0),
         "claimed": counts.get("claimed", 0),
         "claimed_without_started": claimed_without_started,
+        "claimed_without_started_with_pre_start_heartbeat": (
+            claimed_without_started_with_pre_start_heartbeat
+        ),
         "running": counts.get("running", 0),
         "succeeded": counts.get("succeeded", 0),
         "failed": counts.get("failed", 0),

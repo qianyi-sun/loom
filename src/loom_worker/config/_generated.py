@@ -44,6 +44,7 @@ class WorkerSettings(BaseSettings):
     minio_region: str = "us-east-1"
     minio_secret_key: SecretStr
     pool_name: str = "default"
+    pre_start_heartbeat_interval_sec: float = 60.0
     sandbox_isolation: bool = False
     sandbox_singleton_image: str = "loom-llm-gateway-sandbox:dev"
     sandbox_singleton_secrets_dir: str = "/var/lib/loom/sandbox-secrets"
