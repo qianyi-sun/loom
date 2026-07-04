@@ -410,7 +410,9 @@ worker can materialize on demand at trial start (currently just
 `mictern2/terminus2-full:latest` — see
 `_ensure_terminus_2_arm64_base_if_needed` in
 `src/loom/driver/task_image.py`, tag-shadowed by a Debian slim +
-Python 3.13 + Terminus 2 toolchain build).
+Python 3.13 + Terminus 2 toolchain build). The Terminus 2 launcher install
+script also provisions the `tmux` and `asciinema` binaries that upstream
+Terminal-Bench needs before the first model call.
 
 Because the worker guarantees an arm64-compatible base at build time,
 task bundles whose Dockerfile `FROM`s an image in

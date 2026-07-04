@@ -3084,6 +3084,10 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    gateway call records. `loom eval batch show <id>` prints
    `no_call_trials` and an invalid-evidence warning for this case, and
    diagnosis uses `batch.no_llm_calls` when a finished batch has zero calls.
+   For `terminus-2`, also inspect the trajectory for setup-time
+   `terminus2_error` events before debugging provider credentials; upstream
+   Terminal-Bench starts a tmux/asciinema recording session before the first
+   model call, so missing sandbox dependencies can produce `no_calls_invalid`.
    For opencode/subprocess timeout investigation, confirm a worker watchdog
    hard deadline or control-plane stale-running reclaim produces
    `state=failed`, `failure_reason=agent_timeout`, and a failure message that
