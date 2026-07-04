@@ -57,6 +57,8 @@ def _print_text(resources: dict[str, Any]) -> None:
     total = int(aggregate.get("current_active_slots", aggregate.get("total_slots", 0)))
     running = int(aggregate.get("running_tasks", 0))
     starting = int(aggregate.get("starting_tasks", 0))
+    pre_start_fresh = int(aggregate.get("pre_start_heartbeat_fresh_tasks", 0))
+    oldest_starting_age = aggregate.get("oldest_starting_task_age_sec")
     queued = int(aggregate.get("queued_tasks", 0))
     active_workers = int(aggregate.get("active_workers", 0))
     draining_workers = int(aggregate.get("draining_workers", 0))
@@ -73,6 +75,11 @@ def _print_text(resources: dict[str, Any]) -> None:
 
     print(f"Concurrent tasks: {occupied} / {total}")
     print(f"Running: {running} · Starting: {starting} · Queued: {queued}")
+    print(
+        "Pre-start heartbeats: "
+        f"{pre_start_fresh} fresh · oldest starting age "
+        f"{oldest_starting_age if oldest_starting_age is not None else '-'}s",
+    )
     print(f"Workers: {active_workers} active · Free slots: {free}")
     print(
         f"Capacity: active {total} · pending {pending} · "
@@ -90,7 +97,7 @@ def _print_text(resources: dict[str, Any]) -> None:
     print(
         "  Pool                Backend  Arch    Actuator  Active  Pending  "
         "Desired  Max  Draining  Idle       Running  Starting  Queued  Workers  "
-        "Decision       Reason                Blocked"
+        "PreStart  OldestStart  Decision       Reason                Blocked"
     )
     for pool in pools:
         decision = pool.get("last_autoscaler_decision") or "-"
@@ -127,6 +134,8 @@ def _print_text(resources: dict[str, Any]) -> None:
             f"{int(pool.get('starting_tasks', 0)):<9} "
             f"{int(pool.get('queued_tasks', 0)):<7} "
             f"{int(pool.get('active_workers', 0)):<7} "
+            f"{int(pool.get('pre_start_heartbeat_fresh_tasks', 0)):<8} "
+            f"{pool.get('oldest_starting_task_age_sec') or '-'!s:<12} "
             f"{decision!s:<14} "
             f"{reason!s:<21} "
             f"{blocked_text}",

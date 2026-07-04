@@ -171,8 +171,8 @@ default     = 30
 [service_config.claimed_without_start_expiry_sec]
 used_by     = ["control-plane"]
 python_type = "int"
-default     = 300
-description = "Seconds before the crash detector reclaims a trial stuck in claimed with no started_at while the owning worker is still fresh."
+default     = 3600
+description = "Seconds before the crash detector reclaims a trial stuck in claimed with no started_at while the owning worker is still fresh. The crash detector measures from pre_start_heartbeat_at when upgraded workers report setup/cache progress, falling back to claimed_at for older workers. Default is sized for GB10/source-useful cold setup while preserving abandoned-claim recovery."
 
 [service_config.stale_running_trial_reclaim_enabled]
 used_by     = ["control-plane", "loom-service"]
@@ -747,6 +747,12 @@ description = "Optional idle window after which a worker exits successfully when
 used_by     = ["worker"]
 python_type = "float"
 default     = 5.0
+
+[service_config.pre_start_heartbeat_interval_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 60.0
+description = "Interval for worker trial-specific pre-start progress heartbeats while claimed work is still in setup/materialization/task-image/layered-cache preparation and has not yet set started_at. Keep this below LOOM_CP_CLAIMED_WITHOUT_START_EXPIRY_SEC."
 
 [service_config.trajectory_cache_dir]
 used_by     = ["worker"]

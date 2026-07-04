@@ -61,6 +61,7 @@ UPDATE trials t
    SET state = 'claimed',
        worker_id = :worker_id,
        claimed_at = NOW(),
+       pre_start_heartbeat_at = NULL,
        failure_reason = NULL,
        failure_message = NULL,
        attempt_count = attempt_count + 1

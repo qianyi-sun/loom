@@ -464,6 +464,71 @@ async def test_reclaim_stale_claimed_without_started_at_even_when_worker_is_fres
     await engine.dispose()
 
 
+async def test_recent_pre_start_heartbeat_keeps_fresh_worker_claim(
+    postgres_url: str,
+):
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    team_id = uuid4()
+    worker_id = uuid4()
+    trial_id = uuid4()
+    task_id = f"t-{trial_id.hex}"
+    now = datetime.now(UTC)
+
+    async with session_factory() as s:
+        await s.execute(insert(Team).values(id=team_id, name=f"prestart-{team_id}"))
+        await s.execute(
+            insert(Worker).values(
+                id=worker_id,
+                hostname="fresh-prestart",
+                version="v",
+                capabilities=[],
+                registered_at=now,
+                last_seen_at=now,
+                status="active",
+            )
+        )
+        await s.execute(insert(Task).values(id=task_id, checksum="0" * 64, config={}))
+        await s.execute(
+            insert(Trial).values(
+                id=trial_id,
+                team_id=team_id,
+                task_id=task_id,
+                config={},
+                requires_caps={},
+                state="claimed",
+                worker_id=worker_id,
+                claimed_at=now - timedelta(seconds=1800),
+                started_at=None,
+                pre_start_heartbeat_at=now - timedelta(seconds=60),
+            )
+        )
+        await s.commit()
+
+    async with session_factory() as s:
+        n = await reclaim_expired_workers(
+            s,
+            expiry_sec=15,
+            claimed_without_start_expiry_sec=300,
+            now=now,
+        )
+        await s.commit()
+    assert n == 0
+
+    async with session_factory() as s:
+        row = (
+            await s.execute(
+                select(Trial).where(Trial.id == trial_id),
+            )
+        ).scalar_one()
+        assert row.state == "claimed"
+        assert row.worker_id == worker_id
+        assert row.started_at is None
+        assert row.pre_start_heartbeat_at == now - timedelta(seconds=60)
+
+    await engine.dispose()
+
+
 async def test_final_pre_start_reclaim_keeps_retry_exhausted_diagnostic(
     postgres_url: str,
 ):

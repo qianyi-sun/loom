@@ -39,6 +39,21 @@
     "default": "604800",
     "required": false
   },
+  "batch_budget_estimate_input_tokens_per_call": {
+    "annotation": "<class 'int'>",
+    "default": "1000000",
+    "required": false
+  },
+  "batch_budget_estimate_llm_calls_per_trial": {
+    "annotation": "<class 'int'>",
+    "default": "1",
+    "required": false
+  },
+  "batch_budget_estimate_output_tokens_per_call": {
+    "annotation": "<class 'int'>",
+    "default": "0",
+    "required": false
+  },
   "batch_runner_batch_size": {
     "annotation": "<class 'int'>",
     "default": "50",
@@ -89,6 +104,11 @@
     "default": "'http://loom-llm-gateway:9100'",
     "required": false
   },
+  "k8s_worker_enabled": {
+    "annotation": "<class 'bool'>",
+    "default": "True",
+    "required": false
+  },
   "local_servers_json": {
     "annotation": "<class 'str'>",
     "default": "'{}'",
@@ -129,6 +149,26 @@
     "default": "3600",
     "required": false
   },
+  "stale_running_trial_grace_sec": {
+    "annotation": "<class 'float'>",
+    "default": "900.0",
+    "required": false
+  },
+  "stale_running_trial_reclaim_enabled": {
+    "annotation": "<class 'bool'>",
+    "default": "True",
+    "required": false
+  },
+  "stale_running_trial_silence_sec": {
+    "annotation": "<class 'float'>",
+    "default": "900.0",
+    "required": false
+  },
+  "stale_running_trial_timeout_multiplier": {
+    "annotation": "<class 'float'>",
+    "default": "3.0",
+    "required": false
+  },
   "storage_auth_kind": {
     "annotation": "<class 'str'>",
     "default": "'static_keys'",
@@ -139,6 +179,81 @@
     "default": "'minio'",
     "required": false
   },
+  "taskset_gc_poll_interval_sec": {
+    "annotation": "<class 'int'>",
+    "default": "3600",
+    "required": false
+  },
+  "taskset_gc_retention_days": {
+    "annotation": "<class 'int'>",
+    "default": "7",
+    "required": false
+  },
+  "taskset_materializer_batch_size": {
+    "annotation": "<class 'int'>",
+    "default": "1",
+    "required": false
+  },
+  "taskset_materializer_claim_ttl_sec": {
+    "annotation": "<class 'int'>",
+    "default": "600",
+    "required": false
+  },
+  "taskset_materializer_poll_interval_sec": {
+    "annotation": "<class 'int'>",
+    "default": "5",
+    "required": false
+  },
+  "taskset_materializer_transform_cpu_limit_sec": {
+    "annotation": "<class 'int'>",
+    "default": "10",
+    "required": false
+  },
+  "taskset_materializer_transform_memory_limit_mb": {
+    "annotation": "<class 'int'>",
+    "default": "256",
+    "required": false
+  },
+  "taskset_materializer_transform_network_isolated": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
+  "taskset_materializer_transform_wall_timeout_sec": {
+    "annotation": "<class 'int'>",
+    "default": "30",
+    "required": false
+  },
+  "taskset_materializer_transforms_enabled": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
+  "taskset_materializer_upstream_cache_root": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/tmp/loom-taskset-upstream')",
+    "required": false
+  },
+  "taskset_quota_max_bundle_bytes": {
+    "annotation": "<class 'int'>",
+    "default": "5368709120",
+    "required": false
+  },
+  "taskset_quota_max_count_per_team": {
+    "annotation": "<class 'int'>",
+    "default": "50",
+    "required": false
+  },
+  "taskset_quota_max_storage_bytes_per_team": {
+    "annotation": "<class 'int'>",
+    "default": "21474836480",
+    "required": false
+  },
+  "team_quota_max_attempts_ceiling_default": {
+    "annotation": "<class 'int'>",
+    "default": "3",
+    "required": false
+  },
   "team_registration_open": {
     "annotation": "<class 'bool'>",
     "default": "False",
@@ -147,6 +262,41 @@
   "trajectories_bucket": {
     "annotation": "<class 'str'>",
     "default": "'trajectories'",
+    "required": false
+  },
+  "trial_retry_default_backoff_base_sec": {
+    "annotation": "<class 'float'>",
+    "default": "30.0",
+    "required": false
+  },
+  "trial_retry_default_backoff_jitter": {
+    "annotation": "<class 'float'>",
+    "default": "0.2",
+    "required": false
+  },
+  "trial_retry_default_backoff_max_sec": {
+    "annotation": "<class 'float'>",
+    "default": "600.0",
+    "required": false
+  },
+  "trial_retry_default_backoff_multiplier": {
+    "annotation": "<class 'float'>",
+    "default": "2.0",
+    "required": false
+  },
+  "trial_retry_default_max_attempts": {
+    "annotation": "<class 'int'>",
+    "default": "3",
+    "required": false
+  },
+  "trial_retry_default_retry_on": {
+    "annotation": "list[str]",
+    "default": "['gateway_error', 'provider_transport_disconnect']",
+    "required": false
+  },
+  "worker_heartbeat_expiry_sec": {
+    "annotation": "<class 'int'>",
+    "default": "120",
     "required": false
   }
 }

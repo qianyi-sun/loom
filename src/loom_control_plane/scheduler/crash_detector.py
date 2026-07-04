@@ -38,6 +38,7 @@ UPDATE trials
                'claimed_without_started_reclaimed trial_id=', id::text,
                ' worker_id=', worker_id::text,
                ' claimed_at=', claimed_at::text,
+               ' pre_start_heartbeat_at=', COALESCE(pre_start_heartbeat_at::text, 'NULL'),
                ' expiry_sec=', (:expiry_sec)::int::text,
                ' started_at=NULL'
            )
@@ -61,6 +62,7 @@ UPDATE trials
            'claimed_without_started_reclaimed trial_id=', id::text,
            ' worker_id=', worker_id::text,
            ' claimed_at=', claimed_at::text,
+           ' pre_start_heartbeat_at=', COALESCE(pre_start_heartbeat_at::text, 'NULL'),
            ' expiry_sec=', (:expiry_sec)::int::text,
            ' started_at=NULL'
        ),
@@ -68,7 +70,7 @@ UPDATE trials
  WHERE state = 'claimed'
    AND started_at IS NULL
    AND claimed_at IS NOT NULL
-   AND claimed_at < NOW() - INTERVAL '1 second' * (:expiry_sec)::int
+   AND COALESCE(pre_start_heartbeat_at, claimed_at) < NOW() - INTERVAL '1 second' * (:expiry_sec)::int
  RETURNING id;
 """)
 

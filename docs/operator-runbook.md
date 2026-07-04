@@ -1227,7 +1227,8 @@ increase queued connections without removing the token-row write hotspot.
 | `db_pool_size` | `20` | Control Plane SQLAlchemy DB connection pool size. Size with concurrent worker heartbeats, claims, state patches, and trajectory index writes. |
 | `db_max_overflow` | `40` | Control Plane SQLAlchemy overflow connections above `db_pool_size` for short writeback bursts. |
 | `db_pool_timeout_sec` | `30.0` | Timeout while a Control Plane request waits for a DB connection from the pool. Pool timeouts show up as HTTP 500s on claim/state/writeback paths and can leave worker trials stuck before `running`. |
-| `claimed_without_start_expiry_sec` | `300` | Control Plane crash-detector threshold for reclaiming a trial stuck in `claimed` with `started_at IS NULL`, even when the owning worker heartbeat is still fresh. Keep above normal claim-to-start latency, including task materialization and image/cache setup. |
+| `claimed_without_start_expiry_sec` | `3600` | Control Plane crash-detector threshold for reclaiming a trial stuck in `claimed` with `started_at IS NULL`, even when the owning worker heartbeat is still fresh. The crash detector ages from `pre_start_heartbeat_at` when upgraded workers are still reporting setup/cache progress, falling back to `claimed_at` for older workers. Keep above normal claim-to-start latency, including task materialization and image/cache setup. |
+| `pre_start_heartbeat_interval_sec` | `60.0` | Worker cadence for trial-specific pre-start progress heartbeats while a claimed trial is still in task bundle lookup, materialization, task-image build, or layered trial-cache build. Keep this comfortably below `claimed_without_start_expiry_sec`. |
 | `trial_cache_registry_repo` | `""` (unset) | Registry path to share layered images across workers (Docker Hub / GHCR / ECR / self-hosted). When unset, each worker caches locally. |
 | `trial_cache_registry_pull_timeout_sec` | `15.0` | Per-attempt timeout for the registry pull. |
 | `trial_cache_base_image_pull_timeout_sec` | `1800.0` | Per-attempt timeout for the underlying task-image pull (SWE-Bench instance images are 1–2 GB). |
@@ -1334,11 +1335,15 @@ but each worker pays the build cost once).
   when the source is reachable and legitimately slow, and keep it coordinated
   with the claimed-without-start reclaim policy tracked by #193; otherwise a
   healthy worker may still lose a long setup claim before it can mark the trial
-  running. When the crash detector reclaims a pre-start claim, it records
+  running. Upgraded workers report `pre_start_heartbeat_at` while setup/cache
+  work is active, and the crash detector measures the pre-start reclaim window
+  from that timestamp instead of the original claim time. When the crash
+  detector reclaims a pre-start claim, it records
   `failure_reason=worker_lost_claim` and a `claimed_without_started_reclaimed`
-  message with the prior worker id, claim time, expiry window, and
-  `started_at=NULL`; if the retry budget is already exhausted, the terminal
-  `retry_exhausted` row preserves that message for attribution.
+  message with the prior worker id, claim time, pre-start heartbeat time,
+  expiry window, and `started_at=NULL`; if the retry budget is already
+  exhausted, the terminal `retry_exhausted` row preserves that message for
+  attribution.
 - **Trial fails with `TrialCacheError: failed to acquire build slot`**
   → check the `active_trial_cache_builds` table for a stuck row past
   its `expires_at`; the next claimant will steal it on its own, but
@@ -2439,12 +2444,18 @@ following bounds:
   the prior attempt.
 - **Claimed without start:** the crash detector also requeues stale
   `claimed` trials with `started_at IS NULL` after
-  `claimed_without_start_expiry_sec` (default 300s), even if the worker
-  heartbeat is fresh. This covers setup/materialization paths that claim a
-  trial but never reach the worker's started writeback. Reclaim records
-  `worker_lost_claim` plus a `claimed_without_started_reclaimed` diagnostic
-  before clearing `worker_id`; a subsequent claim clears stale failure fields,
-  while terminal retry exhaustion preserves the last reclaim message.
+  `claimed_without_start_expiry_sec` (default 3600s), even if the worker
+  heartbeat is fresh. Upgraded workers refresh `pre_start_heartbeat_at` during
+  setup/materialization/task-image/layered-cache work, so legitimate local
+  pre-start queues age from recent progress instead of the original
+  `claimed_at`. Rows with no pre-start heartbeat still age from `claimed_at`
+  for abandoned-claim recovery and compatibility with older workers. Reclaim
+  records `worker_lost_claim` plus a `claimed_without_started_reclaimed`
+  diagnostic before clearing `worker_id`; a subsequent claim clears stale
+  failure fields, while terminal retry exhaustion preserves the last reclaim
+  message. During large cold-start batches, inspect `loom resources status
+  --json` for `pre_start_heartbeat_fresh_tasks` and
+  `oldest_starting_task_age_sec` before raising the TTL further.
 
 **Operator smoke for the in-flight-trial-across-restart path:**
 

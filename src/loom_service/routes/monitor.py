@@ -80,6 +80,8 @@ def _resource_trials_stmt() -> Any:
             Trial.state,
             Trial.worker_id,
             Trial.requires_caps,
+            Trial.claimed_at,
+            Trial.pre_start_heartbeat_at,
         )
         .select_from(Trial)
         .where(Trial.state.in_(("queued", "claimed", "running")))

@@ -114,6 +114,8 @@ class _BatchTrialProjection:
     failure_reason: str | None
     failure_message: str | None
     result: dict[str, Any] | None
+    claimed_at: datetime | None
+    pre_start_heartbeat_at: datetime | None
     started_at: datetime | None
     finished_at: datetime | None
     sample_idx: int
@@ -1154,6 +1156,8 @@ async def _trial_projections_for_batch_ids(
                 Trial.failure_reason,
                 Trial.failure_message,
                 Trial.result,
+                Trial.claimed_at,
+                Trial.pre_start_heartbeat_at,
                 Trial.started_at,
                 Trial.finished_at,
                 Trial.sample_idx,
@@ -1175,6 +1179,8 @@ async def _trial_projections_for_batch_ids(
             failure_reason=row.failure_reason,
             failure_message=row.failure_message,
             result=row.result,
+            claimed_at=row.claimed_at,
+            pre_start_heartbeat_at=row.pre_start_heartbeat_at,
             started_at=row.started_at,
             finished_at=row.finished_at,
             sample_idx=row.sample_idx,

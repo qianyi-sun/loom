@@ -124,6 +124,15 @@ Evidence date: 2026-06-25.
   `LOOM_WORKER_MAX_CONCURRENT=10`.
 - Every host advertises `LOOM_WORKER_POOL_NAME=gb10-arm64`.
 - Total configured GB10 trial capacity is therefore `15 * 10 = 150` slots.
+- During cold source-useful/Terminus setup, a worker may hold all 10 local
+  slots while `LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT=1` serializes
+  layered trial-cache Docker builds before `started_at` is set. Upgraded
+  workers refresh `pre_start_heartbeat_at` every
+  `LOOM_WORKER_PRE_START_HEARTBEAT_INTERVAL_SEC` seconds so the Control Plane
+  does not reclaim legitimate local pre-start setup as a dead claim. The
+  Control Plane default `LOOM_CP_CLAIMED_WITHOUT_START_EXPIRY_SEC=3600` is a
+  fallback window; do not rely on live manual `kubectl set env` patches as the
+  durable rollout mechanism.
 - Normal capacity policy uses `actuator=slurm`,
   `actuator_config.partition=gb10`, `actuator_config.cpu_arch=arm64`,
   `requested_concurrency=10`, `max_jobs=15`, and `max_slots=150`.
@@ -588,3 +597,8 @@ decision state before starting another sweep.
 If instability happens during cold layered-image setup, keep
 `LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT=1` so each host serializes
 trial-cache Docker builds even when normal warm-trial concurrency is higher.
+Use `loom resources status --json` to inspect
+`pre_start_heartbeat_fresh_tasks` and `oldest_starting_task_age_sec` before
+changing `LOOM_CP_CLAIMED_WITHOUT_START_EXPIRY_SEC`; fresh pre-start
+heartbeats mean the worker-local queue is still alive, while no heartbeat
+means the row still ages from `claimed_at` and should be eligible for reclaim.

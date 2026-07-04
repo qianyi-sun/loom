@@ -602,6 +602,14 @@ async def _spawn_trial(
     async def _setup_run_and_cleanup() -> None:
         task_dir: Path | None = None
         trial_config: TrialConfig | None = None
+        pre_start_heartbeat_task = asyncio.create_task(
+            _run_pre_start_heartbeat(
+                cp_client=cp_client,
+                trial_id=trial_id,
+                worker_id=worker_id,
+                interval_sec=settings.pre_start_heartbeat_interval_sec,
+            )
+        )
         try:
             trial_config = TrialConfig.model_validate(payload.get("config") or {})
             bundle = await cp_client.get_task_bundle(str(payload["task_id"]))
@@ -665,6 +673,12 @@ async def _spawn_trial(
                 attempt_count=attempt_count,
             )
             return
+        finally:
+            pre_start_heartbeat_task.cancel()
+            try:
+                await pre_start_heartbeat_task
+            except asyncio.CancelledError:
+                pass
 
         async def _state_patch(
             state: str,
@@ -836,6 +850,40 @@ async def _spawn_trial(
             shutil.rmtree(task_dir, ignore_errors=True)
 
     await pool.spawn(_setup_run_and_cleanup())
+
+
+async def _run_pre_start_heartbeat(
+    *,
+    cp_client: HttpControlPlaneClient,
+    trial_id: UUID,
+    worker_id: UUID,
+    interval_sec: float,
+) -> None:
+    interval = max(0.001, float(interval_sec))
+    while True:
+        try:
+            accepted = await cp_client.pre_start_heartbeat(
+                trial_id=trial_id,
+                worker_id=worker_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "pre_start_heartbeat_error trial_id=%s worker_id=%s err=%s",
+                trial_id,
+                worker_id,
+                exc,
+            )
+        else:
+            if not accepted:
+                logger.warning(
+                    "pre_start_heartbeat_fenced trial_id=%s worker_id=%s",
+                    trial_id,
+                    worker_id,
+                )
+                return
+        await asyncio.sleep(interval)
 
 
 def _verifier_factory(task_config: TaskConfig) -> Callable[[], Verifier]:
