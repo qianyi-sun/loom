@@ -79,7 +79,7 @@ def test_install_script_pins_current_public_loom_launcher_ref() -> None:
     # This SHA must be reachable from qianyi-sun/loom so fresh GB10
     # agent-layer builds can install loom-launcher without relying on
     # a warm local cache.
-    assert LOOM_LAUNCHER_REF == "4ce8225bf67e88d12dd86e4e1ab3f009f9d4eee2"
+    assert LOOM_LAUNCHER_REF == "daf1fe46ce4146a21f394fa01f7d4f82c4127a20"
     assert f"qianyi-sun/loom.git@{LOOM_LAUNCHER_REF}" in LOOM_LAUNCHER_REQUIREMENT
 
 
