@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import urllib.error
 from typing import Any
 
 import pytest
 
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.evidence import EvidenceDirectory
-from loom_cli.rollout.steps.s13_smoke import SmokeStep
+from loom_cli.rollout.steps.s13_smoke import SmokeStep, _trajectory_head_request
 
 
 def test_smoke_posts_current_trial_config_contract_with_user_owned_token(
@@ -83,6 +84,116 @@ def test_smoke_posts_current_trial_config_contract_with_user_owned_token(
     assert json.loads(step_dir.artifact_path("05-submit.json").read_text()) == {
         "trial_id": "trial-1",
     }
+
+
+def test_smoke_uses_token_when_heading_platform_trajectory_download_url(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(13, "smoke")
+
+    monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "smoke-user-token")
+    monkeypatch.setenv("LOOM_SMOKE_TASK_ID", "terminal-bench-2/hello-world")
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s13_smoke._ingress_base",
+        lambda _ctx: "https://loom.test",
+    )
+
+    def fake_get(url: str, *, token: str | None = None) -> tuple[int, bytes]:
+        assert token == "smoke-user-token"
+        if url.endswith("/api/v1/health"):
+            return 200, b'{"status":"ok"}'
+        if url.endswith("/api/v1/auth/whoami"):
+            return (
+                200,
+                b'{"credential_type":"user_owned_api_token",'
+                b'"scopes":["read:own","submit"]}',
+            )
+        if url.endswith("/api/v1/benchmarks"):
+            return 200, b'{"items":[{"id":"terminal-bench-2"}]}'
+        if url.endswith("/api/v1/tasks/terminal-bench-2/hello-world"):
+            return (
+                200,
+                b'{"id":"terminal-bench-2/hello-world",'
+                b'"benchmark_id":"terminal-bench-2"}',
+            )
+        if url.endswith("/api/v1/trials/trial-1"):
+            return (
+                200,
+                b'{"id":"trial-1","state":"succeeded","aggregate_reward":1.0,'
+                b'"trajectory_url":"http://loom.test/api/v1/trials/trial-1/'
+                b'trajectory/download"}',
+            )
+        if url.endswith("/api/v1/usage"):
+            return 200, b'{"items":[]}'
+        raise AssertionError(f"unexpected GET {url}")
+
+    def fake_post(
+        url: str,
+        payload: dict[str, object],
+        *,
+        token: str | None = None,
+    ) -> tuple[int, bytes]:
+        assert url.endswith("/api/v1/trials")
+        assert token == "smoke-user-token"
+        return 201, b'{"trial_id":"trial-1"}'
+
+    class _HeadResponse:
+        status = 200
+
+        def __init__(self) -> None:
+            self.headers = {"Content-Length": "123"}
+
+        def __enter__(self) -> _HeadResponse:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    def fake_urlopen(request: Any, timeout: float) -> _HeadResponse:
+        assert timeout == 15
+        assert request.get_method() == "HEAD"
+        assert request.full_url == (
+            "https://loom.test/api/v1/trials/trial-1/trajectory/download"
+        )
+        if request.get_header("Authorization") != "Bearer smoke-user-token":
+            raise urllib.error.HTTPError(
+                request.full_url,
+                401,
+                "Unauthorized",
+                hdrs=None,
+                fp=None,
+            )
+        return _HeadResponse()
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s13_smoke._http_get", fake_get)
+    monkeypatch.setattr("loom_cli.rollout.steps.s13_smoke._http_post", fake_post)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s13_smoke.urllib.request.urlopen",
+        fake_urlopen,
+    )
+
+    result = SmokeStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    assert step_dir.artifact_path("07-trajectory-head.txt").read_text() == (
+        "status=200\ncontent-length=123\n"
+    )
+
+
+def test_trajectory_head_request_keeps_external_signed_url_anonymous() -> None:
+    req = _trajectory_head_request(
+        "https://minio.internal/traj?X-Amz-Signature=abc",
+        ingress_base="https://loom.test",
+        token="smoke-user-token",
+    )
+
+    assert req.full_url == "https://minio.internal/traj?X-Amz-Signature=abc"
+    assert req.get_method() == "HEAD"
+    assert req.get_header("Authorization") is None
 
 
 def test_current_gb10_smoke_defaults_to_gb10_compatible_task_and_pool(

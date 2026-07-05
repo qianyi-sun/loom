@@ -11,8 +11,8 @@ Concrete smoke:
    with a deterministic idempotency key derived from the image tag.
 6. Poll ``/api/v1/trials/{id}`` until terminal (cap 5 minutes). Assert
    ``state=succeeded`` and ``aggregate_reward`` is present.
-7. Fetch the trajectory presigned URL and HEAD to confirm the trajectory
-   blob is in MinIO.
+7. Fetch the trajectory download URL and HEAD to confirm the trajectory
+   blob is reachable through the public API.
 8. ``GET /api/v1/usage?since=<start>`` → assert the smoke trial appears.
 
 Every step above writes its response JSON as a separate artifact so an
@@ -113,6 +113,43 @@ def _http_post(
             return resp.status, resp.read()
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read() or b""
+
+
+def _same_host(left: urllib.parse.ParseResult, right: urllib.parse.ParseResult) -> bool:
+    left_host = (left.hostname or "").lower()
+    right_host = (right.hostname or "").lower()
+    return bool(left_host and right_host and left_host == right_host)
+
+
+def _trajectory_head_request(
+    url: str,
+    *,
+    ingress_base: str,
+    token: str,
+) -> urllib.request.Request:
+    parsed_url = urllib.parse.urlparse(url)
+    parsed_base = urllib.parse.urlparse(ingress_base)
+    needs_platform_auth = _same_host(parsed_url, parsed_base) and (
+        parsed_url.path.startswith("/api/")
+    )
+    head_url = url
+    if needs_platform_auth:
+        # Service download URLs are authenticated API routes. Normalize back to
+        # the operator-declared HTTPS ingress before attaching the smoke token.
+        head_url = urllib.parse.urlunparse(
+            (
+                parsed_base.scheme,
+                parsed_base.netloc,
+                parsed_url.path,
+                parsed_url.params,
+                parsed_url.query,
+                parsed_url.fragment,
+            ),
+        )
+    req = urllib.request.Request(head_url, method="HEAD")
+    if needs_platform_auth:
+        req.add_header("Authorization", f"Bearer {token}")
+    return req
 
 
 def _idempotency_key(ctx: RolloutContext) -> str:
@@ -292,11 +329,15 @@ class SmokeStep(BaseStep):
                 error=f"trial {trial_id} succeeded but has no aggregate_reward",
             )
 
-        # 7. trajectory presign — HEAD to confirm storage
+        # 7. trajectory download URL — HEAD to confirm storage reachability
         traj_url_raw = terminal_trial.get("trajectory_url")
         if isinstance(traj_url_raw, str) and traj_url_raw:
             try:
-                req = urllib.request.Request(traj_url_raw, method="HEAD")
+                req = _trajectory_head_request(
+                    traj_url_raw,
+                    ingress_base=base,
+                    token=token,
+                )
                 with urllib.request.urlopen(req, timeout=15) as resp:
                     step_dir.artifact_path("07-trajectory-head.txt").write_text(
                         f"status={resp.status}\n"
