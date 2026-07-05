@@ -129,7 +129,10 @@ class SmokeStep(BaseStep):
         # 3. submit a trivial trial
         payload = {
             "task_id": "hello/hello-world",
-            "agent": "oracle",
+            "config": {
+                "agent_name": "oracle",
+                "agent_model": None,
+            },
             "idempotency_key": _idempotency_key(ctx),
         }
         status, body = _http_post(
