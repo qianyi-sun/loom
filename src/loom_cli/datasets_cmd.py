@@ -358,6 +358,16 @@ def _add_publish_local_args(p: argparse.ArgumentParser) -> None:
         default=None,
         help="Optional relative task-bundle subdir for direct-layout PATHs.",
     )
+    p.add_argument(
+        "--compat-flatten-environment",
+        action="store_true",
+        help=(
+            "Explicit operator compatibility override: stage-copy files from "
+            "environment/ to the bundle root before compatibility preflight. "
+            "Use only with retained evidence for legacy Source Useful-style "
+            "bundles; the default is diagnostic fail-fast."
+        ),
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1038,6 +1048,7 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
             license_spdx=args.license_spdx,
             source_subdir=args.source_subdir,
             imported_by=args.imported_by,
+            compat_flatten_environment=args.compat_flatten_environment,
         ))
     except LocalBenchmarkValidationError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1050,6 +1061,7 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
         f"updated={stats.updated} "
         f"unchanged={stats.unchanged} "
         f"uploaded_objects={stats.uploaded_objects} "
+        f"compat_flattened_files={stats.compat_flattened_files} "
         f"source={stats.source_prefix}",
     )
     return 0

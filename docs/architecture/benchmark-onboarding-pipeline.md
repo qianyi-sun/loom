@@ -401,7 +401,7 @@ is missing so `task.id` cannot be filled), validation surfaces the Loom field
 name so the operator sees a consistent error surface regardless of source
 schema.
 
-### `environment/` subtree flattening (#369)
+### `environment/` subtree compatibility (#369)
 
 Some user bundles (notably the Source Useful set) store auxiliary files
 like `inventory.csv` or `setup_repo.sh` under `environment/` in the task
@@ -410,14 +410,23 @@ those files as `/app/<name>` at build time. Without preprocessing, the
 files land at `/app/environment/<name>` and `RUN chmod`, `RUN
 ./setup_repo.sh`, etc. fail.
 
-`publish-local` stages each bundle into a scratch directory and mirrors
-every file under `environment/` up to the bundle root before uploading.
-Top-level files always win on name collision, and the `environment/`
-tree is preserved so Dockerfiles that DO expect the nested layout still
-work. The operator's on-disk bundle is never modified.
+By default, `publish-local` runs the task-bundle compatibility preflight
+before upload and rejects this mismatch with
+`TASK_COMPAT_APP_PATH_MISSING`. That keeps the user-owned source bundle
+as the source of truth and prevents Loom from silently repairing a
+Dockerfile/build-context contract drift during catalog onboarding.
 
-The DB checksum is computed on the staged (post-flatten) tree so the
-row matches the S3 content the worker will materialize.
+For a production bridge on a legacy Source Useful-style bundle, an
+operator may pass `--compat-flatten-environment`. That explicit override
+stages each bundle in a scratch directory, mirrors files under
+`environment/` up to the bundle root, then runs compatibility preflight
+on the staged tree before uploading. Top-level files win on name
+collision, the `environment/` tree is preserved, and command output
+includes `compat_flattened_files=<N>` so the override can be retained in
+rollout evidence. The operator's on-disk bundle is never modified.
+
+When the override is used, the DB checksum is computed on the staged
+tree so the row matches the S3 content the worker will materialize.
 For code benchmarks whose reference answer already lives in
 `solution/solution.py`, that script can be a no-op and the verifier
 tests provide the actual pass/fail signal.

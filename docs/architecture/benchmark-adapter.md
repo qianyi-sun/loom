@@ -583,7 +583,10 @@ benchmark Dockerfiles should know:
   task-bundle compatibility rules. Hard issues fail with structured diagnostics
   such as `TASK_COMPAT_APP_PATH_MISSING` or `TASK_COMPAT_DNS_MUTATION`; Loom
   does not patch Dockerfiles, flatten `environment/`, restore DNS files, or
-  run hidden bridges to make a bad bundle pass.
+  run hidden bridges to make a bad bundle pass. The only catalog exception is
+  an explicit operator `publish-local --compat-flatten-environment` bridge for
+  legacy Source Useful-style bundles; its command output includes
+  `compat_flattened_files=<N>` so rollout evidence records the override.
 - **Network access during build is not guaranteed.** Some worker
   deployments build behind a restrictive egress policy; benchmark
   Dockerfiles that need to `pip install` / `npm install` from the
