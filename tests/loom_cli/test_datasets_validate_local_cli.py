@@ -186,3 +186,54 @@ def test_publish_local_missing_runtime_config_errors(
     assert "publish-local requires" in err
     assert "--db-url / LOOM_DB_URL / LOOM_SVC_DB_URL" in err
     assert "--minio-endpoint / LOOM_MINIO_ENDPOINT / LOOM_SVC_MINIO_ENDPOINT" in err
+
+
+def test_publish_local_explicit_flatten_override_is_visible_in_output(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "team-evals"
+    root.mkdir()
+
+    class _Stats:
+        benchmark_id = "team-evals"
+        task_count = 1
+        inserted = 1
+        updated = 0
+        unchanged = 0
+        uploaded_objects = 4
+        compat_flattened_files = 2
+        source_prefix = "s3://loom-benchmarks/team-evals/"
+
+    async def fake_publish_local_benchmark(*args, **kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs["compat_flatten_environment"] is True
+        return _Stats()
+
+    class _Store:
+        def __init__(self, **kwargs):  # type: ignore[no-untyped-def]
+            pass
+
+    monkeypatch.setattr(
+        "loom_cli.local_benchmark_publish.publish_local_benchmark",
+        fake_publish_local_benchmark,
+    )
+    monkeypatch.setattr("loom.trajectory.storage.MinioObjectStore", _Store)
+
+    rc = datasets_cmd.dispatch([
+        "publish-local",
+        str(root),
+        "--db-url",
+        "postgresql://loom/loom",
+        "--minio-endpoint",
+        "http://minio:9000",
+        "--minio-access-key",
+        "access",
+        "--minio-secret-key",
+        "secret",
+        "--compat-flatten-environment",
+    ])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "compat_flattened_files=2" in out
