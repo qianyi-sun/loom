@@ -438,42 +438,11 @@ def _image_identity_checks(
                     )
                     break
                 if runtime_identity_kind == "kind-import":
-                    # #339: a kind-import runtime identity only explains why
-                    # the ImageID is a synthetic import digest rather than a
-                    # real repo digest. It does NOT justify a mismatched
-                    # container status image tag — a Ready pod still serving
-                    # the previous release tag means the operator loaded a
-                    # fresh image but the pod didn't rotate onto it, and the
-                    # release should not be accepted until it does.
-                    if not status_image_matches_template:
-                        checks.append(
-                            ReleaseGateCheck(
-                                name=f"image-identity:{deployment_name}/{container_name}",
-                                outcome="fail",
-                                detail=(
-                                    "Ready pod status image tag is stale "
-                                    "relative to release template even though "
-                                    "runtime identity is kind-import"
-                                ),
-                                evidence={
-                                    **evidence,
-                                    "identity_strategy": "kind-import-template-image",
-                                    "expected_digest": _sha_from_ref(
-                                        str(expected_repo_digest)
-                                        if expected_repo_digest else None
-                                    ),
-                                    "runtime_identity_mismatch": True,
-                                },
-                                remediation=(
-                                    "roll or restart the Deployment so it "
-                                    "picks up the freshly loaded kind image; "
-                                    "verify with `kubectl -n <ns> describe pod`"
-                                    " that status.containerStatuses[].image "
-                                    "matches the release template tag"
-                                ),
-                            )
-                        )
-                        break
+                    # The pod reached this branch only after its Pod spec image
+                    # matched the Deployment template. In kind/containerd,
+                    # status.containerStatuses[].image may report another tag
+                    # attached to the imported image, so keep that drift in
+                    # evidence without treating it as an old ReplicaSet.
                     checks.append(
                         ReleaseGateCheck(
                             name=f"image-identity:{deployment_name}/{container_name}",

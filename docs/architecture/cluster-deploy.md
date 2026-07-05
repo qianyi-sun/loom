@@ -683,7 +683,9 @@ pods must match the manifest digest or image ID. For kind-loaded images whose
 runtime identity is reported as `docker.io/library/import-YYYY-MM-DD@sha256:...`,
 the gate records the import identity and accepts the pod only when its spec and
 the live Deployment template image still match the release manifest; it does
-not trust a stale `containerStatuses.image` tag by itself. Managed Deployments
+not trust a stale `containerStatuses.image` tag by itself, and it treats that
+status tag as display evidence rather than the target-generation source of
+truth. Managed Deployments
 with `replicas=0` record zero-replica template-image evidence instead of
 requiring a Ready pod. On success, `up` has also rejected managed Deployment
 pods stuck in blocking
