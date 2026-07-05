@@ -171,11 +171,19 @@ group, and group ratio; unresolved non-facade hashes remain visible with
 - `breakdown_by=team|user|provider_connection|model|benchmark|batch|status|pricing_mode`.
 - `include_batches=true` for per-batch drilldown when not using a
   breakdown dimension.
+- `include_batch_family=true` with `batch_id=<main-batch-id>` to include
+  linked supplemental rerun batches (`batches.rerun_of_batch_id`) in the same
+  usage/cost query. This is the preferred production view after safe failed-case
+  reruns because it shows the original batch and its supplemental children as
+  one budget family while `include_batches=true` still lists each contributing
+  batch.
 
 `loom eval usage` exposes the same filters and prints cost status plus
 usage confidence. Use `--format json` for the full API payload,
 including per-batch `partial_usage_llm_calls_count` and
-`missing_usage_llm_calls_count`.
+`missing_usage_llm_calls_count`. Use
+`loom eval usage --batch-id <main-batch-id> --include-batch-family
+--include-batches` to audit a production batch family after reruns.
 
 ## Local / self-hosted rates
 

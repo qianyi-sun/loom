@@ -29,13 +29,23 @@ _AUTO_SAFE_REASONS: frozenset[str] = frozenset(
 )
 
 _TASK_FAILURE_REASONS: Mapping[str, str] = {
+    "preflight_failed": "task_preflight",
     "task_compatibility": "task_compatibility",
+    "task_image_build_failed": "task_image_build",
     "task_image_build_timeout": "task_image_build",
 }
 
-_VERIFIER_FAILURE_REASONS: frozenset[str] = frozenset(
-    {"verifier_error", "verifier_timeout"}
-)
+_VERIFIER_FAILURE_REASONS: Mapping[str, str] = {
+    "missing_verifier_output": "verifier_missing_output",
+    "verifier_error": "verifier_harness",
+    "verifier_missing_output": "verifier_missing_output",
+    "verifier_timeout": "verifier_harness",
+}
+
+_ARTIFACT_FAILURE_REASONS: Mapping[str, str] = {
+    "missing_atif": "missing_atif",
+    "missing_trajectory": "missing_trajectory",
+}
 
 _AGENT_FAILURE_REASONS: frozenset[str] = frozenset(
     {"agent_error", "agent_timeout"}
@@ -46,10 +56,13 @@ _PLATFORM_SETUP_REASONS: frozenset[str] = frozenset(
         "env_start_failure",
         "env_healthcheck_failed",
         "internal_error",
+        "setup_failure",
     }
 )
 
 _PROVIDER_APPROVAL_REASONS: frozenset[str] = frozenset({"provider_error"})
+_PROVIDER_NO_CALL_REASONS: frozenset[str] = frozenset({"provider_no_call"})
+_PROVIDER_TIMEOUT_REASONS: frozenset[str] = frozenset({"provider_timeout"})
 
 
 def aggregate_reward(result: Any) -> float | None:
@@ -220,7 +233,7 @@ def classify_trial_outcome(trial: Any) -> dict[str, Any]:
             reason_code=f"trial.{reason}",
             reason=reason,
             failure_class="verifier_failure",
-            root_cause="verifier_harness",
+            root_cause=_VERIFIER_FAILURE_REASONS[reason],
             platform_outcome="failed",
             score_outcome="unscored",
             rerun_recommendation="operator_approval",
@@ -229,6 +242,21 @@ def classify_trial_outcome(trial: Any) -> dict[str, Any]:
             attribution="benchmark",
             rerunnable=True,
             requires_operator_approval=True,
+        )
+
+    if reason is not None and reason in _ARTIFACT_FAILURE_REASONS:
+        return _common(
+            reason_code=f"trial.{reason}",
+            reason=reason,
+            failure_class="artifact_failure",
+            root_cause=_ARTIFACT_FAILURE_REASONS[reason],
+            platform_outcome="failed",
+            score_outcome="unscored",
+            rerun_recommendation="auto_safe",
+            message=message,
+            category="artifact",
+            attribution="platform",
+            rerunnable=True,
         )
 
     if reason in _AGENT_FAILURE_REASONS:
@@ -261,6 +289,37 @@ def classify_trial_outcome(trial: Any) -> dict[str, Any]:
             attribution="platform",
             rerunnable=True,
             requires_operator_approval=True,
+        )
+
+    if reason in _PROVIDER_NO_CALL_REASONS:
+        return _common(
+            reason_code=f"trial.{reason}",
+            reason=reason,
+            failure_class="provider_failure",
+            root_cause="provider_no_call",
+            platform_outcome="failed",
+            score_outcome="unscored",
+            rerun_recommendation="operator_approval",
+            message=message,
+            category="provider",
+            attribution="provider",
+            rerunnable=True,
+            requires_operator_approval=True,
+        )
+
+    if reason in _PROVIDER_TIMEOUT_REASONS:
+        return _common(
+            reason_code=f"trial.{reason}",
+            reason=reason,
+            failure_class="provider_failure",
+            root_cause="provider_timeout",
+            platform_outcome="failed",
+            score_outcome="unscored",
+            rerun_recommendation="auto_safe",
+            message=message,
+            category="provider",
+            attribution="provider",
+            rerunnable=True,
         )
 
     if reason in _PROVIDER_APPROVAL_REASONS:
@@ -323,6 +382,14 @@ def _target_record(trial: Any, classification: Mapping[str, Any]) -> dict[str, A
         "rerun_recommendation": classification["rerun_recommendation"],
         "requires_operator_approval": classification["requires_operator_approval"],
         "requires_task_change": classification["requires_task_change"],
+    }
+
+
+def _coordinate_record(target: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "task_id": target["task_id"],
+        "sample_idx": target["sample_idx"],
+        "combination_idx": target["combination_idx"],
     }
 
 
@@ -419,12 +486,25 @@ def build_supplemental_rerun_plan(
     if include_operator_approval:
         supplemental_targets.extend(operator_approval)
     supplemental_task_ids = sorted({target["task_id"] for target in supplemental_targets})
+    supplemental_coordinates = [
+        _coordinate_record(target)
+        for target in sorted(
+            supplemental_targets,
+            key=lambda target: (
+                str(target["task_id"]),
+                int(target["sample_idx"]),
+                int(target["combination_idx"]),
+                str(target["original_trial_id"]),
+            ),
+        )
+    ]
 
     return {
         "schema_version": "1",
         "batch_id": str(batch.id),
         "rerun_of_batch_id": str(batch.id),
         "supplemental_task_ids": supplemental_task_ids,
+        "supplemental_coordinates": supplemental_coordinates,
         "summary": {
             "auto_safe": len(auto_safe),
             "operator_approval": len(operator_approval),

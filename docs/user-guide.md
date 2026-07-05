@@ -266,6 +266,10 @@ loom eval usage --start 2026-06-01 --end 2026-06-30 \
   --breakdown-by pricing_mode
 loom eval usage --start 2026-06-01 --end 2026-06-30 \
   --pricing-mode failed-upstream
+loom eval usage --start 2026-06-01 --end 2026-06-30 \
+  --batch-id <main-batch-id> \
+  --include-batch-family \
+  --include-batches
 loom eval trial show <trial-id>
 loom eval diagnose trial <trial-id>
 loom eval trial debug <trial-id> --format json
@@ -369,7 +373,12 @@ evidence without scraping the web UI. The CLI calls
 safe backend/provider/model identifiers, token usage summaries,
 task/checksum/readiness metadata, verifier reward/error details, scoped
 ATIF/trajectory/artifact links, and `next_actions`. These payloads are
-team-scoped and redacted the same way as normal detail responses.
+team-scoped and redacted the same way as normal detail responses. Required
+production failure reasons are typed distinctly: reward `0` with verifier
+output is `score_failure`, missing verifier output is `verifier_failure`,
+missing trajectory/ATIF is `artifact_failure`, provider no-call/timeout is
+`provider_failure`, and setup/build/image/preflight failures remain separated
+between `platform_failure` and `task_failure`.
 
 Use `loom eval batch rerun-plan <batch-id>` or
 `GET /api/v1/batches/{id}/rerun-plan` before launching supplemental work. The
@@ -380,7 +389,10 @@ the plan to an explicit task list. By default, the supplemental task id list
 contains only auto-safe platform/transient failures. `--include-operator-approval`
 adds operator-approved coordinates, but task compatibility failures and reward
 `0` score failures remain excluded unless the task or scoring evidence changes
-under an explicit operator workflow.
+under an explicit operator workflow. `supplemental_task_ids` stays unique for
+copy/paste task-list launches; `supplemental_coordinates` preserves every
+`task_id`/`sample_idx`/`combination_idx` row when multiple samples or
+combinations for the same task need rerun.
 
 ## Run Library
 
@@ -1072,6 +1084,11 @@ which records tokens but leaves dollar cost as not applicable. Hosted YibuAPI
 connections that use the synced rate card return per-trial, per-batch, and
 admin usage costs; self-deployed/private APIs return token totals and usage
 confidence without inventing a dollar amount.
+When inspecting a main production batch plus linked supplemental reruns, pass
+`batch_id=<main-batch-id>&include_batch_family=true` to `/api/v1/usage` or use
+`loom eval usage --batch-id <main-batch-id> --include-batch-family`. Add
+`--include-batches` to see the main and rerun child batches that contributed
+to the family total.
 
 <a id="pasting-task-ids"></a>
 
