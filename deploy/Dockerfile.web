@@ -3,8 +3,17 @@
 # Stage 1 — build
 FROM node:20-slim AS build
 WORKDIR /web
+ARG TARGETARCH
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) lightningcss_pkg="lightningcss-linux-x64-gnu@1.32.0" ;; \
+      arm64) lightningcss_pkg="lightningcss-linux-arm64-gnu@1.32.0" ;; \
+      *) echo "unsupported web image TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    npm install --no-save --package-lock=false "${lightningcss_pkg}"; \
+    node -e "require('lightningcss')"
 COPY web/ ./
 RUN npm run build
 

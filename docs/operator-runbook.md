@@ -310,7 +310,9 @@ knob you need.
    excludes them so staging evidence, benchmark caches, and local worktrees
    do not make image builds hang while sending context.
    `Dockerfile.web` is multi-stage (node-slim builds the Vite bundle
-   → nginx-alpine serves it). Push to your registry, then update
+   → nginx-alpine serves it) and validates the target-architecture
+   Lightning CSS native binding before running the Vite build. Push to your
+   registry, then update
    `image:` refs in `deploy/k8s/*.yaml`.
 
 2. **Create the `loom-secrets` Secret.** Required keys are declared in

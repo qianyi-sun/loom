@@ -614,9 +614,11 @@ For local dev: `cd web && npm run dev` runs Vite's dev server on
 service pins `node:20.19.5-slim` and uses `npm ci` because
 `web/package-lock.json` is bind-mounted; avoid switching back to
 `npm install` or a floating Node tag unless lockfile stability has
-been re-verified. The web package also pins the Linux x64 and arm64
-Lightning CSS native optional packages at the root so Docker multi-arch
-`npm ci` installs the binding Vite needs for both image platforms. Dev compose
+been re-verified. The web package pins the Linux x64 and arm64
+Lightning CSS native optional packages at the root, and
+`deploy/Dockerfile.web` explicitly installs and validates the
+target-architecture binding after `npm ci` so Vite has the native module
+needed for both image platforms. Dev compose
 host ports bind to
 `${LOOM_DEV_BIND_ADDR:-127.0.0.1}` by default; set
 `LOOM_DEV_BIND_ADDR=0.0.0.0` only for deliberate shared-dev exposure.
