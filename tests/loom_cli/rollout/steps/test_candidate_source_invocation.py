@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tomllib
@@ -41,6 +42,48 @@ def _assert_candidate_invocation(
     assert call["cwd"] == worktree
     pythonpath = call["env"].get("PYTHONPATH", "")
     assert pythonpath.split(os.pathsep)[0] == str(worktree / "src")
+
+
+def _write_rendered_service(
+    ev: EvidenceDirectory,
+    *,
+    image_tag: str = "public-beta-abc123",
+) -> Path:
+    rendered = ev.step_dir(7, "render").artifact_path("rendered.yaml")
+    rendered.write_text(
+        f"""
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-service
+spec:
+  template:
+    spec:
+      containers:
+        - name: loom-service
+          image: loom-service:{image_tag}
+""",
+        encoding="utf-8",
+    )
+    return rendered
+
+
+def _docker_inspect_success(argv: list[str]) -> SubprocessResult:
+    docs = []
+    for image in argv[3:]:
+        docs.append(
+            {
+                "Id": "sha256:" + "1" * 64,
+                "RepoTags": [image],
+                "RepoDigests": [image.split(":", 1)[0] + "@sha256:" + "2" * 64],
+            }
+        )
+    return SubprocessResult(
+        argv=list(argv),
+        returncode=0,
+        stdout=json.dumps(docs),
+        stderr="",
+    )
 
 
 def test_render_runs_loom_cli_from_candidate_worktree(
@@ -456,8 +499,7 @@ def test_release_gate_run_generates_manifest_then_gates(
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     worktree = _prepare_candidate_worktree(ev)
-    rendered = ev.step_dir(7, "render").artifact_path("rendered.yaml")
-    rendered.write_text("kind: List\nitems: []\n")
+    _write_rendered_service(ev)
     step_dir = ev.step_dir(12, "release-gate")
     calls: list[dict[str, Any]] = []
 
@@ -469,6 +511,8 @@ def test_release_gate_run_generates_manifest_then_gates(
                 "env": kwargs.get("env"),
             }
         )
+        if list(argv[:3]) == ["docker", "image", "inspect"]:
+            return _docker_inspect_success(list(argv))
         if "release-manifest" in argv:
             output = Path(argv[argv.index("--output") + 1])
             output.write_text('{"schema_version": 1}\n')
@@ -488,16 +532,116 @@ def test_release_gate_run_generates_manifest_then_gates(
     result = ReleaseGateStep().run(ctx, step_dir)
 
     assert result.exit_code == 0
-    assert len(calls) == 3
-    for call in calls:
+    assert len(calls) == 4
+    assert calls[0]["argv"][:3] == ["docker", "image", "inspect"]
+    for call in calls[1:]:
         _assert_candidate_invocation(call, worktree=worktree)
-    assert calls[0]["argv"][3:5] == ["cluster", "release-manifest"]
-    assert calls[1]["argv"][3:6] == ["admin", "gb10-workers", "status"]
-    assert calls[2]["argv"][3:5] == ["cluster", "release-gate"]
+    assert calls[1]["argv"][3:5] == ["cluster", "release-manifest"]
+    assert calls[2]["argv"][3:6] == ["admin", "gb10-workers", "status"]
+    assert calls[3]["argv"][3:5] == ["cluster", "release-gate"]
     manifest = step_dir.artifact_path("release-manifest-public-beta-abc123.json")
-    assert calls[0]["argv"][calls[0]["argv"].index("--output") + 1] == str(manifest)
-    assert calls[2]["argv"][calls[2]["argv"].index("--manifest") + 1] == str(manifest)
-    assert "--gb10-workers-status" in calls[2]["argv"]
+    assert calls[1]["argv"][calls[1]["argv"].index("--output") + 1] == str(manifest)
+    assert calls[3]["argv"][calls[3]["argv"].index("--manifest") + 1] == str(manifest)
+    assert "--gb10-workers-status" in calls[3]["argv"]
+
+
+def test_release_gate_records_expected_image_identities_before_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="public-beta-abc123")
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    rendered = ev.step_dir(7, "render").artifact_path("rendered.yaml")
+    rendered.write_text(
+        """
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-service
+spec:
+  template:
+    spec:
+      containers:
+        - name: loom-service
+          image: loom-service:public-beta-abc123
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-egress-proxy
+spec:
+  template:
+    spec:
+      containers:
+        - name: envoy
+          image: envoyproxy/envoy:v1.30-latest
+""",
+        encoding="utf-8",
+    )
+    step_dir = ev.step_dir(12, "release-gate")
+
+    def fake_run(argv, **kwargs):
+        if list(argv[:3]) == ["docker", "image", "inspect"]:
+            assert "envoyproxy/envoy:v1.30-latest" not in argv
+            docs = []
+            for image in argv[3:]:
+                docs.append(
+                    {
+                        "Id": "sha256:" + "1" * 64,
+                        "RepoTags": [image],
+                        "RepoDigests": [
+                            image.split(":", 1)[0] + "@sha256:" + "2" * 64,
+                        ],
+                        "Config": {"Env": ["LOOM_ADMIN_TOKEN=do-not-write"]},
+                    }
+                )
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout=json.dumps(docs),
+                stderr="",
+            )
+        if "release-manifest" in argv:
+            assert "--expected-image-identities-json" in argv
+            identities_path = Path(
+                argv[argv.index("--expected-image-identities-json") + 1],
+            )
+            assert identities_path == step_dir.artifact_path(
+                "image-identities-public-beta-abc123.json",
+            )
+            body = json.loads(identities_path.read_text(encoding="utf-8"))
+            assert body == {
+                "loom-service": {
+                    "loom-service": {
+                        "image": "loom-service:public-beta-abc123",
+                        "image_id": "sha256:" + "1" * 64,
+                        "repo_digest": "loom-service@sha256:" + "2" * 64,
+                    },
+                },
+            }
+            assert "do-not-write" not in identities_path.read_text(encoding="utf-8")
+            output = Path(argv[argv.index("--output") + 1])
+            output.write_text('{"schema_version": 1}\n')
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout="manifest\n",
+                stderr="",
+            )
+        return SubprocessResult(
+            argv=list(argv),
+            returncode=0,
+            stdout="ok\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s12_release_gate.run_captured", fake_run)
+
+    result = ReleaseGateStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
 
 
 def test_release_gate_run_fails_fast_when_gb10_status_fails(
@@ -508,13 +652,14 @@ def test_release_gate_run_fails_fast_when_gb10_status_fails(
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     _prepare_candidate_worktree(ev)
-    rendered = ev.step_dir(7, "render").artifact_path("rendered.yaml")
-    rendered.write_text("kind: List\nitems: []\n")
+    _write_rendered_service(ev)
     step_dir = ev.step_dir(12, "release-gate")
     calls: list[list[str]] = []
 
     def fake_run(argv, **kwargs):
         calls.append(list(argv))
+        if list(argv[:3]) == ["docker", "image", "inspect"]:
+            return _docker_inspect_success(list(argv))
         if "release-manifest" in argv:
             output = Path(argv[argv.index("--output") + 1])
             output.write_text('{"schema_version": 1}\n')
@@ -541,7 +686,11 @@ def test_release_gate_run_fails_fast_when_gb10_status_fails(
 
     assert result.exit_code == 1
     assert result.error == "GB10 rollout target mismatch"
-    assert [call[3:6] for call in calls] == [
+    non_docker_calls = [
+        call for call in calls
+        if call[:3] != ["docker", "image", "inspect"]
+    ]
+    assert [call[3:6] for call in non_docker_calls] == [
         ["cluster", "release-manifest", "--config"],
         ["admin", "gb10-workers", "status"],
     ]
@@ -555,8 +704,7 @@ def test_release_gate_retries_transient_gb10_status_cp_unreachable(
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     _prepare_candidate_worktree(ev)
-    rendered = ev.step_dir(7, "render").artifact_path("rendered.yaml")
-    rendered.write_text("kind: List\nitems: []\n")
+    _write_rendered_service(ev)
     step_dir = ev.step_dir(12, "release-gate")
     calls: list[list[str]] = []
     gb10_attempts = 0
@@ -564,6 +712,8 @@ def test_release_gate_retries_transient_gb10_status_cp_unreachable(
     def fake_run(argv, **kwargs):
         nonlocal gb10_attempts
         calls.append(list(argv))
+        if list(argv[:3]) == ["docker", "image", "inspect"]:
+            return _docker_inspect_success(list(argv))
         if "release-manifest" in argv:
             output = Path(argv[argv.index("--output") + 1])
             output.write_text('{"schema_version": 1}\n')
@@ -616,7 +766,11 @@ def test_release_gate_retries_transient_gb10_status_cp_unreachable(
 
     assert result.exit_code == 0
     assert gb10_attempts == 3
-    assert [call[3:6] for call in calls] == [
+    non_docker_calls = [
+        call for call in calls
+        if call[:3] != ["docker", "image", "inspect"]
+    ]
+    assert [call[3:6] for call in non_docker_calls] == [
         ["cluster", "release-manifest", "--config"],
         ["admin", "gb10-workers", "status"],
         ["admin", "gb10-workers", "status"],
