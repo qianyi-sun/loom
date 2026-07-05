@@ -54,6 +54,7 @@ class TestRolloutCLIDryRun:
             "--cluster-name", "loom-staging",
             "--namespace", "loom-staging",
             "--environment", "staging",
+            "--cp-url", "http://control-node.lan:18081",
             "--cluster-config", str(cfg),
             "--backup-manifest", str(backup),
             "--rollout-root", str(tmp_path),
@@ -89,6 +90,7 @@ class TestRolloutCLIDryRun:
             "--image-tag", "staging-aaaaaaa",
             "--cluster-name", "loom-staging",
             "--environment", "staging",
+            "--cp-url", "http://control-node.lan:18081",
             "--cluster-config", str(cfg),
             "--backup-manifest", str(backup),
             "--rollout-root", str(tmp_path),
@@ -102,6 +104,42 @@ class TestRolloutCLIDryRun:
 
 
 class TestRolloutCLIRealRun:
+    def test_passes_cp_url_into_rollout_context(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cfg = tmp_path / "cluster-config.toml"
+        cfg.write_text("image_tag = 'x'\n")
+        backup = tmp_path / "backup-manifest.json"
+        backup.write_text("{}")
+        monkeypatch.setattr(subprocess, "run", _FakeSubprocess())
+        captured = {}
+
+        def fake_run_rollout(ctx, steps, evidence):
+            captured["ctx"] = ctx
+            captured["steps"] = steps
+            captured["evidence"] = evidence
+            return 0
+
+        monkeypatch.setattr("loom_cli.rollout.cli.run_rollout", fake_run_rollout)
+
+        rc = main([
+            "cluster", "rollout",
+            "--ref", "origin/dev",
+            "--image-tag", "staging-aaaaaaa",
+            "--cluster-name", "loom-staging",
+            "--namespace", "loom-staging",
+            "--environment", "staging",
+            "--cp-url", "http://control-node.lan:18081",
+            "--cluster-config", str(cfg),
+            "--backup-manifest", str(backup),
+            "--rollout-root", str(tmp_path),
+        ])
+
+        assert rc == 0
+        assert captured["ctx"].cp_url == "http://control-node.lan:18081"
+
     def test_refuses_without_matching_cluster_config(
         self,
         tmp_path: Path,
@@ -119,6 +157,7 @@ class TestRolloutCLIRealRun:
             "--image-tag", "staging-aaaaaaa",
             "--cluster-name", "loom-staging",
             "--environment", "staging",
+            "--cp-url", "http://control-node.lan:18081",
             "--cluster-config", str(tmp_path / "missing.toml"),
             "--backup-manifest", str(backup),
             "--rollout-root", str(tmp_path),

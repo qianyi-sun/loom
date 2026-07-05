@@ -85,6 +85,8 @@ class ReleaseGateStep(SubcommandStep):
             "admin",
             "gb10-workers",
             "status",
+            "--cp-url",
+            ctx.cp_url,
             "--environment",
             ctx.environment,
             "--release-image-tag",
