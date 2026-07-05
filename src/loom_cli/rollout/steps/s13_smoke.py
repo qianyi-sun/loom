@@ -37,6 +37,10 @@ from loom_cli.rollout.steps.base import BaseStep, RunResult
 DEFAULT_TERMINAL_TIMEOUT_SEC = 300.0
 DEFAULT_POLL_INTERVAL_SEC = 5.0
 DEFAULT_SMOKE_TASK_ID = "terminal-bench-2/hello-world"
+DEFAULT_CURRENT_GB10_SMOKE_TASK_ID = (
+    "skilllearnbench/anthropic-poster-design/anthropic-poster-design-1"
+)
+DEFAULT_CURRENT_GB10_REQUIRED_WORKER_POOL = "gb10-arm64"
 
 
 def _ingress_base(ctx: RolloutContext) -> str:
@@ -54,12 +58,33 @@ def _smoke_api_token(ctx: RolloutContext) -> str | None:
 
 
 def _smoke_task_id(ctx: RolloutContext) -> str:
-    task_id = os.environ.get("LOOM_SMOKE_TASK_ID") or ctx.metadata.get(
-        "smoke_task_id",
-    )
+    task_id = _explicit_smoke_task_id(ctx)
     if isinstance(task_id, str) and task_id.strip():
         return task_id.strip()
+    if ctx.scope == "current-gb10":
+        return DEFAULT_CURRENT_GB10_SMOKE_TASK_ID
     return DEFAULT_SMOKE_TASK_ID
+
+
+def _explicit_smoke_task_id(ctx: RolloutContext) -> str | None:
+    return os.environ.get("LOOM_SMOKE_TASK_ID") or ctx.metadata.get(
+        "smoke_task_id",
+    )
+
+
+def _smoke_required_worker_pool(
+    ctx: RolloutContext,
+    *,
+    explicit_task_id: bool,
+) -> str | None:
+    pool_name = os.environ.get(
+        "LOOM_SMOKE_REQUIRED_WORKER_POOL",
+    ) or ctx.metadata.get("smoke_required_worker_pool")
+    if isinstance(pool_name, str) and pool_name.strip():
+        return pool_name.strip()
+    if ctx.scope == "current-gb10" and not explicit_task_id:
+        return DEFAULT_CURRENT_GB10_REQUIRED_WORKER_POOL
+    return None
 
 
 def _http_get(url: str, *, token: str | None = None) -> tuple[int, bytes]:
@@ -178,7 +203,12 @@ class SmokeStep(BaseStep):
             )
 
         # 4. smoke task exists in the live catalog.
+        explicit_task_id = bool(_explicit_smoke_task_id(ctx))
         task_id = _smoke_task_id(ctx)
+        required_worker_pool = _smoke_required_worker_pool(
+            ctx,
+            explicit_task_id=explicit_task_id,
+        )
         quoted_task_id = urllib.parse.quote(task_id, safe="/")
         status, body = _http_get(
             f"{base}/api/v1/tasks/{quoted_task_id}", token=token,
@@ -204,6 +234,8 @@ class SmokeStep(BaseStep):
             },
             "idempotency_key": _idempotency_key(ctx),
         }
+        if required_worker_pool is not None:
+            payload["required_worker_pool"] = required_worker_pool
         status, body = _http_post(
             f"{base}/api/v1/trials", payload, token=token,
         )

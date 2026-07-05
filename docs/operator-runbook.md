@@ -882,7 +882,6 @@ step.
 ```bash
 export LOOM_ADMIN_TOKEN="$(cat /secure/path/admin-token)"
 export LOOM_SMOKE_API_TOKEN="$(cat /secure/path/user-owned-smoke-token)"
-export LOOM_SMOKE_TASK_ID="${LOOM_SMOKE_TASK_ID:-terminal-bench-2/hello-world}"
 
 loom cluster rollout \
   --ref origin/dev \
@@ -911,8 +910,15 @@ reports `credential_type=user_owned_api_token` and includes `submit` scope.
 Admin secrets, internal service credentials, and legacy team tokens are refused
 before trial submission because they cannot create user-facing work under the
 account-auth model. `LOOM_SMOKE_TASK_ID` defaults to
-`terminal-bench-2/hello-world`; override it only with another short task that
-exists in the live `/api/v1/tasks/{id}` catalog.
+`skilllearnbench/anthropic-poster-design/anthropic-poster-design-1` with
+`required_worker_pool=gb10-arm64` for `--scope=current-gb10`, because that
+scope excludes the x86/OLDLAB path. For `--scope=full-cluster`, the default is
+`terminal-bench-2/hello-world` with no required pool. Override
+`LOOM_SMOKE_TASK_ID` only with another short task that exists in the live
+`/api/v1/tasks/{id}` catalog and is compatible with the rollout scope. If the
+override must target a specific pool, set `LOOM_SMOKE_REQUIRED_WORKER_POOL`
+explicitly; the driver only injects the GB10 pool for its built-in
+current-gb10 default.
 
 Optional flags:
 

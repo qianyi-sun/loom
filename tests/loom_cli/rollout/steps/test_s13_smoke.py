@@ -85,6 +85,154 @@ def test_smoke_posts_current_trial_config_contract_with_user_owned_token(
     }
 
 
+def test_current_gb10_smoke_defaults_to_gb10_compatible_task_and_pool(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, scope="current-gb10", exclude_oldlab=True)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(13, "smoke")
+    captured_payloads: list[dict[str, Any]] = []
+
+    monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "smoke-user-token")
+    monkeypatch.delenv("LOOM_SMOKE_TASK_ID", raising=False)
+    monkeypatch.delenv("LOOM_SMOKE_REQUIRED_WORKER_POOL", raising=False)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s13_smoke._ingress_base",
+        lambda _ctx: "https://loom.test",
+    )
+
+    def fake_get(url: str, *, token: str | None = None) -> tuple[int, bytes]:
+        assert token == "smoke-user-token"
+        if url.endswith("/api/v1/health"):
+            return 200, b'{"status":"ok"}'
+        if url.endswith("/api/v1/auth/whoami"):
+            return (
+                200,
+                b'{"credential_type":"user_owned_api_token",'
+                b'"scopes":["read:own","submit"]}',
+            )
+        if url.endswith("/api/v1/benchmarks"):
+            return 200, b'{"items":[{"id":"skilllearnbench"}]}'
+        if url.endswith(
+            "/api/v1/tasks/skilllearnbench/anthropic-poster-design/"
+            "anthropic-poster-design-1",
+        ):
+            return (
+                200,
+                b'{"id":"skilllearnbench/anthropic-poster-design/'
+                b'anthropic-poster-design-1",'
+                b'"benchmark_id":"skilllearnbench"}',
+            )
+        if url.endswith("/api/v1/trials/trial-1"):
+            return 200, b'{"id":"trial-1","state":"succeeded","aggregate_reward":1.0}'
+        if url.endswith("/api/v1/usage"):
+            return 200, b'{"items":[]}'
+        raise AssertionError(f"unexpected GET {url}")
+
+    def fake_post(
+        url: str,
+        payload: dict[str, object],
+        *,
+        token: str | None = None,
+    ) -> tuple[int, bytes]:
+        assert url.endswith("/api/v1/trials")
+        assert token == "smoke-user-token"
+        captured_payloads.append(dict(payload))
+        return 201, b'{"trial_id":"trial-1"}'
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s13_smoke._http_get", fake_get)
+    monkeypatch.setattr("loom_cli.rollout.steps.s13_smoke._http_post", fake_post)
+
+    result = SmokeStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    assert captured_payloads == [
+        {
+            "task_id": (
+                "skilllearnbench/anthropic-poster-design/"
+                "anthropic-poster-design-1"
+            ),
+            "config": {"agent_name": "oracle", "agent_model": None},
+            "idempotency_key": "smoke-" + hashlib.sha256(
+                f"{ctx.image_tag}|{ctx.resolved_sha}".encode(),
+            ).hexdigest()[:16],
+            "required_worker_pool": "gb10-arm64",
+        }
+    ]
+
+
+def test_full_cluster_smoke_keeps_terminal_bench_default_without_pool(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, scope="full-cluster")
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(13, "smoke")
+    captured_payloads: list[dict[str, Any]] = []
+
+    monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "smoke-user-token")
+    monkeypatch.delenv("LOOM_SMOKE_TASK_ID", raising=False)
+    monkeypatch.delenv("LOOM_SMOKE_REQUIRED_WORKER_POOL", raising=False)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s13_smoke._ingress_base",
+        lambda _ctx: "https://loom.test",
+    )
+
+    def fake_get(url: str, *, token: str | None = None) -> tuple[int, bytes]:
+        assert token == "smoke-user-token"
+        if url.endswith("/api/v1/health"):
+            return 200, b'{"status":"ok"}'
+        if url.endswith("/api/v1/auth/whoami"):
+            return (
+                200,
+                b'{"credential_type":"user_owned_api_token",'
+                b'"scopes":["read:own","submit"]}',
+            )
+        if url.endswith("/api/v1/benchmarks"):
+            return 200, b'{"items":[{"id":"terminal-bench-2"}]}'
+        if url.endswith("/api/v1/tasks/terminal-bench-2/hello-world"):
+            return (
+                200,
+                b'{"id":"terminal-bench-2/hello-world",'
+                b'"benchmark_id":"terminal-bench-2"}',
+            )
+        if url.endswith("/api/v1/trials/trial-1"):
+            return 200, b'{"id":"trial-1","state":"succeeded","aggregate_reward":1.0}'
+        if url.endswith("/api/v1/usage"):
+            return 200, b'{"items":[]}'
+        raise AssertionError(f"unexpected GET {url}")
+
+    def fake_post(
+        url: str,
+        payload: dict[str, object],
+        *,
+        token: str | None = None,
+    ) -> tuple[int, bytes]:
+        assert url.endswith("/api/v1/trials")
+        assert token == "smoke-user-token"
+        captured_payloads.append(dict(payload))
+        return 201, b'{"trial_id":"trial-1"}'
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s13_smoke._http_get", fake_get)
+    monkeypatch.setattr("loom_cli.rollout.steps.s13_smoke._http_post", fake_post)
+
+    result = SmokeStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    assert captured_payloads == [
+        {
+            "task_id": "terminal-bench-2/hello-world",
+            "config": {"agent_name": "oracle", "agent_model": None},
+            "idempotency_key": "smoke-" + hashlib.sha256(
+                f"{ctx.image_tag}|{ctx.resolved_sha}".encode(),
+            ).hexdigest()[:16],
+        }
+    ]
+
+
 def test_smoke_rejects_non_user_owned_smoke_token_before_submit(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
