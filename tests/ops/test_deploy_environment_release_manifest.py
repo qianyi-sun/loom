@@ -57,6 +57,8 @@ def test_deploy_script_runs_release_gate_after_cluster_up() -> None:
     )
     assert "--format markdown" in script
     assert "release-gate-${LOOM_IMAGE_TAG}.md" in script
+    assert "gb10-workers-status-${LOOM_IMAGE_TAG}.json" in script
+    assert "--gb10-workers-status" in script
 
 
 def test_deploy_workflow_uploads_rollout_evidence_artifact() -> None:

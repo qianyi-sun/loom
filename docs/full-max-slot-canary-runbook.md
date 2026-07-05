@@ -165,7 +165,8 @@ loom admin gb10-workers status \
   --pool-name gb10-arm64 \
   --release-image-tag "$IMAGE_TAG" \
   --release-env-config-version "$ENV_CONFIG_VERSION" \
-  | tee "$CANARY_DIR/01-clean-anchor/gb10-workers-status.txt"
+  --format json \
+  | tee "$CANARY_DIR/01-clean-anchor/gb10-workers-status.json"
 
 loom admin worker-pools autoscaler status \
   --cp-url "$CP_URL" \
@@ -476,7 +477,7 @@ $CANARY_DIR/
     environment-state-apply.txt
     environment-state-check.txt
     slurm-workers-status.json
-    gb10-workers-status.txt
+    gb10-workers-status.json
     worker-pool-autoscalers-status.json
     resources-status.json
   02-preflight/

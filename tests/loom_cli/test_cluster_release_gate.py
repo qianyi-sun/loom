@@ -784,6 +784,31 @@ def test_release_gate_passes_when_environment_state_check_is_clean() -> None:
             "drift": [],
         },
         environment_state_check_path="environment-state-check-live-secrets.json",
+        gb10_workers_status_artifact={
+            "desired_states": [
+                {
+                    "environment": "staging",
+                    "pool_name": "gb10-arm64",
+                    "image_tag": "staging-abc123",
+                    "max_concurrent": 10,
+                    "env_config_version": "staging-abc123",
+                    "host_intents": {"trt-gb10-1": "active"},
+                },
+            ],
+            "nodes": [
+                {
+                    "environment": "staging",
+                    "pool_name": "gb10-arm64",
+                    "hostname": "trt-gb10-1",
+                    "apply_state": "applied",
+                    "current_image_tag": "staging-abc123",
+                    "current_env_config_version": "staging-abc123",
+                    "current_max_concurrent": 10,
+                    "desired_intent": "active",
+                },
+            ],
+        },
+        gb10_workers_status_path="gb10-workers-status-staging-abc123.json",
     )
 
     assert report.all_pass
@@ -1124,3 +1149,166 @@ def test_cluster_release_gate_cli_passes_environment_state_check_artifact(
     assert rc == 0
     assert captured["environment_state_check_artifact"]["ok"] is True
     assert captured["environment_state_check_path"] == str(environment_state_check_path.resolve())
+
+
+def test_release_gate_requires_gb10_status_artifact_when_manifest_declares_gb10() -> None:
+    manifest = _manifest(external_workers=_external_workers_manifest_section())
+    apps = _FakeAppsV1({
+        "loom-service": _deployment(
+            name="loom-service",
+            image="loom-service:staging-abc123",
+        ),
+    })
+    core = _FakeCoreV1([
+        _ready_pod(
+            name="loom-service-abc",
+            app="loom-service",
+            image="loom-service:staging-abc123",
+            image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+        ),
+    ])
+
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=apps,
+        core_v1=core,
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+        environment_state_check_artifact={
+            "environment": "staging",
+            "ok": True,
+            "drift": [],
+            "autoscaler_blockers": [],
+        },
+    )
+
+    assert not report.all_pass
+    check = next(
+        check for check in report.checks
+        if check.name == "gb10-worker-convergence"
+    )
+    assert check.outcome == "fail"
+    assert check.detail == "GB10 worker status artifact is required"
+
+
+def test_release_gate_fails_when_gb10_status_reports_missing_active_host() -> None:
+    manifest = _manifest(external_workers=_external_workers_manifest_section())
+    apps = _FakeAppsV1({
+        "loom-service": _deployment(
+            name="loom-service",
+            image="loom-service:staging-abc123",
+        ),
+    })
+    core = _FakeCoreV1([
+        _ready_pod(
+            name="loom-service-abc",
+            app="loom-service",
+            image="loom-service:staging-abc123",
+            image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+        ),
+    ])
+
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=apps,
+        core_v1=core,
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+        environment_state_check_artifact={
+            "environment": "staging",
+            "ok": True,
+            "drift": [],
+            "autoscaler_blockers": [],
+        },
+        gb10_workers_status_artifact={
+            "desired_states": [
+                {
+                    "environment": "staging",
+                    "pool_name": "gb10-arm64",
+                    "image_tag": "staging-abc123",
+                    "max_concurrent": 10,
+                    "env_config_version": "staging-abc123",
+                    "host_intents": {"trt-gb10-14": "active"},
+                },
+            ],
+            "nodes": [],
+        },
+    )
+
+    assert not report.all_pass
+    check = next(
+        check for check in report.checks
+        if check.name == "gb10-worker-convergence"
+    )
+    assert check.outcome == "fail"
+    assert "trt-gb10-14" in check.evidence["mismatches"][0]
+    assert "missing active node report" in check.evidence["mismatches"][0]
+
+
+def test_cluster_release_gate_cli_passes_gb10_status_artifact(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    manifest_path = tmp_path / "release-manifest.json"
+    manifest_path.write_text(
+        json.dumps(_manifest(external_workers=_external_workers_manifest_section())),
+        encoding="utf-8",
+    )
+    gb10_status_path = tmp_path / "gb10-workers-status.json"
+    gb10_status_path.write_text(
+        json.dumps({"desired_states": [], "nodes": []}),
+        encoding="utf-8",
+    )
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._load_clients",
+        lambda _context: (object(), object(), object(), object()),
+    )
+
+    def _fake_collect_release_gate_report(**kwargs: Any) -> ReleaseGateReport:
+        captured.update(kwargs)
+        return ReleaseGateReport(
+            environment="staging",
+            namespace="loom",
+            checks=[
+                ReleaseGateCheck(
+                    name="gb10-worker-convergence",
+                    outcome="pass",
+                    detail="GB10 worker status matches release target",
+                    evidence={},
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd.collect_release_gate_report",
+        _fake_collect_release_gate_report,
+    )
+
+    rc = main([
+        "cluster",
+        "release-gate",
+        "--manifest",
+        str(manifest_path),
+        "--namespace",
+        "loom",
+        "--environment",
+        "staging",
+        "--gb10-workers-status",
+        str(gb10_status_path),
+        "--dry-run",
+        "--format",
+        "json",
+    ])
+
+    assert rc == 0
+    assert captured["gb10_workers_status_artifact"] == {
+        "desired_states": [],
+        "nodes": [],
+    }
+    assert captured["gb10_workers_status_path"] == str(gb10_status_path.resolve())

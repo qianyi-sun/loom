@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, cast
 import httpx
 
 from loom_cli.cluster_backup_guard import is_protected_environment
+from loom_cli.gb10_release_gate import gb10_release_target_mismatches
 from loom_cli.rollout_lock import (
     DEFAULT_ROLLOUT_LOCK_TTL_SECONDS,
     RolloutLease,
@@ -61,7 +62,6 @@ _HEX_PREFIX_RE = re.compile(r"^[0-9a-f]{4,64}$")
 _DEFAULT_CP_URL = "http://localhost:8080"
 _DEFAULT_EXPIRES_DAYS = 365
 _DEFAULT_ADMIN_TOKEN_SOURCE = "env:LOOM_ADMIN_TOKEN"
-_RELEASE_TAG_SHA_RE = re.compile(r"(?:^|[-_])([0-9a-f]{7,40})$")
 
 
 def _add_rollout_lock_args(parser: argparse.ArgumentParser) -> None:
@@ -152,84 +152,6 @@ def _acquire_environment_state_rollout_lock(
         f"Acquired rollout mutation lease for {environment}: {lease.owner_id}\n",
     )
     return lease
-
-
-def _release_source_prefix(release_image_tag: str | None) -> str | None:
-    if not release_image_tag:
-        return None
-    match = _RELEASE_TAG_SHA_RE.search(release_image_tag)
-    return match.group(1) if match else None
-
-
-def _gb10_release_target_mismatches(
-    data: dict[str, Any],
-    *,
-    release_image_tag: str | None,
-    release_env_config_version: str | None,
-) -> list[str]:
-    if release_image_tag is None and release_env_config_version is None:
-        return []
-
-    mismatches: list[str] = []
-    for row in data.get("desired_states", []):
-        if not isinstance(row, dict):
-            continue
-        image = row.get("image_tag")
-        env = row.get("env_config_version")
-        image_bad = release_image_tag is not None and image != release_image_tag
-        env_bad = (
-            release_env_config_version is not None
-            and env != release_env_config_version
-        )
-        if image_bad or env_bad:
-            mismatches.append(
-                "desired "
-                f"{row.get('environment', '-')}/{row.get('pool_name', '-')} "
-                f"image={image or '-'}/{release_image_tag or '-'} "
-                f"env={env or '-'}/{release_env_config_version or '-'}"
-            )
-
-    ignored_intents = {"stopped", "draining", "drained", "unavailable"}
-    ignored_apply_states = {"stopped", "draining", "unavailable"}
-    for node in data.get("nodes", []):
-        if not isinstance(node, dict):
-            continue
-        intent = node.get("desired_intent") or node.get("current_intent")
-        apply_state = node.get("apply_state")
-        if intent in ignored_intents or apply_state in ignored_apply_states:
-            continue
-        image = node.get("current_image_tag")
-        env = node.get("current_env_config_version")
-        image_bad = release_image_tag is not None and image != release_image_tag
-        env_bad = (
-            release_env_config_version is not None
-            and env != release_env_config_version
-        )
-        expected_source = _release_source_prefix(release_image_tag)
-        source_commit = node.get("source_git_commit")
-        source_dirty = node.get("source_git_dirty")
-        source_bad = (
-            expected_source is not None
-            and (
-                not isinstance(source_commit, str)
-                or not source_commit.startswith(expected_source)
-                or source_dirty is not False
-            )
-        )
-        if image_bad or env_bad or source_bad:
-            mismatches.append(
-                "node "
-                f"{node.get('hostname', '-')} "
-                f"image={image or '-'}/{release_image_tag or '-'} "
-                f"env={env or '-'}/{release_env_config_version or '-'} "
-                f"source={source_commit or '-'}/"
-                f"expected_source={expected_source or '-'} "
-                f"dirty={source_dirty if source_dirty is not None else '-'} "
-                f"compose_project_dir={node.get('compose_project_dir') or '-'} "
-                f"apply_state={apply_state or '-'}"
-            )
-
-    return mismatches
 
 
 def _print_gb10_release_target_mismatches(
@@ -565,7 +487,7 @@ def _gb10_workers_status(args: argparse.Namespace) -> int:
         return 1
 
     data = resp.json()
-    mismatches = _gb10_release_target_mismatches(
+    mismatches = gb10_release_target_mismatches(
         data,
         release_image_tag=args.release_image_tag,
         release_env_config_version=args.release_env_config_version,

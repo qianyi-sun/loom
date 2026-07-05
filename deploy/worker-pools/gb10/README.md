@@ -422,9 +422,12 @@ loom admin gb10-workers status \
 
 For release rollouts, gate convergence against the intended image/env target and
 source checkout provenance. This exits non-zero if active nodes or Control Plane
-desired state are still on the old release, if active node-agent reports do not
-include source provenance, if the checkout is dirty, or if the reported git
-commit does not start with the trailing SHA in the release tag.
+desired state are still on the old release, if a declared active host has no
+node report, if an active node is not `applied`, if capacity differs from the
+desired max concurrency, if active node-agent reports do not include source
+provenance, if the checkout is dirty, or if the reported git commit does not
+start with the trailing SHA in the release tag. Save the JSON form and pass it
+to `loom cluster release-gate --gb10-workers-status` for protected rollouts.
 
 ```bash
 loom admin gb10-workers status \
@@ -433,7 +436,9 @@ loom admin gb10-workers status \
   --environment production \
   --pool-name gb10-arm64 \
   --release-image-tag "$IMAGE_TAG" \
-  --release-env-config-version "$ENV_CONFIG_VERSION"
+  --release-env-config-version "$ENV_CONFIG_VERSION" \
+  --format json \
+  > "$ROLLOUT_DIR/gb10-workers-status-$IMAGE_TAG.json"
 ```
 
 The node-agent applies updates by writing non-secret keys in

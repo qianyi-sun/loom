@@ -1461,6 +1461,20 @@ def _release_gate(args: argparse.Namespace) -> int:
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             environment_state_check_error = str(exc)
 
+    gb10_workers_status_artifact: dict[str, Any] | None = None
+    gb10_workers_status_path: str | None = None
+    gb10_workers_status_error: str | None = None
+    if args.gb10_workers_status:
+        gb10_path = Path(args.gb10_workers_status).resolve()
+        gb10_workers_status_path = str(gb10_path)
+        try:
+            loaded_gb10_status = json.loads(gb10_path.read_text(encoding="utf-8"))
+            if not isinstance(loaded_gb10_status, dict):
+                raise ValueError("GB10 worker status JSON root must be an object")
+            gb10_workers_status_artifact = loaded_gb10_status
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            gb10_workers_status_error = str(exc)
+
     if args.dry_run:
         live_alembic = None
         live_alembic_heads = list(manifest.get("alembic", {}).get("expected_heads", []) or [])
@@ -1495,6 +1509,9 @@ def _release_gate(args: argparse.Namespace) -> int:
         environment_state_check_artifact=environment_state_check_artifact,
         environment_state_check_path=environment_state_check_path,
         environment_state_check_error=environment_state_check_error,
+        gb10_workers_status_artifact=gb10_workers_status_artifact,
+        gb10_workers_status_path=gb10_workers_status_path,
+        gb10_workers_status_error=gb10_workers_status_error,
     )
 
     if args.environment:
@@ -4069,6 +4086,14 @@ def dispatch(argv: list[str]) -> int:
             "JSON artifact from `loom admin environment-state check --format json`. "
             "Required when the release manifest records environment-state external "
             "worker desired state."
+        ),
+    )
+    p_release_gate.add_argument(
+        "--gb10-workers-status",
+        default=None,
+        help=(
+            "JSON artifact from `loom admin gb10-workers status --format json`. "
+            "Required when the release manifest records GB10 worker desired state."
         ),
     )
     p_release_gate.add_argument(

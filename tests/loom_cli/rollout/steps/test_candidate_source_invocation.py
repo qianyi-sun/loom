@@ -488,11 +488,60 @@ def test_release_gate_run_generates_manifest_then_gates(
     result = ReleaseGateStep().run(ctx, step_dir)
 
     assert result.exit_code == 0
-    assert len(calls) == 2
+    assert len(calls) == 3
     for call in calls:
         _assert_candidate_invocation(call, worktree=worktree)
     assert calls[0]["argv"][3:5] == ["cluster", "release-manifest"]
-    assert calls[1]["argv"][3:5] == ["cluster", "release-gate"]
+    assert calls[1]["argv"][3:6] == ["admin", "gb10-workers", "status"]
+    assert calls[2]["argv"][3:5] == ["cluster", "release-gate"]
     manifest = step_dir.artifact_path("release-manifest-public-beta-abc123.json")
     assert calls[0]["argv"][calls[0]["argv"].index("--output") + 1] == str(manifest)
-    assert calls[1]["argv"][calls[1]["argv"].index("--manifest") + 1] == str(manifest)
+    assert calls[2]["argv"][calls[2]["argv"].index("--manifest") + 1] == str(manifest)
+    assert "--gb10-workers-status" in calls[2]["argv"]
+
+
+def test_release_gate_run_fails_fast_when_gb10_status_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="public-beta-abc123")
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    rendered = ev.step_dir(7, "render").artifact_path("rendered.yaml")
+    rendered.write_text("kind: List\nitems: []\n")
+    step_dir = ev.step_dir(12, "release-gate")
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if "release-manifest" in argv:
+            output = Path(argv[argv.index("--output") + 1])
+            output.write_text('{"schema_version": 1}\n')
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout="manifest\n",
+                stderr="",
+            )
+        if "gb10-workers" in argv:
+            if kwargs.get("stderr_log"):
+                kwargs["stderr_log"].write_text("GB10 rollout target mismatch\n")
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=1,
+                stdout="{}",
+                stderr="GB10 rollout target mismatch\n",
+            )
+        raise AssertionError("release-gate should not run after GB10 status failure")
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s12_release_gate.run_captured", fake_run)
+
+    result = ReleaseGateStep().run(ctx, step_dir)
+
+    assert result.exit_code == 1
+    assert result.error == "GB10 rollout target mismatch"
+    assert [call[3:6] for call in calls] == [
+        ["cluster", "release-manifest", "--config"],
+        ["admin", "gb10-workers", "status"],
+    ]
