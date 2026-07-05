@@ -139,6 +139,7 @@ loom admin environment-state apply \
   --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="$ENV_CONFIG_VERSION" \
+  --var GIT_SHA="$RELEASE_SHA" \
   | tee "$CANARY_DIR/01-clean-anchor/environment-state-apply.txt"
 
 loom admin environment-state check \
@@ -149,6 +150,7 @@ loom admin environment-state check \
   --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="$ENV_CONFIG_VERSION" \
+  --var GIT_SHA="$RELEASE_SHA" \
   --worker-token "file:$WORKER_TOKEN_FILE" \
   | tee "$CANARY_DIR/01-clean-anchor/environment-state-check.txt"
 
@@ -184,7 +186,7 @@ The anchor is not clean if any of these checks show:
 - stale OLDLAB or GB10 env/repo paths from an older `IMAGE_TAG`.
 - `last_blocked_reason=release_state_drift` on any autoscaler policy.
 - zero healthy slots for `oldlab`, `k8s-worker`, or `gb10-arm64`.
-- GB10 source provenance missing, dirty, or mismatched with `IMAGE_TAG`.
+- GB10 source provenance missing, dirty, or mismatched with desired `GIT_SHA`.
 - current service/control-plane/worker restarts that are not explained by the
   accepted rollout window.
 

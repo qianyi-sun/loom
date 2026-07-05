@@ -57,17 +57,19 @@ def _substitute_release_vars(
     *,
     image_tag: str,
     env_config_version: str,
+    git_sha: str,
 ) -> Any:
     if isinstance(value, str):
         return value.replace("${IMAGE_TAG}", image_tag).replace(
             "${ENV_CONFIG_VERSION}", env_config_version
-        )
+        ).replace("${GIT_SHA}", git_sha)
     if isinstance(value, list):
         return [
             _substitute_release_vars(
                 item,
                 image_tag=image_tag,
                 env_config_version=env_config_version,
+                git_sha=git_sha,
             )
             for item in value
         ]
@@ -77,6 +79,7 @@ def _substitute_release_vars(
                 child,
                 image_tag=image_tag,
                 env_config_version=env_config_version,
+                git_sha=git_sha,
             )
             for key, child in value.items()
         }
@@ -88,6 +91,7 @@ def _external_worker_summary(
     environment_state_path: Path | None,
     image_tag: str,
     env_config_version: str,
+    git_sha: str,
 ) -> dict[str, Any]:
     if environment_state_path is None:
         return {
@@ -102,6 +106,7 @@ def _external_worker_summary(
         raw,
         image_tag=image_tag,
         env_config_version=env_config_version,
+        git_sha=git_sha,
     )
 
     slurm_pools: list[dict[str, Any]] = []
@@ -130,6 +135,7 @@ def _external_worker_summary(
                 "pool_name": desired.get("pool_name"),
                 "image_tag": desired.get("image_tag"),
                 "env_config_version": desired.get("env_config_version"),
+                "source_git_commit": desired.get("source_git_commit"),
             }
         )
 
@@ -159,6 +165,7 @@ def build_release_manifest(
     expected_image_identities: dict[str, dict[str, dict[str, str]]] | None = None,
 ) -> dict[str, Any]:
     release_env_config_version = env_config_version or image_tag
+    release_git_sha = git_sha or _git_head_sha()
     config_bytes = (
         config_path.read_bytes()
         if config_path is not None
@@ -168,7 +175,7 @@ def build_release_manifest(
         "schema_version": 1,
         "release": {
             "environment": environment,
-            "git_sha": git_sha or _git_head_sha(),
+            "git_sha": release_git_sha,
             "image_tag": image_tag,
             "generated_at": generated_at or _utc_now(),
         },
@@ -194,6 +201,7 @@ def build_release_manifest(
             environment_state_path=environment_state_path,
             image_tag=image_tag,
             env_config_version=release_env_config_version,
+            git_sha=release_git_sha,
         ),
     }
 

@@ -104,6 +104,7 @@ pool_name = "gb10-arm64"
 image_tag = "${IMAGE_TAG}"
 max_concurrent = 10
 env_config_version = "${ENV_CONFIG_VERSION}"
+source_git_commit = "${GIT_SHA}"
 target_slots = 150
 
 [gb10_worker_pool_desired_states.host_intents]

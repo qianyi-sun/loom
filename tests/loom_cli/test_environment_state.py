@@ -50,6 +50,7 @@ pool_name = "gb10-arm64"
 image_tag = "${IMAGE_TAG}"
 max_concurrent = 10
 env_config_version = "${ENV_CONFIG_VERSION}"
+source_git_commit = "${GIT_SHA}"
 target_slots = 150
 
 [gb10_worker_pool_desired_states.host_intents]
@@ -79,6 +80,7 @@ def test_load_environment_state_profile_normalizes_payloads_and_variables(
         variables={
             "IMAGE_TAG": "staging-57a7509",
             "ENV_CONFIG_VERSION": "staging-57a7509",
+            "GIT_SHA": "57a750912345678901234567890123456789abcd",
         },
         expected_environment="staging",
     )
@@ -112,6 +114,9 @@ def test_load_environment_state_profile_normalizes_payloads_and_variables(
     ]
     assert profile.gb10_desired_states[0]["image_tag"] == "staging-57a7509"
     assert profile.gb10_desired_states[0]["env_config_version"] == "staging-57a7509"
+    assert profile.gb10_desired_states[0]["source_git_commit"] == (
+        "57a750912345678901234567890123456789abcd"
+    )
     assert profile.catalog_provisioning["required"] is True
 
 
@@ -133,6 +138,7 @@ def test_diff_environment_state_reports_policy_and_desired_state_drift(
         variables={
             "IMAGE_TAG": "staging-57a7509",
             "ENV_CONFIG_VERSION": "staging-57a7509",
+            "GIT_SHA": "57a750912345678901234567890123456789abcd",
         },
     )
 
@@ -164,6 +170,7 @@ def test_diff_environment_state_reports_policy_and_desired_state_drift(
                     "image_tag": "staging-old",
                     "max_concurrent": 10,
                     "env_config_version": "staging-old",
+                    "source_git_commit": "old1111111111111111111111111111111111111",
                     "target_slots": 150,
                     "host_intents": {
                         "trt-gb10-1": "active",
@@ -183,6 +190,7 @@ def test_diff_environment_state_reports_policy_and_desired_state_drift(
         "worker_pool_autoscaler_policies[staging/gb10-arm64].actuator_config",
         "gb10_worker_pool_desired_states[staging/gb10-arm64].image_tag",
         "gb10_worker_pool_desired_states[staging/gb10-arm64].env_config_version",
+        "gb10_worker_pool_desired_states[staging/gb10-arm64].source_git_commit",
     ]
     assert drift[0].desired == "slurm"
     assert drift[0].live == "gb10"
@@ -236,6 +244,7 @@ def _gb10_live_with_node_source(
                     "image_tag": image_tag,
                     "max_concurrent": 10,
                     "env_config_version": env_config_version,
+                    "source_git_commit": "c72f50d67f0d571fef55a9abbbced4e37752ca0e",
                     "target_slots": 150,
                     "host_intents": {
                         "trt-gb10-1": "active",
@@ -276,6 +285,7 @@ def test_diff_environment_state_reports_gb10_node_source_git_commit_drift(
         variables={
             "IMAGE_TAG": "staging-c72f50d",
             "ENV_CONFIG_VERSION": "staging-c72f50d",
+            "GIT_SHA": "c72f50d67f0d571fef55a9abbbced4e37752ca0e",
         },
     )
 
@@ -300,7 +310,7 @@ def test_diff_environment_state_reports_gb10_node_source_git_commit_drift(
         "gb10_worker_node_status[staging/gb10-arm64/trt-gb10-1]"
         ".source_git_commit"
     )
-    assert source_drift[0].desired == "c72f50d*"
+    assert source_drift[0].desired == "c72f50d67f0d571fef55a9abbbced4e37752ca0e"
     assert source_drift[0].live == "ce55a358d8472bce4b580a363806993678d8f116"
 
 
@@ -318,6 +328,7 @@ def test_diff_environment_state_reports_gb10_node_dirty_source(
         variables={
             "IMAGE_TAG": "staging-c72f50d",
             "ENV_CONFIG_VERSION": "staging-c72f50d",
+            "GIT_SHA": "c72f50d67f0d571fef55a9abbbced4e37752ca0e",
         },
     )
 
@@ -350,6 +361,7 @@ def test_diff_environment_state_accepts_matching_gb10_node_source(
         variables={
             "IMAGE_TAG": "staging-c72f50d",
             "ENV_CONFIG_VERSION": "staging-c72f50d",
+            "GIT_SHA": "c72f50d67f0d571fef55a9abbbced4e37752ca0e",
         },
     )
 
@@ -382,6 +394,7 @@ def test_diff_environment_state_ignores_source_drift_on_stopped_gb10_node(
         variables={
             "IMAGE_TAG": "staging-c72f50d",
             "ENV_CONFIG_VERSION": "staging-c72f50d",
+            "GIT_SHA": "c72f50d67f0d571fef55a9abbbced4e37752ca0e",
         },
     )
 
@@ -400,12 +413,11 @@ def test_diff_environment_state_ignores_source_drift_on_stopped_gb10_node(
     assert source_related == []
 
 
-def test_diff_environment_state_ignores_source_drift_when_image_tag_has_no_sha(
+def test_diff_environment_state_uses_explicit_source_when_image_tag_has_no_sha(
     tmp_path: Path,
 ) -> None:
-    """A tag without an embedded SHA (e.g. 'latest', '0.7') can't be
-    used to derive an expected source prefix, so source drift is
-    unenforceable and must not spuriously fire."""
+    """A tag without an embedded SHA (e.g. 'latest', '0.7') can still
+    enforce source convergence when the profile declares GIT_SHA."""
     profile_path = tmp_path / "staging.state.toml"
     _write_profile(profile_path)
     profile = load_environment_state_profile(
@@ -413,6 +425,7 @@ def test_diff_environment_state_ignores_source_drift_when_image_tag_has_no_sha(
         variables={
             "IMAGE_TAG": "latest",
             "ENV_CONFIG_VERSION": "latest",
+            "GIT_SHA": "c72f50d67f0d571fef55a9abbbced4e37752ca0e",
         },
     )
 
@@ -424,10 +437,9 @@ def test_diff_environment_state_ignores_source_drift_when_image_tag_has_no_sha(
     )
 
     drift = diff_environment_state(profile, live)
-    source_related = [
-        item for item in drift if "source_git" in item.path
-    ]
-    assert source_related == []
+    source_related = [item for item in drift if "source_git_commit" in item.path]
+    assert len(source_related) == 1
+    assert source_related[0].desired == "c72f50d67f0d571fef55a9abbbced4e37752ca0e"
 
 
 def test_diff_environment_state_reports_missing_live_policy(tmp_path: Path) -> None:
@@ -438,6 +450,7 @@ def test_diff_environment_state_reports_missing_live_policy(tmp_path: Path) -> N
         variables={
             "IMAGE_TAG": "staging-57a7509",
             "ENV_CONFIG_VERSION": "staging-57a7509",
+            "GIT_SHA": "57a750912345678901234567890123456789abcd",
         },
     )
 
@@ -1482,6 +1495,7 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
         variables={
             "IMAGE_TAG": "staging-test",
             "ENV_CONFIG_VERSION": "staging-test",
+            "GIT_SHA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         },
         expected_environment=environment,
     )
@@ -1519,6 +1533,9 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert gb10_state["environment"] == expected_cp_environment
     assert gb10_state["image_tag"] == "staging-test"
     assert gb10_state["env_config_version"] == "staging-test"
+    assert gb10_state["source_git_commit"] == (
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    )
     assert gb10_state["max_concurrent"] == 10
     assert gb10_state["target_slots"] == 150
     assert profile.catalog_provisioning["required"] is True
@@ -1550,6 +1567,7 @@ def test_staging_oldlab_policy_allows_all_five_oldlab_submit_nodes() -> None:
         variables={
             "IMAGE_TAG": "staging-test",
             "ENV_CONFIG_VERSION": "staging-test",
+            "GIT_SHA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         },
         expected_environment="staging",
     )

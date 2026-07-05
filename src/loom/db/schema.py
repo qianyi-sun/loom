@@ -798,6 +798,7 @@ class GB10WorkerPoolDesiredState(Base):
     image_tag: Mapped[str] = mapped_column(Text, nullable=False)
     max_concurrent: Mapped[int] = mapped_column(Integer, nullable=False)
     env_config_version: Mapped[str] = mapped_column(Text, nullable=False)
+    source_git_commit: Mapped[str | None] = mapped_column(Text, nullable=True)
     rollout_policy: Mapped[dict[str, Any]] = mapped_column(
         JSONB,
         nullable=False,
@@ -821,6 +822,7 @@ class GB10WorkerPoolDesiredState(Base):
     previous_image_tag: Mapped[str | None] = mapped_column(Text, nullable=True)
     previous_max_concurrent: Mapped[int | None] = mapped_column(Integer, nullable=True)
     previous_env_config_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    previous_source_git_commit: Mapped[str | None] = mapped_column(Text, nullable=True)
     previous_env: Mapped[dict[str, str]] = mapped_column(
         JSONB,
         nullable=False,
@@ -885,6 +887,7 @@ class GB10WorkerNodeStatus(Base):
     desired_image_tag: Mapped[str | None] = mapped_column(Text, nullable=True)
     desired_max_concurrent: Mapped[int | None] = mapped_column(Integer, nullable=True)
     desired_env_config_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    desired_source_git_commit: Mapped[str | None] = mapped_column(Text, nullable=True)
     desired_intent: Mapped[str | None] = mapped_column(Text, nullable=True)
     current_intent: Mapped[str | None] = mapped_column(Text, nullable=True)
     apply_state: Mapped[str] = mapped_column(

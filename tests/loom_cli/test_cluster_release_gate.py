@@ -147,6 +147,7 @@ def _external_workers_manifest_section() -> dict[str, Any]:
                 "pool_name": "gb10-arm64",
                 "image_tag": "staging-abc123",
                 "env_config_version": "staging-abc123",
+                "source_git_commit": "abc123ffffffffffffffffffffffffffffffffff",
             },
         ],
     }

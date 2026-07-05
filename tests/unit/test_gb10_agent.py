@@ -70,6 +70,67 @@ def test_build_plan_detects_capacity_intent_change() -> None:
     assert plan.current["capacity_intent"] == "active"
 
 
+def test_build_plan_detects_source_git_commit_drift() -> None:
+    desired = DesiredState(
+        environment="production",
+        pool_name="gb10-arm64",
+        image_tag="public-beta-53897aa",
+        max_concurrent=10,
+        env_config_version="public-beta-53897aa",
+        source_git_commit="53897aa3d6917dfe0800b6291012ab512bbfc6df",
+        rollout_policy={"mode": "all"},
+        env={},
+    )
+    local = LocalWorkerState(
+        hostname="trt-gb10-1",
+        image_tag="public-beta-53897aa",
+        pool_name="gb10-arm64",
+        max_concurrent=10,
+        env_config_version="public-beta-53897aa",
+        source_git_commit="7b61049ffffffffff00000000000000000000000",
+        source_git_dirty=False,
+    )
+
+    plan = build_plan(desired, local)
+
+    assert plan.needs_apply is True
+    assert plan.blocked_reason is None
+    assert plan.changes == ["source_git_commit"]
+    assert plan.desired["source_git_commit"] == (
+        "53897aa3d6917dfe0800b6291012ab512bbfc6df"
+    )
+    assert plan.current["source_git_commit"] == (
+        "7b61049ffffffffff00000000000000000000000"
+    )
+
+
+def test_build_plan_detects_dirty_source_checkout() -> None:
+    desired = DesiredState(
+        environment="production",
+        pool_name="gb10-arm64",
+        image_tag="public-beta-53897aa",
+        max_concurrent=10,
+        env_config_version="public-beta-53897aa",
+        source_git_commit="53897aa3d6917dfe0800b6291012ab512bbfc6df",
+        rollout_policy={"mode": "all"},
+        env={},
+    )
+    local = LocalWorkerState(
+        hostname="trt-gb10-1",
+        image_tag="public-beta-53897aa",
+        pool_name="gb10-arm64",
+        max_concurrent=10,
+        env_config_version="public-beta-53897aa",
+        source_git_commit="53897aa3d6917dfe0800b6291012ab512bbfc6df",
+        source_git_dirty=True,
+    )
+
+    plan = build_plan(desired, local)
+
+    assert plan.needs_apply is True
+    assert plan.changes == ["source_git_dirty"]
+
+
 def test_build_plan_allows_canary_host_and_force_override() -> None:
     desired = DesiredState(
         environment="production",
@@ -343,6 +404,82 @@ def test_apply_dry_run_detects_worker_token_drift(
     assert "loom_w_new_secret" not in out
 
 
+def test_apply_updates_source_checkout_before_compose(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    env_file = tmp_path / ".env.remote-worker"
+    env_file.write_text(
+        "LOOM_IMAGE_TAG=public-beta-old\n"
+        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_MAX_CONCURRENT=10\n"
+        "LOOM_WORKER_ENV_CONFIG_VERSION=public-beta-old\n",
+        encoding="utf-8",
+    )
+    source_dir = tmp_path / "loom"
+    deploy_dir = source_dir / "deploy"
+    deploy_dir.mkdir(parents=True)
+    compose_file = deploy_dir / "docker-compose.gb10-hostnet.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    desired = DesiredState(
+        environment="production",
+        pool_name="gb10-arm64",
+        image_tag="public-beta-53897aa",
+        max_concurrent=10,
+        env_config_version="public-beta-53897aa",
+        source_git_commit="53897aa3d6917dfe0800b6291012ab512bbfc6df",
+        rollout_policy={"mode": "all"},
+        env={},
+    )
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(gb10_agent, "_fetch_desired_state", lambda _args: desired)
+    monkeypatch.setattr(gb10_agent, "_report_node", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        gb10_agent,
+        "_source_git_provenance",
+        lambda _source_dir: ("7b61049ffffffffff00000000000000000000000", False),
+    )
+    monkeypatch.setattr(
+        gb10_agent,
+        "_run",
+        lambda argv, *, dry_run: commands.append(list(argv)),
+    )
+
+    rc = gb10_agent._apply(SimpleNamespace(
+        cp_url="http://cp:8080",
+        admin_token="env:LOOM_ADMIN_TOKEN",
+        environment="production",
+        pool_name="gb10-arm64",
+        hostname="trt-gb10-1",
+        env_file=env_file,
+        compose_file=[compose_file],
+        source_dir=source_dir,
+        worker_token=None,
+        service="worker",
+        drain_timeout_sec=600,
+        dry_run=False,
+        rollback=False,
+        force=False,
+        format="text",
+    ))
+
+    assert rc == 0
+    assert commands[:2] == [
+        ["git", "-C", str(source_dir), "fetch", "--quiet", "origin"],
+        [
+            "git",
+            "-C",
+            str(source_dir),
+            "checkout",
+            "--detach",
+            "53897aa3d6917dfe0800b6291012ab512bbfc6df",
+        ],
+    ]
+    assert commands[2][:3] == ["docker", "compose", "--env-file"]
+    assert commands[2][3].startswith(str(env_file.parent / f".{env_file.name}."))
+
+
 def test_apply_stopped_intent_stops_without_restart(
     tmp_path: Path,
     monkeypatch,
@@ -607,6 +744,7 @@ def test_rollback_apply_publishes_previous_state_to_control_plane(
         "image_tag": "good-image",
         "max_concurrent": 5,
         "env_config_version": "good-env",
+        "source_git_commit": None,
         "rollout_policy": {"mode": "all"},
         "env": {},
         "force": True,
