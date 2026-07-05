@@ -62,6 +62,7 @@ _AUTOSCALER_COMPARE_FIELDS = (
 )
 
 _GB10_DEFAULTS: dict[str, Any] = {
+    "source_git_commit": None,
     "target_slots": None,
     "host_intents": {},
     "rollout_policy": {},
@@ -72,6 +73,7 @@ _GB10_COMPARE_FIELDS = (
     "image_tag",
     "max_concurrent",
     "env_config_version",
+    "source_git_commit",
     "target_slots",
     "host_intents",
     "rollout_policy",
@@ -249,6 +251,7 @@ def _normalize_gb10_desired_state(
         item.get("env_config_version"),
         f"{field}.env_config_version",
     )
+    source_git_commit = item.get("source_git_commit")
     if "max_concurrent" not in item:
         raise EnvironmentStateProfileError(f"{field}.max_concurrent is required")
     payload = dict(_GB10_DEFAULTS)
@@ -257,6 +260,11 @@ def _normalize_gb10_desired_state(
     payload["pool_name"] = pool_name
     payload["image_tag"] = image_tag
     payload["env_config_version"] = env_config_version
+    payload["source_git_commit"] = (
+        _clean_nonempty(source_git_commit, f"{field}.source_git_commit")
+        if source_git_commit is not None
+        else None
+    )
     payload["host_intents"] = _as_dict(
         payload.get("host_intents", {}),
         f"{field}.host_intents",
@@ -518,9 +526,12 @@ def _append_gb10_node_source_drift(
         matched_desired = desired_by_key.get((env, pool))
         if matched_desired is None:
             continue
-        expected_source = _release_source_prefix(matched_desired.get("image_tag"))
+        expected_source = matched_desired.get("source_git_commit")
+        if not isinstance(expected_source, str) or not expected_source.strip():
+            expected_source = _release_source_prefix(matched_desired.get("image_tag"))
         if expected_source is None:
             continue
+        expected_source = expected_source.strip()
         source_commit = node.get("source_git_commit")
         source_dirty = node.get("source_git_dirty")
         source_commit_bad = (
@@ -535,7 +546,7 @@ def _append_gb10_node_source_drift(
                         f"gb10_worker_node_status[{env}/{pool}/{hostname}]"
                         ".source_git_commit"
                     ),
-                    desired=f"{expected_source}*",
+                    desired=expected_source,
                     live=source_commit,
                 ),
             )

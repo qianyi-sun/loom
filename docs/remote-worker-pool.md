@@ -492,6 +492,7 @@ tokens, MinIO credentials, provider keys, or sudo material.
 Desired state is stored per `(environment, pool_name)` and includes:
 
 - worker image tag (`LOOM_IMAGE_TAG`);
+- desired source checkout commit (`source_git_commit`);
 - pool name (`LOOM_WORKER_POOL_NAME`);
 - per-worker trial concurrency (`LOOM_WORKER_MAX_CONCURRENT`);
 - env/config version (`LOOM_WORKER_ENV_CONFIG_VERSION`, node-agent local only);
@@ -518,7 +519,8 @@ loom admin environment-state apply \
   --environment staging \
   --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
-  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
+  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+  --var GIT_SHA="$RELEASE_SHA"
 
 loom admin environment-state check \
   --cp-url http://control-node.lan:18081 \
@@ -527,6 +529,7 @@ loom admin environment-state check \
   --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+  --var GIT_SHA="$RELEASE_SHA" \
   --worker-token env:LOOM_WORKER_TOKEN
 ```
 
@@ -540,6 +543,7 @@ curl -sS -X PUT \
   http://control-node.lan:18081/admin/gb10-worker-pools/production/gb10-arm64/desired-state \
   -d '{
     "image_tag": "staging-<commit>",
+    "source_git_commit": "<full-release-commit>",
     "max_concurrent": 10,
     "env_config_version": "gb10-env-2026-06-26",
     "rollout_policy": {
@@ -562,11 +566,11 @@ expected image tag and env config version. The command exits non-zero if any
 active GB10 node, or the desired state itself, is still on the previous target;
 capacity marked draining/stopped is ignored. Active nodes must also report
 source checkout provenance: the node-agent records `compose_project_dir`, the
-checkout's git commit, and whether the tree is dirty. If `--release-image-tag`
-ends in a short SHA such as `staging-76875ac`, the active node's source git
-commit must start with that SHA and the checkout must be clean. Missing
-provenance is a release-gate failure because it means the operator cannot prove
-that a local build fallback used the desired source tree.
+checkout's git commit, and whether the tree is dirty. When desired state
+contains `source_git_commit`, active node source commits must match it exactly
+and the checkout must be clean. Missing provenance is a release-gate failure
+because it means the operator cannot prove that a local build fallback used the
+desired source tree.
 
 ```bash
 loom admin gb10-workers status \
@@ -580,8 +584,11 @@ loom admin gb10-workers status \
 
 On each GB10 host, the node-agent reads the host-local
 `.env.remote-worker` file, compares it with Control Plane desired state, writes
-only non-secret env updates, then runs Docker Compose locally. The apply path
-uses `docker compose stop --timeout <seconds> worker`, so the worker receives
+only non-secret env updates, then runs Docker Compose locally. If desired state
+contains `source_git_commit`, the apply path fetches `origin` and checks out
+that commit before pull/build/restart, so local-build fallback cannot silently
+reuse a stale source tree. The apply path uses
+`docker compose stop --timeout <seconds> worker`, so the worker receives
 SIGTERM and uses the existing drain path before restart.
 
 ```bash

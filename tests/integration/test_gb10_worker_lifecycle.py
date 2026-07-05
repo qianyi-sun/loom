@@ -88,6 +88,7 @@ def test_desired_state_node_report_and_status_round_trip(app) -> None:
                 "image_tag": "2026-06-26-gb10",
                 "max_concurrent": 10,
                 "env_config_version": "gb10-env-v2",
+                "source_git_commit": "76875ac6d38c91c947c44b22788348db27a8d45b",
                 "target_slots": 10,
                 "host_intents": {"trt-gb10-1": "draining"},
                 "rollout_policy": {
@@ -104,6 +105,9 @@ def test_desired_state_node_report_and_status_round_trip(app) -> None:
         assert body["image_tag"] == "2026-06-26-gb10"
         assert body["max_concurrent"] == 10
         assert body["env_config_version"] == "gb10-env-v2"
+        assert body["source_git_commit"] == (
+            "76875ac6d38c91c947c44b22788348db27a8d45b"
+        )
         assert body["target_slots"] == 10
         assert body["host_intents"] == {"trt-gb10-1": "draining"}
         assert body["previous_image_tag"] is None
@@ -115,6 +119,9 @@ def test_desired_state_node_report_and_status_round_trip(app) -> None:
         )
         assert fetched.status_code == 200, fetched.text
         assert fetched.json()["image_tag"] == "2026-06-26-gb10"
+        assert fetched.json()["source_git_commit"] == (
+            "76875ac6d38c91c947c44b22788348db27a8d45b"
+        )
 
         reported = client.post(
             "/admin/gb10-worker-pools/production/gb10-arm64/nodes/trt-gb10-1/report",
@@ -138,6 +145,9 @@ def test_desired_state_node_report_and_status_round_trip(app) -> None:
         assert node["desired_image_tag"] == "2026-06-26-gb10"
         assert node["desired_max_concurrent"] == 10
         assert node["desired_env_config_version"] == "gb10-env-v2"
+        assert node["desired_source_git_commit"] == (
+            "76875ac6d38c91c947c44b22788348db27a8d45b"
+        )
         assert node["desired_intent"] == "draining"
         assert node["current_intent"] == "draining"
         assert node["apply_state"] == "applied"
@@ -159,6 +169,12 @@ def test_desired_state_node_report_and_status_round_trip(app) -> None:
         == "76875ac6d38c91c947c44b22788348db27a8d45b"
     )
     assert status_body["nodes"][0]["source_git_dirty"] is False
+    assert status_body["desired_states"][0]["source_git_commit"] == (
+        "76875ac6d38c91c947c44b22788348db27a8d45b"
+    )
+    assert status_body["nodes"][0]["desired_source_git_commit"] == (
+        "76875ac6d38c91c947c44b22788348db27a8d45b"
+    )
     assert status_body["nodes"][0]["last_heartbeat_at"] is not None
 
 
