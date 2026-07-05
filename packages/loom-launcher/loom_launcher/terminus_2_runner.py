@@ -187,6 +187,102 @@ def _setup_tmux_session() -> Any:
     )
 
 
+def _tmux_session_name(session: Any) -> str:
+    name = getattr(session, "_session_name", "loom-terminus-2")
+    if not isinstance(name, str) or not name:
+        return "loom-terminus-2"
+    return name
+
+
+def _output_excerpt(result: Any, *, limit: int = 240) -> str:
+    output = getattr(result, "output", b"")
+    if isinstance(output, bytes):
+        text = output.decode("utf-8", errors="replace")
+    else:
+        text = str(output)
+    text = text.replace("\x00", "")
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _capture_tmux_session(session: Any) -> Any:
+    return session.container.exec_run([
+        "tmux",
+        "capture-pane",
+        "-p",
+        "-t",
+        _tmux_session_name(session),
+    ])
+
+
+def _start_and_verify_tmux_session(session: Any) -> None:
+    """Start upstream TmuxSession and verify the actual tmux target exists.
+
+    Live #445 evidence showed `session.start()` could return while every
+    subsequent command against `loom-terminus-2` failed. Verify with a
+    real `capture-pane`; if upstream start did not create the session,
+    create the same session explicitly before allowing provider calls.
+    """
+    session.start()
+    first_check = _capture_tmux_session(session)
+    if getattr(first_check, "exit_code", 1) == 0:
+        _emit({
+            "kind": "terminus2_session_ready",
+            "session_name": _tmux_session_name(session),
+            "source": "upstream_start",
+        })
+        return
+
+    name = _tmux_session_name(session)
+    _emit({
+        "kind": "terminus2_session_start_verify_failed",
+        "session_name": name,
+        "exit_code": getattr(first_check, "exit_code", None),
+        "output_excerpt": _output_excerpt(first_check),
+    })
+    fallback_result = session.container.exec_run([
+        "tmux",
+        "new-session",
+        "-x",
+        "160",
+        "-y",
+        "40",
+        "-d",
+        "-s",
+        name,
+    ])
+    if getattr(fallback_result, "exit_code", 1) != 0:
+        _emit({
+            "kind": "terminus2_session_recovery_failed",
+            "session_name": name,
+            "exit_code": getattr(fallback_result, "exit_code", None),
+            "output_excerpt": _output_excerpt(fallback_result),
+        })
+        raise RuntimeError(
+            f"failed to create tmux session {name!r}: "
+            f"{_output_excerpt(fallback_result)}",
+        )
+
+    second_check = _capture_tmux_session(session)
+    if getattr(second_check, "exit_code", 1) != 0:
+        _emit({
+            "kind": "terminus2_session_recovery_verify_failed",
+            "session_name": name,
+            "exit_code": getattr(second_check, "exit_code", None),
+            "output_excerpt": _output_excerpt(second_check),
+        })
+        raise RuntimeError(
+            f"tmux session {name!r} is still unavailable after recovery: "
+            f"{_output_excerpt(second_check)}",
+        )
+
+    _emit({
+        "kind": "terminus2_session_recovered",
+        "session_name": name,
+    })
+
+
 def _patch_asciinema_timestamp(tmux_mod: Any, now: Any) -> None:
     """Replace `TmuxSession.get_asciinema_timestamp` with a wall-clock
     time stub. Idempotent via `_loom_asciinema_patched` sentinel."""
@@ -542,7 +638,7 @@ def main(argv: list[str] | None = None) -> int:
     session_started = False
     try:
         session = _setup_tmux_session()
-        session.start()
+        _start_and_verify_tmux_session(session)
         session_started = True
         agent = _build_agent(args.model, args.max_episodes)
         result = agent.perform_task(
