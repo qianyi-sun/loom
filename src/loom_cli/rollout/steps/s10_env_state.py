@@ -65,11 +65,17 @@ class EnvStateStep(BaseStep):
             return RunResult(exit_code=2, error=str(exc))
 
         profile_path = candidate_relative_path(Path(profile), step_dir)
+        release_vars = [
+            "--var", f"IMAGE_TAG={ctx.image_tag}",
+            "--var", f"ENV_CONFIG_VERSION={ctx.image_tag}",
+            "--var", f"GIT_SHA={ctx.resolved_sha}",
+        ]
         apply_ = run_captured(
             candidate_loom_argv(
                 "admin", "environment-state", "apply",
                 "--cp-url", ctx.cp_url,
                 "--file", str(profile_path),
+                *release_vars,
             ),
             cwd=cwd,
             env=env,
@@ -79,6 +85,7 @@ class EnvStateStep(BaseStep):
                 "admin", "environment-state", "check",
                 "--cp-url", ctx.cp_url,
                 "--file", str(profile_path),
+                *release_vars,
                 "--format", "json",
             ),
             cwd=cwd,

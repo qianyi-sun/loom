@@ -113,7 +113,11 @@ def gb10_release_target_mismatches(
         )
         max_bad = desired_max is not None and current_max != desired_max
         apply_bad = apply_state != "applied"
-        expected_source = release_source_prefix(release_image_tag)
+        expected_source = desired.get("source_git_commit")
+        if not isinstance(expected_source, str) or not expected_source.strip():
+            expected_source = release_source_prefix(release_image_tag)
+        if isinstance(expected_source, str):
+            expected_source = expected_source.strip()
         source_commit = node.get("source_git_commit")
         source_dirty = node.get("source_git_dirty")
         source_bad = (

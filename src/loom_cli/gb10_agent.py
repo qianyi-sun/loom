@@ -57,12 +57,14 @@ class DesiredState:
     env_config_version: str
     rollout_policy: dict[str, Any]
     env: dict[str, str]
+    source_git_commit: str | None = None
     target_slots: int | None = None
     host_intents: dict[str, str] | None = None
     force: bool = False
     previous_image_tag: str | None = None
     previous_max_concurrent: int | None = None
     previous_env_config_version: str | None = None
+    previous_source_git_commit: str | None = None
     previous_env: dict[str, str] | None = None
 
     @classmethod
@@ -73,6 +75,11 @@ class DesiredState:
             image_tag=str(data["image_tag"]),
             max_concurrent=int(data["max_concurrent"]),
             env_config_version=str(data["env_config_version"]),
+            source_git_commit=(
+                str(data["source_git_commit"])
+                if data.get("source_git_commit") is not None
+                else None
+            ),
             rollout_policy=dict(data.get("rollout_policy") or {}),
             env={str(k): str(v) for k, v in dict(data.get("env") or {}).items()},
             target_slots=(
@@ -88,6 +95,7 @@ class DesiredState:
             previous_image_tag=data.get("previous_image_tag"),
             previous_max_concurrent=data.get("previous_max_concurrent"),
             previous_env_config_version=data.get("previous_env_config_version"),
+            previous_source_git_commit=data.get("previous_source_git_commit"),
             previous_env={
                 str(k): str(v)
                 for k, v in dict(data.get("previous_env") or {}).items()
@@ -107,6 +115,7 @@ class DesiredState:
             image_tag=self.previous_image_tag,
             max_concurrent=int(self.previous_max_concurrent),
             env_config_version=self.previous_env_config_version,
+            source_git_commit=self.previous_source_git_commit,
             rollout_policy={"mode": "all"},
             env=dict(self.previous_env or {}),
             target_slots=self.target_slots,
@@ -123,6 +132,8 @@ class LocalWorkerState:
     max_concurrent: int
     env_config_version: str
     capacity_intent: str = "active"
+    source_git_commit: str | None = None
+    source_git_dirty: bool | None = None
     env: dict[str, str] = field(default_factory=dict)
 
 
@@ -148,7 +159,12 @@ def _env_int(values: Mapping[str, str | None], key: str, default: int) -> int:
         raise ValueError(f"{key} must be an integer; got {raw!r}") from exc
 
 
-def load_local_state(env_file: Path, *, hostname: str | None = None) -> LocalWorkerState:
+def load_local_state(
+    env_file: Path,
+    *,
+    hostname: str | None = None,
+    source_dir: Path | None = None,
+) -> LocalWorkerState:
     raw_values = dotenv_values(env_file)
     values = {str(key): str(value) for key, value in raw_values.items() if value is not None}
     raw_intent = str(values.get("LOOM_GB10_CAPACITY_INTENT") or "").strip()
@@ -158,6 +174,7 @@ def load_local_state(env_file: Path, *, hostname: str | None = None) -> LocalWor
             if str(values.get("LOOM_WORKER_DRAIN") or "").strip() in {"1", "true", "yes"}
             else "active"
         )
+    source_git_commit, source_git_dirty = _source_git_provenance(source_dir)
     return LocalWorkerState(
         hostname=hostname or str(values.get("LOOM_WORKER_HOSTNAME") or socket.gethostname()),
         image_tag=str(values.get("LOOM_IMAGE_TAG") or "dev"),
@@ -165,6 +182,8 @@ def load_local_state(env_file: Path, *, hostname: str | None = None) -> LocalWor
         max_concurrent=_env_int(values, "LOOM_WORKER_MAX_CONCURRENT", 5),
         env_config_version=str(values.get("LOOM_WORKER_ENV_CONFIG_VERSION") or ""),
         capacity_intent=raw_intent,
+        source_git_commit=source_git_commit,
+        source_git_dirty=source_git_dirty,
         env=values,
     )
 
@@ -202,6 +221,11 @@ def build_plan(
         changes.append("max_concurrent")
     if local.env_config_version != desired.env_config_version:
         changes.append("env_config_version")
+    if desired.source_git_commit:
+        if local.source_git_commit != desired.source_git_commit:
+            changes.append("source_git_commit")
+        elif local.source_git_dirty is not False:
+            changes.append("source_git_dirty")
     if local.capacity_intent != desired_intent:
         changes.append("capacity_intent")
     for key, desired_value in sorted(desired.env.items()):
@@ -223,6 +247,8 @@ def build_plan(
             "max_concurrent": desired.max_concurrent,
             "env_config_version": desired.env_config_version,
             "capacity_intent": desired_intent,
+            "source_git_commit": desired.source_git_commit,
+            "source_git_dirty": False if desired.source_git_commit else None,
         },
         current={
             "image_tag": local.image_tag,
@@ -230,6 +256,8 @@ def build_plan(
             "max_concurrent": local.max_concurrent,
             "env_config_version": local.env_config_version,
             "capacity_intent": local.capacity_intent,
+            "source_git_commit": local.source_git_commit,
+            "source_git_dirty": local.source_git_dirty,
         },
     )
 
@@ -337,6 +365,7 @@ def _publish_desired_state(args: argparse.Namespace, desired: DesiredState) -> N
         "image_tag": desired.image_tag,
         "max_concurrent": desired.max_concurrent,
         "env_config_version": desired.env_config_version,
+        "source_git_commit": desired.source_git_commit,
         "rollout_policy": desired.rollout_policy,
         "env": desired.env,
         "force": desired.force,
@@ -367,11 +396,7 @@ def _report_node(
         admin_token = _resolve_admin_token(args.admin_token)
     except ValueError:
         return
-    compose_project_dir = (
-        Path(args.compose_file[0]).resolve().parent
-        if getattr(args, "compose_file", None)
-        else None
-    )
+    compose_project_dir = _source_dir_for_args(args)
     source_git_commit, source_git_dirty = _source_git_provenance(compose_project_dir)
     url = (
         f"{args.cp_url.rstrip('/')}/admin/gb10-worker-pools/"
@@ -430,6 +455,59 @@ def _source_git_provenance(source_dir: Path | None) -> tuple[str | None, bool | 
     return head.stdout.strip(), dirty
 
 
+def _source_dir_for_args(args: argparse.Namespace) -> Path | None:
+    source_dir = getattr(args, "source_dir", None)
+    if source_dir is not None:
+        return Path(source_dir).resolve()
+    compose_files = getattr(args, "compose_file", None)
+    if compose_files:
+        return Path(compose_files[0]).resolve().parent
+    return None
+
+
+def _source_matches_desired(
+    *,
+    desired: DesiredState,
+    local: LocalWorkerState,
+) -> bool:
+    if not desired.source_git_commit:
+        return True
+    return (
+        local.source_git_commit == desired.source_git_commit
+        and local.source_git_dirty is False
+    )
+
+
+def _update_source_checkout(
+    *,
+    desired: DesiredState,
+    source_dir: Path | None,
+    dry_run: bool,
+) -> None:
+    if not desired.source_git_commit:
+        return
+    if source_dir is None:
+        raise RuntimeError(
+            "desired state requires source_git_commit but no --source-dir or "
+            "--compose-file source directory is available",
+        )
+    _run(
+        ["git", "-C", str(source_dir), "fetch", "--quiet", "origin"],
+        dry_run=dry_run,
+    )
+    _run(
+        [
+            "git",
+            "-C",
+            str(source_dir),
+            "checkout",
+            "--detach",
+            desired.source_git_commit,
+        ],
+        dry_run=dry_run,
+    )
+
+
 def _print_plan(plan: AgentPlan, *, json_output: bool) -> None:
     if json_output:
         json.dump(asdict(plan), sys.stdout, indent=2, sort_keys=True)
@@ -450,7 +528,11 @@ def _plan(args: argparse.Namespace) -> int:
         if args.rollback:
             desired = desired.rollback_target()
         desired = _with_local_secret_updates(desired, args)
-        local = load_local_state(args.env_file, hostname=args.hostname)
+        local = load_local_state(
+            args.env_file,
+            hostname=args.hostname,
+            source_dir=_source_dir_for_args(args),
+        )
         plan = build_plan(desired, local, force=args.force)
     except (RuntimeError, ValueError) as exc:
         sys.stderr.write(f"error: {exc}\n")
@@ -501,7 +583,12 @@ def _apply(args: argparse.Namespace) -> int:
             else:
                 _publish_desired_state(args, desired)
         desired = _with_local_secret_updates(desired, args)
-        local = load_local_state(args.env_file, hostname=args.hostname)
+        source_dir = _source_dir_for_args(args)
+        local = load_local_state(
+            args.env_file,
+            hostname=args.hostname,
+            source_dir=source_dir,
+        )
         plan = build_plan(desired, local, force=args.force)
     except (RuntimeError, ValueError) as exc:
         sys.stderr.write(f"error: {exc}\n")
@@ -538,6 +625,12 @@ def _apply(args: argparse.Namespace) -> int:
         else:
             temp_env_file = _write_temp_env_file(args.env_file, rendered)
             compose_env_file = temp_env_file
+        if not _source_matches_desired(desired=desired, local=local):
+            _update_source_checkout(
+                desired=desired,
+                source_dir=source_dir,
+                dry_run=args.dry_run,
+            )
         compose_base = [
             "docker",
             "compose",
@@ -563,7 +656,7 @@ def _apply(args: argparse.Namespace) -> int:
             _run([*compose_base, "up", "-d", args.service], dry_run=args.dry_run)
         if not args.dry_run:
             args.env_file.write_text(rendered, encoding="utf-8")
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         _report_node(
             args,
             desired=desired,
@@ -577,7 +670,11 @@ def _apply(args: argparse.Namespace) -> int:
         if temp_env_file is not None:
             temp_env_file.unlink(missing_ok=True)
 
-    refreshed = load_local_state(args.env_file, hostname=local.hostname)
+    refreshed = load_local_state(
+        args.env_file,
+        hostname=local.hostname,
+        source_dir=source_dir,
+    )
     final_intent = str(plan.desired.get("capacity_intent") or "active")
     apply_state = "rolled_back" if args.rollback else "applied"
     result = "docker compose worker restarted"
@@ -621,6 +718,15 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
             "Optional current environment worker token source for local "
             "host env parity. ONE of env:VAR, file:PATH, or -. The token is "
             "written only to the host-local env file and is not published to CP."
+        ),
+    )
+    parser.add_argument(
+        "--source-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Host-local Loom source checkout to report and converge. Defaults "
+            "to the first --compose-file parent when compose files are provided."
         ),
     )
 

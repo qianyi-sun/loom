@@ -133,6 +133,7 @@ def desired_state_to_dict(row: GB10WorkerPoolDesiredState) -> dict[str, object]:
         "image_tag": row.image_tag,
         "max_concurrent": row.max_concurrent,
         "env_config_version": row.env_config_version,
+        "source_git_commit": row.source_git_commit,
         "target_slots": row.target_slots,
         "host_intents": row.host_intents,
         "rollout_policy": row.rollout_policy,
@@ -141,6 +142,7 @@ def desired_state_to_dict(row: GB10WorkerPoolDesiredState) -> dict[str, object]:
         "previous_image_tag": row.previous_image_tag,
         "previous_max_concurrent": row.previous_max_concurrent,
         "previous_env_config_version": row.previous_env_config_version,
+        "previous_source_git_commit": row.previous_source_git_commit,
         "previous_env": row.previous_env,
         "created_at": _dt(row.created_at),
         "updated_at": _dt(row.updated_at),
@@ -161,6 +163,7 @@ def node_status_to_dict(row: GB10WorkerNodeStatus) -> dict[str, object]:
         "desired_image_tag": row.desired_image_tag,
         "desired_max_concurrent": row.desired_max_concurrent,
         "desired_env_config_version": row.desired_env_config_version,
+        "desired_source_git_commit": row.desired_source_git_commit,
         "desired_intent": row.desired_intent,
         "apply_state": row.apply_state,
         "last_apply_result": row.last_apply_result,
@@ -200,6 +203,7 @@ async def upsert_desired_state(
     image_tag: str,
     max_concurrent: int,
     env_config_version: str,
+    source_git_commit: str | None = None,
     target_slots: int | None = None,
     host_intents: dict[str, str] | None = None,
     rollout_policy: dict[str, Any] | None = None,
@@ -211,6 +215,11 @@ async def upsert_desired_state(
     pool_name = _clean_nonempty(pool_name, "pool_name")
     image_tag = _clean_nonempty(image_tag, "image_tag")
     env_config_version = _clean_nonempty(env_config_version, "env_config_version")
+    cleaned_source_git_commit = (
+        _clean_nonempty(source_git_commit, "source_git_commit")
+        if source_git_commit is not None
+        else None
+    )
     if max_concurrent <= 0:
         raise ValueError("max_concurrent must be positive")
     if target_slots is not None and target_slots < 0:
@@ -231,6 +240,7 @@ async def upsert_desired_state(
             image_tag=image_tag,
             max_concurrent=max_concurrent,
             env_config_version=env_config_version,
+            source_git_commit=cleaned_source_git_commit,
             target_slots=target_slots,
             host_intents=safe_host_intents,
             rollout_policy=policy,
@@ -244,6 +254,7 @@ async def upsert_desired_state(
             row.image_tag != image_tag
             or row.max_concurrent != max_concurrent
             or row.env_config_version != env_config_version
+            or row.source_git_commit != cleaned_source_git_commit
             or row.target_slots != target_slots
             or row.host_intents != safe_host_intents
             or row.env != safe_env
@@ -252,10 +263,12 @@ async def upsert_desired_state(
             row.previous_image_tag = row.image_tag
             row.previous_max_concurrent = row.max_concurrent
             row.previous_env_config_version = row.env_config_version
+            row.previous_source_git_commit = row.source_git_commit
             row.previous_env = dict(row.env or {})
         row.image_tag = image_tag
         row.max_concurrent = max_concurrent
         row.env_config_version = env_config_version
+        row.source_git_commit = cleaned_source_git_commit
         row.target_slots = target_slots
         row.host_intents = safe_host_intents
         row.rollout_policy = policy
@@ -308,6 +321,7 @@ async def record_node_report(
         row.desired_image_tag = desired.image_tag
         row.desired_max_concurrent = desired.max_concurrent
         row.desired_env_config_version = desired.env_config_version
+        row.desired_source_git_commit = desired.source_git_commit
         row.desired_intent = (desired.host_intents or {}).get(hostname, "active")
     row.apply_state = report.apply_state
     row.last_apply_result = redact_status_text(report.last_apply_result)

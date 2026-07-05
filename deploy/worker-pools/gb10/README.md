@@ -241,6 +241,7 @@ loom admin environment-state check \
   --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+  --var GIT_SHA="$RELEASE_SHA" \
   --worker-token file:/secure/path/worker-token
 ```
 
@@ -372,7 +373,8 @@ loom admin environment-state apply \
   --environment staging \
   --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
-  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
+  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+  --var GIT_SHA="$RELEASE_SHA"
 
 loom admin environment-state check \
   --cp-url http://127.0.0.1:18081 \
@@ -381,6 +383,7 @@ loom admin environment-state check \
   --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+  --var GIT_SHA="$RELEASE_SHA" \
   --worker-token file:/secure/path/worker-token
 ```
 
@@ -398,6 +401,7 @@ curl -sS -X PUT \
   http://127.0.0.1:18081/admin/gb10-worker-pools/production/gb10-arm64/desired-state \
   -d '{
     "image_tag": "staging-<commit>",
+    "source_git_commit": "<full-release-commit>",
     "max_concurrent": 10,
     "env_config_version": "gb10-env-2026-06-26",
     "rollout_policy": {
@@ -420,14 +424,14 @@ loom admin gb10-workers status \
   --format json
 ```
 
-For release rollouts, gate convergence against the intended image/env target and
-source checkout provenance. This exits non-zero if active nodes or Control Plane
-desired state are still on the old release, if a declared active host has no
-node report, if an active node is not `applied`, if capacity differs from the
-desired max concurrency, if active node-agent reports do not include source
-provenance, if the checkout is dirty, or if the reported git commit does not
-start with the trailing SHA in the release tag. Save the JSON form and pass it
-to `loom cluster release-gate --gb10-workers-status` for protected rollouts.
+For release rollouts, gate convergence against the intended image/env/source
+target and source checkout provenance. This exits non-zero if active nodes or
+Control Plane desired state are still on the old release, if a declared active
+host has no node report, if an active node is not `applied`, if capacity differs
+from the desired max concurrency, if active node-agent reports do not include
+source provenance, if the checkout is dirty, or if the reported git commit does
+not match desired `source_git_commit`. Save the JSON form and pass it to
+`loom cluster release-gate --gb10-workers-status` for protected rollouts.
 
 ```bash
 loom admin gb10-workers status \
@@ -441,16 +445,15 @@ loom admin gb10-workers status \
   > "$ROLLOUT_DIR/gb10-workers-status-$IMAGE_TAG.json"
 ```
 
-The node-agent applies updates by writing non-secret keys in
-`.env.remote-worker`, then running `docker compose pull`. If the worker image
-tag is not available from a registry, it falls back to `docker compose build`
-from the host-local checkout before running `docker compose stop --timeout
+The node-agent applies updates by first fetching `origin` and checking out the
+desired `source_git_commit` in the host-local checkout when desired state
+requires a source change or the tree is dirty. It then writes non-secret keys in
+`.env.remote-worker` and runs `docker compose pull`. If the worker image tag is
+not available from a registry, it falls back to `docker compose build` from the
+checked-out source before running `docker compose stop --timeout
 <drain-timeout> worker` and `docker compose up -d worker`. The stop path sends
 SIGTERM to the worker, which uses the existing worker drain logic before the
-container exits. When the local-build fallback is used, make sure the
-host-local checkout is on the release commit; the release-target status gate
-above is the operator-visible guardrail for stale source, image, or env state.
-Use `--force` only for an explicit emergency override.
+container exits. Use `--force` only for an explicit emergency override.
 
 Retry a failed rollout by fixing the local cause and restarting the service:
 

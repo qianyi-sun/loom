@@ -77,7 +77,8 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
         "[[gb10_worker_pool_desired_states]]\n"
         'pool_name = "gb10-arm64"\n'
         'image_tag = "${IMAGE_TAG}"\n'
-        'env_config_version = "${ENV_CONFIG_VERSION}"\n',
+        'env_config_version = "${ENV_CONFIG_VERSION}"\n'
+        'source_git_commit = "${GIT_SHA}"\n',
         encoding="utf-8",
     )
     config = load_cluster_config(config_path)
@@ -169,6 +170,7 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
             "pool_name": "gb10-arm64",
             "image_tag": "staging-abc123",
             "env_config_version": "staging-abc123",
+            "source_git_commit": "a" * 40,
         },
     ]
     assert "super-secret-token" not in rendered_json
