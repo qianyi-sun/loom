@@ -545,3 +545,81 @@ def test_release_gate_run_fails_fast_when_gb10_status_fails(
         ["cluster", "release-manifest", "--config"],
         ["admin", "gb10-workers", "status"],
     ]
+
+
+def test_release_gate_retries_transient_gb10_status_cp_unreachable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="public-beta-abc123")
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    rendered = ev.step_dir(7, "render").artifact_path("rendered.yaml")
+    rendered.write_text("kind: List\nitems: []\n")
+    step_dir = ev.step_dir(12, "release-gate")
+    calls: list[list[str]] = []
+    gb10_attempts = 0
+
+    def fake_run(argv, **kwargs):
+        nonlocal gb10_attempts
+        calls.append(list(argv))
+        if "release-manifest" in argv:
+            output = Path(argv[argv.index("--output") + 1])
+            output.write_text('{"schema_version": 1}\n')
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout="manifest\n",
+                stderr="",
+            )
+        if "gb10-workers" in argv:
+            gb10_attempts += 1
+            if gb10_attempts < 3:
+                return SubprocessResult(
+                    argv=list(argv),
+                    returncode=2,
+                    stdout="",
+                    stderr=(
+                        "error: could not reach CP at "
+                        "http://127.0.0.1:18081/admin/gb10-worker-pools/status: "
+                        "[Errno 111] Connection refused\n"
+                    ),
+                )
+            if kwargs.get("stdout_log"):
+                kwargs["stdout_log"].write_text('{"nodes":[],"desired_states":[]}\n')
+            if kwargs.get("stderr_log"):
+                kwargs["stderr_log"].write_text("")
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout='{"nodes":[],"desired_states":[]}\n',
+                stderr="",
+            )
+        if "release-gate" in argv:
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout="gate\n",
+                stderr="",
+            )
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s12_release_gate.run_captured", fake_run)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s12_release_gate._GB10_STATUS_RETRY_DELAY_SEC",
+        0.0,
+        raising=False,
+    )
+
+    result = ReleaseGateStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    assert gb10_attempts == 3
+    assert [call[3:6] for call in calls] == [
+        ["cluster", "release-manifest", "--config"],
+        ["admin", "gb10-workers", "status"],
+        ["admin", "gb10-workers", "status"],
+        ["admin", "gb10-workers", "status"],
+        ["cluster", "release-gate", "--manifest"],
+    ]
