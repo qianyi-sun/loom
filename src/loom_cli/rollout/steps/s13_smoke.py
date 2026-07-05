@@ -6,13 +6,14 @@ Concrete smoke:
 2. ``GET /api/v1/auth/whoami`` with a user-owned smoke API token → submitter
    identity is present.
 3. ``GET /api/v1/benchmarks`` with that submitter token → non-empty.
-4. Submit a trivial ``oracle × hello-world`` trial via the public API
+4. ``GET /api/v1/tasks/{id}`` for the configured smoke task → task exists.
+5. Submit a trivial ``oracle × smoke task`` trial via the public API
    with a deterministic idempotency key derived from the image tag.
-5. Poll ``/api/v1/trials/{id}`` until terminal (cap 5 minutes). Assert
+6. Poll ``/api/v1/trials/{id}`` until terminal (cap 5 minutes). Assert
    ``state=succeeded`` and ``aggregate_reward`` is present.
-6. Fetch the trajectory presigned URL and HEAD to confirm the trajectory
+7. Fetch the trajectory presigned URL and HEAD to confirm the trajectory
    blob is in MinIO.
-7. ``GET /api/v1/usage?since=<start>`` → assert the smoke trial appears.
+8. ``GET /api/v1/usage?since=<start>`` → assert the smoke trial appears.
 
 Every step above writes its response JSON as a separate artifact so an
 operator can inspect the smoke evidence without re-running.
@@ -25,6 +26,7 @@ import json
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Mapping
 
@@ -34,6 +36,7 @@ from loom_cli.rollout.steps.base import BaseStep, RunResult
 
 DEFAULT_TERMINAL_TIMEOUT_SEC = 300.0
 DEFAULT_POLL_INTERVAL_SEC = 5.0
+DEFAULT_SMOKE_TASK_ID = "terminal-bench-2/hello-world"
 
 
 def _ingress_base(ctx: RolloutContext) -> str:
@@ -48,6 +51,15 @@ def _smoke_api_token(ctx: RolloutContext) -> str | None:
     return os.environ.get("LOOM_SMOKE_API_TOKEN") or ctx.metadata.get(
         "smoke_api_token",
     )
+
+
+def _smoke_task_id(ctx: RolloutContext) -> str:
+    task_id = os.environ.get("LOOM_SMOKE_TASK_ID") or ctx.metadata.get(
+        "smoke_task_id",
+    )
+    if isinstance(task_id, str) and task_id.strip():
+        return task_id.strip()
+    return DEFAULT_SMOKE_TASK_ID
 
 
 def _http_get(url: str, *, token: str | None = None) -> tuple[int, bytes]:
@@ -165,9 +177,27 @@ class SmokeStep(BaseStep):
                 exit_code=1, error="benchmarks catalog is empty",
             )
 
-        # 4. submit a trivial trial
+        # 4. smoke task exists in the live catalog.
+        task_id = _smoke_task_id(ctx)
+        quoted_task_id = urllib.parse.quote(task_id, safe="/")
+        status, body = _http_get(
+            f"{base}/api/v1/tasks/{quoted_task_id}", token=token,
+        )
+        step_dir.artifact_path("04-task.json").write_bytes(body)
+        if status == 404:
+            return RunResult(
+                exit_code=1,
+                error=f"smoke task {task_id!r} not found in live catalog",
+            )
+        if status != 200:
+            return RunResult(
+                exit_code=1,
+                error=f"/api/v1/tasks/{task_id} returned {status}",
+            )
+
+        # 5. submit a trivial trial
         payload = {
-            "task_id": "hello/hello-world",
+            "task_id": task_id,
             "config": {
                 "agent_name": "oracle",
                 "agent_model": None,
@@ -177,7 +207,7 @@ class SmokeStep(BaseStep):
         status, body = _http_post(
             f"{base}/api/v1/trials", payload, token=token,
         )
-        step_dir.artifact_path("04-submit.json").write_bytes(body)
+        step_dir.artifact_path("05-submit.json").write_bytes(body)
         if status not in (200, 201, 409):  # 409: idempotency replay
             return RunResult(
                 exit_code=1,
@@ -195,14 +225,14 @@ class SmokeStep(BaseStep):
                 exit_code=1, error="submit response has no trial id",
             )
 
-        # 5. poll
+        # 6. poll
         deadline = time.time() + DEFAULT_TERMINAL_TIMEOUT_SEC
         terminal_trial: dict[str, object] | None = None
         while time.time() < deadline:
             status, body = _http_get(
                 f"{base}/api/v1/trials/{trial_id}", token=token,
             )
-            step_dir.artifact_path("05-poll.json").write_bytes(body)
+            step_dir.artifact_path("06-poll.json").write_bytes(body)
             if status == 200:
                 trial = json.loads(body)
                 state = trial.get("state")
@@ -230,13 +260,13 @@ class SmokeStep(BaseStep):
                 error=f"trial {trial_id} succeeded but has no aggregate_reward",
             )
 
-        # 6. trajectory presign — HEAD to confirm storage
+        # 7. trajectory presign — HEAD to confirm storage
         traj_url_raw = terminal_trial.get("trajectory_url")
         if isinstance(traj_url_raw, str) and traj_url_raw:
             try:
                 req = urllib.request.Request(traj_url_raw, method="HEAD")
                 with urllib.request.urlopen(req, timeout=15) as resp:
-                    step_dir.artifact_path("06-trajectory-head.txt").write_text(
+                    step_dir.artifact_path("07-trajectory-head.txt").write_text(
                         f"status={resp.status}\n"
                         f"content-length={resp.headers.get('Content-Length')}\n"
                     )
@@ -246,11 +276,11 @@ class SmokeStep(BaseStep):
                     error=f"trajectory HEAD failed: {exc}",
                 )
 
-        # 7. usage rollup — verify the smoke trial showed up
+        # 8. usage rollup — verify the smoke trial showed up
         status, body = _http_get(
             f"{base}/api/v1/usage", token=token,
         )
-        step_dir.artifact_path("07-usage.json").write_bytes(body)
+        step_dir.artifact_path("08-usage.json").write_bytes(body)
         # Non-fatal: usage rollups may lag; log but don't fail on empty.
 
         step_dir.stdout_path().write_text(
