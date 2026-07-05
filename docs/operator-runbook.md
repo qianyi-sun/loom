@@ -886,6 +886,7 @@ loom cluster rollout \
   --cluster-name loom-staging \
   --namespace loom-staging \
   --environment staging \
+  --cp-url http://control-node.lan:18081 \
   --cluster-config /operator/cluster-config.toml \
   --backup-manifest /data/loom-staging/backups/latest/backup-manifest.json \
   --rollout-root /data/loom-staging \

@@ -69,7 +69,7 @@ class TestDefaultStepSequence:
         self,
         tmp_path,
     ) -> None:
-        ctx = make_ctx(tmp_path)
+        ctx = make_ctx(tmp_path, cp_url="http://control-node.lan:18081")
         ev = EvidenceDirectory(tmp_path, "rid")
         ev.ensure()
         render_dir = ev.step_dir(7, "render")
@@ -87,3 +87,7 @@ class TestDefaultStepSequence:
         assert str(env_state_dir.artifact_path("environment-state-check.json")) in argv
         assert "--gb10-workers-status" in argv
         assert str(gb10_dir.artifact_path("gb10-workers-status-staging-abc123.json")) in argv
+
+        gb10_argv = list(ReleaseGateStep().gb10_status_argv(ctx, gb10_dir))
+        assert "--cp-url" in gb10_argv
+        assert gb10_argv[gb10_argv.index("--cp-url") + 1] == "http://control-node.lan:18081"

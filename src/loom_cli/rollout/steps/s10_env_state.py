@@ -68,6 +68,7 @@ class EnvStateStep(BaseStep):
         apply_ = run_captured(
             candidate_loom_argv(
                 "admin", "environment-state", "apply",
+                "--cp-url", ctx.cp_url,
                 "--file", str(profile_path),
             ),
             cwd=cwd,
@@ -76,6 +77,7 @@ class EnvStateStep(BaseStep):
         check = run_captured(
             candidate_loom_argv(
                 "admin", "environment-state", "check",
+                "--cp-url", ctx.cp_url,
                 "--file", str(profile_path),
                 "--format", "json",
             ),

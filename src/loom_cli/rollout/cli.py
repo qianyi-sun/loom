@@ -59,6 +59,15 @@ def build_parser(p: argparse.ArgumentParser) -> None:
         ),
     )
     p.add_argument(
+        "--cp-url",
+        required=True,
+        help=(
+            "Operator-reachable Control Plane admin base URL used by rollout "
+            "steps that call `loom admin ...`, for example "
+            "http://control-node.lan:18081 or http://127.0.0.1:18081."
+        ),
+    )
+    p.add_argument(
         "--cluster-config",
         required=True,
         help="Path to the operator's cluster-config.toml.",
@@ -172,6 +181,7 @@ def handle(args: argparse.Namespace) -> int:
         cluster_name=args.cluster_name,
         namespace=args.namespace,
         environment=args.environment,
+        cp_url=args.cp_url,
         cluster_config_path=cluster_config_path,
         cluster_config_sha256=cfg_sha,
         rollout_root=rollout_root,

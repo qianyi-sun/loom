@@ -35,6 +35,10 @@ class RolloutContext:
         environment: Protected environment name (e.g. ``staging``).
             Used by the backup verification and release-gate steps to bind
             evidence to the operator's declared environment.
+        cp_url: Operator-reachable Control Plane admin base URL. Rollout steps
+            that call ``loom admin ...`` must use this instead of the admin
+            CLI's localhost default because protected rollouts often run
+            against a private tunnel or node-local port.
         cluster_config_path: Path to the operator's cluster-config.toml.
         cluster_config_sha256: sha256 of cluster_config_path contents at launch.
         rollout_root: Root of the evidence directory tree (#174 model).
@@ -61,6 +65,7 @@ class RolloutContext:
     cluster_name: str
     namespace: str
     environment: str
+    cp_url: str
     cluster_config_path: Path
     cluster_config_sha256: str
     rollout_root: Path
@@ -84,6 +89,7 @@ class RolloutContext:
             "cluster_name": self.cluster_name,
             "namespace": self.namespace,
             "environment": self.environment,
+            "cp_url": self.cp_url,
             "cluster_config_path": str(self.cluster_config_path),
             "cluster_config_sha256": self.cluster_config_sha256,
             "rollout_root": str(self.rollout_root),
