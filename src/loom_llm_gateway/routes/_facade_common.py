@@ -59,6 +59,9 @@ _TYPE_TO_DEFAULT_RATE_CARD_PROVIDER = {
 _BEARER_VALUE_RE = re.compile(
     r"(?i)(\bBearer\s+)([A-Za-z0-9._~+/=-]{4,})",
 )
+_SECRET_FIELD_RE = re.compile(
+    r"(?i)(api[_-]?key|authorization|bearer|token|secret|password|cookie)",
+)
 
 
 async def verify_facade_auth(
@@ -423,6 +426,82 @@ def redact_api_key(text: str, api_key: str, *, limit: int = 500) -> str:
         excerpt = excerpt.replace(api_key, "[REDACTED]")
     excerpt = _BEARER_VALUE_RE.sub(r"\1[REDACTED]", excerpt)
     return redact_text(excerpt)
+
+
+def _redact_raw_value(value: Any, api_key: str) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if _SECRET_FIELD_RE.search(key_text):
+                redacted[key_text] = "[REDACTED]"
+            else:
+                redacted[key_text] = _redact_raw_value(item, api_key)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_raw_value(item, api_key) for item in value]
+    if isinstance(value, str):
+        out = value
+        if api_key and len(api_key) >= 4:
+            out = out.replace(api_key, "[REDACTED]")
+        out = _BEARER_VALUE_RE.sub(r"\1[REDACTED]", out)
+        return redact_text(out)
+    return value
+
+
+def _redact_raw_headers(headers: dict[str, str], api_key: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for key, value in headers.items():
+        key_l = key.lower()
+        if key_l == "authorization":
+            out[key_l] = str(_redact_raw_value(value, api_key))
+        elif _SECRET_FIELD_RE.search(key_l):
+            out[key_l] = "[REDACTED]"
+        else:
+            out[key_l] = str(_redact_raw_value(value, api_key))
+    return out
+
+
+def build_raw_provider_log(
+    *,
+    dialect: str,
+    provider: str,
+    provider_connection_id: UUID,
+    attempt: int,
+    request_method: str,
+    request_url: str,
+    request_headers: dict[str, str],
+    request_body: dict[str, Any],
+    response_status_code: int,
+    response_headers: dict[str, str],
+    response_body: dict[str, Any],
+    api_key: str,
+) -> dict[str, Any]:
+    """Build the redacted raw request/response record for export.
+
+    The provider prompt/assistant body is intentionally retained for
+    downstream training/audit handoff; only secret-bearing fields, auth
+    headers, bearer values, and known secret text are scrubbed.
+    """
+
+    return {
+        "schema_version": "1",
+        "dialect": dialect,
+        "provider": provider,
+        "provider_connection_id": str(provider_connection_id),
+        "attempt": max(int(attempt or 1), 1),
+        "request": {
+            "method": request_method.upper(),
+            "url": str(_redact_raw_value(request_url, api_key)),
+            "headers": _redact_raw_headers(request_headers, api_key),
+            "body": _redact_raw_value(request_body, api_key),
+        },
+        "response": {
+            "status_code": int(response_status_code),
+            "headers": _redact_raw_headers(response_headers, api_key),
+            "body": _redact_raw_value(response_body, api_key),
+        },
+    }
 
 
 def http_failure_category(status_code: int) -> str:

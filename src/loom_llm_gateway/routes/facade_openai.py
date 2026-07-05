@@ -55,6 +55,7 @@ from loom_llm_gateway.llm_calls import record_call
 from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
+    build_raw_provider_log,
     compute_facade_cost_estimate,
     decrypt_facade_api_key,
     http_failure_category,
@@ -247,6 +248,20 @@ async def openai_chat_facade(
             provider=row.provider_type,
             attempt=outcome.attempt,
             request_params=normalize_request_params(payload),
+            raw_provider_log=build_raw_provider_log(
+                dialect=_FACADE_DIALECT,
+                provider=row.provider_type,
+                provider_connection_id=connection_id,
+                attempt=outcome.attempt,
+                request_method="POST",
+                request_url=upstream_url,
+                request_headers=upstream_headers,
+                request_body=upstream_payload,
+                response_status_code=upstream_response.status_code,
+                response_headers=dict(upstream_response.headers),
+                response_body=body,
+                api_key=api_key,
+            ),
         )
 
     return openai_chat_facade_result(

@@ -352,6 +352,82 @@ async def test_facade_records_redacted_request_params(
     assert "sk-should-not-persist" not in rendered
 
 
+async def test_facade_records_redacted_raw_provider_log(
+    facade_setup,
+    postgres_url: str,
+) -> None:
+    app, jwt, _team_id, trial_id, conn_id, captures = facade_setup
+    body = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "keep this raw prompt"}],
+        "extra_body": {
+            "api_key": "sk-body-secret",
+            "metadata": {"safe": "value"},
+        },
+    }
+    captures["response"] = httpx.Response(
+        200,
+        headers={"x-request-id": "req_123", "authorization": "Bearer echoed-secret"},
+        json={
+            "id": "chatcmpl_raw",
+            "object": "chat.completion",
+            "model": "gpt-4o",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": "raw assistant answer",
+                    },
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+            },
+        },
+    )
+
+    r = await _post(
+        app,
+        jwt,
+        body=body,
+        **{"x-loom-provider-connection-id": str(conn_id)},
+    )
+    assert r.status_code == 200, r.text
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+    sync_engine.dispose()
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    raw_log = row["provider_extras"]["_loom_raw_provider_log"]
+    assert raw_log["schema_version"] == "1"
+    assert raw_log["trial_id"] == str(trial_id)
+    assert raw_log["ref"] == (
+        f"llm_calls/{row['id']}/provider_extras/_loom_raw_provider_log"
+    )
+    assert raw_log["request"]["method"] == "POST"
+    assert raw_log["request"]["url"] == "https://api.openai.com/v1/chat/completions"
+    assert raw_log["request"]["body"]["messages"] == [
+        {"role": "user", "content": "keep this raw prompt"}
+    ]
+    assert raw_log["request"]["body"]["extra_body"]["api_key"] == "[REDACTED]"
+    assert raw_log["request"]["headers"]["authorization"] == "Bearer [REDACTED]"
+    assert raw_log["response"]["status_code"] == 200
+    assert raw_log["response"]["body"]["choices"][0]["message"]["content"] == (
+        "raw assistant answer"
+    )
+    assert raw_log["response"]["headers"]["authorization"] == "Bearer [REDACTED]"
+    rendered = str(raw_log)
+    assert "sk-upstream-XYZ" not in rendered
+    assert "sk-body-secret" not in rendered
+    assert "echoed-secret" not in rendered
+
+
 async def test_facade_rate_card_pricing_uses_connection_provider(
     facade_setup,
     postgres_url: str,

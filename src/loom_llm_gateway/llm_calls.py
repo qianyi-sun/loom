@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +29,7 @@ async def record_call(
     provider: str | None = None,
     attempt: int = 1,
     request_params: dict[str, Any] | None = None,
+    raw_provider_log: dict[str, Any] | None = None,
 ) -> None:
     """Insert one row into `llm_calls`. Called by every dialect endpoint
     (chat / messages / responses / gemini) AFTER the upstream provider
@@ -51,8 +52,20 @@ async def record_call(
         if request_params is None
         else coerce_request_params(request_params)
     )
+    llm_call_id = uuid4()
+    provider_extras = dict(usage.provider_extras)
+    if raw_provider_log is not None:
+        provider_extras["_loom_raw_provider_log"] = {
+            **raw_provider_log,
+            "llm_call_id": str(llm_call_id),
+            "trial_id": str(trial_id),
+            "step_id": step_id,
+            "ref": f"llm_calls/{llm_call_id}/provider_extras/_loom_raw_provider_log",
+        }
+
     await session.execute(
         insert(LlmCall).values(
+            id=llm_call_id,
             team_id=team_id,
             trial_id=trial_id,
             step_id=step_id,
@@ -60,7 +73,7 @@ async def record_call(
             model=model,
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
-            provider_extras=usage.provider_extras,
+            provider_extras=provider_extras,
             request_params=audit_request_params,
             cost_usd=cost_usd,
             rate_card_hash=rate_card_hash,

@@ -719,8 +719,13 @@ def _batch_delivery_bundle(args: argparse.Namespace) -> int:
     def _body() -> int:
         cfg = require_logged_in()
         payload: dict[str, Any] = {}
+        if args.mode != "lightweight":
+            payload["mode"] = args.mode
         if args.supplemental_batch_id:
             payload["supplemental_batch_ids"] = list(args.supplemental_batch_id)
+        expected_sha = ""
+        output: Path | None = None
+        actual_hash = hashlib.sha256()
         with authed_client(cfg, timeout=args.timeout) as c:
             create_resp = c.post(
                 f"/api/v1/batches/{args.batch_id}/delivery-export",
@@ -734,15 +739,24 @@ def _batch_delivery_bundle(args: argparse.Namespace) -> int:
             if not isinstance(download_url, str) or not download_url:
                 sys.stderr.write("error: server did not return a delivery download_url.\n")
                 return 1
-            download_resp = c.get(download_url)
-            assert_2xx_response(
-                download_resp,
-                action=f"download delivery bundle for batch {args.batch_id!r}",
-            )
+            expected_sha = str(body.get("sha256") or "")
+            default_name = str(body.get("archive_filename") or f"{args.batch_id}-delivery.tar.gz")
+            output = Path(args.output) if args.output else Path(default_name)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            with c.stream("GET", download_url) as download_resp:
+                assert_2xx_response(
+                    download_resp,
+                    action=f"download delivery bundle for batch {args.batch_id!r}",
+                )
+                with output.open("wb") as f:
+                    for chunk in download_resp.iter_bytes():
+                        if not chunk:
+                            continue
+                        actual_hash.update(chunk)
+                        f.write(chunk)
 
-        expected_sha = str(body.get("sha256") or "")
-        archive_bytes = download_resp.content
-        actual_sha = hashlib.sha256(archive_bytes).hexdigest()
+        assert output is not None
+        actual_sha = actual_hash.hexdigest()
         if expected_sha and actual_sha != expected_sha:
             sys.stderr.write(
                 "error: downloaded delivery bundle checksum mismatch "
@@ -750,10 +764,6 @@ def _batch_delivery_bundle(args: argparse.Namespace) -> int:
             )
             return 1
 
-        default_name = str(body.get("archive_filename") or f"{args.batch_id}-delivery.tar.gz")
-        output = Path(args.output) if args.output else Path(default_name)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(archive_bytes)
         output.with_suffix(output.suffix + ".sha256").write_text(
             f"{actual_sha}  {output.name}\n",
             encoding="utf-8",
@@ -1335,6 +1345,16 @@ def dispatch(argv: list[str]) -> int:
         "--output",
         default=None,
         help="Destination archive path. Defaults to the server archive filename.",
+    )
+    p_bdel.add_argument(
+        "--mode",
+        choices=["lightweight", "raw-harbor"],
+        default="lightweight",
+        help=(
+            "Export mode. lightweight preserves the #390 delivery bundle; "
+            "raw-harbor adds raw provider logs, task bundles, agent-run "
+            "artifacts, and derived SFT JSONL."
+        ),
     )
     p_bdel.add_argument(
         "--timeout",

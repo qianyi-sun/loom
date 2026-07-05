@@ -289,6 +289,15 @@ loom eval batch delivery-bundle <batch-id> \
   --output delivery-bundle.tar.gz
 ```
 
+Use `--mode raw-harbor` when the handoff needs raw provider and Harbor-style
+execution artifacts for training or audit:
+
+```bash
+loom eval batch delivery-bundle <batch-id> \
+  --mode raw-harbor \
+  --output raw-harbor-delivery.tar.gz
+```
+
 `delivery-bundle` asks the service to choose the final trial for each
 task/sample/combination coordinate across the main batch and any explicit
 supplemental rerun batches. Later linked reruns replace earlier failed attempts
@@ -298,7 +307,10 @@ service verifies that every selected trajectory and ATIF object can be read
 through object storage. The command downloads the archive, verifies the exposed
 SHA-256, writes `<archive>.sha256`, and exits non-zero with the service's
 structured error if a referenced object is missing or a coordinate still has no
-successful final trial.
+successful final trial. The service builds archives through a bounded spool and
+streams object-store bodies into the tar writer; the CLI streams downloads to
+disk while hashing chunks. Large raw exports should not require memory
+proportional to total archive size.
 
 Each archive contains:
 
@@ -313,14 +325,27 @@ Each archive contains:
 - `trajectories/<task>/<trial-id>.events.jsonl` and
   `atif/<task>/<trial-id>.atif.json` for the selected final trials.
 
+Raw Harbor mode keeps those lightweight files and adds:
+
+- `provider_logs/manifest.json` plus redacted raw provider request/response
+  logs captured on the Loom Gateway path.
+- `task_bundles/<task_id>/...` for object-store task bundle inputs when the
+  selected task source is available as an `s3://` bundle.
+- `agent_runs/<task_id>/<trial_id>/execution_result.json`, `metrics.json`,
+  `artifact_manifest.json`, `verifier_output.json`,
+  `provider_logs_manifest.json`, `trajectory.jsonl`, and `atif.json`.
+- `derived/sft_messages.jsonl`, derived from the redacted provider logs for
+  downstream SFT-style pipelines.
+
 The same flow is available in the SPA Batch Detail page through the **Delivery
 bundle** card. API clients can call
 `POST /api/v1/batches/{id}/delivery-export` with optional
-`supplemental_batch_ids`, poll `GET /api/v1/batches/{id}/delivery-export`, and
-download through the returned `/api/v1/batches/.../delivery-export/.../download`
-URL. Creating a bundle requires submit/admin scope; reading or downloading an
-existing bundle only requires normal read access. These routes are team-scoped
-and never expose raw MinIO/S3 URLs.
+`mode` (`lightweight` or `raw-harbor`) and `supplemental_batch_ids`, poll
+`GET /api/v1/batches/{id}/delivery-export`, and download through the returned
+`/api/v1/batches/.../delivery-export/.../download` URL. Creating a bundle
+requires submit/admin scope; reading or downloading an existing bundle only
+requires normal read access. These routes are team-scoped and never expose raw
+MinIO/S3 URLs.
 
 `loom eval batch create` can omit `--name`; the service derives a concise
 name and description from the benchmark/subset, combinations, provider/model,

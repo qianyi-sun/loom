@@ -3284,13 +3284,23 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     loom eval batch delivery-bundle "$TEAM_A_BATCH_ID" \
       --output "$ROLLOUT_DIR/team-a-delivery-bundle.tar.gz"
     ```
+    The default mode is the lightweight #390 delivery bundle: final ledger,
+    selected trajectories, ATIF, manifest, payload checksums, and archive
+    checksum sidecar. For raw provider/Harbor handoff, request the expanded
+    layout explicitly:
+    ```bash
+    loom eval batch delivery-bundle "$TEAM_A_BATCH_ID" \
+      --mode raw-harbor \
+      --output "$ROLLOUT_DIR/team-a-raw-harbor-delivery.tar.gz"
+    ```
     If transient failures were repaired in linked rerun batches, pass each
     supplemental batch explicitly with repeated
     `--supplemental-batch-id "$RERUN_BATCH_ID"` flags. The service also follows
     linked rerun descendants when no explicit list is provided, but explicit ids
     make the rollout evidence auditable. Confirm the CLI prints the SHA-256,
     writes a `.sha256` sidecar, and exits only after verifying the downloaded
-    archive against the service checksum.
+    archive against the service checksum. The CLI streams the archive to disk
+    while hashing chunks; it must not hold the full bundle in memory.
 
     The corresponding API path is
     `POST /api/v1/batches/{id}/delivery-export`, followed by
@@ -3301,15 +3311,31 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
 
     Inspect `manifest.json`, `summary.json`, `ledger/trials.jsonl`,
     `ledger/trials.csv`, `checksums/SHA256SUMS`, `atif/`, and
-    `trajectories/` inside the archive. The manifest must list the main batch,
-    supplemental batch lineage, deterministic selection rule, final selected
-    trial per task/sample/combination, object storage evidence, and the payload
-    checksum file. The archive checksum is exposed outside the tarball by the
-    API/CLI, artifact metadata, and `.sha256` sidecar rather than
-    self-referentially in `manifest.json`. Preparing the bundle requires
-    submit/admin scope and must fail with a structured message before upload if
-    any selected trajectory or ATIF object is unreadable, or if a
-    task/sample/combination has no successful final trial after reruns.
+    `trajectories/` inside the archive. The
+    manifest must list the main batch, supplemental batch lineage, deterministic
+    selection rule, final selected trial per task/sample/combination, object
+    storage evidence, and the payload checksum file. The archive checksum is
+    exposed outside the tarball by the API/CLI, artifact metadata, and `.sha256`
+    sidecar rather than self-referentially in `manifest.json`. Preparing the
+    bundle requires submit/admin scope and must fail with a structured message
+    before upload if any selected trajectory or ATIF object is unreadable, or if
+    a task/sample/combination has no successful final trial after reruns.
+    Service-side archive creation uses a bounded spool and streams object-store
+    bodies into the tar writer while computing payload and archive SHA-256
+    values; operators should treat any regression to full in-memory archive
+    assembly as a production blocker for 100+ and 5000-trial raw exports.
+
+    In `raw-harbor` mode, also inspect `provider_logs/manifest.json`,
+    `task_bundles/<task_id>/...`, `agent_runs/<task_id>/<trial_id>/`, and
+    `derived/sft_messages.jsonl`. Each selected trial gets
+    `execution_result.json`, `metrics.json`, `artifact_manifest.json`,
+    `verifier_output.json`, `provider_logs_manifest.json`, `trajectory.jsonl`,
+    `atif.json`, and an `agent_native_trajectory.json` note documenting the
+    trajectory equivalent when no separate agent-native file exists. Raw
+    provider request/response logs are sourced from Gateway-routed `llm_calls`
+    rows, preserve prompt/assistant payloads for training/audit handoff, and
+    redact bearer values, provider API keys, secret-looking fields, and known
+    secret text before persistence or export.
 
 ### Task compatibility and verifier-detail production gate (#387/#379/#369/#361)
 
