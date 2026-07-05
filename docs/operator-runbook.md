@@ -3317,6 +3317,190 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     rows, preserve prompt/assistant payloads for training/audit handoff, and
     redact bearer values, provider API keys, secret-looking fields, and known
     secret text before persistence or export.
+
+### Task compatibility and verifier-detail production gate (#387/#379/#369/#361)
+
+Run this gate before a formal Source Useful or user-brought TaskSet production
+roll that depends on Dockerfile task images and script verifier diagnostics.
+The goal is to prove Loom reports incompatible bundles before expensive worker
+fanout and preserves verifier diagnostics once a trial reaches verifier output.
+
+Use a fresh evidence directory under the candidate rollout:
+
+```bash
+export COMPAT_GATE_DIR="$ROLLOUT_DIR/task-compat-verifier-gate-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$COMPAT_GATE_DIR"/{fixtures,publish,canaries,api}
+loom auth status | tee "$COMPAT_GATE_DIR/api/auth-status.txt"
+loom auth whoami | tee "$COMPAT_GATE_DIR/api/whoami.txt"
+```
+
+**1. Local code-path sanity.** On the exact candidate source checkout, run the
+targeted tests that pin the gate's non-network behavior:
+
+```bash
+uv run pytest \
+  tests/unit/test_task_bundle_compat.py \
+  tests/unit/test_loom_benchmark_tool_safety.py \
+  tests/integration/test_taskset_materialization.py \
+  tests/integration/test_local_benchmark_publish.py \
+  tests/unit/test_verifier_result.py \
+  tests/unit/test_script_verifier.py \
+  tests/unit/test_main_loop_cleanup.py \
+  -q | tee "$COMPAT_GATE_DIR/local-targeted-tests.txt"
+```
+
+**2. Catalog publish preflight must fail by default.** Create a deliberately
+incompatible Source Useful-style local benchmark whose Dockerfile copies the
+bundle to `/app/` but references a file that only exists under
+`environment/`:
+
+```bash
+BAD_BENCH="$COMPAT_GATE_DIR/fixtures/source-useful-bad-layout"
+mkdir -p "$BAD_BENCH/tasks/app-path-missing/environment"
+cat > "$BAD_BENCH/benchmark.toml" <<'TOML'
+schema_version = 1
+id = "source-useful-bad-layout"
+display_name = "Source Useful bad layout"
+series = "operator-validation"
+license_spdx = "MIT"
+TOML
+cat > "$BAD_BENCH/tasks/app-path-missing/task.toml" <<'TOML'
+schema_version = "1"
+
+[task]
+id = "app-path-missing"
+name = "App path missing"
+
+[environment]
+os = "linux"
+dockerfile = "environment/Dockerfile"
+
+[agent]
+name = "oracle"
+
+[verifier]
+name = "pytest"
+
+[[steps]]
+name = "main"
+TOML
+printf 'do task\n' > "$BAD_BENCH/tasks/app-path-missing/instruction.md"
+printf '#!/bin/sh\necho setup\n' > "$BAD_BENCH/tasks/app-path-missing/environment/setup_repo.sh"
+cat > "$BAD_BENCH/tasks/app-path-missing/environment/Dockerfile" <<'DOCKER'
+FROM debian:bookworm
+COPY . /app/
+RUN chmod +x /app/setup_repo.sh && /app/setup_repo.sh
+DOCKER
+```
+
+Then run `publish-local` without overrides. It must exit non-zero before upload
+or task-row registration and print `TASK_COMPAT_APP_PATH_MISSING`:
+
+```bash
+set +e
+loom datasets publish-local "$BAD_BENCH" \
+  2>&1 | tee "$COMPAT_GATE_DIR/publish/bad-layout-default.txt"
+bad_rc=${PIPESTATUS[0]}
+set -e
+test "$bad_rc" -ne 0
+grep -q 'TASK_COMPAT_APP_PATH_MISSING' \
+  "$COMPAT_GATE_DIR/publish/bad-layout-default.txt"
+```
+
+If a legacy operator bridge is explicitly approved, rerun with retained
+evidence. The command must show `compat_flattened_files=<N>`; absence of that
+line means the bridge is hidden and the gate fails:
+
+```bash
+loom datasets publish-local "$BAD_BENCH" \
+  --compat-flatten-environment \
+  2>&1 | tee "$COMPAT_GATE_DIR/publish/bad-layout-explicit-flatten.txt"
+grep -q 'compat_flattened_files=' \
+  "$COMPAT_GATE_DIR/publish/bad-layout-explicit-flatten.txt"
+```
+
+**3. DNS/NSS mutation must be a compatibility failure.** Validate either a
+TaskSet materialization row or a one-task canary whose Dockerfile mutates
+`/etc/resolv.conf`, `/etc/nsswitch.conf`, or `/etc/hosts` before Loom installs
+the service-mode agent layer. The accepted evidence is one of:
+
+- materialization error JSON containing `code=TASK_COMPAT_DNS_MUTATION`,
+  `phase=agent_layer_build`, and a remediation hint; or
+- a submitted canary trial with `state=failed`,
+  `failure_reason=task_compatibility`, and a failure message containing
+  `TASK_COMPAT_DNS_MUTATION`.
+
+Capture the API/CLI evidence:
+
+```bash
+loom tasksets status "$DNS_TASKSET_SLUG_OR_ID" --json \
+  | tee "$COMPAT_GATE_DIR/canaries/dns-taskset-status.json"
+
+loom eval trial show "$DNS_COMPAT_TRIAL_ID" --format json \
+  | tee "$COMPAT_GATE_DIR/canaries/dns-trial.json"
+loom eval diagnose trial "$DNS_COMPAT_TRIAL_ID" --format json \
+  | tee "$COMPAT_GATE_DIR/canaries/dns-trial-diagnosis.json"
+```
+
+**4. Corrected clean bundle must run.** Publish or select the corrected bundle
+that will be used for production, run a small batch on the intended worker
+pool, and save the batch/trial evidence:
+
+```bash
+loom eval batch create \
+  --agent "$AGENT" \
+  --provider "$PROVIDER" \
+  --model "$MODEL" \
+  --benchmark "$CORRECTED_BENCHMARK_ID" \
+  --task-filter "@$COMPAT_GATE_DIR/corrected-task-filter.json" \
+  --n-per-task 1 \
+  --name "compat-verifier-gate-${CORRECTED_BENCHMARK_ID}" \
+  --required-worker-pool gb10-arm64 \
+  | tee "$COMPAT_GATE_DIR/canaries/corrected-batch-create.txt"
+
+loom eval batch show "$CORRECTED_BATCH_ID" --format json \
+  | tee "$COMPAT_GATE_DIR/canaries/corrected-batch.json"
+loom eval batch debug "$CORRECTED_BATCH_ID" --format json \
+  | tee "$COMPAT_GATE_DIR/canaries/corrected-batch-debug.json"
+```
+
+Acceptance: no trial in the corrected canary has
+`failure_reason=task_compatibility`, `task_image_build`, `agent_layer_build`,
+or `verifier_error`. Reward `0` is acceptable only when verifier output is
+present and the failure is model/task score, not platform execution.
+
+**5. Script verifier detail must be preserved.** Include at least one canary
+task whose script verifier emits `checks[].detail`, including a legacy string
+detail such as `"exit_code=1"` or a structured object. The trial must reach a
+scored terminal outcome instead of `failure_reason=verifier_error`.
+
+Save the detail-bearing trial and verify the field survives API projection:
+
+```bash
+loom eval trial show "$VERIFIER_DETAIL_TRIAL_ID" --format json \
+  | tee "$COMPAT_GATE_DIR/canaries/verifier-detail-trial.json"
+jq -e '
+  .result.verifier.checks
+  | any(.detail != null and .detail != {})
+' "$COMPAT_GATE_DIR/canaries/verifier-detail-trial.json"
+jq -e '.failure_reason == null or .failure_reason != "verifier_error"' \
+  "$COMPAT_GATE_DIR/canaries/verifier-detail-trial.json"
+```
+
+**6. Issue evidence comment.** Link the evidence directory and summarize:
+
+- candidate image/source SHA and public-beta rollout directory;
+- commands above with exit status;
+- incompatible bundle diagnostics for `TASK_COMPAT_APP_PATH_MISSING` and
+  `TASK_COMPAT_DNS_MUTATION`;
+- corrected canary batch id, trial counts, and worker pool;
+- verifier-detail trial id and the observed `checks[].detail` shape;
+- any explicit `--compat-flatten-environment` use with
+  `compat_flattened_files=<N>`.
+
+Keep #387/#379/#369/#361 open as `[Needs validation]` if any accepted evidence
+is missing. Do not close them from local tests alone.
+
 15. **Run Library sharing.** Confirm the completed source run appears in Run
     Library -> My team for Team A and Run Library -> All teams for Team B.
     Evidence must include the owner-team label, completed state, score/cost
