@@ -384,6 +384,11 @@ def test_runner_emits_start_and_end_on_success(
 ) -> None:
     events: list[str] = []
     fake_session = MagicMock(name="TmuxSession")
+    fake_session._session_name = "loom-terminus-2"
+    fake_session.container.exec_run.return_value = terminus_2_runner._ExecResult(
+        exit_code=0,
+        output=b"ready",
+    )
     fake_session.start.side_effect = lambda: events.append("start")
     fake_session.stop.side_effect = lambda: events.append("stop")
     fake_agent = MagicMock(name="Terminus")
@@ -444,6 +449,93 @@ def test_runner_emits_start_and_end_on_success(
     assert call_args.kwargs["session"] is fake_session
 
 
+def test_runner_recovers_when_upstream_start_does_not_create_tmux_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live #445 evidence showed `session.start()` returned but the
+    first `capture-pane -t loom-terminus-2` still failed. The runner
+    must verify the actual tmux session before letting Terminus spend
+    provider calls against a broken control channel."""
+    events: list[str] = []
+    commands: list[list[str] | str] = []
+
+    class _FakeContainer:
+        ready = False
+
+        def exec_run(self, cmd: list[str] | str, *_: object, **__: object) -> object:
+            commands.append(cmd)
+            if (
+                isinstance(cmd, list)
+                and cmd[:3] == ["tmux", "capture-pane", "-p"]
+            ):
+                return terminus_2_runner._ExecResult(
+                    exit_code=0 if self.ready else 1,
+                    output=b"ready" if self.ready else b"can't find session",
+                )
+            if (
+                isinstance(cmd, list)
+                and cmd[:2] == ["tmux", "new-session"]
+            ):
+                self.ready = True
+                return terminus_2_runner._ExecResult(exit_code=0, output=b"")
+            return terminus_2_runner._ExecResult(exit_code=0, output=b"")
+
+    fake_container = _FakeContainer()
+    fake_session = MagicMock(name="TmuxSession")
+    fake_session._session_name = "loom-terminus-2"
+    fake_session.container = fake_container
+    fake_session.start.side_effect = lambda: events.append("start")
+    fake_session.stop.side_effect = lambda: events.append("stop")
+    fake_agent = MagicMock(name="Terminus")
+
+    def _perform_task(**_: object) -> MagicMock:
+        assert fake_container.ready is True
+        events.append("perform")
+        return MagicMock(
+            total_input_tokens=0,
+            total_output_tokens=0,
+            failure_mode="FailureMode.NONE",
+            timestamped_markers=[],
+        )
+
+    fake_agent.perform_task.side_effect = _perform_task
+
+    monkeypatch.setattr(
+        terminus_2_runner, "_setup_tmux_session", lambda: fake_session,
+    )
+    monkeypatch.setattr(
+        terminus_2_runner,
+        "_build_agent",
+        lambda model, max_episodes: fake_agent,
+    )
+
+    buf = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", buf)
+
+    rc = terminus_2_runner.main([
+        "--model", "openai/glm-5.1-thinking",
+        "--task", "make hello.txt",
+        "--workdir", "/app",
+    ])
+
+    assert rc == 0
+    assert events == ["start", "perform", "stop"]
+    assert ["tmux", "capture-pane", "-p", "-t", "loom-terminus-2"] in commands
+    assert [
+        "tmux",
+        "new-session",
+        "-x",
+        "160",
+        "-y",
+        "40",
+        "-d",
+        "-s",
+        "loom-terminus-2",
+    ] in commands
+    lines = [json.loads(line) for line in buf.getvalue().splitlines() if line]
+    assert any(e["kind"] == "terminus2_session_recovered" for e in lines)
+
+
 def test_runner_emits_error_on_setup_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -475,6 +567,11 @@ def test_runner_stops_started_session_after_agent_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_session = MagicMock(name="TmuxSession")
+    fake_session._session_name = "loom-terminus-2"
+    fake_session.container.exec_run.return_value = terminus_2_runner._ExecResult(
+        exit_code=0,
+        output=b"ready",
+    )
     fake_agent = MagicMock(name="Terminus")
     fake_agent.perform_task.side_effect = RuntimeError("agent crashed")
 
