@@ -173,7 +173,8 @@ loom admin environment-state apply \
   --environment staging \
   --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG=${IMAGE_TAG} \
-  --var ENV_CONFIG_VERSION=${IMAGE_TAG}
+  --var ENV_CONFIG_VERSION=${IMAGE_TAG} \
+  --var GIT_SHA=${RELEASE_SHA}
 ```
 
 ### 9. Release-gate verification

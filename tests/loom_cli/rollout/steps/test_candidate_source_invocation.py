@@ -241,6 +241,9 @@ def test_env_state_resolves_loom_cli_without_global_executable(
         _assert_candidate_invocation(call, worktree=worktree)
     assert calls[0]["argv"][3:6] == ["admin", "environment-state", "apply"]
     assert calls[1]["argv"][3:6] == ["admin", "environment-state", "check"]
+    for call in calls:
+        assert "--var" in call["argv"]
+        assert f"GIT_SHA={ctx.resolved_sha}" in call["argv"]
 
 
 def test_subcommand_step_resolves_loom_cli_without_global_executable(
@@ -777,3 +780,75 @@ def test_release_gate_retries_transient_gb10_status_cp_unreachable(
         ["admin", "gb10-workers", "status"],
         ["cluster", "release-gate", "--manifest"],
     ]
+
+
+def test_release_gate_retries_gb10_convergence_until_node_agent_reports_current(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="public-beta-53897aa")
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    _write_rendered_service(ev, image_tag="public-beta-53897aa")
+    step_dir = ev.step_dir(12, "release-gate")
+    status_attempts = 0
+    gate_attempts = 0
+
+    def fake_run(argv, **kwargs):
+        nonlocal status_attempts, gate_attempts
+        if list(argv[:3]) == ["docker", "image", "inspect"]:
+            return _docker_inspect_success(list(argv))
+        if "release-manifest" in argv:
+            output = Path(argv[argv.index("--output") + 1])
+            output.write_text('{"schema_version": 1}\n')
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout="manifest\n",
+                stderr="",
+            )
+        if "gb10-workers" in argv:
+            status_attempts += 1
+            body = (
+                '{"nodes":[{"source_git_commit":"old"}],"desired_states":[]}\n'
+                if status_attempts == 1
+                else '{"nodes":[{"source_git_commit":"53897aa"}],"desired_states":[]}\n'
+            )
+            if kwargs.get("stdout_log"):
+                kwargs["stdout_log"].write_text(body)
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout=body,
+                stderr="",
+            )
+        if "release-gate" in argv:
+            gate_attempts += 1
+            if gate_attempts == 1:
+                return SubprocessResult(
+                    argv=list(argv),
+                    returncode=1,
+                    stdout="gb10-worker-convergence fail stale source\n",
+                    stderr="",
+                )
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout="gb10-worker-convergence pass\n",
+                stderr="",
+            )
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s12_release_gate.run_captured", fake_run)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s12_release_gate._GB10_STATUS_RETRY_DELAY_SEC",
+        0.0,
+        raising=False,
+    )
+
+    result = ReleaseGateStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    assert status_attempts == 2
+    assert gate_attempts == 2

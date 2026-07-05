@@ -23,7 +23,7 @@ from loom_cli.rollout.steps.candidate_source import (
 from loom_cli.rollout.steps.s02_build_images import ROLLOUT_IMAGES, image_tag
 from loom_cli.rollout.steps.s10_env_state import _profile_path_for
 from loom_cli.rollout.steps.subcommand_step import SubcommandStep
-from loom_cli.rollout.steps.subprocess_util import run_captured
+from loom_cli.rollout.steps.subprocess_util import SubprocessResult, run_captured
 
 _GB10_STATUS_MAX_ATTEMPTS = 30
 _GB10_STATUS_RETRY_DELAY_SEC = 2.0
@@ -31,6 +31,15 @@ _GB10_STATUS_RETRY_DELAY_SEC = 2.0
 
 def _is_transient_cp_unreachable(stderr: str) -> bool:
     return "could not reach CP" in stderr
+
+
+def _is_gb10_convergence_failure(result: SubprocessResult) -> bool:
+    text = f"{result.stdout}\n{result.stderr}"
+    return (
+        "gb10-worker-convergence" in text
+        or "GB10 worker" in text
+        or "GB10 rollout target mismatch" in text
+    )
 
 
 def _string_list(value: Any) -> list[str]:
@@ -312,8 +321,9 @@ class ReleaseGateStep(SubcommandStep):
             )
 
         gb10_cmd = list(self.gb10_status_argv(ctx, step_dir))
+        gate_cmd = list(self.argv(ctx, step_dir))
         gb10_retry_log = step_dir.artifact_path("gb10-workers-status.retries.log")
-        gb10 = None
+        last_gate: SubprocessResult | None = None
         for attempt in range(1, _GB10_STATUS_MAX_ATTEMPTS + 1):
             gb10 = run_captured(
                 gb10_cmd,
@@ -323,50 +333,66 @@ class ReleaseGateStep(SubcommandStep):
                 env=env,
                 timeout_sec=60,
             )
-            if gb10.returncode == 0 or not _is_transient_cp_unreachable(gb10.stderr):
-                break
+            if gb10.returncode != 0:
+                if _is_transient_cp_unreachable(gb10.stderr):
+                    gb10_retry_log.open("a", encoding="utf-8").write(
+                        f"attempt {attempt}/{_GB10_STATUS_MAX_ATTEMPTS}: "
+                        f"{gb10.stderr.strip()}\n"
+                    )
+                    if attempt < _GB10_STATUS_MAX_ATTEMPTS:
+                        time.sleep(_GB10_STATUS_RETRY_DELAY_SEC)
+                        continue
+                return RunResult(
+                    exit_code=gb10.returncode,
+                    summary=f"gb10-workers status exited {gb10.returncode}",
+                    error=(
+                        gb10.stderr.strip().splitlines()[-1]
+                        if gb10.stderr.strip()
+                        else f"gb10-workers status exited {gb10.returncode}"
+                    ),
+                    artifacts=artifacts,
+                )
+
+            gate = run_captured(
+                gate_cmd,
+                stdout_log=step_dir.stdout_path(),
+                stderr_log=step_dir.stderr_path(),
+                cwd=cwd,
+                env=env,
+            )
+            last_gate = gate
+            if gate.returncode == 0:
+                return RunResult(
+                    exit_code=0,
+                    summary="release-manifest + GB10 status + release-gate exited 0",
+                    artifacts=artifacts,
+                )
+            if not _is_gb10_convergence_failure(gate):
+                return RunResult(
+                    exit_code=gate.returncode,
+                    summary=f"release-gate exited {gate.returncode}",
+                    error=(
+                        gate.stderr.strip().splitlines()[-1]
+                        if gate.stderr.strip()
+                        else f"release-gate exited {gate.returncode}"
+                    ),
+                    artifacts=artifacts,
+                )
             gb10_retry_log.open("a", encoding="utf-8").write(
                 f"attempt {attempt}/{_GB10_STATUS_MAX_ATTEMPTS}: "
-                f"{gb10.stderr.strip()}\n"
+                "release-gate still reports GB10 convergence drift\n"
             )
             if attempt < _GB10_STATUS_MAX_ATTEMPTS:
                 time.sleep(_GB10_STATUS_RETRY_DELAY_SEC)
-        assert gb10 is not None
-        if gb10.returncode != 0:
-            return RunResult(
-                exit_code=gb10.returncode,
-                summary=f"gb10-workers status exited {gb10.returncode}",
-                error=(
-                    gb10.stderr.strip().splitlines()[-1]
-                    if gb10.stderr.strip()
-                    else f"gb10-workers status exited {gb10.returncode}"
-                ),
-                artifacts=artifacts,
-            )
-
-        gate_cmd = list(self.argv(ctx, step_dir))
-        gate = run_captured(
-            gate_cmd,
-            stdout_log=step_dir.stdout_path(),
-            stderr_log=step_dir.stderr_path(),
-            cwd=cwd,
-            env=env,
+        assert last_gate is not None
+        return RunResult(
+            exit_code=last_gate.returncode,
+            summary=f"release-gate exited {last_gate.returncode}",
+            error=(
+                last_gate.stderr.strip().splitlines()[-1]
+                if last_gate.stderr.strip()
+                else f"release-gate exited {last_gate.returncode}"
+            ),
+            artifacts=artifacts,
         )
-        if gate.returncode == 0:
-            return RunResult(
-                exit_code=0,
-                summary="release-manifest + GB10 status + release-gate exited 0",
-                artifacts=artifacts,
-            )
-        if gate.returncode != 0:
-            return RunResult(
-                exit_code=gate.returncode,
-                summary=f"release-gate exited {gate.returncode}",
-                error=(
-                    gate.stderr.strip().splitlines()[-1]
-                    if gate.stderr.strip()
-                    else f"release-gate exited {gate.returncode}"
-                ),
-                artifacts=artifacts,
-            )
         raise AssertionError("unreachable release-gate branch")

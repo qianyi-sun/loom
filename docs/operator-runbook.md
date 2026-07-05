@@ -500,6 +500,7 @@ knob you need.
      --file deploy/environment-state/staging.toml \
      --var IMAGE_TAG="$IMAGE_TAG" \
      --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+     --var GIT_SHA="$RELEASE_SHA" \
      --rollout-id "$IMAGE_TAG" \
      --rollout-lock-evidence "$ROLLOUT_DIR/environment-state-apply-lock-$IMAGE_TAG.json"
 
@@ -511,6 +512,7 @@ knob you need.
      --file deploy/environment-state/staging.toml \
      --var IMAGE_TAG="$IMAGE_TAG" \
      --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+     --var GIT_SHA="$RELEASE_SHA" \
      --worker-token file:/secure/path/worker-token \
      --rollout-id "$IMAGE_TAG" \
      --rollout-lock-evidence "$ROLLOUT_DIR/environment-state-check-lock-$IMAGE_TAG.json" \
@@ -530,7 +532,10 @@ knob you need.
    The staging profile currently targets the legacy Control Plane
    environment name `production` because existing GB10 node agents read that
    desired-state key; the CLI still requires `--environment staging` so
-   operators do not accidentally apply the staging profile.
+   operators do not accidentally apply the staging profile. Pass the resolved
+   release commit as `GIT_SHA`; the GB10 desired state stores it as
+   `source_git_commit`, so node-agent status and release-gate checks can
+   reject a clean image/env rollout whose host checkout is still stale.
    When a release manifest records this profile, pass the JSON check artifact
    to `loom cluster release-gate --environment-state-check`; a missing artifact,
    `ok=false`, or non-empty `drift` array keeps the protected release gate red
@@ -1028,7 +1033,7 @@ observability and mutation contract:
 | 09 | migrate | candidate-source `loom cluster render-migration` + `kubectl wait` (#332) |
 | 10 | env-state | candidate-source apply + check (#331 fix for stop-on-disable) |
 | 11 | cluster-up | candidate-source `loom cluster up` (#203 fix for updated replicas) |
-| 12 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, then `loom cluster release-gate --manifest <that file>` (#339 fix for stale kind-import) |
+| 12 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, collect GB10 status when the manifest records GB10 desired state, then `loom cluster release-gate --manifest <that file>` (#339 fix for stale kind-import). GB10 convergence mismatches are retried briefly so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. |
 | 13 | smoke | HTTP health + user-owned smoke token whoami + benchmarks + smoke task lookup + trial submit + poll + trajectory HEAD |
 | 99 | summary | write `summary.md` from every prior step's result.json |
 
@@ -1438,6 +1443,7 @@ loom admin environment-state check \
   --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+  --var GIT_SHA="$RELEASE_SHA" \
   --worker-token file:/secure/path/worker-token
 # After in-cluster and remote workers re-register cleanly (no 401s),
 # revoke the old prefix:
@@ -4039,7 +4045,8 @@ link it from #217; do not merge incomplete evidence.
     --environment staging \
     --file deploy/environment-state/staging.toml \
     --var IMAGE_TAG="$IMAGE_TAG" \
-    --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}"
+    --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+    --var GIT_SHA="$RELEASE_SHA"
   loom admin environment-state check \
     --cp-url http://control-node.lan:18081 \
     --admin-token file:/secure/path/admin-token \
@@ -4048,16 +4055,18 @@ link it from #217; do not merge incomplete evidence.
     --file deploy/environment-state/staging.toml \
     --var IMAGE_TAG="$IMAGE_TAG" \
     --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+    --var GIT_SHA="$RELEASE_SHA" \
     --worker-token file:/secure/path/worker-token
   ```
 
   Then confirm the OLDLAB-1 `loom-remote-worker-tunnel-watchdog.timer` is
   active, run the local plus GB10 `check-remote` tunnel gates, verify Slurm
   worker status, then gate the node-agent release target before treating the
-  pool as healthy. The GB10 gate checks image tag, env-config version, and
-  clean source-checkout provenance; active nodes with missing provenance or a
-  git commit that does not match the trailing SHA in `--release-image-tag` must
-  be treated as stale even if their image/env fields look current.
+  pool as healthy. The GB10 gate checks image tag, env-config version, desired
+  source git commit, active-vs-draining host intent, worker-token/env drift,
+  and clean source-checkout provenance. Active nodes with missing provenance,
+  dirty source, or a git commit that does not match desired `source_git_commit`
+  must be treated as stale even if their image/env fields look current.
 
   ```bash
   loom admin slurm-workers status \

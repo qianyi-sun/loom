@@ -81,6 +81,7 @@ class _GB10DesiredStatePayload(BaseModel):
     image_tag: str
     max_concurrent: int = Field(gt=0)
     env_config_version: str
+    source_git_commit: str | None = None
     target_slots: int | None = Field(default=None, ge=0)
     host_intents: dict[str, str] = Field(default_factory=dict)
     rollout_policy: dict[str, Any] = Field(default_factory=dict)
@@ -396,6 +397,7 @@ async def put_gb10_worker_pool_desired_state(
                 image_tag=payload.image_tag,
                 max_concurrent=payload.max_concurrent,
                 env_config_version=payload.env_config_version,
+                source_git_commit=payload.source_git_commit,
                 target_slots=payload.target_slots,
                 host_intents=payload.host_intents,
                 rollout_policy=payload.rollout_policy,

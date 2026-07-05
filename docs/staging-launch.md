@@ -589,6 +589,7 @@ loom admin environment-state apply \
   --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+  --var GIT_SHA="$RELEASE_SHA" \
   --rollout-id "$IMAGE_TAG" \
   --rollout-lock-dir "$LOOM_ROLLOUT_LOCK_DIR" \
   --rollout-lock-evidence "$ROLLOUT_DIR/environment-state-apply-lock-$IMAGE_TAG.json"
@@ -601,6 +602,7 @@ loom admin environment-state check \
   --file deploy/environment-state/staging.toml \
   --var IMAGE_TAG="$IMAGE_TAG" \
   --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
+  --var GIT_SHA="$RELEASE_SHA" \
   --worker-token file:/secure/path/worker-token \
   --rollout-id "$IMAGE_TAG" \
   --rollout-lock-dir "$LOOM_ROLLOUT_LOCK_DIR" \
@@ -624,11 +626,12 @@ loom admin gb10-workers status \
 ```
 
 For GB10 node-agent compatibility workers, `gb10-workers status` proves the
-non-secret desired image/env-config state and source-checkout provenance. With
-`--release-image-tag`, active nodes must report a clean git checkout whose
-commit starts with the release tag's trailing SHA, for example
-`staging-76875ac` -> `76875ac`; missing provenance or a stale
-`compose_project_dir` is a hard failure. During worker-token rotation, also run
+non-secret desired image/env-config state and source-checkout provenance. The
+profile writes `source_git_commit` from `GIT_SHA`; active nodes must report a
+clean git checkout at that commit. Missing provenance, a stale
+`compose_project_dir`, a dirty checkout, or a source commit that differs from
+desired state is a hard failure even when image/env fields are current. During
+worker-token rotation, also run
 `loom worker gb10-agent plan/apply --worker-token file:/...` on each GB10 host,
 then verify `loom resources status --json` shows fresh `gb10-arm64` active
 workers and the Control Plane logs no new `/workers/register` 401s. The
