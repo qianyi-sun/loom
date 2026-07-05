@@ -666,7 +666,10 @@ schema surface. Protected rollouts should first run `loom cluster
 release-manifest` against that exact config and image tag, storing the artifact
 beside the rendered YAML. For protected release acceptance, pass
 `--expected-image-identities-json` so the artifact records immutable image
-digests or image IDs, not just mutable tags. The artifact records the expected
+digests or image IDs, not just mutable tags. The one-command rollout driver
+generates that identity JSON from the rendered Deployment images and local
+Docker image IDs for rollout-managed images only; external images are left out.
+The artifact records the expected
 git SHA, image tag, CLI version, rendered Deployment images,
 cluster-config/rendered-manifest hashes, Alembic heads, and external-worker
 desired-state fingerprints before any apply starts. After readiness passes,

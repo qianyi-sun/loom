@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
+from loom_cli.cluster_cmd import _rendered_deployment_images
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
 from loom_cli.rollout.steps.base import RunResult
@@ -17,6 +20,7 @@ from loom_cli.rollout.steps.candidate_source import (
     candidate_relative_path,
     rollout_cluster_config,
 )
+from loom_cli.rollout.steps.s02_build_images import ROLLOUT_IMAGES, image_tag
 from loom_cli.rollout.steps.s10_env_state import _profile_path_for
 from loom_cli.rollout.steps.subcommand_step import SubcommandStep
 from loom_cli.rollout.steps.subprocess_util import run_captured
@@ -27,6 +31,68 @@ _GB10_STATUS_RETRY_DELAY_SEC = 2.0
 
 def _is_transient_cp_unreachable(stderr: str) -> bool:
     return "could not reach CP" in stderr
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
+def _repo_part(image: str) -> str:
+    image = image.split("@", 1)[0]
+    last_slash = image.rfind("/")
+    last_colon = image.rfind(":")
+    if last_colon > last_slash:
+        return image[:last_colon]
+    return image
+
+
+def _matching_repo_digest(image: str, repo_digests: list[str]) -> str | None:
+    if not repo_digests:
+        return None
+    repo = _repo_part(image)
+    for digest in repo_digests:
+        if digest.split("@", 1)[0] == repo:
+            return digest
+    return repo_digests[0]
+
+
+def _image_identities_from_inspect(
+    *,
+    rendered_images: dict[str, dict[str, str]],
+    inspect_docs: list[dict[str, Any]],
+    managed_images: set[str],
+) -> dict[str, dict[str, dict[str, str]]]:
+    docs_by_tag: dict[str, dict[str, Any]] = {}
+    for doc in inspect_docs:
+        for tag in _string_list(doc.get("RepoTags")):
+            docs_by_tag[tag] = doc
+
+    identities: dict[str, dict[str, dict[str, str]]] = {}
+    for deployment_name, by_container in rendered_images.items():
+        for container_name, image in by_container.items():
+            if image not in managed_images:
+                continue
+            inspect_doc = docs_by_tag.get(image)
+            if inspect_doc is None:
+                raise ValueError(f"Docker inspect output missing managed image {image}")
+            identity: dict[str, str] = {"image": image}
+            image_id = inspect_doc.get("Id")
+            if isinstance(image_id, str) and image_id:
+                identity["image_id"] = image_id
+            repo_digest = _matching_repo_digest(
+                image,
+                _string_list(inspect_doc.get("RepoDigests")),
+            )
+            if repo_digest:
+                identity["repo_digest"] = repo_digest
+            if "image_id" not in identity and "repo_digest" not in identity:
+                raise ValueError(
+                    f"Docker inspect output for {image} lacks Id and RepoDigests",
+                )
+            identities.setdefault(deployment_name, {})[container_name] = identity
+    return identities
 
 
 class ReleaseGateStep(SubcommandStep):
@@ -47,6 +113,13 @@ class ReleaseGateStep(SubcommandStep):
 
     def gb10_status_path(self, ctx: RolloutContext, step_dir: StepDir) -> Path:
         return step_dir.artifact_path(f"gb10-workers-status-{ctx.image_tag}.json")
+
+    def expected_image_identities_path(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+    ) -> Path:
+        return step_dir.artifact_path(f"image-identities-{ctx.image_tag}.json")
 
     def environment_state_check_path(self, step_dir: StepDir) -> Path:
         return (
@@ -71,6 +144,8 @@ class ReleaseGateStep(SubcommandStep):
             ctx.image_tag,
             "--git-sha",
             ctx.resolved_sha,
+            "--expected-image-identities-json",
+            str(self.expected_image_identities_path(ctx, step_dir)),
             "--output",
             str(self.release_manifest_path(ctx, step_dir)),
         )
@@ -130,6 +205,57 @@ class ReleaseGateStep(SubcommandStep):
             argv.extend(["--environment-state-check", str(environment_state_check)])
         return argv
 
+    def _write_expected_image_identities(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+    ) -> Path:
+        rendered_path = step_dir.path.parent / "07-render" / "rendered.yaml"
+        if not rendered_path.is_file():
+            raise FileNotFoundError(
+                f"rendered manifest not found at {rendered_path}; step 07 must "
+                "succeed before step 12 can record image identities"
+            )
+        rendered_images = _rendered_deployment_images(
+            rendered_path.read_text(encoding="utf-8"),
+        )
+        managed_images = {image_tag(image, ctx) for image, _ in ROLLOUT_IMAGES}
+        rendered_managed_images = sorted({
+            image
+            for by_container in rendered_images.values()
+            for image in by_container.values()
+            if image in managed_images
+        })
+        if not rendered_managed_images:
+            raise ValueError(
+                "rendered manifest does not reference any release-managed "
+                f"images for tag {ctx.image_tag}"
+            )
+
+        inspect = run_captured(
+            ["docker", "image", "inspect", *rendered_managed_images],
+            stderr_log=step_dir.artifact_path("image-identities.stderr"),
+        )
+        if inspect.returncode != 0:
+            raise RuntimeError(
+                inspect.stderr.strip()
+                or f"docker image inspect exited {inspect.returncode}"
+            )
+        raw = json.loads(inspect.stdout)
+        if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+            raise ValueError("docker image inspect returned unexpected JSON")
+        identities = _image_identities_from_inspect(
+            rendered_images=rendered_images,
+            inspect_docs=raw,
+            managed_images=managed_images,
+        )
+        output_path = self.expected_image_identities_path(ctx, step_dir)
+        output_path.write_text(
+            json.dumps(identities, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return output_path
+
     def cwd(self, ctx: RolloutContext, step_dir: StepDir) -> Path:
         return candidate_loom_cwd(step_dir)
 
@@ -148,6 +274,23 @@ class ReleaseGateStep(SubcommandStep):
             step_dir.stderr_path().write_text(str(exc) + "\n")
             return RunResult(exit_code=2, error=str(exc))
 
+        artifacts = {
+            "expected_image_identities": str(
+                self.expected_image_identities_path(ctx, step_dir),
+            ),
+            "release_manifest": str(self.release_manifest_path(ctx, step_dir)),
+            "gb10_workers_status": str(self.gb10_status_path(ctx, step_dir)),
+        }
+        try:
+            self._write_expected_image_identities(ctx, step_dir)
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+            return RunResult(
+                exit_code=2,
+                summary="expected image identity collection failed",
+                error=str(exc),
+                artifacts=artifacts,
+            )
+
         manifest_cmd = list(self.release_manifest_argv(ctx, step_dir))
         manifest = run_captured(
             manifest_cmd,
@@ -156,10 +299,6 @@ class ReleaseGateStep(SubcommandStep):
             cwd=cwd,
             env=env,
         )
-        artifacts = {
-            "release_manifest": str(self.release_manifest_path(ctx, step_dir)),
-            "gb10_workers_status": str(self.gb10_status_path(ctx, step_dir)),
-        }
         if manifest.returncode != 0:
             return RunResult(
                 exit_code=manifest.returncode,

@@ -1002,9 +1002,15 @@ observability and mutation contract:
 | 09 | migrate | candidate-source `loom cluster render-migration` + `kubectl wait` (#332) |
 | 10 | env-state | candidate-source apply + check (#331 fix for stop-on-disable) |
 | 11 | cluster-up | candidate-source `loom cluster up` (#203 fix for updated replicas) |
-| 12 | release-gate | candidate-source `loom cluster release-manifest` → `release-manifest-<image-tag>.json`, then `loom cluster release-gate --manifest <that file>` (#339 fix for stale kind-import) |
+| 12 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, then `loom cluster release-gate --manifest <that file>` (#339 fix for stale kind-import) |
 | 13 | smoke | HTTP health + benchmarks + trial submit + poll + trajectory HEAD |
 | 99 | summary | write `summary.md` from every prior step's result.json |
+
+Step 12 deliberately writes a narrow image-identity artifact instead of full
+`docker image inspect` output. The artifact is keyed by Deployment/container and
+contains the rendered image tag plus immutable `image_id` and optional
+`repo_digest` for images built by this rollout. External images, such as Envoy,
+are not included in that artifact.
 
 ## Kind cluster: loading local images before rollout (#96)
 
