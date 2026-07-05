@@ -1728,6 +1728,102 @@ def test_batch_delivery_bundle_creates_downloads_and_writes_checksum(
     )
 
 
+def test_batch_delivery_bundle_streams_download_and_hashes_incrementally(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "raw-harbor.tar.gz"
+    chunks = [b"raw-", b"harbor-", b"archive"]
+    digest = hashlib.sha256(b"".join(chunks)).hexdigest()
+    artifact_id = "00000000-0000-0000-0000-00000000d313"
+    calls: list[tuple[str, str]] = []
+
+    class _StreamResponse:
+        def __init__(self) -> None:
+            self.status_code = 200
+            self.headers: dict[str, str] = {}
+            self.text = ""
+
+        def iter_bytes(self) -> Any:
+            yield from chunks
+
+    class _StreamContext:
+        def __enter__(self) -> _StreamResponse:
+            return _StreamResponse()
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    class _FakeClient:
+        def __enter__(self) -> _FakeClient:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def post(self, path: str, *, json: dict[str, Any]) -> httpx.Response:
+            calls.append(("POST", path))
+            assert json == {"mode": "raw-harbor"}
+            return httpx.Response(
+                201,
+                json={
+                    "id": artifact_id,
+                    "status": "ready",
+                    "archive_filename": "source-useful-raw-harbor.tar.gz",
+                    "sha256": digest,
+                    "download_url": (
+                        f"/api/v1/batches/{_BATCH_ID}/delivery-export/"
+                        f"{artifact_id}/download"
+                    ),
+                    "manifest": {
+                        "mode": "raw-harbor",
+                        "trial_count": 3,
+                        "object_counts": {
+                            "atif": 3,
+                            "trajectory": 3,
+                            "provider_logs": 3,
+                            "task_bundle_files": 2,
+                        },
+                    },
+                },
+            )
+
+        def get(self, path: str) -> httpx.Response:
+            raise AssertionError(f"download must stream, not use get({path!r})")
+
+        def stream(self, method: str, path: str) -> _StreamContext:
+            calls.append((method, path))
+            return _StreamContext()
+
+    monkeypatch.setattr(
+        "loom_cli.eval_cmd.authed_client",
+        lambda _cfg, *, timeout=30.0: _FakeClient(),
+    )
+
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "delivery-bundle",
+            _BATCH_ID,
+            "--mode",
+            "raw-harbor",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert rc == 0
+    assert output.read_bytes() == b"".join(chunks)
+    assert output.with_suffix(output.suffix + ".sha256").read_text() == (
+        f"{digest}  {output.name}\n"
+    )
+    assert calls == [
+        ("POST", f"/api/v1/batches/{_BATCH_ID}/delivery-export"),
+        ("GET", f"/api/v1/batches/{_BATCH_ID}/delivery-export/{artifact_id}/download"),
+    ]
+
+
 # ──────────────────────────────────────────────────────────────────────
 # eval trial list / show
 # ──────────────────────────────────────────────────────────────────────

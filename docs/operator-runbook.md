@@ -3291,6 +3291,22 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     submit/admin scope and must fail with a structured message before upload if
     any selected trajectory or ATIF object is unreadable, or if a
     task/sample/combination has no successful final trial after reruns.
+    Service-side archive creation uses a bounded spool and streams object-store
+    bodies into the tar writer while computing payload and archive SHA-256
+    values; operators should treat any regression to full in-memory archive
+    assembly as a production blocker for 100+ and 5000-trial raw exports.
+
+    In `raw-harbor` mode, also inspect `provider_logs/manifest.json`,
+    `task_bundles/<task_id>/...`, `agent_runs/<task_id>/<trial_id>/`, and
+    `derived/sft_messages.jsonl`. Each selected trial gets
+    `execution_result.json`, `metrics.json`, `artifact_manifest.json`,
+    `verifier_output.json`, `provider_logs_manifest.json`, `trajectory.jsonl`,
+    `atif.json`, and an `agent_native_trajectory.json` note documenting the
+    trajectory equivalent when no separate agent-native file exists. Raw
+    provider request/response logs are sourced from Gateway-routed `llm_calls`
+    rows, preserve prompt/assistant payloads for training/audit handoff, and
+    redact bearer values, provider API keys, secret-looking fields, and known
+    secret text before persistence or export.
 
 ### Task compatibility and verifier-detail production gate (#387/#379/#369/#361)
 
