@@ -25,10 +25,18 @@ from loom.driver.task_image import (
     dockerfile_uses_runtime_arm64_fallback_base,
 )
 from loom.models.task_checksum import task_checksum
+from loom.task_bundle_compat import (
+    CompatibilitySeverity,
+    collect_task_dir_compatibility_issues,
+    format_compatibility_issues,
+)
 from loom.trajectory.storage import ObjectStore
 from loom_benchmark_tool.db_url import normalize_db_url
 from loom_benchmark_tool.upload import upload_task_dir
-from loom_cli.local_benchmark_validate import validate_local_benchmark
+from loom_cli.local_benchmark_validate import (
+    LocalBenchmarkValidationError,
+    validate_local_benchmark,
+)
 from loom_cli.terminal_bench_normalize import (
     normalize_terminal_bench_task_toml,
 )
@@ -45,6 +53,7 @@ class LocalBenchmarkPublishStats:
     updated: int
     unchanged: int
     uploaded_objects: int
+    compat_flattened_files: int
     bucket: str
     source_prefix: str
 
@@ -61,6 +70,7 @@ async def publish_local_benchmark(
     license_spdx: str | None = None,
     source_subdir: str | None = None,
     imported_by: str | None = None,
+    compat_flatten_environment: bool = False,
 ) -> LocalBenchmarkPublishStats:
     """Validate, upload, and register a user-owned local benchmark folder."""
 
@@ -78,6 +88,7 @@ async def publish_local_benchmark(
     engine = create_async_engine(normalize_db_url(db_url))
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     inserted = updated = unchanged = uploaded_objects = 0
+    compat_flattened_files = 0
     source_prefix = f"s3://{bucket}/{entry.id}/"
     try:
         async with session_factory() as session:
@@ -128,7 +139,22 @@ async def publish_local_benchmark(
                 ) as stage_root:
                     staged = Path(stage_root) / "bundle"
                     shutil.copytree(bundle_dir, staged, symlinks=False)
-                    _flatten_environment_subdir(staged)
+                    if compat_flatten_environment:
+                        compat_flattened_files += len(
+                            _flatten_environment_subdir(staged),
+                        )
+
+                    compatibility_issues = [
+                        issue
+                        for issue in collect_task_dir_compatibility_issues(staged)
+                        if issue.severity == CompatibilitySeverity.ERROR
+                    ]
+                    if compatibility_issues:
+                        raise LocalBenchmarkValidationError(
+                            "task bundle compatibility preflight failed for "
+                            f"{task_id}:\n"
+                            + format_compatibility_issues(compatibility_issues),
+                        )
 
                     uploaded_objects += await upload_task_dir(
                         store=object_store,
@@ -191,6 +217,7 @@ async def publish_local_benchmark(
         updated=updated,
         unchanged=unchanged,
         uploaded_objects=uploaded_objects,
+        compat_flattened_files=compat_flattened_files,
         bucket=bucket,
         source_prefix=source_prefix,
     )
