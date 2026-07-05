@@ -22,6 +22,7 @@ from loom.db.schema import (
     Artifact,
     ArtifactLineageEdge,
     Batch,
+    LlmCall,
     Task,
     Team,
     TeamQuota,
@@ -38,6 +39,8 @@ class _FakeS3Client:
         self.head_errors: dict[tuple[str, str], str] = {}
         self.get_errors: dict[tuple[str, str], str] = {}
         self.heads: list[tuple[str, str]] = []
+        self.put_body_types: list[type[object]] = []
+        self.put_body_types_by_key: dict[tuple[str, str], type[object]] = {}
 
     def head_object(self, *, Bucket: str, Key: str) -> dict[str, object]:  # noqa: N803
         self.heads.append((Bucket, Key))
@@ -69,6 +72,8 @@ class _FakeS3Client:
         return {"Body": io.BytesIO(body), "ContentLength": len(body)}
 
     def put_object(self, *, Bucket: str, Key: str, Body: object) -> dict[str, str]:  # noqa: N803
+        self.put_body_types.append(type(Body))
+        self.put_body_types_by_key[(Bucket, Key)] = type(Body)
         if isinstance(Body, bytes):
             data = Body
         elif isinstance(Body, str):
@@ -148,12 +153,15 @@ async def delivery_setup(
             )
         )
         for task_id in task_ids:
+            source = None
+            if task_id == task_ids[0]:
+                source = f"s3://task-bundles/{task_id}/"
             s.execute(
                 insert(Task).values(
                     id=task_id,
                     checksum="d" * 64,
                     config={"task": {"id": task_id, "name": task_id}},
-                    source="local",
+                    source=source or "local",
                 )
             )
         common_batch = {
@@ -328,6 +336,7 @@ async def delivery_setup(
         with sl() as s:
             s.execute(delete(ArtifactLineageEdge))
             s.execute(delete(Artifact))
+            s.execute(delete(LlmCall))
             s.execute(delete(Trial))
             s.execute(delete(Token))
             s.execute(delete(Batch))
@@ -465,6 +474,155 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
             ]
     finally:
         sync_engine.dispose()
+
+
+async def test_raw_harbor_delivery_export_streams_derek_style_bundle(
+    delivery_setup: dict[str, object],
+    postgres_url: str,
+) -> None:
+    app = delivery_setup["app"]
+    raw = str(delivery_setup["raw"])
+    main_batch_id = delivery_setup["main_batch_id"]
+    supplemental_batch_id = delivery_setup["supplemental_batch_id"]
+    targeted_batch_id = delivery_setup["targeted_batch_id"]
+    selected_trials: dict[str, UUID] = delivery_setup["selected_trials"]  # type: ignore[assignment]
+    task_ids: list[str] = delivery_setup["task_ids"]  # type: ignore[assignment]
+    fake_s3 = delivery_setup["fake_s3"]
+
+    task_bundle_key = f"{task_ids[0]}/task.toml"
+    fake_s3.objects[("task-bundles", task_bundle_key)] = (  # type: ignore[attr-defined]
+        f"id = \"{task_ids[0]}\"\n"
+    ).encode()
+    fake_s3.objects[("task-bundles", f"{task_ids[0]}/instruction.md")] = (  # type: ignore[attr-defined]
+        b"solve the task\n"
+    )
+
+    sync_engine = create_engine(postgres_url)
+    try:
+        with sync_engine.begin() as conn:
+            for index, task_id in enumerate(task_ids, start=1):
+                trial_id = selected_trials[task_id]
+                conn.execute(
+                    insert(LlmCall).values(
+                        team_id=delivery_setup["team_id"],
+                        trial_id=trial_id,
+                        step_id=f"step-{index}",
+                        dialect="openai_facade",
+                        model="gpt-4o",
+                        input_tokens=10,
+                        output_tokens=5,
+                        provider_extras={
+                            "_loom_raw_provider_log": {
+                                "schema_version": "1",
+                                "ref": (
+                                    "llm_calls/"
+                                    f"raw-{index}/provider_extras/_loom_raw_provider_log"
+                                ),
+                                "request": {
+                                    "body": {
+                                        "messages": [
+                                            {
+                                                "role": "user",
+                                                "content": f"prompt {index}",
+                                            }
+                                        ]
+                                    }
+                                },
+                                "response": {
+                                    "body": {
+                                        "choices": [
+                                            {
+                                                "message": {
+                                                    "role": "assistant",
+                                                    "content": f"answer {index}",
+                                                }
+                                            }
+                                        ]
+                                    }
+                                },
+                            }
+                        },
+                        request_params={"status": "available", "parameters": {}},
+                        cost_usd=0,
+                        rate_card_hash="facade:operator-supplied",
+                    )
+                )
+    finally:
+        sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            f"/api/v1/batches/{main_batch_id}/delivery-export",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "mode": "raw-harbor",
+                "supplemental_batch_ids": [
+                    str(supplemental_batch_id),
+                    str(targeted_batch_id),
+                ],
+            },
+        )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["manifest"]["mode"] == "raw-harbor"
+    assert body["manifest"]["object_counts"]["provider_logs"] == 4
+    assert body["manifest"]["object_counts"]["task_bundle_files"] == 2
+    assert body["archive_filename"].endswith("-raw-harbor.tar.gz")
+
+    archive_key = body["storage"]["key"]
+    archive_bytes = fake_s3.objects[(body["storage"]["bucket"], archive_key)]  # type: ignore[attr-defined]
+    assert hashlib.sha256(archive_bytes).hexdigest() == body["sha256"]
+    # The archive body must be uploaded from a file-like spool, not held as one
+    # fully materialized bytes object before put_object.
+    assert fake_s3.put_body_types_by_key[(body["storage"]["bucket"], archive_key)] is not bytes  # type: ignore[attr-defined]
+
+    first_task = task_ids[0]
+    first_trial = selected_trials[first_task]
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        names = set(tar.getnames())
+        assert "manifest.json" in names
+        assert "summary.json" in names
+        assert "provider_logs/manifest.json" in names
+        assert "derived/sft_messages.jsonl" in names
+        assert f"task_bundles/{first_task}/task.toml" in names
+        assert f"task_bundles/{first_task}/instruction.md" in names
+        assert f"agent_runs/{first_task}/{first_trial}/execution_result.json" in names
+        assert f"agent_runs/{first_task}/{first_trial}/metrics.json" in names
+        assert f"agent_runs/{first_task}/{first_trial}/artifact_manifest.json" in names
+        assert f"agent_runs/{first_task}/{first_trial}/verifier_output.json" in names
+        assert f"agent_runs/{first_task}/{first_trial}/provider_logs_manifest.json" in names
+        assert f"agent_runs/{first_task}/{first_trial}/trajectory.jsonl" in names
+        manifest = json.load(tar.extractfile("manifest.json"))  # type: ignore[arg-type]
+        assert manifest["mode"] == "raw-harbor"
+        assert manifest["layout"] == {
+            "top_level_manifests": ["manifest.json", "summary.json"],
+            "task_bundles": "task_bundles/<task_id>/...",
+            "agent_runs": "agent_runs/<task_id>/<trial_id>/...",
+            "derived": "derived/sft_messages.jsonl",
+        }
+        provider_manifest = json.load(
+            tar.extractfile("provider_logs/manifest.json")  # type: ignore[arg-type]
+        )
+        assert len(provider_manifest["logs"]) == 4
+        first_provider_log = json.load(
+            tar.extractfile(provider_manifest["logs"][0]["archive_path"])  # type: ignore[arg-type]
+        )
+        rendered_provider_log = json.dumps(first_provider_log)
+        assert "prompt " in rendered_provider_log
+        assert "answer " in rendered_provider_log
+        assert "sk-" not in rendered_provider_log
+        sft_lines = (
+            tar.extractfile("derived/sft_messages.jsonl")  # type: ignore[union-attr]
+            .read()
+            .decode()
+            .splitlines()
+        )
+        assert len(sft_lines) == 4
+        assert json.loads(sft_lines[0])["messages"] == [
+            {"role": "user", "content": "prompt 1"},
+            {"role": "assistant", "content": "answer 1"},
+        ]
 
 
 async def test_delivery_export_create_requires_submit_scope(

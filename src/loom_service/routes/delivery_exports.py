@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
@@ -26,6 +27,14 @@ router = APIRouter()
 
 
 class _DeliveryExportRequest(BaseModel):
+    mode: Literal["lightweight", "raw-harbor"] = Field(
+        default="lightweight",
+        description=(
+            "Export mode. `lightweight` preserves the #390 ledger, ATIF, and "
+            "trajectory bundle. `raw-harbor` adds Derek-style raw provider "
+            "logs, task bundle inputs, agent-run artifacts, and derived SFT JSONL."
+        ),
+    )
     supplemental_batch_ids: list[UUID] | None = Field(
         default=None,
         description=(
@@ -70,6 +79,7 @@ async def create_batch_delivery_export(
     batch, ctx = await _load_authorized_batch(sc, batch_id)
     require_scope(ctx, "submit")
     session, _ = sc
+    mode = payload.mode if payload is not None else "lightweight"
     try:
         return await create_delivery_export(
             session,
@@ -80,6 +90,7 @@ async def create_batch_delivery_export(
             supplemental_batch_ids=(
                 payload.supplemental_batch_ids if payload is not None else None
             ),
+            mode=mode,
         )
     except DeliveryExportError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc

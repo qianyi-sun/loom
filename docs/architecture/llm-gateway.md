@@ -34,10 +34,18 @@ contract against provider SDKs in-process. See [`cli-mode.md`](cli-mode.md).
    for those controls on the `litellm` worker path; the worker filters
    that object through the same allowlist before forwarding it to the
    Gateway.
-5. **Bearer auth + per-team RPM** — every call carries a team
+5. **Raw provider handoff logs** — provider-facade success paths also
+   store a redacted raw request/response record under
+   `llm_calls.provider_extras._loom_raw_provider_log` for production
+   trajectory exports. Unlike `request_params`, this intentionally keeps
+   prompt and assistant payloads for downstream training/audit bundles,
+   but it redacts bearer values, provider API keys, secret-looking
+   fields, and known secret text before persistence. The stable object
+   ref is `llm_calls/<id>/provider_extras/_loom_raw_provider_log`.
+6. **Bearer auth + per-team RPM** — every call carries a team
    token; the Gateway gates RPM per `(team, provider)` and rejects
    when over.
-6. **License allowlists** — task-level allow/deny of model ids; the
+7. **License allowlists** — task-level allow/deny of model ids; the
    Gateway denies a request if its `model` field isn't in the team's
    allowlist.
 
@@ -138,6 +146,12 @@ The worker drops prompt/message payloads, headers, credentials, and
 unknown provider fields before the request is sent. The Gateway then
 records the effective non-sensitive controls in `llm_calls.request_params`
 and the trial/batch debug evidence surfaces.
+
+Provider-facade raw handoff logs are a separate export contract from
+`request_params`. They live in `provider_extras` so the normal debug
+surfaces can continue to show only safe generation controls, while
+`loom eval batch delivery-bundle --mode raw-harbor` can package the
+redacted full request/response bodies into `provider_logs/`.
 
 Codex subprocess alignment runs use a separate adapter-specific path
 because Codex constructs its own Responses request. The worker converts
