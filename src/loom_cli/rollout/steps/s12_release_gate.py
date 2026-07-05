@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -19,6 +20,13 @@ from loom_cli.rollout.steps.candidate_source import (
 from loom_cli.rollout.steps.s10_env_state import _profile_path_for
 from loom_cli.rollout.steps.subcommand_step import SubcommandStep
 from loom_cli.rollout.steps.subprocess_util import run_captured
+
+_GB10_STATUS_MAX_ATTEMPTS = 30
+_GB10_STATUS_RETRY_DELAY_SEC = 2.0
+
+
+def _is_transient_cp_unreachable(stderr: str) -> bool:
+    return "could not reach CP" in stderr
 
 
 class ReleaseGateStep(SubcommandStep):
@@ -165,14 +173,26 @@ class ReleaseGateStep(SubcommandStep):
             )
 
         gb10_cmd = list(self.gb10_status_argv(ctx, step_dir))
-        gb10 = run_captured(
-            gb10_cmd,
-            stdout_log=self.gb10_status_path(ctx, step_dir),
-            stderr_log=step_dir.artifact_path("gb10-workers-status.stderr"),
-            cwd=cwd,
-            env=env,
-            timeout_sec=60,
-        )
+        gb10_retry_log = step_dir.artifact_path("gb10-workers-status.retries.log")
+        gb10 = None
+        for attempt in range(1, _GB10_STATUS_MAX_ATTEMPTS + 1):
+            gb10 = run_captured(
+                gb10_cmd,
+                stdout_log=self.gb10_status_path(ctx, step_dir),
+                stderr_log=step_dir.artifact_path("gb10-workers-status.stderr"),
+                cwd=cwd,
+                env=env,
+                timeout_sec=60,
+            )
+            if gb10.returncode == 0 or not _is_transient_cp_unreachable(gb10.stderr):
+                break
+            gb10_retry_log.open("a", encoding="utf-8").write(
+                f"attempt {attempt}/{_GB10_STATUS_MAX_ATTEMPTS}: "
+                f"{gb10.stderr.strip()}\n"
+            )
+            if attempt < _GB10_STATUS_MAX_ATTEMPTS:
+                time.sleep(_GB10_STATUS_RETRY_DELAY_SEC)
+        assert gb10 is not None
         if gb10.returncode != 0:
             return RunResult(
                 exit_code=gb10.returncode,
