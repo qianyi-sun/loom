@@ -152,6 +152,61 @@ def _trajectory_head_request(
     return req
 
 
+def _trajectory_get_probe_request(
+    url: str,
+    *,
+    ingress_base: str,
+    token: str,
+) -> urllib.request.Request:
+    req = _trajectory_head_request(
+        url,
+        ingress_base=ingress_base,
+        token=token,
+    )
+    req.method = "GET"
+    req.add_header("Range", "bytes=0-0")
+    req.add_header("Connection", "close")
+    return req
+
+
+def _probe_trajectory_download(
+    url: str,
+    *,
+    ingress_base: str,
+    token: str,
+    step_dir: StepDir,
+) -> None:
+    head_req = _trajectory_head_request(
+        url,
+        ingress_base=ingress_base,
+        token=token,
+    )
+    try:
+        with urllib.request.urlopen(head_req, timeout=15) as resp:
+            step_dir.artifact_path("07-trajectory-head.txt").write_text(
+                f"status={resp.status}\n"
+                f"content-length={resp.headers.get('Content-Length')}\n"
+            )
+            return
+    except urllib.error.HTTPError as exc:
+        if exc.code != 405 or head_req.get_header("Authorization") is None:
+            raise
+
+    get_req = _trajectory_get_probe_request(
+        url,
+        ingress_base=ingress_base,
+        token=token,
+    )
+    with urllib.request.urlopen(get_req, timeout=15) as resp:
+        first_byte = resp.read(1)
+        step_dir.artifact_path("07-trajectory-head.txt").write_text(
+            f"status={resp.status}\n"
+            f"content-length={resp.headers.get('Content-Length')}\n"
+            "method=GET\n"
+            f"bytes-read={len(first_byte)}\n"
+        )
+
+
 def _idempotency_key(ctx: RolloutContext) -> str:
     return "smoke-" + hashlib.sha256(
         f"{ctx.image_tag}|{ctx.resolved_sha}".encode(),
@@ -333,16 +388,12 @@ class SmokeStep(BaseStep):
         traj_url_raw = terminal_trial.get("trajectory_url")
         if isinstance(traj_url_raw, str) and traj_url_raw:
             try:
-                req = _trajectory_head_request(
+                _probe_trajectory_download(
                     traj_url_raw,
                     ingress_base=base,
                     token=token,
+                    step_dir=step_dir,
                 )
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    step_dir.artifact_path("07-trajectory-head.txt").write_text(
-                        f"status={resp.status}\n"
-                        f"content-length={resp.headers.get('Content-Length')}\n"
-                    )
             except Exception as exc:
                 return RunResult(
                     exit_code=1,
