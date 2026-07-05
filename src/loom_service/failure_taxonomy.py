@@ -228,7 +228,7 @@ def classify_trial_outcome(trial: Any) -> dict[str, Any]:
             rerunnable=True,
         )
 
-    if reason in _VERIFIER_FAILURE_REASONS:
+    if reason is not None and reason in _VERIFIER_FAILURE_REASONS:
         return _common(
             reason_code=f"trial.{reason}",
             reason=reason,
