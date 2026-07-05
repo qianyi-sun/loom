@@ -295,6 +295,140 @@ async def test_usage_include_batches_distinguishes_token_only_cost(
     assert priced["cost_status"] == "estimated"
 
 
+async def test_usage_batch_family_includes_linked_supplemental_batches(
+    usage_setup: tuple[FastAPI, str, str, str, str],
+    postgres_url: str,
+) -> None:
+    app, raw, _admin_raw, team_str, task_id = usage_setup
+    team_id = UUID(team_str)
+    main_batch_id = uuid4()
+    supplemental_batch_id = uuid4()
+    main_trial_id = uuid4()
+    supplemental_trial_id = uuid4()
+    ts = datetime(2026, 6, 2, 14, tzinfo=UTC)
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch),
+            [
+                {
+                    "id": main_batch_id,
+                    "team_id": team_id,
+                    "name": "main usage family batch",
+                    "task_filter": {"task_ids": [task_id], "subset_kind": "explicit"},
+                    "trial_config": {},
+                    "state": "finished",
+                    "created_by_token_prefix": "usagefam",
+                    "expected_trial_count": 1,
+                    "rerun_of_batch_id": None,
+                },
+                {
+                    "id": supplemental_batch_id,
+                    "team_id": team_id,
+                    "name": "supplemental usage family batch",
+                    "task_filter": {"task_ids": [task_id], "subset_kind": "explicit"},
+                    "trial_config": {},
+                    "state": "finished",
+                    "created_by_token_prefix": "usagefam",
+                    "expected_trial_count": 1,
+                    "rerun_of_batch_id": main_batch_id,
+                },
+            ],
+        )
+        conn.execute(
+            insert(Trial),
+            [
+                {
+                    "id": main_trial_id,
+                    "task_id": task_id,
+                    "team_id": team_id,
+                    "state": "failed",
+                    "config": {},
+                    "requires_caps": {},
+                    "submitted_at": ts,
+                    "finished_at": ts,
+                    "batch_id": main_batch_id,
+                    "result": None,
+                },
+                {
+                    "id": supplemental_trial_id,
+                    "task_id": task_id,
+                    "team_id": team_id,
+                    "state": "succeeded",
+                    "config": {},
+                    "requires_caps": {},
+                    "submitted_at": ts,
+                    "finished_at": ts,
+                    "batch_id": supplemental_batch_id,
+                    "result": {"aggregate_reward": 1.0},
+                },
+            ],
+        )
+        conn.execute(
+            insert(LlmCall),
+            [
+                {
+                    "id": uuid4(),
+                    "team_id": team_id,
+                    "trial_id": main_trial_id,
+                    "step_id": "main",
+                    "model": "glm-5.1-thinking",
+                    "dialect": "openai_facade",
+                    "input_tokens": 100,
+                    "output_tokens": 10,
+                    "provider_extras": {},
+                    "cost_usd": Decimal("0.10"),
+                    "rate_card_hash": "h",
+                    "captured_at": ts,
+                },
+                {
+                    "id": uuid4(),
+                    "team_id": team_id,
+                    "trial_id": supplemental_trial_id,
+                    "step_id": "main",
+                    "model": "glm-5.1-thinking",
+                    "dialect": "openai_facade",
+                    "input_tokens": 200,
+                    "output_tokens": 20,
+                    "provider_extras": {},
+                    "cost_usd": Decimal("0.20"),
+                    "rate_card_hash": "h",
+                    "captured_at": ts,
+                },
+            ],
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        r = await ac.get(
+            "/api/v1/usage",
+            headers={"Authorization": f"Bearer {raw}"},
+            params={
+                "team_id": team_str,
+                "start": "2026-06-02",
+                "end": "2026-06-02",
+                "group_by": "day",
+                "batch_id": str(main_batch_id),
+                "include_batch_family": "true",
+                "include_batches": "true",
+            },
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body["buckets"]) == 1
+    bucket = body["buckets"][0]
+    assert bucket["llm_input_tokens"] == 300
+    assert bucket["llm_output_tokens"] == 30
+    assert bucket["estimated_cost_usd"] == pytest.approx(0.30)
+    assert {item["batch_id"] for item in bucket["batches"]} == {
+        str(main_batch_id),
+        str(supplemental_batch_id),
+    }
+
+
 async def test_usage_failed_upstream_audit_rows_are_not_priced(
     usage_setup: tuple[FastAPI, str, str, str, str],
     postgres_url: str,

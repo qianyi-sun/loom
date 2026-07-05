@@ -120,6 +120,7 @@ def _usage_where_filters(
     model: str | None,
     benchmark_id: str | None,
     batch_id: UUID | None,
+    include_batch_family: bool,
     status: str | None,
     pricing_mode: str | None,
     user_id: UUID | None,
@@ -142,8 +143,11 @@ def _usage_where_filters(
         filters.append("task.benchmark_id = :benchmark_id")
         params["benchmark_id"] = benchmark_id
     if batch_id is not None:
-        filters.append("b.id = :batch_id")
-        params["batch_id"] = str(batch_id)
+        if include_batch_family:
+            filters.append("(b.id = :batch_id OR b.rerun_of_batch_id = :batch_id)")
+        else:
+            filters.append("b.id = :batch_id")
+        params["batch_id"] = batch_id
     if status:
         filters.append("t.state = :status")
         params["status"] = status
@@ -186,6 +190,7 @@ async def get_usage(
     model: Annotated[str | None, Query()] = None,
     benchmark_id: Annotated[str | None, Query()] = None,
     batch_id: Annotated[UUID | None, Query()] = None,
+    include_batch_family: Annotated[bool, Query()] = False,
     status: Annotated[str | None, Query()] = None,
     pricing_mode: Annotated[str | None, Query()] = None,
     breakdown_by: Annotated[str | None, Query()] = None,
@@ -235,6 +240,7 @@ async def get_usage(
         model=model,
         benchmark_id=benchmark_id,
         batch_id=batch_id,
+        include_batch_family=include_batch_family,
         status=status,
         pricing_mode=pricing_mode,
         user_id=user_id,
