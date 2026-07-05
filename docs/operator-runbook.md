@@ -595,7 +595,11 @@ knob you need.
    scoped evidence links, agent timeout config, last trial event, last LLM call,
    worker heartbeat freshness, stale-running keep/reclaim decision, and
    redacted next actions without bearer tokens, provider keys, internal service
-   URLs, or signed object-store URLs.
+   URLs, or signed object-store URLs. Confirm reward `0` with verifier output
+   is a platform-successful `score_failure`; missing verifier output, missing
+   trajectory/ATIF, provider no-call/timeout, setup/build/image/preflight
+   failures should appear as distinct classes/root causes rather than one
+   generic platform failure.
 
 9. **Approve account requests into fixed teams.** Public registration is
    default-closed. A researcher can submit an account request without a bearer
@@ -2197,7 +2201,11 @@ running batches once recorded provider usage exceeds the cap; the
 cancel diagnostic is stored in `batches.budget_diagnostics` with reason
 `budget_hard_limit_exceeded`. Soft budgets return a confirmation error
 when the pre-run estimate is above the cap or unknown/unpriced unless
-the client resubmits with `budget_confirmed=true`.
+the client resubmits with `budget_confirmed=true`. After supplemental reruns,
+audit the combined spend with
+`loom eval usage --batch-id <main-batch-id> --include-batch-family
+--include-batches` so the original and linked rerun child batches are treated
+as one production budget family.
 
 ## BYO provider model selection
 
@@ -3188,7 +3196,11 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    `cost_estimate_confidence`, `pricing_modes`,
    `usage_estimate_confidence`); use
    `/api/v1/usage` with optional `include_batches=true` for admin totals
-   and per-batch drilldown. Failed upstream audit rows surface as
+   and per-batch drilldown. For a main batch plus linked supplemental reruns,
+   query `/api/v1/usage?batch_id=<main>&include_batch_family=true` or
+   `loom eval usage --batch-id <main> --include-batch-family`; add
+   `include_batches=true` / `--include-batches` to list each child batch in
+   the family. Failed upstream audit rows surface as
    `pricing_mode=failed-upstream` and `cost_status=failed_upstream`, not as
    priced provider usage. If confidence is `partial` or `missing`, inspect
    `partial_usage_llm_calls_count` and `missing_usage_llm_calls_count`
@@ -3253,10 +3265,11 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    `loom eval batch rerun-plan <id>` before launching supplemental work. The
    plan must keep auto-safe platform/transient failures separate from
    operator-approval rows and not-rerunnable rows, support explicit repeated
-   `task_id` filters, and exclude task compatibility failures and reward `0`
-   score failures from automatic reruns. Monitor and Run Library should label
-   reward `0` verifier-output rows as platform-successful score failures, not
-   platform failures.
+   `task_id` filters, expose `supplemental_coordinates` for repeated samples or
+   combinations of the same task, and exclude task compatibility failures and
+   reward `0` score failures from automatic reruns. Monitor and Run Library
+   should label reward `0` verifier-output rows as platform-successful score
+   failures, not platform failures.
 13. **Trajectory + artifact download.** `GET /api/v1/trials/{id}/trajectory`
     streams event pages; `GET /api/v1/trials/{id}/trajectory/download`
     returns raw JSONL; `GET /api/v1/trials/{id}/atif` returns the ATIF JSON;

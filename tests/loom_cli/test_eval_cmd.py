@@ -1547,6 +1547,53 @@ def test_batch_rerun_plan_renders_text_summary(
     assert "source-useful/task-a" in out
 
 
+def test_batch_rerun_plan_renders_supplemental_coordinates(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", f"/api/v1/batches/{_BATCH_ID}/rerun-plan")] = (
+        httpx.Response(
+            200,
+            json={
+                "schema_version": "1",
+                "batch_id": _BATCH_ID,
+                "supplemental_task_ids": ["source-useful/task-a"],
+                "supplemental_coordinates": [
+                    {
+                        "task_id": "source-useful/task-a",
+                        "sample_idx": 0,
+                        "combination_idx": 0,
+                    },
+                    {
+                        "task_id": "source-useful/task-a",
+                        "sample_idx": 2,
+                        "combination_idx": 1,
+                    },
+                ],
+                "summary": {
+                    "auto_safe": 2,
+                    "operator_approval": 0,
+                    "not_rerunnable": 0,
+                    "already_covered": 0,
+                    "selected_final_trials": 2,
+                },
+                "auto_safe": [],
+                "operator_approval": [],
+                "not_rerunnable": [],
+                "final_trial_selection": [],
+            },
+        )
+    )
+
+    rc = main(["eval", "batch", "rerun-plan", _BATCH_ID])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "supplemental_coordinates:" in out
+    assert "source-useful/task-a sample=0 combination=0" in out
+    assert "source-useful/task-a sample=2 combination=1" in out
+
+
 def test_diagnose_batch_fetches_machine_readable_report(
     mock_server: MockServer,
     capsys: pytest.CaptureFixture[str],
@@ -2414,6 +2461,52 @@ def test_eval_usage_forwards_admin_filters_and_breakdown(
     out = capsys.readouterr().out
     assert "tokens-only" in out
     assert "not_applicable" in out
+
+
+def test_eval_usage_forwards_batch_family_filter(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", "/api/v1/usage")] = httpx.Response(
+        200,
+        json={
+            "degraded": False,
+            "buckets": [
+                {
+                    "start_at": "2026-06-02T00:00:00+00:00",
+                    "trial_count": 2,
+                    "succeeded_count": 1,
+                    "failed_count": 1,
+                    "estimated_cost_usd": 0.3,
+                    "cost_status": "estimated",
+                    "cost_currency": "USD",
+                    "usage_estimate_confidence": "high",
+                    "llm_input_tokens": 300,
+                    "llm_output_tokens": 30,
+                }
+            ],
+        },
+    )
+
+    rc = main(
+        [
+            "eval",
+            "usage",
+            "--start",
+            "2026-06-02",
+            "--end",
+            "2026-06-02",
+            "--batch-id",
+            "main-batch",
+            "--include-batch-family",
+        ]
+    )
+
+    assert rc == 0
+    params = mock_server[0].url.params
+    assert params.get("batch_id") == "main-batch"
+    assert params.get("include_batch_family") == "true"
+    assert "0.3" in capsys.readouterr().out
 
 
 # ──────────────────────────────────────────────────────────────────────

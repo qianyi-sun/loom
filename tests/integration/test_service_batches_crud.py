@@ -2763,6 +2763,129 @@ async def test_rerun_failed_batch_creates_linked_exact_targets(
     ]
 
 
+async def test_rerun_failed_batch_preserves_duplicate_task_coordinates(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+    first_failed_trial_id = uuid4()
+    second_failed_trial_id = uuid4()
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="gateway-flaked-twice",
+                task_filter={"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+                trial_config={
+                    "agent_name": "litellm",
+                    "agent_model": {"provider": "openai", "name": "qwen"},
+                },
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=3,
+                n_per_task=3,
+                result_status="partial_failed",
+                finished_at=datetime.now(UTC),
+            )
+        )
+        conn.execute(
+            insert(Trial),
+            [
+                {
+                    "id": first_failed_trial_id,
+                    "task_id": "local/mit-0",
+                    "team_id": team_id,
+                    "state": "failed",
+                    "failure_reason": "gateway_error",
+                    "failure_message": "gateway 503",
+                    "config": {},
+                    "requires_caps": {},
+                    "submitted_at": datetime.now(UTC),
+                    "batch_id": batch_id,
+                    "sample_idx": 0,
+                    "combination_idx": 0,
+                    "result": None,
+                },
+                {
+                    "id": uuid4(),
+                    "task_id": "local/mit-0",
+                    "team_id": team_id,
+                    "state": "succeeded",
+                    "failure_reason": None,
+                    "failure_message": None,
+                    "config": {},
+                    "requires_caps": {},
+                    "submitted_at": datetime.now(UTC),
+                    "batch_id": batch_id,
+                    "sample_idx": 1,
+                    "combination_idx": 0,
+                    "result": {"aggregate_reward": 1.0},
+                },
+                {
+                    "id": second_failed_trial_id,
+                    "task_id": "local/mit-0",
+                    "team_id": team_id,
+                    "state": "failed",
+                    "failure_reason": "provider_timeout",
+                    "failure_message": "provider timeout",
+                    "config": {},
+                    "requires_caps": {},
+                    "submitted_at": datetime.now(UTC),
+                    "batch_id": batch_id,
+                    "sample_idx": 2,
+                    "combination_idx": 0,
+                    "result": None,
+                },
+            ],
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        r = await ac.post(
+            f"/api/v1/batches/{batch_id}/rerun-failed",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["expected_trial_count"] == 2
+    assert body["rerun_target_count"] == 2
+    assert body["rerun_plan"]["supplemental_task_ids"] == ["local/mit-0"]
+    assert body["rerun_plan"]["supplemental_coordinates"] == [
+        {"task_id": "local/mit-0", "sample_idx": 0, "combination_idx": 0},
+        {"task_id": "local/mit-0", "sample_idx": 2, "combination_idx": 0},
+    ]
+    rerun_batch_id = UUID(body["batch_id"])
+
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        row = s.execute(
+            select(Batch).where(Batch.id == rerun_batch_id),
+        ).scalar_one()
+    sync_engine.dispose()
+
+    assert row.rerun_targets == [
+        {
+            "task_id": "local/mit-0",
+            "sample_idx": 0,
+            "combination_idx": 0,
+            "original_trial_id": str(first_failed_trial_id),
+            "failure_reason": "gateway_error",
+        },
+        {
+            "task_id": "local/mit-0",
+            "sample_idx": 2,
+            "combination_idx": 0,
+            "original_trial_id": str(second_failed_trial_id),
+            "failure_reason": "provider_timeout",
+        },
+    ]
+
+
 async def test_batch_rerun_plan_classifies_score_task_and_platform_outcomes(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,

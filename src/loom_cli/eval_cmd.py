@@ -342,6 +342,18 @@ def _print_rerun_plan(plan: dict[str, Any]) -> None:
             print(f"  - {task_id}")
     else:
         print("supplemental_task_ids: (none)")
+    coordinates = plan.get("supplemental_coordinates")
+    if isinstance(coordinates, list) and coordinates:
+        print("supplemental_coordinates:")
+        for row in coordinates:
+            if not isinstance(row, dict):
+                continue
+            print(
+                "  - "
+                f"{row.get('task_id')} "
+                f"sample={row.get('sample_idx', 0)} "
+                f"combination={row.get('combination_idx', 0)}",
+            )
     for key, title in (
         ("operator_approval", "Needs operator approval"),
         ("not_rerunnable", "Not rerunnable"),
@@ -1031,6 +1043,8 @@ def _usage(args: argparse.Namespace) -> int:
             params["team_id"] = args.team_id
         if args.include_batches:
             params["include_batches"] = "true"
+        if args.include_batch_family:
+            params["include_batch_family"] = "true"
         for attr, param_name in (
             ("user_id", "user_id"),
             ("provider_connection_id", "provider_connection_id"),
@@ -1528,6 +1542,14 @@ def dispatch(argv: list[str]) -> int:
         "--include-batches",
         action="store_true",
         help="Include per-batch usage/cost rows when the API permits it.",
+    )
+    p_usage.add_argument(
+        "--include-batch-family",
+        action="store_true",
+        help=(
+            "When --batch-id is set, include linked supplemental rerun batches "
+            "in the usage/cost query."
+        ),
     )
     p_usage.add_argument("--format", choices=["table", "json"], default="table")
     p_usage.set_defaults(handler=_usage)

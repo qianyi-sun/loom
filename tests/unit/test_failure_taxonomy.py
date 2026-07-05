@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
+
 from loom_service.failure_taxonomy import (
     build_supplemental_rerun_plan,
     classify_trial_outcome,
@@ -48,6 +50,104 @@ def test_reward_zero_is_score_failure_not_platform_failure() -> None:
     assert classification["score_outcome"] == "failed"
     assert classification["root_cause"] == "model_or_task_score"
     assert classification["rerun_recommendation"] == "not_rerunnable"
+
+
+@pytest.mark.parametrize(
+    (
+        "failure_reason",
+        "failure_class",
+        "root_cause",
+        "rerun_recommendation",
+        "requires_task_change",
+    ),
+    [
+        (
+            "verifier_missing_output",
+            "verifier_failure",
+            "verifier_missing_output",
+            "operator_approval",
+            False,
+        ),
+        (
+            "missing_verifier_output",
+            "verifier_failure",
+            "verifier_missing_output",
+            "operator_approval",
+            False,
+        ),
+        (
+            "missing_trajectory",
+            "artifact_failure",
+            "missing_trajectory",
+            "auto_safe",
+            False,
+        ),
+        (
+            "missing_atif",
+            "artifact_failure",
+            "missing_atif",
+            "auto_safe",
+            False,
+        ),
+        (
+            "provider_no_call",
+            "provider_failure",
+            "provider_no_call",
+            "operator_approval",
+            False,
+        ),
+        (
+            "provider_timeout",
+            "provider_failure",
+            "provider_timeout",
+            "auto_safe",
+            False,
+        ),
+        (
+            "setup_failure",
+            "platform_failure",
+            "platform_setup",
+            "operator_approval",
+            False,
+        ),
+        (
+            "task_image_build_failed",
+            "task_failure",
+            "task_image_build",
+            "not_rerunnable",
+            True,
+        ),
+        (
+            "preflight_failed",
+            "task_failure",
+            "task_preflight",
+            "not_rerunnable",
+            True,
+        ),
+    ],
+)
+def test_required_failure_reasons_are_typed_distinctly(
+    failure_reason: str,
+    failure_class: str,
+    root_cause: str,
+    rerun_recommendation: str,
+    requires_task_change: bool,
+) -> None:
+    classification = classify_trial_outcome(
+        _trial(
+            task_id=f"source-useful/{failure_reason}",
+            state="failed",
+            failure_reason=failure_reason,
+        )
+    )
+
+    assert classification["reason_code"] == f"trial.{failure_reason}"
+    assert classification["failure_class"] == failure_class
+    assert classification["root_cause"] == root_cause
+    assert classification["platform_outcome"] == "failed"
+    assert classification["score_outcome"] == "unscored"
+    assert classification["rerun_recommendation"] == rerun_recommendation
+    assert classification["requires_task_change"] is requires_task_change
 
 
 def test_failed_platform_gateway_is_auto_safe_rerun() -> None:
@@ -134,6 +234,58 @@ def test_supplemental_plan_is_deterministic_and_task_filtered() -> None:
         "already_covered": 0,
         "selected_final_trials": 4,
     }
+
+
+def test_supplemental_plan_preserves_duplicate_task_coordinates() -> None:
+    batch = SimpleNamespace(id=uuid4(), team_id=uuid4())
+    first = _trial(
+        task_id="source-useful/task-auto",
+        state="failed",
+        failure_reason="gateway_error",
+        sample_idx=1,
+        combination_idx=0,
+    )
+    second = _trial(
+        task_id="source-useful/task-auto",
+        state="failed",
+        failure_reason="missing_trajectory",
+        sample_idx=0,
+        combination_idx=2,
+    )
+    operator = _trial(
+        task_id="source-useful/task-auto",
+        state="failed",
+        failure_reason="verifier_timeout",
+        sample_idx=2,
+        combination_idx=0,
+    )
+
+    plan = build_supplemental_rerun_plan(batch, [first, second, operator])
+
+    assert plan["supplemental_task_ids"] == ["source-useful/task-auto"]
+    assert [
+        (item["task_id"], item["sample_idx"], item["combination_idx"])
+        for item in plan["auto_safe"]
+    ] == [
+        ("source-useful/task-auto", 0, 2),
+        ("source-useful/task-auto", 1, 0),
+    ]
+    assert plan["supplemental_coordinates"] == [
+        {
+            "task_id": "source-useful/task-auto",
+            "sample_idx": 0,
+            "combination_idx": 2,
+        },
+        {
+            "task_id": "source-useful/task-auto",
+            "sample_idx": 1,
+            "combination_idx": 0,
+        },
+    ]
+    assert [
+        (item["task_id"], item["sample_idx"], item["combination_idx"])
+        for item in plan["operator_approval"]
+    ] == [("source-useful/task-auto", 2, 0)]
 
 
 def test_successful_supplemental_trial_becomes_final_selection() -> None:
