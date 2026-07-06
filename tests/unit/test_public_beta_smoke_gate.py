@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
@@ -771,6 +772,115 @@ def test_run_smoke_fails_when_service_pod_reports_oom_restart(monkeypatch) -> No
     assert "loom-service-abc" in result.detail
 
 
+def test_run_smoke_rechecks_service_stability_after_route_probe_oom(
+    monkeypatch,
+) -> None:
+    gate = _load_gate_module()
+
+    class FakeClient:
+        def __init__(self, server_url: str, *, max_scan_bytes: int) -> None:
+            self.server_url = server_url
+            self.evidence_chunks: list[str] = []
+            self.response_bytes_scanned = 0
+
+        def request(self, method: str, path: str, **kwargs):
+            if path in {"/api/v1/health", "/", "/api/v1/auth/whoami"}:
+                body = b'{"status":"ok"}'
+            elif path == "/api/v1/provider-connections":
+                body = b'{"items":[{"name":"mz_tn_canada_qianyi"}]}'
+            elif path == "/api/v1/models":
+                body = b'{"items":[{"provider":"openai","name":"gpt-4o-mini"}]}'
+            elif path == "/api/v1/agents":
+                body = b'{"items":[{"name":"oracle","service_mode_ready":true}]}'
+            elif path == "/api/v1/benchmarks":
+                body = (
+                    b'{"items":[{"id":"skilllearnbench","task_count":100,'
+                    b'"readiness_state":"runnable"}]}'
+                )
+            elif path == "/api/v1/batches/batch-1":
+                body = (
+                    b'{"id":"batch-1","debug_evidence":{"trials":{'
+                    b'"summary":{"claimed_without_started":0},'
+                    b'"worker_pools":{"terminal":{"gb10-arm64":1}}}}}'
+                )
+            elif path == "/api/v1/run-library/batches":
+                body = b'{"items":[{"id":"batch-1"}]}'
+            elif path == "/api/v1/run-library/batches/batch-1":
+                return gate.HttpResponse(
+                    status_code=502,
+                    headers={},
+                    body=b"upstream loom-service restarted during route probe",
+                )
+            else:
+                body = b'{"items":[]}'
+            return gate.HttpResponse(status_code=200, headers={}, body=body)
+
+    snapshots = [
+        (
+            '{"items":[{"metadata":{"name":"loom-service-abc"},'
+            '"status":{"containerStatuses":[{"name":"loom-service",'
+            '"restartCount":0,"lastState":{}}]}}]}'
+        ),
+        (
+            '{"items":[{"metadata":{"name":"loom-service-abc"},'
+            '"status":{"containerStatuses":[{"name":"loom-service",'
+            '"restartCount":1,"lastState":{"terminated":{'
+            '"reason":"OOMKilled","exitCode":137}}}]}}]}'
+        ),
+    ]
+
+    class FakeCompleted:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+
+    class FakeSubprocess:
+        TimeoutExpired = subprocess.TimeoutExpired
+
+        @staticmethod
+        def run(*_args, **_kwargs):
+            return FakeCompleted(snapshots.pop(0))
+
+    monkeypatch.setattr(gate, "SmokeClient", FakeClient)
+    monkeypatch.setattr(gate, "subprocess", FakeSubprocess, raising=False)
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+        "--batch-id", "batch-1",
+        "--k8s-namespace", "loom-staging",
+    ])
+
+    report = gate.run_smoke(args)
+    service_index = next(
+        index
+        for index, result in enumerate(report.results)
+        if result.check_id == "service.no_oom_restarts"
+    )
+    security_index = next(
+        index
+        for index, result in enumerate(report.results)
+        if result.check_id == "security.no_secret_or_internal_url_leaks"
+    )
+    owner_label_index = next(
+        index
+        for index, result in enumerate(report.results)
+        if result.check_id == "library.owner_team_label"
+    )
+    result = report.results[service_index]
+
+    assert report.results[owner_label_index].status == "fail"
+    assert result.status == "fail"
+    assert service_index > owner_label_index
+    assert service_index > security_index
+    assert "restartCount increased during smoke" in result.detail
+    assert "0 -> 1" in result.detail
+    assert "OOMKilled" in result.detail
+    assert not snapshots
+
+
 def test_run_smoke_fails_when_provider_connection_catalog_is_empty(monkeypatch) -> None:
     gate = _load_gate_module()
 
@@ -1156,6 +1266,40 @@ def test_run_smoke_can_run_only_minio_write_probe(monkeypatch) -> None:
     assert report.results[0].status == "pass"
     assert "trajectories/_ops/staging-smoke/probe-" in report.results[0].detail
     assert s3.objects == {}
+
+
+def test_object_store_write_check_only_does_not_collect_service_pods(
+    monkeypatch,
+) -> None:
+    gate = _load_gate_module()
+    s3 = _RecordingS3()
+
+    class ExplodingSubprocess:
+        @staticmethod
+        def run(*_args, **_kwargs):
+            raise AssertionError("object-store-only smoke should not call kubectl")
+
+    monkeypatch.setattr(gate, "SmokeClient", _empty_catalog_client(gate))
+    monkeypatch.setattr(gate.boto3, "client", lambda *_args, **_kwargs: s3)
+    monkeypatch.setattr(gate, "subprocess", ExplodingSubprocess, raising=False)
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+        "--catalog-minio-endpoint",
+        "http://minio:9000",
+        "--catalog-minio-access-key",
+        "access",
+        "--catalog-minio-secret-key",
+        "secret",
+        "--object-store-write-check-only",
+        "--k8s-namespace",
+        "loom-staging",
+    ])
+
+    report = gate.run_smoke(args)
+
+    assert [r.check_id for r in report.results] == ["object_store.minio_write_probe"]
 
 
 def test_run_smoke_minio_write_probe_can_exercise_concurrent_objects(
