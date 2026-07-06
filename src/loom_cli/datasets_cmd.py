@@ -7,7 +7,7 @@ Subcommands:
 - refresh-catalog
 - import <slug> [--db-url --minio-* --bucket --cache-dir --limit ...]
 - provision-catalog [--source-db-url --target-db-url --source-minio-* --target-minio-*]
-- publish-local <path> [--db-url --minio-* --bucket ...]
+- publish-local <path> [--db-url env:VAR --minio-* --bucket ...]
 - publish <slug> [--hf-org --hf-token --cache-dir --limit --private]
 - register <slug> [--hf-org --hf-token --db-url --revision --mirror-to-object-store --minio-*]
 - verify <slug> [--limit --minio-* --bucket --seed]
@@ -42,6 +42,7 @@ from loom_cli.benchmark_readiness import (
 )
 from loom_cli.discovery import DatasetEntry, union_entries
 from loom_cli.output import render_datasets_json, render_datasets_table
+from loom_cli.secret_source import SecretSourceError, resolve_secret_source
 
 
 def _env_first(*names: str) -> str | None:
@@ -317,18 +318,45 @@ def _add_validate_local_args(p: argparse.ArgumentParser) -> None:
 
 def _add_publish_local_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("path", type=Path)
-    p.add_argument("--db-url", default=_target_db_url())
+    p.add_argument(
+        "--db-url",
+        default=None,
+        help=(
+            "Postgres URL source for publish-local. Prefer LOOM_DB_URL "
+            "(then LOOM_SVC_DB_URL) in the environment; explicit values must "
+            "use env:LOOM_DB_URL, file:PATH, or -. Literal values are rejected "
+            "because argv is visible through process listings."
+        ),
+    )
     p.add_argument(
         "--minio-endpoint",
         default=_target_minio_env("ENDPOINT"),
+        help=(
+            "Target object-store endpoint (env LOOM_MINIO_ENDPOINT, then "
+            "LOOM_SVC_MINIO_ENDPOINT)."
+        ),
     )
     p.add_argument(
         "--minio-access-key",
-        default=_target_minio_env("ACCESS_KEY"),
+        default=None,
+        help=(
+            "Target object-store access-key source. Prefer "
+            "LOOM_MINIO_ACCESS_KEY (then LOOM_SVC_MINIO_ACCESS_KEY) in the "
+            "environment; explicit values must use env:LOOM_MINIO_ACCESS_KEY, "
+            "file:PATH, or -. Literal values are rejected because argv is "
+            "visible through process listings."
+        ),
     )
     p.add_argument(
         "--minio-secret-key",
-        default=_target_minio_env("SECRET_KEY"),
+        default=None,
+        help=(
+            "Target object-store secret-key source. Prefer "
+            "LOOM_MINIO_SECRET_KEY (then LOOM_SVC_MINIO_SECRET_KEY) in the "
+            "environment; explicit values must use env:LOOM_MINIO_SECRET_KEY, "
+            "file:PATH, or -. Literal values are rejected because argv is "
+            "visible through process listings."
+        ),
     )
     p.add_argument("--bucket", default="loom-benchmarks")
     p.add_argument("--imported-by", default=None)
@@ -368,6 +396,24 @@ def _add_publish_local_args(p: argparse.ArgumentParser) -> None:
             "bundles; the default is diagnostic fail-fast."
         ),
     )
+
+
+def _resolve_secret_source_or_env(
+    value: str | None,
+    *,
+    flag_name: str,
+    env_names: tuple[str, ...],
+    errors: list[str],
+) -> str | None:
+    """Resolve a secret-bearing publish-local argument without encouraging argv."""
+
+    if value is None:
+        return _env_first(*env_names)
+    try:
+        return resolve_secret_source(value, flag_name=flag_name)
+    except SecretSourceError as exc:
+        errors.append(str(exc))
+        return None
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1014,9 +1060,38 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
     from loom_cli.local_benchmark_publish import publish_local_benchmark
     from loom_cli.local_benchmark_validate import LocalBenchmarkValidationError
 
+    secret_source_errors: list[str] = []
+    db_url = _resolve_secret_source_or_env(
+        args.db_url,
+        flag_name="--db-url",
+        env_names=("LOOM_DB_URL", "LOOM_SVC_DB_URL"),
+        errors=secret_source_errors,
+    )
+    minio_access_key = _resolve_secret_source_or_env(
+        args.minio_access_key,
+        flag_name="--minio-access-key",
+        env_names=("LOOM_MINIO_ACCESS_KEY", "LOOM_SVC_MINIO_ACCESS_KEY"),
+        errors=secret_source_errors,
+    )
+    minio_secret_key = _resolve_secret_source_or_env(
+        args.minio_secret_key,
+        flag_name="--minio-secret-key",
+        env_names=("LOOM_MINIO_SECRET_KEY", "LOOM_SVC_MINIO_SECRET_KEY"),
+        errors=secret_source_errors,
+    )
+    if secret_source_errors:
+        print(
+            "error: publish-local refuses secret values in command-line argv; "
+            "use LOOM_* environment variables or env:VAR/file:PATH/- references.",
+            file=sys.stderr,
+        )
+        for error in secret_source_errors:
+            print(f"  {error}", file=sys.stderr)
+        return 2
+
     missing = [
         f for f, v in (
-            ("--db-url / LOOM_DB_URL / LOOM_SVC_DB_URL", args.db_url),
+            ("--db-url / LOOM_DB_URL / LOOM_SVC_DB_URL", db_url),
             (
                 "--minio-endpoint / LOOM_MINIO_ENDPOINT / "
                 "LOOM_SVC_MINIO_ENDPOINT",
@@ -1025,12 +1100,12 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
             (
                 "--minio-access-key / LOOM_MINIO_ACCESS_KEY / "
                 "LOOM_SVC_MINIO_ACCESS_KEY",
-                args.minio_access_key,
+                minio_access_key,
             ),
             (
                 "--minio-secret-key / LOOM_MINIO_SECRET_KEY / "
                 "LOOM_SVC_MINIO_SECRET_KEY",
-                args.minio_secret_key,
+                minio_secret_key,
             ),
         ) if not v
     ]
@@ -1041,15 +1116,20 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
         )
         return 2
 
+    assert db_url is not None
+    assert args.minio_endpoint is not None
+    assert minio_access_key is not None
+    assert minio_secret_key is not None
+
     store = MinioObjectStore(
         endpoint_url=args.minio_endpoint,
-        access_key=args.minio_access_key,
-        secret_key=args.minio_secret_key,
+        access_key=minio_access_key,
+        secret_key=minio_secret_key,
     )
     try:
         stats = asyncio.run(publish_local_benchmark(
             args.path,
-            db_url=args.db_url,
+            db_url=db_url,
             object_store=store,
             bucket=args.bucket,
             benchmark_id=args.benchmark_id,

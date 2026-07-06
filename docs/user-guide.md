@@ -830,10 +830,9 @@ loom datasets validate-local "$LOOM_WORKER_FIXTURES_ROOT/team-evals"
 # Copy the printed [[local]] snippet into config/benchmarks.toml, then sync.
 loom datasets sync-config \
   --config ./config/benchmarks.toml \
-  --fixtures-root "$LOOM_WORKER_FIXTURES_ROOT" \
-  --db-url "$LOOM_DB_URL"
+  --fixtures-root "$LOOM_WORKER_FIXTURES_ROOT"
 
-loom datasets audit team-evals --db-url "$LOOM_DB_URL"
+loom datasets audit team-evals
 ```
 
 The validated folder path is the same path the worker materializes later.
@@ -845,15 +844,12 @@ Production deployments should publish the same validated folder to object
 storage instead of relying on a shared worker fixture mount:
 
 ```bash
+# Export LOOM_DB_URL and LOOM_MINIO_* in the shell or process environment.
+# Do not pass credential values through argv; publish-local reads these env vars.
 loom datasets validate-local ./team-evals
-loom datasets publish-local ./team-evals \
-  --db-url "$LOOM_DB_URL" \
-  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
-  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
-  --minio-secret-key "$LOOM_MINIO_SECRET_KEY" \
-  --bucket loom-benchmarks
+loom datasets publish-local ./team-evals --bucket loom-benchmarks
 
-loom datasets audit team-evals --db-url "$LOOM_DB_URL"
+loom datasets audit team-evals
 ```
 
 `publish-local` uploads each task bundle under
@@ -862,6 +858,10 @@ sources. The worker uses the existing object-store materializer at runtime. If a
 task declares `environment.dockerfile`, that Dockerfile and its build context
 are part of the uploaded bundle; the worker builds and caches a deterministic
 `loom-task:<hash>` image before the first service-mode trial that needs it.
+The secret-bearing `publish-local` flags also accept safe references such as
+`--db-url env:LOOM_DB_URL`, `--minio-access-key env:LOOM_MINIO_ACCESS_KEY`,
+and `--minio-secret-key env:LOOM_MINIO_SECRET_KEY`, but literal credential
+values are rejected because argv is visible in process listings.
 Tasks may narrow the Docker build root with `environment.docker_build_context`,
 and build-only contexts under `.loom-build/` are not uploaded into the agent
 workspace. Tasks can also declare `environment.sidecars` for Docker services
@@ -898,9 +898,10 @@ Operators can inspect why a benchmark is or is not runnable without
 opening the SPA:
 
 ```bash
-loom datasets audit --all --db-url "$LOOM_DB_URL"
-loom datasets audit swe-bench-verified --db-url "$LOOM_DB_URL"
-loom datasets audit --all --db-url "$LOOM_DB_URL" --json
+# Export LOOM_DB_URL in the shell or process environment.
+loom datasets audit --all
+loom datasets audit swe-bench-verified
+loom datasets audit --all --json
 python scripts/benchmark_reward_gate.py readiness \
   --server-url "$LOOM_SERVER_URL" \
   --token env:LOOM_API_TOKEN
