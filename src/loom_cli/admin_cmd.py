@@ -494,6 +494,8 @@ def _gb10_workers_status(args: argparse.Namespace) -> int:
     except ValueError as e:
         sys.stderr.write(f"error: {e}\n")
         return 2
+    if not _validate_expected_admin_token_fingerprint(args, admin_token):
+        return 1
 
     url = f"{args.cp_url.rstrip('/')}/admin/gb10-worker-pools/status"
     params: dict[str, str] = {}
@@ -1686,6 +1688,16 @@ def dispatch(argv: list[str]) -> int:
         help=(
             "Fail if active GB10 nodes or desired state have not converged "
             "to this env config version."
+        ),
+    )
+    p_gb10_status.add_argument(
+        "--expect-admin-token-fingerprint",
+        default=None,
+        help=(
+            "Redacted fingerprint expected for --admin-token, formatted "
+            "as 'sha256:<12-hex> len=<N>'. When set, GB10 status collection "
+            "fails before contacting CP if the resolved admin token source "
+            "drifts from the protected-environment source."
         ),
     )
     p_gb10_status.add_argument(

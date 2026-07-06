@@ -763,6 +763,41 @@ def test_gb10_workers_status_json_format_emits_raw_json(
     assert json.loads(capsys.readouterr().out) == payload
 
 
+def test_gb10_workers_status_fails_before_cp_when_admin_token_fingerprint_drifts(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stale_admin_token = "loom_admin_operator_stale_secret"
+    stale_fingerprint = (
+        "sha256:"
+        f"{hashlib.sha256(stale_admin_token.encode('utf-8')).hexdigest()[:12]} "
+        f"len={len(stale_admin_token)}"
+    )
+
+    def _fake_get(url, *, headers, timeout):  # type: ignore[no-untyped-def]
+        raise AssertionError("gb10-workers status contacted CP before token drift preflight")
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", stale_admin_token)
+
+    rc = main(
+        [
+            "admin",
+            "gb10-workers",
+            "status",
+            "--expect-admin-token-fingerprint",
+            "sha256:liveexpected len=36",
+        ]
+    )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "admin_token_fingerprint" in err
+    assert "sha256:liveexpected len=36" in err
+    assert stale_fingerprint in err
+    assert stale_admin_token not in err
+
+
 def test_gb10_workers_status_release_target_gate_fails_on_stale_nodes(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
