@@ -112,6 +112,7 @@ class _FakeCoreV1:
     def __init__(self, secrets: set[str] | None = None) -> None:
         self.secrets = secrets or set()
         self.pods_by_namespace: dict[str, list[Any]] = {}
+        self.events_by_namespace: dict[str, list[Any]] = {}
 
     def read_namespaced_secret(self, *, name: str, namespace: str) -> object:
         if name not in self.secrets:
@@ -120,6 +121,9 @@ class _FakeCoreV1:
 
     def list_namespaced_pod(self, *, namespace: str) -> object:
         return _Spec(items=self.pods_by_namespace.get(namespace, []))
+
+    def list_namespaced_event(self, *, namespace: str) -> object:
+        return _Spec(items=self.events_by_namespace.get(namespace, []))
 
 
 class _FakeStorageV1:
@@ -513,6 +517,119 @@ def test_collect_status_managed_pod_crashloop_blocks_ready() -> None:
     svc = next(c for c in status.components if c.name == "loom-service")
     assert not svc.healthy
     assert svc.note == "pod-health: loom-service-abc123 CrashLoopBackOff"
+    assert not status.all_ready
+
+
+def test_collect_status_classifies_pod_sandbox_deadline_events() -> None:
+    """#206 regression: kind/containerd sandbox deadline stalls are
+    node-runtime failures, not application CrashLoop/image/config failures.
+
+    The public-beta failure had both target pods stuck creating their pod
+    sandbox and old pods stuck terminating their pod sandbox. The status path
+    must inspect events and include old-template terminating pods for this
+    failure class; otherwise rollout tooling only sees generic readiness lag.
+    """
+    apps = _fully_ready_apps()
+    apps.deployments["loom-worker"] = _Workload(
+        metadata=_Spec(generation=16),
+        spec=_Spec(
+            replicas=6,
+            selector=_Spec(match_labels={"app": "loom-worker"}),
+            template=_Spec(
+                spec=_Spec(
+                    containers=[_Spec(name="worker", image="loom-worker:target")],
+                ),
+            ),
+        ),
+        status=_Spec(
+            ready_replicas=5,
+            available_replicas=5,
+            updated_replicas=5,
+            replicas=7,
+            observed_generation=16,
+        ),
+    )
+    core = _FakeCoreV1(secrets={"loom-secrets"})
+    core.pods_by_namespace["loom"] = [
+        _Spec(
+            metadata=_Spec(
+                name="loom-worker-new",
+                labels={"app": "loom-worker"},
+            ),
+            spec=_Spec(
+                containers=[_Spec(name="worker", image="loom-worker:target")],
+            ),
+            status=_Spec(
+                phase="Pending",
+                conditions=[_Spec(type="Ready", status="False")],
+                container_statuses=[
+                    _Spec(
+                        name="worker",
+                        state=_Spec(
+                            waiting=_Spec(
+                                reason="ContainerCreating",
+                                message="waiting for pod sandbox",
+                            ),
+                        ),
+                    ),
+                ],
+            ),
+        ),
+        _Spec(
+            metadata=_Spec(
+                name="loom-worker-old",
+                labels={"app": "loom-worker"},
+                deletion_timestamp="2026-06-30T16:44:56Z",
+            ),
+            spec=_Spec(
+                containers=[_Spec(name="worker", image="loom-worker:previous")],
+            ),
+            status=_Spec(phase="Running", container_statuses=[]),
+        ),
+    ]
+    core.events_by_namespace["loom"] = [
+        _Spec(
+            involved_object=_Spec(name="loom-worker-new"),
+            reason="FailedCreatePodSandBox",
+            message=(
+                "Failed to create pod sandbox: rpc error: code = "
+                "DeadlineExceeded desc = context deadline exceeded"
+            ),
+        ),
+        _Spec(
+            involved_object=_Spec(name="loom-worker-old"),
+            reason="FailedKillPod",
+            message=(
+                "KillPodSandboxError: rpc error: code = DeadlineExceeded "
+                "desc = context deadline exceeded"
+            ),
+        ),
+    ]
+
+    status = collect_status(apps, _FakeNetworkingV1(), core, "loom", context=None)
+
+    worker = next(c for c in status.components if c.name == "loom-worker")
+    assert not worker.healthy
+    assert worker.failure_class == "node_runtime_sandbox_deadline"
+    assert worker.runtime_recovery == "bounded_pod_cleanup_retry"
+    assert worker.runtime_failure_diagnostics == [
+        {
+            "pod": "loom-worker-new",
+            "reason": "FailedCreatePodSandBox",
+            "operation": "create",
+            "target_generation": True,
+        },
+        {
+            "pod": "loom-worker-old",
+            "reason": "FailedKillPod",
+            "operation": "kill",
+            "target_generation": False,
+        },
+    ]
+    assert worker.note is not None
+    assert "node-runtime-sandbox-deadline" in worker.note
+    assert "loom-worker-new FailedCreatePodSandBox" in worker.note
+    assert "loom-worker-old FailedKillPod" in worker.note
     assert not status.all_ready
 
 

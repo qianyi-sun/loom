@@ -209,6 +209,8 @@ loom cluster up \
   --rollout-id "$IMAGE_TAG" \
   --rollout-lock-dir "$LOOM_ROLLOUT_LOCK_DIR" \
   --rollout-lock-evidence "$ROLLOUT_DIR/rollout-mutation-lock-$IMAGE_TAG.json" \
+  --recover-sandbox-deadlines \
+  --sandbox-deadline-max-pods 4 \
   --timeout 900
 ```
 
@@ -223,6 +225,14 @@ stale, such as a dead terminal/session, no active rollout process for the owner
 PID/host, and no in-flight rollout issue comment claiming ownership. The force
 flag replaces an abandoned durable record; it does not bypass an active process
 that still holds the advisory lock.
+
+The sandbox-deadline recovery flags are intentionally narrow. They only act
+after the protected preflight/apply path, only when pod events classify the
+stall as `node_runtime_sandbox_deadline` (`FailedCreatePodSandBox` or
+`FailedKillPod` with `context deadline exceeded`), and only delete the capped
+set of classified pods before one readiness retry. If that retry fails, keep
+the evidence and inspect kind/containerd/kubelet instead of deleting unrelated
+pods or skipping the storage/backup guards.
 
 After `loom cluster up` reaches readiness, run the hard convergence gate against
 the same saved inputs:
@@ -250,9 +260,10 @@ loom cluster release-gate \
 ```
 
 This gate fails on rendered/config hash drift, unverifiable managed image
-identity convergence, live DB Alembic revision mismatch, and missing or failed
-environment-state convergence evidence when the release manifest records
-external-worker desired state. Generate the environment-state artifact with
+identity convergence, classified node-runtime sandbox deadline stalls, live DB
+Alembic revision mismatch, and missing or failed environment-state convergence
+evidence when the release manifest records external-worker desired state.
+Generate the environment-state artifact with
 `loom admin environment-state check --format json` after the matching
 `environment-state apply`; `ok=false` or any non-empty `drift` array keeps the
 release-gate artifact red and blocks workload-validation anchors. When the

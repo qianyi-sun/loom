@@ -31,6 +31,9 @@ class ClusterUpStep(SubcommandStep):
             ctx.namespace,
             "--config",
             str(rollout_cluster_config(ctx, step_dir)),
+            "--recover-sandbox-deadlines",
+            "--sandbox-deadline-max-pods",
+            "4",
         )
 
     def cwd(self, ctx: RolloutContext, step_dir: StepDir) -> Path:

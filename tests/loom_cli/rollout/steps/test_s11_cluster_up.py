@@ -46,3 +46,14 @@ class TestClusterUpStepArgv:
         argv = list(ClusterUpStep().argv(ctx, step_dir))
 
         assert "--wait" not in argv
+
+    def test_enables_bounded_sandbox_deadline_recovery(self, tmp_path: Path) -> None:
+        ctx = make_ctx(tmp_path, namespace="loom-public-beta")
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        ev.ensure()
+        step_dir = ev.step_dir(11, "cluster-up")
+
+        argv = list(ClusterUpStep().argv(ctx, step_dir))
+
+        assert "--recover-sandbox-deadlines" in argv
+        assert argv[argv.index("--sandbox-deadline-max-pods") + 1] == "4"

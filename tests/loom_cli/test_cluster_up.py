@@ -21,6 +21,7 @@ from loom_cli.cluster_cmd import (
     ComponentStatus,
     DeploymentImageCheck,
     apply_manifests,
+    recover_sandbox_deadline_pods,
     wait_for_ready,
 )
 
@@ -320,6 +321,80 @@ def test_wait_for_ready_returns_unready_status_on_timeout(
         _now=lambda: next(nows),
     )
     assert not status.all_ready
+
+
+def test_recover_sandbox_deadline_pods_is_bounded_and_classified_only() -> None:
+    class _Core:
+        def __init__(self) -> None:
+            self.deleted: list[tuple[str, str]] = []
+
+        def delete_namespaced_pod(self, *, name: str, namespace: str) -> None:
+            self.deleted.append((namespace, name))
+
+    worker = ComponentStatus(
+        name="loom-worker",
+        kind="Deployment",
+        ready=5,
+        desired=6,
+        available=True,
+        generation=1,
+        observed_generation=1,
+        updated=5,
+    )
+    worker.failure_class = "node_runtime_sandbox_deadline"
+    worker.runtime_failure_diagnostics = [
+        {"pod": "loom-worker-a"},
+        {"pod": "loom-worker-b"},
+        {"pod": "loom-worker-c"},
+    ]
+    service = ComponentStatus(
+        name="loom-service",
+        kind="Deployment",
+        ready=0,
+        desired=1,
+        available=False,
+        generation=1,
+        observed_generation=1,
+        updated=0,
+        note="pod-health: loom-service CrashLoopBackOff",
+    )
+    service.runtime_failure_diagnostics = [{"pod": "loom-service-bad"}]
+    status = ClusterStatus(
+        namespace="loom",
+        context=None,
+        components=[worker, service],
+        ingresses=[],
+        warnings=[],
+    )
+    core = _Core()
+
+    recovered = recover_sandbox_deadline_pods(
+        core,
+        "loom",
+        status,
+        max_pods=2,
+        dry_run=False,
+    )
+
+    assert recovered == ["loom-worker-a", "loom-worker-b"]
+    assert core.deleted == [
+        ("loom", "loom-worker-a"),
+        ("loom", "loom-worker-b"),
+    ]
+
+    dry_run = recover_sandbox_deadline_pods(
+        core,
+        "loom",
+        status,
+        max_pods=3,
+        dry_run=True,
+    )
+
+    assert dry_run == ["loom-worker-a", "loom-worker-b", "loom-worker-c"]
+    assert core.deleted == [
+        ("loom", "loom-worker-a"),
+        ("loom", "loom-worker-b"),
+    ]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -622,6 +697,91 @@ def test_cli_up_timeout_returns_1_when_not_ready(
     assert rc == 1
     err = capsys.readouterr().err
     assert "did not reach ready state" in err
+
+
+def test_cli_up_retries_once_after_bounded_sandbox_deadline_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#206: protected rollout recovery is automated and bounded.
+
+    Operators opt in to pod sandbox deadline recovery; after the normal
+    preflight/apply path, `cluster up` should delete only classified
+    sandbox-deadline pods, then run one more readiness wait.
+    """
+    _patch_full_up_path(monkeypatch, final_ready=False)
+    stalled = ClusterStatus(
+        namespace="loom",
+        context=None,
+        components=[
+            ComponentStatus(
+                name="loom-worker",
+                kind="Deployment",
+                ready=5,
+                desired=6,
+                available=True,
+                generation=1,
+                observed_generation=1,
+                updated=5,
+                note=(
+                    "node-runtime-sandbox-deadline: "
+                    "loom-worker-old FailedKillPod"
+                ),
+            ),
+        ],
+        ingresses=[],
+        warnings=[],
+    )
+    stalled.components[0].failure_class = "node_runtime_sandbox_deadline"
+    stalled.components[0].runtime_failure_diagnostics = [
+        {
+            "pod": "loom-worker-old",
+            "reason": "FailedKillPod",
+            "operation": "kill",
+            "target_generation": False,
+        },
+    ]
+    ready = _all_ready_status()
+    wait_results = iter([stalled, ready])
+    waits: list[int] = []
+
+    def _wait(*args, **kwargs):  # type: ignore[no-untyped-def]
+        waits.append(kwargs["timeout_sec"])
+        return next(wait_results)
+
+    recovered: dict[str, Any] = {}
+
+    def _recover(core_v1, namespace, status, *, max_pods, dry_run):  # type: ignore[no-untyped-def]
+        recovered["namespace"] = namespace
+        recovered["status"] = status
+        recovered["max_pods"] = max_pods
+        recovered["dry_run"] = dry_run
+        return ["loom-worker-old"]
+
+    monkeypatch.setattr("loom_cli.cluster_cmd.wait_for_ready", _wait)
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd.recover_sandbox_deadline_pods",
+        _recover,
+        raising=False,
+    )
+
+    rc = main([
+        "cluster",
+        "up",
+        "--recover-sandbox-deadlines",
+        "--sandbox-deadline-max-pods",
+        "2",
+    ])
+
+    assert rc == 0
+    assert waits == [600, 600]
+    assert recovered["namespace"] == "loom"
+    assert recovered["max_pods"] == 2
+    assert recovered["dry_run"] is False
+    assert recovered["status"] is stalled
+    out = capsys.readouterr().out
+    assert "Recovered 1 pod sandbox deadline stall(s)" in out
+    assert "loom-worker-old" in out
 
 
 def test_cli_up_fails_when_live_deployment_image_drifts_after_ready(

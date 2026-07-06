@@ -679,9 +679,13 @@ cluster-config/rendered-manifest hashes, Alembic heads, and external-worker
 desired-state fingerprints before any apply starts. After readiness passes,
 `up` compares rendered Deployment container images with the live Deployment
 specs and fails if a concurrent operator mutation drifted the live image away
-from the release manifest. The separate `loom cluster release-gate` command
-then compares saved rendered/config hashes, manifest image identities, and live
-DB Alembic heads queried from `deploy/loom-control-plane` via
+from the release manifest. When kind/containerd stalls pod sandbox create or
+kill operations, `up --recover-sandbox-deadlines` only acts on pods whose
+events classify as `node_runtime_sandbox_deadline`, deletes at most the
+configured cap, and retries readiness once after the protected preflight/apply
+path. The separate `loom cluster release-gate` command then compares saved
+rendered/config hashes, manifest image identities, and live DB Alembic heads
+queried from `deploy/loom-control-plane` via
 `env:LOOM_CP_DB_URL`. For ordinary runtime image IDs, Ready target-generation
 pods must match the manifest digest or image ID. For kind-loaded images whose
 runtime identity is reported as `docker.io/library/import-YYYY-MM-DD@sha256:...`,
@@ -689,13 +693,13 @@ the gate records the import identity and accepts the pod only when its spec and
 the live Deployment template image still match the release manifest; it does
 not trust a stale `containerStatuses.image` tag by itself, and it treats that
 status tag as display evidence rather than the target-generation source of
-truth. Managed Deployments
-with `replicas=0` record zero-replica template-image evidence instead of
-requiring a Ready pod. On success, `up` has also rejected managed Deployment
-pods stuck in blocking
-CrashLoop/image/config/start/OOM/failed states, then prints the rendered and
-live image for each managed Deployment/container so the rollout log captures
-image-convergence evidence.
+truth. Managed Deployments with `replicas=0` record zero-replica
+template-image evidence instead of requiring a Ready pod. The gate also rejects
+old-pod sandbox teardown stalls instead of passing solely because a
+target-generation pod is Ready. On success, `up` has also rejected managed
+Deployment pods stuck in blocking CrashLoop/image/config/start/OOM/failed
+states, then prints the rendered and live image for each managed
+Deployment/container so the rollout log captures image-convergence evidence.
 `loom cluster down --with-volumes` and `--delete-namespace` refuse protected environments
 unless the manifest is recent and the operator passes `--acknowledge-data-loss
 <environment>`. This guard distinguishes ordinary pod or service restarts from
