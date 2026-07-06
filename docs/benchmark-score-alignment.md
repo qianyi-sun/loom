@@ -61,6 +61,13 @@ Examples:
 - code artifact replay for HumanEval, MBPP, and LiveCodeBench;
 - patch replay for SWE-Bench Verified;
 - task artifact replay for SkillFlow, SkillLearnBench, and Terminal-Bench 2.0.
+- effective request-parameter evidence for SkillLearnBench Codex alignment reports,
+  generated with
+  `python scripts/alignment/skilllearnbench_effective_params.py` from redacted
+  official-plan and Loom debug JSON. This records computed official
+  `extra_flags`, whether the selected agent template consumed them, sanitized
+  Loom `trial_config.request_params`, observed gateway/provider request params,
+  and an explicit default-vs-explicit alignment classification.
 
 If live model outputs differ during Layer 2, replay one side's output through
 both verifier paths before calling the score delta a Loom scoring mismatch.
