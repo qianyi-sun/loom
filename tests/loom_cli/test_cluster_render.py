@@ -987,3 +987,55 @@ def test_loom_service_env_carries_k8s_worker_enabled_from_profile() -> None:
         env = svc["spec"]["template"]["spec"]["containers"][0]["env"]
         by_name = {entry["name"]: entry for entry in env}
         assert by_name["LOOM_SVC_K8S_WORKER_ENABLED"]["value"] == str(enabled)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #547 drain hook + HPA
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_llm_gateway_deployment_includes_drain_prestop_and_grace() -> None:
+    docs = _load_docs(render_manifests(_DEFAULT_CFG))
+    gateway = next(
+        d for d in docs
+        if d["kind"] == "Deployment"
+        and d["metadata"]["name"] == "loom-llm-gateway"
+    )
+    pod_spec = gateway["spec"]["template"]["spec"]
+    assert pod_spec["terminationGracePeriodSeconds"] == 300
+    container = pod_spec["containers"][0]
+    prestop_command = container["lifecycle"]["preStop"]["exec"]["command"]
+    joined = " ".join(str(part) for part in prestop_command)
+    assert "127.0.0.1:9100/drain" in joined
+
+
+def test_default_config_disables_gateway_hpa() -> None:
+    assert ClusterConfig().gateway_hpa.enabled is False
+
+
+def test_render_omits_hpa_when_disabled() -> None:
+    docs = _load_docs(render_manifests(ClusterConfig()))
+    kinds = {d["kind"] for d in docs}
+    assert "HorizontalPodAutoscaler" not in kinds
+
+
+def test_render_includes_hpa_when_enabled_with_custom_thresholds() -> None:
+    hpa_cls = type(ClusterConfig().gateway_hpa)
+    cfg = _default_cfg(
+        gateway_hpa=hpa_cls(
+            enabled=True,
+            min_replicas=3,
+            max_replicas=10,
+            cpu_target_pct=70,
+        ),
+    )
+    docs = _load_docs(render_manifests(cfg))
+    hpa = next(
+        d for d in docs
+        if d["kind"] == "HorizontalPodAutoscaler"
+        and d["metadata"]["name"] == "loom-llm-gateway"
+    )
+    spec = hpa["spec"]
+    assert spec["minReplicas"] == 3
+    assert spec["maxReplicas"] == 10
+    assert spec["metrics"][0]["resource"]["target"]["averageUtilization"] == 70

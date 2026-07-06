@@ -979,6 +979,9 @@ _TEMPLATE_ORDER: tuple[str, ...] = (
     "control-plane.yaml.j2",
     "loom-service.yaml.j2",
     "llm-gateway.yaml.j2",
+    # HPA for loom-llm-gateway (#547). Renders only when
+    # gateway_hpa.enabled=true in the profile — off by default.
+    "gateway-hpa.yaml.j2",
     "worker.yaml.j2",
     "web.yaml.j2",
     "ingress.yaml.j2",

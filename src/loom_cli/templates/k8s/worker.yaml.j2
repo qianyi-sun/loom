@@ -19,7 +19,7 @@ spec:
       containers:
         - name: worker
           image: loom-worker:{{ image_tag }}
-          {{ env_macros.env_block("worker", schema, skip_names=("max_concurrent", "pool_name")) | indent(10) }}
+          {{ env_macros.env_block("worker", schema, skip_names=("max_concurrent", "pool_name"), override_values={"trial_cache_registry_repo": trial_cache_registry_repo}) | indent(10) }}
             - name: LOOM_WORKER_MAX_CONCURRENT
               value: {{ worker_capacity.max_concurrent | string | tojson }}
             - name: LOOM_WORKER_POOL_NAME

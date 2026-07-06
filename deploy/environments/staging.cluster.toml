@@ -9,6 +9,15 @@ trajectories_bucket = "loom-staging-trajectories"
 artifacts_bucket = "loom-staging-artifacts"
 env_state_profile = "../environment-state/staging.toml"
 
+# #547 item #2: shared trial-image cache. Workers on any node can pull
+# a layered image built on any other node, unlocking OLDLAB's paper
+# 40-slot capacity in practice (without this, cold-cache misses queue
+# behind the per-daemon build slot from #275). Workers need GHCR
+# push credentials mounted for the cache to actually populate; without
+# them the pull-fail path falls back to local build (harmless — same
+# behavior as today).
+trial_cache_registry_repo = "ghcr.io/qianyi-sun/loom-trial-cache"
+
 # v1.0 staging validation uses GB10 only. The in-cluster loom-worker
 # Deployment is omitted so trial execution capacity comes from the
 # release-managed external GB10 pool.
