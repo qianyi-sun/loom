@@ -7,6 +7,7 @@ import pytest
 
 from loom_cli.__main__ import main
 from loom_cli.cluster_cmd import ApplyResult, ClusterStatus, ComponentStatus
+from loom_cli.cluster_config import ClusterConfig
 from loom_cli.environment_state import EnvironmentStateProfile
 from loom_cli.rollout_lock import RolloutLeaseManager
 
@@ -33,11 +34,13 @@ def _ready_status() -> ClusterStatus:
 
 
 def _patch_cluster_up_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    k8s_worker_cls = type(ClusterConfig().k8s_worker)
+    config = ClusterConfig(k8s_worker=k8s_worker_cls(enabled=True))
     monkeypatch.setattr(
         "loom_cli.cluster_cmd._load_clients",
         lambda _context: (object(), object(), object(), object()),
     )
-    monkeypatch.setattr("loom_cli.cluster_cmd.load_cluster_config", lambda _path: object())
+    monkeypatch.setattr("loom_cli.cluster_cmd.load_cluster_config", lambda _path: config)
     monkeypatch.setattr(
         "loom_cli.cluster_cmd.render_manifests",
         lambda _config: "apiVersion: v1\nkind: List\nitems: []\n",
