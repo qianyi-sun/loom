@@ -64,6 +64,14 @@ Attach these to the release issue or release PR:
   `https://yylx.world/prod/api`, while `https://yylx.world/dev` exposes
   development/public-beta identity and `https://yylx.world/dev/api`, with
   no-store runtime config responses.
+- For first prod, the release-promotion manifest's `prod_beta_isolation` check
+  must embed structured dry-run evidence for state profiles, object storage
+  buckets/prefix policy, safe token/provider refs, frontend API bases, worker
+  API URLs, worker image/source identities, and beta lease status. The
+  production gate fails active beta leases unless `beta_slots=0` or a documented
+  override with an approval URL is present. Safe refs such as
+  `github-environment:production/...` are expected; raw token/provider/MinIO
+  values are not.
 - Screenshots or notes for logged-out SPA load, account request, admin account
   approval link, password setup, forgot-password request/reset approval, Team
   Settings, provider setup, SPA batch submission, Monitor progress showing

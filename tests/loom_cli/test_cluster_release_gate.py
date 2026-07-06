@@ -1328,6 +1328,61 @@ def test_cluster_release_gate_cli_dry_run_reports_structured_failure(
     assert out["checks"][0]["name"] == "alembic-heads"
 
 
+def test_public_beta_cluster_release_gate_dry_run_does_not_require_prod_credentials(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    manifest_path = tmp_path / "release-manifest.json"
+    manifest_path.write_text(json.dumps(_manifest()), encoding="utf-8")
+    for name in (
+        "LOOM_CANDIDATE_SHA",
+        "LOOM_IMAGE_TAG",
+        "LOOM_RELEASE_GATE_RUN_ID",
+        "LOOM_SERVICE_API_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._load_clients",
+        lambda _context: (object(), object(), object(), object()),
+    )
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd.collect_release_gate_report",
+        lambda **_kwargs: ReleaseGateReport(
+            environment="staging",
+            namespace="loom",
+            checks=[
+                ReleaseGateCheck(
+                    name="image-identity:loom-service/app",
+                    outcome="pass",
+                    detail="public-beta release manifest identity matched",
+                    evidence={},
+                ),
+            ],
+        ),
+    )
+
+    rc = main([
+        "cluster",
+        "release-gate",
+        "--manifest",
+        str(manifest_path),
+        "--namespace",
+        "loom",
+        "--environment",
+        "staging",
+        "--dry-run",
+        "--format",
+        "json",
+    ])
+
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["environment"] == "staging"
+    assert out["all_pass"] is True
+
+
 def test_cluster_release_gate_cli_passes_environment_state_check_artifact(
     tmp_path,
     monkeypatch,
