@@ -87,6 +87,8 @@ Normal flow:
    rollback evidence. For first prod, also include prod/dev frontend route
    evidence, prod/beta state and worker isolation evidence, and the
    raw-delivery/export requirement status from the operator-free user E2E gate.
+   The worker-isolation evidence must include the prod-first shared-capacity
+   report generated from `deploy/worker-capacity/prod-first.toml`.
 6. Write a JSON manifest with `schema_version=1`, `candidate_sha`,
    `image_tag`, `prod_tag`, `staging_url`, image digests for every Loom image,
    and pass records for every required check:
@@ -535,6 +537,35 @@ knob you need.
      --format json \
      > "$ROLLOUT_DIR/environment-state-check-$IMAGE_TAG.json"
    ```
+
+   For first prod, also generate the shared physical worker-capacity contract.
+   This is a repo-only desired-state/evidence check: it does not mutate worker
+   pools, mint tokens, or read live credentials. The default manifest assigns
+   every eligible GB10/OLDLAB slot to production, leaves beta/dev at zero
+   borrowed slots, and records `trt-gb10-14` as unreachable until the SSH path
+   is repaired. When an observed worker registration/status artifact is
+   available, pass it with `--observed-json` so the report fails on prod/dev
+   environment, API URL, image tag, source commit, compose service, Kubernetes
+   deployment, slot-count, or worker-identity drift:
+
+   ```bash
+   uv run python scripts/ops/worker_capacity_manifest.py \
+     --manifest deploy/worker-capacity/prod-first.toml \
+     --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
+     --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
+     --var BETA_IMAGE_TAG="$IMAGE_TAG" \
+     --var BETA_SOURCE_COMMIT="$RELEASE_SHA" \
+     --observed-json "$ROLLOUT_DIR/worker-registrations.json" \
+     --evidence-out "$ROLLOUT_DIR/worker-capacity-prod-first.json" \
+     --format markdown
+   ```
+
+   The report is safe to attach to release issues and PRs: secret-bearing input
+   fields are omitted or redacted, and the output must not contain service
+   tokens, provider keys, signed URLs, MinIO credentials, or secret refs. Until
+   #488/#489 land, use this check as the release contract and perform any beta
+   capacity borrow/drain operation explicitly through an operator-approved
+   procedure; do not treat the manifest validator as a capacity lease actuator.
 
    The command is idempotent and uses the existing Control Plane admin APIs for
    worker-pool autoscaler policies, GB10 desired state, and Slurm worker job

@@ -128,6 +128,14 @@ Attach these to the release issue or release PR:
   evidence must include the smoke batch id, runtime, failure count, and one
   `oldlab_worker_records` entry per OLDLAB worker with node name, Slurm job id,
   Loom worker id, configured concurrency, and claimed trial count.
+- For first prod, `worker_capacity_smoke` / prod-beta isolation evidence must
+  also attach the secret-safe output from
+  `uv run python scripts/ops/worker_capacity_manifest.py --manifest
+  deploy/worker-capacity/prod-first.toml`. The report must show production as
+  the default owner of all eligible GB10/OLDLAB slots, beta/dev at zero slots
+  unless an explicit bounded borrow is active, and no worker identity, API URL,
+  image tag, source commit, compose service, or Kubernetes deployment crossing
+  the prod/dev boundary.
 - `scripts/staging_smoke_gate.py` Markdown evidence with `--fail-on-skip`
   and `--allow-mutating-checks` against disposable staging data. The report
   must include the service restart/OOM row by passing `--k8s-namespace`, and
