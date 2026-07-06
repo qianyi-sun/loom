@@ -444,7 +444,9 @@ runs or memberships.
 
 `GET /api/v1/admin/team-registrations?status=pending`
 
-Returns pending registration summaries. Requires admin auth.
+Returns pending legacy invite-based team registration summaries from
+`/api/v1/teams/register`. Requires admin auth. Username/password account
+approvals use `/api/v1/admin/registration-requests`.
 
 `POST /api/v1/admin/team-registrations/{id}/approve`
 
@@ -475,7 +477,8 @@ row.
 `GET /api/v1/admin/registration-requests?status=pending`
 
 Returns pending username account requests. Requires platform-admin session or
-singleton admin auth.
+singleton admin auth. This is the primary username/password approval path and
+is surfaced from the default Admin Access Requests section.
 
 `POST /api/v1/admin/registration-requests/{id}/approve`
 
@@ -688,14 +691,16 @@ Settings is the session and team-settings surface:
   member/viewer users do not get owner-only UI affordances and still receive
   server-side 403s for forbidden mutations.
 
-Team access is organized into role-aware sections. Platform admins see legacy
-Requests, Accounts, Teams, Invites, API tokens, and Audit sections; team owners
-see Invites and API tokens only. The Accounts section lists pending username
-registration requests and password reset requests. Approvals reveal setup/reset
-links exactly once for manual sharing. Deployed environments should reveal
-links with the public HTTPS origin at source. Manual invite creation remains
-available as a compatibility path and selects from visible team names for
-platform admins instead of requiring a pasted raw team id; team-owner invite
+Team access is organized into role-aware sections. Platform admins see Requests,
+Accounts, Teams, Invites, API tokens, and Audit sections; team owners see
+Invites and API tokens only. The default Requests section lists pending
+username registration requests first and clearly separates legacy
+team-registration invite requests. The Accounts section also lists username
+registration requests alongside password reset requests. Approvals reveal
+setup/reset links exactly once for manual sharing. Deployed environments should
+reveal links with the public HTTPS origin at source. Manual invite creation
+remains available as a compatibility path and selects from visible team names
+for platform admins instead of requiring a pasted raw team id; team-owner invite
 creation uses the current team from the session context.
 
 The setup page at `/auth/setup?token=...` and reset page at

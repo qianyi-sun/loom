@@ -122,6 +122,9 @@ describe("AdminAccess", () => {
             ],
           });
         }
+        if (url.includes("/api/v1/admin/registration-requests")) {
+          return jsonResponse({ items: [] });
+        }
         if (url.includes("/api/v1/admin/team-registrations")) {
           if (init?.method === "POST" && url.endsWith("/approve")) {
             expect(JSON.parse(String(init.body))).toEqual({
@@ -238,7 +241,7 @@ describe("AdminAccess", () => {
     expect(await screen.findByText("Mark Li")).toBeInTheDocument();
     expect(screen.getAllByText("latent@example.com").length).toBeGreaterThan(0);
     expect(screen.getByText(
-      "Approve creates an invite link for the selected team and role. Copy it and share it manually; Loom does not send email.",
+      "Approve older team-registration requests into an invite link. Username/password account approvals are listed above.",
     )).toBeInTheDocument();
 
     await userEvent.clear(screen.getByLabelText("Admin actor"));
@@ -282,6 +285,80 @@ describe("AdminAccess", () => {
         role: "member",
       });
     });
+  });
+
+  it("shows pending username account approvals on the default requests tab", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/auth/me")) {
+          return jsonResponse(platformAdminMe);
+        }
+        if (url.endsWith("/api/v1/admin/teams")) {
+          return jsonResponse({
+            items: [
+              {
+                id: "team-dev",
+                name: "Dev",
+                created_at: "2026-06-16T00:00:00Z",
+                disabled_at: null,
+                disabled_reason: null,
+                submissions_paused_at: null,
+                submissions_paused_reason: null,
+                quota: null,
+                members: [],
+                user_members: [],
+              },
+            ],
+          });
+        }
+        if (url.includes("/api/v1/admin/team-registrations")) {
+          return jsonResponse({ items: [] });
+        }
+        if (url.includes("/api/v1/admin/registration-requests")) {
+          return jsonResponse({
+            items: [
+              {
+                id: "reg-account-1",
+                username: "Ada",
+                username_normalized: "ada",
+                team_id: "team-dev",
+                team_name: "Dev",
+                role: "member",
+                status: "pending",
+                requested_at: "2026-06-24T00:00:00Z",
+                reviewed_at: null,
+                reviewed_by_actor: null,
+                setup_token_prefix: null,
+              },
+            ],
+          });
+        }
+        if (url.includes("/api/v1/admin/audit-events")) {
+          return jsonResponse({ items: [], next_cursor: null });
+        }
+        if (url.includes("/api/v1/invites")) {
+          return jsonResponse({ items: [] });
+        }
+        if (url.endsWith("/api/v1/tokens")) {
+          return jsonResponse({ items: [] });
+        }
+        return jsonResponse({ detail: `unhandled ${url}` }, 404);
+      },
+    );
+
+    renderWithProviders(<AdminAccess />);
+
+    expect(await screen.findByRole("tab", { name: "Requests" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(await screen.findByText("Account requests")).toBeInTheDocument();
+    expect(screen.getByText("Ada")).toBeInTheDocument();
+    expect(screen.getByText("Dev")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve account Ada" })).toBeInTheDocument();
+    expect(screen.getByText("Legacy team registrations")).toBeInTheDocument();
+    expect(screen.getByText("No pending legacy team registrations.")).toBeInTheDocument();
   });
 
   it("approves username accounts and password resets with manual links", async () => {
@@ -445,6 +522,9 @@ describe("AdminAccess", () => {
             ],
           });
         }
+        if (url.includes("/api/v1/admin/registration-requests")) {
+          return jsonResponse({ items: [] });
+        }
         if (url.includes("/api/v1/admin/team-registrations")) {
           if (init?.method === "POST" && url.endsWith("/reg-1/approve")) {
             return jsonResponse({
@@ -600,6 +680,9 @@ describe("AdminAccess", () => {
             ],
           });
         }
+        if (url.includes("/api/v1/admin/registration-requests")) {
+          return jsonResponse({ items: [] });
+        }
         if (url.includes("/api/v1/admin/team-registrations")) {
           return jsonResponse({ items: [] });
         }
@@ -673,6 +756,9 @@ describe("AdminAccess", () => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {
           return jsonResponse(platformAdminMe);
+        }
+        if (url.includes("/api/v1/admin/registration-requests")) {
+          return jsonResponse({ items: [] });
         }
         if (url.includes("/api/v1/admin/team-registrations")) {
           return jsonResponse({ items: [] });

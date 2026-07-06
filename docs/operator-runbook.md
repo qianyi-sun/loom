@@ -681,7 +681,25 @@ knob you need.
      -H "Content-Type: application/json" \
      -d '{"name":"Research Platform"}'
    ```
-   An admin lists and approves pending requests into one existing team and role:
+   An admin lists and approves pending username/password account requests into
+   their requested team with an explicit role:
+   ```bash
+   curl https://loom.example.com/api/v1/admin/registration-requests?status=pending \
+     -H "Authorization: Bearer $ADMIN_TOKEN"
+
+   curl -X POST https://loom.example.com/api/v1/admin/registration-requests/$REQUEST_ID/approve \
+     -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"role":"member"}'
+   ```
+   The approval response reveals a one-time browser password setup link exactly
+   once. Deliver the link to the requested user out of band; the user sets a
+   password and receives the selected team membership without seeing raw API
+   credentials. Loom does not email the link in staging.
+
+   The legacy team-registration endpoints are only for old invite-based
+   onboarding flows. Use them when a pending row came from
+   `/api/v1/teams/register`, not for username/password account requests:
    ```bash
    curl https://loom.example.com/api/v1/admin/team-registrations?status=pending \
      -H "Authorization: Bearer $ADMIN_TOKEN"
@@ -692,25 +710,17 @@ knob you need.
      -H "Content-Type: application/json" \
      -d '{"team_id":"'"$TEAM_ID"'", "role":"member"}'
    ```
-   The approval response reveals a raw `loom_invite_...` code and browser invite
-   link exactly once. Deliver the link to the requested contact; the contact
-   accepts it to create their user session and the selected team membership
-   without seeing raw API credentials. Loom does not email the link in staging.
-   If the link is lost, resend the invite to rotate the stored hash and reveal a
-   replacement:
-   ```bash
-   curl -X POST https://loom.example.com/api/v1/invites/$INVITE_ID/resend \
-     -H "Authorization: Bearer $ADMIN_TOKEN" \
-     -H "X-Loom-Admin-Actor: qianyi"
-   ```
-   Reject accidental requests with `POST .../$REG_ID/reject` and the same actor
-   header. Review backend audit evidence with:
+   Reject accidental username/password account requests with
+   `POST .../registration-requests/$REQUEST_ID/reject`. Reject legacy team
+   registrations with `POST .../team-registrations/$REG_ID/reject` and the same
+   actor header. Review backend audit evidence with:
    ```bash
    curl https://loom.example.com/api/v1/admin/audit-events?limit=20 \
      -H "Authorization: Bearer $ADMIN_TOKEN"
    ```
-   Audit rows include the operator-attested actor and safe metadata such as
-   invite prefixes, never raw bearer or invite tokens.
+   Audit rows include authenticated or operator-attested actors and safe
+   metadata such as token prefixes, never raw bearer, invite, setup, or reset
+   tokens.
 
 10. **Staging incident controls.** Use the same admin token plus an
     operator-attested `X-Loom-Admin-Actor` for every emergency mutation:
