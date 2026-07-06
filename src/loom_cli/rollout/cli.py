@@ -65,6 +65,10 @@ def _replayable_worker_token_source(source: str) -> str:
     return _replayable_secret_source(source, flag_name="--worker-token")
 
 
+def _replayable_service_token_source(source: str) -> str:
+    return _replayable_secret_source(source, flag_name="--service-token")
+
+
 def _validate_physical_environment_target(args: argparse.Namespace) -> str | None:
     """Return a rollout-target error when logical env and physical target diverge."""
     environment = str(args.environment).strip().lower()
@@ -176,6 +180,17 @@ def build_parser(p: argparse.ArgumentParser) -> None:
             "Use a replayable env:VAR or file:PATH reference so raw tokens "
             "never enter argv or rollout evidence. Passed only to "
             "`loom admin environment-state check`."
+        ),
+    )
+    p.add_argument(
+        "--service-token",
+        default=None,
+        type=_replayable_service_token_source,
+        help=(
+            "Service API token source for rollout-owned CLI calls that mutate "
+            "or verify Service-backed defaults, such as rate-card sync and "
+            "hosted provider pricing. Use a replayable env:VAR or file:PATH "
+            "reference so raw tokens never enter argv or rollout evidence."
         ),
     )
     p.add_argument(
@@ -301,6 +316,7 @@ def handle(args: argparse.Namespace) -> int:
         admin_token_source=args.admin_token,
         expect_admin_token_fingerprint=args.expect_admin_token_fingerprint,
         worker_token_source=args.worker_token,
+        service_token_source=args.service_token,
         cluster_config_path=cluster_config_path,
         cluster_config_sha256=cfg_sha,
         rollout_root=rollout_root,

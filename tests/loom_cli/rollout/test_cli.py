@@ -241,6 +241,57 @@ class TestRolloutCLIRealRun:
         assert "stdin source '-' is not replayable for rollout" in err
         assert "env:VAR or file:PATH" in err
 
+    def test_refuses_literal_service_token_before_evidence_capture(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        raw_token = "raw-service-secret"
+
+        with pytest.raises(SystemExit) as excinfo:
+            main([
+                "cluster", "rollout",
+                "--ref", "origin/dev",
+                "--image-tag", "staging-aaaaaaa",
+                "--cluster-name", "loom-staging",
+                "--namespace", "loom-staging",
+                "--environment", "staging",
+                "--cp-url", "http://control-node.lan:18081",
+                "--service-token", raw_token,
+                "--cluster-config", "/tmp/cluster-config.toml",
+                "--backup-manifest", "/tmp/backup-manifest.json",
+                "--rollout-root", "/tmp/rollout-root",
+            ])
+
+        assert excinfo.value.code == 2
+        err = capsys.readouterr().err
+        assert "literal values are rejected" in err
+        assert "env:VAR | file:PATH" in err
+        assert raw_token not in err
+
+    def test_refuses_stdin_service_token_for_replayable_rollout(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main([
+                "cluster", "rollout",
+                "--ref", "origin/dev",
+                "--image-tag", "staging-aaaaaaa",
+                "--cluster-name", "loom-staging",
+                "--namespace", "loom-staging",
+                "--environment", "staging",
+                "--cp-url", "http://control-node.lan:18081",
+                "--service-token", "-",
+                "--cluster-config", "/tmp/cluster-config.toml",
+                "--backup-manifest", "/tmp/backup-manifest.json",
+                "--rollout-root", "/tmp/rollout-root",
+            ])
+
+        assert excinfo.value.code == 2
+        err = capsys.readouterr().err
+        assert "stdin source '-' is not replayable for rollout" in err
+        assert "env:VAR or file:PATH" in err
+
     def test_passes_cp_url_into_rollout_context(
         self,
         tmp_path: Path,
@@ -352,6 +403,44 @@ class TestRolloutCLIRealRun:
         assert captured["ctx"].worker_token_source == "file:/secure/path/worker-token"
         assert captured["ctx"].to_inputs_dict()["worker_token_source"] == (
             "file:/secure/path/worker-token"
+        )
+
+    def test_passes_service_token_source_into_rollout_context(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cfg = tmp_path / "cluster-config.toml"
+        cfg.write_text("image_tag = 'x'\n")
+        backup = tmp_path / "backup-manifest.json"
+        backup.write_text("{}")
+        monkeypatch.setattr(subprocess, "run", _FakeSubprocess())
+        captured = {}
+
+        def fake_run_rollout(ctx, steps, evidence):
+            captured["ctx"] = ctx
+            return 0
+
+        monkeypatch.setattr("loom_cli.rollout.cli.run_rollout", fake_run_rollout)
+
+        rc = main([
+            "cluster", "rollout",
+            "--ref", "origin/dev",
+            "--image-tag", "staging-aaaaaaa",
+            "--cluster-name", "loom-staging",
+            "--namespace", "loom-staging",
+            "--environment", "staging",
+            "--cp-url", "http://control-node.lan:18081",
+            "--service-token", "file:/secure/path/service-token",
+            "--cluster-config", str(cfg),
+            "--backup-manifest", str(backup),
+            "--rollout-root", str(tmp_path),
+        ])
+
+        assert rc == 0
+        assert captured["ctx"].service_token_source == "file:/secure/path/service-token"
+        assert captured["ctx"].to_inputs_dict()["service_token_source"] == (
+            "file:/secure/path/service-token"
         )
 
     def test_refuses_without_matching_cluster_config(

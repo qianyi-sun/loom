@@ -48,6 +48,9 @@ class RolloutContext:
         worker_token_source: Optional secret-source reference for protected
             external runner parity checks. This is persisted as a source
             reference only, never the raw token value.
+        service_token_source: Optional secret-source reference for protected
+            Service API calls made by rollout-owned CLI subcommands. This is
+            persisted as a source reference only, never the raw token value.
         cluster_config_path: Path to the operator's cluster-config.toml.
         cluster_config_sha256: sha256 of cluster_config_path contents at launch.
         rollout_root: Root of the evidence directory tree (#174 model).
@@ -82,6 +85,7 @@ class RolloutContext:
     admin_token_source: str = "env:LOOM_CP_ADMIN_TOKEN"
     expect_admin_token_fingerprint: str | None = None
     worker_token_source: str | None = None
+    service_token_source: str | None = None
     scope: str = "current-gb10"
     exclude_oldlab: bool = False
     resume: bool = False
@@ -105,6 +109,7 @@ class RolloutContext:
             "admin_token_source": self.admin_token_source,
             "expect_admin_token_fingerprint": self.expect_admin_token_fingerprint,
             "worker_token_source": self.worker_token_source,
+            "service_token_source": self.service_token_source,
             "cluster_config_path": str(self.cluster_config_path),
             "cluster_config_sha256": self.cluster_config_sha256,
             "rollout_root": str(self.rollout_root),
