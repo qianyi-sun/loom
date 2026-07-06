@@ -82,9 +82,13 @@ cd web && npm install && npm run dev
 
 ## Tests
 
-CI gates the fast tier on every push + PR. PRs that change only docs or repo
-metadata still report the required `repository-checks` status, but skip the
-heavy install/test/coverage steps:
+CI gates the fast tier on every PR and on `main` pushes. `dev` pushes skip the
+Python gate because the squash-merged PR already produced the required context.
+PRs that change only docs or repo metadata still report the required
+`repository-checks` status, but skip the heavy install/test/coverage steps.
+The required context is an aggregator: ruff/mypy/static checks, root tests, and
+sibling-package tests run in parallel jobs, then `repository-checks` combines
+their coverage artifacts and applies the 70% fast-tier gate.
 
 ```bash
 uv run ruff check src tests packages migrations
@@ -119,10 +123,16 @@ LOOM_RUN_DAYTONA_INTEGRATION=1 DAYTONA_API_KEY=... \
 The `slow` marker is applied at module level on the heaviest 9 test
 files (Docker driver lifecycle / exec / io / healthcheck /
 network-policy + full trial e2e + Daytona live). CI runs the fast
-tier on every push/PR and runs the Docker/testcontainers integration
-tier only on `ci:integration`-labeled PRs or manual workflow dispatch;
-see the historical archive issue (carinrc#7) for the slow-tier
-tuning work.
+tier on every PR and runs the Docker/testcontainers integration tier
+only on `ci:integration`-labeled PRs or manual workflow dispatch; see
+the historical archive issue (carinrc#7) for the slow-tier tuning work.
+
+Image builds are intentionally separate from the required fast gate. Relevant
+pushes to `dev`/`main` still publish multi-arch images, but PR image validation
+is opt-in: add the `ci:images` label, or run `.github/workflows/images.yml`
+manually. The image workflow plans a path-aware matrix so web-only changes build
+only the web image, Dockerfile-only changes build the matching component, and
+shared Python/runtime changes rebuild the affected Python images.
 
 ## Coverage gates
 
@@ -136,8 +146,11 @@ tuning work.
 - Baseline at latest dev tip: ~72 % fast, ~85 % combined.
 - `coverage.xml` ships as a workflow artifact for external tools.
 
-To reproduce the protected fast coverage gate locally, run the same two pytest
-coverage steps as `repository-checks`, then run the threshold check:
+To reproduce the protected fast coverage gate locally, run the equivalent
+serial form of the two pytest coverage steps, then run the threshold check.
+CI runs these pytest commands in parallel and combines their coverage data in
+the final `repository-checks` job; local serial runs need `--cov-append` on the
+second command:
 
 ```bash
 rm -f .coverage coverage.xml
