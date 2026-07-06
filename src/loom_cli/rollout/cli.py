@@ -22,6 +22,10 @@ from loom_cli.rollout.evidence import EvidenceDirectory, new_rollout_id
 from loom_cli.rollout.steps import default_step_sequence
 from loom_cli.rollout.steps.s00_resolve_target import resolve_ref_to_sha
 
+_STAGING_CLUSTER_NAME = "loom-staging"
+_STAGING_NAMESPACE = "loom-staging"
+_STAGING_DATA_ROOT = "/data/loom-staging"
+
 
 def _replayable_admin_token_source(source: str) -> str:
     """Validate a secret source that rollout steps can safely reuse.
@@ -50,6 +54,43 @@ def _replayable_admin_token_source(source: str) -> str:
     raise argparse.ArgumentTypeError(
         "--admin-token: literal values are rejected; use one of "
         "{env:VAR | file:PATH}",
+    )
+
+
+def _validate_physical_environment_target(args: argparse.Namespace) -> str | None:
+    """Return a rollout-target error when logical env and physical target diverge."""
+    environment = str(args.environment).strip().lower()
+    cluster_name = str(args.cluster_name).strip()
+    namespace = str(args.namespace).strip()
+    rollout_root = str(args.rollout_root).strip().rstrip("/")
+
+    if environment != "staging":
+        return None
+    mismatches: list[str] = []
+    if cluster_name != _STAGING_CLUSTER_NAME:
+        mismatches.append(
+            f"--cluster-name must be {_STAGING_CLUSTER_NAME!r}, got {cluster_name!r}",
+        )
+    if namespace != _STAGING_NAMESPACE:
+        mismatches.append(
+            f"--namespace must be {_STAGING_NAMESPACE!r}, got {namespace!r}",
+        )
+    if rollout_root.startswith("/data/") and not (
+        rollout_root == _STAGING_DATA_ROOT
+        or rollout_root.startswith(f"{_STAGING_DATA_ROOT}/")
+    ):
+        mismatches.append(
+            f"--rollout-root under /data must be {_STAGING_DATA_ROOT!r} "
+            f"or a child path, got {rollout_root!r}",
+        )
+    if not mismatches:
+        return None
+
+    return (
+        "staging rollout must use physical staging resources: "
+        "cluster 'loom-staging', namespace 'loom-staging', and "
+        "rollout root '/data/loom-staging'. "
+        + "; ".join(mismatches)
     )
 
 
@@ -177,6 +218,11 @@ def build_parser(p: argparse.ArgumentParser) -> None:
 
 def handle(args: argparse.Namespace) -> int:
     """Handler wired up from `loom cluster rollout`."""
+    physical_target_error = _validate_physical_environment_target(args)
+    if physical_target_error is not None:
+        sys.stderr.write(f"error: {physical_target_error}\n")
+        return 2
+
     # Resolve --ref → sha via git.
     try:
         resolved_sha = resolve_ref_to_sha(args.ref)

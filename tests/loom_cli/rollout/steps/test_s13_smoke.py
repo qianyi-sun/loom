@@ -341,15 +341,12 @@ def test_current_gb10_smoke_defaults_to_gb10_compatible_task_and_pool(
                 b'{"credential_type":"user_owned_api_token","scopes":["read:own","submit"]}',
             )
         if url.endswith("/api/v1/benchmarks"):
-            return 200, b'{"items":[{"id":"skilllearnbench"}]}'
-        if url.endswith(
-            "/api/v1/tasks/skilllearnbench/anthropic-poster-design/anthropic-poster-design-1",
-        ):
+            return 200, b'{"items":[{"id":"loom-smoke"}]}'
+        if url.endswith("/api/v1/tasks/loom-smoke/gb10-oracle-hello-world"):
             return (
                 200,
-                b'{"id":"skilllearnbench/anthropic-poster-design/'
-                b'anthropic-poster-design-1",'
-                b'"benchmark_id":"skilllearnbench"}',
+                b'{"id":"loom-smoke/gb10-oracle-hello-world",'
+                b'"benchmark_id":"loom-smoke"}',
             )
         if url.endswith("/api/v1/trials/trial-1"):
             return 200, b'{"id":"trial-1","state":"succeeded","aggregate_reward":1.0}'
@@ -376,7 +373,7 @@ def test_current_gb10_smoke_defaults_to_gb10_compatible_task_and_pool(
     assert result.exit_code == 0
     assert captured_payloads == [
         {
-            "task_id": ("skilllearnbench/anthropic-poster-design/anthropic-poster-design-1"),
+            "task_id": "loom-smoke/gb10-oracle-hello-world",
             "config": {"agent_name": "oracle", "agent_model": None},
             "idempotency_key": "smoke-"
             + hashlib.sha256(

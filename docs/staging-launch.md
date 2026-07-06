@@ -375,7 +375,7 @@ python scripts/staging_smoke_gate.py \
   --team-b-token env:TEAM_B_TOKEN \
   --provider-connection-name mz_tn_canada_qianyi \
   --provider-model-provider yibuapi \
-  --provider-model-name gpt-4o-mini \
+  --provider-model-name glm5.1-thinking \
   --batch-id "$TEAM_A_BATCH_ID" \
   --trial-id "$TEAM_A_TRIAL_ID" \
   --safe-artifact-key "$SAFE_ARTIFACT_KEY" \
@@ -392,7 +392,7 @@ python scripts/staging_smoke_gate.py \
   --object-store-write-check-count 64 \
   --object-store-write-check-concurrency 16 \
   --k8s-namespace loom-staging \
-  --required-worker-pool oldlab \
+  --required-worker-pool gb10-arm64 \
   --secret-needle env:STAGING_SECRET_NEEDLE \
   --internal-url-needle loom-minio.loom.svc.cluster.local \
   --allow-mutating-checks \
@@ -453,12 +453,13 @@ For Terminus 2 task bundles that inherit from `mictern2/terminus2-full:latest`,
 the first GB10/ARM64 canary also creates a worker-local compatibility base
 image on the ARM64 Docker daemon before building the task image, because the
 upstream tag is amd64-only.
-Do not rely on theoretical max-slot saturation to prove worker-pool coverage:
-create the release/acceptance batch with repeated `--required-worker-pool`
-flags, for example `--required-worker-pool oldlab
---required-worker-pool gb10-arm64` on staging (`k8s_worker.enabled=false`,
-#383). On clusters that intentionally host a dedicated k8s worker
-node pool, add `--required-worker-pool k8s-worker` as well. The service adds one
+Do not rely on theoretical max-slot saturation to prove worker-pool coverage.
+For v1.0's GB10-only staging gate, require `--required-worker-pool gb10-arm64`.
+For v1.1/full-cluster mixed-pool evidence, create the release/acceptance batch
+with repeated `--required-worker-pool` flags, for example
+`--required-worker-pool oldlab --required-worker-pool gb10-arm64`. On clusters
+that intentionally host a dedicated k8s worker node pool, add
+`--required-worker-pool k8s-worker` as well. The service adds one
 pool-pinned coverage trial per required pool while leaving the normal portable
 trials portable. When a target pool's CPU architecture is known from active
 workers or autoscaler policy, coverage uses a selected task compatible with that

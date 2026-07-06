@@ -1202,6 +1202,12 @@ loom cluster rollout \
   --scope current-gb10
 ```
 
+For `--environment staging`, the driver intentionally refuses legacy physical
+targets. Use `--cluster-name loom-staging`, `--namespace loom-staging`, and
+`--rollout-root /data/loom-staging` after creating those resources; do not run
+a logical staging rollout against any older pre-production cluster, namespace,
+or data root.
+
 `--backup-manifest` is required. The driver does not create the backup
 itself — the operator produces the Postgres dump, MinIO snapshot, and
 secrets export per the runbook procedure (§ *Protected-environment
@@ -1227,16 +1233,16 @@ user-owned API token whose `/api/v1/auth/whoami` reports
 `credential_type=user_owned_api_token` and includes `submit` scope. Admin
 secrets, internal service credentials, and legacy team tokens are refused before
 trial submission because they cannot create user-facing work under the
-account-auth model. `LOOM_SMOKE_TASK_ID` defaults to
-`skilllearnbench/anthropic-poster-design/anthropic-poster-design-1` with
-`required_worker_pool=gb10-arm64` for `--scope=current-gb10`, because that
-scope excludes the x86/OLDLAB path. For `--scope=full-cluster`, the default is
+account-auth model. For `--scope=current-gb10`, `LOOM_SMOKE_TASK_ID` defaults
+to `loom-smoke/gb10-oracle-hello-world` with
+`required_worker_pool=gb10-arm64`, because that task is oracle-compatible and
+declares `cpu_arch=any`. For `--scope=full-cluster`, the default is
 `terminal-bench-2/hello-world` with no required pool. Override
 `LOOM_SMOKE_TASK_ID` only with another short task that exists in the live
-`/api/v1/tasks/{id}` catalog and is compatible with the rollout scope. If the
-override must target a specific pool, set `LOOM_SMOKE_REQUIRED_WORKER_POOL`
-explicitly; the driver only injects the GB10 pool for its built-in
-current-gb10 default.
+`/api/v1/tasks/{id}` catalog and is compatible with the rollout scope and
+selected worker pool. If the override must target a specific pool, set
+`LOOM_SMOKE_REQUIRED_WORKER_POOL` explicitly; the driver only injects the GB10
+pool for its built-in current-gb10 default.
 
 For a release canary where an operator must represent an active user/team and a
 user-owned smoke token is unavailable, set
@@ -2424,9 +2430,10 @@ loom admin batches submit-on-behalf \
   --team-id <agentic-rl-team-id> \
   --admin-actor <operator-name> \
   --name-suffix oracle-smoke \
-  --task-filter '{"task_ids":["hello-world"]}' \
+  --task-filter '{"task_ids":["loom-smoke/gb10-oracle-hello-world"]}' \
   --agent oracle \
-  --n-per-task 1
+  --n-per-task 1 \
+  --required-worker-pool gb10-arm64
 ```
 
 Model-backed provider canary example:
@@ -2436,14 +2443,14 @@ loom admin batches submit-on-behalf \
   --represented-username qianyi \
   --team-id <agentic-rl-team-id> \
   --admin-actor <operator-name> \
-  --name-suffix codex-yibuapi-smoke \
-  --task-filter '{"task_ids":["skilllearnbench/anthropic-poster-design/anthropic-poster-design-1"]}' \
+  --name-suffix opencode-yibuapi-smoke \
+  --task-filter '{"task_ids":["source-useful-frontier-5003/shard003__software_development__buildsqliteissuetrackercli"]}' \
   --provider mz_tn_canada_qianyi \
-  --model gpt-4o-mini \
-  --agent codex \
+  --model glm5.1-thinking \
+  --agent opencode \
   --n-per-task 1 \
   --backend docker \
-  --required-worker-pool oldlab
+  --required-worker-pool gb10-arm64
 ```
 
 Audit evidence:
@@ -3732,8 +3739,8 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
 7. **Provider connection create + test.** As Team A, create the staging
    smoke provider through the CLI (or `POST /api/v1/provider-connections`),
    then probe. The release fixture uses YibuAPI through Loom's
-   OpenAI-compatible provider path so the same connection can run the Codex
-   SkillLearnBench smoke:
+   OpenAI-compatible provider path so the same connection can run the
+   GB10-backed Source Useful smoke:
    ```bash
    export YIBUAPI_API_KEY=...
    loom providers create \
@@ -3748,11 +3755,11 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    HTTP response code. Exit code is 0 for valid, 1 for invalid.
 8. **Model discovery.** `loom providers models mz_tn_canada_qianyi --refresh`
    followed by `loom providers models mz_tn_canada_qianyi` returns a
-   non-empty catalog, including `gpt-4o-mini`. `curl /api/v1/models` from a
+   non-empty catalog, including `glm5.1-thinking`. `curl /api/v1/models` from a
    user-owned API token shows the agent-capable view with provider namespace
    `yibuapi`.
 9. **Model preflight.** Run
-   `loom providers models mz_tn_canada_qianyi --preflight gpt-4o-mini`.
+   `loom providers models mz_tn_canada_qianyi --preflight glm5.1-thinking`.
    The model row
    should show `preflight=valid`. A 401/403 should show `access-denied` without
    raw provider keys.
@@ -3785,9 +3792,10 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    # No-model oracle canary; no provider/model flags are needed.
    loom eval batch create \
      --name-suffix oracle-smoke \
-     --task-filter '{"task_ids":["hello-world"]}' \
+     --task-filter '{"task_ids":["loom-smoke/gb10-oracle-hello-world"]}' \
      --agent oracle \
-     --n-per-task 1
+     --n-per-task 1 \
+     --required-worker-pool gb10-arm64
 
    # Model-backed path through the provider gateway. This is the release
    # provider smoke because it exercises codex + YibuAPI OpenAI-compatible.
@@ -3795,14 +3803,14 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    # provider-name lookup is scoped to that team.
    loom eval batch create \
      --team-id <agentic-rl-team-id> \
-     --name-suffix codex-yibuapi-smoke \
-     --task-filter '{"task_ids":["skilllearnbench/anthropic-poster-design/anthropic-poster-design-1"]}' \
+     --name-suffix opencode-yibuapi-smoke \
+     --task-filter '{"task_ids":["source-useful-frontier-5003/shard003__software_development__buildsqliteissuetrackercli"]}' \
      --provider mz_tn_canada_qianyi \
-     --model gpt-4o-mini \
-     --agent codex \
+     --model glm5.1-thinking \
+     --agent opencode \
      --n-per-task 1 \
      --backend docker \
-     --required-worker-pool oldlab
+     --required-worker-pool gb10-arm64
    # then tail it:
    loom eval batch show <batch-id>
    ```
@@ -4227,7 +4235,7 @@ is missing. Do not close them from local tests alone.
       --team-b-token env:TEAM_B_TOKEN \
       --provider-connection-name mz_tn_canada_qianyi \
       --provider-model-provider yibuapi \
-      --provider-model-name gpt-4o-mini \
+      --provider-model-name glm5.1-thinking \
       --batch-id "$TEAM_A_BATCH_ID" \
       --trial-id "$TEAM_A_TRIAL_ID" \
       --safe-artifact-key "$SAFE_ARTIFACT_KEY" \
@@ -4244,7 +4252,7 @@ is missing. Do not close them from local tests alone.
       --object-store-write-check-count 64 \
       --object-store-write-check-concurrency 16 \
       --k8s-namespace loom-staging \
-      --required-worker-pool oldlab \
+      --required-worker-pool gb10-arm64 \
       --secret-needle env:STAGING_SECRET_NEEDLE \
       --internal-url-needle loom-minio.loom.svc.cluster.local \
       --allow-mutating-checks \
@@ -4271,13 +4279,13 @@ is missing. Do not close them from local tests alone.
     it reports a restart-count increase during the smoke, an `OOMKilled` last
     state, or an unexpected current restart count, inspect `loom-service`
     memory, previous pod logs, and large batch detail/cancel traffic before
-    accepting the gate. For OLDLAB-required
-    full100/release evidence, the `runs.worker_pool_coverage` row must pass
-    with `--required-worker-pool oldlab`; a missing pool means the batch did
-    not produce deterministic terminal evidence on that worker pool. The
-    source batch should have been created with the same
-    `loom eval batch create --required-worker-pool oldlab` constraint so this
-    is a deterministic gate rather than a post-hoc DB distribution check.
+    accepting the gate. For v1.0's GB10-only gate, the
+    `runs.worker_pool_coverage` row must pass with
+    `--required-worker-pool gb10-arm64`; a missing pool means the batch did not
+    produce deterministic terminal evidence on the GB10 worker pool. For
+    v1.1/full-cluster OLDLAB-required evidence, repeat the same pattern with an
+    additional `--required-worker-pool oldlab` constraint so the gate is
+    deterministic rather than a post-hoc DB distribution check.
 19. **Teardown clean.** `loom cluster down --yes` removes every applied
     object; PVCs survive (verify via `kubectl get pvc -n loom`). For
     staging, pass `--with-volumes` or `--delete-namespace` only
