@@ -27,34 +27,42 @@ _STAGING_NAMESPACE = "loom-staging"
 _STAGING_DATA_ROOT = "/data/loom-staging"
 
 
-def _replayable_admin_token_source(source: str) -> str:
+def _replayable_secret_source(source: str, *, flag_name: str) -> str:
     """Validate a secret source that rollout steps can safely reuse.
 
-    Direct admin commands may accept stdin for one-shot operations. The rollout
-    driver calls env-state apply and check separately, persists inputs for
-    resume evidence, and therefore requires a replayable reference.
+    Direct commands may accept stdin for one-shot operations. The rollout
+    driver calls subcommands separately, persists inputs for resume evidence,
+    and therefore requires a replayable reference.
     """
     if source.startswith("env:"):
         if source == "env:":
             raise argparse.ArgumentTypeError(
-                "--admin-token: env: source requires a variable name",
+                f"{flag_name}: env: source requires a variable name",
             )
         return source
     if source.startswith("file:"):
         if source == "file:":
             raise argparse.ArgumentTypeError(
-                "--admin-token: file: source requires a path",
+                f"{flag_name}: file: source requires a path",
             )
         return source
     if source == "-":
         raise argparse.ArgumentTypeError(
-            "--admin-token: stdin source '-' is not replayable for rollout; "
+            f"{flag_name}: stdin source '-' is not replayable for rollout; "
             "use env:VAR or file:PATH",
         )
     raise argparse.ArgumentTypeError(
-        "--admin-token: literal values are rejected; use one of "
+        f"{flag_name}: literal values are rejected; use one of "
         "{env:VAR | file:PATH}",
     )
+
+
+def _replayable_admin_token_source(source: str) -> str:
+    return _replayable_secret_source(source, flag_name="--admin-token")
+
+
+def _replayable_worker_token_source(source: str) -> str:
+    return _replayable_secret_source(source, flag_name="--worker-token")
 
 
 def _validate_physical_environment_target(args: argparse.Namespace) -> str | None:
@@ -157,6 +165,17 @@ def build_parser(p: argparse.ArgumentParser) -> None:
             "'sha256:<12-hex> len=<N>'. When set, env-state apply/check "
             "fail before contacting CP if --admin-token resolves to a "
             "different token."
+        ),
+    )
+    p.add_argument(
+        "--worker-token",
+        default=None,
+        type=_replayable_worker_token_source,
+        help=(
+            "Worker token source for protected external runner parity checks. "
+            "Use a replayable env:VAR or file:PATH reference so raw tokens "
+            "never enter argv or rollout evidence. Passed only to "
+            "`loom admin environment-state check`."
         ),
     )
     p.add_argument(
@@ -281,6 +300,7 @@ def handle(args: argparse.Namespace) -> int:
         cp_url=args.cp_url,
         admin_token_source=args.admin_token,
         expect_admin_token_fingerprint=args.expect_admin_token_fingerprint,
+        worker_token_source=args.worker_token,
         cluster_config_path=cluster_config_path,
         cluster_config_sha256=cfg_sha,
         rollout_root=rollout_root,
