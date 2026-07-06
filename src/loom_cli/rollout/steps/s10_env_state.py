@@ -24,8 +24,8 @@ from loom_cli.rollout.steps.candidate_source import (
 )
 from loom_cli.rollout.steps.subprocess_util import run_captured
 
-_ENV_STATE_CHECK_MAX_ATTEMPTS = 30
-_ENV_STATE_CHECK_RETRY_DELAY_SEC = 2.0
+_ENV_STATE_CHECK_MAX_ATTEMPTS = 180
+_ENV_STATE_CHECK_RETRY_DELAY_SEC = 5.0
 
 
 def _is_retryable_gb10_convergence_drift(stdout: str) -> bool:

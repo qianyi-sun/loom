@@ -348,6 +348,20 @@ def test_env_state_retries_gb10_source_convergence_drift(
     assert "gb10 convergence drift" in retry_log.read_text()
 
 
+def test_gb10_rollout_convergence_retry_budget_covers_worker_image_builds() -> None:
+    from loom_cli.rollout.steps import s10_env_state, s12_release_gate
+
+    min_budget_sec = 15 * 60
+    assert (
+        s10_env_state._ENV_STATE_CHECK_MAX_ATTEMPTS
+        * s10_env_state._ENV_STATE_CHECK_RETRY_DELAY_SEC
+    ) >= min_budget_sec
+    assert (
+        s12_release_gate._GB10_STATUS_MAX_ATTEMPTS
+        * s12_release_gate._GB10_STATUS_RETRY_DELAY_SEC
+    ) >= min_budget_sec
+
+
 def test_env_state_profile_path_resolves_from_cluster_config_dir(
     tmp_path: Path,
 ) -> None:
