@@ -22,6 +22,10 @@ name: images
 
 on:
   pull_request:
+    # PR image validation is opt-in because each run fans out to five
+    # multi-arch builds. Add the `ci:images` label when image evidence is
+    # needed before merge; pushes to dev/main still publish deployable images.
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - "deploy/Dockerfile.*"
       - "deploy/nginx-spa.conf"
@@ -65,24 +69,136 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  plan:
+    name: image plan
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'ci:images'))
+    outputs:
+      images: ${{ steps.plan.outputs.images }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Select affected images
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          images = {
+              "worker": "deploy/Dockerfile.worker",
+              "service": "deploy/Dockerfile.service",
+              "control-plane": "deploy/Dockerfile.control-plane",
+              "llm-gateway": "deploy/Dockerfile.gateway",
+              "web": "deploy/Dockerfile.web",
+          }
+          python_images = {"worker", "service", "control-plane", "llm-gateway"}
+
+          def all_images() -> set[str]:
+              return set(images)
+
+          def diff_names(base: str, head: str) -> list[str]:
+              if not base or base.startswith("0000000"):
+                  return []
+              out = subprocess.check_output(
+                  ["git", "diff", "--name-only", base, head],
+                  text=True,
+              )
+              return [line.strip() for line in out.splitlines() if line.strip()]
+
+          event = os.environ["EVENT_NAME"]
+          selected: set[str] = set()
+          if event == "workflow_dispatch":
+              selected = all_images()
+          elif event == "pull_request":
+              changed = diff_names(os.environ["BASE_SHA"], os.environ["HEAD_SHA"])
+          else:
+              changed = diff_names(os.environ["BEFORE_SHA"], os.environ["GITHUB_SHA"])
+
+          if event != "workflow_dispatch":
+              if not changed:
+                  selected = all_images()
+              for path in changed:
+                  if path.endswith(".md"):
+                      continue
+                  if path in {
+                      ".dockerignore",
+                      ".github/workflows/images.yml",
+                      "README.md",
+                      "pyproject.toml",
+                      "uv.lock",
+                  }:
+                      selected = all_images()
+                      break
+                  if path.startswith("src/"):
+                      selected |= python_images
+                  elif path.startswith("packages/"):
+                      selected |= {"worker", "service"}
+                  elif path.startswith("migrations/"):
+                      selected |= {"service", "control-plane", "llm-gateway"}
+                  elif path.startswith("web/") or path in {
+                      "web/index.html",
+                      "web/package.json",
+                      "web/package-lock.json",
+                      "web/vite.config.ts",
+                      "deploy/nginx-spa.conf",
+                      "deploy/web-runtime-config.sh",
+                  }:
+                      selected.add("web")
+                  elif path == "deploy/Dockerfile.worker":
+                      selected.add("worker")
+                  elif path == "deploy/Dockerfile.service":
+                      selected.add("service")
+                  elif path == "deploy/Dockerfile.control-plane":
+                      selected.add("control-plane")
+                  elif path == "deploy/Dockerfile.gateway":
+                      selected.add("llm-gateway")
+                  elif path == "deploy/Dockerfile.web":
+                      selected.add("web")
+                  elif path.startswith("deploy/"):
+                      selected = all_images()
+                      break
+
+          matrix = [
+              {"image": image, "dockerfile": dockerfile}
+              for image, dockerfile in images.items()
+              if image in selected
+          ]
+          payload = json.dumps(matrix, separators=(",", ":"))
+          Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8").write(
+              f"images={payload}\n"
+          )
+          print(f"selected_images={payload}")
+          PY
+
   build:
     name: ${{ matrix.image }} (multi-arch)
+    needs: plan
+    if: >-
+      needs.plan.outputs.images != '[]' &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event_name == 'push' ||
+       (github.event_name == 'pull_request' &&
+        contains(github.event.pull_request.labels.*.name, 'ci:images')))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - image: worker
-            dockerfile: deploy/Dockerfile.worker
-          - image: service
-            dockerfile: deploy/Dockerfile.service
-          - image: control-plane
-            dockerfile: deploy/Dockerfile.control-plane
-          - image: llm-gateway
-            dockerfile: deploy/Dockerfile.gateway
-          - image: web
-            dockerfile: deploy/Dockerfile.web
+        include: ${{ fromJSON(needs.plan.outputs.images) }}
     steps:
       - uses: actions/checkout@v5
 
@@ -112,7 +228,7 @@ jobs:
             echo "tag_args=--tag ${image}:pr-${{ github.event.number }}" >> "$GITHUB_OUTPUT"
             echo "push_flag=" >> "$GITHUB_OUTPUT"
           else
-            branch=$(echo "${{ github.ref_name }}")
+            branch="${{ github.ref_name }}"
             echo "tag_args=--tag ${image}:${sha_short} --tag ${image}:${branch}" >> "$GITHUB_OUTPUT"
             echo "push_flag=--push" >> "$GITHUB_OUTPUT"
           fi
