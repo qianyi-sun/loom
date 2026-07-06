@@ -52,6 +52,17 @@ Those rows are an auditable restore snapshot with runtime contracts,
 compatibility metadata, and provisioner provenance; they are not maintained by
 manual SQL.
 
+`loom qa matrix --compatibility-plan` turns the same service-mode agent
+metadata into a login-free provider compatibility plan. It emits one cell per
+repo-known displayed `service_mode_ready=true` agent and provider endpoint type,
+including generic `supported_providers=["*"]` agents as per-agent rows for #35
+planning. Each cell records whether the combination is repo-supported, skipped
+because the harness takes no model, or blocked before submit because the
+agent's `supported_providers` do not include the endpoint provider family. Live
+provider-smoke evidence is optional and merged from sanitized JSON; absent live
+evidence leaves usage, diagnostics, and other runtime dimensions as
+`pending_live_smoke` rather than treating the cell as validated.
+
 Model-backed `litellm` submissions may include
 `trial_config.request_params` for safe request controls such as
 `temperature`, `top_p`, `seed`, max output limits, reasoning effort,
