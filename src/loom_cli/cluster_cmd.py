@@ -1172,6 +1172,10 @@ def _ingress_redirect_hosts(config: ClusterConfig) -> tuple[str, ...]:
     canonical = config.ingress_host.strip()
     if not canonical:
         raise ValueError("ingress_host must not be empty")
+    if canonical.startswith("www."):
+        expected_redirect_host = canonical[4:]
+    else:
+        expected_redirect_host = f"www.{canonical}"
 
     hosts: list[str] = []
     seen: set[str] = set()
@@ -1189,6 +1193,11 @@ def _ingress_redirect_hosts(config: ClusterConfig) -> tuple[str, ...]:
             raise ValueError(f"ingress_redirect_hosts entries must be hostnames: {host!r}")
         if host == canonical:
             raise ValueError("ingress_redirect_hosts must not include ingress_host")
+        if host != expected_redirect_host:
+            raise ValueError(
+                "ingress_redirect_hosts currently supports only the www/non-www "
+                f"counterpart of ingress_host: expected {expected_redirect_host!r}",
+            )
         if host in seen:
             raise ValueError(f"duplicate ingress_redirect_hosts entry: {host!r}")
         seen.add(host)

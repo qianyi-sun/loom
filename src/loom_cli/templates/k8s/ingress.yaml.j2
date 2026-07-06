@@ -10,6 +10,9 @@ metadata:
     nginx.ingress.kubernetes.io/use-regex: "true"
     nginx.ingress.kubernetes.io/rewrite-target: /$2
 {% endif %}
+{% if ingress_redirect_hosts %}
+    nginx.ingress.kubernetes.io/from-to-www-redirect: "true"
+{% endif %}
 {% if ingress_cert_manager_cluster_issuer %}
     cert-manager.io/cluster-issuer: {{ ingress_cert_manager_cluster_issuer }}
 {% endif %}
@@ -94,34 +97,3 @@ spec:
   # Ingress. Sandboxes reach it through the internal gateway-router /
   # singleton path; public browser and CLI traffic goes through
   # `loom-service` under `/api/v1`.
-{% if ingress_redirect_hosts %}
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: loom-ingress-redirect
-  annotations:
-    nginx.ingress.kubernetes.io/permanent-redirect: https://{{ ingress_host }}$request_uri
-    nginx.ingress.kubernetes.io/permanent-redirect-code: "308"
-spec:
-  ingressClassName: {{ ingress_class_name }}
-  tls:
-    - hosts:
-{% for host in ingress_redirect_hosts %}
-        - {{ host }}
-{% endfor %}
-      secretName: {{ ingress_tls_secret_name }}
-  rules:
-{% for host in ingress_redirect_hosts %}
-    - host: {{ host }}
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: loom-web
-                port:
-                  number: 80
-{% endfor %}
-{% endif %}

@@ -353,9 +353,9 @@ uv run python scripts/ops/frontend_route_smoke.py \
 
 Treat `www.yylx.world` as a redirect-only alias, not a second release route.
 The cluster profiles bind it to the same TLS secret through
-`ingress_redirect_hosts` and redirect it to `https://yylx.world$request_uri`.
-Frontend route smoke and release-gate evidence should continue to use only
-`https://yylx.world/prod` and `https://yylx.world/dev`.
+`ingress_redirect_hosts` and ingress-nginx `from-to-www-redirect` handling.
+Frontend route smoke and release-gate evidence should continue to use only the
+canonical `https://yylx.world/prod` and `https://yylx.world/dev` routes.
 
 Expected success output:
 
