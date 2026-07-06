@@ -24,6 +24,7 @@ class GatewaySettings(BaseSettings):
     db_url: PostgresDsn
     dev_reload: bool = False
     egress_proxy_url: str = ""
+    gateway_drain_timeout_sec: float = 270.0
     google_api_key: SecretStr | None = None
     huggingface_api_key: SecretStr | None = None
     llm_retry_base_backoff_sec: float = 0.5
