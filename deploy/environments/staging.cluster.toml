@@ -1,10 +1,10 @@
 namespace = "loom-staging"
-ingress_host = "staging.yylx.world"
+ingress_host = "yylx.world"
 ingress_tls_secret_name = "loom-staging-tls"
 frontend_environment = "staging"
-frontend_environment_label = "Staging"
-frontend_route_path = ""
-frontend_api_base_path = ""
+frontend_environment_label = "Development / staging"
+frontend_route_path = "/dev"
+frontend_api_base_path = "/dev"
 trajectories_bucket = "loom-staging-trajectories"
 artifacts_bucket = "loom-staging-artifacts"
 env_state_profile = "../environment-state/staging.toml"
@@ -21,5 +21,8 @@ trial_cache_registry_repo = "ghcr.io/qianyi-sun/loom-trial-cache"
 # v1.0 staging validation uses GB10 only. The in-cluster loom-worker
 # Deployment is omitted so trial execution capacity comes from the
 # release-managed external GB10 pool.
+[replicas]
+web = 1
+
 [k8s_worker]
 enabled = false

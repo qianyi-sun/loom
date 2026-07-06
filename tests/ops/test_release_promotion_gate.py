@@ -150,7 +150,7 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
             "url": "https://github.com/qianyi-sun/loom/actions/runs/1005",
             "batch_id": "batch-release-smoke",
             "trial_id": "trial-release-smoke",
-            "artifact_url": "https://staging.yylx.world/api/v1/trials/trial-release-smoke/atif",
+            "artifact_url": "https://yylx.world/dev/api/v1/trials/trial-release-smoke/atif",
         },
         "frontend_route_evidence": {
             "status": "pass",
@@ -264,7 +264,7 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         "candidate_sha": _candidate_sha(),
         "image_tag": "release-0123456789ab",
         "prod_tag": "v1.0.0",
-        "staging_url": "https://staging.yylx.world",
+        "staging_url": "https://yylx.world/dev",
         "image_digests": _image_digests(),
         "checks": checks,
     }

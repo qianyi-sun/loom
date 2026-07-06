@@ -24,8 +24,15 @@ across rows.
 | Environment | Git branch / ref | GitHub Environment | Namespace | Public route | API base | DB name | Object buckets |
 |---|---|---|---|---|---|---|---|
 | `development` | `dev` only | `development` | `loom-dev` | `https://yylx.world/dev` | `https://yylx.world/dev/api` | `loom_dev` | `loom-dev-trajectories`, `loom-dev-artifacts` |
-| `staging` | pinned `dev` SHA | `staging` | `loom-staging` | `https://staging.yylx.world` | `https://staging.yylx.world/api` | `loom_staging` | `loom-staging-trajectories`, `loom-staging-artifacts` |
+| `staging` | pinned `dev` SHA | `staging` | `loom-staging` | `https://yylx.world/dev` | `https://yylx.world/dev/api` | `loom_staging` | `loom-staging-trajectories`, `loom-staging-artifacts` |
 | `production` | `main` plus immutable `vX.Y.Z` release tags | `production` | `loom-prod` | `https://yylx.world/prod` | `https://yylx.world/prod/api` | `loom_prod` | `loom-prod-trajectories`, `loom-prod-artifacts` |
+
+The public `/dev` route is the single non-production frontend surface. For
+v1.0 validation, physical `staging` owns that surface; do not deploy
+`development` and `staging` concurrently to claim `https://yylx.world/dev`.
+They remain separate GitHub/Kubernetes/storage identities for controlled
+workflow isolation, but prod-vs-non-prod browser separation is `/prod` vs
+`/dev`.
 
 Committed environment profiles live in `deploy/environments/`. Each profile
 has a matching `*.cluster.toml` render input. The production profile follows
