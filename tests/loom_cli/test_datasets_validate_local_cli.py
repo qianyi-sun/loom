@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -38,15 +39,16 @@ def _write_task(root: Path, tid: str) -> None:
 def _write_benchmark_toml(root: Path) -> None:
     (root / "benchmark.toml").write_text(
         "schema_version = 1\n"
-        "id = \"team-evals\"\n"
-        "display_name = \"Team evaluations\"\n"
-        "series = \"internal\"\n"
-        "license_spdx = \"MIT\"\n",
+        'id = "team-evals"\n'
+        'display_name = "Team evaluations"\n'
+        'series = "internal"\n'
+        'license_spdx = "MIT"\n',
     )
 
 
 def test_validate_local_benchmark_toml_tasks_layout_outputs_config_snippet(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     root = tmp_path / "team-evals"
     tasks_root = root / "tasks"
@@ -65,7 +67,8 @@ def test_validate_local_benchmark_toml_tasks_layout_outputs_config_snippet(
 
 
 def test_validate_local_direct_layout_requires_metadata_flags(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     root = tmp_path / "team-evals"
     root.mkdir()
@@ -80,20 +83,27 @@ def test_validate_local_direct_layout_requires_metadata_flags(
 
 
 def test_validate_local_direct_layout_accepts_metadata_flags(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     root = tmp_path / "team-evals"
     root.mkdir()
     _write_task(root, "alpha")
 
-    rc = datasets_cmd.dispatch([
-        "validate-local",
-        str(root),
-        "--id", "team-evals",
-        "--display-name", "Team evaluations",
-        "--series", "internal",
-        "--license-spdx", "MIT",
-    ])
+    rc = datasets_cmd.dispatch(
+        [
+            "validate-local",
+            str(root),
+            "--id",
+            "team-evals",
+            "--display-name",
+            "Team evaluations",
+            "--series",
+            "internal",
+            "--license-spdx",
+            "MIT",
+        ]
+    )
 
     assert rc == 0
     out = capsys.readouterr().out
@@ -118,7 +128,8 @@ dockerfile = "Dockerfile"
 
 
 def test_validate_local_accepts_terminal_bench_shape(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """#341: TB-shaped bundles are auto-normalized before validation."""
     root = tmp_path / "src-useful"
@@ -130,10 +141,10 @@ def test_validate_local_accepts_terminal_bench_shape(
     (bundle / "Dockerfile").write_text("FROM alpine:3.19\n")
     (root / "benchmark.toml").write_text(
         "schema_version = 1\n"
-        "id = \"src-useful\"\n"
-        "display_name = \"Source Useful\"\n"
-        "series = \"internal\"\n"
-        "license_spdx = \"MIT\"\n",
+        'id = "src-useful"\n'
+        'display_name = "Source Useful"\n'
+        'series = "internal"\n'
+        'license_spdx = "MIT"\n',
     )
 
     rc = datasets_cmd.dispatch(["validate-local", str(root)])
@@ -144,7 +155,8 @@ def test_validate_local_accepts_terminal_bench_shape(
 
 
 def test_validate_local_invalid_task_toml_exits_one(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     root = tmp_path / "team-evals"
     tasks_root = root / "tasks"
@@ -162,7 +174,8 @@ def test_validate_local_invalid_task_toml_exits_one(
 
 
 def test_publish_local_missing_runtime_config_errors(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for env in (
@@ -223,18 +236,20 @@ def test_publish_local_rejects_literal_secret_flags_before_upload(
         fake_publish_local_benchmark,
     )
 
-    rc = datasets_cmd.dispatch([
-        "publish-local",
-        str(root),
-        "--db-url",
-        "postgresql://loom:argv-db-secret@db.example/loom",
-        "--minio-endpoint",
-        "https://minio.example",
-        "--minio-access-key",
-        "argv-access-secret",
-        "--minio-secret-key",
-        "argv-minio-secret",
-    ])
+    rc = datasets_cmd.dispatch(
+        [
+            "publish-local",
+            str(root),
+            "--db-url",
+            "postgresql://loom:argv-db-secret@db.example/loom",
+            "--minio-endpoint",
+            "https://minio.example",
+            "--minio-access-key",
+            "argv-access-secret",
+            "--minio-secret-key",
+            "argv-minio-secret",
+        ]
+    )
 
     assert rc == 2
     captured = capsys.readouterr()
@@ -288,18 +303,20 @@ def test_publish_local_resolves_env_secret_references_without_logging_values(
         fake_publish_local_benchmark,
     )
 
-    rc = datasets_cmd.dispatch([
-        "publish-local",
-        str(root),
-        "--db-url",
-        "env:SAFE_PUBLISH_DB_URL",
-        "--minio-endpoint",
-        "https://minio.example",
-        "--minio-access-key",
-        "env:SAFE_PUBLISH_MINIO_ACCESS_KEY",
-        "--minio-secret-key",
-        "env:SAFE_PUBLISH_MINIO_SECRET_KEY",
-    ])
+    rc = datasets_cmd.dispatch(
+        [
+            "publish-local",
+            str(root),
+            "--db-url",
+            "env:SAFE_PUBLISH_DB_URL",
+            "--minio-endpoint",
+            "https://minio.example",
+            "--minio-access-key",
+            "env:SAFE_PUBLISH_MINIO_ACCESS_KEY",
+            "--minio-secret-key",
+            "env:SAFE_PUBLISH_MINIO_SECRET_KEY",
+        ]
+    )
 
     assert rc == 0
     assert captured["db_url"] == "postgresql://loom:resolved-db-secret@db.example/loom"
@@ -351,12 +368,33 @@ def test_publish_local_explicit_flatten_override_is_visible_in_output(
     monkeypatch.setenv("LOOM_MINIO_ACCESS_KEY", "access")
     monkeypatch.setenv("LOOM_MINIO_SECRET_KEY", "secret")
 
-    rc = datasets_cmd.dispatch([
-        "publish-local",
-        str(root),
-        "--compat-flatten-environment",
-    ])
+    rc = datasets_cmd.dispatch(
+        [
+            "publish-local",
+            str(root),
+            "--compat-flatten-environment",
+        ]
+    )
 
     assert rc == 0
     out = capsys.readouterr().out
     assert "compat_flattened_files=2" in out
+
+
+def test_gb10_smoke_catalog_fixture_is_publish_local_ready(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = Path("deploy/catalog/gb10-smoke")
+
+    rc = datasets_cmd.dispatch(["validate-local", str(root)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "benchmark_id: loom-smoke" in out
+    assert "tasks:        1 valid" in out
+
+    task_toml = root / "tasks" / "gb10-oracle-hello-world" / "task.toml"
+    raw = tomllib.loads(task_toml.read_text(encoding="utf-8"))
+    assert raw["task"]["id"] == "loom-smoke/gb10-oracle-hello-world"
+    assert raw["verifier"]["name"] == "pytest"
+    assert raw["environment"]["cpu_arch"] in {"any", "arm64"}

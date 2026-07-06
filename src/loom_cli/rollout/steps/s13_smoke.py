@@ -38,6 +38,7 @@ import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from loom.security.redaction import redact_mapping, redact_text
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
 from loom_cli.rollout.steps.base import BaseStep, RunResult
@@ -46,11 +47,14 @@ from loom_cli.secret_source import SecretSourceError, resolve_secret_source
 DEFAULT_TERMINAL_TIMEOUT_SEC = 300.0
 DEFAULT_POLL_INTERVAL_SEC = 5.0
 DEFAULT_SMOKE_TASK_ID = "terminal-bench-2/hello-world"
+DEFAULT_ADMIN_CURRENT_GB10_SMOKE_TASK_ID = "loom-smoke/gb10-oracle-hello-world"
 DEFAULT_CURRENT_GB10_SMOKE_TASK_ID = (
     "skilllearnbench/anthropic-poster-design/anthropic-poster-design-1"
 )
 DEFAULT_CURRENT_GB10_REQUIRED_WORKER_POOL = "gb10-arm64"
 DEFAULT_SMOKE_AGENT = "oracle"
+_NONRECOVERABLE_BATCH_RESULT_STATUSES = frozenset({"partial_failed", "all_failed"})
+_NONRECOVERABLE_FANOUT_REASONS = frozenset({"required_worker_pool_incompatible"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +94,7 @@ def _smoke_task_id(ctx: RolloutContext, *, submit_mode: str = "user-token") -> s
     if isinstance(task_id, str) and task_id.strip():
         return task_id.strip()
     if submit_mode == "admin-on-behalf" and ctx.scope == "current-gb10":
-        return DEFAULT_SMOKE_TASK_ID
+        return DEFAULT_ADMIN_CURRENT_GB10_SMOKE_TASK_ID
     if ctx.scope == "current-gb10":
         return DEFAULT_CURRENT_GB10_SMOKE_TASK_ID
     return DEFAULT_SMOKE_TASK_ID
@@ -511,6 +515,55 @@ def _admin_batch_succeeded(
     return True, "ok"
 
 
+def _compact_redacted_json(value: object, *, limit: int = 800) -> str:
+    redacted = redact_mapping(value)
+    try:
+        rendered = json.dumps(redacted, sort_keys=True, separators=(",", ":"))
+    except TypeError:
+        rendered = str(redacted)
+    return redact_text(rendered, limit=limit)
+
+
+def _fanout_error_reasons(value: object) -> set[str]:
+    if isinstance(value, Mapping):
+        reason = value.get("reason")
+        return {reason} if isinstance(reason, str) and reason else set()
+    if isinstance(value, list):
+        reasons: set[str] = set()
+        for item in value:
+            reasons.update(_fanout_error_reasons(item))
+        return reasons
+    return set()
+
+
+def _admin_batch_nonrecoverable_failure(batch: Mapping[str, object]) -> str | None:
+    result_status = batch.get("result_status")
+    failure_reason = batch.get("failure_reason")
+    fanout_errors = batch.get("fanout_errors")
+    fanout_reasons = _fanout_error_reasons(fanout_errors)
+    fanout_submit_failed = failure_reason == "fanout_submit_failed"
+    incompatible_fanout = bool(fanout_reasons & _NONRECOVERABLE_FANOUT_REASONS)
+    failed_result = result_status in _NONRECOVERABLE_BATCH_RESULT_STATUSES
+
+    if not fanout_submit_failed and not (failed_result and incompatible_fanout):
+        return None
+
+    parts = [
+        "admin-on-behalf smoke batch reported nonrecoverable fanout failure",
+        f"state={batch.get('state')!r}",
+        f"result_status={result_status!r}",
+        f"failure_reason={failure_reason!r}",
+    ]
+    failure_message = batch.get("failure_message")
+    if isinstance(failure_message, str) and failure_message.strip():
+        parts.append(f"failure_message={redact_text(failure_message, limit=300)!r}")
+    if fanout_errors:
+        parts.append(
+            "fanout_errors=" + _compact_redacted_json(fanout_errors, limit=1000),
+        )
+    return "; ".join(parts)
+
+
 def _run_admin_on_behalf_smoke(
     ctx: RolloutContext,
     step_dir: StepDir,
@@ -629,6 +682,9 @@ def _run_admin_on_behalf_smoke(
             except json.JSONDecodeError:
                 return RunResult(exit_code=1, error="batch poll response not JSON")
             state = batch.get("state")
+            nonrecoverable_error = _admin_batch_nonrecoverable_failure(batch)
+            if nonrecoverable_error is not None:
+                return RunResult(exit_code=1, error=nonrecoverable_error)
             if state in ("finished", "failed", "cancelled"):
                 terminal_batch = batch
                 break

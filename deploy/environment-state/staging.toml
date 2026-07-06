@@ -129,7 +129,7 @@ mode = "all"
 
 [catalog_provisioning]
 required = true
-command = "loom datasets provision-catalog --imported-by catalog-provision && loom datasets register skilllearnbench --hf-org PRHW --revision \"$PUBLISHED_SHA\" --mirror-to-object-store --bucket loom-benchmarks --registered-by catalog-provision && loom datasets audit --all --verify-bundles"
+command = "loom datasets provision-catalog --imported-by catalog-provision && loom datasets register skilllearnbench --hf-org PRHW --revision \"$PUBLISHED_SHA\" --mirror-to-object-store --bucket loom-benchmarks --registered-by catalog-provision && loom datasets publish-local deploy/catalog/gb10-smoke --bucket loom-benchmarks --imported-by catalog-provision && loom datasets audit --all --verify-bundles"
 required_env = [
   "HF_TOKEN",
   "LOOM_SVC_DB_URL",

@@ -87,9 +87,13 @@ Attach these to the release issue or release PR:
   `loom datasets register <benchmark>` against the published HF manifest with
   `--mirror-to-object-store`, non-zero `registered`, non-zero `mirrored`, zero
   unexpected `legacy_placeholders`, and `loom datasets audit --verify-bundles`
-  showing `missing=0`. Include `/api/v1/agents` evidence with at least one
-  ready entry and `/api/v1/benchmarks` evidence with at least one runnable
-  entry. For private or gated HF manifests, confirm the operator
+  showing `missing=0`. The protected rollout smoke catalog must also include
+  the checked-in GB10 smoke fixture published through
+  `loom datasets publish-local deploy/catalog/gb10-smoke`, producing task
+  `loom-smoke/gb10-oracle-hello-world` with an internal `s3://` source. Include
+  `/api/v1/agents` evidence with at least one ready entry and
+  `/api/v1/benchmarks` evidence with at least one runnable entry. For private or
+  gated HF manifests, confirm the operator
   context has `HF_TOKEN` and target `LOOM_SVC_MINIO_*` credentials. Workers may
   still receive optional `loom-secrets/huggingface-api-key` as legacy `hf://`
   compatibility, but mirrored release evidence should not depend on worker

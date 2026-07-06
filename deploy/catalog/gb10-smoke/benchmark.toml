@@ -1,0 +1,6 @@
+schema_version = 1
+id = "loom-smoke"
+display_name = "Loom release smoke tasks"
+series = "release-gate"
+license_spdx = "MIT"
+source_subdir = "tasks"
