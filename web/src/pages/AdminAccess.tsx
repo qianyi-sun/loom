@@ -243,7 +243,7 @@ export default function AdminAccess(): JSX.Element {
   const userRegistrationRequests = useQuery({
     queryKey: ["admin", "user-registration-requests", "pending"],
     queryFn: () => api.listUserRegistrationRequests("pending"),
-    enabled: isAdmin && activeSection === "accounts",
+    enabled: isAdmin && (activeSection === "requests" || activeSection === "accounts"),
   });
   const passwordResetRequests = useQuery({
     queryKey: ["admin", "password-reset-requests", "pending"],
@@ -483,13 +483,114 @@ export default function AdminAccess(): JSX.Element {
     );
   }
 
+  const accountRequestsCard = (
+    <Card>
+      <Card.Header
+        title="Account requests"
+        description="Approve a username into its requested team, then share the one-time password setup link manually."
+      />
+      <Card.Body className="space-y-3">
+        {userRegistrationRequests.isPending ? <LoadingState /> : null}
+        {userRegistrationRequests.isError ? (
+          <ErrorState error={userRegistrationRequests.error} />
+        ) : null}
+        {userRegistrationRequests.data ? (
+          userRegistrationRequests.data.items.length === 0 ? (
+            <EmptyState label="No pending account requests." />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-slate-200 text-sm">
+                <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
+                  <tr>
+                    <th className="px-3 py-2 font-semibold">Username</th>
+                    <th className="px-3 py-2 font-semibold">Team</th>
+                    <th className="px-3 py-2 font-semibold">Requested</th>
+                    <th className="px-3 py-2 font-semibold">Role</th>
+                    <th className="px-3 py-2 font-semibold">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 bg-white">
+                  {userRegistrationRequests.data.items.map((request) => {
+                    const role =
+                      accountApprovalRoles[request.id] ?? request.role ?? "member";
+                    return (
+                      <tr key={request.id}>
+                        <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-900">
+                          {request.username}
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-2 text-slate-700">
+                          {request.team_name ?? request.team_id}
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-2 text-slate-600">
+                          {formatDate(request.requested_at)}
+                        </td>
+                        <td className="px-3 py-2">
+                          <select
+                            aria-label={`Role for ${request.username}`}
+                            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm"
+                            value={role}
+                            onChange={(event) =>
+                              setAccountApprovalRoles((current) => ({
+                                ...current,
+                                [request.id]: event.target.value as InviteRole,
+                              }))
+                            }
+                          >
+                            {(["member", "owner", "viewer"] as InviteRole[]).map(
+                              (option) => (
+                                <option key={option} value={option}>
+                                  {option}
+                                </option>
+                              ),
+                            )}
+                          </select>
+                        </td>
+                        <td className="px-3 py-2">
+                          <div className="flex flex-wrap gap-2">
+                            <Button
+                              size="sm"
+                              aria-label={`Approve account ${request.username}`}
+                              disabled={approveUserRegistration.isPending}
+                              onClick={() => approveUserRegistration.mutate(request)}
+                            >
+                              Approve
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              aria-label={`Reject account ${request.username}`}
+                              disabled={rejectUserRegistration.isPending}
+                              onClick={() => rejectUserRegistration.mutate(request)}
+                            >
+                              Reject
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )
+        ) : null}
+        {approveUserRegistration.isError ? (
+          <ErrorState error={approveUserRegistration.error} />
+        ) : null}
+        {rejectUserRegistration.isError ? (
+          <ErrorState error={rejectUserRegistration.error} />
+        ) : null}
+      </Card.Body>
+    </Card>
+  );
+
   return (
     <div className="space-y-6">
       <header>
         <h1 className="text-2xl font-bold text-slate-900">Team access</h1>
         <p className="mt-1 text-sm text-slate-500">
           {isAdmin
-            ? "Approve pending team registrations, issue invites, and audit access decisions."
+            ? "Approve pending account requests, issue invites, and audit access decisions."
             : "Manage team invites and user-owned API tokens for the current team."}
         </p>
       </header>
@@ -741,104 +842,7 @@ export default function AdminAccess(): JSX.Element {
 
       {isAdmin && activeSection === "accounts" ? (
         <div className="grid gap-4 xl:grid-cols-2">
-          <Card>
-            <Card.Header
-              title="Account requests"
-              description="Approve a username into its requested team, then share the one-time password setup link manually."
-            />
-            <Card.Body className="space-y-3">
-              {userRegistrationRequests.isPending ? <LoadingState /> : null}
-              {userRegistrationRequests.isError ? (
-                <ErrorState error={userRegistrationRequests.error} />
-              ) : null}
-              {userRegistrationRequests.data ? (
-                userRegistrationRequests.data.items.length === 0 ? (
-                  <EmptyState label="No pending account requests." />
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-slate-200 text-sm">
-                      <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
-                        <tr>
-                          <th className="px-3 py-2 font-semibold">Username</th>
-                          <th className="px-3 py-2 font-semibold">Team</th>
-                          <th className="px-3 py-2 font-semibold">Requested</th>
-                          <th className="px-3 py-2 font-semibold">Role</th>
-                          <th className="px-3 py-2 font-semibold">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 bg-white">
-                        {userRegistrationRequests.data.items.map((request) => {
-                          const role =
-                            accountApprovalRoles[request.id] ?? request.role ?? "member";
-                          return (
-                            <tr key={request.id}>
-                              <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-900">
-                                {request.username}
-                              </td>
-                              <td className="whitespace-nowrap px-3 py-2 text-slate-700">
-                                {request.team_name ?? request.team_id}
-                              </td>
-                              <td className="whitespace-nowrap px-3 py-2 text-slate-600">
-                                {formatDate(request.requested_at)}
-                              </td>
-                              <td className="px-3 py-2">
-                                <select
-                                  aria-label={`Role for ${request.username}`}
-                                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm"
-                                  value={role}
-                                  onChange={(event) =>
-                                    setAccountApprovalRoles((current) => ({
-                                      ...current,
-                                      [request.id]: event.target.value as InviteRole,
-                                    }))
-                                  }
-                                >
-                                  {(["member", "owner", "viewer"] as InviteRole[]).map(
-                                    (option) => (
-                                      <option key={option} value={option}>
-                                        {option}
-                                      </option>
-                                    ),
-                                  )}
-                                </select>
-                              </td>
-                              <td className="px-3 py-2">
-                                <div className="flex flex-wrap gap-2">
-                                  <Button
-                                    size="sm"
-                                    aria-label={`Approve account ${request.username}`}
-                                    disabled={approveUserRegistration.isPending}
-                                    onClick={() => approveUserRegistration.mutate(request)}
-                                  >
-                                    Approve
-                                  </Button>
-                                  <Button
-                                    size="sm"
-                                    variant="secondary"
-                                    aria-label={`Reject account ${request.username}`}
-                                    disabled={rejectUserRegistration.isPending}
-                                    onClick={() => rejectUserRegistration.mutate(request)}
-                                  >
-                                    Reject
-                                  </Button>
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                )
-              ) : null}
-              {approveUserRegistration.isError ? (
-                <ErrorState error={approveUserRegistration.error} />
-              ) : null}
-              {rejectUserRegistration.isError ? (
-                <ErrorState error={rejectUserRegistration.error} />
-              ) : null}
-            </Card.Body>
-          </Card>
+          {accountRequestsCard}
 
           <Card>
             <Card.Header
@@ -1066,130 +1070,133 @@ export default function AdminAccess(): JSX.Element {
       ) : null}
 
       {isAdmin && activeSection === "requests" ? (
-        <Card>
-          <Card.Header
-            title="Pending registrations"
-            description="Approve creates an invite link for the selected team and role. Copy it and share it manually; Loom does not send email."
-          />
-          <Card.Body>
-            {registrations.isPending ? <LoadingState /> : null}
-            {registrations.isError ? <ErrorState error={registrations.error} /> : null}
-            {registrations.data ? (
-              registrations.data.items.length === 0 ? (
-                <EmptyState label="No pending registrations." />
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-slate-200 text-sm">
-                    <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
-                      <tr>
-                        <th className="px-3 py-2 font-semibold">Team</th>
-                        <th className="px-3 py-2 font-semibold">Contact</th>
-                        <th className="px-3 py-2 font-semibold">Requested</th>
-                        <th className="px-3 py-2 font-semibold">Assign to</th>
-                        <th className="px-3 py-2 font-semibold">Role</th>
-                        <th className="px-3 py-2 font-semibold">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 bg-white">
-                      {registrations.data.items.map((item) => {
-                        const selectedTeamId =
-                          approvalTeamIds[item.id] ?? adminTeams.data?.items[0]?.id ?? "";
-                        const selectedRole = approvalRoles[item.id] ?? "member";
-                        return (
-                          <tr key={item.id}>
-                            <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-900">{item.name}</td>
-                            <td className="whitespace-nowrap px-3 py-2 text-slate-600">{item.contact_email}</td>
-                            <td className="whitespace-nowrap px-3 py-2 text-slate-600">{formatDate(item.requested_at)}</td>
-                            <td className="min-w-48 px-3 py-2">
-                              <select
-                                aria-label={`Approval team for ${item.name}`}
-                                className="block w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm text-slate-800"
-                                value={selectedTeamId}
-                                onChange={(event) =>
-                                  setApprovalTeamIds((current) => ({
-                                    ...current,
-                                    [item.id]: event.target.value,
-                                  }))
-                                }
-                              >
-                                {adminTeams.data?.items.map((team) => (
-                                  <option key={team.id} value={team.id}>
-                                    {team.name}
-                                  </option>
-                                ))}
-                              </select>
-                            </td>
-                            <td className="px-3 py-2">
-                              <select
-                                aria-label={`Approval role for ${item.name}`}
-                                className="block w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm text-slate-800"
-                                value={selectedRole}
-                                onChange={(event) =>
-                                  setApprovalRoles((current) => ({
-                                    ...current,
-                                    [item.id]: event.target.value as InviteRole,
-                                  }))
-                                }
-                              >
-                                <option value="member">member</option>
-                                <option value="viewer">viewer</option>
-                                <option value="owner">owner</option>
-                              </select>
-                            </td>
-                            <td className="px-3 py-2">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <Button
-                                  size="sm"
-                                  variant="primary"
-                                  disabled={
-                                    actorMissing ||
-                                    !selectedTeamId ||
-                                    approve.isPending
-                                  }
-                                  onClick={() =>
-                                    approve.mutate({
-                                      id: item.id,
-                                      teamId: selectedTeamId,
-                                      role: selectedRole,
-                                    })
+        <div className="grid gap-4">
+          {accountRequestsCard}
+          <Card>
+            <Card.Header
+              title="Legacy team registrations"
+              description="Approve older team-registration requests into an invite link. Username/password account approvals are listed above."
+            />
+            <Card.Body>
+              {registrations.isPending ? <LoadingState /> : null}
+              {registrations.isError ? <ErrorState error={registrations.error} /> : null}
+              {registrations.data ? (
+                registrations.data.items.length === 0 ? (
+                  <EmptyState label="No pending legacy team registrations." />
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-slate-200 text-sm">
+                      <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
+                        <tr>
+                          <th className="px-3 py-2 font-semibold">Team</th>
+                          <th className="px-3 py-2 font-semibold">Contact</th>
+                          <th className="px-3 py-2 font-semibold">Requested</th>
+                          <th className="px-3 py-2 font-semibold">Assign to</th>
+                          <th className="px-3 py-2 font-semibold">Role</th>
+                          <th className="px-3 py-2 font-semibold">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 bg-white">
+                        {registrations.data.items.map((item) => {
+                          const selectedTeamId =
+                            approvalTeamIds[item.id] ?? adminTeams.data?.items[0]?.id ?? "";
+                          const selectedRole = approvalRoles[item.id] ?? "member";
+                          return (
+                            <tr key={item.id}>
+                              <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-900">{item.name}</td>
+                              <td className="whitespace-nowrap px-3 py-2 text-slate-600">{item.contact_email}</td>
+                              <td className="whitespace-nowrap px-3 py-2 text-slate-600">{formatDate(item.requested_at)}</td>
+                              <td className="min-w-48 px-3 py-2">
+                                <select
+                                  aria-label={`Approval team for ${item.name}`}
+                                  className="block w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm text-slate-800"
+                                  value={selectedTeamId}
+                                  onChange={(event) =>
+                                    setApprovalTeamIds((current) => ({
+                                      ...current,
+                                      [item.id]: event.target.value,
+                                    }))
                                   }
                                 >
-                                  Approve
-                                </Button>
-                              <Input
-                                aria-label={`Reject reason for ${item.name}`}
-                                className="w-48"
-                                value={rejectedReason[item.id] ?? ""}
-                                onChange={(event) =>
-                                  setRejectedReason((current) => ({
-                                    ...current,
-                                    [item.id]: event.target.value,
-                                  }))
-                                }
-                                placeholder="reason"
-                              />
-                              <Button
-                                size="sm"
-                                variant="danger"
-                                disabled={actorMissing || reject.isPending}
-                                onClick={() => reject.mutate(item.id)}
-                              >
-                                Reject
-                              </Button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )
-            ) : null}
-            {approve.isError ? <ErrorState error={approve.error} /> : null}
-            {reject.isError ? <ErrorState error={reject.error} /> : null}
-          </Card.Body>
-        </Card>
+                                  {adminTeams.data?.items.map((team) => (
+                                    <option key={team.id} value={team.id}>
+                                      {team.name}
+                                    </option>
+                                  ))}
+                                </select>
+                              </td>
+                              <td className="px-3 py-2">
+                                <select
+                                  aria-label={`Approval role for ${item.name}`}
+                                  className="block w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm text-slate-800"
+                                  value={selectedRole}
+                                  onChange={(event) =>
+                                    setApprovalRoles((current) => ({
+                                      ...current,
+                                      [item.id]: event.target.value as InviteRole,
+                                    }))
+                                  }
+                                >
+                                  <option value="member">member</option>
+                                  <option value="viewer">viewer</option>
+                                  <option value="owner">owner</option>
+                                </select>
+                              </td>
+                              <td className="px-3 py-2">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <Button
+                                    size="sm"
+                                    variant="primary"
+                                    disabled={
+                                      actorMissing ||
+                                      !selectedTeamId ||
+                                      approve.isPending
+                                    }
+                                    onClick={() =>
+                                      approve.mutate({
+                                        id: item.id,
+                                        teamId: selectedTeamId,
+                                        role: selectedRole,
+                                      })
+                                    }
+                                  >
+                                    Approve
+                                  </Button>
+                                  <Input
+                                    aria-label={`Reject reason for ${item.name}`}
+                                    className="w-48"
+                                    value={rejectedReason[item.id] ?? ""}
+                                    onChange={(event) =>
+                                      setRejectedReason((current) => ({
+                                        ...current,
+                                        [item.id]: event.target.value,
+                                      }))
+                                    }
+                                    placeholder="reason"
+                                  />
+                                  <Button
+                                    size="sm"
+                                    variant="danger"
+                                    disabled={actorMissing || reject.isPending}
+                                    onClick={() => reject.mutate(item.id)}
+                                  >
+                                    Reject
+                                  </Button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )
+              ) : null}
+              {approve.isError ? <ErrorState error={approve.error} /> : null}
+              {reject.isError ? <ErrorState error={reject.error} /> : null}
+            </Card.Body>
+          </Card>
+        </div>
       ) : null}
 
       {activeSection === "invites" ? (
