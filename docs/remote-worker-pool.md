@@ -508,7 +508,12 @@ renamed in a coordinated rollout. Run this from the Slurm submit host when the
 profile declares an external Slurm autoscaler supervisor; staging uses that
 path to install and check the OLDLAB user timer, and the rendered service must
 call the repo one-shot with `--pool-name oldlab` so it cannot reconcile GB10 as
-a side effect. The check also compares the active environment worker token to
+a side effect. Protected `current-gb10` rollouts must point
+cluster-config `env_state_profile` at this profile. The release gate treats an
+empty `gb10_worker_pool_desired_states` section as a failure, even when a
+GB10 status artifact exists, because an empty manifest would otherwise allow
+external workers to drift outside the release contract.
+The check also compares the active environment worker token to
 remote-worker env files and active Slurm job fingerprints using only redacted
 sha256-prefix output, so pass the token through `env:` or `file:` indirection:
 

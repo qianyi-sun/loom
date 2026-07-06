@@ -130,6 +130,7 @@ def _external_workers_manifest_section() -> dict[str, Any]:
             "path": "deploy/environment-state/staging.toml",
             "sha256": "state-sha",
         },
+        "control_plane_environment": "production",
         "slurm_pools": [
             {
                 "pool_name": "oldlab",
@@ -1226,6 +1227,55 @@ def test_release_gate_requires_gb10_status_artifact_when_manifest_declares_gb10(
     )
     assert check.outcome == "fail"
     assert check.detail == "GB10 worker status artifact is required"
+
+
+def test_release_gate_rejects_gb10_status_without_manifest_desired_state() -> None:
+    manifest = _manifest(
+        external_workers={
+            "environment_state_file": None,
+            "control_plane_environment": None,
+            "slurm_pools": [],
+            "gb10_desired_states": [],
+        },
+    )
+    apps = _FakeAppsV1({
+        "loom-service": _deployment(
+            name="loom-service",
+            image="loom-service:staging-abc123",
+        ),
+    })
+    core = _FakeCoreV1([
+        _ready_pod(
+            name="loom-service-abc",
+            app="loom-service",
+            image="loom-service:staging-abc123",
+            image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+        ),
+    ])
+
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=apps,
+        core_v1=core,
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+        gb10_workers_status_artifact={
+            "desired_states": [],
+            "nodes": [],
+        },
+        gb10_workers_status_path="gb10-workers-status.json",
+    )
+
+    assert not report.all_pass
+    check = next(
+        check for check in report.checks
+        if check.name == "gb10-worker-convergence"
+    )
+    assert check.outcome == "fail"
+    assert check.detail == "release manifest declares no GB10 desired state"
+    assert check.evidence["manifest_desired_state_count"] == 0
 
 
 def test_release_gate_fails_when_gb10_status_reports_missing_active_host() -> None:

@@ -14,12 +14,13 @@ import pytest
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.evidence import EvidenceDirectory
 from loom_cli.rollout.steps.s03_kind_load_images import KindLoadImagesStep
+from loom_cli.rollout.steps.s04_gb10_prep import gb10_hosts_for
 from loom_cli.rollout.steps.s05_backup import BackupStep
 from loom_cli.rollout.steps.s06_audit import AuditStep
 from loom_cli.rollout.steps.s07_render import RenderStep
 from loom_cli.rollout.steps.s08_preflight import PreflightStep
 from loom_cli.rollout.steps.s09_migrate import MigrateStep
-from loom_cli.rollout.steps.s10_env_state import EnvStateStep
+from loom_cli.rollout.steps.s10_env_state import EnvStateStep, _profile_path_for
 from loom_cli.rollout.steps.s11_cluster_up import ClusterUpStep
 from loom_cli.rollout.steps.s12_release_gate import ReleaseGateStep
 from loom_cli.rollout.steps.subprocess_util import SubprocessResult
@@ -84,6 +85,25 @@ def _docker_inspect_success(argv: list[str]) -> SubprocessResult:
         stdout=json.dumps(docs),
         stderr="",
     )
+
+
+def _release_manifest_with_gb10_contract() -> str:
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "external_workers": {
+                "control_plane_environment": "production",
+                "gb10_desired_states": [
+                    {
+                        "pool_name": "gb10-arm64",
+                        "image_tag": "public-beta-abc123",
+                        "env_config_version": "public-beta-abc123",
+                        "source_git_commit": "a" * 40,
+                    }
+                ],
+            },
+        }
+    ) + "\n"
 
 
 def test_render_runs_loom_cli_from_candidate_worktree(
@@ -242,8 +262,31 @@ def test_env_state_resolves_loom_cli_without_global_executable(
     assert calls[0]["argv"][3:6] == ["admin", "environment-state", "apply"]
     assert calls[1]["argv"][3:6] == ["admin", "environment-state", "check"]
     for call in calls:
+        assert call["argv"][call["argv"].index("--environment") + 1] == ctx.environment
         assert "--var" in call["argv"]
         assert f"GIT_SHA={ctx.resolved_sha}" in call["argv"]
+
+
+def test_env_state_profile_path_resolves_from_cluster_config_dir(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "deploy" / "environments"
+    config_dir.mkdir(parents=True)
+    profile = tmp_path / "deploy" / "environment-state" / "staging.toml"
+    profile.parent.mkdir()
+    profile.write_text('environment = "staging"\n', encoding="utf-8")
+    ctx = make_ctx(tmp_path)
+    ctx.cluster_config_path.write_text(
+        'env_state_profile = "../environment-state/staging.toml"\n',
+        encoding="utf-8",
+    )
+    config_path = config_dir / "staging.cluster.toml"
+    config_path.write_text(
+        'env_state_profile = "../environment-state/staging.toml"\n',
+        encoding="utf-8",
+    )
+
+    assert _profile_path_for(ctx, config_path) == str(profile)
 
 
 def test_subcommand_step_resolves_loom_cli_without_global_executable(
@@ -494,6 +537,25 @@ def test_rollout_cluster_config_is_stable_after_first_synthesis(
     assert rendered_raw["namespace"] == "loom-public-beta"
 
 
+def test_gb10_prep_reads_hosts_from_cluster_config(tmp_path: Path) -> None:
+    ctx = make_ctx(tmp_path)
+    ctx.cluster_config_path.write_text(
+        "[gb10_pool]\n"
+        "hosts = [\n"
+        "  { ssh_target = \"trt-gb10-1\", repo_path = \"/srv/loom\", "
+        "env_file_path = \"/srv/loom/.env\" },\n"
+        "]\n",
+        encoding="utf-8",
+    )
+
+    hosts = gb10_hosts_for(ctx)
+
+    assert len(hosts) == 1
+    assert hosts[0].ssh_target == "trt-gb10-1"
+    assert hosts[0].repo_path == "/srv/loom"
+    assert hosts[0].env_file_path == "/srv/loom/.env"
+
+
 def test_release_gate_run_generates_manifest_then_gates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -518,7 +580,7 @@ def test_release_gate_run_generates_manifest_then_gates(
             return _docker_inspect_success(list(argv))
         if "release-manifest" in argv:
             output = Path(argv[argv.index("--output") + 1])
-            output.write_text('{"schema_version": 1}\n')
+            output.write_text(_release_manifest_with_gb10_contract())
         if kwargs.get("stdout_log"):
             kwargs["stdout_log"].write_text("ok\n")
         if kwargs.get("stderr_log"):
@@ -541,6 +603,7 @@ def test_release_gate_run_generates_manifest_then_gates(
         _assert_candidate_invocation(call, worktree=worktree)
     assert calls[1]["argv"][3:5] == ["cluster", "release-manifest"]
     assert calls[2]["argv"][3:6] == ["admin", "gb10-workers", "status"]
+    assert calls[2]["argv"][calls[2]["argv"].index("--environment") + 1] == "production"
     assert calls[3]["argv"][3:5] == ["cluster", "release-gate"]
     manifest = step_dir.artifact_path("release-manifest-public-beta-abc123.json")
     assert calls[1]["argv"][calls[1]["argv"].index("--output") + 1] == str(manifest)
@@ -626,7 +689,7 @@ spec:
             }
             assert "do-not-write" not in identities_path.read_text(encoding="utf-8")
             output = Path(argv[argv.index("--output") + 1])
-            output.write_text('{"schema_version": 1}\n')
+            output.write_text(_release_manifest_with_gb10_contract())
             return SubprocessResult(
                 argv=list(argv),
                 returncode=0,
@@ -665,7 +728,7 @@ def test_release_gate_run_fails_fast_when_gb10_status_fails(
             return _docker_inspect_success(list(argv))
         if "release-manifest" in argv:
             output = Path(argv[argv.index("--output") + 1])
-            output.write_text('{"schema_version": 1}\n')
+            output.write_text(_release_manifest_with_gb10_contract())
             return SubprocessResult(
                 argv=list(argv),
                 returncode=0,
@@ -699,6 +762,62 @@ def test_release_gate_run_fails_fast_when_gb10_status_fails(
     ]
 
 
+def test_release_gate_current_gb10_requires_manifest_desired_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="public-beta-abc123", scope="current-gb10")
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    _write_rendered_service(ev)
+    step_dir = ev.step_dir(12, "release-gate")
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if list(argv[:3]) == ["docker", "image", "inspect"]:
+            return _docker_inspect_success(list(argv))
+        if "release-manifest" in argv:
+            output = Path(argv[argv.index("--output") + 1])
+            output.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "external_workers": {
+                            "environment_state_file": None,
+                            "control_plane_environment": None,
+                            "slurm_pools": [],
+                            "gb10_desired_states": [],
+                        },
+                    }
+                )
+                + "\n"
+            )
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout="manifest\n",
+                stderr="",
+            )
+        raise AssertionError("GB10 status should not run without a desired state")
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s12_release_gate.run_captured", fake_run)
+
+    result = ReleaseGateStep().run(ctx, step_dir)
+
+    assert result.exit_code == 2
+    assert result.summary == "release manifest lacks GB10 desired state"
+    assert "env_state_profile" in (result.error or "")
+    non_docker_calls = [
+        call for call in calls
+        if call[:3] != ["docker", "image", "inspect"]
+    ]
+    assert [call[3:6] for call in non_docker_calls] == [
+        ["cluster", "release-manifest", "--config"],
+    ]
+
+
 def test_release_gate_retries_transient_gb10_status_cp_unreachable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -719,7 +838,7 @@ def test_release_gate_retries_transient_gb10_status_cp_unreachable(
             return _docker_inspect_success(list(argv))
         if "release-manifest" in argv:
             output = Path(argv[argv.index("--output") + 1])
-            output.write_text('{"schema_version": 1}\n')
+            output.write_text(_release_manifest_with_gb10_contract())
             return SubprocessResult(
                 argv=list(argv),
                 returncode=0,
@@ -801,7 +920,7 @@ def test_release_gate_retries_gb10_convergence_until_node_agent_reports_current(
             return _docker_inspect_success(list(argv))
         if "release-manifest" in argv:
             output = Path(argv[argv.index("--output") + 1])
-            output.write_text('{"schema_version": 1}\n')
+            output.write_text(_release_manifest_with_gb10_contract())
             return SubprocessResult(
                 argv=list(argv),
                 returncode=0,

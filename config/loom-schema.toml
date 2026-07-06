@@ -964,6 +964,11 @@ python_type = "str"
 default     = "artifacts"
 description = "Object-store bucket used by loom-service for safe artifacts. Set per environment when deployments share an object-store endpoint."
 
+[render_config.env_state_profile]
+python_type = "str"
+default     = ""
+description = "Optional environment-state TOML profile used by protected rollout steps. Relative paths resolve from the cluster-config file directory."
+
 [render_config.worker_trajectory_storage_gi]
 python_type = "int"
 default     = 100
@@ -1000,3 +1005,8 @@ python_type = "table"
 # submissions whose `required_worker_pools` list contains
 # `k8s-worker`.
 fields      = { enabled = false }
+
+[render_config.gb10_pool]
+python_type = "table"
+description = "GB10 hosts managed by protected rollout step 04. Each host entry is an inline TOML table with ssh_target, repo_path, and env_file_path."
+fields      = { hosts = [] }
