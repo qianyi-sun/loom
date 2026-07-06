@@ -522,7 +522,7 @@ Rewrap during master-key rotation bumps `provider_connections.updated_at` for ev
 
 | `pricing_source` | Behavior |
 |---|---|
-| `rate-card` | Look up `(rate_card_provider, model_id)` for facade-routed calls, falling back to safe type defaults (`anthropic`, `google`, `openai` for `openai-compatible`). For YibuAPI, sync the official catalog with `loom admin rate-cards sync-yibuapi` and set `pricing_source=rate-card` plus `rate_card_provider=yibuapi`. Protected rollout profiles can declare these hosted defaults so each rollout re-applies and verifies them before release-gate. Missing entries record `cost_usd=0` with a missing-rate-card marker and surface as `cost_status=price_unknown`. |
+| `rate-card` | Look up `(rate_card_provider, model_id)` for facade-routed calls, falling back to safe type defaults (`anthropic`, `google`, `openai` for `openai-compatible`). For YibuAPI, sync the official catalog with `loom admin rate-cards sync-yibuapi` and set `pricing_source=rate-card` plus `rate_card_provider=yibuapi`. Protected rollout profiles can declare these hosted defaults so each rollout re-applies and verifies them before release-gate using a replayable Service API token source, not ambient `loom auth login` state. Missing entries record `cost_usd=0` with a missing-rate-card marker and surface as `cost_status=price_unknown`. |
 | `tokens-only` | Record tokens; `cost_usd = 0`. Default for `openai-compatible` and `custom`; use this for user-managed/self-deployed APIs so API and CLI views return token totals with `cost_status=not_applicable`. |
 | `operator-supplied` | Use `pricing_data.{input_usd_per_1m, output_usd_per_1m}`; route-validates non-null + non-negative. |
 

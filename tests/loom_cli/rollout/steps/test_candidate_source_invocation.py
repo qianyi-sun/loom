@@ -481,7 +481,20 @@ def test_production_defaults_syncs_rate_card_and_verifies_hosted_provider(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ctx = make_ctx(tmp_path)
+    token_file = tmp_path / "service-token"
+    token_file.write_text("super-secret-service-token\n", encoding="utf-8")
+    ctx = make_ctx(
+        tmp_path,
+        service_token_source=f"file:{token_file}",
+    )
+    ctx.cluster_config_path.write_text(
+        """
+ingress_host = "yylx.world"
+frontend_route_path = "/dev"
+frontend_api_base_path = "/dev"
+""".lstrip(),
+        encoding="utf-8",
+    )
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     worktree = _prepare_candidate_worktree(ev)
@@ -504,8 +517,16 @@ rate_card_provider = "yibuapi"
         encoding="utf-8",
     )
     calls: list[dict[str, Any]] = []
+    xdg_dirs: list[Path] = []
 
     def fake_run(argv, **kwargs):
+        xdg_config_home = Path(kwargs["env"]["XDG_CONFIG_HOME"])
+        xdg_dirs.append(xdg_config_home)
+        config_text = (xdg_config_home / "loom" / "config.toml").read_text(
+            encoding="utf-8",
+        )
+        assert 'server_url = "https://yylx.world/dev"' in config_text
+        assert 'auth_token = "super-secret-service-token"' in config_text
         calls.append(
             {
                 "argv": list(argv),
@@ -557,6 +578,7 @@ rate_card_provider = "yibuapi"
     assert len(calls) == 3
     for call in calls:
         _assert_candidate_invocation(call, worktree=worktree)
+        assert call["env"]["XDG_CONFIG_HOME"] != os.environ.get("XDG_CONFIG_HOME")
     assert calls[0]["argv"][3:] == [
         "admin",
         "rate-cards",
@@ -586,6 +608,126 @@ rate_card_provider = "yibuapi"
     assert step_dir.artifact_path(
         "provider-mz_tn_canada_qianyi.json",
     ).is_file()
+    assert xdg_dirs
+    assert all(not path.exists() for path in xdg_dirs)
+    stdout = step_dir.stdout_path().read_text(encoding="utf-8")
+    stderr = step_dir.stderr_path().read_text(encoding="utf-8")
+    assert "super-secret-service-token" not in stdout
+    assert "super-secret-service-token" not in stderr
+    assert "super-secret-service-token" not in json.dumps(result.artifacts)
+
+
+def test_production_defaults_requires_service_token_source_for_mutations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    step_dir = ev.step_dir(12, "production-defaults")
+    profile = tmp_path / "staging.toml"
+    profile.write_text(
+        """
+environment = "staging"
+
+[rate_card_sync.yibuapi]
+enabled = true
+group = "default"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s12_production_defaults._profile_path_for",
+        lambda ctx: str(profile),
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s12_production_defaults.run_captured",
+        lambda argv, **kwargs: calls.append(list(argv)),
+    )
+
+    result = ProductionDefaultsStep().run(ctx, step_dir)
+
+    assert result.exit_code == 2
+    assert "--service-token" in (result.error or "")
+    assert "env:VAR or file:PATH" in (result.error or "")
+    assert calls == []
+
+
+def test_production_defaults_redacts_service_token_from_failed_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token_file = tmp_path / "service-token"
+    token_file.write_text("super-secret-service-token\n", encoding="utf-8")
+    ctx = make_ctx(
+        tmp_path,
+        service_token_source=f"file:{token_file}",
+    )
+    ctx.cluster_config_path.write_text(
+        """
+ingress_host = "yylx.world"
+frontend_route_path = "/dev"
+frontend_api_base_path = "/dev"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    step_dir = ev.step_dir(12, "production-defaults")
+    profile = tmp_path / "staging.toml"
+    profile.write_text(
+        """
+environment = "staging"
+
+[rate_card_sync.yibuapi]
+enabled = true
+group = "default"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def fake_run(argv, **kwargs):
+        return SubprocessResult(
+            argv=list(argv),
+            returncode=1,
+            stdout="debug token super-secret-service-token\n",
+            stderr=(
+                "failed Authorization: Bearer super-secret-service-token "
+                "super-secret-service-token\n"
+            ),
+        )
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s12_production_defaults._profile_path_for",
+        lambda ctx: str(profile),
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s12_production_defaults.run_captured",
+        fake_run,
+    )
+
+    result = ProductionDefaultsStep().run(ctx, step_dir)
+
+    assert result.exit_code == 1
+    assert "super-secret-service-token" not in (result.error or "")
+    assert "[REDACTED:service-token]" in (result.error or "")
+    stdout = step_dir.stdout_path().read_text(encoding="utf-8")
+    stderr = step_dir.stderr_path().read_text(encoding="utf-8")
+    artifact = step_dir.artifact_path("rate-card-sync-yibuapi.json").read_text(
+        encoding="utf-8",
+    )
+    assert "super-secret-service-token" not in stdout
+    assert "super-secret-service-token" not in stderr
+    assert "super-secret-service-token" not in artifact
+    assert "[REDACTED:service-token]" in stdout
+    assert "[REDACTED:service-token]" in stderr
+    assert "[REDACTED:service-token]" in artifact
 
 
 def test_subcommand_step_resolves_loom_cli_without_global_executable(

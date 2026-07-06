@@ -1205,6 +1205,7 @@ resumes from the interrupted step.
 export ADMIN_TOKEN_SOURCE="${ADMIN_TOKEN_SOURCE:-file:/secure/path/admin-token}"
 export ADMIN_TOKEN_FINGERPRINT="${ADMIN_TOKEN_FINGERPRINT:-sha256:<12-hex> len=<N>}"
 export WORKER_TOKEN_SOURCE="${WORKER_TOKEN_SOURCE:-file:/secure/path/worker-token}"
+export SERVICE_TOKEN_SOURCE="${SERVICE_TOKEN_SOURCE:-file:/secure/path/service-api-token}"
 export LOOM_SMOKE_API_TOKEN="$(cat /secure/path/user-owned-smoke-token)"
 
 loom cluster rollout \
@@ -1220,6 +1221,7 @@ loom cluster rollout \
   --admin-token "$ADMIN_TOKEN_SOURCE" \
   --expect-admin-token-fingerprint "$ADMIN_TOKEN_FINGERPRINT" \
   --worker-token "$WORKER_TOKEN_SOURCE" \
+  --service-token "$SERVICE_TOKEN_SOURCE" \
   --scope current-gb10
 ```
 
@@ -1259,6 +1261,17 @@ profile declares `external_slurm_runner_prerequisites`, materialize the
 declared `env_file` and `repo_dir` for the rollout image tag before rerunning
 step 10; the check should then prove existence, git HEAD, clean status, and
 worker-token fingerprint parity.
+
+`SERVICE_TOKEN_SOURCE` is a Service API token source reference for
+rollout-owned CLI commands that mutate or verify DB-backed service defaults.
+It is separate from the Control Plane admin token. Step 12 resolves this source
+inside a temporary, private `$XDG_CONFIG_HOME` and writes only the token value
+there for the duration of `loom admin rate-cards sync-yibuapi` and
+`loom providers update/show`; rollout logs and inputs retain only the source
+reference. The server URL is derived from the rollout cluster config, for
+example `https://yylx.world/dev` for staging and `https://yylx.world/prod` for
+first prod. Do not use stdin `-`; the source must be replayable as `env:VAR` or
+`file:PATH`.
 
 Step 14 defaults to `LOOM_SMOKE_SUBMIT_MODE=user-token`. In that mode, the live
 trial submit uses `LOOM_SMOKE_API_TOKEN`, and that credential must be a
@@ -1408,7 +1421,7 @@ observability and mutation contract:
 | 09 | migrate | candidate-source `loom cluster render-migration` + `kubectl wait` (#332) |
 | 10 | env-state | candidate-source `loom admin environment-state apply/check --admin-token <source> --expect-admin-token-fingerprint <fingerprint>` (#331 fix for stop-on-disable, #533 guard for scoped admin token drift). Pure GB10 node-status convergence drift is retried for up to 15 minutes so node-agent image builds can finish; mixed drift still fails immediately. |
 | 11 | cluster-up | candidate-source `loom cluster up --backup-manifest <path> --recover-sandbox-deadlines --sandbox-deadline-max-pods 4` using the same manifest verified by step 05 and preflighted by step 08 (#203 fix for updated replicas, #206 bounded kind/containerd sandbox-deadline retry) |
-| 12 | production-defaults | candidate-source `loom admin rate-cards sync-yibuapi --format json`, then `loom providers update/show` for hosted provider pricing defaults declared in the environment-state profile. This keeps DB-backed cost-attribution defaults from disappearing after a fresh rollout. |
+| 12 | production-defaults | candidate-source `loom admin rate-cards sync-yibuapi --format json`, then `loom providers update/show` for hosted provider pricing defaults declared in the environment-state profile, using `--service-token <source>` in an isolated CLI config derived from the rollout route. This keeps DB-backed cost-attribution defaults from disappearing after a fresh rollout without depending on ambient operator login state. |
 | 13 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, run `loom cluster minio-storage-preflight --output minio-storage-preflight-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment` with the same `--admin-token <source> --expect-admin-token-fingerprint <fingerprint>` contract as step 10, then `loom cluster release-gate --manifest <that file> --minio-storage-preflight <that storage artifact>` (#339 fix for stale kind-import, #536 guard for GB10 status token drift). GB10 convergence mismatches are retried for up to 15 minutes so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. |
 | 14 | smoke | HTTP health + smoke identity + benchmarks + smoke task lookup. Default `user-token` mode submits a user-owned trial and checks trajectory/usage; `admin-on-behalf` mode submits an audited represented-user batch through the admin API, uses a batch-compatible current-GB10 default task, and polls batch success. |
 | 99 | summary | write `summary.md` from every prior step's result.json |
