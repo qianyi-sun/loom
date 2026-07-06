@@ -613,6 +613,7 @@ def _cmd_import(args: argparse.Namespace) -> int:
 
 
 def _cmd_publish(args: argparse.Namespace) -> int:
+    from loom.security.redaction import redact_text
     from loom_benchmark_tool.publish_cmd import run_publish
 
     if not args.hf_token:
@@ -633,8 +634,17 @@ def _cmd_publish(args: argparse.Namespace) -> int:
             refresh=args.refresh,
         )
     except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"error: {redact_text(str(exc))}", file=sys.stderr)
         return 2
+    except Exception as exc:
+        message = redact_text(str(exc))
+        if args.hf_token:
+            message = message.replace(args.hf_token, "[REDACTED:hf-token]")
+        print(
+            f"error: publish failed for {args.benchmark}: {message}",
+            file=sys.stderr,
+        )
+        return 1
     print(
         f"publish {args.benchmark}: "
         f"published={result['published']} "

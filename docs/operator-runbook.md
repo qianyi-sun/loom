@@ -2919,6 +2919,16 @@ If the HF repo is private/gated and the pod lacks `HF_TOKEN`, the 401/403 is a
 real rollout blocker. Fix it by updating the Secret/profile and restarting the
 operator context; do not replace it with hand-written DB rows.
 
+For adapter-backed benchmark publishing, use the protected `Publish benchmarks
+to HF Hub` workflow when possible. The workflow fails hard when the selected
+benchmark publish command fails, including missing `HF_TOKEN` and HF 403
+authorization failures. The per-benchmark summary records the benchmark, target
+repo, success/failure, exit code, and whether the token was present without
+printing any token value. For PRHW namespace failures, provide a
+PRHW-authorized write token in the `huggingface-publish` environment or have a
+PRHW admin pre-create the dataset repo with write access for the publishing
+token; do not switch release evidence to a personal namespace.
+
 The mirror path is idempotent. It downloads the exact HF revision with the
 operator token, writes bundle objects under deterministic internal keys, stores
 `s3://...` runtime sources in `tasks.source`, and preserves HF repo/revision/

@@ -567,6 +567,35 @@ def test_publish_passes_instance_ids_to_benchmark_tool(
     assert "published=1" in capsys.readouterr().out
 
 
+def test_publish_failure_redacts_hf_token_from_cli_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    hf_token = "hf_1234567890abcdef1234"
+
+    def fake_run_publish(**kwargs: object) -> dict[str, object]:
+        raise RuntimeError(f"403 Forbidden for token {kwargs['hf_token']}")
+
+    monkeypatch.setattr("loom_benchmark_tool.publish_cmd.run_publish", fake_run_publish)
+
+    rc = dispatch([
+        "publish",
+        "humaneval",
+        "--hf-org",
+        "PRHW",
+        "--hf-token",
+        hf_token,
+    ])
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert rc == 1
+    assert "publish failed" in captured.err
+    assert "403 Forbidden" in captured.err
+    assert "[REDACTED:hf-token]" in captured.err
+    assert hf_token not in combined
+
+
 def test_top_level_main_routes_to_datasets(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
