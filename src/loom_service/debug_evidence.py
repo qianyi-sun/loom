@@ -21,12 +21,9 @@ from loom.db.schema import Batch, LlmCall, Task, Trial
 from loom.request_params import coerce_request_params
 from loom.security.redaction import redact_mapping
 from loom.trial.stale_running import effective_agent_timeout_sec
-from loom_service.failure_taxonomy import (
-    classification_counts,
-    classify_trial_outcome,
-    rerun_recommendation_counts,
-)
+from loom_service.failure_taxonomy import classify_trial_outcome
 from loom_service.usage_accounting import (
+    classify_no_call_evidence_failure,
     llm_call_counts_by_trial_id,
     project_trial_llm_evidence,
     summarize_llm_evidence_for_trials,
@@ -507,22 +504,12 @@ def build_trial_debug_evidence(
         "provider_model_id": trial.provider_model_id,
     }
     failure = _failure_for_trial(trial)
-    if provider_summary["llm_evidence_status"] == "no_calls_invalid":
-        failure = {
-            "reason_code": "trial.no_llm_calls",
-            "reason": "no_llm_calls",
-            "category": "gateway",
-            "attribution": "platform",
-            "message": ("Terminal model-backed trial did not record any LLM calls."),
-            "failure_class": "platform_failure",
-            "root_cause": "no_llm_calls",
-            "platform_outcome": "failed",
-            "score_outcome": "unscored",
-            "rerun_recommendation": "operator_approval",
-            "rerunnable": True,
-            "requires_operator_approval": True,
-            "requires_task_change": False,
-        }
+    no_call_failure = classify_no_call_evidence_failure(
+        trial,
+        llm_calls_count=len(llm_calls),
+    )
+    if no_call_failure is not None:
+        failure = no_call_failure
     evidence = {
         "schema_version": "1",
         "generated_at": generated_at.isoformat(),
@@ -599,7 +586,7 @@ def build_trial_debug_evidence(
         },
         "next_actions": (
             [
-                "Check subprocess gateway URL, provider route, and worker env.",
+                "Exclude this trial from clean parity and request-parameter baselines.",
                 "Rerun after the model path records LLM calls.",
             ]
             if provider_summary["llm_evidence_status"] == "no_calls_invalid"
@@ -722,10 +709,90 @@ def _failure_for_batch(batch: Batch) -> dict[str, Any]:
     }
 
 
-def _failure_ledger(trials: Sequence[Any]) -> list[dict[str, Any]]:
+def _classification_for_trial(
+    trial: Any,
+    *,
+    llm_call_counts: Mapping[UUID, int],
+) -> dict[str, Any]:
+    calls = int(llm_call_counts.get(trial.id, 0) or 0)
+    no_call_failure = classify_no_call_evidence_failure(
+        trial,
+        llm_calls_count=calls,
+    )
+    if no_call_failure is not None:
+        return no_call_failure
+    return classify_trial_outcome(trial)
+
+
+def _classification_counts(
+    trials: Sequence[Any],
+    *,
+    llm_call_counts: Mapping[UUID, int],
+) -> dict[str, int]:
+    counts = Counter(
+        str(_classification_for_trial(trial, llm_call_counts=llm_call_counts)["failure_class"])
+        for trial in trials
+    )
+    counts.pop("platform_success", None)
+    return dict(sorted(counts.items()))
+
+
+def _rerun_recommendation_counts(
+    trials: Sequence[Any],
+    *,
+    llm_call_counts: Mapping[UUID, int],
+) -> dict[str, int]:
+    counts = Counter(
+        str(
+            _classification_for_trial(
+                trial,
+                llm_call_counts=llm_call_counts,
+            )["rerun_recommendation"]
+        )
+        for trial in trials
+    )
+    counts.pop("not_needed", None)
+    return dict(sorted(counts.items()))
+
+
+def _no_call_trial_rows(
+    trials: Sequence[Any],
+    *,
+    llm_call_counts: Mapping[UUID, int],
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for trial in trials:
-        classification = classify_trial_outcome(trial)
+        classification = classify_no_call_evidence_failure(
+            trial,
+            llm_calls_count=llm_call_counts.get(trial.id, 0),
+        )
+        if classification is None:
+            continue
+        rows.append(
+            {
+                "id": str(trial.id),
+                "task_id": trial.task_id,
+                "state": trial.state,
+                "reason_code": classification["reason_code"],
+                "failure_reason": classification["reason"],
+                "failure_message": classification["message"],
+                "retryable": classification["rerun_recommendation"] == "auto_safe",
+            }
+        )
+    return rows
+
+
+def _failure_ledger(
+    trials: Sequence[Any],
+    *,
+    llm_call_counts: Mapping[UUID, int],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for trial in trials:
+        classification = _classification_for_trial(
+            trial,
+            llm_call_counts=llm_call_counts,
+        )
         if classification["failure_class"] == "platform_success":
             continue
         rows.append(
@@ -845,27 +912,13 @@ def build_batch_debug_evidence(
         for trial in trials
         if trial.state == "failed" or trial.failure_reason
     ]
-    no_call_trials: list[dict[str, Any]] = [
-        {
-            "id": str(trial.id),
-            "task_id": trial.task_id,
-            "state": trial.state,
-            "reason_code": "trial.no_llm_calls",
-            "failure_reason": "no_llm_calls",
-            "failure_message": ("Terminal model-backed trial did not record any LLM calls."),
-        }
-        for trial in trials
-        if project_trial_llm_evidence(
-            trial,
-            llm_calls_count=llm_call_counts.get(trial.id, 0),
-        )["no_call"]
-    ]
+    no_call_trials = _no_call_trial_rows(trials, llm_call_counts=llm_call_counts)
     if no_call_trials:
         seen_failed_ids = {trial["id"] for trial in failed_trials}
         failed_trials.extend(
             trial for trial in no_call_trials if trial["id"] not in seen_failed_ids
         )
-    failure_ledger = _failure_ledger(trials)
+    failure_ledger = _failure_ledger(trials, llm_call_counts=llm_call_counts)
     rewards = [
         reward for trial in trials if (reward := _aggregate_reward(trial.result)) is not None
     ]
@@ -914,8 +967,14 @@ def build_batch_debug_evidence(
             "failed_count": len(failed_trials),
             "failure_ledger": failure_ledger[:50],
             "failure_ledger_count": len(failure_ledger),
-            "classification_summary": classification_counts(trials),
-            "rerun_recommendation_summary": rerun_recommendation_counts(trials),
+            "classification_summary": _classification_counts(
+                trials,
+                llm_call_counts=llm_call_counts,
+            ),
+            "rerun_recommendation_summary": _rerun_recommendation_counts(
+                trials,
+                llm_call_counts=llm_call_counts,
+            ),
             "stale_running": stale_running[:50],
             "stale_running_count": len(stale_running),
         },

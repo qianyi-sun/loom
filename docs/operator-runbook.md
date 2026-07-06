@@ -3344,6 +3344,14 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    gateway call records. `loom eval batch show <id>` prints
    `no_call_trials` and an invalid-evidence warning for this case, and
    diagnosis uses `batch.no_llm_calls` when a finished batch has zero calls.
+   Trial detail also exposes `no_call_reason`, `no_call_message`, and
+   `no_call_retryable`; batch detail exposes `no_call_reason_counts` and
+   `effective_no_call_reason_counts`. A Codex subprocess exit such as
+   `codex_high_demand_no_call` means the agent failed before any Loom Gateway
+   request was recorded. Exclude those trials from clean #6 score-alignment
+   and #85 request-parameter baselines unless a retry succeeds with
+   `llm_evidence_status=calls_observed`; do not count the original reward-0 row
+   as clean model/provider parity evidence.
    For `terminus-2`, also inspect the trajectory for setup-time
    `terminus2_error` events before debugging provider credentials; upstream
    Terminal-Bench starts a tmux/asciinema recording session before the first

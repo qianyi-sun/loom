@@ -64,6 +64,13 @@ Examples:
 
 If live model outputs differ during Layer 2, replay one side's output through
 both verifier paths before calling the score delta a Loom scoring mismatch.
+Layer 2 parity baselines must also exclude terminal model-backed trials whose
+API/debug evidence reports `llm_evidence_status=no_calls_invalid` or
+`partial_no_calls` unless a supplemental retry succeeds and records
+`calls_observed`. In particular, `no_call_reason=codex_high_demand_no_call`
+means Codex exited before any Loom Gateway request, so the reward row is not
+clean model/provider evidence and cannot satisfy #6 score-alignment or #85
+request-parameter audit baselines by itself.
 
 The manifest may record `harbor_support.status="unknown"` while support is not
 confirmed. That is intentionally explicit: the parity target is the upstream

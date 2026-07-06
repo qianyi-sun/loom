@@ -238,6 +238,71 @@ def test_trial_debug_evidence_distinguishes_reward_zero_score_failure() -> None:
     assert evidence["failure"]["rerun_recommendation"] == "not_rerunnable"
 
 
+def test_trial_debug_evidence_surfaces_codex_high_demand_no_call_reason() -> None:
+    now = datetime.now(UTC)
+    trial = SimpleNamespace(
+        id=uuid4(),
+        team_id=uuid4(),
+        batch_id=None,
+        task_id="skilllearnbench/anthropic-poster-design/anthropic-poster-design-2",
+        state="succeeded",
+        failure_reason=None,
+        failure_message=None,
+        result={
+            "aggregate_reward": 0.0,
+            "steps": [
+                {
+                    "step_name": "main",
+                    "error": {
+                        "phase": "agent",
+                        "reason": "exception",
+                        "message": (
+                            "codex exited rc=1 on step main; stdout: "
+                            "We're currently experiencing high demand, which "
+                            "may cause temporary errors."
+                        ),
+                        "occurred_at": now.isoformat(),
+                    },
+                    "verifier_result": {"rewards": {"score": 0.0}},
+                },
+            ],
+        },
+        config={
+            "agent_name": "codex",
+            "agent_model": {"provider": "openai", "name": "gpt-5.2"},
+        },
+        trajectory_index={},
+        provider_connection_id=None,
+        provider_model_id=None,
+        submitted_at=now - timedelta(minutes=2),
+        claimed_at=now - timedelta(minutes=2),
+        started_at=now - timedelta(minutes=1),
+        finished_at=now,
+        cancellation_requested_at=None,
+        cancellation_observed_at=None,
+        attempt_count=1,
+        next_attempt_at=None,
+        worker_id=None,
+        requires_caps={},
+    )
+
+    evidence = build_trial_debug_evidence(
+        _Request(),  # type: ignore[arg-type]
+        trial,  # type: ignore[arg-type]
+        task=None,
+        llm_calls=[],
+    )
+
+    assert evidence["provider"]["llm_evidence_status"] == "no_calls_invalid"
+    assert evidence["provider"]["no_call_reason"] == "codex_high_demand_no_call"
+    assert evidence["provider"]["no_call_retryable"] is True
+    assert "high demand" in evidence["provider"]["no_call_message"].lower()
+    assert evidence["failure"]["reason_code"] == "trial.codex_high_demand_no_call"
+    assert evidence["failure"]["root_cause"] == "codex_high_demand_no_call"
+    assert evidence["failure"]["rerun_recommendation"] == "auto_safe"
+    assert "clean parity" in " ".join(evidence["next_actions"]).lower()
+
+
 def test_trial_debug_evidence_preserves_verifier_check_details() -> None:
     now = datetime.now(UTC)
     trial = SimpleNamespace(
@@ -398,3 +463,100 @@ def test_batch_debug_evidence_includes_failure_taxonomy_summary() -> None:
         "score_failure",
         "task_failure",
     ]
+
+
+def test_batch_debug_evidence_marks_codex_high_demand_no_call_retryable() -> None:
+    team_id = uuid4()
+    batch_id = uuid4()
+    now = datetime.now(UTC)
+    trial_id = uuid4()
+    batch = SimpleNamespace(
+        id=batch_id,
+        team_id=team_id,
+        state="finished",
+        result_status="succeeded",
+        failure_reason=None,
+        failure_message=None,
+        created_at=now - timedelta(minutes=3),
+        finished_at=now,
+        backend="docker",
+        trial_config={
+            "agent_name": "codex",
+            "agent_model": {"provider": "openai", "name": "gpt-5.2"},
+        },
+        combinations=[],
+        provider_connection_id=None,
+        provider_model_id=None,
+        task_filter={"benchmark_id": "skilllearnbench"},
+        expected_trial_count=1,
+        n_per_task=1,
+        fanout_errors=None,
+    )
+    trial = SimpleNamespace(
+        id=trial_id,
+        task_id="skilllearnbench/anthropic-poster-design/anthropic-poster-design-2",
+        state="succeeded",
+        failure_reason=None,
+        failure_message=None,
+        result={
+            "aggregate_reward": 0.0,
+            "steps": [
+                {
+                    "step_name": "main",
+                    "error": {
+                        "phase": "agent",
+                        "reason": "exception",
+                        "message": (
+                            "codex exited rc=1 on step main; stdout: "
+                            "We're currently experiencing high demand, which "
+                            "may cause temporary errors."
+                        ),
+                        "occurred_at": now.isoformat(),
+                    },
+                    "verifier_result": {"rewards": {"score": 0.0}},
+                },
+            ],
+        },
+        config={
+            "agent_name": "codex",
+            "agent_model": {"provider": "openai", "name": "gpt-5.2"},
+        },
+        provider_connection_id=None,
+        provider_model_id=None,
+        worker_id=None,
+        claimed_at=now - timedelta(minutes=2),
+        started_at=now - timedelta(minutes=1),
+        sample_idx=0,
+        combination_idx=0,
+    )
+
+    evidence = build_batch_debug_evidence(
+        batch,  # type: ignore[arg-type]
+        trials=[trial],  # type: ignore[list-item]
+        llm_calls=[],
+    )
+
+    assert evidence["provider"]["llm_evidence_status"] == "no_calls_invalid"
+    assert evidence["provider"]["no_call_reason_counts"] == {
+        "codex_high_demand_no_call": 1,
+    }
+    assert evidence["trials"]["failed"] == [
+        {
+            "id": str(trial_id),
+            "task_id": trial.task_id,
+            "state": "succeeded",
+            "reason_code": "trial.codex_high_demand_no_call",
+            "failure_reason": "codex_high_demand_no_call",
+            "failure_message": (
+                "Codex exited before any gateway request because the Codex "
+                "service reported high demand; exclude this trial from clean "
+                "parity/request-parameter evidence unless a retry succeeds."
+            ),
+            "retryable": True,
+        },
+    ]
+    assert evidence["trials"]["classification_summary"] == {"platform_failure": 1}
+    assert evidence["trials"]["rerun_recommendation_summary"] == {"auto_safe": 1}
+    assert evidence["trials"]["failure_ledger"][0]["reason_code"] == (
+        "trial.codex_high_demand_no_call"
+    )
