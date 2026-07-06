@@ -27,7 +27,7 @@ SCHEMA_VERSION = "1"
 TERMINAL_BATCH_STATES = {"finished", "cancelled"}
 PAYLOAD_CHECKSUMS_FILE = "checksums/SHA256SUMS"
 DEFAULT_ARCHIVE_SPOOL_MAX_BYTES = 64 * 1024 * 1024
-DeliveryExportMode = Literal["lightweight", "raw-harbor"]
+DeliveryExportMode = Literal["lightweight", "raw-harbor", "raw-harbor-tb2-v1"]
 
 
 class DeliveryExportError(Exception):
@@ -793,8 +793,15 @@ def _summary(
         "object_validation": object_validation,
         "created_at": datetime.now(UTC).isoformat(),
     }
-    if mode == "raw-harbor":
+    if _is_raw_harbor_mode(mode):
         summary["layout"] = _raw_harbor_layout()
+    if _is_tb2_profile(mode):
+        summary["export_profile"] = {
+            "name": "raw-harbor-tb2",
+            "version": "1",
+            "source_of_truth": "provider_logs",
+            "audit_spine": "loom_trajectory.jsonl",
+        }
     return summary
 
 
@@ -881,9 +888,166 @@ def _raw_log_for_call(call: LlmCall) -> dict[str, Any] | None:
     return None
 
 
-def _messages_from_raw_log(raw_log: dict[str, Any]) -> list[dict[str, Any]]:
+def _message_content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                parts.append(part["text"])
+            elif isinstance(part, str):
+                parts.append(part)
+        if parts:
+            return "".join(parts)
+    if content is None:
+        return ""
+    try:
+        return json.dumps(content, ensure_ascii=False)
+    except TypeError:
+        return str(content)
+
+
+def _first_or_last_raw_message(
+    raw_log: dict[str, Any],
+    *,
+    role: str,
+    last: bool = False,
+) -> dict[str, Any] | None:
     request = raw_log.get("request")
+    if not isinstance(request, dict):
+        return None
+    body = request.get("body")
+    if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
+        return None
+    candidates = [
+        item
+        for item in body["messages"]
+        if isinstance(item, dict) and item.get("role") == role
+    ]
+    if not candidates:
+        return None
+    return candidates[-1] if last else candidates[0]
+
+
+def _assistant_message_from_raw_log(raw_log: dict[str, Any]) -> dict[str, Any] | None:
     response = raw_log.get("response")
+    if not isinstance(response, dict):
+        return None
+    body = response.get("body")
+    if not isinstance(body, dict):
+        return None
+    choices = body.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            if isinstance(message, dict) and isinstance(message.get("role"), str):
+                msg = {"role": message["role"]}
+                if "content" in message:
+                    msg["content"] = message["content"]
+                if "reasoning_content" in message:
+                    msg["reasoning_content"] = message["reasoning_content"]
+                if "tool_calls" in message:
+                    msg["tool_calls"] = message["tool_calls"]
+                return msg
+    content = body.get("content")
+    if isinstance(content, list):
+        text = "".join(
+            str(part.get("text"))
+            for part in content
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        )
+        if text:
+            return {"role": "assistant", "content": text}
+    return None
+
+
+def _normalize_tb2_command(command: Any) -> dict[str, Any] | None:
+    if not isinstance(command, dict):
+        return None
+    keystrokes = command.get("keystrokes")
+    if not isinstance(keystrokes, str):
+        cmd = command.get("cmd") or command.get("command")
+        if isinstance(cmd, str):
+            keystrokes = cmd
+    out: dict[str, Any] = {}
+    if isinstance(keystrokes, str):
+        out["keystrokes"] = keystrokes
+    duration = command.get("duration")
+    if duration is None:
+        duration = command.get("timeout_sec")
+    if duration is not None:
+        out["duration"] = duration
+    return out or None
+
+
+def _parse_json_object(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _normalize_tb2_action_payload(payload: Any) -> dict[str, Any] | None:
+    data = _parse_json_object(payload)
+    if data is None:
+        return None
+    has_tb2 = any(key in data for key in ("analysis", "plan", "duration", "task_complete"))
+    has_loom = any(
+        key in data
+        for key in (
+            "state_analysis",
+            "explanation",
+            "timeout_sec",
+            "is_task_complete",
+        )
+    )
+    commands_raw = data.get("commands")
+    has_commands = isinstance(commands_raw, list)
+    if not has_tb2 and not has_loom and not has_commands:
+        return None
+
+    commands: list[dict[str, Any]] = []
+    if isinstance(commands_raw, list):
+        for command in commands_raw:
+            normalized = _normalize_tb2_command(command)
+            if normalized is not None:
+                commands.append(normalized)
+
+    raw_task_complete = (
+        data.get("task_complete")
+        if "task_complete" in data
+        else data.get("is_task_complete", False)
+    )
+    normalized_action: dict[str, Any] = {
+        "analysis": data.get("analysis") or data.get("state_analysis") or "",
+        "plan": data.get("plan") or data.get("explanation") or "",
+        "commands": commands,
+        "task_complete": bool(raw_task_complete),
+    }
+    return normalized_action
+
+
+def _normalize_tb2_assistant_content(content: Any) -> Any:
+    normalized = _normalize_tb2_action_payload(content)
+    if normalized is None:
+        return content
+    return json.dumps(normalized, ensure_ascii=False)
+
+
+def _messages_from_raw_log(
+    raw_log: dict[str, Any],
+    *,
+    normalize_tb2: bool = False,
+) -> list[dict[str, Any]]:
+    request = raw_log.get("request")
     messages: list[dict[str, Any]] = []
     if isinstance(request, dict):
         body = request.get("body")
@@ -894,31 +1058,154 @@ def _messages_from_raw_log(raw_log: dict[str, Any]) -> list[dict[str, Any]]:
                     if "content" in item:
                         msg["content"] = item["content"]
                     messages.append(msg)
-    if isinstance(response, dict):
-        body = response.get("body")
-        if isinstance(body, dict):
-            choices = body.get("choices")
-            if isinstance(choices, list):
-                for choice in choices:
-                    if not isinstance(choice, dict):
-                        continue
-                    message = choice.get("message")
-                    if isinstance(message, dict) and isinstance(message.get("role"), str):
-                        msg = {"role": message["role"]}
-                        if "content" in message:
-                            msg["content"] = message["content"]
-                        messages.append(msg)
-                        break
-            content = body.get("content")
-            if isinstance(content, list):
-                text = "".join(
-                    str(part.get("text"))
-                    for part in content
-                    if isinstance(part, dict) and isinstance(part.get("text"), str)
-                )
-                if text:
-                    messages.append({"role": "assistant", "content": text})
+    assistant = _assistant_message_from_raw_log(raw_log)
+    if assistant is not None:
+        msg = {"role": assistant["role"]}
+        if "content" in assistant:
+            content = assistant["content"]
+            msg["content"] = (
+                _normalize_tb2_assistant_content(content) if normalize_tb2 else content
+            )
+        messages.append(msg)
     return messages
+
+
+def _call_timestamp(call: LlmCall) -> str | None:
+    captured_at = getattr(call, "captured_at", None)
+    if isinstance(captured_at, datetime):
+        return captured_at.isoformat()
+    return None
+
+
+def _agent_name_for_trial(trial: Trial) -> str:
+    config = trial.config if isinstance(trial.config, dict) else {}
+    raw = config.get("agent_name")
+    return str(raw) if raw else "unknown"
+
+
+def _model_name_for_trial(item: SelectedTrial, calls: list[LlmCall]) -> str | None:
+    for call in calls:
+        if call.model:
+            return call.model
+    if item.trial.provider_model_id:
+        return item.trial.provider_model_id
+    if item.batch.provider_model_id:
+        return item.batch.provider_model_id
+    return None
+
+
+def _tb2_tool_calls(action: dict[str, Any], *, call_index: int) -> list[dict[str, Any]]:
+    commands = action.get("commands")
+    if not isinstance(commands, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for command_index, command in enumerate(commands, start=1):
+        if not isinstance(command, dict):
+            continue
+        out.append(
+            {
+                "tool_call_id": f"call-{call_index}-{command_index}",
+                "function_name": "bash_command",
+                "arguments": command,
+            }
+        )
+    return out
+
+
+def _tb2_agent_message(action: dict[str, Any]) -> str:
+    analysis = str(action.get("analysis") or "")
+    plan = str(action.get("plan") or "")
+    return f"Analysis: {analysis}\nPlan: {plan}"
+
+
+def _tb2_observation_after_call(
+    calls: list[LlmCall],
+    *,
+    current_index: int,
+) -> dict[str, list[dict[str, str]]]:
+    next_index = current_index + 1
+    if next_index >= len(calls):
+        return {"results": []}
+    raw_log = _raw_log_for_call(calls[next_index])
+    if raw_log is None:
+        return {"results": []}
+    message = _first_or_last_raw_message(raw_log, role="user", last=True)
+    if message is None:
+        return {"results": []}
+    content = _message_content_text(message.get("content"))
+    if not content:
+        return {"results": []}
+    return {"results": [{"content": content}]}
+
+
+def _raw_harbor_trajectory(item: SelectedTrial, calls: list[LlmCall]) -> dict[str, Any]:
+    steps: list[dict[str, Any]] = []
+    for zero_index, call in enumerate(calls):
+        call_index = zero_index + 1
+        raw_log = _raw_log_for_call(call)
+        if raw_log is None:
+            continue
+        user_message = _first_or_last_raw_message(raw_log, role="user", last=True)
+        timestamp = _call_timestamp(call)
+        if user_message is not None:
+            user_step: dict[str, Any] = {
+                "step_id": f"{call.step_id}:user",
+                "source": "user",
+                "message": _message_content_text(user_message.get("content")),
+            }
+            if timestamp is not None:
+                user_step["timestamp"] = timestamp
+            steps.append(user_step)
+
+        assistant = _assistant_message_from_raw_log(raw_log)
+        if assistant is None:
+            continue
+        content = assistant.get("content")
+        action = _normalize_tb2_action_payload(content)
+        agent_step: dict[str, Any] = {
+            "step_id": f"{call.step_id}:assistant",
+            "source": "agent",
+            "model_name": call.model,
+            "message": (
+                _tb2_agent_message(action)
+                if action is not None
+                else _message_content_text(content)
+            ),
+            "observation": _tb2_observation_after_call(
+                calls,
+                current_index=zero_index,
+            ),
+            "metrics": {
+                "input_tokens": int(call.input_tokens or 0),
+                "output_tokens": int(call.output_tokens or 0),
+                "cost_usd": float(call.cost_usd or 0),
+                "rate_card_hash": call.rate_card_hash,
+            },
+        }
+        if timestamp is not None:
+            agent_step["timestamp"] = timestamp
+        if isinstance(assistant.get("reasoning_content"), str):
+            agent_step["reasoning_content"] = assistant["reasoning_content"]
+        if action is not None:
+            tool_calls = _tb2_tool_calls(action, call_index=call_index)
+            if tool_calls:
+                agent_step["tool_calls"] = tool_calls
+        elif isinstance(assistant.get("tool_calls"), list):
+            agent_step["tool_calls"] = assistant["tool_calls"]
+        steps.append(agent_step)
+
+    return {
+        "schema_version": "ATIF-v1.7",
+        "session_id": str(item.trial.id),
+        "agent": {
+            "name": _agent_name_for_trial(item.trial),
+            "model_name": _model_name_for_trial(item, calls),
+            "version": None,
+            "extra": {},
+        },
+        "steps": steps,
+        "final_metrics": _raw_metrics(item, calls),
+    }
 
 
 def _raw_harbor_layout() -> dict[str, Any]:
@@ -1005,12 +1292,21 @@ def _raw_agent_native_note(item: SelectedTrial) -> dict[str, Any]:
         "schema_version": "1",
         "trial_id": str(item.trial.id),
         "status": "documented_equivalent",
-        "path": "trajectory.jsonl",
+        "path": "loom_trajectory.jsonl",
         "description": (
-            "Loom stores the persisted agent-native equivalent as typed "
-            "trajectory JSONL for this trial."
+            "Loom stores the persisted agent-native event stream as typed "
+            "trajectory JSONL. Raw Harbor exports keep that stream as audit "
+            "evidence and reconstruct trajectory.json from provider logs."
         ),
     }
+
+
+def _is_raw_harbor_mode(mode: DeliveryExportMode) -> bool:
+    return mode in {"raw-harbor", "raw-harbor-tb2-v1"}
+
+
+def _is_tb2_profile(mode: DeliveryExportMode) -> bool:
+    return mode == "raw-harbor-tb2-v1"
 
 
 def _raw_provider_log_path(item: SelectedTrial, index: int) -> str:
@@ -1053,7 +1349,7 @@ def _build_archive(
             for row, item in zip(rows, selected, strict=True):
                 add_ref(tar, str(row["trajectory_file"]), item.trajectory)
                 add_ref(tar, str(row["atif_file"]), item.atif)
-            if mode == "raw-harbor":
+            if _is_raw_harbor_mode(mode):
                 _add_raw_harbor_entries(
                     tar=tar,
                     client=client,
@@ -1062,6 +1358,7 @@ def _build_archive(
                     selected=selected,
                     tasks_by_id=tasks_by_id or {},
                     llm_calls_by_trial=llm_calls_by_trial or {},
+                    tb2_profile=_is_tb2_profile(mode),
                 )
             add_bytes(tar, PAYLOAD_CHECKSUMS_FILE, _payload_checksums_from_entries(checksums))
     size_bytes = int(spool.tell())
@@ -1082,6 +1379,7 @@ def _add_raw_harbor_entries(
     selected: list[SelectedTrial],
     tasks_by_id: dict[str, Task],
     llm_calls_by_trial: dict[UUID, list[LlmCall]],
+    tb2_profile: bool,
 ) -> None:
     provider_logs: list[dict[str, Any]] = []
     sft_rows: list[dict[str, Any]] = []
@@ -1107,23 +1405,61 @@ def _add_raw_harbor_entries(
             }
             provider_logs.append(manifest_row)
             trial_provider_logs.append(manifest_row)
-            messages = _messages_from_raw_log(raw_log)
+            messages = _messages_from_raw_log(raw_log, normalize_tb2=tb2_profile)
             if messages:
                 sft_rows.append(
                     {
                         "trial_id": str(item.trial.id),
                         "task_id": item.trial.task_id,
                         "llm_call_id": str(call.id),
+                        "reward": item.reward,
+                        "reward_positive": (
+                            bool(item.reward > 0) if item.reward is not None else None
+                        ),
+                        "source": "provider_logs",
+                        "selection_source": item.selection_source,
                         "messages": messages,
                     }
                 )
 
-        add_bytes(tar, _raw_agent_run_path(item, "execution_result.json"), _public_json_bytes(_raw_execution_result(item)))
-        add_bytes(tar, _raw_agent_run_path(item, "metrics.json"), _public_json_bytes(_raw_metrics(item, calls)))
-        add_bytes(tar, _raw_agent_run_path(item, "verifier_output.json"), _public_json_bytes(_raw_verifier_output(item)))
-        add_bytes(tar, _raw_agent_run_path(item, "agent_native_trajectory.json"), _public_json_bytes(_raw_agent_native_note(item)))
-        add_ref(tar, _raw_agent_run_path(item, "trajectory.jsonl"), item.trajectory)
+        add_bytes(
+            tar,
+            _raw_agent_run_path(item, "execution_result.json"),
+            _public_json_bytes(_raw_execution_result(item)),
+        )
+        add_bytes(
+            tar,
+            _raw_agent_run_path(item, "metrics.json"),
+            _public_json_bytes(_raw_metrics(item, calls)),
+        )
+        add_bytes(
+            tar,
+            _raw_agent_run_path(item, "verifier_output.json"),
+            _public_json_bytes(_raw_verifier_output(item)),
+        )
+        if tb2_profile:
+            add_bytes(
+                tar,
+                _raw_agent_run_path(item, "trajectory.json"),
+                _public_json_bytes(_raw_harbor_trajectory(item, calls)),
+            )
+            add_bytes(
+                tar,
+                _raw_agent_run_path(item, "agent_native_trajectory.json"),
+                _public_json_bytes(_raw_agent_native_note(item)),
+            )
+            add_ref(tar, _raw_agent_run_path(item, "loom_trajectory.jsonl"), item.trajectory)
+        else:
+            add_ref(tar, _raw_agent_run_path(item, "trajectory.jsonl"), item.trajectory)
         add_ref(tar, _raw_agent_run_path(item, "atif.json"), item.atif)
+        trajectory_artifacts = (
+            [
+                {"kind": "trajectory", "path": "trajectory.json"},
+                {"kind": "agent_native_trajectory", "path": "loom_trajectory.jsonl"},
+            ]
+            if tb2_profile
+            else [{"kind": "agent_native_trajectory", "path": "trajectory.jsonl"}]
+        )
         artifact_manifest = {
             "schema_version": "1",
             "trial_id": str(item.trial.id),
@@ -1132,12 +1468,16 @@ def _add_raw_harbor_entries(
                 {"kind": "execution_result", "path": "execution_result.json"},
                 {"kind": "metrics", "path": "metrics.json"},
                 {"kind": "verifier_output", "path": "verifier_output.json"},
-                {"kind": "agent_native_trajectory", "path": "trajectory.jsonl"},
+                *trajectory_artifacts,
                 {"kind": "atif", "path": "atif.json"},
                 {"kind": "provider_logs_manifest", "path": "provider_logs_manifest.json"},
             ],
         }
-        add_bytes(tar, _raw_agent_run_path(item, "artifact_manifest.json"), _public_json_bytes(artifact_manifest))
+        add_bytes(
+            tar,
+            _raw_agent_run_path(item, "artifact_manifest.json"),
+            _public_json_bytes(artifact_manifest),
+        )
         add_bytes(
             tar,
             _raw_agent_run_path(item, "provider_logs_manifest.json"),
@@ -1210,7 +1550,12 @@ def _add_raw_harbor_entries(
 
 
 def _archive_filename(batch: Batch, *, mode: DeliveryExportMode) -> str:
-    suffix = "raw-harbor" if mode == "raw-harbor" else "delivery"
+    suffix_by_mode = {
+        "lightweight": "delivery",
+        "raw-harbor": "raw-harbor",
+        "raw-harbor-tb2-v1": "raw-harbor-tb2-v1",
+    }
+    suffix = suffix_by_mode[mode]
     return f"{_safe_slug(batch.name, max_len=120)}-{suffix}.tar.gz"
 
 
@@ -1322,7 +1667,7 @@ async def create_delivery_export(
     tasks_by_id: dict[str, Task] = {}
     llm_calls_by_trial: dict[UUID, list[LlmCall]] = {}
     extra_object_counts: dict[str, int] = {}
-    if mode == "raw-harbor":
+    if _is_raw_harbor_mode(mode):
         tasks_by_id = await _tasks_for_selected(session, selected)
         llm_calls_by_trial = await _llm_calls_for_selected(session, selected)
         extra_object_counts = _raw_harbor_object_counts(
