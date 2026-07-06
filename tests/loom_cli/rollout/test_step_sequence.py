@@ -70,7 +70,12 @@ class TestDefaultStepSequence:
         self,
         tmp_path,
     ) -> None:
-        ctx = make_ctx(tmp_path, cp_url="http://control-node.lan:18081")
+        ctx = make_ctx(
+            tmp_path,
+            cp_url="http://control-node.lan:18081",
+            admin_token_source="file:/secure/path/staging-admin-token",
+            expect_admin_token_fingerprint="sha256:abc123def456 len=64",
+        )
         ev = EvidenceDirectory(tmp_path, "rid")
         ev.ensure()
         render_dir = ev.step_dir(7, "render")
@@ -92,3 +97,9 @@ class TestDefaultStepSequence:
         gb10_argv = list(ReleaseGateStep().gb10_status_argv(ctx, gb10_dir))
         assert "--cp-url" in gb10_argv
         assert gb10_argv[gb10_argv.index("--cp-url") + 1] == "http://control-node.lan:18081"
+        assert gb10_argv[gb10_argv.index("--admin-token") + 1] == (
+            "file:/secure/path/staging-admin-token"
+        )
+        assert gb10_argv[gb10_argv.index("--expect-admin-token-fingerprint") + 1] == (
+            "sha256:abc123def456 len=64"
+        )

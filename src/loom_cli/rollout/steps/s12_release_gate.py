@@ -110,6 +110,8 @@ class ReleaseGateStep(SubcommandStep):
 
     def _inputs_fingerprint(self, ctx: RolloutContext) -> dict[str, object]:
         return {
+            "admin_token_source": ctx.admin_token_source,
+            "expect_admin_token_fingerprint": ctx.expect_admin_token_fingerprint,
             "cluster_config_sha256": ctx.cluster_config_sha256,
             "environment": ctx.environment,
             "image_tag": ctx.image_tag,
@@ -224,12 +226,22 @@ class ReleaseGateStep(SubcommandStep):
         ctx: RolloutContext,
         step_dir: StepDir,
     ) -> Sequence[str]:
+        admin_args = [
+            "--admin-token",
+            ctx.admin_token_source,
+        ]
+        if ctx.expect_admin_token_fingerprint:
+            admin_args.extend([
+                "--expect-admin-token-fingerprint",
+                ctx.expect_admin_token_fingerprint,
+            ])
         return candidate_loom_argv(
             "admin",
             "gb10-workers",
             "status",
             "--cp-url",
             ctx.cp_url,
+            *admin_args,
             "--environment",
             self._gb10_status_environment(ctx, step_dir),
             "--release-image-tag",
