@@ -555,19 +555,40 @@ uv run python scripts/ops/worker_capacity_manifest.py lease-beta \
   --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-lease.json"
 ```
 
-Check lease status, including automatic TTL-expiry handling, with the latest
-secret-free worker registration/status artifact when available:
+Check lease status, including automatic TTL-expiry and prod-pressure handling,
+with the latest secret-free worker registration/status artifact when
+available. Treat `prod_pending_count > 0`, `prod_active_count > 0`, or a
+positive prod capacity shortfall as prod pressure: `status` stops new beta
+claims in the desired state, releases idle beta slots back to prod, and reports
+running beta slots as draining. Preemptible running beta trials are only marked
+retryable in evidence after the configured grace period; this repo helper does
+not cancel live work.
 
 ```bash
 uv run python scripts/ops/worker_capacity_manifest.py status \
   --manifest "$LEASE_MANIFEST" \
   --observed-json "$ROLLOUT_DIR/worker-registrations.json" \
+  --prod-pending-count "${PROD_PENDING_COUNT:-0}" \
+  --prod-active-count "${PROD_ACTIVE_COUNT:-0}" \
+  --prod-capacity-shortfall "${PROD_CAPACITY_SHORTFALL:-0}" \
+  --prod-pressure-source "control-plane prod queue summary" \
+  --preemptible-grace-period 10m \
+  --apply \
+  --output-manifest "$ROLLOUT_DIR/worker-capacity-beta-status.toml" \
   --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-status.json"
 ```
 
-If prod pressure appears while beta trials are still running, drain beta. The
-report separates `running_beta_trials` from `idle_leased_slots` so operators
-can see what is still active and what was released from the desired state:
+The evidence distinguishes prod-driven pauses from beta rollout failures:
+`prod_pressure.cause=prod_capacity_pressure` means prod demand triggered the
+drain, while `drift` or `errors` still indicate manifest/worker mismatch. If
+pressure clears before the lease TTL expires, rerun `status` with zero
+prod-pressure counts to recover the bounded beta desired slots from the lease
+metadata.
+
+Use an explicit manual drain only for operator-initiated pause scenarios that
+are not represented by the prod-pressure counts. The report separates
+`running_beta_trials` from `idle_leased_slots` so operators can see what is
+still active and what was released from the desired state:
 
 ```bash
 uv run python scripts/ops/worker_capacity_manifest.py drain-beta \

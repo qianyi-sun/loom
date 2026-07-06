@@ -8,7 +8,8 @@ registration artifact.
 
 Lifecycle commands are file-only:
 
-* ``status`` reports the effective beta lease state and TTL expiry.
+* ``status`` reports the effective beta lease state, TTL expiry, and optional
+  prod-pressure drain/recovery evidence.
 * ``lease-beta`` previews or writes a bounded beta/dev lease.
 * ``drain-beta`` stops new beta claims and reports running vs. idle beta slots.
 * ``release-beta`` idempotently returns beta desired slots to zero.
@@ -27,7 +28,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import tomli_w
 
@@ -164,21 +165,24 @@ class ObservedWorker:
         return self.drain_state not in INACTIVE_WORKER_STATES
 
     def public_dict(self) -> dict[str, Any]:
-        return redact(
-            {
-                "index": self.index,
-                "worker_id": self.worker_id,
-                "host": self.host,
-                "environment": self.environment,
-                "api_url": self.api_url,
-                "image_tag": self.image_tag,
-                "source_commit": self.source_commit,
-                "compose_service": self.compose_service,
-                "k8s_deployment": self.k8s_deployment,
-                "slots": self.slots,
-                "drain_state": self.drain_state,
-                "running_trials": self.running_trials,
-            },
+        return cast(
+            dict[str, Any],
+            redact(
+                {
+                    "index": self.index,
+                    "worker_id": self.worker_id,
+                    "host": self.host,
+                    "environment": self.environment,
+                    "api_url": self.api_url,
+                    "image_tag": self.image_tag,
+                    "source_commit": self.source_commit,
+                    "compose_service": self.compose_service,
+                    "k8s_deployment": self.k8s_deployment,
+                    "slots": self.slots,
+                    "drain_state": self.drain_state,
+                    "running_trials": self.running_trials,
+                },
+            ),
         )
 
 
@@ -194,6 +198,38 @@ class Drift:
             "desired": redact(self.desired),
             "observed": redact(self.observed),
         }
+
+
+@dataclass(frozen=True)
+class ProdPressure:
+    prod_pending_count: int
+    prod_active_count: int
+    prod_capacity_shortfall: int
+    source: str
+
+    @property
+    def has_pressure(self) -> bool:
+        return (
+            self.prod_pending_count > 0
+            or self.prod_active_count > 0
+            or self.prod_capacity_shortfall > 0
+        )
+
+    def public_dict(self, *, recovered: bool = False) -> dict[str, Any]:
+        return cast(
+            dict[str, Any],
+            redact(
+                {
+                    "has_pressure": self.has_pressure,
+                    "cause": "prod_capacity_pressure" if self.has_pressure else "none",
+                    "prod_pending_count": self.prod_pending_count,
+                    "prod_active_count": self.prod_active_count,
+                    "prod_capacity_shortfall": self.prod_capacity_shortfall,
+                    "source": self.source,
+                    "recovered": recovered,
+                },
+            ),
+        )
 
 
 def _beta_drain_state(host: HostIntent) -> str:
@@ -678,7 +714,7 @@ def build_report(
             "worker_count": len(workers),
             "workers": [worker.public_dict() for worker in workers],
         }
-    return redact(report)
+    return cast(dict[str, Any], redact(report))
 
 
 def format_markdown(report: dict[str, Any]) -> str:
@@ -693,6 +729,15 @@ def format_markdown(report: dict[str, Any]) -> str:
     lease = report.get("lease")
     if isinstance(lease, dict):
         lines.append(f"- Beta lease: `{lease.get('state', 'none')}`")
+    prod_pressure = report.get("prod_pressure")
+    if isinstance(prod_pressure, dict):
+        lines.append(
+            "- Prod pressure: "
+            f"`{prod_pressure.get('cause', 'none')}` "
+            f"(pending `{prod_pressure.get('prod_pending_count', 0)}`, "
+            f"active `{prod_pressure.get('prod_active_count', 0)}`, "
+            f"shortfall `{prod_pressure.get('prod_capacity_shortfall', 0)}`)",
+        )
     summary = report.get("summary")
     if isinstance(summary, dict):
         lines.extend(
@@ -760,6 +805,16 @@ def _parse_ttl_seconds(value: str | None) -> int:
     return amount * multiplier
 
 
+def _non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{value!r} must be an integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"{value!r} must be greater than or equal to zero")
+    return parsed
+
+
 def _safe_reason(value: str | None, *, fallback: str) -> str:
     reason = (value or fallback).strip()
     if not reason:
@@ -780,7 +835,11 @@ def _effective_lease_state(raw: dict[str, Any], *, now: datetime) -> str:
     lease = _lease_table(raw)
     state = str(lease.get("state") or "none").strip() or "none"
     expires_at = _parse_timestamp(lease.get("expires_at"))
-    if state == "active" and expires_at is not None and now >= expires_at:
+    if (
+        state in {"active", "prod_pressure_draining"}
+        and expires_at is not None
+        and now >= expires_at
+    ):
         return "expired"
     return state
 
@@ -790,7 +849,7 @@ def _public_lease(raw: dict[str, Any], *, now: datetime) -> dict[str, Any]:
     if not lease:
         return {"state": "none"}
     lease["state"] = _effective_lease_state(raw, now=now)
-    return redact(lease)
+    return cast(dict[str, Any], redact(lease))
 
 
 def _host_rows(raw: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1008,6 +1067,83 @@ def _mark_beta_draining_raw(
     return next_raw
 
 
+def _mark_prod_pressure_draining_raw(
+    raw: dict[str, Any],
+    *,
+    now: datetime,
+    pressure: ProdPressure,
+) -> dict[str, Any]:
+    next_raw = copy.deepcopy(raw)
+    lease = {**_lease_table(next_raw)}
+    lease["state"] = "prod_pressure_draining"
+    lease["stopped_new_claims"] = True
+    lease.setdefault("prod_pressure_started_at", _format_time(now))
+    lease["prod_pressure_reason"] = "prod capacity pressure"
+    lease["prod_pressure_counts"] = {
+        "prod_pending_count": pressure.prod_pending_count,
+        "prod_active_count": pressure.prod_active_count,
+        "prod_capacity_shortfall": pressure.prod_capacity_shortfall,
+    }
+    lease["prod_pressure_source"] = _safe_reason(
+        pressure.source,
+        fallback="operator supplied prod pressure summary",
+    )
+    next_raw["beta_capacity_lease"] = lease
+    return next_raw
+
+
+def _recover_prod_pressure_lease_raw(
+    raw: dict[str, Any],
+    *,
+    path: Path,
+    unresolved: tuple[str, ...],
+    now: datetime,
+) -> dict[str, Any]:
+    before = _manifest_from_raw(path, raw, unresolved=unresolved)
+    next_raw = copy.deepcopy(raw)
+    lease = {**_lease_table(next_raw)}
+    leased_hosts = lease.get("leased_hosts")
+    if not isinstance(leased_hosts, list):
+        leased_hosts = []
+    slots_per_host = lease.get("slots_per_host", 1)
+    if not isinstance(slots_per_host, int) or isinstance(slots_per_host, bool):
+        slots_per_host = 1
+    max_total_slots = lease.get("max_total_slots")
+    if not isinstance(max_total_slots, int) or isinstance(max_total_slots, bool):
+        max_total_slots = len(leased_hosts) * slots_per_host
+
+    rows = {str(row.get("name")): row for row in _host_rows(next_raw)}
+    remaining = max(0, max_total_slots)
+    hosts_by_name = {host.name: host for host in before.hosts}
+    recovered_hosts: list[str] = []
+    for raw_host_name in leased_hosts:
+        host_name = str(raw_host_name)
+        if remaining < slots_per_host:
+            break
+        host = hosts_by_name.get(host_name)
+        row = rows.get(host_name)
+        if host is None or row is None:
+            continue
+        if host.state in {"host_draining", "unreachable"} or host.total_slots < slots_per_host:
+            continue
+        _set_host_capacity(
+            row,
+            state="eligible",
+            total_slots=host.total_slots,
+            beta_slots=slots_per_host,
+        )
+        recovered_hosts.append(host_name)
+        remaining -= slots_per_host
+
+    lease["state"] = "active"
+    lease["stopped_new_claims"] = False
+    lease["recovered_at"] = _format_time(now)
+    lease["recovery_reason"] = "prod pressure cleared"
+    lease["recovered_hosts"] = recovered_hosts
+    next_raw["beta_capacity_lease"] = lease
+    return next_raw
+
+
 def _write_capacity_manifest(path: Path, raw: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(tomli_w.dumps(raw), encoding="utf-8")
@@ -1026,6 +1162,60 @@ def _new_beta_claims_allowed(
     return all(host.state != "beta_draining" for host in manifest.hosts if host.beta_slots > 0)
 
 
+def _build_preemptible_drain_evidence(
+    *,
+    raw: dict[str, Any],
+    running_beta_trials: int,
+    now: datetime,
+    grace_seconds: int,
+) -> dict[str, Any]:
+    lease = _lease_table(raw)
+    preemptible = bool(lease.get("preemptible", False))
+    started_at = _parse_timestamp(
+        lease.get("prod_pressure_started_at")
+        or lease.get("drained_at")
+        or lease.get("expired_at")
+    )
+    cancel_after = (
+        started_at + timedelta(seconds=grace_seconds)
+        if preemptible and started_at is not None
+        else None
+    )
+    eligible = (
+        running_beta_trials
+        if preemptible
+        and running_beta_trials > 0
+        and cancel_after is not None
+        and now >= cancel_after
+        else 0
+    )
+    if not preemptible:
+        action = "not_preemptible"
+        reason = "beta lease is non-preemptible"
+    elif running_beta_trials <= 0:
+        action = "none"
+        reason = "no running beta trials"
+    elif cancel_after is None:
+        action = "wait"
+        reason = "missing drain start timestamp"
+    elif eligible > 0:
+        action = "cancel_retryable"
+        reason = "prod_capacity_pressure_grace_period_elapsed"
+    else:
+        action = "wait"
+        reason = "grace_period_active"
+    return {
+        "enabled": preemptible,
+        "grace_period_seconds": grace_seconds,
+        "started_at": _format_time(started_at) if started_at else None,
+        "cancel_after": _format_time(cancel_after) if cancel_after else None,
+        "eligible_running_beta_trials": eligible,
+        "retryable": eligible > 0,
+        "action": action,
+        "reason": reason,
+    }
+
+
 def _build_lifecycle_report(
     *,
     path: Path,
@@ -1038,6 +1228,9 @@ def _build_lifecycle_report(
     now: datetime,
     argv: list[str],
     drain: dict[str, Any] | None = None,
+    prod_pressure: ProdPressure | None = None,
+    prod_pressure_recovered: bool = False,
+    preemptible_grace_seconds: int = 0,
 ) -> dict[str, Any]:
     manifest = _manifest_from_raw(path, raw, unresolved=unresolved)
     report = build_report(manifest, workers=workers, drift=[])
@@ -1048,14 +1241,23 @@ def _build_lifecycle_report(
     report["changes"] = {
         "changed_host_count": _changed_host_count(before, manifest),
     }
-    report["drain"] = drain or {
+    drain_report = drain or {
         "running_beta_trials": sum(_running_beta_trials_by_host(manifest, workers).values()),
         "idle_leased_slots": 0,
         "draining_hosts": [],
         "released_idle_hosts": [],
     }
+    drain_report["preemptible"] = _build_preemptible_drain_evidence(
+        raw=raw,
+        running_beta_trials=int(drain_report.get("running_beta_trials") or 0),
+        now=now,
+        grace_seconds=preemptible_grace_seconds,
+    )
+    report["drain"] = drain_report
+    if prod_pressure is not None:
+        report["prod_pressure"] = prod_pressure.public_dict(recovered=prod_pressure_recovered)
     report["command"] = {"argv": redact(argv)}
-    return redact(report)
+    return cast(dict[str, Any], redact(report))
 
 
 def _expect_dict(raw: dict[str, Any], path: Path, key: str) -> dict[str, Any]:
@@ -1225,6 +1427,34 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="UTC ISO-8601 time for deterministic lease previews/tests",
     )
+    parser.add_argument(
+        "--prod-pending-count",
+        type=_non_negative_int,
+        default=0,
+        help="secret-free count of queued production work that should preempt beta capacity",
+    )
+    parser.add_argument(
+        "--prod-active-count",
+        type=_non_negative_int,
+        default=0,
+        help="secret-free count of active production work that should keep capacity prod-first",
+    )
+    parser.add_argument(
+        "--prod-capacity-shortfall",
+        type=_non_negative_int,
+        default=0,
+        help="secret-free production capacity shortfall count",
+    )
+    parser.add_argument(
+        "--prod-pressure-source",
+        default="operator supplied prod pressure summary",
+        help="sanitized source label for the production pressure evidence",
+    )
+    parser.add_argument(
+        "--preemptible-grace-period",
+        default="10m",
+        help="grace period before preemptible running beta work is retryable, e.g. 10m",
+    )
     args = parser.parse_args(raw_argv)
 
     if args.command == "lease-beta":
@@ -1246,6 +1476,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         variables = _parse_vars(args.var)
         now = _parse_now(args.now)
+        preemptible_grace_seconds = _parse_ttl_seconds(args.preemptible_grace_period)
+        prod_pressure = ProdPressure(
+            prod_pending_count=args.prod_pending_count,
+            prod_active_count=args.prod_active_count,
+            prod_capacity_shortfall=args.prod_capacity_shortfall,
+            source=_safe_reason(
+                args.prod_pressure_source,
+                fallback="operator supplied prod pressure summary",
+            ),
+        )
         raw, unresolved = _load_manifest_raw(
             args.manifest,
             variables=variables,
@@ -1260,6 +1500,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "status":
             effective_raw = raw
             drain: dict[str, Any] | None = None
+            recovered_from_prod_pressure = False
             if _effective_lease_state(raw, now=now) == "expired":
                 drained_raw, drain = _drain_beta_capacity_raw(
                     raw,
@@ -1273,6 +1514,32 @@ def main(argv: list[str] | None = None) -> int:
                     reason="beta capacity lease expired",
                     expired=True,
                 )
+            elif prod_pressure.has_pressure and _effective_lease_state(
+                raw,
+                now=now,
+            ) in {"active", "prod_pressure_draining"}:
+                drained_raw, drain = _drain_beta_capacity_raw(
+                    raw,
+                    path=args.manifest,
+                    unresolved=unresolved,
+                    workers=workers,
+                )
+                effective_raw = _mark_prod_pressure_draining_raw(
+                    drained_raw,
+                    now=now,
+                    pressure=prod_pressure,
+                )
+            elif (
+                not prod_pressure.has_pressure
+                and _effective_lease_state(raw, now=now) == "prod_pressure_draining"
+            ):
+                effective_raw = _recover_prod_pressure_lease_raw(
+                    raw,
+                    path=args.manifest,
+                    unresolved=unresolved,
+                    now=now,
+                )
+                recovered_from_prod_pressure = True
             if args.apply:
                 _write_capacity_manifest(args.output_manifest or args.manifest, effective_raw)
             report = _build_lifecycle_report(
@@ -1286,6 +1553,9 @@ def main(argv: list[str] | None = None) -> int:
                 now=now,
                 argv=raw_argv,
                 drain=drain,
+                prod_pressure=prod_pressure,
+                prod_pressure_recovered=recovered_from_prod_pressure,
+                preemptible_grace_seconds=preemptible_grace_seconds,
             )
         elif args.command == "lease-beta":
             ttl_seconds = _parse_ttl_seconds(args.ttl)
@@ -1312,6 +1582,7 @@ def main(argv: list[str] | None = None) -> int:
                 workers=workers,
                 now=now,
                 argv=raw_argv,
+                preemptible_grace_seconds=preemptible_grace_seconds,
             )
         elif args.command == "release-beta":
             next_raw = _release_beta_capacity_raw(
@@ -1333,6 +1604,7 @@ def main(argv: list[str] | None = None) -> int:
                 workers=workers,
                 now=now,
                 argv=raw_argv,
+                preemptible_grace_seconds=preemptible_grace_seconds,
             )
         elif args.command == "drain-beta":
             drained_raw, drain = _drain_beta_capacity_raw(
@@ -1360,6 +1632,7 @@ def main(argv: list[str] | None = None) -> int:
                 now=now,
                 argv=raw_argv,
                 drain=drain,
+                preemptible_grace_seconds=preemptible_grace_seconds,
             )
         else:
             raise ManifestError(f"unsupported command: {args.command}")
