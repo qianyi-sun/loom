@@ -7,6 +7,10 @@ on:
     # `labeled` is included so adding the `ci:integration` label to an
     # existing PR re-triggers CI and runs the gated `integration` job.
     types: [opened, synchronize, reopened, labeled]
+  merge_group:
+    # Required if dev later enables GitHub merge queue: queued merge groups
+    # need to emit the same required `repository-checks` context as PRs.
+    types: [checks_requested]
   workflow_dispatch:
     inputs:
       integration:
@@ -32,12 +36,10 @@ permissions:
   # the GitHub Actions step summary, not as a PR comment.
 
 jobs:
-  # Job name must stay `repository-checks` — the dev branch protection
-  # rule lists this exact context as a required status check.
-  repository-checks:
-    name: repository-checks
+  workflow-plan:
+    name: workflow-plan
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     outputs:
       docs_only: ${{ steps.docs_only.outputs.docs_only }}
     # Skip on push to dev: every squash-merge to dev carries the same
@@ -62,19 +64,19 @@ jobs:
             docs_only=true
             changed_files=$(git diff --name-only \
               "${{ github.event.pull_request.base.sha }}" \
-              "$GITHUB_SHA")
+              "${{ github.event.pull_request.head.sha }}")
             if [[ -z "$changed_files" ]]; then
               docs_only=false
             else
               while IFS= read -r path; do
                 case "$path" in
-                  *.md|docs/*|.gitignore|LICENSE|.editorconfig)
-                    ;;
                   .github/CODEOWNERS)
                     ;;
                   .github/PULL_REQUEST_TEMPLATE.md)
                     ;;
                   .github/ISSUE_TEMPLATE/*)
+                    ;;
+                  *.md|docs/*|.gitignore|LICENSE|.editorconfig)
                     ;;
                   *)
                     docs_only=false
@@ -95,8 +97,16 @@ jobs:
         if: steps.docs_only.outputs.docs_only == 'true'
         run: echo "Only docs/repo metadata changed; heavy checks skipped."
 
+  lint-and-static:
+    name: lint-and-static
+    runs-on: ubuntu-latest
+    needs: workflow-plan
+    timeout-minutes: 12
+    if: needs.workflow-plan.outputs.docs_only != 'true'
+    steps:
+      - uses: actions/checkout@v5
+
       - name: Install uv
-        if: steps.docs_only.outputs.docs_only != 'true'
         uses: astral-sh/setup-uv@v8.2.0
         with:
           enable-cache: true
@@ -106,19 +116,16 @@ jobs:
             uv.lock
 
       - name: Set up Python 3.11
-        if: steps.docs_only.outputs.docs_only != 'true'
         run: uv python install 3.11
 
       - name: Cache .venv
         id: cache-venv
-        if: steps.docs_only.outputs.docs_only != 'true'
         uses: actions/cache@v4
         with:
           path: .venv
           key: venv-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'packages/*/pyproject.toml', 'uv.lock') }}
 
       - name: Install project + dev deps + sibling packages
-        if: steps.docs_only.outputs.docs_only != 'true'
         run: |
           if [[ ! -d .venv ]]; then
             uv venv --python 3.11
@@ -129,41 +136,208 @@ jobs:
           uv pip install -e packages/loom-benchmark-terminal-bench-2
 
       - name: Ruff
-        if: steps.docs_only.outputs.docs_only != 'true'
         run: uv run ruff check src tests packages migrations
 
       - name: Mypy (strict)
-        if: steps.docs_only.outputs.docs_only != 'true'
         run: uv run mypy
 
       - name: Verify codegen up-to-date
-        if: steps.docs_only.outputs.docs_only != 'true'
         run: uv run loom config codegen --check
 
       - name: Verify agent install_scripts are pinned (#317)
-        if: steps.docs_only.outputs.docs_only != 'true'
         run: uv run python scripts/check_install_scripts_pinned.py
 
+  tests-root:
+    name: tests-root
+    runs-on: ubuntu-latest
+    needs: workflow-plan
+    timeout-minutes: 15
+    if: needs.workflow-plan.outputs.docs_only != 'true'
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            packages/*/pyproject.toml
+            uv.lock
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Cache .venv
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'packages/*/pyproject.toml', 'uv.lock') }}
+
+      - name: Install project + dev deps + sibling packages
+        run: |
+          if [[ ! -d .venv ]]; then
+            uv venv --python 3.11
+          fi
+          uv pip install -e ".[dev]"
+          uv pip install -e packages/loom-launcher
+          uv pip install -e packages/loom-benchmarks
+          uv pip install -e packages/loom-benchmark-terminal-bench-2
+
       - name: Pytest — unit + contract + property + loom_cli
-        if: steps.docs_only.outputs.docs_only != 'true'
         run: |
           uv run pytest \
             tests/unit tests/contract tests/property tests/loom_cli tests/ops \
             --cov=src --cov=packages \
             --cov-report=term --cov-report=xml
 
+      - name: Upload root coverage data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-data-root
+          path: .coverage
+          include-hidden-files: true
+          if-no-files-found: warn
+
+  tests-packages:
+    name: tests-packages
+    runs-on: ubuntu-latest
+    needs: workflow-plan
+    timeout-minutes: 10
+    if: needs.workflow-plan.outputs.docs_only != 'true'
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            packages/*/pyproject.toml
+            uv.lock
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Cache .venv
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'packages/*/pyproject.toml', 'uv.lock') }}
+
+      - name: Install project + dev deps + sibling packages
+        run: |
+          if [[ ! -d .venv ]]; then
+            uv venv --python 3.11
+          fi
+          uv pip install -e ".[dev]"
+          uv pip install -e packages/loom-launcher
+          uv pip install -e packages/loom-benchmarks
+          uv pip install -e packages/loom-benchmark-terminal-bench-2
+
       - name: Pytest — sibling packages
-        if: steps.docs_only.outputs.docs_only != 'true'
         run: |
           uv run pytest \
             packages/loom-launcher/tests \
             packages/loom-benchmarks/tests \
             packages/loom-benchmark-terminal-bench-2/tests \
-            --cov=src --cov=packages --cov-append \
+            --cov=src --cov=packages \
             --cov-report=term --cov-report=xml
 
+      - name: Upload package coverage data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-data-packages
+          path: .coverage
+          include-hidden-files: true
+          if-no-files-found: warn
+
+  # Job name must stay `repository-checks` — the dev branch protection
+  # rule lists this exact context as a required status check. The heavy
+  # work runs in parallel jobs above; this aggregator keeps the protected
+  # context stable and owns the final fast-tier coverage gate.
+  repository-checks:
+    name: repository-checks
+    runs-on: ubuntu-latest
+    needs:
+      - workflow-plan
+      - lint-and-static
+      - tests-root
+      - tests-packages
+    timeout-minutes: 10
+    if: >-
+      always() &&
+      (github.event_name != 'push' || github.ref != 'refs/heads/dev')
+    outputs:
+      docs_only: ${{ needs.workflow-plan.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate parallel check results
+        run: |
+          set -euo pipefail
+          docs_only="${{ needs.workflow-plan.outputs.docs_only }}"
+          if [[ "${docs_only}" == "true" ]]; then
+            echo "Only docs/repo metadata changed; heavy checks skipped."
+            exit 0
+          fi
+          for result in \
+            "${{ needs.workflow-plan.result }}" \
+            "${{ needs.lint-and-static.result }}" \
+            "${{ needs.tests-root.result }}" \
+            "${{ needs.tests-packages.result }}"
+          do
+            if [[ "${result}" != "success" ]]; then
+              echo "Required parallel check result was ${result}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Install uv
+        if: needs.workflow-plan.outputs.docs_only != 'true'
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.11
+        if: needs.workflow-plan.outputs.docs_only != 'true'
+        run: uv python install 3.11
+
+      - name: Install coverage
+        if: needs.workflow-plan.outputs.docs_only != 'true'
+        run: |
+          uv venv --python 3.11
+          uv pip install 'coverage>=7'
+
+      - name: Download root coverage
+        if: needs.workflow-plan.outputs.docs_only != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-data-root
+          path: cov-root
+
+      - name: Download package coverage
+        if: needs.workflow-plan.outputs.docs_only != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-data-packages
+          path: cov-packages
+
+      - name: Combine fast-tier coverage
+        if: needs.workflow-plan.outputs.docs_only != 'true'
+        run: |
+          cp cov-root/.coverage .coverage.root
+          cp cov-packages/.coverage .coverage.packages
+          uv run coverage combine .coverage.root .coverage.packages
+          uv run coverage xml
+
       - name: Upload coverage.xml
-        if: always() && steps.docs_only.outputs.docs_only != 'true'
+        if: always() && needs.workflow-plan.outputs.docs_only != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-xml-fast
@@ -173,7 +347,7 @@ jobs:
       # Binary .coverage data file (SQLite) consumed by coverage-summary
       # job to combine with integration-tier coverage.
       - name: Upload fast-tier coverage data
-        if: always() && steps.docs_only.outputs.docs_only != 'true'
+        if: always() && needs.workflow-plan.outputs.docs_only != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-data-fast
@@ -187,7 +361,7 @@ jobs:
       # grows. Combined-tier baseline collection (Phase 3) happens in
       # the `coverage-summary` job; no combined-tier gate yet.
       - name: Coverage gate (fast tier)
-        if: steps.docs_only.outputs.docs_only != 'true'
+        if: needs.workflow-plan.outputs.docs_only != 'true'
         run: uv run coverage report --fail-under=70
 
   # Go binary checks (#78 Phase B). Separate from repository-checks

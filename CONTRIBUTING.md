@@ -10,8 +10,10 @@
 > GitHub-flow project. Normal
 > changes land through PRs into `dev`; `main` remains reserved for
 > release promotion from `dev`. `repository-checks` remains the required
-> fast CI gate. Normal `dev` PRs use GitHub auto-merge, so GitHub
-> squash-merges once required checks and required review state pass.
+> fast CI gate. It is an aggregator over parallel lint/static/test jobs, so
+> branch protection keeps one stable context while CI work fans out. Normal
+> `dev` PRs use GitHub auto-merge, so GitHub squash-merges once required
+> checks and required review state pass.
 > External pull requests are accepted for issue-scoped work that follows
 > the templates below. Workflows that need publish or deployment secrets
 > must use protected GitHub Environments and must not expose secrets to
@@ -137,6 +139,10 @@ worker-token secrets.
   GitHub squash-merges when `repository-checks` and any required review
   state pass; do not hand-merge eligible `dev` PRs just because CI is
   green.
+- Do not assume PR image builds run automatically. Add the `ci:images`
+  label when a PR needs multi-arch image evidence before merge; pushes to
+  `dev`/`main` still publish deployable images from the path-aware image
+  workflow.
 - Human review is required only on branches or environments whose
   protection rules demand it, and for external PRs before enabling or
   approving auto-merge
@@ -187,6 +193,10 @@ have one place to audit them.
   protected Environments so they are not available to pull request code.
 - **Branch protection on `main` and `dev`** keeps `repository-checks`
   required, blocks direct pushes, and enforces squash-only merges.
+- **Merge queue readiness**: `repository-checks` also runs on GitHub's
+  `merge_group` event. Maintainers should prefer enabling GitHub merge queue
+  over weakening strict required-check behavior when PR concurrency causes
+  repeated behind-branch reruns.
 - **Selected Actions sources** restricts third-party actions to the
   pinned allowlist; new actions are added by maintainer review.
 - **Secret scanning** is enabled at the repo level.

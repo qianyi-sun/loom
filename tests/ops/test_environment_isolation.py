@@ -174,7 +174,7 @@ def test_deploy_workflow_keeps_production_secrets_on_main_or_semver_tags() -> No
 
 def test_repository_checks_run_environment_isolation_tests() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
-    steps = workflow["jobs"]["repository-checks"]["steps"]
+    steps = workflow["jobs"]["tests-root"]["steps"]
     pytest_steps = [
         step
         for step in steps
