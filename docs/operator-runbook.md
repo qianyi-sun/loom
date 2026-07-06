@@ -15,11 +15,11 @@ operator contract; do not reuse kubeconfigs, databases, object buckets,
 SecretStore keys, worker tokens, provider connections, or deploy credentials
 across rows.
 
-| Environment | Git branch / ref | GitHub Environment | Namespace | Public host | DB name | Object buckets |
-|---|---|---|---|---|---|---|
-| `development` | `dev` only | `development` | `loom-dev` | `dev.yylx.world` | `loom_dev` | `loom-dev-trajectories`, `loom-dev-artifacts` |
-| `staging` | pinned `dev` SHA | `staging` | `loom-staging` | `staging.yylx.world` | `loom_staging` | `loom-staging-trajectories`, `loom-staging-artifacts` |
-| `production` | `main` plus immutable `vX.Y.Z` release tags | `production` | `loom-prod` | `yylx.world` | `loom_prod` | `loom-prod-trajectories`, `loom-prod-artifacts` |
+| Environment | Git branch / ref | GitHub Environment | Namespace | Public route | API base | DB name | Object buckets |
+|---|---|---|---|---|---|---|---|
+| `development` | `dev` only | `development` | `loom-dev` | `https://yylx.world/dev` | `https://yylx.world/dev/api` | `loom_dev` | `loom-dev-trajectories`, `loom-dev-artifacts` |
+| `staging` | pinned `dev` SHA | `staging` | `loom-staging` | `https://staging.yylx.world` | `https://staging.yylx.world/api` | `loom_staging` | `loom-staging-trajectories`, `loom-staging-artifacts` |
+| `production` | `main` plus immutable `vX.Y.Z` release tags | `production` | `loom-prod` | `https://yylx.world/prod` | `https://yylx.world/prod/api` | `loom_prod` | `loom-prod-trajectories`, `loom-prod-artifacts` |
 
 Committed environment profiles live in `deploy/environments/`. Each profile
 has a matching `*.cluster.toml` render input. The production profile follows
@@ -56,13 +56,14 @@ python scripts/validate_environment_isolation.py \
   --dry-run-artifact release-evidence/environment-isolation-dry-run.json
 ```
 
-It verifies the committed environment profile names, namespaces, domains,
-database names, object buckets, SecretStore key refs, worker-token refs,
-service API token refs, provider/YibuAPI secret refs, provider-connection
-namespaces, cluster render inputs, and workflow branch guards. The dry-run
-artifact records only target identities and safe secret refs; it must not
-contain credential values, bearer tokens, signed URLs, object-store keys, or
-provider API keys. The same check runs in repository CI through `tests/ops`.
+It verifies the committed environment profile names, namespaces, canonical
+frontend routes/API bases, database names, object buckets, SecretStore key
+refs, worker-token refs, service API token refs, provider/YibuAPI secret refs,
+provider-connection namespaces, cluster render inputs, and workflow branch
+guards. The dry-run artifact records only target identities and safe secret
+refs; it must not contain credential values, bearer tokens, signed URLs,
+object-store keys, or provider API keys. The same check runs in repository CI
+through `tests/ops`.
 
 Before the first production migration or production batch, record a fresh
 backup/snapshot pointer for the production database and object buckets in the
@@ -315,7 +316,7 @@ Each verb:
 | `loom cluster release-manifest` | Write a safe pre-apply rollout artifact with the candidate git SHA/image tag, CLI version, cluster-config and rendered-manifest hashes, intended Deployment images, optional expected image digests/IDs from `--expected-image-identities-json`, Alembic heads, and environment-state worker desired-state fingerprints | 0 written / 2 bad input |
 | `loom cluster minio-storage-preflight` | Execs into `loom-minio-0` and records `/data` filesystem size/used/free/percent, bucket usage for artifacts/trajectories/benchmark-task data, configured warning/stop thresholds, optional estimated batch headroom, and rapid artifact/trajectory growth when `--previous-evidence` is supplied. Writes JSON with `--output`; exits 1 on stop unless `--allow-storage-stop-override` is supplied. | 0 pass or warning / 1 stop threshold / 2 bad input or unreachable |
 | `loom cluster release-gate` | Compare the release manifest against the saved rendered/config hashes, live target-generation image evidence, live DB Alembic heads queried through `deploy/loom-control-plane`, the `loom admin environment-state check --format json` artifact when the manifest records external-worker desired state, the `loom admin gb10-workers status --format json` artifact when the manifest records GB10 desired state, and the optional `--minio-storage-preflight` artifact for a `minio-storage-pressure` component row. Running Deployments use exact Ready-pod runtime digest/image-ID comparison when available; kind-loaded `import-YYYY-MM-DD@sha256:...` runtime identities are accepted only with matching target-generation pod spec and Deployment template images; zero-replica managed Deployments use template-image convergence evidence. JSON output includes `component_evidence`; `--format markdown` writes the pasteable per-component release evidence table for issue comments. | 0 pass / 1 hard-check fail / 2 bad input or unreachable |
-| `loom cluster audit` | Static public/internal boundary check on rendered manifests: TLS ingress, only `/api/v1` → `loom-service` and `/` → `loom-web`, no LoadBalancer/NodePort, no unsafe hostPort, required NetworkPolicies present | 0 clean / 1 violation / 2 bad config |
+| `loom cluster audit` | Static public/internal boundary check on rendered manifests: TLS ingress, only `/api/v1` → `loom-service` and `/` → `loom-web` or the canonical `/prod`/`/dev` prefixed equivalents, no LoadBalancer/NodePort, no unsafe hostPort, required NetworkPolicies present | 0 clean / 1 violation / 2 bad config |
 | `loom cluster up` | Preflight → render → protected-environment rollout mutation lease acquisition → `kubectl apply` → wait for components ready, Deployment generations observed, updated replicas converged, managed Deployment pods inspectable and free of blocking CrashLoop/image/config/start failures, kube-system rollout controllers healthy, and live Deployment images matching the rendered manifests; prints rendered/live image evidence for managed Deployments. For staging/staging/production, pass `--rollout-id` and `--rollout-lock-evidence` so evidence records acquisition and release/failure state. | 0 ready / 1 lock contention, not-ready, or image drift / 2 unreachable or kubectl missing |
 | `loom cluster status` | Live readiness snapshot with ingress endpoints; marks stale Deployment generations, incomplete updated replicas, failed managed-pod inspection, managed Deployment pod CrashLoop/image/config/start failures, and visible kube-system controller/scheduler/etcd/API pod failures as not-ready | 0 all-ready / 1 not-ready / 2 unreachable |
 | `loom cluster down` | `kubectl delete` of the rendered manifests; opt-in `--with-volumes` (PVCs) and `--delete-namespace` for full teardown. Protected environments require `--backup-manifest` and `--acknowledge-data-loss` before destructive flags. | 0 / 1 on failure, invalid backup guard, or operator-cancelled prompt |
@@ -385,8 +386,16 @@ knob you need.
    is the production/public path; dev compose is loopback-only by default and
    must not be used as the Internet-facing deployment.
 
-   - Create a DNS A/AAAA or CNAME record for `ingress_host` pointing at your
+  - Create a DNS A/AAAA or CNAME record for `ingress_host` pointing at your
      ingress controller's public address.
+   - For first production, use the committed route split instead of separate
+     user-facing hosts: production renders `https://yylx.world/prod` with API
+     calls under `https://yylx.world/prod/api`, and development/public-beta
+     renders `https://yylx.world/dev` with API calls under
+     `https://yylx.world/dev/api`. The web pod writes
+     `loom-frontend-config.json` from runtime environment variables on startup
+     and nginx serves it with `Cache-Control: no-store`, so a stale Vite build
+     or browser-cached config cannot silently keep pointing at the wrong API.
    - For a lab or invite-only staging host reached directly by IP address, set
      `ingress_host` to that IP and pre-create the TLS Secret with a certificate
      whose Subject Alternative Name includes the IP address. Kubernetes rejects
@@ -3126,16 +3135,32 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
 
 1. **Cluster healthy.** `loom cluster status --namespace loom` reports
    `all_ready=True`. `kubectl get pods -n loom` shows no `CrashLoopBackOff`.
-2. **Public surface reachable.** `curl -sf https://<ingress_host>/api/v1/health`
-   returns `200`. `curl -sf https://<ingress_host>/` returns the SPA
-   index when `loom-web` replicas > 0.
+2. **Public surface reachable.** For root-host deployments,
+   `curl -sf https://<ingress_host>/api/v1/health` returns `200` and
+   `curl -sf https://<ingress_host>/` returns the SPA index when `loom-web`
+   replicas > 0. For first prod route-split deployments, check
+   `https://yylx.world/prod/api/v1/health`,
+   `https://yylx.world/dev/api/v1/health`, `https://yylx.world/prod`, and
+   `https://yylx.world/dev`.
 3. **Boundary holds.** `loom cluster audit` exits 0. `kubectl get svc -n loom`
    shows no `LoadBalancer` / `NodePort` services. `kubectl get ingress -n loom`
    shows TLS enabled and backends only for `loom-service` at `/api/v1` and
-   `loom-web` at `/`. `loom-llm-gateway`, Control Plane, Postgres, MinIO,
-   workers, worker-token admin routes, and batch-runner bootstrap routes stay
+   `loom-web` at `/`, or the canonical `/prod`/`/dev` prefixed equivalents.
+   `loom-llm-gateway`, Control Plane, Postgres, MinIO, workers,
+   worker-token admin routes, and batch-runner bootstrap routes stay
    internal-only.
-4. **Remote-worker private tunnels hold.** If remote workers are attached,
+4. **Frontend route metadata holds.** Before traffic, run the no-secret route
+   smoke against the public runtime config:
+   ```bash
+   python scripts/ops/frontend_route_smoke.py \
+     --route production=https://yylx.world/prod=https://yylx.world/prod/api \
+     --route development=https://yylx.world/dev=https://yylx.world/dev/api \
+     --json
+   ```
+   Both route documents must report the expected `environment`,
+   `environmentLabel`, `routePath`, `apiBase`, and `apiRouteBase`; the response
+   must be `no-store`. Production labels must not contain beta wording.
+5. **Remote-worker private tunnels hold.** If remote workers are attached,
    collect watchdog evidence, then verify the exact worker-facing URLs from the
    control node and at least one worker host. The evidence command resolves the
    active `--env-file` path from the systemd unit without reading or printing

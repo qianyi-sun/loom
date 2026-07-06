@@ -25,11 +25,14 @@ on:
     paths:
       - "deploy/Dockerfile.*"
       - "deploy/nginx-spa.conf"
+      - "deploy/web-runtime-config.sh"
       - "src/**"
       - "packages/**"
       - "pyproject.toml"
+      - "web/index.html"
       - "web/package*.json"
       - "web/src/**"
+      - "web/vite.config.ts"
       - ".github/workflows/images.yml"
       # Markdown is never baked into the image; trailing negation
       # overrides any positive match above (e.g. packages/<x>/README.md).
@@ -39,11 +42,14 @@ on:
     paths:
       - "deploy/Dockerfile.*"
       - "deploy/nginx-spa.conf"
+      - "deploy/web-runtime-config.sh"
       - "src/**"
       - "packages/**"
       - "pyproject.toml"
+      - "web/index.html"
       - "web/package*.json"
       - "web/src/**"
+      - "web/vite.config.ts"
       - ".github/workflows/images.yml"
       # Markdown is never baked into the image; trailing negation
       # overrides any positive match above (e.g. packages/<x>/README.md).

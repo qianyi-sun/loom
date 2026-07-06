@@ -23,6 +23,17 @@ spec:
       containers:
         - name: loom-web
           image: loom-web:{{ image_tag }}
+          env:
+            - name: LOOM_FRONTEND_ENVIRONMENT
+              value: "{{ frontend_environment }}"
+            - name: LOOM_FRONTEND_ENVIRONMENT_LABEL
+              value: "{{ frontend_environment_label }}"
+            - name: LOOM_FRONTEND_ROUTE_PATH
+              value: "{{ frontend_route_path }}"
+            - name: LOOM_FRONTEND_API_BASE
+              value: "{{ frontend_api_base_path }}"
+            - name: LOOM_FRONTEND_PUBLIC_ORIGIN
+              value: "{{ frontend_public_origin }}"
           ports:
             - containerPort: 8080
           readinessProbe:

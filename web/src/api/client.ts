@@ -6,6 +6,7 @@
  * typed `ApiError`s.
  */
 
+import { getApiBase } from "../lib/frontendConfig";
 import type { paths } from "./schema";
 
 export type ApiError = { status: number; detail: string };
@@ -21,10 +22,7 @@ export function setCsrfToken(token: string | null): void {
 }
 
 function apiBase(): string {
-  const env = (
-    import.meta as unknown as { env: { VITE_API_BASE?: string } }
-  ).env;
-  return env.VITE_API_BASE ?? "";
+  return getApiBase();
 }
 
 function isUnsafeMethod(method?: string): boolean {

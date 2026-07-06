@@ -1,6 +1,10 @@
 namespace = "loom-prod"
 ingress_host = "yylx.world"
 ingress_tls_secret_name = "loom-prod-tls"
+frontend_environment = "production"
+frontend_environment_label = "Production"
+frontend_route_path = "/prod"
+frontend_api_base_path = "/prod"
 trajectories_bucket = "loom-prod-trajectories"
 artifacts_bucket = "loom-prod-artifacts"
 

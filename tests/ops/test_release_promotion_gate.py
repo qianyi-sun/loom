@@ -254,6 +254,27 @@ def test_release_gate_rejects_missing_required_checks_and_secret_leaks(tmp_path:
     assert "provider_smoke.notes" in result.stderr
 
 
+def test_release_gate_rejects_frontend_route_api_mismatches(tmp_path: Path) -> None:
+    manifest = _passing_evidence()
+    manifest["checks"]["frontend_route_evidence"]["production_api_base"] = (
+        "https://yylx.world/dev/api"
+    )
+
+    result = _run_release_gate(
+        tmp_path,
+        manifest,
+        "validate",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "release-0123456789ab",
+    )
+
+    assert result.returncode == 1
+    assert "frontend_route_evidence.production_api_base" in result.stderr
+    assert "must be https://yylx.world/prod/api" in result.stderr
+
+
 def test_release_gate_requires_immutable_semver_prod_tag(
     tmp_path: Path,
 ) -> None:

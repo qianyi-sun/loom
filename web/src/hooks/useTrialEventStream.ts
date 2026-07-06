@@ -26,6 +26,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { components } from "../api/schema";
+import { getApiBase } from "../lib/frontendConfig";
 
 type TrajEvent = components["schemas"]["TrajectoryEvent"];
 
@@ -44,7 +45,7 @@ export interface UseTrialEventStreamOptions {
   enabled?: boolean;
   /**
    * Override the base URL the EventSource opens against. Defaults to
-   * Vite's `VITE_API_BASE`, matching `apiBase()` in `api/client.ts`.
+   * the runtime frontend API base, matching `apiBase()` in `api/client.ts`.
    */
   baseUrl?: string;
   /**
@@ -61,10 +62,7 @@ export interface UseTrialEventStreamResult {
 }
 
 function _defaultBaseUrl(): string {
-  const env = (
-    import.meta as unknown as { env: { VITE_API_BASE?: string } }
-  ).env;
-  return env?.VITE_API_BASE ?? "";
+  return getApiBase();
 }
 
 export function useTrialEventStream(

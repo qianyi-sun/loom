@@ -214,8 +214,8 @@ and the kind smoke runs it before `kubectl apply` — see #77.
 
 | Component | Public via Ingress | Reason |
 |---|---|---|
-| `loom-service` | Yes — `https://<ingress_host>/api/v1/*` | The user-facing REST surface and authenticated service-proxied downloads. |
-| `loom-web` | Yes — `https://<ingress_host>/` | The React SPA. Replica count is 0 by default; operators scale up to enable. |
+| `loom-service` | Yes — `https://<ingress_host>/api/v1/*`, or `https://yylx.world/{prod,dev}/api/v1/*` for first-prod route-split profiles | The user-facing REST surface and authenticated service-proxied downloads. |
+| `loom-web` | Yes — `https://<ingress_host>/`, or `https://yylx.world/{prod,dev}` for first-prod route-split profiles | The React SPA. Replica count is 0 by default; operators scale up to enable. |
 | `loom-llm-gateway` | **No** | LLM calls stay behind the sandbox singleton / gateway-router path. Public browser and CLI clients use `loom-service` under `/api/v1`. |
 | `loom-control-plane` | **No** — port-forward for operator-side admin curls | Worker claim path + admin token issuance must not be reachable from the public Internet. |
 | `loom-worker` | **No** | Worker pods talk only to control-plane via cluster DNS. |
@@ -242,8 +242,11 @@ gets a `cert-manager.io/cluster-issuer` annotation; without cert-manager,
 operators pre-create the named TLS Secret.
 Production-like deployments should use the committed environment-specific
 render inputs under `deploy/environments/` so `development`, `staging`, and
-`production` keep separate namespaces, public hosts, object buckets, worker
-tokens, provider namespaces, SecretStore keys, and database names.
+`production` keep separate namespaces, frontend routes/API bases, object
+buckets, worker tokens, provider namespaces, SecretStore keys, and database
+names. First-prod `development` and `production` intentionally share
+`ingress_host = "yylx.world"` and split traffic by `/dev` and `/prod` path
+prefixes.
 When `ingress_host` is an IP literal for a lab or invite-only staging
 entrypoint, the renderer omits `spec.rules[].host` and `tls.hosts` because the
 Kubernetes API rejects IP literals in those fields. Operators must still
@@ -253,7 +256,7 @@ reach `https://<ip-address>`.
 The audit checks:
 
 1. **Service type.** Every `Service` must be `ClusterIP`. `LoadBalancer` or `NodePort` would publish a pod to external traffic; the public surface is supposed to flow through the shared Ingress.
-2. **Ingress TLS and paths.** Every Ingress must declare TLS. `loom-service` may appear only at `/api/v1`; `loom-web` may appear only at `/`; `defaultBackend` is rejected because it hides catch-all routing.
+2. **Ingress TLS and paths.** Every Ingress must declare TLS. `loom-service` may appear only at `/api/v1` or canonical `/prod`/`/dev` API rewrite paths; `loom-web` may appear only at `/` or canonical `/prod`/`/dev` SPA paths; `defaultBackend` is rejected because it hides catch-all routing.
 3. **Ingress backends.** Only `loom-service` and `loom-web` are allowed. Control Plane, LLM Gateway, Postgres, MinIO, worker, egress, worker-token admin, and batch-runner bootstrap surfaces must not be reachable from public Ingress.
 4. **`hostPort` declarations.** Any container port that binds to the node interface is flagged unless it is the explicitly allowlisted `loom-gateway-router` path used by sandbox-Docker → gateway routing.
 5. **NetworkPolicy coverage.** Required Loom components must have a matching NetworkPolicy selector so Kubernetes does not fall back to namespace default allow-all.

@@ -18,7 +18,7 @@ The important product boundary is simple:
   LM Studio, or hosted API endpoint is operated by the user/team and registered
   as a provider connection.
 
-Public beta: [https://yylx.world](https://yylx.world)
+Public beta/dev route: [https://yylx.world/dev](https://yylx.world/dev)
 
 ## What Loom Does
 
@@ -227,7 +227,7 @@ Pick the path that matches what you have:
 
 | You have… | Use |
 |---|---|
-| An account on a running Loom (e.g. `https://yylx.world`) and want clicks | [Submit From the Web App](#quickstart-submit-from-the-web-app) |
+| An account on a running Loom (e.g. `https://yylx.world/dev`) and want clicks | [Submit From the Web App](#quickstart-submit-from-the-web-app) |
 | The same account but prefer a terminal | [Submit From the CLI](#quickstart-submit-from-the-cli-to-any-loom-server) |
 | No account; you want to run the full stack on your own machine | [Run Loom Locally](#quickstart-run-loom-locally) |
 | No stack at all, just a task + a model key, throwaway run | [Laptop-Only `loom run`](#quickstart-laptop-only-loom-run) |
@@ -250,7 +250,7 @@ Use this path when presenting the public UI.
 > Full flow:
 > [`docs/user-guide.md#web-sessions-and-teams`](docs/user-guide.md#web-sessions-and-teams).
 
-1. Open [https://yylx.world](https://yylx.world) or your local Loom URL.
+1. Open [https://yylx.world/dev](https://yylx.world/dev) or your local Loom URL. First production uses [https://yylx.world/prod](https://yylx.world/prod).
 2. Sign in and select the team that owns the run.
 3. Open **Providers**.
    - Add a third-party provider connection, or register a self-hosted
@@ -300,7 +300,7 @@ first.
 
 ```bash
 export LOOM_PASSWORD=...
-loom auth login --server https://yylx.world --username USER --password env:LOOM_PASSWORD
+loom auth login --server https://yylx.world/dev --username USER --password env:LOOM_PASSWORD
 loom auth whoami
 ```
 

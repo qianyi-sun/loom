@@ -57,8 +57,13 @@ Attach these to the release issue or release PR:
   plus the exact `deploy/environments/staging.cluster.toml` and
   `deploy/environments/production.cluster.toml` inputs used for the candidate.
 - `loom cluster audit` output showing TLS ingress, only `/` and `/api/v1`
-  public backends, no public LLM Gateway, no public Control Plane, and no public
-  object store.
+  public backends or the canonical `/prod`/`/dev` prefixed equivalents, no
+  public LLM Gateway, no public Control Plane, and no public object store.
+- For first prod, `python scripts/ops/frontend_route_smoke.py --route ...`
+  output proving `https://yylx.world/prod` exposes production identity and
+  `https://yylx.world/prod/api`, while `https://yylx.world/dev` exposes
+  development/public-beta identity and `https://yylx.world/dev/api`, with
+  no-store runtime config responses.
 - Screenshots or notes for logged-out SPA load, account request, admin account
   approval link, password setup, forgot-password request/reset approval, Team
   Settings, provider setup, SPA batch submission, Monitor progress showing

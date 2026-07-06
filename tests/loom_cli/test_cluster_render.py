@@ -641,6 +641,42 @@ def test_render_ingress_routes_only_api_and_spa_backends() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("filename", "route_path"),
+    [
+        ("production.cluster.toml", "/prod"),
+        ("development.cluster.toml", "/dev"),
+    ],
+)
+def test_render_profile_ingress_routes_api_and_spa_under_frontend_prefix(
+    filename: str,
+    route_path: str,
+) -> None:
+    cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / filename)
+    docs = _load_docs(render_manifests(cfg))
+    ingress = next(d for d in docs if d["kind"] == "Ingress")
+
+    annotations = ingress["metadata"]["annotations"]
+    assert annotations["nginx.ingress.kubernetes.io/use-regex"] == "true"
+    assert annotations["nginx.ingress.kubernetes.io/rewrite-target"] == "/$2"
+
+    rule = ingress["spec"]["rules"][0]
+    assert rule["host"] == "yylx.world"
+    paths = rule["http"]["paths"]
+    assert [
+        (
+            p["path"],
+            p["pathType"],
+            p["backend"]["service"]["name"],
+            p["backend"]["service"]["port"]["number"],
+        )
+        for p in paths
+    ] == [
+        (f"{route_path}(/|$)(api/v1.*)", "ImplementationSpecific", "loom-service", 8090),
+        (f"{route_path}(/|$)(.*)", "ImplementationSpecific", "loom-web", 80),
+    ]
+
+
 def test_render_custom_storage_sizes() -> None:
     cfg = _default_cfg(
         postgres_storage_gi=200,

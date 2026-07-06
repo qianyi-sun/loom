@@ -928,6 +928,26 @@ python_type = "str"
 default     = ""
 description = "Optional cert-manager ClusterIssuer name for automatic TLS."
 
+[render_config.frontend_environment]
+python_type = "str"
+default     = "local"
+description = "Public SPA environment identity written to the runtime frontend config."
+
+[render_config.frontend_environment_label]
+python_type = "str"
+default     = "Local development"
+description = "Human-readable public SPA environment label shown in the UI chrome."
+
+[render_config.frontend_route_path]
+python_type = "str"
+default     = ""
+description = "Public SPA path prefix on ingress_host. Empty means host root; production uses /prod and development/public-beta uses /dev."
+
+[render_config.frontend_api_base_path]
+python_type = "str"
+default     = ""
+description = "Public path prefix prepended by the SPA API client before /api/v1. Must match frontend_route_path for protected prod/dev routes."
+
 [render_config.postgres_image]
 python_type = "str"
 default     = "postgres:16"

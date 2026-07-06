@@ -6,6 +6,10 @@ metadata:
     # Adjust to match your cluster's ingress controller (nginx, traefik,
     # gke-ingress, alb, etc.). Defaults assume nginx.
     nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+{% if frontend_prefixed_route %}
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+{% endif %}
 {% if ingress_cert_manager_cluster_issuer %}
     cert-manager.io/cluster-issuer: {{ ingress_cert_manager_cluster_issuer }}
 {% endif %}
@@ -23,10 +27,15 @@ spec:
       secretName: {{ ingress_tls_secret_name }}
 {% endif %}
   rules:
-    # On `{{ ingress_host }}`:
+    # On `{{ ingress_host }}`{% if frontend_route_path %} under `{{ frontend_route_path }}`{% endif %}:
+{% if frontend_prefixed_route %}
+    #   {{ frontend_route_path }}/api/v1/*  → loom_service (rewritten to /api/v1/*)
+    #   {{ frontend_route_path }}/*         → loom_web (rewritten before nginx fallback)
+{% else %}
     #   /api/v1/*  → loom_service (REST surface mounted at /api/v1/*)
     #   anything else → loom_web (React SPA; nginx falls back to
     #                   index.html for client-side React Router paths)
+{% endif %}
     #
     # Path order matters: more-specific `/api/v1` MUST precede the
     # catch-all `/`. Nginx ingress evaluates Prefix paths longest-first
@@ -38,6 +47,22 @@ spec:
       http:
 {% endif %}
         paths:
+{% if frontend_prefixed_route %}
+          - path: {{ frontend_route_path }}(/|$)(api/v1.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: loom-service
+                port:
+                  number: 8090
+          - path: {{ frontend_route_path }}(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: loom-web
+                port:
+                  number: 80
+{% else %}
           - path: /api/v1
             pathType: Prefix
             backend:
@@ -52,6 +77,7 @@ spec:
                 name: loom-web
                 port:
                   number: 80
+{% endif %}
   # NOTE: the Control Plane (`loom-control-plane:8080`) is intentionally
   # NOT exposed via Ingress. It carries worker-only routes
   # (`POST /trials/claim`, `PATCH /trials/{id}/state`) and admin

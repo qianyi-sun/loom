@@ -36,6 +36,16 @@ _EXPECTED_INGRESS_ROUTES: dict[str, str] = {
     "loom-service": "/api/v1",
     "loom-web": "/",
 }
+_EXPECTED_PREFIXED_INGRESS_ROUTES: dict[str, frozenset[str]] = {
+    "loom-service": frozenset({
+        "/prod(/|$)(api/v1.*)",
+        "/dev(/|$)(api/v1.*)",
+    }),
+    "loom-web": frozenset({
+        "/prod(/|$)(.*)",
+        "/dev(/|$)(.*)",
+    }),
+}
 
 # Pods that MUST have a NetworkPolicy selecting them (#78 slice C).
 # These are the in-cluster Loom components; an internal-only workload
@@ -219,7 +229,7 @@ def _audit_ingress(
             if svc_name:
                 expected_path = _EXPECTED_INGRESS_ROUTES[svc_name]
                 actual_path = path.get("path", "")
-                if actual_path != expected_path:
+                if not _is_expected_ingress_route(svc_name, actual_path):
                     out.append(BoundaryViolation(
                         kind="ingress-path",
                         object_kind="Ingress",
@@ -228,7 +238,8 @@ def _audit_ingress(
                             f"Ingress backend {svc_name!r} must be routed "
                             f"only at {expected_path!r}; found path "
                             f"{actual_path!r}. Public ingress may expose "
-                            f"only SPA '/' and API '/api/v1'."
+                            f"only SPA '/' and API '/api/v1', or their "
+                            f"canonical /prod and /dev prefixed routes."
                         ),
                     ))
     # `defaultBackend` catches every request that doesn't match a
@@ -248,6 +259,13 @@ def _audit_ingress(
             ),
         ))
     return out
+
+
+def _is_expected_ingress_route(svc_name: str, actual_path: str) -> bool:
+    return (
+        actual_path == _EXPECTED_INGRESS_ROUTES[svc_name]
+        or actual_path in _EXPECTED_PREFIXED_INGRESS_ROUTES[svc_name]
+    )
 
 
 def _ingress_has_valid_tls(spec: dict[str, Any]) -> bool:
