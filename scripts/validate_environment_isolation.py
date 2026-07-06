@@ -49,9 +49,14 @@ REQUIRED_DISTINCT_FIELDS = (
     "trajectories_bucket",
     "artifacts_bucket",
     "secret_store_key_ref",
+    "service_api_token_ref",
     "worker_token_ref",
+    "provider_secret_ref",
+    "yibuapi_secret_ref",
     "provider_connection_namespace",
 )
+
+SAFE_SECRET_REF_PREFIXES = ("github-environment:", "env:", "file:")
 
 
 @dataclass(frozen=True)
@@ -69,7 +74,10 @@ class EnvironmentProfile:
     trajectories_bucket: str
     artifacts_bucket: str
     secret_store_key_ref: str
+    service_api_token_ref: str
     worker_token_ref: str
+    provider_secret_ref: str
+    yibuapi_secret_ref: str
     provider_connection_namespace: str
 
     @classmethod
@@ -89,7 +97,10 @@ class EnvironmentProfile:
             "trajectories_bucket",
             "artifacts_bucket",
             "secret_store_key_ref",
+            "service_api_token_ref",
             "worker_token_ref",
+            "provider_secret_ref",
+            "yibuapi_secret_ref",
             "provider_connection_namespace",
         }
         missing = sorted(required - set(raw))
@@ -109,7 +120,10 @@ class EnvironmentProfile:
             trajectories_bucket=_expect_str(raw, path, "trajectories_bucket"),
             artifacts_bucket=_expect_str(raw, path, "artifacts_bucket"),
             secret_store_key_ref=_expect_str(raw, path, "secret_store_key_ref"),
+            service_api_token_ref=_expect_str(raw, path, "service_api_token_ref"),
             worker_token_ref=_expect_str(raw, path, "worker_token_ref"),
+            provider_secret_ref=_expect_str(raw, path, "provider_secret_ref"),
+            yibuapi_secret_ref=_expect_str(raw, path, "yibuapi_secret_ref"),
             provider_connection_namespace=_expect_str(
                 raw,
                 path,
@@ -199,7 +213,13 @@ def validate_profiles(profiles: list[EnvironmentProfile], repo_root: Path) -> li
                     f"{profile.environment}: {field}={value!r} must include "
                     f"short environment name {profile.short_name!r}",
                 )
-        for field in ("secret_store_key_ref", "worker_token_ref"):
+        for field in (
+            "secret_store_key_ref",
+            "service_api_token_ref",
+            "worker_token_ref",
+            "provider_secret_ref",
+            "yibuapi_secret_ref",
+        ):
             value = getattr(profile, field)
             expected_prefix = f"github-environment:{profile.github_environment}/"
             if not value.startswith(expected_prefix):
@@ -207,8 +227,44 @@ def validate_profiles(profiles: list[EnvironmentProfile], repo_root: Path) -> li
                     f"{profile.environment}: {field} must start with "
                     f"{expected_prefix!r}",
                 )
+            if not value.startswith(SAFE_SECRET_REF_PREFIXES):
+                errors.append(
+                    f"{profile.environment}: {field} must use a safe secret ref "
+                    f"prefix from {SAFE_SECRET_REF_PREFIXES!r}",
+                )
 
     return errors
+
+
+def build_dry_run_artifact(profiles: list[EnvironmentProfile]) -> dict[str, Any]:
+    """Return release-safe target identities without resolving secret values."""
+    return {
+        "schema_version": 1,
+        "artifact_type": "environment-isolation-dry-run",
+        "profiles": [
+            {
+                "environment": profile.environment,
+                "github_environment": profile.github_environment,
+                "namespace": profile.namespace,
+                "ingress_host": profile.ingress_host,
+                "database_name": profile.database_name,
+                "object_storage": {
+                    "task_bucket": profile.task_bucket,
+                    "trajectories_bucket": profile.trajectories_bucket,
+                    "artifacts_bucket": profile.artifacts_bucket,
+                },
+                "secret_refs": {
+                    "secret_store_key_ref": profile.secret_store_key_ref,
+                    "service_api_token_ref": profile.service_api_token_ref,
+                    "worker_token_ref": profile.worker_token_ref,
+                    "provider_secret_ref": profile.provider_secret_ref,
+                    "yibuapi_secret_ref": profile.yibuapi_secret_ref,
+                },
+                "provider_connection_namespace": profile.provider_connection_namespace,
+            }
+            for profile in profiles
+        ],
+    }
 
 
 def validate_workflow(workflow_path: Path) -> list[str]:
@@ -271,6 +327,7 @@ def build_report(
         "status": "pass" if not errors else "fail",
         "errors": errors,
         "profiles": [asdict(profile) for profile in profiles],
+        "dry_run_artifact": build_dry_run_artifact(profiles),
     }
 
 
@@ -289,6 +346,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Deployment workflow to validate.",
     )
     parser.add_argument("--json", action="store_true", help="Emit JSON report.")
+    parser.add_argument(
+        "--dry-run-artifact",
+        type=Path,
+        help="Write a release-safe JSON artifact with environment target identities.",
+    )
     return parser.parse_args(argv)
 
 
@@ -309,6 +371,11 @@ def main(argv: list[str] | None = None) -> int:
             print("Environment isolation validation: FAIL", file=sys.stderr)
             for error in report["errors"]:
                 print(f"- {error}", file=sys.stderr)
+    if args.dry_run_artifact is not None:
+        args.dry_run_artifact.write_text(
+            json.dumps(report["dry_run_artifact"], indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     return 0 if report["status"] == "pass" else 1
 
 

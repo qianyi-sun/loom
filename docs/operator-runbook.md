@@ -35,7 +35,10 @@ Set these GitHub Environment secrets independently in `development`,
 | `LOOM_CLUSTER_CONFIG_B64` | Base64-encoded cluster config for only that environment. |
 | `LOOM_DEPLOY_TOKEN` | Environment-scoped deploy marker/credential used to require an environment secret before deploy. |
 | `LOOM_SECRET_STORE_MASTER_KEY` | SecretStore master key for only that environment. |
+| `LOOM_SERVICE_API_TOKEN` | Environment-scoped service/API automation token reference for release gates and operator-owned submissions. |
 | `LOOM_WORKER_TOKEN` | Worker bearer token for only that environment. |
+| `LOOM_PROVIDER_SECRET_REF` | Environment-scoped provider bootstrap secret reference. Store only the ref in release evidence. |
+| `YIBUAPI_API_KEY` | Environment-scoped YibuAPI provider/rate-card secret when that provider is enabled. |
 
 The workflow `.github/workflows/deploy-environment.yml` binds each job to the
 matching GitHub Environment. Because GitHub only exposes environment secrets
@@ -49,13 +52,23 @@ Before a production release, run the static boundary validator:
 ```bash
 python scripts/validate_environment_isolation.py \
   --profiles-dir deploy/environments \
-  --workflow .github/workflows/deploy-environment.yml
+  --workflow .github/workflows/deploy-environment.yml \
+  --dry-run-artifact release-evidence/environment-isolation-dry-run.json
 ```
 
 It verifies the committed environment profile names, namespaces, domains,
 database names, object buckets, SecretStore key refs, worker-token refs,
-provider-connection namespaces, cluster render inputs, and workflow branch
-guards. The same check runs in repository CI through `tests/ops`.
+service API token refs, provider/YibuAPI secret refs, provider-connection
+namespaces, cluster render inputs, and workflow branch guards. The dry-run
+artifact records only target identities and safe secret refs; it must not
+contain credential values, bearer tokens, signed URLs, object-store keys, or
+provider API keys. The same check runs in repository CI through `tests/ops`.
+
+Before the first production migration or production batch, record a fresh
+backup/snapshot pointer for the production database and object buckets in the
+release checklist. The pointer belongs in release evidence; raw backup contents
+and credentials must stay outside GitHub issues, PRs, Markdown, and workflow
+logs.
 
 ### Release promotion gate
 
