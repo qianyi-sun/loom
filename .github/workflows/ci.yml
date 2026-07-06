@@ -138,6 +138,15 @@ jobs:
       - name: Ruff
         run: uv run ruff check src tests packages migrations
 
+      - name: Cache mypy
+        uses: actions/cache@v4
+        with:
+          path: .mypy_cache
+          key: mypy-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'uv.lock', 'src/**/*.py', 'tests/**/*.py', 'packages/**/*.py') }}
+          restore-keys: |
+            mypy-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'uv.lock') }}-
+            mypy-${{ runner.os }}-py3.11-
+
       - name: Mypy (strict)
         run: uv run mypy
 
@@ -298,21 +307,9 @@ jobs:
             fi
           done
 
-      - name: Install uv
-        if: needs.workflow-plan.outputs.docs_only != 'true'
-        uses: astral-sh/setup-uv@v8.2.0
-        with:
-          enable-cache: true
-
-      - name: Set up Python 3.11
-        if: needs.workflow-plan.outputs.docs_only != 'true'
-        run: uv python install 3.11
-
       - name: Install coverage
         if: needs.workflow-plan.outputs.docs_only != 'true'
-        run: |
-          uv venv --python 3.11
-          uv pip install 'coverage>=7'
+        run: python3 -m pip install --user 'coverage>=7'
 
       - name: Download root coverage
         if: needs.workflow-plan.outputs.docs_only != 'true'
@@ -333,8 +330,8 @@ jobs:
         run: |
           cp cov-root/.coverage .coverage.root
           cp cov-packages/.coverage .coverage.packages
-          uv run coverage combine .coverage.root .coverage.packages
-          uv run coverage xml
+          python3 -m coverage combine .coverage.root .coverage.packages
+          python3 -m coverage xml
 
       - name: Upload coverage.xml
         if: always() && needs.workflow-plan.outputs.docs_only != 'true'
@@ -358,11 +355,29 @@ jobs:
       # Phase 2 of #260: gate at 70 % (baseline ~72 % minus 2 pp
       # headroom). Runs on push AND PR — any drop below the floor
       # fails the job. Raise the floor in this step when baseline
-      # grows. Combined-tier baseline collection (Phase 3) happens in
-      # the `coverage-summary` job; no combined-tier gate yet.
-      - name: Coverage gate (fast tier)
+      # grows. Combined-tier baseline collection (Phase 3) remains
+      # opt-in via the `coverage-summary` job; no combined-tier gate yet.
+      - name: Coverage gate + summary (fast tier)
         if: needs.workflow-plan.outputs.docs_only != 'true'
-        run: uv run coverage report --fail-under=70
+        run: |
+          set +e
+          python3 -m coverage report --fail-under=70 | tee coverage-report.txt
+          status=${PIPESTATUS[0]}
+          set -e
+          fast_pct=$(python3 -m coverage report --format=total)
+          fast_summary=$(tail -1 coverage-report.txt)
+          {
+            echo "## Coverage report"
+            echo ""
+            echo "**Fast tier: ${fast_pct} %** (gate >= 70 %)."
+            echo ""
+            echo '```'
+            echo "${fast_summary}"
+            echo '```'
+            echo ""
+            echo "Per-file XML attached as the \`coverage-xml-fast\` workflow artifact."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
 
   # Go binary checks (#78 Phase B). Separate from repository-checks
   # because Go is its own toolchain — running it here keeps Python CI
@@ -503,12 +518,12 @@ jobs:
             -m "docker" \
             --durations=15
 
-  # Combines fast-tier + integration-tier coverage (when the
-  # integration job ran) and writes the summary to the workflow
-  # run's step-summary markdown. Was previously posting a PR
-  # comment via `gh pr comment` — that triggered an email to PR
-  # authors on every push, which is noise. Step summary surfaces
-  # the same info at the workflow page + PR Checks tab.
+  # Optional PR-only combined coverage summary. The default fast-tier
+  # summary is written by repository-checks so ordinary PRs do not
+  # start another runner only for summary text. Apply ci:integration
+  # or ci:coverage-summary when combined coverage details are useful.
+  # This used to post a PR comment via `gh pr comment`; step summary
+  # keeps the same information on the workflow page without email spam.
   coverage-summary:
     name: coverage-summary
     runs-on: ubuntu-latest
@@ -516,6 +531,8 @@ jobs:
     if: >-
       always() &&
       github.event_name == 'pull_request' &&
+      (contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') ||
+       contains(github.event.pull_request.labels.*.name, 'ci:integration')) &&
       needs.repository-checks.result == 'success' &&
       needs.repository-checks.outputs.docs_only != 'true'
     permissions:

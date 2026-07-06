@@ -88,7 +88,10 @@ PRs that change only docs or repo metadata still report the required
 `repository-checks` status, but skip the heavy install/test/coverage steps.
 The required context is an aggregator: ruff/mypy/static checks, root tests, and
 sibling-package tests run in parallel jobs, then `repository-checks` combines
-their coverage artifacts and applies the 70% fast-tier gate.
+their coverage artifacts, applies the 70% fast-tier gate, and writes the
+default fast-tier coverage summary. The mypy step uses a GitHub Actions cache
+for `.mypy_cache`; a restored cache is only a speed-up, not a replacement for
+running `uv run mypy`.
 
 ```bash
 uv run ruff check src tests packages migrations
@@ -126,6 +129,9 @@ network-policy + full trial e2e + Daytona live). CI runs the fast
 tier on every PR and runs the Docker/testcontainers integration tier
 only on `ci:integration`-labeled PRs or manual workflow dispatch; see
 the historical archive issue (carinrc#7) for the slow-tier tuning work.
+Label-gated smoke workflows cancel superseded PR runs, so a new push to the
+same PR stops the older `cluster-smoke`, `staging-smoke`, or
+`cluster-deploy-spikes` run instead of building a queue of stale checks.
 
 Image builds are intentionally separate from the required fast gate. Relevant
 pushes to `dev`/`main` still publish multi-arch images, but PR image validation
@@ -138,11 +144,12 @@ shared Python/runtime changes rebuild the affected Python images.
 
 - **Fast tier:** gated at **70 %** via
   `coverage report --fail-under=70` in CI. Drops below fail
-  `repository-checks` for everyone.
+  `repository-checks` for everyone. The same job writes the default fast-tier
+  coverage summary to the GitHub Actions step summary.
 - **Combined fast + integration:** measured + posted to the GitHub
-  Actions step summary (workflow run page) when integration ran
-  (i.e., `ci:integration` label or manual dispatch). Not yet gated;
-  keep changes aligned with the historical archive issue (carinrc#7).
+  Actions step summary (workflow run page) only on PRs labelled
+  `ci:integration` or `ci:coverage-summary`. Not yet gated; keep changes
+  aligned with the historical archive issue (carinrc#7).
 - Baseline at latest dev tip: ~72 % fast, ~85 % combined.
 - `coverage.xml` ships as a workflow artifact for external tools.
 

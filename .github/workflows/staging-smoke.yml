@@ -29,6 +29,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: staging-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   smoke:
     name: kind staging smoke (build images → cluster up → verify ready)
@@ -250,7 +254,7 @@ jobs:
           kubectl --context kind-loom-staging -n loom port-forward \
             svc/loom-postgres 15432:5432 &
           PF_PID=$!
-          trap "kill ${PF_PID} 2>/dev/null || true" EXIT
+          trap 'kill ${PF_PID} 2>/dev/null || true' EXIT
           sleep 3
 
           for key in cp-db-url gw-db-url svc-db-url; do
@@ -388,7 +392,7 @@ jobs:
           kubectl --context kind-loom-staging -n loom port-forward \
             svc/loom-minio 19000:9000 &
           PF_PID=$!
-          trap "kill ${PF_PID} 2>/dev/null || true" EXIT
+          trap 'kill ${PF_PID} 2>/dev/null || true' EXIT
           sleep 3
 
           export LOOM_SVC_MINIO_ENDPOINT="http://localhost:19000"
