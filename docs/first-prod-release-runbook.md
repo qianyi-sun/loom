@@ -503,7 +503,7 @@ manifest = {
     "candidate_sha": candidate,
     "image_tag": image_tag,
     "prod_tag": os.environ["PROD_TAG"],
-    "staging_url": "https://staging.yylx.world",
+    "staging_url": "https://yylx.world/dev",
     "image_digests": {
         "loom-control-plane": digest("loom-control-plane", "1"),
         "loom-llm-gateway": digest("loom-llm-gateway", "2"),
@@ -530,7 +530,7 @@ manifest = {
             "url": "https://example.invalid/smoke",
             "batch_id": "batch-release-smoke",
             "trial_id": "trial-release-smoke",
-            "artifact_url": "https://staging.yylx.world/api/v1/trials/trial-release-smoke/atif",
+            "artifact_url": "https://yylx.world/dev/api/v1/trials/trial-release-smoke/atif",
             "service_no_oom_restarts_row": "final service.no_oom_restarts row after route probes passed",
         },
         "frontend_route_evidence": {

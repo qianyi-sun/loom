@@ -29,9 +29,9 @@ EXPECTED_ENVIRONMENTS = {
     },
     "staging": {
         "namespace": "loom-staging",
-        "ingress_host": "staging.yylx.world",
-        "frontend_route": "https://staging.yylx.world",
-        "frontend_api_base": "https://staging.yylx.world/api",
+        "ingress_host": "yylx.world",
+        "frontend_route": "https://yylx.world/dev",
+        "frontend_api_base": "https://yylx.world/dev/api",
         "github_environment": "staging",
         "allowed_refs": ("refs/heads/dev",),
         "allowed_tag_prefixes": (),
@@ -49,8 +49,6 @@ EXPECTED_ENVIRONMENTS = {
 
 REQUIRED_DISTINCT_FIELDS = (
     "namespace",
-    "frontend_route",
-    "frontend_api_base",
     "database_name",
     "task_bucket",
     "trajectories_bucket",
@@ -239,6 +237,18 @@ def validate_profiles(profiles: list[EnvironmentProfile], repo_root: Path) -> li
         values = [getattr(profile, field) for profile in profiles]
         if len(values) != len(set(values)):
             errors.append(f"{field} must be distinct across environments")
+
+    if set(by_env) == set(EXPECTED_ENVIRONMENTS):
+        for field in ("frontend_route", "frontend_api_base"):
+            prod_value = getattr(by_env["production"], field)
+            dev_value = getattr(by_env["development"], field)
+            staging_value = getattr(by_env["staging"], field)
+            if prod_value in {dev_value, staging_value}:
+                errors.append(f"production {field} must differ from non-production")
+            if dev_value != staging_value:
+                errors.append(
+                    f"development and staging {field} must share the canonical /dev surface",
+                )
 
     for profile in profiles:
         for field in (

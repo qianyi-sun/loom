@@ -190,7 +190,7 @@ loom cluster release-gate --format json \
 
 ### 10. Reopen submissions
 
-Restore the LLM-gateway rate-card. Send internal-teams the new ingress hostname (`staging.yylx.world`), the new evidence directory (`/data/loom-staging/rollouts`), and a summary of the rename.
+Restore the LLM-gateway rate-card. Send internal-teams the staging route (`https://yylx.world/dev`), the new evidence directory (`/data/loom-staging/rollouts`), and a summary of the rename.
 
 ### 11. Retire the old cluster
 
