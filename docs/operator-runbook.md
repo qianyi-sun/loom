@@ -2706,6 +2706,42 @@ from a sanitized `--compatibility-evidence` JSON file. Evidence files must use
 safe references such as `env:PROVIDER_API_KEY`; the CLI rejects raw-looking
 bearer tokens, provider keys, and signed URLs before writing Markdown or JSON.
 
+Before spending provider calls on the full #35 agent x ready-benchmark matrix,
+turn the catalog snapshot plus the compatibility-plan JSON into a deterministic
+pre-submit plan:
+
+```bash
+loom qa matrix \
+  --preflight-plan \
+  --catalog-snapshot qa-catalog-snapshot.json \
+  --provider-compatibility-plan provider-harness-compatibility.json \
+  --output agent-benchmark-preflight-plan.md \
+  --json-output agent-benchmark-preflight-plan.json
+```
+
+This command is also login-free and does not call `/api/v1/*`, contact model
+providers, submit batches, read artifact storage, or require live secrets. The
+catalog snapshot must contain `agents.items[]` shaped like `GET /api/v1/agents`
+and `benchmarks.items[]` shaped like `GET /api/v1/benchmarks`, plus offline
+evidence needed to pick one representative task per benchmark:
+`representative_task_id` or `tasks[]`, license evidence such as `license_spdx`,
+capability evidence such as `capability_evidence`, and architecture evidence
+such as `architecture_evidence` or `supported_architectures`.
+
+The output marks each agent x benchmark x provider-endpoint row as
+`planned_submit`, `blocked`, or `skipped`. Provider-family mismatches are
+consumed from the #114 compatibility plan; no-model agents are represented once
+per benchmark with provider endpoint `no-model` and `agent_model=null`. Cells
+with supported metadata but missing live #114 smoke evidence remain `blocked`
+with `pending_live_evidence`.
+
+The pre-submit plan is an operator planning artifact only. It does not satisfy
+live #35 acceptance; #35 still requires terminal live trial evidence or a
+pre-submit skipped/blocked reason for every displayed ready agent x ready
+benchmark cell. Both the catalog snapshot and compatibility plan are scanned
+before rendering, and raw-looking bearer tokens, provider keys, and signed URLs
+are rejected rather than redacted into Markdown or JSON.
+
 For self-hosted endpoints that do not implement useful discovery, add
 the model id manually through the provider model API:
 
