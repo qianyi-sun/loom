@@ -358,6 +358,14 @@ loom datasets audit my-benchmark --db-url "$LOOM_DB_URL" \
     --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
 ```
 
+For first-party adapter publishes, the `Publish benchmarks to HF Hub` GitHub
+Actions workflow is the preferred protected path. It runs in the
+`huggingface-publish` environment, fails the selected benchmark job when
+`HF_TOKEN` is missing or the HF publish command exits non-zero, and writes only
+non-secret status lines such as token presence and target repo. A green workflow
+means the selected benchmark publish command succeeded; a failed workflow is a
+release/catalog gate that must be fixed before registration evidence is trusted.
+
 Legacy manifests without `task_config` remain metadata placeholders.
 They must be republished or backfilled before users can launch them
 from the batch UI.
