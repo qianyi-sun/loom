@@ -288,7 +288,7 @@ instruction for that step instead of the top-level one. The top-level
 
 ```bash
 # Schema-validate the task config without running it:
-python -c "
+uv run python -c "
 import tomllib
 from loom.models.task import TaskConfig
 TaskConfig.model_validate(tomllib.load(open('task.toml', 'rb')))

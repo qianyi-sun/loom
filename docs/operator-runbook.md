@@ -2120,9 +2120,12 @@ pre-creates it.
 - **Backup:** provider-side. Object Versioning + cross-region
   replication; no Loom-side automation.
 
-> The IRSA path requires #251 (boto3 credentials abstraction) before
-> it's wired end-to-end. Until then, the operator falls back to static
-> access keys provisioned via `loom-secrets`.
+> IRSA is wired end-to-end via `loom.storage_credentials.build_s3_client`.
+> Set `LOOM_SVC_STORAGE_AUTH_KIND=irsa` (default is `static_keys`) so
+> boto3 walks its standard provider chain — the ServiceAccount
+> annotation above is what makes the STS `AssumeRoleWithWebIdentity`
+> call resolve on EKS. Static access keys in `loom-secrets` remain
+> supported for deployments not on EKS.
 
 ##### Shape 3: GCS (managed, durable)
 
@@ -2150,10 +2153,15 @@ AWS S3 with provider-specific differences.
 - **Backup:** Object Versioning + scheduled `gsutil rsync` if
   off-platform copy is required.
 
-> GCS requires #254 (GCS lifecycle renderer) before
-> `bootstrap-storage-lifecycle` works against it natively. Until
-> then, operators using GCS apply lifecycle manually via `gsutil
-> lifecycle set`.
+> The GCS lifecycle renderer ships. `bootstrap-storage-lifecycle
+> --dry-run --config … --endpoint https://storage.googleapis.com`
+> emits the GCS-native lifecycle JSON dialect (`{"rule": [...]}`).
+> The SDK-based native apply is deferred until the first GCS
+> deployment lands (`google-cloud-storage` integration in the
+> factory); until then, operators pipe the `--dry-run` output into
+> `gcloud storage buckets update --lifecycle-file` or `gsutil
+> lifecycle set`. `loom cluster doctor --storage-lifecycle-config`
+> against GCS is deferred on the same schedule.
 
 ##### Shape 4: On-prem distributed MinIO (erasure coding)
 

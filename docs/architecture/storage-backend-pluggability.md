@@ -180,8 +180,8 @@ Provider matrix:
 
 | Provider family | Renderer | Status |
 |---|---|---|
-| S3-compatible (MinIO, AWS S3, R2, B2, Wasabi) | `loom.storage_retention.render_s3_lifecycle` | **Shipped in #226** |
-| GCS native | `loom.storage_retention.render_gcs_lifecycle` (to add) | Design only |
+| S3-compatible (MinIO, AWS S3, R2, B2, Wasabi) | `loom.storage_retention.render_bucket_lifecycle` | **Shipped in #226** (consolidated single-rule-per-bucket after MinIO wire-format fix) |
+| GCS native | `loom.storage_retention.render_gcs_lifecycle` | **Renderer shipped in #258**; SDK-based apply deferred until first GCS deployment |
 | Azure Blob | `loom.storage_retention.render_azure_lifecycle` (to add) | Out of v1.0 scope |
 
 The S3 renderer handles the bulk because the lifecycle XML is

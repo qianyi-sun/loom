@@ -61,7 +61,7 @@ Start with the overview, drill into the area you care about:
   — scalable benchmark lifecycle, runnable task configs,
   readiness states, and user-owned benchmark onboarding
 - **[architecture/agent-adapter.md](architecture/agent-adapter.md)**
-  — `loom-launcher` framework; the 11 shipped CLI adapters;
+  — `loom-launcher` framework; the 12 shipped CLI adapters;
   `SubprocessAgent`; per-trial install + content-addressed image
   cache; how to add an agent
 - **[architecture/verifier-protocol.md](architecture/verifier-protocol.md)**

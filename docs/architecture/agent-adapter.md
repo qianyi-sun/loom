@@ -8,7 +8,7 @@ Loom drives three kinds of agents:
    dialect routing through the Loom Gateway.
 3. **SubprocessAgent + a launcher adapter** — wraps an external CLI
    agent (claude-code, codex, openhands, ...) launched as a
-   subprocess inside the sandbox. The 11 shipped CLI adapters live
+   subprocess inside the sandbox. The 12 shipped CLI adapters live
    in `packages/loom-launcher/`.
 
 This doc focuses on #3 — the extensible surface.
