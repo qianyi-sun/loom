@@ -31,6 +31,8 @@ class ClusterUpStep(SubcommandStep):
             ctx.namespace,
             "--config",
             str(rollout_cluster_config(ctx, step_dir)),
+            "--backup-manifest",
+            str(ctx.backup_manifest_path),
             "--recover-sandbox-deadlines",
             "--sandbox-deadline-max-pods",
             "4",
