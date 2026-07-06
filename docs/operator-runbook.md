@@ -585,20 +585,91 @@ knob you need.
 
    The report is safe to attach to release issues and PRs: secret-bearing input
    fields are omitted or redacted, and the output must not contain service
-   tokens, provider keys, signed URLs, MinIO credentials, or secret refs. Until
-   #488/#489 land, use this check as the release contract and perform any beta
-   capacity borrow/drain operation explicitly through an operator-approved
-   procedure; do not treat the manifest validator as a capacity lease actuator.
+   tokens, provider keys, signed URLs, MinIO credentials, or secret refs.
 
-   The command is idempotent and uses the existing Control Plane admin APIs for
-   worker-pool autoscaler policies, GB10 desired state, and Slurm worker job
-   status. A drift failure is actionable, for example desired `gb10-arm64`
-   actuator `slurm` but live `gb10`, or an active OLDLAB Slurm job still
-   pointing at an older `LOOM_REMOTE_WORKER_REPO_DIR`; fix it with the profile
-   apply and by draining/replacing stale Slurm jobs rather than a one-off SQL
-   patch. If `admin_token_fingerprint` fails, refresh the operator token
-   source from the canonical protected-environment secret before rerunning;
-   do not work around it by switching to an untracked token.
+   If a public-beta rollout smoke needs temporary shared capacity, create a
+   bounded beta lease in a separate desired-state file. First preview the
+   resulting state; the helper does not write anything unless `--apply` is
+   present:
+
+   ```bash
+   uv run python scripts/ops/worker_capacity_manifest.py lease-beta \
+     --manifest deploy/worker-capacity/prod-first.toml \
+     --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
+     --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
+     --var BETA_IMAGE_TAG="$IMAGE_TAG" \
+     --var BETA_SOURCE_COMMIT="$RELEASE_SHA" \
+     --reason "public-beta rollout smoke $IMAGE_TAG" \
+     --ttl 45m \
+     --slots-per-host 1 \
+     --max-total-slots 2 \
+     --preemptible
+   ```
+
+   After review, write the lease manifest and evidence:
+
+   ```bash
+   LEASE_MANIFEST="$ROLLOUT_DIR/worker-capacity-beta-lease.toml"
+
+   uv run python scripts/ops/worker_capacity_manifest.py lease-beta \
+     --manifest deploy/worker-capacity/prod-first.toml \
+     --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
+     --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
+     --var BETA_IMAGE_TAG="$IMAGE_TAG" \
+     --var BETA_SOURCE_COMMIT="$RELEASE_SHA" \
+     --reason "public-beta rollout smoke $IMAGE_TAG" \
+     --ttl 45m \
+     --slots-per-host 1 \
+     --max-total-slots 2 \
+     --preemptible \
+     --apply \
+     --output-manifest "$LEASE_MANIFEST" \
+     --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-lease.json"
+   ```
+
+   Check or drain the beta lease with the latest secret-free worker
+   registration/status artifact. TTL-expired status stops new beta claims in
+   the desired state and reports running beta trials separately from idle
+   leased slots:
+
+   ```bash
+   uv run python scripts/ops/worker_capacity_manifest.py status \
+     --manifest "$LEASE_MANIFEST" \
+     --observed-json "$ROLLOUT_DIR/worker-registrations.json" \
+     --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-status.json"
+
+   uv run python scripts/ops/worker_capacity_manifest.py drain-beta \
+     --manifest "$LEASE_MANIFEST" \
+     --observed-json "$ROLLOUT_DIR/worker-registrations.json" \
+     --reason "prod pressure before release gate" \
+     --apply \
+     --output-manifest "$ROLLOUT_DIR/worker-capacity-beta-draining.toml" \
+     --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-drain.json"
+   ```
+
+   Immediately release beta capacity after validation. `release-beta` is safe
+   to rerun and returns beta desired slots to zero without changing prod slot
+   ownership on eligible hosts:
+
+   ```bash
+   uv run python scripts/ops/worker_capacity_manifest.py release-beta \
+     --manifest "$LEASE_MANIFEST" \
+     --reason "public-beta smoke complete" \
+     --apply \
+     --output-manifest "$ROLLOUT_DIR/worker-capacity-beta-released.toml" \
+     --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-release.json"
+   ```
+
+   The `loom admin environment-state apply/check` commands above are
+   idempotent and use the existing Control Plane admin APIs for worker-pool
+   autoscaler policies, GB10 desired state, and Slurm worker job status. A
+   drift failure is actionable, for example desired `gb10-arm64` actuator
+   `slurm` but live `gb10`, or an active OLDLAB Slurm job still pointing at an
+   older `LOOM_REMOTE_WORKER_REPO_DIR`; fix it with the profile apply and by
+   draining/replacing stale Slurm jobs rather than a one-off SQL patch. If
+   `admin_token_fingerprint` fails, refresh the operator token source from the
+   canonical protected-environment secret before rerunning; do not work around
+   it by switching to an untracked token.
    The staging profile currently targets the legacy Control Plane
    environment name `production` because existing GB10 node agents read that
    desired-state key; the CLI still requires `--environment staging` so

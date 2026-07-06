@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""Validate prod-first shared worker capacity desired-state evidence.
+"""Validate and stage prod-first shared worker capacity desired state.
 
 The manifest is a release contract, not a live mutator. It describes how shared
 physical GB10/OLDLAB hosts are assigned between production and beta/dev, then
 optionally compares that desired state with a secret-free observed worker
 registration artifact.
+
+Lifecycle commands are file-only:
+
+* ``status`` reports the effective beta lease state and TTL expiry.
+* ``lease-beta`` previews or writes a bounded beta/dev lease.
+* ``drain-beta`` stops new beta claims and reports running vs. idle beta slots.
+* ``release-beta`` idempotently returns beta desired slots to zero.
 """
+
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 import sys
@@ -16,13 +25,17 @@ import tomllib
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+import tomli_w
 
 SCHEMA_VERSION = 1
 HOST_STATES = frozenset({"eligible", "beta_draining", "host_draining", "unreachable"})
 INACTIVE_WORKER_STATES = frozenset({"drained", "stopped", "offline", "unreachable"})
 BETA_DRAINING_STATES = frozenset({"draining", "drained", "stopped", "offline"})
+COMMANDS = frozenset({"status", "lease-beta", "release-beta", "drain-beta"})
 
 _PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _SECRET_KEY_RE = re.compile(
@@ -145,6 +158,7 @@ class ObservedWorker:
     k8s_deployment: str | None
     slots: int
     drain_state: str
+    running_trials: int
 
     def is_registered(self) -> bool:
         return self.drain_state not in INACTIVE_WORKER_STATES
@@ -163,6 +177,7 @@ class ObservedWorker:
                 "k8s_deployment": self.k8s_deployment,
                 "slots": self.slots,
                 "drain_state": self.drain_state,
+                "running_trials": self.running_trials,
             },
         )
 
@@ -235,6 +250,7 @@ def _replace_placeholders(
     missing: set[str],
 ) -> Any:
     if isinstance(value, str):
+
         def _replacement(match: re.Match[str]) -> str:
             name = match.group(1)
             if name not in variables:
@@ -259,15 +275,38 @@ def load_manifest(
     variables: dict[str, str] | None = None,
     require_resolved: bool = False,
 ) -> CapacityManifest:
+    raw, unresolved = _load_manifest_raw(
+        path,
+        variables=variables,
+        require_resolved=require_resolved,
+    )
+    return _manifest_from_raw(path, raw, unresolved=unresolved)
+
+
+def _load_manifest_raw(
+    path: Path,
+    *,
+    variables: dict[str, str] | None = None,
+    require_resolved: bool = False,
+) -> tuple[dict[str, Any], tuple[str, ...]]:
     raw = _load_toml(path)
-    unresolved: set[str] = set()
-    raw = _replace_placeholders(raw, variables or {}, missing=unresolved)
-    if require_resolved and unresolved:
-        names = ", ".join(sorted(unresolved))
+    unresolved_set: set[str] = set()
+    raw = _replace_placeholders(raw, variables or {}, missing=unresolved_set)
+    if require_resolved and unresolved_set:
+        names = ", ".join(sorted(unresolved_set))
         raise ManifestError(f"{path}: missing --var value(s): {names}")
     errors = _find_secret_bearing_keys(raw)
     if errors:
         raise ManifestError("; ".join(errors))
+    return raw, tuple(sorted(unresolved_set))
+
+
+def _manifest_from_raw(
+    path: Path,
+    raw: dict[str, Any],
+    *,
+    unresolved: tuple[str, ...],
+) -> CapacityManifest:
     if raw.get("schema_version") != SCHEMA_VERSION:
         raise ManifestError(f"{path}: schema_version must be {SCHEMA_VERSION}")
 
@@ -321,7 +360,7 @@ def load_manifest(
         prod=prod,
         beta=beta,
         hosts=tuple(hosts),
-        unresolved_placeholders=tuple(sorted(unresolved)),
+        unresolved_placeholders=unresolved,
     )
 
 
@@ -358,7 +397,9 @@ def _load_environment(
     )
 
 
-def _validate_environment_pair(path: Path, prod: EnvironmentTarget, beta: EnvironmentTarget) -> None:
+def _validate_environment_pair(
+    path: Path, prod: EnvironmentTarget, beta: EnvironmentTarget
+) -> None:
     distinct_fields = ("name", "api_url", "compose_service", "k8s_deployment", "k8s_namespace")
     for field in distinct_fields:
         if getattr(prod, field) == getattr(beta, field):
@@ -471,6 +512,16 @@ def load_observed_workers(path: Path) -> list[ObservedWorker]:
                 drain_state=(
                     _first_str(item, ("drain_state", "worker_status", "state")) or "active"
                 ).lower(),
+                running_trials=_first_int(
+                    item,
+                    (
+                        "running_trials",
+                        "running_beta_trials",
+                        "active_trials",
+                        "claimed_trials",
+                    ),
+                    default=0,
+                ),
             ),
         )
     return workers
@@ -636,6 +687,12 @@ def format_markdown(report: dict[str, Any]) -> str:
         "",
         f"- Status: `{report['status']}`",
     ]
+    operation = report.get("operation")
+    if operation:
+        lines.append(f"- Operation: `{operation}`")
+    lease = report.get("lease")
+    if isinstance(lease, dict):
+        lines.append(f"- Beta lease: `{lease.get('state', 'none')}`")
     summary = report.get("summary")
     if isinstance(summary, dict):
         lines.extend(
@@ -657,6 +714,348 @@ def format_markdown(report: dict[str, Any]) -> str:
         for error in report["errors"]:
             lines.append(f"- {error}")
     return "\n".join(lines) + "\n"
+
+
+def _parse_now(value: str | None) -> datetime:
+    if value is None:
+        return datetime.now(UTC).replace(microsecond=0)
+    normalized = value.strip()
+    if not normalized:
+        raise ManifestError("--now must be a non-empty ISO-8601 timestamp")
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ManifestError(f"--now must be an ISO-8601 timestamp, got {value!r}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).replace(microsecond=0)
+
+
+def _format_time(value: datetime) -> str:
+    return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return _parse_now(value)
+    except ManifestError:
+        return None
+
+
+def _parse_ttl_seconds(value: str | None) -> int:
+    if value is None:
+        raise ManifestError("lease-beta requires --ttl; unbounded beta leases are refused")
+    match = re.fullmatch(r"\s*(\d+)\s*([smhd])\s*", value)
+    if not match:
+        raise ManifestError("--ttl must be a bounded duration like 30m, 2h, or 1d")
+    amount = int(match.group(1))
+    if amount <= 0:
+        raise ManifestError("--ttl must be greater than zero")
+    unit = match.group(2)
+    multiplier = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+    return amount * multiplier
+
+
+def _safe_reason(value: str | None, *, fallback: str) -> str:
+    reason = (value or fallback).strip()
+    if not reason:
+        reason = fallback
+    return _redact_string(reason)
+
+
+def _lease_table(raw: dict[str, Any]) -> dict[str, Any]:
+    lease = raw.get("beta_capacity_lease")
+    if lease is None:
+        return {}
+    if not isinstance(lease, dict):
+        raise ManifestError("beta_capacity_lease must be a table")
+    return lease
+
+
+def _effective_lease_state(raw: dict[str, Any], *, now: datetime) -> str:
+    lease = _lease_table(raw)
+    state = str(lease.get("state") or "none").strip() or "none"
+    expires_at = _parse_timestamp(lease.get("expires_at"))
+    if state == "active" and expires_at is not None and now >= expires_at:
+        return "expired"
+    return state
+
+
+def _public_lease(raw: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+    lease = dict(_lease_table(raw))
+    if not lease:
+        return {"state": "none"}
+    lease["state"] = _effective_lease_state(raw, now=now)
+    return redact(lease)
+
+
+def _host_rows(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    hosts = raw.get("hosts")
+    if not isinstance(hosts, list):
+        raise ManifestError("hosts must be an array of tables")
+    rows: list[dict[str, Any]] = []
+    for index, item in enumerate(hosts):
+        if not isinstance(item, dict):
+            raise ManifestError(f"hosts[{index}] must be a table")
+        rows.append(item)
+    return rows
+
+
+def _set_host_capacity(
+    row: dict[str, Any],
+    *,
+    state: str,
+    total_slots: int,
+    beta_slots: int,
+) -> None:
+    row["state"] = state
+    row["beta_slots"] = beta_slots
+    row["prod_slots"] = 0 if state in {"host_draining", "unreachable"} else total_slots - beta_slots
+
+
+def _host_signatures(manifest: CapacityManifest) -> dict[str, tuple[str, int, int]]:
+    return {host.name: (host.state, host.prod_slots, host.beta_slots) for host in manifest.hosts}
+
+
+def _changed_host_count(
+    before: CapacityManifest,
+    after: CapacityManifest,
+) -> int:
+    before_hosts = _host_signatures(before)
+    return sum(
+        1
+        for name, signature in _host_signatures(after).items()
+        if before_hosts.get(name) != signature
+    )
+
+
+def _running_beta_trials_by_host(
+    manifest: CapacityManifest,
+    workers: list[ObservedWorker] | None,
+) -> dict[str, int]:
+    running: dict[str, int] = defaultdict(int)
+    if workers is None:
+        return running
+    for worker in workers:
+        if worker.host and worker.environment == manifest.beta.name and worker.is_registered():
+            running[worker.host] += worker.running_trials
+    return running
+
+
+def _drain_beta_capacity_raw(
+    raw: dict[str, Any],
+    *,
+    path: Path,
+    unresolved: tuple[str, ...],
+    workers: list[ObservedWorker] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    before = _manifest_from_raw(path, raw, unresolved=unresolved)
+    running = _running_beta_trials_by_host(before, workers)
+    next_raw = copy.deepcopy(raw)
+    rows = {str(row.get("name")): row for row in _host_rows(next_raw)}
+    running_total = sum(running.values())
+    idle_leased_slots = 0
+    draining_hosts: list[str] = []
+    released_idle_hosts: list[str] = []
+    for host in before.hosts:
+        if host.beta_slots <= 0:
+            continue
+        row = rows[host.name]
+        host_running = running.get(host.name, 0)
+        if host_running > 0:
+            retained_slots = max(1, min(host.beta_slots, host_running))
+            _set_host_capacity(
+                row,
+                state="beta_draining",
+                total_slots=host.total_slots,
+                beta_slots=retained_slots,
+            )
+            draining_hosts.append(host.name)
+            idle_leased_slots += max(0, host.beta_slots - retained_slots)
+        else:
+            _set_host_capacity(
+                row,
+                state="eligible",
+                total_slots=host.total_slots,
+                beta_slots=0,
+            )
+            released_idle_hosts.append(host.name)
+            idle_leased_slots += host.beta_slots
+    return next_raw, {
+        "running_beta_trials": running_total,
+        "idle_leased_slots": idle_leased_slots,
+        "draining_hosts": draining_hosts,
+        "released_idle_hosts": released_idle_hosts,
+    }
+
+
+def _lease_beta_capacity_raw(
+    raw: dict[str, Any],
+    *,
+    path: Path,
+    unresolved: tuple[str, ...],
+    now: datetime,
+    reason: str,
+    ttl_seconds: int,
+    slots_per_host: int,
+    max_total_slots: int,
+    preemptible: bool,
+) -> dict[str, Any]:
+    before = _manifest_from_raw(path, raw, unresolved=unresolved)
+    if any(host.beta_slots > 0 for host in before.hosts):
+        raise ManifestError(
+            "lease-beta refused: beta slots are already leased; drain or release first"
+        )
+    next_raw = copy.deepcopy(raw)
+    rows = {str(row.get("name")): row for row in _host_rows(next_raw)}
+    remaining = max_total_slots
+    leased_hosts: list[str] = []
+    for host in before.hosts:
+        if remaining < slots_per_host:
+            break
+        if host.state != "eligible" or host.total_slots < slots_per_host:
+            continue
+        row = rows[host.name]
+        _set_host_capacity(
+            row,
+            state="eligible",
+            total_slots=host.total_slots,
+            beta_slots=slots_per_host,
+        )
+        leased_hosts.append(host.name)
+        remaining -= slots_per_host
+    if not leased_hosts:
+        raise ManifestError("lease-beta found no eligible hosts for the requested beta lease")
+    next_raw["beta_capacity_lease"] = {
+        "state": "active",
+        "reason": _safe_reason(reason, fallback="beta capacity lease"),
+        "created_at": _format_time(now),
+        "expires_at": _format_time(now + timedelta(seconds=ttl_seconds)),
+        "ttl_seconds": ttl_seconds,
+        "slots_per_host": slots_per_host,
+        "max_total_slots": max_total_slots,
+        "preemptible": preemptible,
+        "leased_hosts": leased_hosts,
+    }
+    return next_raw
+
+
+def _release_beta_capacity_raw(
+    raw: dict[str, Any],
+    *,
+    path: Path,
+    unresolved: tuple[str, ...],
+    now: datetime,
+    reason: str,
+) -> dict[str, Any]:
+    before = _manifest_from_raw(path, raw, unresolved=unresolved)
+    already_released = _lease_table(raw).get("state") == "released" and all(
+        host.beta_slots == 0 for host in before.hosts
+    )
+    if already_released:
+        return copy.deepcopy(raw)
+
+    next_raw = copy.deepcopy(raw)
+    rows = {str(row.get("name")): row for row in _host_rows(next_raw)}
+    for host in before.hosts:
+        row = rows[host.name]
+        if host.state in {"host_draining", "unreachable"}:
+            _set_host_capacity(
+                row,
+                state=host.state,
+                total_slots=host.total_slots,
+                beta_slots=0,
+            )
+            continue
+        _set_host_capacity(
+            row,
+            state="eligible",
+            total_slots=host.total_slots,
+            beta_slots=0,
+        )
+    next_raw["beta_capacity_lease"] = {
+        **_lease_table(raw),
+        "state": "released",
+        "release_reason": _safe_reason(reason, fallback="beta capacity released"),
+        "released_at": _format_time(now),
+        "leased_hosts": [],
+    }
+    return next_raw
+
+
+def _mark_beta_draining_raw(
+    raw: dict[str, Any],
+    *,
+    now: datetime,
+    reason: str,
+    expired: bool,
+) -> dict[str, Any]:
+    next_raw = copy.deepcopy(raw)
+    lease = {**_lease_table(next_raw)}
+    lease["state"] = "expired" if expired else "draining"
+    lease["stopped_new_claims"] = True
+    if expired:
+        lease.setdefault("expired_at", lease.get("expires_at") or _format_time(now))
+        lease["expiry_reason"] = _safe_reason(reason, fallback="beta capacity lease expired")
+    else:
+        lease["drain_reason"] = _safe_reason(reason, fallback="beta capacity drain")
+        lease["drained_at"] = _format_time(now)
+    next_raw["beta_capacity_lease"] = lease
+    return next_raw
+
+
+def _write_capacity_manifest(path: Path, raw: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(tomli_w.dumps(raw), encoding="utf-8")
+
+
+def _new_beta_claims_allowed(
+    manifest: CapacityManifest,
+    raw: dict[str, Any],
+    *,
+    now: datetime,
+) -> bool:
+    if _effective_lease_state(raw, now=now) != "active":
+        return False
+    if manifest.summary()["beta_slots"] <= 0:
+        return False
+    return all(host.state != "beta_draining" for host in manifest.hosts if host.beta_slots > 0)
+
+
+def _build_lifecycle_report(
+    *,
+    path: Path,
+    raw: dict[str, Any],
+    unresolved: tuple[str, ...],
+    operation: str,
+    applied: bool,
+    before: CapacityManifest,
+    workers: list[ObservedWorker] | None,
+    now: datetime,
+    argv: list[str],
+    drain: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    manifest = _manifest_from_raw(path, raw, unresolved=unresolved)
+    report = build_report(manifest, workers=workers, drift=[])
+    report["operation"] = operation
+    report["applied"] = applied
+    report["new_beta_claims_allowed"] = _new_beta_claims_allowed(manifest, raw, now=now)
+    report["lease"] = _public_lease(raw, now=now)
+    report["changes"] = {
+        "changed_host_count": _changed_host_count(before, manifest),
+    }
+    report["drain"] = drain or {
+        "running_beta_trials": sum(_running_beta_trials_by_host(manifest, workers).values()),
+        "idle_leased_slots": 0,
+        "draining_hosts": [],
+        "released_idle_hosts": [],
+    }
+    report["command"] = {"argv": redact(argv)}
+    return redact(report)
 
 
 def _expect_dict(raw: dict[str, Any], path: Path, key: str) -> dict[str, Any]:
@@ -731,7 +1130,19 @@ def _first_int(raw: dict[str, Any], keys: tuple[str, ...], *, default: int) -> i
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    explicit_command = bool(raw_argv and raw_argv[0] in COMMANDS)
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=sorted(COMMANDS),
+        default="status",
+        help=(
+            "Lifecycle operation. Omit for the legacy desired-vs-observed "
+            "validator; use explicit status for beta lease lifecycle status."
+        ),
+    )
     parser.add_argument(
         "--manifest",
         type=Path,
@@ -757,18 +1168,201 @@ def main(argv: list[str] | None = None) -> int:
         help="stdout format",
     )
     parser.add_argument("--evidence-out", type=Path, help="write sanitized JSON evidence")
-    args = parser.parse_args(argv)
+    parser.add_argument(
+        "--output-manifest",
+        type=Path,
+        default=None,
+        help="manifest path to write when --apply is set; defaults to --manifest",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="write the resulting desired-state manifest; without this, only preview",
+    )
+    parser.add_argument(
+        "--reason",
+        default=None,
+        help="operator reason recorded in sanitized lease/drain/release evidence",
+    )
+    parser.add_argument(
+        "--ttl",
+        default=None,
+        help="bounded beta lease TTL such as 30m, 2h, or 1d",
+    )
+    parser.add_argument(
+        "--slots-per-host",
+        type=int,
+        default=1,
+        help="beta slots per leased host; first version supports 1",
+    )
+    parser.add_argument(
+        "--max-total-slots",
+        type=int,
+        default=None,
+        help="maximum total beta slots to lease",
+    )
+    parser.set_defaults(preemptible=None)
+    preemptible = parser.add_mutually_exclusive_group()
+    preemptible.add_argument(
+        "--preemptible",
+        dest="preemptible",
+        action="store_true",
+        help="mark beta capacity as preemptible",
+    )
+    preemptible.add_argument(
+        "--non-preemptible",
+        dest="preemptible",
+        action="store_false",
+        help="request non-preemptible beta capacity; requires explicit override",
+    )
+    parser.add_argument(
+        "--allow-non-preemptible",
+        action="store_true",
+        help="allow --non-preemptible beta capacity for an explicit operator exception",
+    )
+    parser.add_argument(
+        "--now",
+        default=None,
+        help="UTC ISO-8601 time for deterministic lease previews/tests",
+    )
+    args = parser.parse_args(raw_argv)
+
+    if args.command == "lease-beta":
+        if args.ttl is None:
+            parser.error("lease-beta requires --ttl; unbounded beta leases are refused")
+        if args.reason is None or not args.reason.strip():
+            parser.error("lease-beta requires --reason")
+        if args.max_total_slots is None:
+            parser.error("lease-beta requires --max-total-slots")
+        if args.max_total_slots <= 0:
+            parser.error("--max-total-slots must be greater than zero")
+        if args.slots_per_host != 1:
+            parser.error("--slots-per-host must be 1 in the first beta lease version")
+        if args.preemptible is None:
+            parser.error("lease-beta requires --preemptible or --non-preemptible")
+        if args.preemptible is False and not args.allow_non_preemptible:
+            parser.error("--non-preemptible beta capacity requires --allow-non-preemptible")
 
     try:
         variables = _parse_vars(args.var)
-        manifest = load_manifest(
+        now = _parse_now(args.now)
+        raw, unresolved = _load_manifest_raw(
             args.manifest,
             variables=variables,
             require_resolved=args.observed_json is not None,
         )
         workers = load_observed_workers(args.observed_json) if args.observed_json else None
-        drift = diff_observed_workers(manifest, workers) if workers is not None else []
-        report = build_report(manifest, workers=workers, drift=drift)
+        before = _manifest_from_raw(args.manifest, raw, unresolved=unresolved)
+
+        if not explicit_command:
+            drift = diff_observed_workers(before, workers) if workers is not None else []
+            report = build_report(before, workers=workers, drift=drift)
+        elif args.command == "status":
+            effective_raw = raw
+            drain: dict[str, Any] | None = None
+            if _effective_lease_state(raw, now=now) == "expired":
+                drained_raw, drain = _drain_beta_capacity_raw(
+                    raw,
+                    path=args.manifest,
+                    unresolved=unresolved,
+                    workers=workers,
+                )
+                effective_raw = _mark_beta_draining_raw(
+                    drained_raw,
+                    now=now,
+                    reason="beta capacity lease expired",
+                    expired=True,
+                )
+            if args.apply:
+                _write_capacity_manifest(args.output_manifest or args.manifest, effective_raw)
+            report = _build_lifecycle_report(
+                path=args.output_manifest or args.manifest,
+                raw=effective_raw,
+                unresolved=unresolved,
+                operation=args.command,
+                applied=bool(args.apply),
+                before=before,
+                workers=workers,
+                now=now,
+                argv=raw_argv,
+                drain=drain,
+            )
+        elif args.command == "lease-beta":
+            ttl_seconds = _parse_ttl_seconds(args.ttl)
+            next_raw = _lease_beta_capacity_raw(
+                raw,
+                path=args.manifest,
+                unresolved=unresolved,
+                now=now,
+                reason=str(args.reason),
+                ttl_seconds=ttl_seconds,
+                slots_per_host=args.slots_per_host,
+                max_total_slots=int(args.max_total_slots),
+                preemptible=bool(args.preemptible),
+            )
+            if args.apply:
+                _write_capacity_manifest(args.output_manifest or args.manifest, next_raw)
+            report = _build_lifecycle_report(
+                path=args.output_manifest or args.manifest,
+                raw=next_raw,
+                unresolved=unresolved,
+                operation=args.command,
+                applied=bool(args.apply),
+                before=before,
+                workers=workers,
+                now=now,
+                argv=raw_argv,
+            )
+        elif args.command == "release-beta":
+            next_raw = _release_beta_capacity_raw(
+                raw,
+                path=args.manifest,
+                unresolved=unresolved,
+                now=now,
+                reason=_safe_reason(args.reason, fallback="beta capacity released"),
+            )
+            if args.apply:
+                _write_capacity_manifest(args.output_manifest or args.manifest, next_raw)
+            report = _build_lifecycle_report(
+                path=args.output_manifest or args.manifest,
+                raw=next_raw,
+                unresolved=unresolved,
+                operation=args.command,
+                applied=bool(args.apply),
+                before=before,
+                workers=workers,
+                now=now,
+                argv=raw_argv,
+            )
+        elif args.command == "drain-beta":
+            drained_raw, drain = _drain_beta_capacity_raw(
+                raw,
+                path=args.manifest,
+                unresolved=unresolved,
+                workers=workers,
+            )
+            next_raw = _mark_beta_draining_raw(
+                drained_raw,
+                now=now,
+                reason=_safe_reason(args.reason, fallback="beta capacity drain"),
+                expired=False,
+            )
+            if args.apply:
+                _write_capacity_manifest(args.output_manifest or args.manifest, next_raw)
+            report = _build_lifecycle_report(
+                path=args.output_manifest or args.manifest,
+                raw=next_raw,
+                unresolved=unresolved,
+                operation=args.command,
+                applied=bool(args.apply),
+                before=before,
+                workers=workers,
+                now=now,
+                argv=raw_argv,
+                drain=drain,
+            )
+        else:
+            raise ManifestError(f"unsupported command: {args.command}")
     except ManifestError as exc:
         report = {
             "artifact_type": "worker-capacity-desired-state",
