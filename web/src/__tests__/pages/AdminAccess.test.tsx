@@ -2,6 +2,7 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { setFrontendConfigForTests } from "../../lib/frontendConfig";
 import AdminAccess from "../../pages/AdminAccess";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
@@ -46,6 +47,7 @@ const ownerMe = {
 
 describe("AdminAccess", () => {
   afterEach(() => {
+    setFrontendConfigForTests(null);
     vi.restoreAllMocks();
   });
 
@@ -751,6 +753,13 @@ describe("AdminAccess", () => {
   });
 
   it("manages named API tokens without exposing stored raw secrets", async () => {
+    setFrontendConfigForTests({
+      environment: "staging",
+      environmentLabel: "Staging",
+      routePath: "/dev",
+      apiBase: "/dev",
+      apiRouteBase: `${window.location.origin}/dev/api`,
+    });
     const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
@@ -856,7 +865,7 @@ describe("AdminAccess", () => {
     expect(screen.getByText("export LOOM_API_TOKEN=loom_api_revealed_create_secret")).toBeInTheDocument();
     expect(
       screen.getByText(
-        `loom auth login --server ${window.location.origin} --token env:LOOM_API_TOKEN`,
+        `loom auth login --server ${window.location.origin}/dev --token env:LOOM_API_TOKEN`,
       ),
     ).toBeInTheDocument();
     expect(

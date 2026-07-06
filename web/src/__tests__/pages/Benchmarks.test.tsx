@@ -1,6 +1,7 @@
 import { screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { setFrontendConfigForTests } from "../../lib/frontendConfig";
 import Benchmarks from "../../pages/Benchmarks";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
@@ -67,10 +68,18 @@ describe("Benchmarks page", () => {
   beforeEach(() => {
     window.localStorage.clear();
     window.localStorage.setItem("loom_token", "test-token");
+    setFrontendConfigForTests(null);
     vi.restoreAllMocks();
   });
 
   it("renders readiness context, hidden-route guidance, and safe CLI snippets", async () => {
+    setFrontendConfigForTests({
+      environment: "staging",
+      environmentLabel: "Staging",
+      routePath: "/dev",
+      apiBase: "/dev",
+      apiRouteBase: `${window.location.origin}/dev/api`,
+    });
     setupFetch();
     renderWithProviders(<Benchmarks />, { route: "/benchmarks" });
 
@@ -85,6 +94,7 @@ describe("Benchmarks page", () => {
 
     const pageText = document.body.textContent ?? "";
     expect(pageText).toContain("loom datasets list --remote");
+    expect(pageText).toContain(`--server-url ${window.location.origin}/dev`);
     expect(pageText).toContain("--token env:LOOM_API_TOKEN");
     expect(pageText).toContain('loom datasets audit --all --db-url "$LOOM_DB_URL"');
     expect(pageText).toContain("loom datasets sync-config");

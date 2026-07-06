@@ -31,6 +31,7 @@ import {
 } from "../components/paginationState";
 import { cn } from "../lib/cn";
 import { benchmarkCatalogCommands } from "../lib/quickstartSnippets";
+import { currentServerOrigin } from "../lib/serverOrigin";
 
 interface BenchmarkRow {
   id: string;
@@ -52,10 +53,6 @@ interface BenchmarkRow {
   readiness_message?: string | null;
   selectable?: boolean;
   blocker_reason?: string | null;
-}
-
-function currentServerOrigin(): string {
-  return window.location.origin;
 }
 
 function readinessLabel(row: BenchmarkRow): string {
