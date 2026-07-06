@@ -85,10 +85,12 @@ def _smoke_submit_mode(ctx: RolloutContext) -> str:
     return _config_value(ctx, "LOOM_SMOKE_SUBMIT_MODE", "smoke_submit_mode") or "user-token"
 
 
-def _smoke_task_id(ctx: RolloutContext) -> str:
+def _smoke_task_id(ctx: RolloutContext, *, submit_mode: str = "user-token") -> str:
     task_id = _explicit_smoke_task_id(ctx)
     if isinstance(task_id, str) and task_id.strip():
         return task_id.strip()
+    if submit_mode == "admin-on-behalf" and ctx.scope == "current-gb10":
+        return DEFAULT_SMOKE_TASK_ID
     if ctx.scope == "current-gb10":
         return DEFAULT_CURRENT_GB10_SMOKE_TASK_ID
     return DEFAULT_SMOKE_TASK_ID
@@ -379,9 +381,13 @@ def _validate_benchmark_catalog(body: bytes) -> str | None:
     return None
 
 
-def _task_payload_inputs(ctx: RolloutContext) -> tuple[str, str | None]:
+def _task_payload_inputs(
+    ctx: RolloutContext,
+    *,
+    submit_mode: str = "user-token",
+) -> tuple[str, str | None]:
     explicit_task_id = bool(_explicit_smoke_task_id(ctx))
-    task_id = _smoke_task_id(ctx)
+    task_id = _smoke_task_id(ctx, submit_mode=submit_mode)
     required_worker_pool = _smoke_required_worker_pool(
         ctx,
         explicit_task_id=explicit_task_id,
@@ -393,7 +399,10 @@ def _admin_on_behalf_payload(
     ctx: RolloutContext,
     cfg: _AdminOnBehalfConfig,
 ) -> dict[str, object]:
-    task_id, required_worker_pool = _task_payload_inputs(ctx)
+    task_id, required_worker_pool = _task_payload_inputs(
+        ctx,
+        submit_mode="admin-on-behalf",
+    )
     payload: dict[str, object] = {
         "name": _admin_smoke_batch_name(ctx),
         "represented_username": cfg.represented_username,
@@ -538,7 +547,10 @@ def _run_admin_on_behalf_smoke(
     if catalog_error is not None:
         return RunResult(exit_code=1, error=catalog_error)
 
-    task_id, _required_worker_pool = _task_payload_inputs(ctx)
+    task_id, _required_worker_pool = _task_payload_inputs(
+        ctx,
+        submit_mode="admin-on-behalf",
+    )
     quoted_task_id = urllib.parse.quote(task_id, safe="/")
     status, body = _http_get(f"{base}/api/v1/tasks/{quoted_task_id}", token=token)
     step_dir.artifact_path("04-task.json").write_bytes(body)
@@ -653,7 +665,10 @@ class SmokeStep(BaseStep):
 
     def _inputs_fingerprint(self, ctx: RolloutContext) -> dict[str, object]:
         submit_mode = _smoke_submit_mode(ctx)
-        task_id, required_worker_pool = _task_payload_inputs(ctx)
+        task_id, required_worker_pool = _task_payload_inputs(
+            ctx,
+            submit_mode=submit_mode,
+        )
         fingerprint: dict[str, object] = {
             **ctx.to_inputs_dict(),
             "smoke_submit_mode": submit_mode,
@@ -756,7 +771,7 @@ class SmokeStep(BaseStep):
 
         # 4. smoke task exists in the live catalog.
         explicit_task_id = bool(_explicit_smoke_task_id(ctx))
-        task_id = _smoke_task_id(ctx)
+        task_id = _smoke_task_id(ctx, submit_mode="user-token")
         required_worker_pool = _smoke_required_worker_pool(
             ctx,
             explicit_task_id=explicit_task_id,
