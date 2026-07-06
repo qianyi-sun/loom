@@ -896,10 +896,10 @@ that drops the env vars breaks CI before the rollout does.
 
 `loom cluster rollout` orchestrates the full staging rollout: resolve
 target ref → worktree → build → kind-load → GB10 prep → backup → audit →
-render → preflight → migrate → env-state → cluster up → release-gate →
-smoke → summary. Every step writes evidence into a per-rollout directory
-tree; a re-run of the same command safely resumes from the interrupted
-step.
+render → preflight → migrate → env-state → cluster up → production
+defaults → release-gate → smoke → summary. Every step writes evidence
+into a per-rollout directory tree; a re-run of the same command safely
+resumes from the interrupted step.
 
 ### Invocation
 
@@ -928,7 +928,7 @@ Step 05 invokes `loom cluster backup check` and refuses to advance
 without a fresh, verified manifest.
 
 `LOOM_ADMIN_TOKEN` is used only for protected admin checks such as GB10 worker
-status collection. Step 13's live trial submit uses `LOOM_SMOKE_API_TOKEN`, and
+status collection. Step 14's live trial submit uses `LOOM_SMOKE_API_TOKEN`, and
 that credential must be a user-owned API token whose `/api/v1/auth/whoami`
 reports `credential_type=user_owned_api_token` and includes `submit` scope.
 Admin secrets, internal service credentials, and legacy team tokens are refused
@@ -995,7 +995,7 @@ Each invocation gets a directory under `<rollout-root>/rollouts/`:
 ├── 00-resolve-target/       # per-step: result.json, stdout.log, stderr.log,
 ├── 01-worktree/             # step-specific artifacts (rendered.yaml,
 ├── ...                      # loaded-images.json, migration.yaml, etc.)
-├── 13-smoke/
+├── 14-smoke/
 └── 99-summary/summary.md
 ```
 
@@ -1046,11 +1046,12 @@ observability and mutation contract:
 | 09 | migrate | candidate-source `loom cluster render-migration` + `kubectl wait` (#332) |
 | 10 | env-state | candidate-source apply + check (#331 fix for stop-on-disable). Pure GB10 node-status convergence drift is retried for up to 15 minutes so node-agent image builds can finish; mixed drift still fails immediately. |
 | 11 | cluster-up | candidate-source `loom cluster up` (#203 fix for updated replicas) |
-| 12 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment`, then `loom cluster release-gate --manifest <that file>` (#339 fix for stale kind-import). GB10 convergence mismatches are retried for up to 15 minutes so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. |
-| 13 | smoke | HTTP health + user-owned smoke token whoami + benchmarks + smoke task lookup + trial submit + poll + trajectory HEAD |
+| 12 | production-defaults | candidate-source `loom admin rate-cards sync-yibuapi --format json`, then `loom providers update/show` for hosted provider pricing defaults declared in the environment-state profile. This keeps DB-backed cost-attribution defaults from disappearing after a fresh rollout. |
+| 13 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment`, then `loom cluster release-gate --manifest <that file>` (#339 fix for stale kind-import). GB10 convergence mismatches are retried for up to 15 minutes so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. |
+| 14 | smoke | HTTP health + user-owned smoke token whoami + benchmarks + smoke task lookup + trial submit + poll + trajectory HEAD |
 | 99 | summary | write `summary.md` from every prior step's result.json |
 
-Step 12 deliberately writes a narrow image-identity artifact instead of full
+Step 13 deliberately writes a narrow image-identity artifact instead of full
 `docker image inspect` output. The artifact is keyed by Deployment/container and
 contains the rendered image tag plus immutable `image_id` and optional
 `repo_digest` for images built by this rollout. External images, such as Envoy,
@@ -1211,10 +1212,13 @@ loom admin rate-cards sync-yibuapi
 
 This stores the official `source_url`, `pricing_version`, check time, group
 ratio, and model count metadata in the service rate-card payload. Hosted
-YibuAPI provider connections should use `rate_card_provider=yibuapi`; user
-self-deployed/private API connections should normally stay `tokens-only`, which
-reports token totals and `cost_status=not_applicable` without assigning a
-fabricated dollar amount.
+YibuAPI provider connections should use `pricing_source=rate-card` with
+`rate_card_provider=yibuapi`; user self-deployed/private API connections should
+normally stay `tokens-only`, which reports token totals and
+`cost_status=not_applicable` without assigning a fabricated dollar amount.
+Protected rollout profiles can declare `[rate_card_sync.yibuapi]` plus
+`[[hosted_provider_pricing_defaults]]`; step 12 applies and verifies those
+defaults on every rollout before release-gate or smoke can proceed.
 
 ## Trial-cache (per-trial agent install)
 
@@ -2194,10 +2198,12 @@ loom providers create \
   --api-key env:TOGETHER_API_KEY \
   --rate-card-provider together
 
-loom providers update together-prod --rate-card-provider together
+loom providers update together-prod \
+  --pricing-source rate-card \
+  --rate-card-provider together
 ```
 
-Then switch `pricing_source` to `rate-card` only after the Gateway's
+Run the `--pricing-source rate-card` update only after the Gateway's
 `rate_cards` table has matching `(provider, model)` entries. Facade calls
 with a missing entry still record tokens and use
 `rate_card_hash='facade:rate-card:missing'` with `cost_usd=0`, but the

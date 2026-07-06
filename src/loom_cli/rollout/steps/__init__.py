@@ -19,13 +19,14 @@ from loom_cli.rollout.steps.s08_preflight import PreflightStep
 from loom_cli.rollout.steps.s09_migrate import MigrateStep
 from loom_cli.rollout.steps.s10_env_state import EnvStateStep
 from loom_cli.rollout.steps.s11_cluster_up import ClusterUpStep
+from loom_cli.rollout.steps.s12_production_defaults import ProductionDefaultsStep
 from loom_cli.rollout.steps.s12_release_gate import ReleaseGateStep
 from loom_cli.rollout.steps.s13_smoke import SmokeStep
 from loom_cli.rollout.steps.s99_summary import SummaryStep
 
 
 def default_step_sequence() -> list[Step]:
-    """Return the standard 14-step + summary rollout sequence.
+    """Return the standard 15-step + summary rollout sequence.
 
     The order is significant: dependencies flow left-to-right (worktree
     is required by build; build by kind-load; render by migrate; etc.).
@@ -43,6 +44,7 @@ def default_step_sequence() -> list[Step]:
         MigrateStep(),
         EnvStateStep(),
         ClusterUpStep(),
+        ProductionDefaultsStep(),
         ReleaseGateStep(),
         SmokeStep(),
         SummaryStep(),

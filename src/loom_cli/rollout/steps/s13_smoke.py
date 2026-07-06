@@ -237,7 +237,7 @@ def _validate_submitter_identity(
 
 
 class SmokeStep(BaseStep):
-    number = 13
+    number = 14
     name = "smoke"
 
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:

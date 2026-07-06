@@ -112,6 +112,8 @@ class EnvironmentStateProfile:
     autoscaler_policies: list[dict[str, Any]]
     gb10_desired_states: list[dict[str, Any]]
     catalog_provisioning: dict[str, Any]
+    rate_card_sync: dict[str, Any]
+    hosted_provider_pricing_defaults: list[dict[str, Any]]
     external_slurm_runner_prerequisites: dict[str, Any]
     external_slurm_autoscaler_supervisors: list[dict[str, Any]]
 
@@ -337,6 +339,39 @@ def _normalize_external_slurm_autoscaler_supervisor(
     return normalized
 
 
+def _normalize_hosted_provider_pricing_default(
+    item: dict[str, Any],
+    *,
+    index: int,
+) -> dict[str, Any]:
+    field = f"hosted_provider_pricing_defaults[{index}]"
+    name = _clean_nonempty(item.get("name"), f"{field}.name")
+    pricing_source = _clean_nonempty(
+        item.get("pricing_source"),
+        f"{field}.pricing_source",
+    )
+    if pricing_source not in {"rate-card", "tokens-only"}:
+        raise EnvironmentStateProfileError(
+            f"{field}.pricing_source must be 'rate-card' or 'tokens-only'",
+        )
+    rate_card_provider = item.get("rate_card_provider")
+    normalized: dict[str, Any] = {
+        "name": name,
+        "pricing_source": pricing_source,
+        "required": bool(item.get("required", True)),
+    }
+    if rate_card_provider is not None:
+        normalized["rate_card_provider"] = _clean_nonempty(
+            rate_card_provider,
+            f"{field}.rate_card_provider",
+        )
+    if pricing_source == "rate-card" and "rate_card_provider" not in normalized:
+        raise EnvironmentStateProfileError(
+            f"{field}.rate_card_provider is required when pricing_source='rate-card'",
+        )
+    return normalized
+
+
 def load_environment_state_profile(
     path: Path | str,
     *,
@@ -383,6 +418,16 @@ def load_environment_state_profile(
         )
     ]
     catalog = raw.get("catalog_provisioning", {})
+    rate_card_sync = raw.get("rate_card_sync", {})
+    hosted_provider_pricing_defaults = [
+        _normalize_hosted_provider_pricing_default(item, index=idx)
+        for idx, item in enumerate(
+            _as_list(
+                raw.get("hosted_provider_pricing_defaults"),
+                "hosted_provider_pricing_defaults",
+            ),
+        )
+    ]
     external_slurm_runner_prerequisites = raw.get(
         "external_slurm_runner_prerequisites",
         {},
@@ -406,6 +451,8 @@ def load_environment_state_profile(
         autoscaler_policies=autoscaler_policies,
         gb10_desired_states=gb10_desired_states,
         catalog_provisioning=_as_dict(catalog, "catalog_provisioning"),
+        rate_card_sync=_as_dict(rate_card_sync, "rate_card_sync"),
+        hosted_provider_pricing_defaults=hosted_provider_pricing_defaults,
         external_slurm_runner_prerequisites=_as_dict(
             external_slurm_runner_prerequisites,
             "external_slurm_runner_prerequisites",

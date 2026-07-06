@@ -63,6 +63,15 @@ mode = "all"
 [catalog_provisioning]
 required = true
 command = "loom datasets provision-catalog"
+
+[rate_card_sync.yibuapi]
+enabled = true
+group = "default"
+
+[[hosted_provider_pricing_defaults]]
+name = "mz_tn_canada_qianyi"
+pricing_source = "rate-card"
+rate_card_provider = "yibuapi"
 """.strip()
         + "\n",
         encoding="utf-8",
@@ -118,6 +127,20 @@ def test_load_environment_state_profile_normalizes_payloads_and_variables(
         "57a750912345678901234567890123456789abcd"
     )
     assert profile.catalog_provisioning["required"] is True
+    assert profile.rate_card_sync == {
+        "yibuapi": {
+            "enabled": True,
+            "group": "default",
+        },
+    }
+    assert profile.hosted_provider_pricing_defaults == [
+        {
+            "name": "mz_tn_canada_qianyi",
+            "pricing_source": "rate-card",
+            "rate_card_provider": "yibuapi",
+            "required": True,
+        },
+    ]
 
 
 def test_load_environment_state_profile_requires_placeholder_values(tmp_path: Path) -> None:

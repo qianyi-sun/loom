@@ -71,6 +71,8 @@ def _empty_environment_profile() -> EnvironmentStateProfile:
         autoscaler_policies=[],
         gb10_desired_states=[],
         catalog_provisioning={},
+        rate_card_sync={},
+        hosted_provider_pricing_defaults=[],
         external_slurm_runner_prerequisites={},
         external_slurm_autoscaler_supervisors=[],
     )
