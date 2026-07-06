@@ -671,3 +671,361 @@ beta_slots = 1
     assert report["applied"] is False
     assert report["drain"]["running_beta_trials"] == 1
     assert report["command"]["argv"][0] == "drain-beta"
+
+
+def test_status_keeps_active_beta_lease_when_prod_pressure_is_absent(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "capacity.toml"
+    _write_manifest(
+        manifest,
+        """
+[[hosts]]
+name = "gb10-1"
+pool = "gb10-arm64"
+total_slots = 10
+state = "eligible"
+
+[[hosts]]
+name = "gb10-2"
+pool = "gb10-arm64"
+total_slots = 10
+state = "eligible"
+""",
+    )
+    leased_manifest = tmp_path / "leased.toml"
+    lease = _run_capacity(
+        "lease-beta",
+        "--manifest",
+        manifest,
+        "--reason",
+        "validation",
+        "--ttl",
+        "30m",
+        "--slots-per-host",
+        "1",
+        "--max-total-slots",
+        "2",
+        "--preemptible",
+        "--now",
+        "2026-07-06T12:00:00Z",
+        "--apply",
+        "--output-manifest",
+        leased_manifest,
+    )
+    assert lease.returncode == 0, lease.stderr
+
+    status = _run_capacity(
+        "status",
+        "--manifest",
+        leased_manifest,
+        "--prod-pending-count",
+        "0",
+        "--prod-active-count",
+        "0",
+        "--now",
+        "2026-07-06T12:05:00Z",
+    )
+
+    assert status.returncode == 0, status.stderr
+    report = json.loads(status.stdout)
+    assert report["lease"]["state"] == "active"
+    assert report["summary"]["beta_slots"] == 2
+    assert report["new_beta_claims_allowed"] is True
+    assert report["prod_pressure"]["has_pressure"] is False
+    assert report["prod_pressure"]["cause"] == "none"
+
+
+def test_status_auto_drains_beta_capacity_under_prod_pressure(tmp_path: Path) -> None:
+    manifest = tmp_path / "capacity.toml"
+    _write_manifest(
+        manifest,
+        """
+[[hosts]]
+name = "gb10-1"
+pool = "gb10-arm64"
+total_slots = 10
+state = "eligible"
+
+[[hosts]]
+name = "gb10-2"
+pool = "gb10-arm64"
+total_slots = 10
+state = "eligible"
+""",
+    )
+    leased_manifest = tmp_path / "leased.toml"
+    lease = _run_capacity(
+        "lease-beta",
+        "--manifest",
+        manifest,
+        "--reason",
+        "validation",
+        "--ttl",
+        "30m",
+        "--slots-per-host",
+        "1",
+        "--max-total-slots",
+        "2",
+        "--preemptible",
+        "--now",
+        "2026-07-06T12:00:00Z",
+        "--apply",
+        "--output-manifest",
+        leased_manifest,
+    )
+    assert lease.returncode == 0, lease.stderr
+    observed = tmp_path / "observed.json"
+    observed.write_text(
+        json.dumps(
+            {
+                "workers": [
+                    {
+                        "worker_id": "beta-worker-1",
+                        "host": "gb10-1",
+                        "environment": "development",
+                        "api_url": "https://yylx.world/dev/api",
+                        "image_tag": "dev-2222222",
+                        "source_git_commit": "2222222222222222222222222222222222222222",
+                        "max_concurrent": 1,
+                        "running_trials": 1,
+                    },
+                    {
+                        "worker_id": "beta-worker-2",
+                        "host": "gb10-2",
+                        "environment": "development",
+                        "api_url": "https://yylx.world/dev/api",
+                        "image_tag": "dev-2222222",
+                        "source_git_commit": "2222222222222222222222222222222222222222",
+                        "max_concurrent": 1,
+                        "running_trials": 0,
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    pressure = _run_capacity(
+        "status",
+        "--manifest",
+        leased_manifest,
+        "--observed-json",
+        observed,
+        "--prod-pending-count",
+        "3",
+        "--prod-active-count",
+        "1",
+        "--prod-pressure-source",
+        "prod queue https://user:secret@example.invalid",
+        "--now",
+        "2026-07-06T12:05:00Z",
+    )
+
+    assert pressure.returncode == 0, pressure.stderr
+    assert "secret@example" not in pressure.stdout
+    report = json.loads(pressure.stdout)
+    assert report["lease"]["state"] == "prod_pressure_draining"
+    assert report["new_beta_claims_allowed"] is False
+    assert report["prod_pressure"]["has_pressure"] is True
+    assert report["prod_pressure"]["cause"] == "prod_capacity_pressure"
+    assert report["prod_pressure"]["prod_pending_count"] == 3
+    assert report["prod_pressure"]["prod_active_count"] == 1
+    assert "<redacted>" in report["prod_pressure"]["source"]
+    assert report["drain"]["running_beta_trials"] == 1
+    assert report["drain"]["idle_leased_slots"] == 1
+    assert report["drain"]["released_idle_hosts"] == ["gb10-2"]
+    assert report["drain"]["preemptible"]["action"] == "wait"
+    assert report["drain"]["preemptible"]["eligible_running_beta_trials"] == 0
+    hosts = {item["host"]: item for item in report["desired_hosts"]}
+    assert hosts["gb10-1"]["state"] == "beta_draining"
+    assert hosts["gb10-1"]["beta_slots"] == 1
+    assert hosts["gb10-2"]["state"] == "eligible"
+    assert hosts["gb10-2"]["beta_slots"] == 0
+
+
+def test_prod_pressure_grace_period_marks_preemptible_beta_retryable_after_grace(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "pressure-draining.toml"
+    _write_manifest(
+        manifest,
+        """
+[beta_capacity_lease]
+state = "prod_pressure_draining"
+reason = "validation"
+created_at = "2026-07-06T11:55:00Z"
+expires_at = "2026-07-06T12:55:00Z"
+ttl_seconds = 3600
+slots_per_host = 1
+max_total_slots = 1
+preemptible = true
+leased_hosts = ["gb10-1"]
+stopped_new_claims = true
+prod_pressure_started_at = "2026-07-06T12:00:00Z"
+prod_pressure_reason = "prod capacity pressure"
+
+[[hosts]]
+name = "gb10-1"
+pool = "gb10-arm64"
+total_slots = 10
+state = "beta_draining"
+beta_slots = 1
+""",
+    )
+    observed = tmp_path / "observed.json"
+    observed.write_text(
+        json.dumps(
+            {
+                "workers": [
+                    {
+                        "worker_id": "beta-worker-1",
+                        "host": "gb10-1",
+                        "environment": "development",
+                        "api_url": "https://yylx.world/dev/api",
+                        "image_tag": "dev-2222222",
+                        "source_git_commit": "2222222222222222222222222222222222222222",
+                        "max_concurrent": 1,
+                        "running_trials": 1,
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    pressure = _run_capacity(
+        "status",
+        "--manifest",
+        manifest,
+        "--observed-json",
+        observed,
+        "--prod-pending-count",
+        "1",
+        "--preemptible-grace-period",
+        "10m",
+        "--now",
+        "2026-07-06T12:11:00Z",
+    )
+
+    assert pressure.returncode == 0, pressure.stderr
+    report = json.loads(pressure.stdout)
+    preemptible = report["drain"]["preemptible"]
+    assert preemptible["enabled"] is True
+    assert preemptible["grace_period_seconds"] == 600
+    assert preemptible["cancel_after"] == "2026-07-06T12:10:00Z"
+    assert preemptible["eligible_running_beta_trials"] == 1
+    assert preemptible["action"] == "cancel_retryable"
+    assert preemptible["reason"] == "prod_capacity_pressure_grace_period_elapsed"
+
+
+def test_prod_pressure_drained_lease_recovers_after_pressure_clears(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "pressure-draining.toml"
+    _write_manifest(
+        manifest,
+        """
+[beta_capacity_lease]
+state = "prod_pressure_draining"
+reason = "validation"
+created_at = "2026-07-06T12:00:00Z"
+expires_at = "2026-07-06T12:30:00Z"
+ttl_seconds = 1800
+slots_per_host = 1
+max_total_slots = 2
+preemptible = true
+leased_hosts = ["gb10-1", "gb10-2"]
+stopped_new_claims = true
+prod_pressure_started_at = "2026-07-06T12:05:00Z"
+prod_pressure_reason = "prod capacity pressure"
+
+[[hosts]]
+name = "gb10-1"
+pool = "gb10-arm64"
+total_slots = 10
+state = "beta_draining"
+beta_slots = 1
+
+[[hosts]]
+name = "gb10-2"
+pool = "gb10-arm64"
+total_slots = 10
+state = "eligible"
+beta_slots = 0
+""",
+    )
+
+    recovered = _run_capacity(
+        "status",
+        "--manifest",
+        manifest,
+        "--prod-pending-count",
+        "0",
+        "--prod-active-count",
+        "0",
+        "--now",
+        "2026-07-06T12:10:00Z",
+    )
+
+    assert recovered.returncode == 0, recovered.stderr
+    report = json.loads(recovered.stdout)
+    assert report["lease"]["state"] == "active"
+    assert report["lease"]["recovery_reason"] == "prod pressure cleared"
+    assert report["prod_pressure"]["has_pressure"] is False
+    assert report["prod_pressure"]["recovered"] is True
+    assert report["summary"]["beta_slots"] == 2
+    assert report["new_beta_claims_allowed"] is True
+    hosts = {item["host"]: item for item in report["desired_hosts"]}
+    assert hosts["gb10-1"]["state"] == "eligible"
+    assert hosts["gb10-1"]["beta_slots"] == 1
+    assert hosts["gb10-2"]["state"] == "eligible"
+    assert hosts["gb10-2"]["beta_slots"] == 1
+
+
+def test_prod_pressure_drained_lease_expires_instead_of_recovering_after_ttl(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "pressure-draining.toml"
+    _write_manifest(
+        manifest,
+        """
+[beta_capacity_lease]
+state = "prod_pressure_draining"
+reason = "validation"
+created_at = "2026-07-06T12:00:00Z"
+expires_at = "2026-07-06T12:30:00Z"
+ttl_seconds = 1800
+slots_per_host = 1
+max_total_slots = 1
+preemptible = true
+leased_hosts = ["gb10-1"]
+stopped_new_claims = true
+prod_pressure_started_at = "2026-07-06T12:05:00Z"
+prod_pressure_reason = "prod capacity pressure"
+
+[[hosts]]
+name = "gb10-1"
+pool = "gb10-arm64"
+total_slots = 10
+state = "beta_draining"
+beta_slots = 1
+""",
+    )
+
+    expired = _run_capacity(
+        "status",
+        "--manifest",
+        manifest,
+        "--prod-pending-count",
+        "0",
+        "--now",
+        "2026-07-06T12:31:00Z",
+    )
+
+    assert expired.returncode == 0, expired.stderr
+    report = json.loads(expired.stdout)
+    assert report["lease"]["state"] == "expired"
+    assert report["prod_pressure"]["recovered"] is False
+    assert report["summary"]["beta_slots"] == 0
+    assert report["new_beta_claims_allowed"] is False
