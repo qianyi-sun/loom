@@ -49,6 +49,7 @@ name = "pytest"  # or "script", "structured", "llm-judge", "composite"
 [[steps]]
 name = "main"
 artifacts = ["result.txt"]
+required_artifacts = ["result.txt"]
 # min_reward = 0.5  # gates aggregate reward; only on multi-step tasks
 ```
 
@@ -160,6 +161,13 @@ and includes return code, stdout/stderr tails, truncation status, duration, the
 script path, and the expected output path in `VerifierResult.error.detail`.
 Individual `checks[].detail` fields may be objects or simpler JSON values such
 as strings when upstream verifier tooling emits legacy diagnostics.
+
+Use `required_artifacts` for output files that the verifier or upstream task
+contract requires. These paths are relative to `[environment].workdir` and are
+checked after the verifier runs against the same workspace state. If a required
+artifact is missing, Loom marks the trial evidence invalid/retryable with
+`missing_required_artifacts` instead of treating the row as an ordinary
+reward-0 score failure.
 
 For `litellm` service-mode runs, the platform can write the final model
 response into declared step artifacts before verification. Keep benchmark

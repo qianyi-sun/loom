@@ -85,7 +85,12 @@ smoke runs can execute the materialized `solution/solve.sh` from the solution
 directory. SkillLearnBench conversion also rewrites unsupported classic-Docker
 heredoc `RUN <<EOF` forms into copied shell scripts and normalizes
 Python-to-Scala oracle output back to the task root when the upstream verifier
-expects root-level artifacts. The shim runs the upstream
+expects root-level artifacts. SkillLearnBench `[evaluation].required_files`
+entries are normalized relative to `/root` and emitted as
+`steps[0].required_artifacts`, so verifier-required outputs are preserved even
+when they are not covered by the generic artifact extension list; missing
+required outputs become retryable invalid-evidence diagnostics. The shim runs
+the upstream
 `tests/test.sh` from the task root, reads `/logs/verifier/reward.txt`, and
 converts that reward into Loom's structured `VerifierResult` JSON. When the
 upstream test writes `/logs/verifier/output.log`, the shim includes the log

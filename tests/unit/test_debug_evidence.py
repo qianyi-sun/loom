@@ -2,14 +2,20 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from urllib.parse import urlencode
 from uuid import uuid4
 
 from loom_service.debug_evidence import build_batch_debug_evidence, build_trial_debug_evidence
 
 
+class _URL(str):
+    def include_query_params(self, **values: object) -> str:
+        return f"{self}?{urlencode(values)}"
+
+
 class _Request:
-    def url_for(self, name: str, **values: object) -> str:
-        return f"http://test/{name}/{values.get('trial_id', '')}"
+    def url_for(self, name: str, **values: object) -> _URL:
+        return _URL(f"http://test/{name}/{values.get('trial_id', '')}")
 
 
 def test_batch_debug_evidence_counts_claimed_without_started_trials() -> None:
@@ -236,6 +242,78 @@ def test_trial_debug_evidence_distinguishes_reward_zero_score_failure() -> None:
     assert evidence["failure"]["platform_outcome"] == "success"
     assert evidence["failure"]["score_outcome"] == "failed"
     assert evidence["failure"]["rerun_recommendation"] == "not_rerunnable"
+
+
+def test_trial_debug_evidence_marks_missing_required_artifacts_retryable() -> None:
+    now = datetime.now(UTC)
+    trial = SimpleNamespace(
+        id=uuid4(),
+        team_id=uuid4(),
+        batch_id=None,
+        task_id="skilllearnbench/anthropic-poster-design/anthropic-poster-design-5",
+        state="succeeded",
+        failure_reason=None,
+        failure_message=None,
+        result={"aggregate_reward": 0.0},
+        config={},
+        trajectory_index={
+            "artifacts": [
+                {
+                    "step_name": "main",
+                    "key": "team/trial/main/design_parameters.json",
+                    "size": 42,
+                },
+            ],
+        },
+        provider_connection_id=None,
+        provider_model_id=None,
+        submitted_at=now - timedelta(minutes=2),
+        claimed_at=now - timedelta(minutes=2),
+        started_at=now - timedelta(minutes=1),
+        finished_at=now,
+        cancellation_requested_at=None,
+        cancellation_observed_at=None,
+        attempt_count=1,
+        next_attempt_at=None,
+        worker_id=None,
+        requires_caps={},
+    )
+    task = SimpleNamespace(
+        benchmark_id="skilllearnbench",
+        checksum="0" * 64,
+        source="benchmark",
+        config={
+            "steps": [
+                {
+                    "name": "main",
+                    "required_artifacts": [
+                        "anthropic_branded_artifact.png",
+                        "design_parameters.json",
+                    ],
+                }
+            ]
+        },
+    )
+
+    evidence = build_trial_debug_evidence(
+        _Request(),  # type: ignore[arg-type]
+        trial,  # type: ignore[arg-type]
+        task=task,  # type: ignore[arg-type]
+        llm_calls=[],
+    )
+
+    required = evidence["evidence_refs"]["required_artifacts"]
+    assert required["status"] == "missing"
+    assert required["missing"] == [
+        {
+            "step_name": "main",
+            "pattern": "anthropic_branded_artifact.png",
+        }
+    ]
+    assert evidence["failure"]["reason_code"] == "trial.missing_required_artifacts"
+    assert evidence["failure"]["failure_class"] == "artifact_failure"
+    assert evidence["failure"]["platform_outcome"] == "invalid_evidence"
+    assert evidence["failure"]["rerun_recommendation"] == "auto_safe"
 
 
 def test_trial_debug_evidence_surfaces_codex_high_demand_no_call_reason() -> None:

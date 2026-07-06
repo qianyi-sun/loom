@@ -36,6 +36,13 @@ def test_failure_reason_includes_provider_transport_disconnect():
     )
 
 
+def test_failure_reason_includes_missing_required_artifacts():
+    assert (
+        FailureReason.MISSING_REQUIRED_ARTIFACTS.value
+        == "missing_required_artifacts"
+    )
+
+
 def test_agent_info():
     info = AgentInfo(
         name="claude-code-agent", version="1.4.0", mode="in-box",

@@ -44,6 +44,7 @@ _VERIFIER_FAILURE_REASONS: Mapping[str, str] = {
 
 _ARTIFACT_FAILURE_REASONS: Mapping[str, str] = {
     "missing_atif": "missing_atif",
+    "missing_required_artifacts": "missing_required_artifacts",
     "missing_trajectory": "missing_trajectory",
 }
 
@@ -208,6 +209,21 @@ def classify_trial_outcome(trial: Any) -> dict[str, Any]:
             category="task",
             attribution="benchmark",
             requires_task_change=True,
+        )
+
+    if reason == "missing_required_artifacts":
+        return _common(
+            reason_code="trial.missing_required_artifacts",
+            reason=reason,
+            failure_class="artifact_failure",
+            root_cause="missing_required_artifacts",
+            platform_outcome="invalid_evidence",
+            score_outcome="unscored",
+            rerun_recommendation="auto_safe",
+            message=message,
+            category="artifact",
+            attribution="platform",
+            rerunnable=True,
         )
 
     if reason in _AUTO_SAFE_REASONS:

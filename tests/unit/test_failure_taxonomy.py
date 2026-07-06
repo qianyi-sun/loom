@@ -52,6 +52,24 @@ def test_reward_zero_is_score_failure_not_platform_failure() -> None:
     assert classification["rerun_recommendation"] == "not_rerunnable"
 
 
+def test_missing_required_artifacts_are_retryable_invalid_evidence() -> None:
+    classification = classify_trial_outcome(
+        _trial(
+            task_id="skilllearnbench/anthropic-poster-design/anthropic-poster-design-5",
+            state="failed",
+            failure_reason="missing_required_artifacts",
+        )
+    )
+
+    assert classification["reason_code"] == "trial.missing_required_artifacts"
+    assert classification["failure_class"] == "artifact_failure"
+    assert classification["root_cause"] == "missing_required_artifacts"
+    assert classification["platform_outcome"] == "invalid_evidence"
+    assert classification["score_outcome"] == "unscored"
+    assert classification["rerun_recommendation"] == "auto_safe"
+    assert classification["rerunnable"] is True
+
+
 @pytest.mark.parametrize(
     (
         "failure_reason",
