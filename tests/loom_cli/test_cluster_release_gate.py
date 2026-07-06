@@ -30,11 +30,15 @@ class _FakeAppsV1:
 
 
 class _FakeCoreV1:
-    def __init__(self, pods: list[Any]) -> None:
+    def __init__(self, pods: list[Any], events: list[Any] | None = None) -> None:
         self.pods = pods
+        self.events = events or []
 
     def list_namespaced_pod(self, *, namespace: str) -> Any:
         return _Spec(items=self.pods)
+
+    def list_namespaced_event(self, *, namespace: str) -> Any:
+        return _Spec(items=self.events)
 
 
 def _deployment(
@@ -81,6 +85,31 @@ def _ready_pod(
             conditions=[_Spec(type="Ready", status="True")],
             container_statuses=[container_status],
         ),
+    )
+
+
+def _pod(
+    *,
+    name: str,
+    app: str,
+    image: str,
+    deletion_timestamp: str | None = None,
+) -> Any:
+    metadata = _Spec(name=name, labels={"app": app})
+    if deletion_timestamp is not None:
+        metadata.deletion_timestamp = deletion_timestamp
+    return _Spec(
+        metadata=metadata,
+        spec=_Spec(containers=[_Spec(name="app", image=image)]),
+        status=_Spec(phase="Running", container_statuses=[]),
+    )
+
+
+def _event(*, pod: str, reason: str, message: str) -> Any:
+    return _Spec(
+        involved_object=_Spec(name=pod),
+        reason=reason,
+        message=message,
     )
 
 
@@ -651,6 +680,80 @@ def test_release_gate_fails_when_deployment_updated_replicas_are_partial() -> No
     assert check.evidence["desired_replicas"] == 2
     assert check.evidence["updated_replicas"] == 1
     assert check.evidence["ready_replicas"] == 1
+
+
+def test_release_gate_classifies_node_runtime_sandbox_cleanup_failure() -> None:
+    """#206 regression: a target pod can be Ready while an old pod is stuck
+    terminating because kubelet/containerd cannot kill its pod sandbox.
+
+    That is a node-runtime cleanup failure. The release gate must not pass the
+    image identity row just because one target-generation pod is Ready.
+    """
+    manifest = _manifest(expected_digest="sha256:" + "1" * 64)
+    deployment = _deployment(
+        name="loom-service",
+        image="loom-service:staging-abc123",
+    )
+    deployment.status.replicas = 2
+    deployment.status.updated_replicas = 1
+    deployment.status.ready_replicas = 1
+    apps = _FakeAppsV1({"loom-service": deployment})
+    core = _FakeCoreV1(
+        [
+            _ready_pod(
+                name="loom-service-new",
+                app="loom-service",
+                image="loom-service:staging-abc123",
+                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+            ),
+            _pod(
+                name="loom-service-old",
+                app="loom-service",
+                image="loom-service:staging-old",
+                deletion_timestamp="2026-06-30T16:44:56Z",
+            ),
+        ],
+        events=[
+            _event(
+                pod="loom-service-old",
+                reason="FailedKillPod",
+                message=(
+                    "KillPodSandboxError: rpc error: code = DeadlineExceeded "
+                    "desc = context deadline exceeded"
+                ),
+            ),
+        ],
+    )
+
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=apps,
+        core_v1=core,
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+    )
+
+    assert not report.all_pass
+    check = next(
+        check for check in report.checks
+        if check.name == "image-identity:loom-service/app"
+    )
+    assert check.outcome == "fail"
+    assert check.detail == "node runtime sandbox deadline blocked Deployment rollout"
+    assert check.remediation is not None
+    assert "--recover-sandbox-deadlines" in check.remediation
+    assert check.evidence["failure_class"] == "node_runtime_sandbox_deadline"
+    assert check.evidence["total_replicas"] == 2
+    assert check.evidence["sandbox_deadline_diagnostics"] == [
+        {
+            "pod": "loom-service-old",
+            "reason": "FailedKillPod",
+            "operation": "kill",
+            "target_generation": False,
+        },
+    ]
 
 
 def test_release_gate_fails_on_rendered_manifest_hash_drift() -> None:

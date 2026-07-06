@@ -49,6 +49,19 @@ from loom_cli.cluster_rollout_evidence import (
     normalize_cluster_status_format,
     render_rollout_evidence_json,
 )
+from loom_cli.cluster_sandbox_deadline import (
+    FAILURE_CLASS as SANDBOX_DEADLINE_FAILURE_CLASS,
+)
+from loom_cli.cluster_sandbox_deadline import (
+    RECOVERY_KIND as SANDBOX_DEADLINE_RECOVERY_KIND,
+)
+from loom_cli.cluster_sandbox_deadline import (
+    diagnostic_summaries,
+    format_sandbox_deadline_note,
+    pod_names_from_status,
+    sandbox_deadline_diagnostics_for_deployment,
+    status_has_sandbox_deadline_failures,
+)
 from loom_cli.minio_storage_preflight import (
     DEFAULT_BUCKETS,
     DEFAULT_STOP_FREE_PERCENT,
@@ -227,6 +240,9 @@ class ComponentStatus:
     pod_health_ok: bool = True
     last_restart_reason: str | None = None
     note: str | None = None
+    failure_class: str | None = None
+    runtime_recovery: str | None = None
+    runtime_failure_diagnostics: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def healthy(self) -> bool:
@@ -393,6 +409,9 @@ def _format_json(status: ClusterStatus) -> str:
                 "observed_generation": c.observed_generation,
                 "updated": c.updated,
                 "pod_health_ok": c.pod_health_ok,
+                "failure_class": c.failure_class,
+                "runtime_recovery": c.runtime_recovery,
+                "runtime_failure_diagnostics": c.runtime_failure_diagnostics,
             }
             for c in status.components
         ],
@@ -623,6 +642,7 @@ def _collect_workload(
     statefulsets: tuple[tuple[str, str], ...],
     *,
     pods: list[Any] | None = None,
+    events: list[Any] | None = None,
 ) -> list[ComponentStatus]:
     """Read each workload's ready/desired counts. A workload that
     isn't deployed at all surfaces as ready=0/desired=0 with a
@@ -656,11 +676,19 @@ def _collect_workload(
                 desired=desired,
                 total_replicas=total_replicas,
             )
+            sandbox_diagnostics = sandbox_deadline_diagnostics_for_deployment(
+                deployment=d,
+                fallback_name=k8s_name,
+                pods=pods or [],
+                events=events or [],
+            )
+            sandbox_note = format_sandbox_deadline_note(sandbox_diagnostics)
             pod_health_note = _deployment_pod_health_note(
                 d,
                 k8s_name=k8s_name,
                 pods=pods or [],
             ) if desired > 0 else None
+            pod_health_ok = pod_health_note is None and not sandbox_diagnostics
             out.append(
                 ComponentStatus(
                     name=display_name,
@@ -672,8 +700,23 @@ def _collect_workload(
                     observed_generation=observed_generation,
                     updated=updated,
                     total_replicas=total_replicas,
-                    pod_health_ok=pod_health_note is None,
-                    note=_combine_notes(convergence_note, pod_health_note),
+                    pod_health_ok=pod_health_ok,
+                    note=_combine_notes(
+                        convergence_note,
+                        sandbox_note,
+                        pod_health_note,
+                    ),
+                    failure_class=(
+                        SANDBOX_DEADLINE_FAILURE_CLASS
+                        if sandbox_diagnostics else None
+                    ),
+                    runtime_recovery=(
+                        SANDBOX_DEADLINE_RECOVERY_KIND
+                        if sandbox_diagnostics else None
+                    ),
+                    runtime_failure_diagnostics=diagnostic_summaries(
+                        sandbox_diagnostics,
+                    ),
                 )
             )
         except Exception as exc:  # ApiException 404 most commonly
@@ -807,6 +850,7 @@ def collect_status(
     tests can inject fakes. Keeps the network-touching glue
     (`_load_clients`) out of the assertion surface."""
     namespace_pods, pod_list_error = _list_namespace_pods(core_v1, namespace)
+    namespace_events, event_list_error = _list_namespace_events(core_v1, namespace)
     components = _collect_workload(
         apps_v1,
         namespace,
@@ -814,12 +858,15 @@ def collect_status(
         _COMPONENT_DAEMONSETS,
         _COMPONENT_STATEFULSETS,
         pods=namespace_pods,
+        events=namespace_events,
     )
     ingresses = _collect_ingresses(networking_v1, namespace)
     warnings: list[str] = []
     blocking_warnings: list[str] = _collect_kube_system_rollout_blockers(core_v1)
     if pod_list_error is not None:
         blocking_warnings.append(pod_list_error)
+    if event_list_error is not None:
+        warnings.append(event_list_error)
     warnings.extend(blocking_warnings)
     # Surface common missing-secret cases without poking each
     # component's pod-level events (that's preflight's job; this is
@@ -847,6 +894,18 @@ def _list_namespace_pods(core_v1: Any, namespace: str) -> tuple[list[Any], str |
     except Exception as exc:
         return [], (
             f"cannot inspect managed pods in namespace {namespace}: "
+            f"{_exception_to_note(exc)}"
+        )
+
+
+def _list_namespace_events(core_v1: Any, namespace: str) -> tuple[list[Any], str | None]:
+    try:
+        return list(core_v1.list_namespaced_event(namespace=namespace).items), None
+    except AttributeError:
+        return [], None
+    except Exception as exc:
+        return [], (
+            f"cannot inspect pod events in namespace {namespace}: "
             f"{_exception_to_note(exc)}"
         )
 
@@ -3052,6 +3111,33 @@ def wait_for_ready(
         sleep_fn(poll_interval_sec)
 
 
+def recover_sandbox_deadline_pods(
+    core_v1: Any,
+    namespace: str,
+    status: ClusterStatus,
+    *,
+    max_pods: int,
+    dry_run: bool,
+) -> list[str]:
+    """Delete only pods classified as pod sandbox deadline stalls.
+
+    This is intentionally narrow: it never scans arbitrary selectors and never
+    deletes merely-unready pods. The diagnostics come from the same status
+    object that blocked readiness, so the operation remains bounded and
+    auditable.
+    """
+    if max_pods <= 0:
+        return []
+    pods = pod_names_from_status(status)[:max_pods]
+    if dry_run:
+        return pods
+    recovered: list[str] = []
+    for pod in pods:
+        core_v1.delete_namespaced_pod(name=pod, namespace=namespace)
+        recovered.append(pod)
+    return recovered
+
+
 def _up(args: argparse.Namespace) -> int:
     try:
         command = [
@@ -3087,6 +3173,10 @@ def _up(args: argparse.Namespace) -> int:
 
 
 def _up_impl(args: argparse.Namespace) -> int:
+    if args.sandbox_deadline_max_pods <= 0:
+        sys.stderr.write("error: --sandbox-deadline-max-pods must be > 0\n")
+        return 2
+
     try:
         apps_v1, net_v1, core_v1, storage_v1 = _load_clients(args.context)
     except RuntimeError as exc:
@@ -3218,6 +3308,50 @@ def _up_impl(args: argparse.Namespace) -> int:
         poll_interval_sec=args.poll_interval,
     )
     sys.stdout.write(_format_table(final))
+    if (
+        not final.all_ready
+        and args.recover_sandbox_deadlines
+        and status_has_sandbox_deadline_failures(final)
+    ):
+        try:
+            recovered_pods = recover_sandbox_deadline_pods(
+                core_v1,
+                args.namespace,
+                final,
+                max_pods=args.sandbox_deadline_max_pods,
+                dry_run=False,
+            )
+        except Exception as exc:
+            sys.stderr.write(
+                "error: sandbox deadline recovery failed: "
+                f"{type(exc).__name__}: {exc}\n",
+            )
+            return 1
+        if recovered_pods:
+            sys.stdout.write(
+                "\nRecovered "
+                f"{len(recovered_pods)} pod sandbox deadline stall(s): "
+                + ", ".join(recovered_pods)
+                + "\n",
+            )
+            sys.stdout.write(
+                "Retrying readiness after bounded sandbox-deadline cleanup...\n",
+            )
+            final = wait_for_ready(
+                apps_v1,
+                net_v1,
+                core_v1,
+                args.namespace,
+                context=args.context,
+                timeout_sec=args.timeout,
+                poll_interval_sec=args.poll_interval,
+            )
+            sys.stdout.write(_format_table(final))
+        else:
+            sys.stderr.write(
+                "error: sandbox deadline recovery found no classified pods "
+                "within the configured bound.\n",
+            )
     if final.all_ready:
         image_checks = rendered_image_checks(apps_v1, args.namespace, manifests)
         image_drifts = [check.drift_message() for check in image_checks if check.drifted]
@@ -4095,6 +4229,25 @@ def dispatch(argv: list[str]) -> int:
         help=(
             f"Poll interval in seconds during the readiness wait "
             f"(default: {_DEFAULT_UP_POLL_INTERVAL_SEC})."
+        ),
+    )
+    p_up.add_argument(
+        "--recover-sandbox-deadlines",
+        action="store_true",
+        help=(
+            "When readiness stalls on classified kind/containerd pod "
+            "sandbox deadline failures, delete only those classified pods "
+            "and retry readiness once. Preflight still runs first unless "
+            "--skip-preflight is explicitly supplied."
+        ),
+    )
+    p_up.add_argument(
+        "--sandbox-deadline-max-pods",
+        type=int,
+        default=4,
+        help=(
+            "Maximum classified pod sandbox deadline pods to delete during "
+            "the bounded recovery retry (default: 4)."
         ),
     )
     _add_rollout_lock_args(p_up)

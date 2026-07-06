@@ -8,6 +8,16 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from loom_cli.cluster_sandbox_deadline import (
+    FAILURE_CLASS as SANDBOX_DEADLINE_FAILURE_CLASS,
+)
+from loom_cli.cluster_sandbox_deadline import (
+    RECOVERY_KIND as SANDBOX_DEADLINE_RECOVERY_KIND,
+)
+from loom_cli.cluster_sandbox_deadline import (
+    diagnostic_summaries,
+    sandbox_deadline_diagnostics_for_deployment,
+)
 from loom_cli.gb10_release_gate import gb10_release_target_mismatches
 
 _Outcome = Literal["pass", "fail"]
@@ -210,12 +220,14 @@ def _deployment_rollout_issue(deployment: Any) -> tuple[str, dict[str, Any]] | N
     observed_generation = _int_or_none(_get_field(status, "observed_generation"))
     updated_replicas = _int_or_none(_get_field(status, "updated_replicas"))
     ready_replicas = _int_or_none(_get_field(status, "ready_replicas"))
+    total_replicas = _int_or_none(_get_field(status, "replicas"))
     evidence = {
         "generation": generation,
         "observed_generation": observed_generation,
         "desired_replicas": desired,
         "updated_replicas": updated_replicas,
         "ready_replicas": ready_replicas,
+        "total_replicas": total_replicas,
     }
     if generation is not None and observed_generation is not None:
         if observed_generation < generation:
@@ -225,7 +237,22 @@ def _deployment_rollout_issue(deployment: Any) -> tuple[str, dict[str, Any]] | N
             return "Deployment rollout is not target-generation converged", evidence
         if ready_replicas is None or ready_replicas < desired:
             return "Deployment rollout is not target-generation converged", evidence
+    if (
+        updated_replicas is not None
+        and total_replicas is not None
+        and total_replicas > updated_replicas
+    ):
+        return "Deployment rollout is not target-generation converged", evidence
     return None
+
+
+def _list_namespace_events(core_v1: Any, namespace: str) -> list[Any]:
+    try:
+        return list(core_v1.list_namespaced_event(namespace=namespace).items)
+    except AttributeError:
+        return []
+    except Exception:
+        return []
 
 
 def _image_identity_checks(
@@ -256,6 +283,7 @@ def _image_identity_checks(
         pod_list_error = _exception_note(exc)
     else:
         pod_list_error = None
+    events = _list_namespace_events(core_v1, namespace)
 
     checks: list[ReleaseGateCheck] = []
     for deployment_name, by_container in identities.items():
@@ -297,6 +325,13 @@ def _image_identity_checks(
             for pod in pods
             if _pod_matches_selector(pod, selector) and _pod_ready(pod)
         ]
+        sandbox_diagnostics = sandbox_deadline_diagnostics_for_deployment(
+            deployment=deployment,
+            fallback_name=str(deployment_name),
+            pods=pods,
+            events=events,
+        )
+        sandbox_diagnostic_evidence = diagnostic_summaries(sandbox_diagnostics)
 
         for container_name, expected_identity in by_container.items():
             if not isinstance(expected_identity, dict):
@@ -320,6 +355,35 @@ def _image_identity_checks(
             }
             if rollout_issue is not None:
                 detail, rollout_evidence = rollout_issue
+                if sandbox_diagnostics:
+                    checks.append(
+                        ReleaseGateCheck(
+                            name=f"image-identity:{deployment_name}/{container_name}",
+                            outcome="fail",
+                            detail=(
+                                "node runtime sandbox deadline blocked "
+                                "Deployment rollout"
+                            ),
+                            evidence={
+                                **base_evidence,
+                                **rollout_evidence,
+                                "failure_class": SANDBOX_DEADLINE_FAILURE_CLASS,
+                                "runtime_recovery": SANDBOX_DEADLINE_RECOVERY_KIND,
+                                "sandbox_deadline_diagnostics": (
+                                    sandbox_diagnostic_evidence
+                                ),
+                            },
+                            remediation=(
+                                "rerun `loom cluster up "
+                                "--recover-sandbox-deadlines` so the "
+                                "preflighted rollout path deletes only "
+                                "classified sandbox-deadline pods and "
+                                "retries readiness once; if it still fails, "
+                                "inspect kind/containerd/kubelet on the node"
+                            ),
+                        )
+                    )
+                    continue
                 checks.append(
                     ReleaseGateCheck(
                         name=f"image-identity:{deployment_name}/{container_name}",
