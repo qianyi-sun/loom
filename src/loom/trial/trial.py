@@ -592,6 +592,8 @@ def _failure_from_step_error(error: StepError) -> tuple[FailureReason, str | Non
         )
         return reason, error.message
     if error.phase == "artifacts":
+        if error.reason == "missing_artifacts":
+            return FailureReason.MISSING_REQUIRED_ARTIFACTS, error.message
         return FailureReason.ARTIFACT_UPLOAD_FAILED, error.message
     return FailureReason.INTERNAL_ERROR, error.message
 

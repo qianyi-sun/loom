@@ -171,10 +171,51 @@ def test_skilllearnbench_converts_real_bundle_to_loom_task_config(
     assert cfg.environment.user == "root"
     assert cfg.verifier.name == "script"
     assert cfg.verifier.args["script_path"] == "/root/verifier/run.sh"
+    assert cfg.steps[0].required_artifacts == ["result.txt"]
     assert (out_dir / "skills" / ".keep").exists()
     run_sh = (out_dir / "verifier" / "run.sh").read_text()
     assert "LOOM_VERIFIER_OUTPUT" in run_sh
     assert "/logs/verifier/reward.txt" in run_sh
+
+
+def test_skilllearnbench_preserves_required_files_outside_generic_artifact_list(
+    tmp_path: Path,
+) -> None:
+    bundle = _write_real_bundle(
+        tmp_path,
+        family="anthropic-poster-design",
+        task="anthropic-poster-design-5",
+    )
+    (bundle / "task.toml").write_text(
+        "[task]\n"
+        "id = \"anthropic-poster-design\"\n"
+        "name = \"Brand-Compliant Technical Infographic Generation\"\n"
+        "category = \"Image Generation\"\n"
+        "difficulty = \"Medium\"\n"
+        "\n"
+        "[evaluation]\n"
+        "required_files = [\n"
+        "  \"/root/nova_technical_poster.asset\",\n"
+        "  \"/root/design_parameters.json\",\n"
+        "]\n",
+    )
+    adapter = SkillLearnBenchAdapter()
+    inst = BenchmarkInstance(
+        instance_id="anthropic-poster-design/anthropic-poster-design-5",
+        split="test",
+        raw={"__source_path": str(bundle), "task_toml": tomllib.loads((bundle / "task.toml").read_text())},
+    )
+    out_dir = tmp_path / "out"
+
+    adapter.convert_instance(inst, out_dir=out_dir)
+    cfg = TaskConfig.model_validate(
+        tomllib.loads((out_dir / "task.toml").read_text()),
+    )
+
+    assert cfg.steps[0].required_artifacts == [
+        "nova_technical_poster.asset",
+        "design_parameters.json",
+    ]
 
 
 def test_skillflow_uses_environment_build_context_for_environment_assets(
