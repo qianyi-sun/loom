@@ -89,10 +89,10 @@ heavy install/test/coverage steps:
 ```bash
 uv run ruff check src tests packages migrations
 uv run mypy
-pytest tests/unit tests/contract tests/property tests/loom_cli \
-       packages/loom-launcher/tests packages/loom-benchmarks/tests \
-       packages/loom-benchmark-terminal-bench-2/tests
-       # ~10 s, no external deps
+uv run pytest tests/unit tests/contract tests/property tests/loom_cli tests/ops
+uv run pytest packages/loom-launcher/tests \
+              packages/loom-benchmarks/tests \
+              packages/loom-benchmark-terminal-bench-2/tests
 ```
 
 Local verification should use Python 3.11, matching the `repository-checks`
@@ -135,6 +135,29 @@ tuning work.
   keep changes aligned with the historical archive issue (carinrc#7).
 - Baseline at latest dev tip: ~72 % fast, ~85 % combined.
 - `coverage.xml` ships as a workflow artifact for external tools.
+
+To reproduce the protected fast coverage gate locally, run the same two pytest
+coverage steps as `repository-checks`, then run the threshold check:
+
+```bash
+rm -f .coverage coverage.xml
+uv run pytest \
+  tests/unit tests/contract tests/property tests/loom_cli tests/ops \
+  --cov=src --cov=packages \
+  --cov-report=term --cov-report=xml
+uv run pytest \
+  packages/loom-launcher/tests \
+  packages/loom-benchmarks/tests \
+  packages/loom-benchmark-terminal-bench-2/tests \
+  --cov=src --cov=packages --cov-append \
+  --cov-report=term --cov-report=xml
+uv run coverage report --fail-under=70
+```
+
+The first pytest command alone is not the fast coverage gate: it measures the
+package source directories in `--cov=packages` before the sibling package tests
+have appended their coverage, so it can report a lower partial total. The gate
+is the final `coverage report` after both pytest commands have completed.
 
 ## Workflow
 
