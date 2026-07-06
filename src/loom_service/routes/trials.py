@@ -585,6 +585,7 @@ async def get_trial(
         owner_team=owner_team,
         submitted_by_user=submitted_by_user,
     )
+    base["result"] = trial.result
     base["price_snapshots"] = await price_snapshots_for_trials(s, [trial.id])
     trajectory_index = trial.trajectory_index or {}
     # The worker's TrajectoryWriter writes events.jsonl under

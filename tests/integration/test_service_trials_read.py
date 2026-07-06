@@ -133,7 +133,40 @@ async def trials_setup(
                     requires_caps={},
                     submitted_by_user_id=user_id,
                     submitted_at=now - timedelta(minutes=i),
-                    result=({"aggregate_reward": 1.0, "cost_usd": 0.05} if i % 2 == 0 else None),
+                    result=(
+                        {
+                            "aggregate_reward": 1.0,
+                            "cost_usd": 0.05,
+                            "reward": {"score": 1.0},
+                            "steps": [
+                                {
+                                    "step_name": "main",
+                                    "verifier_result": {
+                                        "rewards": {"score": 1.0},
+                                        "checks": [
+                                            {
+                                                "name": "structured_detail",
+                                                "passed": True,
+                                                "score": 1.0,
+                                                "detail": {
+                                                    "exit_code": 0,
+                                                    "source": "compat-gate",
+                                                },
+                                            },
+                                            {
+                                                "name": "string_detail",
+                                                "passed": True,
+                                                "score": 1.0,
+                                                "detail": "exit_code=0",
+                                            },
+                                        ],
+                                    },
+                                },
+                            ],
+                        }
+                        if i % 2 == 0
+                        else None
+                    ),
                 )
             )
         s.execute(
@@ -465,6 +498,11 @@ async def test_trial_detail_returns_service_download_urls(
     assert body["cost_status"] == "mixed"
     assert body["pricing_modes"] == ["priced", "price-unknown"]
     assert body["llm_calls_count"] == 2
+    details = [
+        check["detail"]
+        for check in body["result"]["steps"][0]["verifier_result"]["checks"]
+    ]
+    assert details == [{"exit_code": 0, "source": "compat-gate"}, "exit_code=0"]
     # failure_message field present in response (issue #164).
     assert "failure_message" in body
 

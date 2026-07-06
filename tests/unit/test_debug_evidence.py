@@ -238,6 +238,72 @@ def test_trial_debug_evidence_distinguishes_reward_zero_score_failure() -> None:
     assert evidence["failure"]["rerun_recommendation"] == "not_rerunnable"
 
 
+def test_trial_debug_evidence_preserves_verifier_check_details() -> None:
+    now = datetime.now(UTC)
+    trial = SimpleNamespace(
+        id=uuid4(),
+        team_id=uuid4(),
+        batch_id=None,
+        task_id="compat/verifier-detail",
+        state="succeeded",
+        failure_reason=None,
+        failure_message=None,
+        result={
+            "aggregate_reward": 1.0,
+            "reward": {"score": 1.0},
+            "steps": [
+                {
+                    "step_name": "main",
+                    "verifier_result": {
+                        "rewards": {"score": 1.0},
+                        "checks": [
+                            {
+                                "name": "structured_detail",
+                                "passed": True,
+                                "score": 1.0,
+                                "detail": {"exit_code": 0, "source": "compat-gate"},
+                            },
+                            {
+                                "name": "string_detail",
+                                "passed": True,
+                                "score": 1.0,
+                                "detail": "exit_code=0",
+                            },
+                        ],
+                    },
+                },
+            ],
+        },
+        config={},
+        trajectory_index={},
+        provider_connection_id=None,
+        provider_model_id=None,
+        submitted_at=now - timedelta(minutes=2),
+        claimed_at=now - timedelta(minutes=2),
+        started_at=now - timedelta(minutes=1),
+        finished_at=now,
+        cancellation_requested_at=None,
+        cancellation_observed_at=None,
+        attempt_count=1,
+        next_attempt_at=None,
+        worker_id=None,
+        requires_caps={},
+    )
+
+    evidence = build_trial_debug_evidence(
+        _Request(),  # type: ignore[arg-type]
+        trial,  # type: ignore[arg-type]
+        task=None,
+        llm_calls=[],
+    )
+
+    checks = evidence["reward"]["verifier_steps"][0]["checks"]
+    assert [check["detail"] for check in checks] == [
+        {"exit_code": 0, "source": "compat-gate"},
+        "exit_code=0",
+    ]
+
+
 def test_batch_debug_evidence_includes_failure_taxonomy_summary() -> None:
     team_id = uuid4()
     batch_id = uuid4()
