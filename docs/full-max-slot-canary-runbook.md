@@ -1,16 +1,22 @@
-# Full/Max-Slot Three-Cluster Canary Runbook
+# Full/Max-Slot External-Pool Canary Runbook
 
 This runbook prepares the unified staging canary for #49/#129 with the
 current #188/#193/#190/#271 blocker set. It is a preparation artifact only:
 do not submit the canary until the coordinating thread gives an explicit
-`GO` for the full/max-slot three-cluster canary.
+`GO` for the full/max-slot external-pool canary.
 
 The canary must prove that a current staging release can execute a
-SkillLearnBench full/max-slot workload across all three release-managed pools:
+SkillLearnBench full/max-slot workload across the release-managed external
+pools used by staging/prod profiles:
 
 - `oldlab` - x86_64 elastic Slurm workers.
-- `k8s-worker` - x86_64 Kubernetes worker Deployment.
 - `gb10-arm64` - ARM64 GB10 Slurm-backed workers.
+
+Per #383, staging/prod external-worker profiles render with
+`k8s_worker.enabled=false`; the in-cluster Kubernetes `loom-worker` Deployment
+is not release-managed OLDLAB capacity and must not be required by default.
+Only add `k8s-worker` coverage if the deployment intentionally enables a
+dedicated non-OLDLAB Kubernetes execution node pool.
 
 ## Hard Gates Before GO
 
@@ -33,12 +39,12 @@ Stop before submitting any workload unless every item in this section is true.
    anchor. The rollout evidence must not show control-plane, service, worker,
    Postgres, or DNS dependency crash loops.
 5. #188 pool coverage is configured in the canary submission with repeated
-   `--required-worker-pool oldlab --required-worker-pool k8s-worker
-   --required-worker-pool gb10-arm64`. The selected task slate must include at
-   least one task compatible with each required pool's CPU architecture when
-   that architecture is known from active workers or autoscaler policy; fanout
-   records `required_worker_pool_incompatible` rather than submitting an
-   unclaimable coverage trial when it cannot satisfy a pool.
+   `--required-worker-pool oldlab --required-worker-pool gb10-arm64`. The
+   selected task slate must include at least one task compatible with each
+   required pool's CPU architecture when that architecture is known from active
+   workers or autoscaler policy; fanout records
+   `required_worker_pool_incompatible` rather than submitting an unclaimable
+   coverage trial when it cannot satisfy a pool.
 6. #193 coverage expectations are explicit. The current canary covers the
    release-gate observable `claimed_without_started=0` through batch debug
    evidence and `scripts/staging_smoke_gate.py`. It does not replace a
@@ -192,7 +198,7 @@ The anchor is not clean if any of these checks show:
 - `environment-state check` not returning `ok=true` / `drift=[]`.
 - stale OLDLAB or GB10 env/repo paths from an older `IMAGE_TAG`.
 - `last_blocked_reason=release_state_drift` on any autoscaler policy.
-- zero healthy slots for `oldlab`, `k8s-worker`, or `gb10-arm64`.
+- zero healthy slots for `oldlab` or `gb10-arm64`.
 - GB10 source provenance missing, dirty, or mismatched with desired `GIT_SHA`.
 - current service/control-plane/worker restarts that are not explained by the
   accepted rollout window.
@@ -316,7 +322,6 @@ loom eval batch create \
   --backend docker \
   --storage-preflight-evidence "$CANARY_DIR/01-clean-anchor/minio-storage-preflight-$IMAGE_TAG.json" \
   --required-worker-pool oldlab \
-  --required-worker-pool k8s-worker \
   --required-worker-pool gb10-arm64 \
   | tee "$CANARY_DIR/04-submit/batch-create.txt"
 ```
@@ -341,11 +346,10 @@ jq '{id, state, expected_trial_count, required_worker_pools}' \
 ```
 
 Stop if `required_worker_pools` is not exactly
-`["oldlab","k8s-worker","gb10-arm64"]` or if the expected count does not
-include the three #188 coverage trials. During the watch loop, also stop if
-batch debug or detail output records a `required_worker_pool_incompatible`
-fanout error; the task slate is not valid release evidence for all required
-pools.
+`["oldlab","gb10-arm64"]` or if the expected count does not include the two
+#188 coverage trials. During the watch loop, also stop if batch debug or
+detail output records a `required_worker_pool_incompatible` fanout error; the
+task slate is not valid release evidence for all required pools.
 
 ## Watch Loop
 
@@ -443,7 +447,6 @@ uv run python scripts/staging_smoke_gate.py \
   --object-store-write-check-concurrency 16 \
   --k8s-namespace "$K8S_NAMESPACE" \
   --required-worker-pool oldlab \
-  --required-worker-pool k8s-worker \
   --required-worker-pool gb10-arm64 \
   --secret-needle env:PUBLIC_BETA_SECRET_NEEDLE \
   --internal-url-needle loom-minio.loom.svc.cluster.local \
@@ -469,9 +472,9 @@ Acceptance requires:
   operator-stopped runs can still be useful debugging evidence but are not
   automatic #49 acceptance.
 - `runs.claimed_without_started=0`.
-- `runs.worker_pool_coverage` passes for all three pools.
-- `batch-debug-final.json` has terminal worker-pool evidence for `oldlab`,
-  `k8s-worker`, and `gb10-arm64`.
+- `runs.worker_pool_coverage` passes for both required pools.
+- `batch-debug-final.json` has terminal worker-pool evidence for `oldlab` and
+  `gb10-arm64`.
 - Each architecture family has platform-successful terminal trials with
   persisted trajectory and artifact/ATIF evidence.
 - The object-store write probe passes at the documented count/concurrency.

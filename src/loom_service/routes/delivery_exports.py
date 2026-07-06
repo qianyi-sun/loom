@@ -27,12 +27,14 @@ router = APIRouter()
 
 
 class _DeliveryExportRequest(BaseModel):
-    mode: Literal["lightweight", "raw-harbor"] = Field(
+    mode: Literal["lightweight", "raw-harbor", "raw-harbor-tb2-v1"] = Field(
         default="lightweight",
         description=(
             "Export mode. `lightweight` preserves the #390 ledger, ATIF, and "
             "trajectory bundle. `raw-harbor` adds Derek-style raw provider "
-            "logs, task bundle inputs, agent-run artifacts, and derived SFT JSONL."
+            "logs, task bundle inputs, agent-run artifacts, and derived SFT JSONL. "
+            "`raw-harbor-tb2-v1` adds the versioned TB2-facing delivery profile "
+            "while preserving Loom-native audit artifacts."
         ),
     )
     supplemental_batch_ids: list[UUID] | None = Field(
