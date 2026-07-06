@@ -155,6 +155,39 @@ def _external_worker_summary(
     }
 
 
+def _catalog_provisioning_summary(
+    *,
+    environment_state_path: Path | None,
+    image_tag: str,
+    env_config_version: str,
+    git_sha: str,
+) -> dict[str, Any]:
+    if environment_state_path is None:
+        return {"required": False}
+
+    raw = tomllib.loads(environment_state_path.read_text(encoding="utf-8"))
+    resolved = _substitute_release_vars(
+        raw,
+        image_tag=image_tag,
+        env_config_version=env_config_version,
+        git_sha=git_sha,
+    )
+    catalog = resolved.get("catalog_provisioning")
+    if not isinstance(catalog, dict):
+        return {"required": False}
+    summary: dict[str, Any] = {"required": bool(catalog.get("required"))}
+    command = catalog.get("command")
+    if isinstance(command, str) and command:
+        summary["command"] = command
+    required_env = catalog.get("required_env")
+    if isinstance(required_env, list):
+        summary["required_env"] = [
+            item for item in required_env
+            if isinstance(item, str) and item
+        ]
+    return summary
+
+
 def build_release_manifest(
     *,
     config: ClusterConfig,
@@ -204,6 +237,12 @@ def build_release_manifest(
             "compatible_heads": _alembic_heads(alembic_ini),
         },
         "external_workers": _external_worker_summary(
+            environment_state_path=environment_state_path,
+            image_tag=image_tag,
+            env_config_version=release_env_config_version,
+            git_sha=release_git_sha,
+        ),
+        "catalog_provisioning": _catalog_provisioning_summary(
             environment_state_path=environment_state_path,
             image_tag=image_tag,
             env_config_version=release_env_config_version,

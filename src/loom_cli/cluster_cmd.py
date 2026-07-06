@@ -1670,6 +1670,20 @@ def _release_gate(args: argparse.Namespace) -> int:
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             minio_storage_preflight_error = str(exc)
 
+    hf_mirror_boundary_artifact: dict[str, Any] | None = None
+    hf_mirror_boundary_path: str | None = None
+    hf_mirror_boundary_error: str | None = None
+    if args.hf_mirror_boundary_evidence:
+        boundary_path = Path(args.hf_mirror_boundary_evidence).resolve()
+        hf_mirror_boundary_path = str(boundary_path)
+        try:
+            loaded_hf_boundary = json.loads(boundary_path.read_text(encoding="utf-8"))
+            if not isinstance(loaded_hf_boundary, dict):
+                raise ValueError("HF mirror boundary JSON root must be an object")
+            hf_mirror_boundary_artifact = loaded_hf_boundary
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            hf_mirror_boundary_error = str(exc)
+
     if args.dry_run:
         live_alembic = None
         live_alembic_heads = list(manifest.get("alembic", {}).get("expected_heads", []) or [])
@@ -1710,6 +1724,9 @@ def _release_gate(args: argparse.Namespace) -> int:
         minio_storage_preflight_artifact=minio_storage_preflight_artifact,
         minio_storage_preflight_path=minio_storage_preflight_path,
         minio_storage_preflight_error=minio_storage_preflight_error,
+        hf_mirror_boundary_artifact=hf_mirror_boundary_artifact,
+        hf_mirror_boundary_path=hf_mirror_boundary_path,
+        hf_mirror_boundary_error=hf_mirror_boundary_error,
     )
 
     if args.environment:
@@ -4578,6 +4595,16 @@ def dispatch(argv: list[str]) -> int:
         help=(
             "JSON artifact from `loom cluster minio-storage-preflight --output`. "
             "When supplied, release-gate fails if the artifact outcome is stop."
+        ),
+    )
+    p_release_gate.add_argument(
+        "--hf-mirror-boundary-evidence",
+        default=None,
+        help=(
+            "Secret-safe JSON artifact proving SkillLearnBench uses mirrored "
+            "internal s3:// runtime sources, retains HF provenance, and does "
+            "not require worker HF_TOKEN egress. Required for staging/production "
+            "when the release manifest records the HF catalog gate."
         ),
     )
     p_release_gate.add_argument(

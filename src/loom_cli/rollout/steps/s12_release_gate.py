@@ -130,6 +130,15 @@ class ReleaseGateStep(SubcommandStep):
     ) -> Path:
         return step_dir.artifact_path(f"minio-storage-preflight-{ctx.image_tag}.json")
 
+    def hf_mirror_boundary_evidence_path(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+    ) -> Path:
+        return step_dir.artifact_path(
+            f"hf-mirror-boundary-evidence-{ctx.image_tag}.json",
+        )
+
     def expected_image_identities_path(
         self,
         ctx: RolloutContext,
@@ -272,6 +281,11 @@ class ReleaseGateStep(SubcommandStep):
         environment_state_check = self.environment_state_check_path(step_dir)
         if environment_state_check.exists():
             argv.extend(["--environment-state-check", str(environment_state_check)])
+        if ctx.environment in {"staging", "production"}:
+            argv.extend([
+                "--hf-mirror-boundary-evidence",
+                str(self.hf_mirror_boundary_evidence_path(ctx, step_dir)),
+            ])
         return argv
 
     def _write_expected_image_identities(
@@ -352,6 +366,9 @@ class ReleaseGateStep(SubcommandStep):
                 self.minio_storage_preflight_path(ctx, step_dir),
             ),
             "gb10_workers_status": str(self.gb10_status_path(ctx, step_dir)),
+            "hf_mirror_boundary_evidence": str(
+                self.hf_mirror_boundary_evidence_path(ctx, step_dir),
+            ),
         }
         try:
             self._write_expected_image_identities(ctx, step_dir)

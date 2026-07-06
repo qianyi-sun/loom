@@ -837,7 +837,10 @@ knob you need.
    Control Plane admin API. The profile also lists the operator-only env keys
    required by that gate: `HF_TOKEN`, `LOOM_SVC_DB_URL`, and
    `LOOM_SVC_MINIO_*`. Those credentials belong in the operator context, not
-   the runtime worker pods.
+   the runtime worker pods. For SkillLearnBench, the release manifest records
+   the profile's catalog gate and `loom cluster release-gate` requires the
+   matching `--hf-mirror-boundary-evidence` artifact before staging or
+   production promotion can pass.
 
 9. **Verify service-proxied downloads.** `loom_service` should use the
    cluster-internal MinIO endpoint for object reads, then stream ATIF,
@@ -3238,6 +3241,51 @@ The mirror path is idempotent. It downloads the exact HF revision with the
 operator token, writes bundle objects under deterministic internal keys, stores
 `s3://...` runtime sources in `tasks.source`, and preserves HF repo/revision/
 path/checksum provenance in task tags without storing tokens.
+
+For staging or production promotion, turn the audit/canary result into a
+secret-safe HF mirror/token-boundary artifact and keep it with the rollout
+evidence:
+
+```json
+{
+  "schema_version": 1,
+  "environment": "staging",
+  "benchmark_id": "skilllearnbench",
+  "catalog": {
+    "runnable_tasks": 100,
+    "requires_caps": {"cpu_arch": "any"}
+  },
+  "runtime_sources": {
+    "total_task_sources": 100,
+    "internal_s3_sources": 100,
+    "non_internal_sources": [],
+    "sample_s3_source": "s3://loom-benchmarks/skilllearnbench/task-000/"
+  },
+  "hf_provenance": {
+    "upstream_kind": "huggingface",
+    "upstream_locator": "PRHW/SkillLearnBench",
+    "upstream_revision": "$PUBLISHED_SHA"
+  },
+  "worker_boundary": {
+    "canary_started": true,
+    "terminal_state": "succeeded",
+    "hf_token_present": false,
+    "hf_token_isolated": true,
+    "direct_hf_egress_required": false,
+    "materialized_from_internal_source": true
+  },
+  "secret_scan": {"raw_secret_values_present": false}
+}
+```
+
+Pass the artifact to `loom cluster release-gate` with
+`--hf-mirror-boundary-evidence "$ROLLOUT_DIR/hf-mirror-boundary-evidence-$IMAGE_TAG.json"`.
+The release gate fails staging/production when the release manifest records the
+SkillLearnBench HF catalog gate but this artifact is missing, has non-`s3://`
+runtime sources, lacks HF provenance, reports worker `HF_TOKEN` presence,
+requires direct worker HF egress, or contains raw secret-looking values. This
+repo-side check does not replace live staging validation; it makes the
+required evidence acceptance-testable and production-promotion-blocking.
 
 Runtime workers also support private/gated `hf://` sources as a compatibility
 path. `loom cluster render` injects the optional `loom-secrets` key

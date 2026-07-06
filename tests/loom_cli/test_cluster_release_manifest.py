@@ -79,7 +79,16 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
         'pool_name = "gb10-arm64"\n'
         'image_tag = "${IMAGE_TAG}"\n'
         'env_config_version = "${ENV_CONFIG_VERSION}"\n'
-        'source_git_commit = "${GIT_SHA}"\n',
+        'source_git_commit = "${GIT_SHA}"\n'
+        "[catalog_provisioning]\n"
+        "required = true\n"
+        'command = "loom datasets register skilllearnbench --hf-org PRHW '
+        '--revision \\"$PUBLISHED_SHA\\" --mirror-to-object-store '
+        '--bucket loom-benchmarks && '
+        'loom datasets audit --all --verify-bundles"\n'
+        'required_env = ["HF_TOKEN", "LOOM_SVC_DB_URL", '
+        '"LOOM_SVC_MINIO_ENDPOINT", "LOOM_SVC_MINIO_ACCESS_KEY", '
+        '"LOOM_SVC_MINIO_SECRET_KEY"]\n',
         encoding="utf-8",
     )
     config = load_cluster_config(config_path)
@@ -175,6 +184,22 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
             "source_git_commit": "a" * 40,
         },
     ]
+    assert manifest["catalog_provisioning"] == {
+        "required": True,
+        "command": (
+            "loom datasets register skilllearnbench --hf-org PRHW "
+            "--revision \"$PUBLISHED_SHA\" --mirror-to-object-store "
+            "--bucket loom-benchmarks && "
+            "loom datasets audit --all --verify-bundles"
+        ),
+        "required_env": [
+            "HF_TOKEN",
+            "LOOM_SVC_DB_URL",
+            "LOOM_SVC_MINIO_ENDPOINT",
+            "LOOM_SVC_MINIO_ACCESS_KEY",
+            "LOOM_SVC_MINIO_SECRET_KEY",
+        ],
+    }
     assert "super-secret-token" not in rendered_json
     assert render_release_manifest_json(manifest) == rendered_json
 
