@@ -53,7 +53,7 @@ def test_environment_profiles_pin_approved_names_and_isolated_state() -> None:
     assert len({profile["provider_connection_namespace"] for profile in profiles.values()}) == 3
 
 
-def test_deploy_workflow_keeps_production_secrets_on_main_or_release_tags() -> None:
+def test_deploy_workflow_keeps_production_secrets_on_main_or_semver_tags() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/deploy-environment.yml").read_text())
     jobs = workflow["jobs"]
 
@@ -71,7 +71,7 @@ def test_deploy_workflow_keeps_production_secrets_on_main_or_release_tags() -> N
     assert "production" not in staging_job["if"]
 
     assert "refs/heads/main" in prod_job["if"]
-    assert "refs/tags/release-" in prod_job["if"]
+    assert "refs/tags/v" in prod_job["if"]
     assert "environment == 'production'" in prod_job["if"]
 
     for secret_name in (

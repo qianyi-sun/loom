@@ -54,6 +54,14 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
             "trial_id": "trial-release-smoke",
             "artifact_url": "https://staging.yylx.world/api/v1/trials/trial-release-smoke/atif",
         },
+        "frontend_route_evidence": {
+            "status": "pass",
+            "url": "https://github.com/qianyi-sun/loom/issues/486#issuecomment-route-gate",
+            "production_route": "https://yylx.world/prod",
+            "development_route": "https://yylx.world/dev",
+            "production_api_base": "https://yylx.world/prod/api",
+            "development_api_base": "https://yylx.world/dev/api",
+        },
         "secret_redaction": {
             "status": "pass",
             "url": "https://github.com/qianyi-sun/loom/actions/runs/1006",
@@ -114,6 +122,18 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
                 },
             ],
         },
+        "prod_beta_isolation": {
+            "status": "pass",
+            "url": "https://github.com/qianyi-sun/loom/issues/490#issuecomment-isolation-gate",
+            "state_profile_evidence": "release-evidence/prod-beta-state-profile.json",
+            "worker_identity_evidence": "release-evidence/prod-beta-worker-identity.json",
+            "frontend_api_base_evidence": "release-evidence/prod-beta-api-base.json",
+        },
+        "raw_delivery_export_status": {
+            "status": "pass",
+            "url": "https://github.com/qianyi-sun/loom/issues/493#issuecomment-user-e2e",
+            "requirement_status": "required export bundle verified for first-prod representative workflow",
+        },
         "rollback_plan": {
             "status": "pass",
             "previous_production_image_digest": "ghcr.io/qianyi-sun/loom-service@sha256:"
@@ -131,6 +151,7 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         "schema_version": 1,
         "candidate_sha": _candidate_sha(),
         "image_tag": "release-0123456789ab",
+        "prod_tag": "v1.0.0",
         "staging_url": "https://staging.yylx.world",
         "image_digests": _image_digests(),
         "checks": checks,
@@ -187,10 +208,14 @@ def test_release_gate_accepts_complete_manifest_and_writes_artifacts(tmp_path: P
     assert evidence["candidate_sha"] == _candidate_sha()
     markdown = markdown_out.read_text(encoding="utf-8")
     assert "Release Gate Evidence" in markdown
+    assert "v1.0.0" in markdown
     assert "benchmark_reward_gate" in markdown
     assert "score_positive_canary" in markdown
     assert "benchmark_score_alignment" in markdown
     assert "worker_capacity_smoke" in markdown
+    assert "frontend_route_evidence" in markdown
+    assert "prod_beta_isolation" in markdown
+    assert "raw_delivery_export_status" in markdown
 
 
 def test_release_gate_rejects_missing_required_checks_and_secret_leaks(tmp_path: Path) -> None:
@@ -198,6 +223,9 @@ def test_release_gate_rejects_missing_required_checks_and_secret_leaks(tmp_path:
     manifest["checks"].pop("benchmark_reward_gate")
     manifest["checks"].pop("score_positive_canary")
     manifest["checks"].pop("benchmark_score_alignment")
+    manifest["checks"].pop("frontend_route_evidence")
+    manifest["checks"].pop("prod_beta_isolation")
+    manifest["checks"].pop("raw_delivery_export_status")
     manifest["checks"]["public_api_spa_smoke"]["artifact_url"] = (
         "https://loom-minio.loom.svc.cluster.local/bucket/object"
         "?X-Amz-Signature=abc"
@@ -218,9 +246,31 @@ def test_release_gate_rejects_missing_required_checks_and_secret_leaks(tmp_path:
     assert "missing required check 'benchmark_reward_gate'" in result.stderr
     assert "missing required check 'score_positive_canary'" in result.stderr
     assert "missing required check 'benchmark_score_alignment'" in result.stderr
+    assert "missing required check 'frontend_route_evidence'" in result.stderr
+    assert "missing required check 'prod_beta_isolation'" in result.stderr
+    assert "missing required check 'raw_delivery_export_status'" in result.stderr
     assert "forbidden evidence value" in result.stderr
     assert "public_api_spa_smoke.artifact_url" in result.stderr
     assert "provider_smoke.notes" in result.stderr
+
+
+def test_release_gate_requires_immutable_semver_prod_tag(
+    tmp_path: Path,
+) -> None:
+    manifest = _passing_evidence({"prod_tag": "release-0123456789ab"})
+
+    result = _run_release_gate(
+        tmp_path,
+        manifest,
+        "validate",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "release-0123456789ab",
+    )
+
+    assert result.returncode == 1
+    assert "prod_tag must be an immutable SemVer tag like v1.0.0" in result.stderr
 
 
 def test_release_gate_requires_oldlab_worker_records_when_enabled(

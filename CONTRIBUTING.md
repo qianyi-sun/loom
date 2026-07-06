@@ -112,7 +112,7 @@ for release promotion PRs from `dev`.
 Deployment environments are separated from branch workflow:
 `development` follows `dev` at `dev.yylx.world`, `staging` deploys pinned
 `dev` SHAs at `staging.yylx.world`, and `production` follows `main` or
-`release-*` tags at `yylx.world`. Production deploys use the protected
+immutable `vX.Y.Z` production release tags at `yylx.world`. Production deploys use the protected
 GitHub Environment named `production`; normal development jobs must not use
 production kubeconfig, database, object-store, provider, SecretStore, or
 worker-token secrets.
@@ -155,20 +155,23 @@ worker-token secrets.
    `packages/<name>/pyproject.toml`); the GitHub release notes are
    the user-facing changelog (auto-generated from squash-merge PR
    titles between tags)
-3. Pick the exact `dev` candidate SHA, deploy that image tag to staging, and
+3. Pick the exact `dev` candidate SHA, choose the new immutable SemVer prod
+   tag (`vX.Y.Z`), deploy that image tag to staging, and
    run `.github/workflows/release-promotion-gate.yml` with the structured
    release evidence manifest
 4. Open a PR from `dev` to `main`; complete the template's Release Promotion
-   section with the candidate SHA, staging URL, image digests, gate workflow
-   run, gate artifact, and rollback notes
+   section with the candidate SHA, immutable prod tag, staging URL, image
+   digests, gate workflow run, gate artifact, frontend route evidence, worker
+   isolation evidence, raw-delivery/export status, and rollback notes
 5. Merge the release PR only after the release owner confirms the staging
    evidence; production release PRs do not rely on routine `dev` auto-merge
 6. Deploy production from `main` with `candidate_sha`, `image_tag`, and
    `release_gate_run_id`. The production deployment workflow rejects missing
    or mismatched gate evidence before it can use production environment
    secrets.
-7. After merge, tag the `main` commit `vX.Y.Z` to create the GitHub
-   release
+7. After merge, tag the `main` commit with the recorded `vX.Y.Z` tag to create
+   the GitHub release. Never force-move or reuse a published prod tag; rollback
+   deploys the previous recorded tag or image digest instead.
 
 ## Repository Hardening (maintainers)
 

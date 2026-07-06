@@ -29,6 +29,29 @@ def test_normal_dev_prs_use_auto_merge_after_required_ci() -> None:
     assert "I enabled GitHub auto-merge for this `dev` PR" in pr_template
 
 
+def test_release_promotion_template_requires_first_prod_evidence() -> None:
+    contributing = _read("CONTRIBUTING.md")
+    operator_runbook = _read("docs/operator-runbook.md")
+    pr_template = _read(".github/PULL_REQUEST_TEMPLATE.md")
+
+    for required_text in (
+        "Immutable prod tag",
+        "Frontend route evidence",
+        "Worker isolation evidence",
+        "Raw-delivery/export requirement status",
+        "prod tag is new, immutable, and will not be force-moved",
+    ):
+        assert required_text in pr_template
+
+    assert "immutable `vX.Y.Z` production release tags" in contributing
+    assert "Never force-move or reuse a published prod tag" in contributing
+    assert "Production tags are immutable SemVer Git tags on `main`" in operator_runbook
+    assert "`prod_tag`" in operator_runbook
+    assert "`frontend_route_evidence`" in operator_runbook
+    assert "`prod_beta_isolation`" in operator_runbook
+    assert "`raw_delivery_export_status`" in operator_runbook
+
+
 def test_issue_templates_use_current_loom_language() -> None:
     template_dir = ROOT / ".github" / "ISSUE_TEMPLATE"
     template_text = "\n".join(
