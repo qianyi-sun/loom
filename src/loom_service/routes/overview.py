@@ -22,6 +22,7 @@ from loom_service.dependencies import SessionAndCtx
 from loom_service.routes.benchmarks import (
     _bench_row,
     _benchmark_rows_with_readiness,
+    _visible_benchmarks_statement,
 )
 from loom_service.worker_backends import (
     get_active_backends,
@@ -128,7 +129,7 @@ async def _provider_health(
 
 async def _benchmark_readiness(session: AsyncSession) -> dict[str, Any]:
     benchmarks = list((await session.scalars(
-        select(Benchmark).order_by(Benchmark.display_name),
+        _visible_benchmarks_statement().order_by(Benchmark.display_name),
     )).all())
     rows = await _benchmark_rows_with_readiness(session, benchmarks)
     projected = [_bench_row(bench, readiness) for bench, readiness in rows]

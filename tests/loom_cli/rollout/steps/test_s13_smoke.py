@@ -42,7 +42,7 @@ def test_smoke_posts_current_trial_config_contract_with_user_owned_token(
                 b'"scopes":["read:own","submit"]}',
             )
         if url.endswith("/api/v1/benchmarks"):
-            return 200, b'{"items":[{"id":"sample-tasks"}]}'
+            return 200, b'{"items":[{"id":"terminal-bench-2"}]}'
         if url.endswith("/api/v1/tasks/terminal-bench-2/hello-world"):
             return (
                 200,
@@ -535,7 +535,7 @@ def test_smoke_rejects_missing_smoke_task_before_submit(
                 b'"scopes":["read:own","submit"]}',
             )
         if url.endswith("/api/v1/benchmarks"):
-            return 200, b'{"items":[{"id":"sample-tasks"}]}'
+            return 200, b'{"items":[{"id":"terminal-bench-2"}]}'
         if url.endswith("/api/v1/tasks/missing/task"):
             return 404, b'{"detail":"task not found"}'
         raise AssertionError(f"unexpected GET {url}")

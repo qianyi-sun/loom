@@ -612,7 +612,7 @@ def test_batch_create_resolves_agent_from_server_when_local_launcher_missing(
             "--agent",
             "codex",
             "--benchmark",
-            "sample-tasks",
+            "mbpp",
             "--name",
             "codex-smoke",
         ]
