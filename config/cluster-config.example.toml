@@ -21,6 +21,8 @@ ingress_cert_manager_cluster_issuer = ""
 # Kubernetes IngressClass used by the public Web/API ingress.
 ingress_class_name = "nginx"
 ingress_host = "loom.example.com"
+# Additional HTTPS hostnames that bind the public ingress TLS secret and permanently redirect to ingress_host. They must not serve separate frontend/API routes.
+ingress_redirect_hosts = []
 # TLS Secret name referenced by the public Web/API ingress.
 ingress_tls_secret_name = "loom-tls"
 minio_image = "minio/minio"

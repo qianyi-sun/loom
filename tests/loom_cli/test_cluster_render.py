@@ -100,6 +100,7 @@ def test_load_config_from_toml(tmp_path: Path) -> None:
     cfg_path.write_text(
         'image_tag = "1.2.3"\n'
         'ingress_host = "loom.acme.example"\n'
+        'ingress_redirect_hosts = ["www.loom.acme.example"]\n'
         'ingress_class_name = "public-nginx"\n'
         'ingress_tls_secret_name = "loom-acme-tls"\n'
         'ingress_cert_manager_cluster_issuer = "letsencrypt-prod"\n'
@@ -114,6 +115,7 @@ def test_load_config_from_toml(tmp_path: Path) -> None:
     cfg = load_cluster_config(cfg_path)
     assert cfg.image_tag == "1.2.3"
     assert cfg.ingress_host == "loom.acme.example"
+    assert cfg.ingress_redirect_hosts == ("www.loom.acme.example",)
     assert cfg.ingress_class_name == "public-nginx"
     assert cfg.ingress_tls_secret_name == "loom-acme-tls"
     assert cfg.ingress_cert_manager_cluster_issuer == "letsencrypt-prod"
@@ -620,6 +622,53 @@ def test_render_with_cert_manager_cluster_issuer_annotation() -> None:
         "hosts": ["loom.acme.example"],
         "secretName": "loom-acme-tls",
     }]
+
+
+def test_render_ingress_redirect_hosts_bind_tls_and_redirect_to_canonical() -> None:
+    cfg = ClusterConfig(
+        ingress_host="yylx.world",
+        ingress_redirect_hosts=("www.yylx.world",),
+        ingress_tls_secret_name="loom-staging-tls",
+        frontend_environment="staging",
+        frontend_environment_label="Development / staging",
+        frontend_route_path="/dev",
+        frontend_api_base_path="/dev",
+    )
+    docs = _load_docs(render_manifests(cfg))
+    ingresses = [d for d in docs if d["kind"] == "Ingress"]
+    main = next(d for d in ingresses if d["metadata"]["name"] == "loom-ingress")
+    redirect = next(
+        d for d in ingresses if d["metadata"]["name"] == "loom-ingress-redirect"
+    )
+
+    assert [r["host"] for r in main["spec"]["rules"]] == ["yylx.world"]
+    assert main["spec"]["tls"] == [{
+        "hosts": ["yylx.world", "www.yylx.world"],
+        "secretName": "loom-staging-tls",
+    }]
+
+    assert redirect["metadata"]["annotations"][
+        "nginx.ingress.kubernetes.io/permanent-redirect"
+    ] == "https://yylx.world$request_uri"
+    assert redirect["metadata"]["annotations"][
+        "nginx.ingress.kubernetes.io/permanent-redirect-code"
+    ] == "308"
+    assert redirect["spec"]["tls"] == [{
+        "hosts": ["www.yylx.world"],
+        "secretName": "loom-staging-tls",
+    }]
+    assert [r["host"] for r in redirect["spec"]["rules"]] == ["www.yylx.world"]
+    assert redirect["spec"]["rules"][0]["http"]["paths"][0]["path"] == "/"
+    assert redirect["spec"]["rules"][0]["http"]["paths"][0]["pathType"] == "Prefix"
+
+
+def test_render_rejects_redirect_host_matching_canonical_host() -> None:
+    cfg = ClusterConfig(
+        ingress_host="yylx.world",
+        ingress_redirect_hosts=("yylx.world",),
+    )
+    with pytest.raises(ValueError, match="must not include ingress_host"):
+        render_manifests(cfg)
 
 
 def test_render_ingress_routes_only_api_and_spa_backends() -> None:

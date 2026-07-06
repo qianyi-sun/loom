@@ -64,6 +64,9 @@ Attach these to the release issue or release PR:
   `https://yylx.world/prod/api`, while `https://yylx.world/dev` exposes
   staging identity and `https://yylx.world/dev/api`, with
   no-store runtime config responses.
+- `www.yylx.world` must not become a second staging/prod surface. It is only a
+  TLS-bound redirect host via `ingress_redirect_hosts = ["www.yylx.world"]`;
+  smoke and release evidence should use the canonical bare-domain routes.
 - For first prod, the release-promotion manifest's `prod_staging_isolation` check
   must embed structured dry-run evidence for state profiles, object storage
   buckets/prefix policy, safe token/provider refs, frontend API bases, worker

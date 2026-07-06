@@ -1,5 +1,6 @@
 namespace = "loom-dev"
 ingress_host = "yylx.world"
+ingress_redirect_hosts = ["www.yylx.world"]
 ingress_tls_secret_name = "loom-dev-tls"
 frontend_environment = "development"
 frontend_environment_label = "Development / staging"
