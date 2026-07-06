@@ -11,6 +11,13 @@ spec:
     metadata:
       labels: { app: loom-llm-gateway }
     spec:
+      # #547: bumped from k8s default 30s to 300s so long-running
+      # LLM calls (Claude Opus with thinking, o1) have time to
+      # complete before SIGKILL. The preStop hook calls /drain
+      # which marks the pod not-ready and waits for in-flight
+      # requests to reach zero; only the pathological "call took
+      # longer than 270s" gets truncated.
+      terminationGracePeriodSeconds: 300
       containers:
         - name: gateway
           image: loom-llm-gateway:{{ image_tag }}
@@ -29,6 +36,31 @@ spec:
           readinessProbe:
             httpGet: { path: /healthz, port: 9100 }
             periodSeconds: 5
+          # #547: preStop runs BEFORE SIGTERM. It POSTs to /drain,
+          # which flips /healthz to 503 (Service stops routing new
+          # requests) and blocks until in-flight requests finish or
+          # the drain timeout (270s) fires. This prevents rolling
+          # upgrades / HPA scale-down from truncating in-flight LLM
+          # calls.
+          lifecycle:
+            preStop:
+              exec:
+                # Use python (guaranteed present in the gateway image)
+                # rather than curl/wget which aren't in python:slim.
+                command:
+                  - python
+                  - -c
+                  - |
+                    import urllib.request
+                    try:
+                        req = urllib.request.Request(
+                            "http://127.0.0.1:9100/drain",
+                            method="POST",
+                            data=b"",
+                        )
+                        urllib.request.urlopen(req, timeout=280).read()
+                    except Exception:
+                        pass  # SIGTERM path still runs; do not block kubelet
           volumeMounts:
             - name: loom-admin-secret
               mountPath: /var/run/loom/admin

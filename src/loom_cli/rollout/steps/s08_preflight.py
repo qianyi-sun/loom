@@ -28,6 +28,8 @@ class PreflightStep(SubcommandStep):
             ctx.namespace,
             "--config",
             str(rollout_cluster_config(ctx, step_dir)),
+            "--backup-manifest",
+            str(ctx.backup_manifest_path),
         )
 
     def cwd(self, ctx: RolloutContext, step_dir: StepDir) -> Path:

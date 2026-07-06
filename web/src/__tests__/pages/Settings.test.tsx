@@ -136,7 +136,7 @@ describe("Settings", () => {
     expect(screen.queryByText(/check your email/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/invite link/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/one-time login code/i)).not.toBeInTheDocument();
-    expect(screen.getByText(/Public beta account requests are reviewed by an admin/i)).toBeInTheDocument();
+    expect(screen.getByText(/Staging account requests are reviewed by an admin/i)).toBeInTheDocument();
     expect(screen.getAllByText("Request account").length).toBeGreaterThan(0);
     expect(screen.getByText("Forgot password")).toBeInTheDocument();
     expect(screen.getByText("CLI setup")).toBeInTheDocument();

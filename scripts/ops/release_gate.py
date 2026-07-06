@@ -6,6 +6,7 @@ and rollback checks that are partly operator-driven. This script validates the
 structured evidence manifest those checks produce so a production deploy can
 machine-reject missing evidence or leaked secrets.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -49,7 +50,7 @@ REQUIRED_CHECKS: dict[str, tuple[str, ...]] = {
         "upstream_revision",
     ),
     "worker_capacity_smoke": ("url", "batch_id", "k8s_workers", "oldlab_workers"),
-    "prod_beta_isolation": (
+    "prod_staging_isolation": (
         "url",
         "state_profile_evidence",
         "worker_identity_evidence",
@@ -83,22 +84,22 @@ CANONICAL_STATE_IDENTITIES: dict[str, dict[str, Any]] = {
         },
         "secret_ref_prefix": "github-environment:production/",
     },
-    "development": {
-        "environment": "development",
-        "github_environment": "development",
-        "namespace": "loom-dev",
-        "database_name": "loom_dev",
-        "provider_connection_namespace": "development",
+    "staging": {
+        "environment": "staging",
+        "github_environment": "staging",
+        "namespace": "loom-staging",
+        "database_name": "loom_staging",
+        "provider_connection_namespace": "staging",
         "object_storage": {
-            "task_bucket": "loom-dev-tasks",
-            "trajectories_bucket": "loom-dev-trajectories",
-            "artifacts_bucket": "loom-dev-artifacts",
+            "task_bucket": "loom-staging-tasks",
+            "trajectories_bucket": "loom-staging-trajectories",
+            "artifacts_bucket": "loom-staging-artifacts",
         },
-        "secret_ref_prefix": "github-environment:development/",
+        "secret_ref_prefix": "github-environment:staging/",
     },
 }
-PROD_BETA_STORAGE_FIELDS = ("task_bucket", "trajectories_bucket", "artifacts_bucket")
-PROD_BETA_SECRET_REF_FIELDS = (
+PROD_STAGING_STORAGE_FIELDS = ("task_bucket", "trajectories_bucket", "artifacts_bucket")
+PROD_STAGING_SECRET_REF_FIELDS = (
     "secret_store_key_ref",
     "service_api_token_ref",
     "worker_token_ref",
@@ -207,7 +208,9 @@ def _validate_top_level(
     if not isinstance(manifest_sha, str) or not SHA_RE.fullmatch(manifest_sha):
         errors.append("candidate_sha must be a 40-character lowercase git SHA")
     if candidate_sha and manifest_sha != candidate_sha:
-        errors.append(f"candidate_sha mismatch: manifest={manifest_sha!r} expected={candidate_sha!r}")
+        errors.append(
+            f"candidate_sha mismatch: manifest={manifest_sha!r} expected={candidate_sha!r}"
+        )
 
     manifest_image_tag = manifest.get("image_tag")
     if not _is_non_empty_string(manifest_image_tag):
@@ -254,8 +257,10 @@ def _validate_checks(manifest: dict[str, Any]) -> list[str]:
                     errors.append(f"{check_name}.{field} must be a non-negative integer")
                 continue
             if field == "benchmarks":
-                if not isinstance(value, list) or not value or not all(
-                    _is_non_empty_string(item) for item in value
+                if (
+                    not isinstance(value, list)
+                    or not value
+                    or not all(_is_non_empty_string(item) for item in value)
                 ):
                     errors.append(f"{check_name}.benchmarks must be a non-empty string list")
                 continue
@@ -270,8 +275,8 @@ def _validate_checks(manifest: dict[str, Any]) -> list[str]:
             errors.extend(_validate_frontend_route_evidence(check))
         if check_name == "hf_mirror_token_boundary":
             errors.extend(_validate_hf_mirror_token_boundary(check))
-        if check_name == "prod_beta_isolation":
-            errors.extend(_validate_prod_beta_isolation(check, manifest=manifest))
+        if check_name == "prod_staging_isolation":
+            errors.extend(_validate_prod_staging_isolation(check, manifest=manifest))
 
     return errors
 
@@ -321,9 +326,9 @@ def _validate_frontend_route_evidence(check: dict[str, Any]) -> list[str]:
         if check.get(field) != expected:
             errors.append(f"frontend_route_evidence.{field} must be {expected}")
     if check.get("production_route") == check.get("development_route"):
-        errors.append("frontend_route_evidence production and development routes must differ")
+        errors.append("frontend_route_evidence production and staging routes must differ")
     if check.get("production_api_base") == check.get("development_api_base"):
-        errors.append("frontend_route_evidence production and development API bases must differ")
+        errors.append("frontend_route_evidence production and staging API bases must differ")
     prod_label = check.get("production_environment_label")
     if isinstance(prod_label, str) and "beta" in prod_label.lower():
         errors.append("frontend_route_evidence.production_environment_label must not contain beta")
@@ -363,8 +368,7 @@ def _validate_worker_capacity_smoke(check: dict[str, Any]) -> list[str]:
     records = check.get("oldlab_worker_records")
     if not isinstance(records, list) or len(records) < oldlab_workers:
         errors.append(
-            "worker_capacity_smoke.oldlab_worker_records must include one "
-            "record per OLDLAB worker",
+            "worker_capacity_smoke.oldlab_worker_records must include one record per OLDLAB worker",
         )
         return errors
 
@@ -400,12 +404,12 @@ def _profiles_by_environment(check: dict[str, Any], errors: list[str]) -> dict[s
     if isinstance(raw_profiles, list):
         for index, item in enumerate(raw_profiles):
             if not isinstance(item, dict):
-                errors.append(f"prod_beta_isolation.state_profiles[{index}] must be an object")
+                errors.append(f"prod_staging_isolation.state_profiles[{index}] must be an object")
                 continue
             environment = item.get("environment")
             if not _is_non_empty_string(environment):
                 errors.append(
-                    f"prod_beta_isolation.state_profiles[{index}].environment "
+                    f"prod_staging_isolation.state_profiles[{index}].environment "
                     "must be a non-empty string",
                 )
                 continue
@@ -413,14 +417,14 @@ def _profiles_by_environment(check: dict[str, Any], errors: list[str]) -> dict[s
     elif isinstance(raw_profiles, dict):
         for key, item in raw_profiles.items():
             if not isinstance(item, dict):
-                errors.append(f"prod_beta_isolation.state_profiles.{key} must be an object")
+                errors.append(f"prod_staging_isolation.state_profiles.{key} must be an object")
                 continue
             profiles[str(key)] = item
             environment = item.get("environment")
             if _is_non_empty_string(environment):
                 profiles.setdefault(str(environment), item)
     else:
-        errors.append("prod_beta_isolation.state_profiles must be an object or profile list")
+        errors.append("prod_staging_isolation.state_profiles must be an object or profile list")
     return profiles
 
 
@@ -443,7 +447,7 @@ def _environment_item(
     return None
 
 
-def _validate_prod_beta_isolation(
+def _validate_prod_staging_isolation(
     check: dict[str, Any],
     *,
     manifest: dict[str, Any],
@@ -454,74 +458,76 @@ def _validate_prod_beta_isolation(
         profiles,
         environment="production",
         aliases=("prod",),
-        path="prod_beta_isolation.state_profiles",
+        path="prod_staging_isolation.state_profiles",
         errors=errors,
     )
-    dev_profile = _environment_item(
+    staging_profile = _environment_item(
         profiles,
-        environment="development",
-        aliases=("dev", "public-beta", "public_beta", "beta"),
-        path="prod_beta_isolation.state_profiles",
+        environment="staging",
+        aliases=("stage", "dev", "development"),
+        path="prod_staging_isolation.state_profiles",
         errors=errors,
     )
-    if prod_profile is not None and dev_profile is not None:
-        errors.extend(_validate_state_profiles(prod_profile, dev_profile))
+    if prod_profile is not None and staging_profile is not None:
+        errors.extend(_validate_state_profiles(prod_profile, staging_profile))
 
-    frontend = _as_dict(check.get("frontend"), "prod_beta_isolation.frontend", errors)
+    frontend = _as_dict(check.get("frontend"), "prod_staging_isolation.frontend", errors)
     if frontend is not None:
         prod_frontend = _environment_item(
             frontend,
             environment="production",
             aliases=("prod",),
-            path="prod_beta_isolation.frontend",
+            path="prod_staging_isolation.frontend",
             errors=errors,
         )
-        dev_frontend = _environment_item(
+        staging_frontend = _environment_item(
             frontend,
-            environment="development",
-            aliases=("dev", "public-beta", "public_beta", "beta"),
-            path="prod_beta_isolation.frontend",
+            environment="staging",
+            aliases=("stage", "dev", "development"),
+            path="prod_staging_isolation.frontend",
             errors=errors,
         )
-        if prod_frontend is not None and dev_frontend is not None:
-            errors.extend(_validate_prod_beta_frontend(prod_frontend, dev_frontend))
+        if prod_frontend is not None and staging_frontend is not None:
+            errors.extend(_validate_prod_staging_frontend(prod_frontend, staging_frontend))
 
-    workers = _as_dict(check.get("workers"), "prod_beta_isolation.workers", errors)
+    workers = _as_dict(check.get("workers"), "prod_staging_isolation.workers", errors)
     if workers is not None:
         prod_worker = _environment_item(
             workers,
             environment="production",
             aliases=("prod",),
-            path="prod_beta_isolation.workers",
+            path="prod_staging_isolation.workers",
             errors=errors,
         )
-        dev_worker = _environment_item(
+        staging_worker = _environment_item(
             workers,
-            environment="development",
-            aliases=("dev", "public-beta", "public_beta", "beta"),
-            path="prod_beta_isolation.workers",
+            environment="staging",
+            aliases=("stage", "dev", "development"),
+            path="prod_staging_isolation.workers",
             errors=errors,
         )
-        if prod_worker is not None and dev_worker is not None:
-            errors.extend(_validate_prod_beta_workers(prod_worker, dev_worker, manifest=manifest))
+        if prod_worker is not None and staging_worker is not None:
+            errors.extend(
+                _validate_prod_staging_workers(prod_worker, staging_worker, manifest=manifest)
+            )
 
-    beta_capacity = _as_dict(
-        check.get("beta_capacity"),
-        "prod_beta_isolation.beta_capacity",
+    staging_capacity = _as_dict(
+        check.get("staging_capacity"),
+        "prod_staging_isolation.staging_capacity",
         errors,
     )
-    if beta_capacity is not None:
-        errors.extend(_validate_beta_capacity(beta_capacity))
+    if staging_capacity is not None:
+        errors.extend(_validate_staging_capacity(staging_capacity))
 
     return errors
 
 
 def _validate_state_profiles(
     prod_profile: dict[str, Any],
-    dev_profile: dict[str, Any],
+    staging_profile: dict[str, Any],
 ) -> list[str]:
     errors: list[str] = []
-    for environment, profile in (("production", prod_profile), ("development", dev_profile)):
+    for environment, profile in (("production", prod_profile), ("staging", staging_profile)):
         expected = CANONICAL_STATE_IDENTITIES[environment]
         for field in (
             "environment",
@@ -532,49 +538,49 @@ def _validate_state_profiles(
         ):
             if profile.get(field) != expected[field]:
                 errors.append(
-                    f"prod_beta_isolation.state_profiles.{environment}.{field} "
+                    f"prod_staging_isolation.state_profiles.{environment}.{field} "
                     f"must be {expected[field]!r}",
                 )
         _as_dict(
             profile.get("object_storage"),
-            f"prod_beta_isolation.state_profiles.{environment}.object_storage",
+            f"prod_staging_isolation.state_profiles.{environment}.object_storage",
             errors,
         )
         secret_refs = _as_dict(
             profile.get("secret_refs"),
-            f"prod_beta_isolation.state_profiles.{environment}.secret_refs",
+            f"prod_staging_isolation.state_profiles.{environment}.secret_refs",
             errors,
         )
         if secret_refs is not None:
             prefix = str(expected["secret_ref_prefix"])
-            for field in PROD_BETA_SECRET_REF_FIELDS:
+            for field in PROD_STAGING_SECRET_REF_FIELDS:
                 ref = _string_value(
                     secret_refs.get(field),
-                    f"prod_beta_isolation.state_profiles.{environment}.secret_refs.{field}",
+                    f"prod_staging_isolation.state_profiles.{environment}.secret_refs.{field}",
                     errors,
                 )
                 if ref is not None and not ref.startswith(prefix):
                     errors.append(
-                        "prod_beta_isolation.state_profiles."
+                        "prod_staging_isolation.state_profiles."
                         f"{environment}.secret_refs.{field} must start with {prefix!r}",
                     )
 
     for field in ("database_name", "provider_connection_namespace", "namespace"):
-        if prod_profile.get(field) == dev_profile.get(field):
+        if prod_profile.get(field) == staging_profile.get(field):
             errors.append(
-                f"prod_beta_isolation.state_profiles.production.{field} "
-                "must differ from development",
+                f"prod_staging_isolation.state_profiles.production.{field} "
+                "must differ from staging",
             )
     prod_storage = prod_profile.get("object_storage")
-    dev_storage = dev_profile.get("object_storage")
-    if isinstance(prod_storage, dict) and isinstance(dev_storage, dict):
+    staging_storage = staging_profile.get("object_storage")
+    if isinstance(prod_storage, dict) and isinstance(staging_storage, dict):
         shared_with_prefix_policy = _has_explicit_prod_prefix_policy(prod_storage)
         for environment, storage, peer_storage in (
-            ("production", prod_storage, dev_storage),
-            ("development", dev_storage, prod_storage),
+            ("production", prod_storage, staging_storage),
+            ("staging", staging_storage, prod_storage),
         ):
             expected_storage = CANONICAL_STATE_IDENTITIES[environment]["object_storage"]
-            for field in PROD_BETA_STORAGE_FIELDS:
+            for field in PROD_STAGING_STORAGE_FIELDS:
                 actual = storage.get(field)
                 expected = expected_storage[field]
                 shared_with_peer = actual == peer_storage.get(field)
@@ -583,24 +589,24 @@ def _validate_state_profiles(
                 if shared_with_peer and shared_with_prefix_policy:
                     continue
                 errors.append(
-                    "prod_beta_isolation.state_profiles."
+                    "prod_staging_isolation.state_profiles."
                     f"{environment}.object_storage.{field} must be {expected!r} "
                     "or shared with an approved prod prefix policy",
                 )
                 if environment == "production" and shared_with_peer:
                     errors.append(
-                        "prod_beta_isolation.state_profiles.production.object_storage."
-                        f"{field} must differ from development or declare an approved "
+                        "prod_staging_isolation.state_profiles.production.object_storage."
+                        f"{field} must differ from staging or declare an approved "
                         "prod prefix policy",
                     )
     prod_refs = prod_profile.get("secret_refs")
-    dev_refs = dev_profile.get("secret_refs")
-    if isinstance(prod_refs, dict) and isinstance(dev_refs, dict):
-        for field in PROD_BETA_SECRET_REF_FIELDS:
-            if prod_refs.get(field) == dev_refs.get(field):
+    staging_refs = staging_profile.get("secret_refs")
+    if isinstance(prod_refs, dict) and isinstance(staging_refs, dict):
+        for field in PROD_STAGING_SECRET_REF_FIELDS:
+            if prod_refs.get(field) == staging_refs.get(field):
                 errors.append(
-                    f"prod_beta_isolation.state_profiles.production.secret_refs.{field} "
-                    "must differ from development",
+                    f"prod_staging_isolation.state_profiles.production.secret_refs.{field} "
+                    "must differ from staging",
                 )
     return errors
 
@@ -620,9 +626,9 @@ def _has_explicit_prod_prefix_policy(storage: dict[str, Any]) -> bool:
     )
 
 
-def _validate_prod_beta_frontend(
+def _validate_prod_staging_frontend(
     prod_frontend: dict[str, Any],
-    dev_frontend: dict[str, Any],
+    staging_frontend: dict[str, Any],
 ) -> list[str]:
     errors: list[str] = []
     checks = (
@@ -633,66 +639,69 @@ def _validate_prod_beta_frontend(
         expected = CANONICAL_FRONTEND_ROUTES[canonical_key]
         if prod_frontend.get(field) != expected:
             errors.append(
-                f"prod_beta_isolation.frontend.production.{field} must be {expected}",
+                f"prod_staging_isolation.frontend.production.{field} must be {expected}",
             )
-    dev_expected = {
+    staging_expected = {
         "route": CANONICAL_FRONTEND_ROUTES["development_route"],
         "api_base": CANONICAL_FRONTEND_ROUTES["development_api_base"],
     }
-    for field, expected in dev_expected.items():
-        if dev_frontend.get(field) != expected:
+    for field, expected in staging_expected.items():
+        if staging_frontend.get(field) != expected:
             errors.append(
-                f"prod_beta_isolation.frontend.development.{field} must be {expected}",
+                f"prod_staging_isolation.frontend.staging.{field} must be {expected}",
             )
-    if prod_frontend.get("route") == dev_frontend.get("route"):
-        errors.append("prod_beta_isolation.frontend production and development routes must differ")
-    if prod_frontend.get("api_base") == dev_frontend.get("api_base"):
+    if prod_frontend.get("route") == staging_frontend.get("route"):
+        errors.append("prod_staging_isolation.frontend production and staging routes must differ")
+    if prod_frontend.get("api_base") == staging_frontend.get("api_base"):
         errors.append(
-            "prod_beta_isolation.frontend production and development API bases must differ",
+            "prod_staging_isolation.frontend production and staging API bases must differ",
         )
     prod_label = prod_frontend.get("environment_label")
     if isinstance(prod_label, str) and "beta" in prod_label.lower():
-        errors.append("prod_beta_isolation.frontend.production.environment_label must not contain beta")
+        errors.append(
+            "prod_staging_isolation.frontend.production.environment_label must not contain beta"
+        )
     return errors
 
 
-def _validate_prod_beta_workers(
+def _validate_prod_staging_workers(
     prod_worker: dict[str, Any],
-    dev_worker: dict[str, Any],
+    staging_worker: dict[str, Any],
     *,
     manifest: dict[str, Any],
 ) -> list[str]:
     errors: list[str] = []
     if prod_worker.get("environment") != "production":
-        errors.append("prod_beta_isolation.workers.production.environment must be 'production'")
-    dev_environment = dev_worker.get("environment")
-    if dev_environment not in {"development", "dev", "public-beta", "public_beta", "beta"}:
-        errors.append("prod_beta_isolation.workers.development.environment must identify dev/beta")
+        errors.append("prod_staging_isolation.workers.production.environment must be 'production'")
+    staging_environment = staging_worker.get("environment")
+    if staging_environment not in {"staging", "stage", "dev", "development"}:
+        errors.append(
+            "prod_staging_isolation.workers.staging.environment must identify dev/staging"
+        )
 
     prod_api = prod_worker.get("api_url")
-    dev_api = dev_worker.get("api_url")
+    staging_api = staging_worker.get("api_url")
     if prod_api != CANONICAL_FRONTEND_ROUTES["production_api_base"]:
         errors.append(
-            "prod_beta_isolation.workers.production.api_url must be "
+            "prod_staging_isolation.workers.production.api_url must be "
             f"{CANONICAL_FRONTEND_ROUTES['production_api_base']}",
         )
-    if dev_api != CANONICAL_FRONTEND_ROUTES["development_api_base"]:
+    if staging_api != CANONICAL_FRONTEND_ROUTES["development_api_base"]:
         errors.append(
-            "prod_beta_isolation.workers.development.api_url must be "
+            "prod_staging_isolation.workers.staging.api_url must be "
             f"{CANONICAL_FRONTEND_ROUTES['development_api_base']}",
         )
-    if prod_api == dev_api:
-        errors.append("prod_beta_isolation.workers production and development api_url must differ")
+    if prod_api == staging_api:
+        errors.append("prod_staging_isolation.workers production and staging api_url must differ")
 
     candidate_sha = manifest.get("candidate_sha")
     source_commit = prod_worker.get("source_commit")
     if source_commit != candidate_sha:
         errors.append(
-            "prod_beta_isolation.workers.production.source_commit must match "
-            "candidate_sha",
+            "prod_staging_isolation.workers.production.source_commit must match candidate_sha",
         )
     elif not isinstance(source_commit, str) or not SHA_RE.fullmatch(source_commit):
-        errors.append("prod_beta_isolation.workers.production.source_commit must be a git SHA")
+        errors.append("prod_staging_isolation.workers.production.source_commit must be a git SHA")
 
     image_tag = manifest.get("image_tag")
     worker_digest = None
@@ -703,67 +712,71 @@ def _validate_prod_beta_workers(
     image_digest = prod_worker.get("image_digest")
     if worker_digest is not None and image_digest != worker_digest:
         errors.append(
-            "prod_beta_isolation.workers.production.image_digest must match "
+            "prod_staging_isolation.workers.production.image_digest must match "
             "image_digests.loom-worker",
         )
     if isinstance(image, str) and isinstance(image_tag, str) and image_tag not in image:
         errors.append(
-            "prod_beta_isolation.workers.production.image must reference image_tag",
+            "prod_staging_isolation.workers.production.image must reference image_tag",
         )
-    if isinstance(image, str) and re.search(r"(public-beta|:dev\b|/dev\b)", image, re.IGNORECASE):
-        errors.append("prod_beta_isolation.workers.production.image must not be a dev/beta image")
+    if isinstance(image, str) and re.search(r"(staging|:dev\b|/dev\b)", image, re.IGNORECASE):
+        errors.append(
+            "prod_staging_isolation.workers.production.image must not be a dev/staging image"
+        )
     if prod_worker.get("k8s_namespace") != "loom-prod":
-        errors.append("prod_beta_isolation.workers.production.k8s_namespace must be 'loom-prod'")
-    if dev_worker.get("k8s_namespace") == "loom-prod":
-        errors.append("prod_beta_isolation.workers.development.k8s_namespace must not be loom-prod")
+        errors.append("prod_staging_isolation.workers.production.k8s_namespace must be 'loom-prod'")
+    if staging_worker.get("k8s_namespace") == "loom-prod":
+        errors.append("prod_staging_isolation.workers.staging.k8s_namespace must not be loom-prod")
     return errors
 
 
-def _validate_beta_capacity(beta_capacity: dict[str, Any]) -> list[str]:
+def _validate_staging_capacity(staging_capacity: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    lease_state = beta_capacity.get("lease_state")
-    lease = beta_capacity.get("lease")
+    lease_state = staging_capacity.get("lease_state")
+    lease = staging_capacity.get("lease")
     if lease_state is None and isinstance(lease, dict):
         lease_state = lease.get("state")
     if lease_state is None:
         lease_state = "none"
     if not isinstance(lease_state, str) or not lease_state:
-        errors.append("prod_beta_isolation.beta_capacity.lease_state must be a non-empty string")
+        errors.append(
+            "prod_staging_isolation.staging_capacity.lease_state must be a non-empty string"
+        )
         lease_state = "invalid"
     lease_state_normalized = str(lease_state).lower()
-    beta_slots = _int_value(
-        beta_capacity.get("beta_slots")
-        if beta_capacity.get("beta_slots") is not None
+    staging_slots = _int_value(
+        staging_capacity.get("staging_slots")
+        if staging_capacity.get("staging_slots") is not None
         else (
-            beta_capacity.get("summary", {}).get("beta_slots")
-            if isinstance(beta_capacity.get("summary"), dict)
+            staging_capacity.get("summary", {}).get("staging_slots")
+            if isinstance(staging_capacity.get("summary"), dict)
             else None
         ),
-        "prod_beta_isolation.beta_capacity.beta_slots",
+        "prod_staging_isolation.staging_capacity.staging_slots",
         errors,
         default=0,
     )
     new_claims_allowed = _bool_value(
-        beta_capacity.get("new_beta_claims_allowed"),
-        "prod_beta_isolation.beta_capacity.new_beta_claims_allowed",
+        staging_capacity.get("new_staging_claims_allowed"),
+        "prod_staging_isolation.staging_capacity.new_staging_claims_allowed",
         errors,
         default=False,
     )
     blocking_lease = (
         lease_state_normalized in {"active", "leased", "draining"}
-        or beta_slots != 0
+        or staging_slots != 0
         or new_claims_allowed
     )
-    if blocking_lease and not _has_documented_beta_override(beta_capacity):
+    if blocking_lease and not _has_documented_staging_override(staging_capacity):
         errors.append(
-            "prod_beta_isolation.beta_capacity requires beta_slots=0 and no active "
-            "beta lease unless override.approved includes reason and url",
+            "prod_staging_isolation.staging_capacity requires staging_slots=0 and no active "
+            "staging lease unless override.approved includes reason and url",
         )
     return errors
 
 
-def _has_documented_beta_override(beta_capacity: dict[str, Any]) -> bool:
-    override = beta_capacity.get("override")
+def _has_documented_staging_override(staging_capacity: dict[str, Any]) -> bool:
+    override = staging_capacity.get("override")
     if not isinstance(override, dict):
         return False
     return (
@@ -858,7 +871,9 @@ def _write_outputs(
 ) -> None:
     report = _evidence_report(manifest)
     if output_json is not None:
-        output_json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        output_json.write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
     if output_markdown is not None:
         output_markdown.write_text(_render_markdown(report), encoding="utf-8")
 

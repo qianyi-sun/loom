@@ -109,6 +109,17 @@ if TYPE_CHECKING:
         hosts: list[dict[str, Any]] = field(default_factory=list)
 
     @dataclass(frozen=True)
+    class _GatewayHpaConfig:
+        enabled: bool = False
+        min_replicas: int = 2
+        max_replicas: int = 8
+        cpu_target_pct: int = 60
+
+    @dataclass(frozen=True)
+    class _LlmGatewaySandboxConfig:
+        enabled: bool = False
+
+    @dataclass(frozen=True)
     class ClusterConfig:
         image_tag: str = "0.7"
         env_state_profile: str = ""
@@ -122,7 +133,9 @@ if TYPE_CHECKING:
         frontend_route_path: str = ""
         frontend_api_base_path: str = ""
         artifacts_bucket: str = "artifacts"
+        gateway_hpa: _GatewayHpaConfig = field(default_factory=_GatewayHpaConfig)
         k8s_worker: _K8sWorkerConfig = field(default_factory=_K8sWorkerConfig)
+        llm_gateway_sandbox: _LlmGatewaySandboxConfig = field(default_factory=_LlmGatewaySandboxConfig)
         minio_image: str = "minio/minio"
         minio_storage_gi: int = 500
         namespace: str = "loom"
@@ -133,6 +146,7 @@ if TYPE_CHECKING:
         provider_egress_allowlist: tuple[str, ...] = ()
         replicas: _ReplicasConfig = field(default_factory=_ReplicasConfig)
         trajectories_bucket: str = "trajectories"
+        trial_cache_registry_repo: str = ""
         worker_capacity: _WorkerCapacityConfig = field(default_factory=_WorkerCapacityConfig)
         worker_subprocess_gateway_url: str = "http://host.docker.internal:30443/openai/v1"
         worker_trajectory_storage_gi: int = 100

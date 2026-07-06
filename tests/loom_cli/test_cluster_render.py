@@ -646,6 +646,7 @@ def test_render_ingress_routes_only_api_and_spa_backends() -> None:
     [
         ("production.cluster.toml", "/prod"),
         ("development.cluster.toml", "/dev"),
+        ("staging.cluster.toml", "/dev"),
     ],
 )
 def test_render_profile_ingress_routes_api_and_spa_under_frontend_prefix(
@@ -754,6 +755,31 @@ def test_render_static_host_path_storage_binds_critical_state_to_retain_pvs() ->
     minio_claim = minio["spec"]["volumeClaimTemplates"][0]["spec"]
     assert minio_claim["storageClassName"] == ""
     assert minio_claim["volumeName"] == "loom-staging-minio-data"
+
+    worker_pvc = next(
+        d for d in docs
+        if d["kind"] == "PersistentVolumeClaim"
+        and d["metadata"]["name"] == "loom-worker-trajectories"
+    )
+    assert worker_pvc["spec"]["storageClassName"] == ""
+    assert worker_pvc["spec"]["volumeName"] == (
+        "loom-staging-worker-trajectories-data"
+    )
+
+
+def test_render_static_host_path_keeps_worker_trajectories_pvc_when_worker_disabled() -> None:
+    cfg = ClusterConfig(
+        namespace="loom-staging",
+        persistent_storage_backend="static-host-path",
+        persistent_storage_host_path_root="/data/loom-staging",
+    )
+
+    docs = _load_docs(render_manifests(cfg))
+    kinds_names = {(d["kind"], d["metadata"]["name"]) for d in docs}
+
+    assert ("Deployment", "loom-worker") not in kinds_names
+    assert ("NetworkPolicy", "loom-worker") not in kinds_names
+    assert ("PersistentVolumeClaim", "loom-worker-trajectories") in kinds_names
 
     worker_pvc = next(
         d for d in docs
@@ -928,10 +954,10 @@ def test_default_config_disables_k8s_worker() -> None:
 
 
 def test_render_omits_worker_deployment_when_disabled() -> None:
-    """Rendering with k8s_worker.enabled=false must omit the whole
-    loom-worker Deployment + trajectories PVC + worker NetworkPolicy,
-    not merely scale it to zero replicas — belt-and-suspenders against
-    `kubectl scale` drift."""
+    """Default dynamic rendering with k8s_worker.enabled=false must omit
+    the whole loom-worker Deployment + trajectories PVC + worker
+    NetworkPolicy, not merely scale it to zero replicas — belt-and-
+    suspenders against `kubectl scale` drift."""
     docs = _load_docs(render_manifests(ClusterConfig()))
     kinds_names = {(d["kind"], d["metadata"]["name"]) for d in docs}
     assert ("Deployment", "loom-worker") not in kinds_names
@@ -987,3 +1013,148 @@ def test_loom_service_env_carries_k8s_worker_enabled_from_profile() -> None:
         env = svc["spec"]["template"]["spec"]["containers"][0]["env"]
         by_name = {entry["name"]: entry for entry in env}
         assert by_name["LOOM_SVC_K8S_WORKER_ENABLED"]["value"] == str(enabled)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #547 drain hook + HPA
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_llm_gateway_deployment_includes_drain_prestop_and_grace() -> None:
+    docs = _load_docs(render_manifests(_DEFAULT_CFG))
+    gateway = next(
+        d for d in docs
+        if d["kind"] == "Deployment"
+        and d["metadata"]["name"] == "loom-llm-gateway"
+    )
+    pod_spec = gateway["spec"]["template"]["spec"]
+    assert pod_spec["terminationGracePeriodSeconds"] == 300
+    container = pod_spec["containers"][0]
+    prestop_command = container["lifecycle"]["preStop"]["exec"]["command"]
+    joined = " ".join(str(part) for part in prestop_command)
+    assert "127.0.0.1:9100/drain" in joined
+
+
+def test_default_config_disables_gateway_hpa() -> None:
+    assert ClusterConfig().gateway_hpa.enabled is False
+
+
+def test_render_omits_hpa_when_disabled() -> None:
+    docs = _load_docs(render_manifests(ClusterConfig()))
+    kinds = {d["kind"] for d in docs}
+    assert "HorizontalPodAutoscaler" not in kinds
+
+
+def test_render_includes_hpa_when_enabled_with_custom_thresholds() -> None:
+    hpa_cls = type(ClusterConfig().gateway_hpa)
+    cfg = _default_cfg(
+        gateway_hpa=hpa_cls(
+            enabled=True,
+            min_replicas=3,
+            max_replicas=10,
+            cpu_target_pct=70,
+        ),
+    )
+    docs = _load_docs(render_manifests(cfg))
+    hpa = next(
+        d for d in docs
+        if d["kind"] == "HorizontalPodAutoscaler"
+        and d["metadata"]["name"] == "loom-llm-gateway"
+    )
+    spec = hpa["spec"]
+    assert spec["minReplicas"] == 3
+    assert spec["maxReplicas"] == 10
+    assert spec["metrics"][0]["resource"]["target"]["averageUtilization"] == 70
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #547 item #3: loom-llm-gateway-sandbox
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_default_config_disables_llm_gateway_sandbox() -> None:
+    """Off by default because the DaemonSet needs an operator-
+    provisioned TLS Secret (loom-sandbox-gateway-tls)."""
+    assert ClusterConfig().llm_gateway_sandbox.enabled is False
+
+
+def test_render_omits_llm_gateway_sandbox_when_disabled() -> None:
+    docs = _load_docs(render_manifests(_DEFAULT_CFG))
+    kinds_names = {(d["kind"], d["metadata"]["name"]) for d in docs}
+    assert ("DaemonSet", "loom-llm-gateway-sandbox") not in kinds_names
+    assert (
+        "NetworkPolicy",
+        "loom-llm-gateway-sandbox",
+    ) not in kinds_names
+
+
+def test_render_includes_sandbox_daemonset_when_enabled() -> None:
+    sandbox_cls = type(ClusterConfig().llm_gateway_sandbox)
+    cfg = _default_cfg(llm_gateway_sandbox=sandbox_cls(enabled=True))
+    docs = _load_docs(render_manifests(cfg))
+
+    ds = next(
+        d for d in docs
+        if d["kind"] == "DaemonSet"
+        and d["metadata"]["name"] == "loom-llm-gateway-sandbox"
+    )
+    pod_spec = ds["spec"]["template"]["spec"]
+    container = pod_spec["containers"][0]
+
+    # Binary points at the intended k8s Service (skipping the socat
+    # router — the Go proxy resolves cluster DNS directly).
+    args = container["args"]
+    upstream = next(a for a in args if a.startswith("--upstream-url="))
+    assert "loom-llm-gateway." in upstream
+    assert ".svc.cluster.local:9100" in upstream
+
+    # hostPort 8443 is exposed for sandbox Docker containers to dial.
+    port = container["ports"][0]
+    assert port["containerPort"] == 8443
+    assert port["hostPort"] == 8443
+
+    # Both secrets are mounted read-only into /run/loom.
+    vol_secret_names = {
+        v["secret"]["secretName"]
+        for v in pod_spec["volumes"] if "secret" in v
+    }
+    assert vol_secret_names == {
+        "loom-secrets",
+        "loom-sandbox-gateway-tls",
+    }
+
+
+def test_render_includes_sandbox_network_policy_when_enabled() -> None:
+    """The NetworkPolicy must permit hostPort ingress on 8443 (node-
+    local traffic can't be further restricted by k8s NetworkPolicy)
+    and egress to the in-cluster llm-gateway + kube-dns only."""
+    sandbox_cls = type(ClusterConfig().llm_gateway_sandbox)
+    cfg = _default_cfg(llm_gateway_sandbox=sandbox_cls(enabled=True))
+    docs = _load_docs(render_manifests(cfg))
+
+    policy = next(
+        d for d in docs
+        if d["kind"] == "NetworkPolicy"
+        and d["metadata"]["name"] == "loom-llm-gateway-sandbox"
+    )
+    spec = policy["spec"]
+    assert spec["podSelector"] == {
+        "matchLabels": {"app": "loom-llm-gateway-sandbox"},
+    }
+    ingress_ports = {p["port"] for p in spec["ingress"][0]["ports"]}
+    assert ingress_ports == {8443}
+    egress_pods = {
+        target["podSelector"]["matchLabels"].get("app")
+        for rule in spec["egress"]
+        for target in rule.get("to", [])
+        if "podSelector" in target
+    }
+    assert "loom-llm-gateway" in egress_pods
+
+
+def test_cluster_audit_exempts_sandbox_hostport() -> None:
+    """The auditor's `_HOSTPORT_ALLOWLIST` must include
+    loom-llm-gateway-sandbox; otherwise every enabled render would
+    flag its hostPort as a boundary violation."""
+    from loom_cli.cluster_boundary import _HOSTPORT_ALLOWLIST
+    assert "loom-llm-gateway-sandbox" in _HOSTPORT_ALLOWLIST

@@ -43,7 +43,9 @@ def test_environment_profiles_pin_approved_names_and_isolated_state() -> None:
     assert profiles["development"]["frontend_route"] == "https://yylx.world/dev"
     assert profiles["development"]["frontend_api_base"] == "https://yylx.world/dev/api"
     assert profiles["staging"]["namespace"] == "loom-staging"
-    assert profiles["staging"]["ingress_host"] == "staging.yylx.world"
+    assert profiles["staging"]["ingress_host"] == "yylx.world"
+    assert profiles["staging"]["frontend_route"] == "https://yylx.world/dev"
+    assert profiles["staging"]["frontend_api_base"] == "https://yylx.world/dev/api"
     assert profiles["production"]["namespace"] == "loom-prod"
     assert profiles["production"]["ingress_host"] == "yylx.world"
     assert profiles["production"]["frontend_route"] == "https://yylx.world/prod"
@@ -106,16 +108,16 @@ def test_environment_isolation_rejects_shared_prod_secret_refs(tmp_path: Path) -
     production = profiles_dir / "production.toml"
     text = production.read_text(encoding="utf-8")
     text = text.replace(
-        "service_api_token_ref = \"github-environment:production/LOOM_SERVICE_API_TOKEN\"",
-        "service_api_token_ref = \"github-environment:staging/LOOM_SERVICE_API_TOKEN\"",
+        'service_api_token_ref = "github-environment:production/LOOM_SERVICE_API_TOKEN"',
+        'service_api_token_ref = "github-environment:staging/LOOM_SERVICE_API_TOKEN"',
     )
     text = text.replace(
-        "provider_secret_ref = \"github-environment:production/LOOM_PROVIDER_SECRET_REF\"",
-        "provider_secret_ref = \"github-environment:staging/LOOM_PROVIDER_SECRET_REF\"",
+        'provider_secret_ref = "github-environment:production/LOOM_PROVIDER_SECRET_REF"',
+        'provider_secret_ref = "github-environment:staging/LOOM_PROVIDER_SECRET_REF"',
     )
     text = text.replace(
-        "yibuapi_secret_ref = \"github-environment:production/YIBUAPI_API_KEY\"",
-        "yibuapi_secret_ref = \"github-environment:staging/YIBUAPI_API_KEY\"",
+        'yibuapi_secret_ref = "github-environment:production/YIBUAPI_API_KEY"',
+        'yibuapi_secret_ref = "github-environment:staging/YIBUAPI_API_KEY"',
     )
     production.write_text(text, encoding="utf-8")
 
@@ -175,11 +177,7 @@ def test_deploy_workflow_keeps_production_secrets_on_main_or_semver_tags() -> No
 def test_repository_checks_run_environment_isolation_tests() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
     steps = workflow["jobs"]["tests-root"]["steps"]
-    pytest_steps = [
-        step
-        for step in steps
-        if "run" in step and "uv run pytest" in str(step["run"])
-    ]
+    pytest_steps = [step for step in steps if "run" in step and "uv run pytest" in str(step["run"])]
     assert any("tests/ops" in str(step["run"]) for step in pytest_steps)
 
 
@@ -190,6 +188,7 @@ def test_dockerignore_excludes_operator_local_artifacts_from_image_context() -> 
         if line.strip() and not line.startswith("#")
     }
 
-    assert ".staging-staging" in patterns
+    assert ".staging" in patterns
+    assert ".staging-*" in patterns
     assert ".worktrees" in patterns
     assert "worktrees" in patterns

@@ -323,15 +323,12 @@ def test_diff_environment_state_reports_gb10_node_source_git_commit_drift(
 
     drift = diff_environment_state(profile, live)
 
-    source_drift = [
-        item for item in drift if "source_git_commit" in item.path
-    ]
+    source_drift = [item for item in drift if "source_git_commit" in item.path]
     assert len(source_drift) == 1, (
         f"expected exactly one source_git_commit drift entry, got {drift}"
     )
     assert source_drift[0].path == (
-        "gb10_worker_node_status[staging/gb10-arm64/trt-gb10-1]"
-        ".source_git_commit"
+        "gb10_worker_node_status[staging/gb10-arm64/trt-gb10-1].source_git_commit"
     )
     assert source_drift[0].desired == "c72f50d67f0d571fef55a9abbbced4e37752ca0e"
     assert source_drift[0].live == "ce55a358d8472bce4b580a363806993678d8f116"
@@ -364,9 +361,7 @@ def test_diff_environment_state_reports_gb10_node_dirty_source(
 
     drift = diff_environment_state(profile, live)
 
-    dirty_drift = [
-        item for item in drift if item.path.endswith(".source_git_dirty")
-    ]
+    dirty_drift = [item for item in drift if item.path.endswith(".source_git_dirty")]
     assert len(dirty_drift) == 1, drift
     assert dirty_drift[0].desired is False
     assert dirty_drift[0].live is True
@@ -396,12 +391,9 @@ def test_diff_environment_state_accepts_matching_gb10_node_source(
     )
 
     drift = diff_environment_state(profile, live)
-    source_related = [
-        item for item in drift if "source_git" in item.path
-    ]
+    source_related = [item for item in drift if "source_git" in item.path]
     assert source_related == [], (
-        f"fresh source with matching prefix should not produce drift; "
-        f"got {source_related}"
+        f"fresh source with matching prefix should not produce drift; got {source_related}"
     )
 
 
@@ -430,9 +422,7 @@ def test_diff_environment_state_ignores_source_drift_on_stopped_gb10_node(
     )
 
     drift = diff_environment_state(profile, live)
-    source_related = [
-        item for item in drift if "source_git" in item.path
-    ]
+    source_related = [item for item in drift if "source_git" in item.path]
     assert source_related == []
 
 
@@ -634,16 +624,12 @@ external_runner = true
     )
 
     assert any(
-        item.path
-        == "slurm_worker_jobs[production/oldlab/14893].LOOM_WORKER_AUTH_FINGERPRINT"
+        item.path == "slurm_worker_jobs[production/oldlab/14893].LOOM_WORKER_AUTH_FINGERPRINT"
         for item in drift
     )
-    token_drift = next(
-        item for item in drift if item.path.endswith("LOOM_WORKER_AUTH_FINGERPRINT")
-    )
+    token_drift = next(item for item in drift if item.path.endswith("LOOM_WORKER_AUTH_FINGERPRINT"))
     assert token_drift.desired == (
-        f"sha256:{hashlib.sha256(active_token.encode()).hexdigest()[:12]} "
-        f"len={len(active_token)}"
+        f"sha256:{hashlib.sha256(active_token.encode()).hexdigest()[:12]} len={len(active_token)}"
     )
     assert stale_token not in str(token_drift)
     assert active_token not in str(token_drift)
@@ -671,7 +657,7 @@ max_slots = 40
 [worker_pool_autoscaler_policies.actuator_config]
 backend = "docker"
 cpu_arch = "x86_64"
-env_file = "{tmp_path / 'missing.env'}"
+env_file = "{tmp_path / "missing.env"}"
 repo_dir = "{repo_dir}"
 requested_concurrency = 1
 external_runner = true
@@ -758,12 +744,10 @@ require_worker_token_parity = true
         "external_slurm_runner_prerequisites[production/oldlab].worker_token_fingerprint",
     ]
     assert drift[0].desired == (
-        f"sha256:{hashlib.sha256(active_token.encode()).hexdigest()[:12]} "
-        f"len={len(active_token)}"
+        f"sha256:{hashlib.sha256(active_token.encode()).hexdigest()[:12]} len={len(active_token)}"
     )
     assert drift[0].live == (
-        f"sha256:{hashlib.sha256(stale_token.encode()).hexdigest()[:12]} "
-        f"len={len(stale_token)}"
+        f"sha256:{hashlib.sha256(stale_token.encode()).hexdigest()[:12]} len={len(stale_token)}"
     )
     assert stale_token not in str(drift[0])
     assert active_token not in str(drift[0])
@@ -949,10 +933,7 @@ active = true
             "service_name": "loom-oldlab-autoscaler.service",
             "timer_name": "loom-oldlab-autoscaler.timer",
             "working_directory": "/home/qianyi/dev/loom-worktrees/staging-052e420",
-            "python_path": (
-                "/home/qianyi/dev/loom-worktrees/"
-                "staging-052e420/.venv/bin/python"
-            ),
+            "python_path": ("/home/qianyi/dev/loom-worktrees/staging-052e420/.venv/bin/python"),
             "script_path": (
                 "/home/qianyi/dev/loom-worktrees/staging-052e420/"
                 "scripts/ops/worker_pool_autoscaler_external_once.py"
@@ -1366,7 +1347,8 @@ timer_on_unit_active_sec = "30"
 timer_accuracy_sec = "5"
 enabled = false
 active = false
-""".strip() + "\n",
+""".strip()
+        + "\n",
         encoding="utf-8",
     )
     profile = load_environment_state_profile(profile_path)
@@ -1428,7 +1410,8 @@ timer_on_unit_active_sec = "30"
 timer_accuracy_sec = "5"
 enabled = true
 active = false
-""".strip() + "\n",
+""".strip()
+        + "\n",
         encoding="utf-8",
     )
     profile = load_environment_state_profile(profile_path)
@@ -1482,7 +1465,8 @@ timer_on_unit_active_sec = "30"
 timer_accuracy_sec = "5"
 enabled = false
 active = false
-""".strip() + "\n",
+""".strip()
+        + "\n",
         encoding="utf-8",
     )
     profile = load_environment_state_profile(profile_path)
@@ -1492,7 +1476,11 @@ active = false
         # daemon-reload succeeds; stop/disable return 5 (not loaded).
         if command[-1] == "daemon-reload":
             return 0, "", ""
-        return 5, "", "Failed to disable unit: Unit file loom-oldlab-autoscaler.timer does not exist."
+        return (
+            5,
+            "",
+            "Failed to disable unit: Unit file loom-oldlab-autoscaler.timer does not exist.",
+        )
 
     # Must not raise — the supervisor is simply not installed.
     apply_external_slurm_autoscaler_supervisors(
@@ -1505,7 +1493,6 @@ active = false
 @pytest.mark.parametrize(
     ("path", "environment"),
     [
-        (Path("deploy/environment-state/staging.toml"), "staging"),
         (Path("deploy/environment-state/staging.toml"), "staging"),
     ],
 )
@@ -1524,9 +1511,7 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     )
 
     gb10_policy = next(
-        policy
-        for policy in profile.autoscaler_policies
-        if policy["pool_name"] == "gb10-arm64"
+        policy for policy in profile.autoscaler_policies if policy["pool_name"] == "gb10-arm64"
     )
     expected_cp_environment = "production" if environment == "staging" else environment
     assert profile.environment == environment
@@ -1541,31 +1526,24 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
         gb10_policy["actuator_config"]["env_file"]
         == f"/shared_work/qianyi/loom-worker-capacity/{environment}-gb10-worker-staging-test.env"
     )
-    suffix = (
-        "loom-remote-worker-staging-test"
-        if environment == "staging"
-        else "loom-remote-worker-staging-staging-test"
-    )
+    suffix = "loom-remote-worker-staging-test"
     assert gb10_policy["actuator_config"]["repo_dir"].endswith(suffix)
 
     gb10_state = next(
-        state
-        for state in profile.gb10_desired_states
-        if state["pool_name"] == "gb10-arm64"
+        state for state in profile.gb10_desired_states if state["pool_name"] == "gb10-arm64"
     )
     assert gb10_state["environment"] == expected_cp_environment
     assert gb10_state["image_tag"] == "staging-test"
     assert gb10_state["env_config_version"] == "staging-test"
-    assert gb10_state["source_git_commit"] == (
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    )
+    assert gb10_state["source_git_commit"] == ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     assert gb10_state["max_concurrent"] == 10
-    assert gb10_state["target_slots"] == 150
+    assert gb10_state["target_slots"] == 140
     assert profile.catalog_provisioning["required"] is True
     command = profile.catalog_provisioning["command"]
     assert "loom datasets provision-catalog" in command
     assert "loom datasets register skilllearnbench" in command
     assert "--mirror-to-object-store" in command
+    assert "loom datasets publish-local deploy/catalog/gb10-smoke" in command
     assert "loom datasets audit --all --verify-bundles" in command
     assert profile.catalog_provisioning["required_env"] == [
         "HF_TOKEN",
@@ -1574,17 +1552,11 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
         "LOOM_SVC_MINIO_ACCESS_KEY",
         "LOOM_SVC_MINIO_SECRET_KEY",
     ]
-    assert set(profile.external_slurm_runner_prerequisites["pools"]) == {
-        "oldlab",
-        "gb10-arm64",
-    }
-    assert (
-        profile.external_slurm_runner_prerequisites["require_worker_token_parity"]
-        is True
-    )
+    assert set(profile.external_slurm_runner_prerequisites["pools"]) == {"gb10-arm64"}
+    assert profile.external_slurm_runner_prerequisites["require_worker_token_parity"] is True
 
 
-def test_staging_oldlab_policy_allows_all_five_oldlab_submit_nodes() -> None:
+def test_staging_profile_is_gb10_only_for_first_prod_validation() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables={
@@ -1595,18 +1567,10 @@ def test_staging_oldlab_policy_allows_all_five_oldlab_submit_nodes() -> None:
         expected_environment="staging",
     )
 
-    oldlab_policy = next(
-        policy
-        for policy in profile.autoscaler_policies
-        if policy["pool_name"] == "oldlab"
-    )
+    pool_names = {policy["pool_name"] for policy in profile.autoscaler_policies}
+    assert pool_names == {"gb10-arm64"}
 
-    assert oldlab_policy["environment"] == "production"
-    assert oldlab_policy["actuator_config"]["allowed_nodes"] == [
-        "TRT-EAI-OLDLAB-1",
-        "trt-EAI-OLDLAB-2",
-        "trt-eai-oldlab-3",
-        "trt-eai-oldlab-4",
-        "trt-eai-oldlab-5",
-    ]
-    assert oldlab_policy["actuator_config"]["max_jobs"] == 5
+    gb10_state = next(
+        state for state in profile.gb10_desired_states if state["pool_name"] == "gb10-arm64"
+    )
+    assert gb10_state["host_intents"]["trt-gb10-14"] == "draining"

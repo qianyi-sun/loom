@@ -1,0 +1,38 @@
+{% if gateway_hpa.enabled %}
+# HorizontalPodAutoscaler for loom-llm-gateway (#547). Renders only
+# when `gateway_hpa.enabled = true` in the profile — off by default so
+# the schema-default deploy matches the pre-#547 behaviour.
+#
+# The `preStop` drain hook on the loom-llm-gateway Deployment
+# (llm-gateway.yaml.j2) is a HARD prerequisite for HPA scale-down:
+# without it, every replica removal truncates in-flight LLM calls.
+# See the umbrella issue #547 Tier 1 item ordering.
+#
+# CPU-based scaling target is a crude but adequate signal for HTTP-
+# proxy workloads. Custom metrics (request rate, upstream latency
+# p99) are more accurate but require a custom-metrics adapter in the
+# cluster; kept out of this template for scope. Operators can add an
+# additional Object metric via `kubectl edit hpa loom-llm-gateway`
+# post-render as a one-off tuning step.
+#
+# Requires `metrics-server` (or an equivalent CPU-metric provider) in
+# the cluster.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: loom-llm-gateway
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: loom-llm-gateway
+  minReplicas: {{ gateway_hpa.min_replicas }}
+  maxReplicas: {{ gateway_hpa.max_replicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ gateway_hpa.cpu_target_pct }}
+{% endif %}

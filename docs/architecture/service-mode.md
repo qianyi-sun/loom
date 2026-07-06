@@ -47,7 +47,7 @@ capture mode. The SPA disables unavailable agents with a setup-needed
 message, and service submit routes enforce the same readiness check so
 clients cannot create doomed batches by bypassing the browser.
 Staging and release restore drills materialize this same service catalog
-into the `agents` table through `loom datasets provision-staging-catalog`.
+into the `agents` table through `loom datasets provision-catalog`.
 Those rows are an auditable restore snapshot with runtime contracts,
 compatibility metadata, and provisioner provenance; they are not maintained by
 manual SQL.

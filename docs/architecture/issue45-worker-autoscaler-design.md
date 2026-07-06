@@ -183,7 +183,7 @@ Prometheus:
 - blocked/error status
 - drain waiting state through autoscaler decision reason
 
-## Public-Beta Validation
+## Staging Validation
 
 Validation must use real staging capacity.
 

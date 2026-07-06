@@ -341,15 +341,12 @@ def test_current_gb10_smoke_defaults_to_gb10_compatible_task_and_pool(
                 b'{"credential_type":"user_owned_api_token","scopes":["read:own","submit"]}',
             )
         if url.endswith("/api/v1/benchmarks"):
-            return 200, b'{"items":[{"id":"skilllearnbench"}]}'
-        if url.endswith(
-            "/api/v1/tasks/skilllearnbench/anthropic-poster-design/anthropic-poster-design-1",
-        ):
+            return 200, b'{"items":[{"id":"loom-smoke"}]}'
+        if url.endswith("/api/v1/tasks/loom-smoke/gb10-oracle-hello-world"):
             return (
                 200,
-                b'{"id":"skilllearnbench/anthropic-poster-design/'
-                b'anthropic-poster-design-1",'
-                b'"benchmark_id":"skilllearnbench"}',
+                b'{"id":"loom-smoke/gb10-oracle-hello-world",'
+                b'"benchmark_id":"loom-smoke"}',
             )
         if url.endswith("/api/v1/trials/trial-1"):
             return 200, b'{"id":"trial-1","state":"succeeded","aggregate_reward":1.0}'
@@ -376,7 +373,7 @@ def test_current_gb10_smoke_defaults_to_gb10_compatible_task_and_pool(
     assert result.exit_code == 0
     assert captured_payloads == [
         {
-            "task_id": ("skilllearnbench/anthropic-poster-design/anthropic-poster-design-1"),
+            "task_id": "loom-smoke/gb10-oracle-hello-world",
             "config": {"agent_name": "oracle", "agent_model": None},
             "idempotency_key": "smoke-"
             + hashlib.sha256(
@@ -541,15 +538,11 @@ def test_admin_on_behalf_smoke_submits_batch_with_admin_source_ref(
                 b'"principal_type":"admin","scopes":["admin:worker_pools"]}',
             )
         if url.endswith("/api/v1/benchmarks"):
-            return 200, b'{"items":[{"id":"skilllearnbench"}]}'
-        if url.endswith(
-            "/api/v1/tasks/skilllearnbench/anthropic-poster-design/anthropic-poster-design-1",
-        ):
+            return 200, b'{"items":[{"id":"loom-smoke"}]}'
+        if url.endswith("/api/v1/tasks/loom-smoke/gb10-oracle-hello-world"):
             return (
                 200,
-                b'{"id":"skilllearnbench/anthropic-poster-design/'
-                b'anthropic-poster-design-1",'
-                b'"benchmark_id":"skilllearnbench"}',
+                b'{"id":"loom-smoke/gb10-oracle-hello-world","benchmark_id":"loom-smoke"}',
             )
         if url.startswith("https://loom.test/api/v1/batches?"):
             return 200, b'{"items":[]}'
@@ -593,11 +586,7 @@ def test_admin_on_behalf_smoke_submits_batch_with_admin_source_ref(
             ).hexdigest()[:16],
             "represented_username": "devansh",
             "team_id": "11111111-1111-4111-8111-111111111111",
-            "task_filter": {
-                "task_ids": [
-                    "skilllearnbench/anthropic-poster-design/anthropic-poster-design-1",
-                ],
-            },
+            "task_filter": {"task_ids": ["loom-smoke/gb10-oracle-hello-world"]},
             "trial_config": {"agent_name": "oracle", "agent_model": None},
             "n_per_task": 1,
             "required_worker_pools": ["gb10-arm64"],
@@ -610,6 +599,91 @@ def test_admin_on_behalf_smoke_submits_batch_with_admin_source_ref(
             "05-submit.json",
         ).read_text()
     )
+
+
+def test_admin_on_behalf_smoke_fails_fast_on_fanout_submit_failure(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin_token = "admin-token-from-env"
+    ctx = make_ctx(tmp_path, scope="current-gb10", exclude_oldlab=True)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(14, "smoke")
+
+    monkeypatch.setenv("LOOM_CP_ADMIN_TOKEN", admin_token)
+    monkeypatch.setenv("LOOM_SMOKE_SUBMIT_MODE", "admin-on-behalf")
+    monkeypatch.setenv("LOOM_SMOKE_ON_BEHALF_USERNAME", "devansh")
+    monkeypatch.setenv(
+        "LOOM_SMOKE_ON_BEHALF_TEAM_ID",
+        "11111111-1111-4111-8111-111111111111",
+    )
+    monkeypatch.setenv("LOOM_SMOKE_ADMIN_ACTOR", "qianyi")
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s13_smoke._ingress_base",
+        lambda _ctx: "https://loom.test",
+    )
+
+    def fake_get(url: str, *, token: str | None = None) -> tuple[int, bytes]:
+        assert token == admin_token
+        if url.endswith("/api/v1/health"):
+            return 200, b'{"status":"ok"}'
+        if url.endswith("/api/v1/auth/whoami"):
+            return (
+                200,
+                b'{"credential_type":"admin_bearer_token",'
+                b'"principal_type":"admin","scopes":["admin:worker_pools"]}',
+            )
+        if url.endswith("/api/v1/benchmarks"):
+            return 200, b'{"items":[{"id":"loom-smoke"}]}'
+        if url.endswith("/api/v1/tasks/loom-smoke/gb10-oracle-hello-world"):
+            return (
+                200,
+                b'{"id":"loom-smoke/gb10-oracle-hello-world","benchmark_id":"loom-smoke"}',
+            )
+        if url.startswith("https://loom.test/api/v1/batches?"):
+            return 200, b'{"items":[]}'
+        if url.endswith("/api/v1/batches/batch-1"):
+            return (
+                200,
+                b'{"id":"batch-1","state":"running",'
+                b'"result_status":"partial_failed",'
+                b'"failure_reason":"fanout_submit_failed",'
+                b'"failure_message":"required_worker_pool gb10-arm64 is incompatible",'
+                b'"fanout_errors":[{"reason":"required_worker_pool_incompatible",'
+                b'"required_worker_pool":"gb10-arm64",'
+                b'"detail":"Authorization: Bearer loom_admin_fake_secret",'
+                b'"pool_cpu_arches":["arm64"],'
+                b'"task_cpu_arches":{"x86_64":["loom-smoke/gb10-oracle-hello-world"]}}]}',
+            )
+        raise AssertionError(f"unexpected GET {url}")
+
+    def fake_post(
+        url: str,
+        payload: dict[str, object],
+        *,
+        token: str | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, bytes]:
+        assert url.endswith("/api/v1/admin/batches/on-behalf")
+        assert token == admin_token
+        return 201, b'{"batch_id":"batch-1","expected_trial_count":1}'
+
+    times = iter([100.0, 101.0, 500.0])
+    monkeypatch.setattr("loom_cli.rollout.steps.s13_smoke.time.time", lambda: next(times))
+    monkeypatch.setattr("loom_cli.rollout.steps.s13_smoke.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("loom_cli.rollout.steps.s13_smoke._http_get", fake_get)
+    monkeypatch.setattr("loom_cli.rollout.steps.s13_smoke._http_post", fake_post)
+
+    result = SmokeStep().run(ctx, step_dir)
+
+    assert result.exit_code == 1
+    assert "fanout_submit_failed" in str(result.error)
+    assert "required_worker_pool_incompatible" in str(result.error)
+    assert "gb10-arm64" in str(result.error)
+    assert "admin-token-from-env" not in str(result.error)
+    assert "loom_admin_fake_secret" not in str(result.error)
+    assert "Bearer [REDACTED:bearer]" in str(result.error)
 
 
 def test_admin_on_behalf_smoke_reuses_existing_deterministic_batch(
@@ -652,15 +726,11 @@ def test_admin_on_behalf_smoke_reuses_existing_deterministic_batch(
                 b'"principal_type":"admin","scopes":["admin:worker_pools"]}',
             )
         if url.endswith("/api/v1/benchmarks"):
-            return 200, b'{"items":[{"id":"skilllearnbench"}]}'
-        if url.endswith(
-            "/api/v1/tasks/skilllearnbench/anthropic-poster-design/anthropic-poster-design-1",
-        ):
+            return 200, b'{"items":[{"id":"loom-smoke"}]}'
+        if url.endswith("/api/v1/tasks/loom-smoke/gb10-oracle-hello-world"):
             return (
                 200,
-                b'{"id":"skilllearnbench/anthropic-poster-design/'
-                b'anthropic-poster-design-1",'
-                b'"benchmark_id":"skilllearnbench"}',
+                b'{"id":"loom-smoke/gb10-oracle-hello-world","benchmark_id":"loom-smoke"}',
             )
         if url.startswith("https://loom.test/api/v1/batches?"):
             return (
@@ -677,10 +747,7 @@ def test_admin_on_behalf_smoke_reuses_existing_deterministic_batch(
                                     "team_id": ("11111111-1111-4111-8111-111111111111"),
                                 },
                                 "task_filter": {
-                                    "task_ids": [
-                                        "skilllearnbench/anthropic-poster-design/"
-                                        "anthropic-poster-design-1",
-                                    ],
+                                    "task_ids": ["loom-smoke/gb10-oracle-hello-world"],
                                 },
                             }
                         ]

@@ -89,6 +89,7 @@ class TestRolloutCLIDryRun:
             "--ref", "origin/dev",
             "--image-tag", "staging-aaaaaaa",
             "--cluster-name", "loom-staging",
+            "--namespace", "loom-staging",
             "--environment", "staging",
             "--cp-url", "http://control-node.lan:18081",
             "--cluster-config", str(cfg),
@@ -101,6 +102,40 @@ class TestRolloutCLIDryRun:
         # Dry-run doesn't trigger preflight — refusal must happen in the
         # real run path. This confirms dry-run itself is a safe read-only.
         assert rc == 0
+
+    def test_staging_refuses_non_staging_physical_targets(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cfg = tmp_path / "cluster-config.toml"
+        cfg.write_text("image_tag = 'x'\n")
+        backup = tmp_path / "backup-manifest.json"
+        backup.write_text("{}")
+
+        monkeypatch.setattr(subprocess, "run", _FakeSubprocess())
+
+        rc = main([
+            "cluster", "rollout",
+            "--ref", "origin/dev",
+            "--image-tag", "staging-aaaaaaa",
+            "--cluster-name", "loom-legacy-preprod",
+            "--namespace", "loom-legacy-preprod",
+            "--environment", "staging",
+            "--cp-url", "http://control-node.lan:18081",
+            "--cluster-config", str(cfg),
+            "--backup-manifest", str(backup),
+            "--rollout-root", "/data/loom-legacy-preprod",
+            "--dry-run",
+        ])
+
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "staging rollout must use physical staging resources" in err
+        assert "loom-staging" in err
+        assert "/data/loom-staging" in err
+        assert "loom-legacy-preprod" in err
 
 
 class TestRolloutCLIRealRun:
@@ -246,6 +281,7 @@ class TestRolloutCLIRealRun:
             "--ref", "origin/dev",
             "--image-tag", "staging-aaaaaaa",
             "--cluster-name", "loom-staging",
+            "--namespace", "loom-staging",
             "--environment", "staging",
             "--cp-url", "http://control-node.lan:18081",
             "--cluster-config", str(tmp_path / "missing.toml"),

@@ -13,9 +13,9 @@ DEFAULT_VARS = [
     "--var",
     "PROD_SOURCE_COMMIT=1111111111111111111111111111111111111111",
     "--var",
-    "BETA_IMAGE_TAG=dev-2222222",
+    "STAGING_IMAGE_TAG=dev-2222222",
     "--var",
-    "BETA_SOURCE_COMMIT=2222222222222222222222222222222222222222",
+    "STAGING_SOURCE_COMMIT=2222222222222222222222222222222222222222",
 ]
 
 
@@ -36,8 +36,8 @@ schema_version = 1
 
 [defaults]
 prod_gets_remaining = true
-default_beta_slots = 0
-beta_slot_limit_per_host = 1
+default_staging_slots = 0
+staging_slot_limit_per_host = 1
 
 [environments.prod]
 name = "production"
@@ -48,7 +48,7 @@ compose_service = "loom-prod-worker"
 k8s_deployment = "loom-prod-worker"
 k8s_namespace = "loom-prod"
 
-[environments.beta]
+[environments.staging]
 name = "development"
 api_url = "https://yylx.world/dev/api"
 image_tag = "dev-2222222"
@@ -70,21 +70,21 @@ def test_default_manifest_is_prod_first_and_secret_safe() -> None:
     report = json.loads(completed.stdout)
     assert report["status"] == "pass"
     assert report["summary"]["prod_slots"] == 180
-    assert report["summary"]["beta_slots"] == 0
+    assert report["summary"]["staging_slots"] == 0
     assert report["summary"]["state_counts"]["unreachable"] == 1
 
     hosts = {item["host"]: item for item in report["desired_hosts"]}
     assert hosts["trt-gb10-1"]["prod_slots"] == 10
-    assert hosts["trt-gb10-1"]["beta_slots"] == 0
+    assert hosts["trt-gb10-1"]["staging_slots"] == 0
     assert hosts["trt-gb10-14"]["state"] == "unreachable"
     assert hosts["trt-gb10-14"]["prod_slots"] == 0
-    assert hosts["trt-gb10-14"]["beta_slots"] == 0
+    assert hosts["trt-gb10-14"]["staging_slots"] == 0
     assert "Bearer" not in completed.stdout
     assert "sk-" not in completed.stdout
     assert "loom_api_" not in completed.stdout
 
 
-def test_manifest_expresses_beta_lease_and_draining_states(tmp_path: Path) -> None:
+def test_manifest_expresses_staging_lease_and_draining_states(tmp_path: Path) -> None:
     manifest = tmp_path / "lease.toml"
     _write_manifest(
         manifest,
@@ -94,14 +94,14 @@ name = "gb10-1"
 pool = "gb10-arm64"
 total_slots = 10
 state = "eligible"
-beta_slots = 1
+staging_slots = 1
 
 [[hosts]]
 name = "gb10-2"
 pool = "gb10-arm64"
 total_slots = 10
-state = "beta_draining"
-beta_slots = 1
+state = "staging_draining"
+staging_slots = 1
 
 [[hosts]]
 name = "gb10-3"
@@ -123,9 +123,9 @@ state = "unreachable"
     report = json.loads(completed.stdout)
     hosts = {item["host"]: item for item in report["desired_hosts"]}
     assert hosts["gb10-1"]["prod_slots"] == 9
-    assert hosts["gb10-1"]["beta_slots"] == 1
-    assert hosts["gb10-1"]["beta"]["drain_state"] == "leased"
-    assert hosts["gb10-2"]["beta"]["drain_state"] == "draining"
+    assert hosts["gb10-1"]["staging_slots"] == 1
+    assert hosts["gb10-1"]["staging"]["drain_state"] == "leased"
+    assert hosts["gb10-2"]["staging"]["drain_state"] == "draining"
     assert hosts["gb10-3"]["prod_slots"] == 0
     assert hosts["gb10-4"]["state"] == "unreachable"
 
@@ -191,7 +191,7 @@ pool = "gb10-arm64"
 total_slots = 10
 state = "eligible"
 prod_slots = 9
-beta_slots = 1
+staging_slots = 1
 """,
     )
     observed = tmp_path / "observed.json"
@@ -265,7 +265,7 @@ api_token = "sk-do-not-print-this-value"
     assert "sk-do-not-print-this-value" not in completed.stdout
 
 
-def test_lease_beta_previews_before_apply_and_writes_bounded_lease(tmp_path: Path) -> None:
+def test_lease_staging_previews_before_apply_and_writes_bounded_lease(tmp_path: Path) -> None:
     manifest = tmp_path / "capacity.toml"
     _write_manifest(
         manifest,
@@ -286,11 +286,11 @@ state = "eligible"
     before = manifest.read_text(encoding="utf-8")
 
     preview = _run_capacity(
-        "lease-beta",
+        "lease-staging",
         "--manifest",
         manifest,
         "--reason",
-        "public beta rollout smoke",
+        "staging rollout smoke",
         "--ttl",
         "30m",
         "--slots-per-host",
@@ -308,17 +308,17 @@ state = "eligible"
     assert preview_report["applied"] is False
     assert preview_report["lease"]["state"] == "active"
     assert preview_report["lease"]["expires_at"] == "2026-07-06T12:30:00Z"
-    assert preview_report["summary"]["beta_slots"] == 2
+    assert preview_report["summary"]["staging_slots"] == 2
     assert preview_report["summary"]["prod_slots"] == 18
-    assert preview_report["new_beta_claims_allowed"] is True
+    assert preview_report["new_staging_claims_allowed"] is True
 
     leased_manifest = tmp_path / "leased-capacity.toml"
     applied = _run_capacity(
-        "lease-beta",
+        "lease-staging",
         "--manifest",
         manifest,
         "--reason",
-        "public beta rollout smoke",
+        "staging rollout smoke",
         "--ttl",
         "30m",
         "--slots-per-host",
@@ -345,10 +345,10 @@ state = "eligible"
     assert status.returncode == 0, status.stderr
     status_report = json.loads(status.stdout)
     assert status_report["lease"]["state"] == "active"
-    assert status_report["summary"]["beta_slots"] == 2
+    assert status_report["summary"]["staging_slots"] == 2
 
 
-def test_lease_beta_rejects_unbounded_ttl_multi_slot_and_non_preemptible(
+def test_lease_staging_rejects_unbounded_ttl_multi_slot_and_non_preemptible(
     tmp_path: Path,
 ) -> None:
     manifest = tmp_path / "capacity.toml"
@@ -364,7 +364,7 @@ state = "eligible"
     )
 
     missing_ttl = _run_capacity(
-        "lease-beta",
+        "lease-staging",
         "--manifest",
         manifest,
         "--reason",
@@ -379,7 +379,7 @@ state = "eligible"
     assert "ttl" in missing_ttl.stderr.lower()
 
     multi_slot = _run_capacity(
-        "lease-beta",
+        "lease-staging",
         "--manifest",
         manifest,
         "--reason",
@@ -397,7 +397,7 @@ state = "eligible"
     assert "1" in multi_slot.stderr
 
     non_preemptible = _run_capacity(
-        "lease-beta",
+        "lease-staging",
         "--manifest",
         manifest,
         "--reason",
@@ -415,7 +415,7 @@ state = "eligible"
     assert "--allow-non-preemptible" in non_preemptible.stderr
 
 
-def test_status_expires_beta_lease_and_reports_running_vs_idle_drain_slots(
+def test_status_expires_staging_lease_and_reports_running_vs_idle_drain_slots(
     tmp_path: Path,
 ) -> None:
     manifest = tmp_path / "capacity.toml"
@@ -437,7 +437,7 @@ state = "eligible"
     )
     leased_manifest = tmp_path / "leased.toml"
     lease = _run_capacity(
-        "lease-beta",
+        "lease-staging",
         "--manifest",
         manifest,
         "--reason",
@@ -462,7 +462,7 @@ state = "eligible"
             {
                 "workers": [
                     {
-                        "worker_id": "beta-worker-1",
+                        "worker_id": "staging-worker-1",
                         "host": "gb10-1",
                         "environment": "development",
                         "api_url": "https://yylx.world/dev/api",
@@ -472,7 +472,7 @@ state = "eligible"
                         "running_trials": 1,
                     },
                     {
-                        "worker_id": "beta-worker-2",
+                        "worker_id": "staging-worker-2",
                         "host": "gb10-2",
                         "environment": "development",
                         "api_url": "https://yylx.world/dev/api",
@@ -500,14 +500,14 @@ state = "eligible"
     assert expired.returncode == 0, expired.stderr
     report = json.loads(expired.stdout)
     assert report["lease"]["state"] == "expired"
-    assert report["new_beta_claims_allowed"] is False
-    assert report["drain"]["running_beta_trials"] == 1
+    assert report["new_staging_claims_allowed"] is False
+    assert report["drain"]["running_staging_trials"] == 1
     assert report["drain"]["idle_leased_slots"] == 1
     hosts = {item["host"]: item for item in report["desired_hosts"]}
-    assert hosts["gb10-1"]["state"] == "beta_draining"
-    assert hosts["gb10-1"]["beta_slots"] == 1
+    assert hosts["gb10-1"]["state"] == "staging_draining"
+    assert hosts["gb10-1"]["staging_slots"] == 1
     assert hosts["gb10-2"]["state"] == "eligible"
-    assert hosts["gb10-2"]["beta_slots"] == 0
+    assert hosts["gb10-2"]["staging_slots"] == 0
 
     expired_manifest = tmp_path / "expired.toml"
     applied_expiry = _run_capacity(
@@ -529,7 +529,7 @@ state = "eligible"
     assert applied_report["lease"]["state"] == "expired"
 
 
-def test_release_beta_is_idempotent_and_returns_beta_slots_to_zero(tmp_path: Path) -> None:
+def test_release_staging_is_idempotent_and_returns_staging_slots_to_zero(tmp_path: Path) -> None:
     manifest = tmp_path / "capacity.toml"
     _write_manifest(
         manifest,
@@ -551,7 +551,7 @@ state = "eligible"
     release_one_manifest = tmp_path / "released-once.toml"
     release_two_manifest = tmp_path / "released-twice.toml"
     lease = _run_capacity(
-        "lease-beta",
+        "lease-staging",
         "--manifest",
         manifest,
         "--reason",
@@ -572,7 +572,7 @@ state = "eligible"
     assert lease.returncode == 0, lease.stderr
 
     release_one = _run_capacity(
-        "release-beta",
+        "release-staging",
         "--manifest",
         leased_manifest,
         "--reason",
@@ -585,13 +585,13 @@ state = "eligible"
     )
     assert release_one.returncode == 0, release_one.stderr
     first_report = json.loads(release_one.stdout)
-    assert first_report["summary"]["beta_slots"] == 0
+    assert first_report["summary"]["staging_slots"] == 0
     assert first_report["summary"]["prod_slots"] == 20
     assert first_report["lease"]["state"] == "released"
-    assert first_report["new_beta_claims_allowed"] is False
+    assert first_report["new_staging_claims_allowed"] is False
 
     release_two = _run_capacity(
-        "release-beta",
+        "release-staging",
         "--manifest",
         release_one_manifest,
         "--reason",
@@ -604,14 +604,14 @@ state = "eligible"
     )
     assert release_two.returncode == 0, release_two.stderr
     second_report = json.loads(release_two.stdout)
-    assert second_report["summary"]["beta_slots"] == 0
+    assert second_report["summary"]["staging_slots"] == 0
     assert second_report["changes"]["changed_host_count"] == 0
     assert release_two_manifest.read_text(encoding="utf-8") == release_one_manifest.read_text(
         encoding="utf-8",
     )
 
 
-def test_drain_beta_redacts_command_and_evidence_output(tmp_path: Path) -> None:
+def test_drain_staging_redacts_command_and_evidence_output(tmp_path: Path) -> None:
     manifest = tmp_path / "capacity.toml"
     _write_manifest(
         manifest,
@@ -621,7 +621,7 @@ name = "gb10-1"
 pool = "gb10-arm64"
 total_slots = 10
 state = "eligible"
-beta_slots = 1
+staging_slots = 1
 """,
     )
     observed = tmp_path / "observed.json"
@@ -630,7 +630,7 @@ beta_slots = 1
             {
                 "workers": [
                     {
-                        "worker_id": "beta-worker-1",
+                        "worker_id": "staging-worker-1",
                         "host": "gb10-1",
                         "environment": "development",
                         "api_url": "https://yylx.world/dev/api?token=loom_api_livevalue",
@@ -648,7 +648,7 @@ beta_slots = 1
     secret_reason = "incident Bearer sk-live-secret-value"
 
     drain = _run_capacity(
-        "drain-beta",
+        "drain-staging",
         "--manifest",
         manifest,
         "--observed-json",
@@ -669,11 +669,11 @@ beta_slots = 1
     assert "<redacted>" in combined
     report = json.loads(drain.stdout)
     assert report["applied"] is False
-    assert report["drain"]["running_beta_trials"] == 1
-    assert report["command"]["argv"][0] == "drain-beta"
+    assert report["drain"]["running_staging_trials"] == 1
+    assert report["command"]["argv"][0] == "drain-staging"
 
 
-def test_status_keeps_active_beta_lease_when_prod_pressure_is_absent(
+def test_status_keeps_active_staging_lease_when_prod_pressure_is_absent(
     tmp_path: Path,
 ) -> None:
     manifest = tmp_path / "capacity.toml"
@@ -695,7 +695,7 @@ state = "eligible"
     )
     leased_manifest = tmp_path / "leased.toml"
     lease = _run_capacity(
-        "lease-beta",
+        "lease-staging",
         "--manifest",
         manifest,
         "--reason",
@@ -730,13 +730,13 @@ state = "eligible"
     assert status.returncode == 0, status.stderr
     report = json.loads(status.stdout)
     assert report["lease"]["state"] == "active"
-    assert report["summary"]["beta_slots"] == 2
-    assert report["new_beta_claims_allowed"] is True
+    assert report["summary"]["staging_slots"] == 2
+    assert report["new_staging_claims_allowed"] is True
     assert report["prod_pressure"]["has_pressure"] is False
     assert report["prod_pressure"]["cause"] == "none"
 
 
-def test_status_auto_drains_beta_capacity_under_prod_pressure(tmp_path: Path) -> None:
+def test_status_auto_drains_staging_capacity_under_prod_pressure(tmp_path: Path) -> None:
     manifest = tmp_path / "capacity.toml"
     _write_manifest(
         manifest,
@@ -756,7 +756,7 @@ state = "eligible"
     )
     leased_manifest = tmp_path / "leased.toml"
     lease = _run_capacity(
-        "lease-beta",
+        "lease-staging",
         "--manifest",
         manifest,
         "--reason",
@@ -781,7 +781,7 @@ state = "eligible"
             {
                 "workers": [
                     {
-                        "worker_id": "beta-worker-1",
+                        "worker_id": "staging-worker-1",
                         "host": "gb10-1",
                         "environment": "development",
                         "api_url": "https://yylx.world/dev/api",
@@ -791,7 +791,7 @@ state = "eligible"
                         "running_trials": 1,
                     },
                     {
-                        "worker_id": "beta-worker-2",
+                        "worker_id": "staging-worker-2",
                         "host": "gb10-2",
                         "environment": "development",
                         "api_url": "https://yylx.world/dev/api",
@@ -826,32 +826,32 @@ state = "eligible"
     assert "secret@example" not in pressure.stdout
     report = json.loads(pressure.stdout)
     assert report["lease"]["state"] == "prod_pressure_draining"
-    assert report["new_beta_claims_allowed"] is False
+    assert report["new_staging_claims_allowed"] is False
     assert report["prod_pressure"]["has_pressure"] is True
     assert report["prod_pressure"]["cause"] == "prod_capacity_pressure"
     assert report["prod_pressure"]["prod_pending_count"] == 3
     assert report["prod_pressure"]["prod_active_count"] == 1
     assert "<redacted>" in report["prod_pressure"]["source"]
-    assert report["drain"]["running_beta_trials"] == 1
+    assert report["drain"]["running_staging_trials"] == 1
     assert report["drain"]["idle_leased_slots"] == 1
     assert report["drain"]["released_idle_hosts"] == ["gb10-2"]
     assert report["drain"]["preemptible"]["action"] == "wait"
-    assert report["drain"]["preemptible"]["eligible_running_beta_trials"] == 0
+    assert report["drain"]["preemptible"]["eligible_running_staging_trials"] == 0
     hosts = {item["host"]: item for item in report["desired_hosts"]}
-    assert hosts["gb10-1"]["state"] == "beta_draining"
-    assert hosts["gb10-1"]["beta_slots"] == 1
+    assert hosts["gb10-1"]["state"] == "staging_draining"
+    assert hosts["gb10-1"]["staging_slots"] == 1
     assert hosts["gb10-2"]["state"] == "eligible"
-    assert hosts["gb10-2"]["beta_slots"] == 0
+    assert hosts["gb10-2"]["staging_slots"] == 0
 
 
-def test_prod_pressure_grace_period_marks_preemptible_beta_retryable_after_grace(
+def test_prod_pressure_grace_period_marks_preemptible_staging_retryable_after_grace(
     tmp_path: Path,
 ) -> None:
     manifest = tmp_path / "pressure-draining.toml"
     _write_manifest(
         manifest,
         """
-[beta_capacity_lease]
+[staging_capacity_lease]
 state = "prod_pressure_draining"
 reason = "validation"
 created_at = "2026-07-06T11:55:00Z"
@@ -869,8 +869,8 @@ prod_pressure_reason = "prod capacity pressure"
 name = "gb10-1"
 pool = "gb10-arm64"
 total_slots = 10
-state = "beta_draining"
-beta_slots = 1
+state = "staging_draining"
+staging_slots = 1
 """,
     )
     observed = tmp_path / "observed.json"
@@ -879,7 +879,7 @@ beta_slots = 1
             {
                 "workers": [
                     {
-                        "worker_id": "beta-worker-1",
+                        "worker_id": "staging-worker-1",
                         "host": "gb10-1",
                         "environment": "development",
                         "api_url": "https://yylx.world/dev/api",
@@ -914,7 +914,7 @@ beta_slots = 1
     assert preemptible["enabled"] is True
     assert preemptible["grace_period_seconds"] == 600
     assert preemptible["cancel_after"] == "2026-07-06T12:10:00Z"
-    assert preemptible["eligible_running_beta_trials"] == 1
+    assert preemptible["eligible_running_staging_trials"] == 1
     assert preemptible["action"] == "cancel_retryable"
     assert preemptible["reason"] == "prod_capacity_pressure_grace_period_elapsed"
 
@@ -926,7 +926,7 @@ def test_prod_pressure_drained_lease_recovers_after_pressure_clears(
     _write_manifest(
         manifest,
         """
-[beta_capacity_lease]
+[staging_capacity_lease]
 state = "prod_pressure_draining"
 reason = "validation"
 created_at = "2026-07-06T12:00:00Z"
@@ -944,15 +944,15 @@ prod_pressure_reason = "prod capacity pressure"
 name = "gb10-1"
 pool = "gb10-arm64"
 total_slots = 10
-state = "beta_draining"
-beta_slots = 1
+state = "staging_draining"
+staging_slots = 1
 
 [[hosts]]
 name = "gb10-2"
 pool = "gb10-arm64"
 total_slots = 10
 state = "eligible"
-beta_slots = 0
+staging_slots = 0
 """,
     )
 
@@ -974,13 +974,13 @@ beta_slots = 0
     assert report["lease"]["recovery_reason"] == "prod pressure cleared"
     assert report["prod_pressure"]["has_pressure"] is False
     assert report["prod_pressure"]["recovered"] is True
-    assert report["summary"]["beta_slots"] == 2
-    assert report["new_beta_claims_allowed"] is True
+    assert report["summary"]["staging_slots"] == 2
+    assert report["new_staging_claims_allowed"] is True
     hosts = {item["host"]: item for item in report["desired_hosts"]}
     assert hosts["gb10-1"]["state"] == "eligible"
-    assert hosts["gb10-1"]["beta_slots"] == 1
+    assert hosts["gb10-1"]["staging_slots"] == 1
     assert hosts["gb10-2"]["state"] == "eligible"
-    assert hosts["gb10-2"]["beta_slots"] == 1
+    assert hosts["gb10-2"]["staging_slots"] == 1
 
 
 def test_prod_pressure_drained_lease_expires_instead_of_recovering_after_ttl(
@@ -990,7 +990,7 @@ def test_prod_pressure_drained_lease_expires_instead_of_recovering_after_ttl(
     _write_manifest(
         manifest,
         """
-[beta_capacity_lease]
+[staging_capacity_lease]
 state = "prod_pressure_draining"
 reason = "validation"
 created_at = "2026-07-06T12:00:00Z"
@@ -1008,8 +1008,8 @@ prod_pressure_reason = "prod capacity pressure"
 name = "gb10-1"
 pool = "gb10-arm64"
 total_slots = 10
-state = "beta_draining"
-beta_slots = 1
+state = "staging_draining"
+staging_slots = 1
 """,
     )
 
@@ -1027,5 +1027,5 @@ beta_slots = 1
     report = json.loads(expired.stdout)
     assert report["lease"]["state"] == "expired"
     assert report["prod_pressure"]["recovered"] is False
-    assert report["summary"]["beta_slots"] == 0
-    assert report["new_beta_claims_allowed"] is False
+    assert report["summary"]["staging_slots"] == 0
+    assert report["new_staging_claims_allowed"] is False

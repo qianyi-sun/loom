@@ -1,4 +1,4 @@
-"""MinIO storage preflight evidence for large public-beta runs."""
+"""MinIO storage preflight evidence for large staging runs."""
 
 from __future__ import annotations
 
@@ -83,7 +83,9 @@ def _parse_df_pk(output: str, *, data_path: str) -> dict[str, Any]:
     }
 
 
-def _parse_du_sk(output: str, *, bucket_names: Sequence[str], data_path: str) -> list[dict[str, Any]]:
+def _parse_du_sk(
+    output: str, *, bucket_names: Sequence[str], data_path: str
+) -> list[dict[str, Any]]:
     usage_by_name = {name: 0 for name in bucket_names}
     for line in output.splitlines():
         if not line.strip():
@@ -106,12 +108,14 @@ def _parse_du_sk(output: str, *, bucket_names: Sequence[str], data_path: str) ->
             category = name
         else:
             category = "benchmark-task-data"
-        buckets.append({
-            "name": name,
-            "path": f"{data_path.rstrip('/')}/{name}",
-            "category": category,
-            "usage_bytes": usage_by_name[name],
-        })
+        buckets.append(
+            {
+                "name": name,
+                "path": f"{data_path.rstrip('/')}/{name}",
+                "category": category,
+                "usage_bytes": usage_by_name[name],
+            }
+        )
     return buckets
 
 
@@ -171,16 +175,13 @@ def _growth_check(
         growth_bytes += max(0, current_buckets.get(name, 0) - previous_buckets.get(name, 0))
     growth_per_hour = int(growth_bytes / hours) if hours > 0 else 0
     outcome: StorageOutcome = (
-        "warn"
-        if growth_per_hour >= thresholds.warn_growth_bytes_per_hour
-        else "pass"
+        "warn" if growth_per_hour >= thresholds.warn_growth_bytes_per_hour else "pass"
     )
     return {
         "name": "minio-artifact-trajectory-growth",
         "outcome": outcome,
         "detail": (
-            f"artifacts+trajectories growth is {growth_per_hour} bytes/hour "
-            f"over {hours:.2f} hours"
+            f"artifacts+trajectories growth is {growth_per_hour} bytes/hour over {hours:.2f} hours"
         ),
         "growth_bytes": growth_bytes,
         "growth_bytes_per_hour": growth_per_hour,
@@ -198,15 +199,9 @@ def _free_space_check(
     size_bytes = int(filesystem["size_bytes"])
     free_percent = float(filesystem["free_percent"])
     free_after_bytes = (
-        free_bytes - estimated_batch_bytes
-        if estimated_batch_bytes is not None
-        else free_bytes
+        free_bytes - estimated_batch_bytes if estimated_batch_bytes is not None else free_bytes
     )
-    free_after_percent = (
-        (free_after_bytes / size_bytes) * 100.0
-        if size_bytes > 0
-        else 0.0
-    )
+    free_after_percent = (free_after_bytes / size_bytes) * 100.0 if size_bytes > 0 else 0.0
     threshold_percent = free_after_percent if estimated_batch_bytes is not None else free_percent
     threshold_bytes = free_after_bytes if estimated_batch_bytes is not None else free_bytes
     if threshold_percent < thresholds.stop_free_percent or threshold_bytes < 0:
@@ -307,7 +302,7 @@ def build_minio_storage_preflight(
         "storage_contract": {
             "mode": "hostpath-local-pv",
             "description": (
-                "Public-beta MinIO capacity is governed by the /data backing "
+                "Staging MinIO capacity is governed by the /data backing "
                 "filesystem. PVC/PV capacity is allocation metadata, not the "
                 "effective stop threshold."
             ),

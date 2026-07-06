@@ -38,6 +38,7 @@ import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from loom.security.redaction import redact_mapping, redact_text
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
 from loom_cli.rollout.steps.base import BaseStep, RunResult
@@ -46,11 +47,11 @@ from loom_cli.secret_source import SecretSourceError, resolve_secret_source
 DEFAULT_TERMINAL_TIMEOUT_SEC = 300.0
 DEFAULT_POLL_INTERVAL_SEC = 5.0
 DEFAULT_SMOKE_TASK_ID = "terminal-bench-2/hello-world"
-DEFAULT_CURRENT_GB10_SMOKE_TASK_ID = (
-    "skilllearnbench/anthropic-poster-design/anthropic-poster-design-1"
-)
+DEFAULT_CURRENT_GB10_SMOKE_TASK_ID = "loom-smoke/gb10-oracle-hello-world"
 DEFAULT_CURRENT_GB10_REQUIRED_WORKER_POOL = "gb10-arm64"
 DEFAULT_SMOKE_AGENT = "oracle"
+_NONRECOVERABLE_BATCH_RESULT_STATUSES = frozenset({"partial_failed", "all_failed"})
+_NONRECOVERABLE_FANOUT_REASONS = frozenset({"required_worker_pool_incompatible"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +86,7 @@ def _smoke_submit_mode(ctx: RolloutContext) -> str:
     return _config_value(ctx, "LOOM_SMOKE_SUBMIT_MODE", "smoke_submit_mode") or "user-token"
 
 
-def _smoke_task_id(ctx: RolloutContext) -> str:
+def _smoke_task_id(ctx: RolloutContext, *, submit_mode: str = "user-token") -> str:
     task_id = _explicit_smoke_task_id(ctx)
     if isinstance(task_id, str) and task_id.strip():
         return task_id.strip()
@@ -379,9 +380,13 @@ def _validate_benchmark_catalog(body: bytes) -> str | None:
     return None
 
 
-def _task_payload_inputs(ctx: RolloutContext) -> tuple[str, str | None]:
+def _task_payload_inputs(
+    ctx: RolloutContext,
+    *,
+    submit_mode: str = "user-token",
+) -> tuple[str, str | None]:
     explicit_task_id = bool(_explicit_smoke_task_id(ctx))
-    task_id = _smoke_task_id(ctx)
+    task_id = _smoke_task_id(ctx, submit_mode=submit_mode)
     required_worker_pool = _smoke_required_worker_pool(
         ctx,
         explicit_task_id=explicit_task_id,
@@ -393,7 +398,10 @@ def _admin_on_behalf_payload(
     ctx: RolloutContext,
     cfg: _AdminOnBehalfConfig,
 ) -> dict[str, object]:
-    task_id, required_worker_pool = _task_payload_inputs(ctx)
+    task_id, required_worker_pool = _task_payload_inputs(
+        ctx,
+        submit_mode="admin-on-behalf",
+    )
     payload: dict[str, object] = {
         "name": _admin_smoke_batch_name(ctx),
         "represented_username": cfg.represented_username,
@@ -502,6 +510,55 @@ def _admin_batch_succeeded(
     return True, "ok"
 
 
+def _compact_redacted_json(value: object, *, limit: int = 800) -> str:
+    redacted = redact_mapping(value)
+    try:
+        rendered = json.dumps(redacted, sort_keys=True, separators=(",", ":"))
+    except TypeError:
+        rendered = str(redacted)
+    return redact_text(rendered, limit=limit)
+
+
+def _fanout_error_reasons(value: object) -> set[str]:
+    if isinstance(value, Mapping):
+        reason = value.get("reason")
+        return {reason} if isinstance(reason, str) and reason else set()
+    if isinstance(value, list):
+        reasons: set[str] = set()
+        for item in value:
+            reasons.update(_fanout_error_reasons(item))
+        return reasons
+    return set()
+
+
+def _admin_batch_nonrecoverable_failure(batch: Mapping[str, object]) -> str | None:
+    result_status = batch.get("result_status")
+    failure_reason = batch.get("failure_reason")
+    fanout_errors = batch.get("fanout_errors")
+    fanout_reasons = _fanout_error_reasons(fanout_errors)
+    fanout_submit_failed = failure_reason == "fanout_submit_failed"
+    incompatible_fanout = bool(fanout_reasons & _NONRECOVERABLE_FANOUT_REASONS)
+    failed_result = result_status in _NONRECOVERABLE_BATCH_RESULT_STATUSES
+
+    if not fanout_submit_failed and not (failed_result and incompatible_fanout):
+        return None
+
+    parts = [
+        "admin-on-behalf smoke batch reported nonrecoverable fanout failure",
+        f"state={batch.get('state')!r}",
+        f"result_status={result_status!r}",
+        f"failure_reason={failure_reason!r}",
+    ]
+    failure_message = batch.get("failure_message")
+    if isinstance(failure_message, str) and failure_message.strip():
+        parts.append(f"failure_message={redact_text(failure_message, limit=300)!r}")
+    if fanout_errors:
+        parts.append(
+            "fanout_errors=" + _compact_redacted_json(fanout_errors, limit=1000),
+        )
+    return "; ".join(parts)
+
+
 def _run_admin_on_behalf_smoke(
     ctx: RolloutContext,
     step_dir: StepDir,
@@ -538,7 +595,10 @@ def _run_admin_on_behalf_smoke(
     if catalog_error is not None:
         return RunResult(exit_code=1, error=catalog_error)
 
-    task_id, _required_worker_pool = _task_payload_inputs(ctx)
+    task_id, _required_worker_pool = _task_payload_inputs(
+        ctx,
+        submit_mode="admin-on-behalf",
+    )
     quoted_task_id = urllib.parse.quote(task_id, safe="/")
     status, body = _http_get(f"{base}/api/v1/tasks/{quoted_task_id}", token=token)
     step_dir.artifact_path("04-task.json").write_bytes(body)
@@ -617,6 +677,9 @@ def _run_admin_on_behalf_smoke(
             except json.JSONDecodeError:
                 return RunResult(exit_code=1, error="batch poll response not JSON")
             state = batch.get("state")
+            nonrecoverable_error = _admin_batch_nonrecoverable_failure(batch)
+            if nonrecoverable_error is not None:
+                return RunResult(exit_code=1, error=nonrecoverable_error)
             if state in ("finished", "failed", "cancelled"):
                 terminal_batch = batch
                 break
@@ -653,7 +716,10 @@ class SmokeStep(BaseStep):
 
     def _inputs_fingerprint(self, ctx: RolloutContext) -> dict[str, object]:
         submit_mode = _smoke_submit_mode(ctx)
-        task_id, required_worker_pool = _task_payload_inputs(ctx)
+        task_id, required_worker_pool = _task_payload_inputs(
+            ctx,
+            submit_mode=submit_mode,
+        )
         fingerprint: dict[str, object] = {
             **ctx.to_inputs_dict(),
             "smoke_submit_mode": submit_mode,
@@ -756,7 +822,7 @@ class SmokeStep(BaseStep):
 
         # 4. smoke task exists in the live catalog.
         explicit_task_id = bool(_explicit_smoke_task_id(ctx))
-        task_id = _smoke_task_id(ctx)
+        task_id = _smoke_task_id(ctx, submit_mode="user-token")
         required_worker_pool = _smoke_required_worker_pool(
             ctx,
             explicit_task_id=explicit_task_id,

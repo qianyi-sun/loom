@@ -921,6 +921,12 @@ python_type = "bool"
 default     = true
 description = "Whether the k8s loom-worker Deployment is rendered on this cluster (#383). When false, POST /api/v1/batches rejects submissions whose required_worker_pools list contains 'k8s-worker' because that pool cannot exist on this cluster. Rendered by cluster-render from k8s_worker.enabled in the profile config."
 
+[service_config.gateway_drain_timeout_sec]
+used_by     = ["llm-gateway"]
+python_type = "float"
+default     = 270.0
+description = "Maximum wall-clock seconds `POST /drain` will wait for in-flight requests to reach zero before returning a 503 diagnostic (#547). Set ~30s under `terminationGracePeriodSeconds` (currently 300s in llm-gateway.yaml.j2) so the drain response arrives before kubelet SIGKILLs the pod."
+
 # ─── non-codegen secrets: keys mounted from loom-secrets without Settings fields ───
 # Not Pydantic fields — bootstrap-secrets covers them, doctor verifies them,
 # but no codegen Settings field is emitted. Use this for third-party containers
@@ -983,7 +989,7 @@ description = "Human-readable public SPA environment label shown in the UI chrom
 [render_config.frontend_route_path]
 python_type = "str"
 default     = ""
-description = "Public SPA path prefix on ingress_host. Empty means host root; production uses /prod and development/public-beta uses /dev."
+description = "Public SPA path prefix on ingress_host. Empty means host root; production uses /prod and staging uses /dev."
 
 [render_config.frontend_api_base_path]
 python_type = "str"
@@ -1077,3 +1083,34 @@ fields      = { enabled = false }
 python_type = "table"
 description = "GB10 hosts managed by protected rollout step 04. Each host entry is an inline TOML table with ssh_target, repo_path, and env_file_path."
 fields      = { hosts = [] }
+
+[render_config.trial_cache_registry_repo]
+python_type = "str"
+default     = ""
+description = "Registry repo path for the shared trial-image cache (#547 item #2). Enables cross-node build sharing so workers on node B can pull layered images built on node A instead of rebuilding. Empty (default) = per-worker local cache only. Set to e.g. `ghcr.io/qianyi-sun/loom-trial-cache` on staging/production to activate. Workers need push+pull credentials via a mounted docker-config secret; without them the pull-fail case falls back cleanly to a local build (harmless)."
+
+[render_config.gateway_hpa]
+python_type = "table"
+# Off by default so the schema-default render is identical to the
+# pre-#547 behaviour (fixed `replicas.gateway` pods, no HorizontalPod-
+# Autoscaler object). Profiles that expect variable trial-batch load
+# flip `enabled = true` and tune `min_replicas` / `max_replicas` /
+# `cpu_target_pct`. Requires a metrics-server or equivalent CPU-metric
+# provider in the cluster; kind + development don't have one by
+# default, so leave this off for local dev.
+fields      = { enabled = false, min_replicas = 2, max_replicas = 8, cpu_target_pct = 60 }
+
+[render_config.llm_gateway_sandbox]
+python_type = "table"
+# Off by default because the DaemonSet requires operator to pre-
+# provision `loom-sandbox-gateway-tls` Secret (a `tls`-shaped
+# k8s Secret with cert + key for `loom-sandbox-gateway.local`).
+# The `loom cluster bootstrap-secrets` command intentionally does
+# NOT generate this — operators pick a cert issuance path
+# (self-signed for dev, cert-manager or loom-CA-signed for prod).
+# When enabled, the DaemonSet places one loom-llm-gateway-sandbox
+# pod per node (hostPort 8443) that terminates TLS + verifies the
+# HS256 step-JWT before tunneling bytes to loom-llm-gateway.
+# Closes #78 Phase B — per-node edge auth instead of destination-
+# only.
+fields      = { enabled = false }

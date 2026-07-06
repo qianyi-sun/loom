@@ -82,7 +82,7 @@ describe("Layout", () => {
       }
       if (url.includes("/api/v1/invites/lookup")) {
         return jsonResponse({
-          team_name: "Public Beta",
+          team_name: "Staging",
           role: "member",
           status: "pending",
           code_prefix: "abc12345",
@@ -95,7 +95,7 @@ describe("Layout", () => {
       route: "/invites/accept?code=loom_invite_abc",
     });
 
-    expect(await screen.findByText("Public Beta")).toBeInTheDocument();
+    expect(await screen.findByText("Staging")).toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: "Sign in" }),
     ).not.toBeInTheDocument();

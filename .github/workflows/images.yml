@@ -37,6 +37,10 @@ on:
       - "web/package*.json"
       - "web/src/**"
       - "web/vite.config.ts"
+      # Go source for the llm-gateway-sandbox binary (#547 item #3).
+      - "cmd/**"
+      - "go.mod"
+      - "go.sum"
       - ".github/workflows/images.yml"
       # Markdown is never baked into the image; trailing negation
       # overrides any positive match above (e.g. packages/<x>/README.md).
@@ -54,6 +58,10 @@ on:
       - "web/package*.json"
       - "web/src/**"
       - "web/vite.config.ts"
+      # Go source for the llm-gateway-sandbox binary (#547 item #3).
+      - "cmd/**"
+      - "go.mod"
+      - "go.sum"
       - ".github/workflows/images.yml"
       # Markdown is never baked into the image; trailing negation
       # overrides any positive match above (e.g. packages/<x>/README.md).
@@ -104,6 +112,9 @@ jobs:
               "control-plane": "deploy/Dockerfile.control-plane",
               "llm-gateway": "deploy/Dockerfile.gateway",
               "web": "deploy/Dockerfile.web",
+              # #547 item #3: Go binary, distroless-static runtime.
+              # NOT in python_images — built with Go toolchain.
+              "llm-gateway-sandbox": "deploy/Dockerfile.gateway-sandbox",
           }
           python_images = {"worker", "service", "control-plane", "llm-gateway"}
 
@@ -166,8 +177,17 @@ jobs:
                       selected.add("control-plane")
                   elif path == "deploy/Dockerfile.gateway":
                       selected.add("llm-gateway")
+                  elif path == "deploy/Dockerfile.gateway-sandbox":
+                      selected.add("llm-gateway-sandbox")
                   elif path == "deploy/Dockerfile.web":
                       selected.add("web")
+                  # #547 item #3: Go source or go.mod/go.sum touches
+                  # rebuild the sandbox proxy image.
+                  elif path.startswith("cmd/loom-llm-gateway-sandbox/") or path in {
+                      "go.mod",
+                      "go.sum",
+                  }:
+                      selected.add("llm-gateway-sandbox")
                   elif path.startswith("deploy/"):
                       selected = all_images()
                       break

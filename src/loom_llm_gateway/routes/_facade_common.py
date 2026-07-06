@@ -365,7 +365,7 @@ async def decrypt_facade_api_key(
     - `malformed_ref` — `encrypted_api_key_ref` doesn't parse as the
       runtime-supported `loom://<namespace>/<uuid>` shape. Legacy rows
       created before secret-store enforcement (e.g. argv-style
-      `env:PUBLIC_BETA_SMOKE_OPENAI` strings) hit this. Fix:
+      `env:STAGING_SMOKE_OPENAI` strings) hit this. Fix:
       `loom providers rotate-key <name> --api-key env:<NEW>`.
     - `missing_secret` — ref is well-formed but the `secrets` row was
       pruned. Same operator fix.

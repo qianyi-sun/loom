@@ -21,11 +21,13 @@ from loom.db.schema_startup import assert_schema_at_head
 from loom.security.secret_store import assert_existing_secrets_decryptable
 from loom.startup_retry import retry_startup_dependency
 from loom_llm_gateway.config import GatewaySettings
+from loom_llm_gateway.drain import DrainState, install_drain_middleware
 from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.rate_card import RateCardCache
 from loom_llm_gateway.routes import (
     admin,
     chat,
+    drain,
     facade_anthropic,
     facade_google,
     facade_openai,
@@ -65,6 +67,10 @@ def create_app(settings: GatewaySettings) -> FastAPI:
         admin_secret_verifier = _load_admin_secret_verifier(settings)
         await _assert_schema_startup(engine)
         app.state.settings = settings
+        # #547: drain state must be attached BEFORE middleware runs its
+        # first request. Live-migrated to app.state so the middleware
+        # and both /healthz and /drain share one instance.
+        app.state.drain = DrainState()
         app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
         await retry_startup_dependency(
             lambda: _assert_secret_store_startup(app.state.session_factory),
@@ -100,7 +106,10 @@ def create_app(settings: GatewaySettings) -> FastAPI:
     app: FastAPI = FastAPI(
         title="Loom LLM Gateway", version="0.0.1", lifespan=lifespan,
     )
+    # #547: register middleware BEFORE routers so it wraps every route.
+    install_drain_middleware(app)
     app.include_router(health.router)
+    app.include_router(drain.router)
     app.include_router(chat.router)
     app.include_router(messages.router)
     app.include_router(responses.router)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Public invite-only beta smoke gate.
+"""Staging invite-only smoke gate.
 
 This script verifies the public API and Run Library release boundary against a
 staging deployment. Browser-only invite acceptance and SPA submission still
@@ -2005,7 +2005,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--provider-model-name",
         default=None,
-        help="Expected model id in /api/v1/models, for example `gpt-4o-mini`.",
+        help="Expected model id in /api/v1/models, for example `glm5.1-thinking`.",
     )
     parser.add_argument("--batch-id", default=None, help="Completed Team A batch id.")
     parser.add_argument(

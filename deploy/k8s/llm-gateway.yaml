@@ -5,123 +5,149 @@ metadata:
 spec:
   replicas: 2
   selector:
-    matchLabels:
-      app: loom-llm-gateway
+    matchLabels: { app: loom-llm-gateway }
   template:
     metadata:
-      labels:
-        app: loom-llm-gateway
+      labels: { app: loom-llm-gateway }
     spec:
+      # #547: bumped from k8s default 30s to 300s so long-running
+      # LLM calls (Claude Opus with thinking, o1) have time to
+      # complete before SIGKILL. The preStop hook calls /drain
+      # which marks the pod not-ready and waits for in-flight
+      # requests to reach zero; only the pathological "call took
+      # longer than 270s" gets truncated.
+      terminationGracePeriodSeconds: 300
       containers:
-      - name: gateway
-        image: loom-llm-gateway:0.7
-        env:
-        - name: LOOM_GW_ANTHROPIC_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: anthropic-api-key
-              optional: true
-        - name: LOOM_GW_BIND_HOST
-          value: 0.0.0.0
-        - name: LOOM_GW_BIND_PORT
-          value: '9100'
-        - name: LOOM_GW_DB_URL
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: gw-db-url
-        - name: LOOM_GW_DEV_RELOAD
-          value: 'False'
-        - name: LOOM_GW_EGRESS_PROXY_URL
-          value: ''
-        - name: LOOM_GW_GOOGLE_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: google-api-key
-              optional: true
-        - name: LOOM_GW_HUGGINGFACE_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: huggingface-api-key
-              optional: true
-        - name: LOOM_GW_LLM_RETRY_BASE_BACKOFF_SEC
-          value: '0.5'
-        - name: LOOM_GW_LLM_RETRY_BUDGET_SEC
-          value: '60.0'
-        - name: LOOM_GW_LLM_RETRY_JITTER_SEC
-          value: '0.25'
-        - name: LOOM_GW_LLM_RETRY_MAX_ATTEMPTS
-          value: '5'
-        - name: LOOM_GW_LLM_RETRY_MAX_BACKOFF_SEC
-          value: '8.0'
-        - name: LOOM_GW_LOG_LEVEL
-          value: info
-        - name: LOOM_GW_METRICS_PORT
-          value: '9101'
-        - name: LOOM_GW_OPENAI_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: openai-api-key
-              optional: true
-        - name: LOOM_GW_RATE_CARD_CACHE_TTL_SEC
-          value: '300'
-        - name: LOOM_GW_STEP_JWT_SIGNING_KEY
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: step-jwt-signing-key
-        - name: LOOM_GW_TOGETHER_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: together-api-key
-              optional: true
-        - name: LOOM_GW_UPSTREAM_TIMEOUT_SEC
-          value: '120.0'
-        - name: LOOM_GW_ADMIN_SECRET_FILE
-          value: /var/run/loom/admin/secrets.toml
-        - name: LOOM_SECRET_STORE_MASTER_KEY
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: secret-store-master-key
-        - name: LOOM_ENV
-          value: production
-        ports:
-        - containerPort: 9100
-        readinessProbe:
-          httpGet:
-            path: /healthz
-            port: 9100
-          periodSeconds: 5
-        volumeMounts:
-        - name: loom-admin-secret
-          mountPath: /var/run/loom/admin
-          readOnly: true
-        resources:
-          requests:
-            cpu: 200m
-            memory: 256Mi
-          limits:
-            cpu: 1
-            memory: 1Gi
+        - name: gateway
+          image: loom-llm-gateway:0.7
+          env:
+            - name: LOOM_GW_ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: anthropic-api-key
+                  optional: true
+            - name: LOOM_GW_BIND_HOST
+              value: "0.0.0.0"
+            - name: LOOM_GW_BIND_PORT
+              value: "9100"
+            - name: LOOM_GW_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: gw-db-url
+            - name: LOOM_GW_DEV_RELOAD
+              value: "False"
+            - name: LOOM_GW_EGRESS_PROXY_URL
+              value: ""
+            - name: LOOM_GW_GATEWAY_DRAIN_TIMEOUT_SEC
+              value: "270.0"
+            - name: LOOM_GW_GOOGLE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: google-api-key
+                  optional: true
+            - name: LOOM_GW_HUGGINGFACE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: huggingface-api-key
+                  optional: true
+            - name: LOOM_GW_LLM_RETRY_BASE_BACKOFF_SEC
+              value: "0.5"
+            - name: LOOM_GW_LLM_RETRY_BUDGET_SEC
+              value: "60.0"
+            - name: LOOM_GW_LLM_RETRY_JITTER_SEC
+              value: "0.25"
+            - name: LOOM_GW_LLM_RETRY_MAX_ATTEMPTS
+              value: "5"
+            - name: LOOM_GW_LLM_RETRY_MAX_BACKOFF_SEC
+              value: "8.0"
+            - name: LOOM_GW_LOG_LEVEL
+              value: "info"
+            - name: LOOM_GW_METRICS_PORT
+              value: "9101"
+            - name: LOOM_GW_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: openai-api-key
+                  optional: true
+            - name: LOOM_GW_RATE_CARD_CACHE_TTL_SEC
+              value: "300"
+            - name: LOOM_GW_STEP_JWT_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: step-jwt-signing-key
+            - name: LOOM_GW_TOGETHER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: together-api-key
+                  optional: true
+            - name: LOOM_GW_UPSTREAM_TIMEOUT_SEC
+              value: "120.0"
+
+            - name: LOOM_GW_ADMIN_SECRET_FILE
+              value: "/var/run/loom/admin/secrets.toml"
+            - name: LOOM_SECRET_STORE_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: secret-store-master-key
+            - name: LOOM_ENV
+              value: "production"
+          ports:
+            - containerPort: 9100
+          readinessProbe:
+            httpGet: { path: /healthz, port: 9100 }
+            periodSeconds: 5
+          # #547: preStop runs BEFORE SIGTERM. It POSTs to /drain,
+          # which flips /healthz to 503 (Service stops routing new
+          # requests) and blocks until in-flight requests finish or
+          # the drain timeout (270s) fires. This prevents rolling
+          # upgrades / HPA scale-down from truncating in-flight LLM
+          # calls.
+          lifecycle:
+            preStop:
+              exec:
+                # Use python (guaranteed present in the gateway image)
+                # rather than curl/wget which aren't in python:slim.
+                command:
+                  - python
+                  - -c
+                  - |
+                    import urllib.request
+                    try:
+                        req = urllib.request.Request(
+                            "http://127.0.0.1:9100/drain",
+                            method="POST",
+                            data=b"",
+                        )
+                        urllib.request.urlopen(req, timeout=280).read()
+                    except Exception:
+                        pass  # SIGTERM path still runs; do not block kubelet
+          volumeMounts:
+            - name: loom-admin-secret
+              mountPath: /var/run/loom/admin
+              readOnly: true
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits: { cpu: 1, memory: 1Gi }
       volumes:
-      - name: loom-admin-secret
-        secret:
-          secretName: loom-admin-secret
-          defaultMode: 384
+        - name: loom-admin-secret
+          secret:
+            secretName: loom-admin-secret
+            defaultMode: 0600
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: loom-llm-gateway
 spec:
-  selector:
-    app: loom-llm-gateway
+  selector: { app: loom-llm-gateway }
   ports:
-  - port: 9100
-    targetPort: 9100
+    - port: 9100
+      targetPort: 9100

@@ -18,8 +18,7 @@ def _candidate_sha() -> str:
 
 def _image_digests() -> dict[str, str]:
     return {
-        "loom-control-plane": "ghcr.io/qianyi-sun/loom-control-plane@sha256:"
-        + "1" * 64,
+        "loom-control-plane": "ghcr.io/qianyi-sun/loom-control-plane@sha256:" + "1" * 64,
         "loom-llm-gateway": "ghcr.io/qianyi-sun/loom-llm-gateway@sha256:" + "2" * 64,
         "loom-service": "ghcr.io/qianyi-sun/loom-service@sha256:" + "3" * 64,
         "loom-worker": "ghcr.io/qianyi-sun/loom-worker@sha256:" + "4" * 64,
@@ -27,13 +26,13 @@ def _image_digests() -> dict[str, str]:
     }
 
 
-def _prod_beta_isolation_evidence() -> dict[str, Any]:
+def _prod_staging_isolation_evidence() -> dict[str, Any]:
     return {
         "status": "pass",
         "url": "https://github.com/qianyi-sun/loom/issues/490#issuecomment-isolation-gate",
-        "state_profile_evidence": "release-evidence/prod-beta-state-profile.json",
-        "worker_identity_evidence": "release-evidence/prod-beta-worker-identity.json",
-        "frontend_api_base_evidence": "release-evidence/prod-beta-api-base.json",
+        "state_profile_evidence": "release-evidence/prod-staging-state-profile.json",
+        "worker_identity_evidence": "release-evidence/prod-staging-worker-identity.json",
+        "frontend_api_base_evidence": "release-evidence/prod-staging-api-base.json",
         "state_profiles": {
             "production": {
                 "environment": "production",
@@ -60,30 +59,26 @@ def _prod_beta_isolation_evidence() -> dict[str, Any]:
                 },
                 "provider_connection_namespace": "production",
             },
-            "development": {
-                "environment": "development",
-                "github_environment": "development",
-                "namespace": "loom-dev",
-                "database_name": "loom_dev",
+            "staging": {
+                "environment": "staging",
+                "github_environment": "staging",
+                "namespace": "loom-staging",
+                "database_name": "loom_staging",
                 "object_storage": {
-                    "task_bucket": "loom-dev-tasks",
-                    "trajectories_bucket": "loom-dev-trajectories",
-                    "artifacts_bucket": "loom-dev-artifacts",
+                    "task_bucket": "loom-staging-tasks",
+                    "trajectories_bucket": "loom-staging-trajectories",
+                    "artifacts_bucket": "loom-staging-artifacts",
                 },
                 "secret_refs": {
                     "secret_store_key_ref": (
-                        "github-environment:development/LOOM_SECRET_STORE_MASTER_KEY"
+                        "github-environment:staging/LOOM_SECRET_STORE_MASTER_KEY"
                     ),
-                    "service_api_token_ref": (
-                        "github-environment:development/LOOM_SERVICE_API_TOKEN"
-                    ),
-                    "worker_token_ref": "github-environment:development/LOOM_WORKER_TOKEN",
-                    "provider_secret_ref": (
-                        "github-environment:development/LOOM_PROVIDER_SECRET_REF"
-                    ),
-                    "yibuapi_secret_ref": "github-environment:development/YIBUAPI_API_KEY",
+                    "service_api_token_ref": ("github-environment:staging/LOOM_SERVICE_API_TOKEN"),
+                    "worker_token_ref": "github-environment:staging/LOOM_WORKER_TOKEN",
+                    "provider_secret_ref": ("github-environment:staging/LOOM_PROVIDER_SECRET_REF"),
+                    "yibuapi_secret_ref": "github-environment:staging/YIBUAPI_API_KEY",
                 },
-                "provider_connection_namespace": "development",
+                "provider_connection_namespace": "staging",
             },
         },
         "frontend": {
@@ -92,10 +87,10 @@ def _prod_beta_isolation_evidence() -> dict[str, Any]:
                 "api_base": "https://yylx.world/prod/api",
                 "environment_label": "Production",
             },
-            "development": {
+            "staging": {
                 "route": "https://yylx.world/dev",
                 "api_base": "https://yylx.world/dev/api",
-                "environment_label": "Development / public beta",
+                "environment_label": "Staging",
             },
         },
         "workers": {
@@ -108,20 +103,20 @@ def _prod_beta_isolation_evidence() -> dict[str, Any]:
                 "k8s_namespace": "loom-prod",
                 "k8s_deployment": "loom-prod-worker",
             },
-            "development": {
-                "environment": "development",
+            "staging": {
+                "environment": "staging",
                 "api_url": "https://yylx.world/dev/api",
-                "image": "ghcr.io/qianyi-sun/loom-worker:public-beta-abc1234",
+                "image": "ghcr.io/qianyi-sun/loom-worker:staging-abc1234",
                 "image_digest": "ghcr.io/qianyi-sun/loom-worker@sha256:" + "6" * 64,
                 "source_commit": "abcdef0123456789abcdef0123456789abcdef01",
-                "k8s_namespace": "loom-dev",
-                "k8s_deployment": "loom-dev-worker",
+                "k8s_namespace": "loom-staging",
+                "k8s_deployment": "loom-staging-worker",
             },
         },
-        "beta_capacity": {
+        "staging_capacity": {
             "lease_state": "none",
-            "beta_slots": 0,
-            "new_beta_claims_allowed": False,
+            "staging_slots": 0,
+            "new_staging_claims_allowed": False,
             "override": {
                 "approved": False,
             },
@@ -155,7 +150,7 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
             "url": "https://github.com/qianyi-sun/loom/actions/runs/1005",
             "batch_id": "batch-release-smoke",
             "trial_id": "trial-release-smoke",
-            "artifact_url": "https://staging.yylx.world/api/v1/trials/trial-release-smoke/atif",
+            "artifact_url": "https://yylx.world/dev/api/v1/trials/trial-release-smoke/atif",
         },
         "frontend_route_evidence": {
             "status": "pass",
@@ -243,8 +238,8 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
                 },
             ],
         },
-        "prod_beta_isolation": {
-            **_prod_beta_isolation_evidence(),
+        "prod_staging_isolation": {
+            **_prod_staging_isolation_evidence(),
         },
         "raw_delivery_export_status": {
             "status": "pass",
@@ -269,7 +264,7 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         "candidate_sha": _candidate_sha(),
         "image_tag": "release-0123456789ab",
         "prod_tag": "v1.0.0",
-        "staging_url": "https://staging.yylx.world",
+        "staging_url": "https://yylx.world/dev",
         "image_digests": _image_digests(),
         "checks": checks,
     }
@@ -278,7 +273,9 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
     return manifest
 
 
-def _run_release_gate(tmp_path: Path, manifest: dict[str, Any], *args: str) -> subprocess.CompletedProcess[str]:
+def _run_release_gate(
+    tmp_path: Path, manifest: dict[str, Any], *args: str
+) -> subprocess.CompletedProcess[str]:
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     return subprocess.run(
@@ -323,7 +320,7 @@ def test_release_gate_accepts_complete_manifest_and_writes_artifacts(tmp_path: P
     evidence = json.loads(json_out.read_text(encoding="utf-8"))
     assert evidence["status"] == "pass"
     assert evidence["candidate_sha"] == _candidate_sha()
-    isolation = evidence["checks"]["prod_beta_isolation"]
+    isolation = evidence["checks"]["prod_staging_isolation"]
     assert (
         isolation["state_profiles"]["production"]["secret_refs"]["worker_token_ref"]
         == "github-environment:production/LOOM_WORKER_TOKEN"
@@ -338,7 +335,7 @@ def test_release_gate_accepts_complete_manifest_and_writes_artifacts(tmp_path: P
     assert "hf_mirror_token_boundary" in markdown
     assert "worker_capacity_smoke" in markdown
     assert "frontend_route_evidence" in markdown
-    assert "prod_beta_isolation" in markdown
+    assert "prod_staging_isolation" in markdown
     assert "raw_delivery_export_status" in markdown
 
 
@@ -396,38 +393,38 @@ def test_release_gate_rejects_hf_boundary_worker_token_or_direct_egress(
             lambda check: check["frontend"]["production"].update(
                 {"api_base": "https://yylx.world/dev/api"},
             ),
-            "prod_beta_isolation.frontend.production.api_base",
+            "prod_staging_isolation.frontend.production.api_base",
         ),
         (
             "worker_api_url",
-            lambda check: check["workers"]["development"].update(
+            lambda check: check["workers"]["staging"].update(
                 {"api_url": "https://yylx.world/prod/api"},
             ),
-            "prod_beta_isolation.workers.development.api_url",
+            "prod_staging_isolation.workers.staging.api_url",
         ),
         (
             "worker_source",
             lambda check: check["workers"]["production"].update(
                 {
                     "source_commit": "abcdef0123456789abcdef0123456789abcdef01",
-                    "image": "ghcr.io/qianyi-sun/loom-worker:public-beta-abc1234",
+                    "image": "ghcr.io/qianyi-sun/loom-worker:staging-abc1234",
                 },
             ),
-            "prod_beta_isolation.workers.production.source_commit",
+            "prod_staging_isolation.workers.production.source_commit",
         ),
         (
             "db_target",
             lambda check: check["state_profiles"]["production"].update(
                 {"database_name": "loom_dev"},
             ),
-            "prod_beta_isolation.state_profiles.production.database_name",
+            "prod_staging_isolation.state_profiles.production.database_name",
         ),
         (
             "object_storage_target",
             lambda check: check["state_profiles"]["production"]["object_storage"].update(
                 {"task_bucket": "loom-dev-tasks"},
             ),
-            "prod_beta_isolation.state_profiles.production.object_storage.task_bucket",
+            "prod_staging_isolation.state_profiles.production.object_storage.task_bucket",
         ),
         (
             "token_refs",
@@ -438,29 +435,29 @@ def test_release_gate_rejects_hf_boundary_worker_token_or_direct_egress(
                     ),
                 },
             ),
-            "prod_beta_isolation.state_profiles.production.secret_refs.service_api_token_ref",
+            "prod_staging_isolation.state_profiles.production.secret_refs.service_api_token_ref",
         ),
         (
-            "active_beta_lease",
-            lambda check: check["beta_capacity"].update(
+            "active_staging_lease",
+            lambda check: check["staging_capacity"].update(
                 {
                     "lease_state": "active",
-                    "beta_slots": 2,
-                    "new_beta_claims_allowed": True,
+                    "staging_slots": 2,
+                    "new_staging_claims_allowed": True,
                 },
             ),
-            "prod_beta_isolation.beta_capacity requires beta_slots=0",
+            "prod_staging_isolation.staging_capacity requires staging_slots=0",
         ),
     ],
 )
-def test_release_gate_rejects_seeded_prod_beta_crossings(
+def test_release_gate_rejects_seeded_prod_staging_crossings(
     tmp_path: Path,
     seed_name: str,
     mutate: Any,
     expected_error: str,
 ) -> None:
     manifest = _passing_evidence()
-    check = manifest["checks"]["prod_beta_isolation"]
+    check = manifest["checks"]["prod_staging_isolation"]
     mutate(check)
 
     result = _run_release_gate(
@@ -477,16 +474,16 @@ def test_release_gate_rejects_seeded_prod_beta_crossings(
     assert expected_error in result.stderr
 
 
-def test_release_gate_allows_documented_beta_lease_override(tmp_path: Path) -> None:
+def test_release_gate_allows_documented_staging_lease_override(tmp_path: Path) -> None:
     manifest = _passing_evidence()
-    manifest["checks"]["prod_beta_isolation"]["beta_capacity"].update(
+    manifest["checks"]["prod_staging_isolation"]["staging_capacity"].update(
         {
             "lease_state": "active",
-            "beta_slots": 1,
-            "new_beta_claims_allowed": True,
+            "staging_slots": 1,
+            "new_staging_claims_allowed": True,
             "override": {
                 "approved": True,
-                "reason": "Qianyi approved one running beta drain slot before prod promote",
+                "reason": "Qianyi approved one running staging drain slot before prod promote",
                 "url": "https://github.com/qianyi-sun/loom/issues/490#issuecomment-override",
             },
         },
@@ -509,7 +506,7 @@ def test_release_gate_allows_shared_object_bucket_with_documented_prefix_policy(
     tmp_path: Path,
 ) -> None:
     manifest = _passing_evidence()
-    check = manifest["checks"]["prod_beta_isolation"]
+    check = manifest["checks"]["prod_staging_isolation"]
     for profile in check["state_profiles"].values():
         profile["object_storage"] = {
             "task_bucket": "loom-shared-tasks",
@@ -539,7 +536,7 @@ def test_release_gate_allows_shared_object_bucket_with_documented_prefix_policy(
 def test_release_gate_rejects_raw_secret_values_without_echoing_them(tmp_path: Path) -> None:
     manifest = _passing_evidence()
     raw_token = "sk-thisrawsecretmustnotappear1234567890"
-    manifest["checks"]["prod_beta_isolation"]["state_profiles"]["production"][
+    manifest["checks"]["prod_staging_isolation"]["state_profiles"]["production"][
         "operator_note"
     ] = raw_token
 
@@ -565,11 +562,10 @@ def test_release_gate_rejects_missing_required_checks_and_secret_leaks(tmp_path:
     manifest["checks"].pop("score_positive_canary")
     manifest["checks"].pop("benchmark_score_alignment")
     manifest["checks"].pop("frontend_route_evidence")
-    manifest["checks"].pop("prod_beta_isolation")
+    manifest["checks"].pop("prod_staging_isolation")
     manifest["checks"].pop("raw_delivery_export_status")
     manifest["checks"]["public_api_spa_smoke"]["artifact_url"] = (
-        "https://loom-minio.loom.svc.cluster.local/bucket/object"
-        "?X-Amz-Signature=abc"
+        "https://loom-minio.loom.svc.cluster.local/bucket/object?X-Amz-Signature=abc"
     )
     manifest["checks"]["provider_smoke"]["notes"] = "Authorization: Bearer raw-token"
 
@@ -588,7 +584,7 @@ def test_release_gate_rejects_missing_required_checks_and_secret_leaks(tmp_path:
     assert "missing required check 'score_positive_canary'" in result.stderr
     assert "missing required check 'benchmark_score_alignment'" in result.stderr
     assert "missing required check 'frontend_route_evidence'" in result.stderr
-    assert "missing required check 'prod_beta_isolation'" in result.stderr
+    assert "missing required check 'prod_staging_isolation'" in result.stderr
     assert "missing required check 'raw_delivery_export_status'" in result.stderr
     assert "forbidden evidence value" in result.stderr
     assert "public_api_spa_smoke.artifact_url" in result.stderr

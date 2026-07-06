@@ -1460,7 +1460,7 @@ export default function NewBatch(): JSX.Element {
                   <Help>
                     No runnable benchmarks are provisioned in this
                     environment yet. Ask an admin or operator to run the
-                    public beta catalog provisioning step from the deployment
+                    staging catalog provisioning step from the deployment
                     runbook, then refresh this page.
                   </Help>
                 ) : null}

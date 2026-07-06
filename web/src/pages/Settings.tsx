@@ -174,13 +174,13 @@ export default function Settings(): JSX.Element {
       <div className="space-y-8">
         <header className="max-w-3xl">
           <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-            Loom public beta
+            Loom staging
           </p>
           <h1 className="mt-2 text-3xl font-bold text-slate-950">
             Sign in to run and review evaluations
           </h1>
           <p className="mt-3 text-base text-slate-600">
-            Public beta account requests are reviewed by an admin. Request a
+            Staging account requests are reviewed by an admin. Request a
             username for an existing team, set your password from the approved
             setup link, then use the same account in the browser and CLI.
           </p>

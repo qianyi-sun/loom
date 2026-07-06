@@ -49,7 +49,7 @@ def _assert_candidate_invocation(
 def _write_rendered_service(
     ev: EvidenceDirectory,
     *,
-    image_tag: str = "public-beta-abc123",
+    image_tag: str = "staging-abc123",
 ) -> Path:
     rendered = ev.step_dir(7, "render").artifact_path("rendered.yaml")
     rendered.write_text(
@@ -89,22 +89,25 @@ def _docker_inspect_success(argv: list[str]) -> SubprocessResult:
 
 
 def _release_manifest_with_gb10_contract() -> str:
-    return json.dumps(
-        {
-            "schema_version": 1,
-            "external_workers": {
-                "control_plane_environment": "production",
-                "gb10_desired_states": [
-                    {
-                        "pool_name": "gb10-arm64",
-                        "image_tag": "public-beta-abc123",
-                        "env_config_version": "public-beta-abc123",
-                        "source_git_commit": "a" * 40,
-                    }
-                ],
-            },
-        }
-    ) + "\n"
+    return (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "external_workers": {
+                    "control_plane_environment": "production",
+                    "gb10_desired_states": [
+                        {
+                            "pool_name": "gb10-arm64",
+                            "image_tag": "staging-abc123",
+                            "env_config_version": "staging-abc123",
+                            "source_git_commit": "a" * 40,
+                        }
+                    ],
+                },
+            }
+        )
+        + "\n"
+    )
 
 
 def test_render_runs_loom_cli_from_candidate_worktree(
@@ -264,9 +267,7 @@ def test_env_state_resolves_loom_cli_without_global_executable(
     assert calls[1]["argv"][3:6] == ["admin", "environment-state", "check"]
     for call in calls:
         assert call["argv"][call["argv"].index("--environment") + 1] == ctx.environment
-        assert call["argv"][call["argv"].index("--admin-token") + 1] == (
-            "env:LOOM_CP_ADMIN_TOKEN"
-        )
+        assert call["argv"][call["argv"].index("--admin-token") + 1] == ("env:LOOM_CP_ADMIN_TOKEN")
         assert "--var" in call["argv"]
         assert f"GIT_SHA={ctx.resolved_sha}" in call["argv"]
 
@@ -277,7 +278,7 @@ def test_env_state_passes_pinned_admin_token_source_and_fingerprint(
 ) -> None:
     ctx = make_ctx(
         tmp_path,
-        admin_token_source="file:/secure/path/public-beta-admin-token",
+        admin_token_source="file:/secure/path/staging-admin-token",
         expect_admin_token_fingerprint="sha256:abc123def456 len=64",
     )
     ev = EvidenceDirectory(tmp_path, "test-rid")
@@ -308,9 +309,7 @@ def test_env_state_passes_pinned_admin_token_source_and_fingerprint(
     assert result.exit_code == 0
     assert len(calls) == 2
     for argv in calls:
-        assert argv[argv.index("--admin-token") + 1] == (
-            "file:/secure/path/public-beta-admin-token"
-        )
+        assert argv[argv.index("--admin-token") + 1] == ("file:/secure/path/staging-admin-token")
         assert argv[argv.index("--expect-admin-token-fingerprint") + 1] == (
             "sha256:abc123def456 len=64"
         )
@@ -321,7 +320,7 @@ def test_env_state_retries_gb10_source_convergence_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ctx = make_ctx(tmp_path, image_tag="public-beta-80f7e01")
+    ctx = make_ctx(tmp_path, image_tag="staging-80f7e01")
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     _prepare_candidate_worktree(ev)
@@ -403,12 +402,10 @@ def test_gb10_rollout_convergence_retry_budget_covers_worker_image_builds() -> N
 
     min_budget_sec = 15 * 60
     assert (
-        s10_env_state._ENV_STATE_CHECK_MAX_ATTEMPTS
-        * s10_env_state._ENV_STATE_CHECK_RETRY_DELAY_SEC
+        s10_env_state._ENV_STATE_CHECK_MAX_ATTEMPTS * s10_env_state._ENV_STATE_CHECK_RETRY_DELAY_SEC
     ) >= min_budget_sec
     assert (
-        s12_release_gate._GB10_STATUS_MAX_ATTEMPTS
-        * s12_release_gate._GB10_STATUS_RETRY_DELAY_SEC
+        s12_release_gate._GB10_STATUS_MAX_ATTEMPTS * s12_release_gate._GB10_STATUS_RETRY_DELAY_SEC
     ) >= min_budget_sec
 
 
@@ -488,11 +485,13 @@ rate_card_provider = "yibuapi"
             return SubprocessResult(
                 argv=list(argv),
                 returncode=0,
-                stdout=json.dumps({
-                    "name": "mz_tn_canada_qianyi",
-                    "pricing_source": "rate-card",
-                    "rate_card_provider": "yibuapi",
-                }),
+                stdout=json.dumps(
+                    {
+                        "name": "mz_tn_canada_qianyi",
+                        "pricing_source": "rate-card",
+                        "rate_card_provider": "yibuapi",
+                    }
+                ),
                 stderr="",
             )
         raise AssertionError(f"unexpected argv: {argv}")
@@ -513,18 +512,29 @@ rate_card_provider = "yibuapi"
     for call in calls:
         _assert_candidate_invocation(call, worktree=worktree)
     assert calls[0]["argv"][3:] == [
-        "admin", "rate-cards", "sync-yibuapi",
-        "--group", "default",
-        "--format", "json",
+        "admin",
+        "rate-cards",
+        "sync-yibuapi",
+        "--group",
+        "default",
+        "--format",
+        "json",
     ]
     assert calls[1]["argv"][3:] == [
-        "providers", "update", "mz_tn_canada_qianyi",
-        "--pricing-source", "rate-card",
-        "--rate-card-provider", "yibuapi",
+        "providers",
+        "update",
+        "mz_tn_canada_qianyi",
+        "--pricing-source",
+        "rate-card",
+        "--rate-card-provider",
+        "yibuapi",
     ]
     assert calls[2]["argv"][3:] == [
-        "providers", "show", "mz_tn_canada_qianyi",
-        "--format", "json",
+        "providers",
+        "show",
+        "mz_tn_canada_qianyi",
+        "--format",
+        "json",
     ]
     assert step_dir.artifact_path("rate-card-sync-yibuapi.json").is_file()
     assert step_dir.artifact_path(
@@ -602,9 +612,9 @@ def test_preflight_resolves_loom_cli_with_rollout_cluster_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ctx = make_ctx(tmp_path, image_tag="public-beta-new")
+    ctx = make_ctx(tmp_path, image_tag="staging-new")
     ctx.cluster_config_path.write_text(
-        'image_tag = "public-beta-old"\nnamespace = "loom-public-beta"\n',
+        'image_tag = "staging-old"\nnamespace = "loom-staging"\n',
     )
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
@@ -634,6 +644,9 @@ def test_preflight_resolves_loom_cli_with_rollout_cluster_config(
     config_path = Path(seen["argv"][seen["argv"].index("--config") + 1])
     assert config_path != ctx.cluster_config_path
     assert tomllib.loads(config_path.read_text())["image_tag"] == ctx.image_tag
+    assert seen["argv"][seen["argv"].index("--backup-manifest") + 1] == (
+        str(ctx.backup_manifest_path)
+    )
 
 
 def test_cluster_up_runs_loom_cli_from_candidate_worktree(
@@ -671,7 +684,7 @@ def test_cluster_up_runs_loom_cli_from_candidate_worktree(
 
 
 def test_release_gate_argv_passes_generated_release_manifest(tmp_path: Path) -> None:
-    ctx = make_ctx(tmp_path, image_tag="public-beta-abc123")
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     step_dir = ev.step_dir(13, "release-gate")
@@ -680,7 +693,7 @@ def test_release_gate_argv_passes_generated_release_manifest(tmp_path: Path) -> 
 
     assert "--manifest" in argv
     manifest = Path(argv[argv.index("--manifest") + 1])
-    assert manifest == step_dir.artifact_path("release-manifest-public-beta-abc123.json")
+    assert manifest == step_dir.artifact_path("release-manifest-staging-abc123.json")
 
 
 def test_release_gate_argv_passes_hf_mirror_boundary_evidence_for_staging(
@@ -704,9 +717,9 @@ def test_rollout_cluster_commands_use_config_with_context_image_tag(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ctx = make_ctx(tmp_path, image_tag="public-beta-new")
+    ctx = make_ctx(tmp_path, image_tag="staging-new")
     ctx.cluster_config_path.write_text(
-        'image_tag = "public-beta-old"\nnamespace = "loom-public-beta"\n',
+        'image_tag = "staging-old"\nnamespace = "loom-staging"\n',
     )
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
@@ -750,17 +763,17 @@ def test_rollout_cluster_commands_use_config_with_context_image_tag(
     assert rendered_config.is_file()
     rendered_raw = tomllib.loads(rendered_config.read_text())
     original_raw = tomllib.loads(ctx.cluster_config_path.read_text())
-    assert rendered_raw["image_tag"] == "public-beta-new"
-    assert original_raw["image_tag"] == "public-beta-old"
+    assert rendered_raw["image_tag"] == "staging-new"
+    assert original_raw["image_tag"] == "staging-old"
 
 
 def test_rollout_cluster_config_is_stable_after_first_synthesis(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ctx = make_ctx(tmp_path, image_tag="public-beta-new")
+    ctx = make_ctx(tmp_path, image_tag="staging-new")
     ctx.cluster_config_path.write_text(
-        'image_tag = "public-beta-old"\nnamespace = "loom-public-beta"\n',
+        'image_tag = "staging-old"\nnamespace = "loom-staging"\n',
     )
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
@@ -785,7 +798,7 @@ def test_rollout_cluster_config_is_stable_after_first_synthesis(
         render_call["argv"][render_call["argv"].index("--config") + 1],
     )
     ctx.cluster_config_path.write_text(
-        'image_tag = "public-beta-old"\nnamespace = "changed-after-render"\n',
+        'image_tag = "staging-old"\nnamespace = "changed-after-render"\n',
     )
 
     cluster_up_argv = list(ClusterUpStep().argv(ctx, ev.step_dir(11, "cluster-up")))
@@ -793,8 +806,8 @@ def test_rollout_cluster_config_is_stable_after_first_synthesis(
     rendered_raw = tomllib.loads(cluster_up_config.read_text())
 
     assert cluster_up_config == rendered_config
-    assert rendered_raw["image_tag"] == "public-beta-new"
-    assert rendered_raw["namespace"] == "loom-public-beta"
+    assert rendered_raw["image_tag"] == "staging-new"
+    assert rendered_raw["namespace"] == "loom-staging"
 
 
 def test_gb10_prep_reads_hosts_from_cluster_config(tmp_path: Path) -> None:
@@ -802,8 +815,8 @@ def test_gb10_prep_reads_hosts_from_cluster_config(tmp_path: Path) -> None:
     ctx.cluster_config_path.write_text(
         "[gb10_pool]\n"
         "hosts = [\n"
-        "  { ssh_target = \"trt-gb10-1\", repo_path = \"/srv/loom\", "
-        "env_file_path = \"/srv/loom/.env\" },\n"
+        '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom", '
+        'env_file_path = "/srv/loom/.env" },\n'
         "]\n",
         encoding="utf-8",
     )
@@ -820,7 +833,7 @@ def test_release_gate_run_generates_manifest_then_gates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ctx = make_ctx(tmp_path, image_tag="public-beta-abc123")
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     worktree = _prepare_candidate_worktree(ev)
@@ -841,12 +854,14 @@ def test_release_gate_run_generates_manifest_then_gates(
         if "minio-storage-preflight" in argv:
             output = Path(argv[argv.index("--output") + 1])
             output.write_text(
-                json.dumps({
-                    "outcome": "pass",
-                    "filesystem": {"free_percent": 42.0},
-                    "thresholds": {"stop_free_percent": 15.0},
-                    "checks": [],
-                })
+                json.dumps(
+                    {
+                        "outcome": "pass",
+                        "filesystem": {"free_percent": 42.0},
+                        "thresholds": {"stop_free_percent": 15.0},
+                        "checks": [],
+                    }
+                )
                 + "\n",
                 encoding="utf-8",
             )
@@ -879,8 +894,8 @@ def test_release_gate_run_generates_manifest_then_gates(
     assert calls[3]["argv"][3:6] == ["admin", "gb10-workers", "status"]
     assert calls[3]["argv"][calls[3]["argv"].index("--environment") + 1] == "production"
     assert calls[4]["argv"][3:5] == ["cluster", "release-gate"]
-    manifest = step_dir.artifact_path("release-manifest-public-beta-abc123.json")
-    storage = step_dir.artifact_path("minio-storage-preflight-public-beta-abc123.json")
+    manifest = step_dir.artifact_path("release-manifest-staging-abc123.json")
+    storage = step_dir.artifact_path("minio-storage-preflight-staging-abc123.json")
     assert calls[1]["argv"][calls[1]["argv"].index("--output") + 1] == str(manifest)
     assert calls[2]["argv"][calls[2]["argv"].index("--output") + 1] == str(storage)
     assert calls[4]["argv"][calls[4]["argv"].index("--manifest") + 1] == str(manifest)
@@ -892,7 +907,7 @@ def test_release_gate_records_expected_image_identities_before_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ctx = make_ctx(tmp_path, image_tag="public-beta-abc123")
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     _prepare_candidate_worktree(ev)
@@ -908,7 +923,7 @@ spec:
     spec:
       containers:
         - name: loom-service
-          image: loom-service:public-beta-abc123
+          image: loom-service:staging-abc123
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -952,13 +967,13 @@ spec:
                 argv[argv.index("--expected-image-identities-json") + 1],
             )
             assert identities_path == step_dir.artifact_path(
-                "image-identities-public-beta-abc123.json",
+                "image-identities-staging-abc123.json",
             )
             body = json.loads(identities_path.read_text(encoding="utf-8"))
             assert body == {
                 "loom-service": {
                     "loom-service": {
-                        "image": "loom-service:public-beta-abc123",
+                        "image": "loom-service:staging-abc123",
                         "image_id": "sha256:" + "1" * 64,
                         "repo_digest": "loom-service@sha256:" + "2" * 64,
                     },
@@ -991,7 +1006,7 @@ def test_release_gate_run_fails_fast_when_gb10_status_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ctx = make_ctx(tmp_path, image_tag="public-beta-abc123")
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     _prepare_candidate_worktree(ev)
@@ -1038,10 +1053,7 @@ def test_release_gate_run_fails_fast_when_gb10_status_fails(
 
     assert result.exit_code == 1
     assert result.error == "GB10 rollout target mismatch"
-    non_docker_calls = [
-        call for call in calls
-        if call[:3] != ["docker", "image", "inspect"]
-    ]
+    non_docker_calls = [call for call in calls if call[:3] != ["docker", "image", "inspect"]]
     assert [call[3:6] for call in non_docker_calls] == [
         ["cluster", "release-manifest", "--config"],
         ["cluster", "minio-storage-preflight", "--namespace"],
@@ -1053,7 +1065,7 @@ def test_release_gate_current_gb10_requires_manifest_desired_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ctx = make_ctx(tmp_path, image_tag="public-beta-abc123", scope="current-gb10")
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123", scope="current-gb10")
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     _prepare_candidate_worktree(ev)
@@ -1096,10 +1108,7 @@ def test_release_gate_current_gb10_requires_manifest_desired_state(
     assert result.exit_code == 2
     assert result.summary == "release manifest lacks GB10 desired state"
     assert "env_state_profile" in (result.error or "")
-    non_docker_calls = [
-        call for call in calls
-        if call[:3] != ["docker", "image", "inspect"]
-    ]
+    non_docker_calls = [call for call in calls if call[:3] != ["docker", "image", "inspect"]]
     assert [call[3:6] for call in non_docker_calls] == [
         ["cluster", "release-manifest", "--config"],
     ]
@@ -1109,7 +1118,7 @@ def test_release_gate_retries_transient_gb10_status_cp_unreachable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ctx = make_ctx(tmp_path, image_tag="public-beta-abc123")
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     _prepare_candidate_worktree(ev)
@@ -1184,10 +1193,7 @@ def test_release_gate_retries_transient_gb10_status_cp_unreachable(
 
     assert result.exit_code == 0
     assert gb10_attempts == 3
-    non_docker_calls = [
-        call for call in calls
-        if call[:3] != ["docker", "image", "inspect"]
-    ]
+    non_docker_calls = [call for call in calls if call[:3] != ["docker", "image", "inspect"]]
     assert [call[3:6] for call in non_docker_calls] == [
         ["cluster", "release-manifest", "--config"],
         ["cluster", "minio-storage-preflight", "--namespace"],
@@ -1202,11 +1208,11 @@ def test_release_gate_retries_gb10_convergence_until_node_agent_reports_current(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ctx = make_ctx(tmp_path, image_tag="public-beta-53897aa")
+    ctx = make_ctx(tmp_path, image_tag="staging-53897aa")
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     _prepare_candidate_worktree(ev)
-    _write_rendered_service(ev, image_tag="public-beta-53897aa")
+    _write_rendered_service(ev, image_tag="staging-53897aa")
     step_dir = ev.step_dir(13, "release-gate")
     status_attempts = 0
     gate_attempts = 0

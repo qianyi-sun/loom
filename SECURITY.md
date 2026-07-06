@@ -63,7 +63,7 @@ For public repository operation:
   diagnostics must show only safe names, scopes, and hash prefixes.
 - Team is the execution, cost, provider credential, member, and API-token
   boundary. Future quota/rate-limit enforcement, if added, must use an explicit
-  product policy rather than implicit beta defaults. Browser `viewer`, `member`,
+  product policy rather than implicit pre-production defaults. Browser `viewer`, `member`,
   and `owner` roles are enforced server-side, with owner-only management of team
   API tokens and provider connections.
 

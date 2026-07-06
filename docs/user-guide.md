@@ -803,7 +803,7 @@ loom datasets list --json           # machine-readable output
 loom datasets show <slug>           # full detail for one adapter
 loom datasets install <slug>        # pip-install a catalog entry
 loom datasets refresh-catalog      # drop the 24h catalog HTTP cache
-loom datasets provision-staging-catalog
+loom datasets provision-catalog
                                     # copy ready benchmark/task rows,
                                     # materialize supported agent rows,
                                     # and copy S3 bundles into a
@@ -981,7 +981,7 @@ For a narrower diagnostic, add repeated `--expected-benchmark BENCHMARK_ID`
 arguments.
 
 For staging or release deployments, operators should provision the ready
-catalog before inviting users. Use `loom datasets provision-staging-catalog`
+catalog before inviting users. Use `loom datasets provision-catalog`
 when copying runnable benchmark/task rows, materializing supported service-mode
 agent rows, and copying referenced `s3://` bundles from a known-good source
 environment into the target database/object store. For

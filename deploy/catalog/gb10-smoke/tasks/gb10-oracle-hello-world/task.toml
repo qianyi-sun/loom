@@ -1,0 +1,21 @@
+schema_version = "1"
+
+[task]
+id = "loom-smoke/gb10-oracle-hello-world"
+name = "GB10 oracle hello-world smoke"
+description = "Tiny release-gate task used to verify oracle batch submission on GB10."
+
+[environment]
+os = "linux"
+cpu_arch = "any"
+dockerfile = "environment/Dockerfile"
+
+[agent]
+name = "oracle"
+
+[verifier]
+name = "pytest"
+
+[[steps]]
+name = "main"
+artifacts = ["result.txt"]

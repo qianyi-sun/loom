@@ -18,7 +18,7 @@ The important product boundary is simple:
   LM Studio, or hosted API endpoint is operated by the user/team and registered
   as a provider connection.
 
-Public beta/dev route: [https://yylx.world/dev](https://yylx.world/dev)
+Staging/dev route: [https://yylx.world/dev](https://yylx.world/dev)
 
 ## What Loom Does
 
@@ -243,7 +243,7 @@ local directory and exits — no DB, no team, no provider registration.
 
 Use this path when presenting the public UI.
 
-> **Need an account?** Public beta uses admin-approved username/password
+> **Need an account?** Staging uses admin-approved username/password
 > accounts (no email, no automatic mail). On the sign-in page, use the
 > **Request account** card: enter a username, pick an existing team, and
 > wait for an admin to approve and share the one-time password setup link.

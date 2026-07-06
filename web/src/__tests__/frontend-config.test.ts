@@ -48,7 +48,7 @@ describe("frontend runtime config", () => {
       resolveFrontendConfig(
         {
           environment: "development",
-          environmentLabel: "Development / public beta",
+          environmentLabel: "Development / staging",
           routePath: "/dev",
           apiBase: "/prod",
         },
@@ -62,7 +62,7 @@ describe("frontend runtime config", () => {
       new Response(
         JSON.stringify({
           environment: "development",
-          environmentLabel: "Development / public beta",
+          environmentLabel: "Development / staging",
           routePath: "/dev",
           apiBase: "/dev",
           apiRouteBase: "https://yylx.world/dev/api",
@@ -84,7 +84,7 @@ describe("frontend runtime config", () => {
       "/dev/loom-frontend-config.json",
       expect.objectContaining({ cache: "no-store" }),
     );
-    expect(config.environmentLabel).toBe("Development / public beta");
+    expect(config.environmentLabel).toBe("Development / staging");
     expect(getFrontendConfig().apiRouteBase).toBe("https://yylx.world/dev/api");
   });
 });
