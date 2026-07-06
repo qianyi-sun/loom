@@ -83,6 +83,8 @@ spec:
             secretKeyRef:
               name: loom-secrets
               key: minio-secret-key
+        - name: LOOM_SVC_PUBLIC_BASE_URL
+          value: https://loom.example.com
         - name: LOOM_SVC_SIGNED_URL_EXPIRY_SEC
           value: '3600'
         - name: LOOM_SVC_STALE_RUNNING_TRIAL_GRACE_SEC

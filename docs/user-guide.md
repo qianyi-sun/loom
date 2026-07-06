@@ -114,13 +114,15 @@ team is missing, contact an admin to create it first. Staging does not
 collect email and does not send automatic mail: an admin reviews the request,
 approves a team role, and manually shares the one-time password setup link.
 Forgot-password follows the same pattern: the user submits a reset request,
-the admin approves it, and the user receives a one-time reset link. The service
-sets an HttpOnly session cookie. Auth responses return a CSRF token that the
-SPA keeps in memory; the browser sends cookies automatically, and mutating
-requests include the CSRF header. You should not paste a raw bearer token into
-the production SPA. The CLI stores the same session cookie plus CSRF token in
-the owner-only config file; `loom auth whoami` persists rotated session/CSRF
-values returned by the server, and mutating CLI requests refresh the session
+the admin approves it, and the user receives a one-time reset link. On deployed
+web environments, setup and reset links are generated with the public HTTPS
+origin. The service sets an HttpOnly session cookie. Auth responses return a
+CSRF token that the SPA keeps in memory; the browser sends cookies
+automatically, and mutating requests include the CSRF header. You should not
+paste a raw bearer token into the production SPA. The CLI stores the same
+session cookie plus CSRF token in the owner-only config file; `loom auth
+whoami` persists rotated session/CSRF values returned by the server, and
+mutating CLI requests refresh the session
 CSRF before retrying a CSRF-specific rejection.
 
 Your current team controls execution, cost attribution, provider credentials,

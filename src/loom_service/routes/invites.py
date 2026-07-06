@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
@@ -20,6 +19,7 @@ from loom_service.auth_guards import is_admin, require_scope
 from loom_service.dependencies import SessionAndCtx
 from loom_service.metrics import INVITES_TOTAL
 from loom_service.password_auth import normalize_username
+from loom_service.public_links import public_base_url
 from loom_service.routes.auth import _serialize_me, _set_auth_cookies
 from loom_service.session_auth import (
     create_session_for_user,
@@ -108,9 +108,7 @@ def _mint_invite_code() -> tuple[str, bytes, str]:
 
 
 def _invite_link(request: Request, raw_code: str) -> str:
-    public_base = os.environ.get("LOOM_PUBLIC_BASE_URL")
-    base = public_base.rstrip("/") if public_base else str(request.base_url).rstrip("/")
-    return f"{base}/invites/accept?code={raw_code}"
+    return f"{public_base_url(request)}/invites/accept?code={raw_code}"
 
 
 def _display_status(invite: TeamInvite, now: datetime | None = None) -> str:

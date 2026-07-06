@@ -462,6 +462,11 @@ used_by     = ["loom-service"]
 python_type = "bool"
 default     = false
 
+[service_config.public_base_url]
+used_by     = ["loom-service"]
+python_type = "HttpUrl"
+description = "Canonical public Web/API origin used for one-time setup, reset, and invite links. Deployed k8s environments render this as https://<ingress_host>; local/dev may leave it unset and use forwarded headers or the request base URL."
+
 [service_config.auth_session_cookie_name]
 used_by     = ["loom-service"]
 python_type = "str"

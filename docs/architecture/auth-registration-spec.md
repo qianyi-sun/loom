@@ -303,6 +303,13 @@ admin to create it first.
 The raw setup/reset link is returned only from the approve response. Database,
 list, audit, and diagnostics expose only safe prefixes.
 
+Setup, reset, and invite links are generated from the configured public origin
+when available. Deployed Kubernetes profiles render `LOOM_SVC_PUBLIC_BASE_URL`
+as `https://<ingress_host>`; compatibility deployments may still set
+`LOOM_PUBLIC_BASE_URL`. If neither is set, Loom uses trusted forwarded
+`proto`/`host` headers and finally the request base URL, preserving local/dev
+behavior without asking operators to manually rewrite one-time link schemes.
+
 ### `password_reset_requests`
 
 | Column | Type | Notes |
@@ -483,7 +490,8 @@ Requires platform-admin authority. The body selects the role:
 Approval creates or activates the user record in `pending_setup` state, creates
 the team membership, writes an account-action setup token, records audit
 metadata using the authenticated admin actor where available, and returns
-`setup_link` exactly once.
+`setup_link` exactly once. The link uses the configured public HTTPS origin
+in deployed environments.
 
 `POST /api/v1/admin/registration-requests/{id}/reject`
 
@@ -496,7 +504,8 @@ Returns pending password reset requests. Requires platform-admin authority.
 `POST /api/v1/admin/password-reset-requests/{id}/approve`
 
 Creates an account-action reset token for the target user and returns
-`reset_link` exactly once. The admin copies the link and shares it manually.
+`reset_link` exactly once. The admin copies the link and shares it manually;
+the link uses the configured public HTTPS origin in deployed environments.
 
 `POST /api/v1/admin/password-reset-requests/{id}/reject`
 
@@ -683,10 +692,11 @@ Team access is organized into role-aware sections. Platform admins see legacy
 Requests, Accounts, Teams, Invites, API tokens, and Audit sections; team owners
 see Invites and API tokens only. The Accounts section lists pending username
 registration requests and password reset requests. Approvals reveal setup/reset
-links exactly once for manual sharing. Manual invite creation remains available
-as a compatibility path and selects from visible team names for platform admins
-instead of requiring a pasted raw team id; team-owner invite creation uses the
-current team from the session context.
+links exactly once for manual sharing. Deployed environments should reveal
+links with the public HTTPS origin at source. Manual invite creation remains
+available as a compatibility path and selects from visible team names for
+platform admins instead of requiring a pasted raw team id; team-owner invite
+creation uses the current team from the session context.
 
 The setup page at `/auth/setup?token=...` and reset page at
 `/auth/reset?token=...` perform safe lookups, then accept password and
