@@ -31,6 +31,7 @@ class CollectedArtifact:
 class ArtifactCollection:
     prefix: str
     artifacts: list[CollectedArtifact]
+    missing_required: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -50,11 +51,18 @@ class ArtifactCollector:
         return f"s3://{self.bucket}/{self.team_id}/{self.trial_id}/{self.step_name}/"
 
     async def collect(
-        self, *, env: Driver, patterns: Sequence[str],
+        self,
+        *,
+        env: Driver,
+        patterns: Sequence[str],
+        required_patterns: Sequence[str] = (),
     ) -> ArtifactCollection:
         self.local_root.mkdir(parents=True, exist_ok=True)
         artifacts: list[CollectedArtifact] = []
-        for pattern in patterns:
+        missing_required: list[str] = []
+        required = set(required_patterns)
+        seen: set[str] = set()
+        for pattern in _ordered_unique((*patterns, *required_patterns)):
             anchored = f"{self.workspace_root.as_posix()}/{pattern}"
             cmd = (
                 f"find {shlex.quote(self.workspace_root.as_posix())} "
@@ -62,12 +70,19 @@ class ArtifactCollector:
             )
             result = await env.exec(cmd, user="root")
             if result.return_code != 0 or not result.stdout:
+                if pattern in required:
+                    missing_required.append(pattern)
                 continue
+            matched = False
             for sandbox_path in result.stdout.split(b"\x00"):
                 if not sandbox_path:
                     continue
                 p = PurePosixPath(sandbox_path.decode())
                 rel = p.relative_to(self.workspace_root)
+                matched = True
+                if rel.as_posix() in seen:
+                    continue
+                seen.add(rel.as_posix())
                 local_target = self.local_root / rel
                 local_target.parent.mkdir(parents=True, exist_ok=True)
                 await env.download(p, local_target)
@@ -90,4 +105,21 @@ class ArtifactCollector:
                         blocked_reason=share_decision.reason,
                     ),
                 )
-        return ArtifactCollection(prefix=self.prefix, artifacts=artifacts)
+            if pattern in required and not matched:
+                missing_required.append(pattern)
+        return ArtifactCollection(
+            prefix=self.prefix,
+            artifacts=artifacts,
+            missing_required=missing_required,
+        )
+
+
+def _ordered_unique(values: Sequence[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out

@@ -142,6 +142,7 @@ timeout_sec = 300
 name = "main"
 instruction_file = "instruction.md"
 artifacts = ["result.json"]
+required_artifacts = ["result.json"]
 ```
 
 The full pydantic models live in `src/loom/models/task.py`. `extra =
@@ -155,6 +156,14 @@ upstreams with their own convention should declare it explicitly. For example,
 Terminal-Bench-2 tasks use `/app`, so their script verifier path is
 `/app/verifier/run.sh` and their test tree lands under
 `/app/environment/tb2-tests`.
+
+`steps[*].artifacts` is the generic artifact preservation list. Use
+`steps[*].required_artifacts` for files that the verifier or upstream
+benchmark contract requires to exist. Required artifacts are collected from
+the final verifier-visible workspace state and missing matches invalidate the
+trial evidence with an actionable, retryable artifact diagnostic instead of
+being silently folded into a reward-0 score failure. Patterns are relative to
+`environment.workdir`.
 
 Adapters that generate `verifier/run.sh` must also declare
 `[verifier.args].script_path`. Writing the script into the bundle is not enough:
@@ -322,6 +331,12 @@ from the catalog entry's `params.skill_method` (default
 operation — sibling rows that share the same upstream + different
 slug + different `params.skill_method` value, with no adapter code
 change.
+
+SkillLearnBench upstream task TOML may declare `[evaluation].required_files`.
+The adapter normalizes those paths relative to `/root` and emits them as
+`steps[0].required_artifacts`. This preserves verifier-required outputs that
+are not covered by the generic extension-based artifact list and makes missing
+required files visible in trial debug evidence.
 
 The SkillLearnBench adapter also emits an `oracle_eligible=true|false`
 per-instance tag, derived from `solution/solve.sh` presence in the

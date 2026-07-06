@@ -43,6 +43,25 @@ _SOLUTION_ROOT_HEADER = (
 )
 
 
+def _normalize_required_artifact_pattern(value: str, *, workdir: str) -> str | None:
+    pattern = value.strip()
+    if not pattern or "\x00" in pattern:
+        return None
+
+    workdir_prefix = workdir.rstrip("/") + "/"
+    if pattern.startswith(workdir_prefix):
+        pattern = pattern[len(workdir_prefix):]
+    elif pattern == workdir.rstrip("/"):
+        return None
+    elif pattern.startswith("/"):
+        pattern = pattern.lstrip("/")
+
+    parts = [part for part in pattern.split("/") if part]
+    if not parts or any(part == ".." for part in parts):
+        return None
+    return "/".join(parts)
+
+
 class SkillFlowAdapter(CatalogBackedAdapter):
     name = "skillflow"
 
@@ -304,6 +323,13 @@ class SkillFlowAdapter(CatalogBackedAdapter):
         task_id: str,
     ) -> None:
         raw_task = cast(dict[str, Any], instance.raw.get("task_toml") or {})
+        if not raw_task:
+            copied_task_toml = out_dir / "task.toml"
+            if copied_task_toml.exists():
+                raw_task = cast(
+                    dict[str, Any],
+                    tomllib.loads(copied_task_toml.read_text()),
+                )
         task_meta = (
             raw_task.get("task")
             if isinstance(raw_task.get("task"), dict)
@@ -336,6 +362,17 @@ class SkillFlowAdapter(CatalogBackedAdapter):
 
         environment_block = "\n".join(environment_lines)
         display_name = f"{self.display_name} - {name}"
+        required_artifacts = self._required_artifacts(raw_task, workdir="/root")
+        required_artifacts_block = ""
+        if required_artifacts:
+            required_artifacts_block = (
+                "\n            required_artifacts = [\n"
+                + "".join(
+                    f"              {toml_string(pattern)},\n"
+                    for pattern in required_artifacts
+                )
+                + "            ]"
+            )
         (out_dir / "task.toml").write_text(textwrap.dedent(f"""
             schema_version = "1"
 
@@ -368,8 +405,29 @@ class SkillFlowAdapter(CatalogBackedAdapter):
               "*.png",
               "*.txt",
               "*.xlsx",
-            ]
+            ]{required_artifacts_block}
         """).strip() + "\n")
+
+    @staticmethod
+    def _required_artifacts(raw_task: dict[str, Any], *, workdir: str) -> list[str]:
+        evaluation = raw_task.get("evaluation")
+        if not isinstance(evaluation, dict):
+            return []
+        raw_required = evaluation.get("required_files")
+        if not isinstance(raw_required, list):
+            return []
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in raw_required:
+            if not isinstance(item, str):
+                continue
+            pattern = _normalize_required_artifact_pattern(item, workdir=workdir)
+            if pattern is None or pattern in seen:
+                continue
+            seen.add(pattern)
+            normalized.append(pattern)
+        return normalized
 
     def _task_cpu_arch(self) -> str | None:
         """Return explicit catalog-declared task CPU compatibility.

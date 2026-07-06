@@ -31,6 +31,7 @@ class FailureReason(StrEnum):
     VERIFIER_ERROR = "verifier_error"
     VERIFIER_TIMEOUT = "verifier_timeout"
     ARTIFACT_UPLOAD_FAILED = "artifact_upload_failed"
+    MISSING_REQUIRED_ARTIFACTS = "missing_required_artifacts"
     TRAJECTORY_FLUSH_FAILED = "trajectory_flush_failed"
     TASK_IMAGE_BUILD_TIMEOUT = "task_image_build_timeout"
     NODE_SETUP_HEALTH = "node_setup_health"

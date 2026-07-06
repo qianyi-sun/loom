@@ -123,6 +123,7 @@ class StepConfig(BaseModel):
     agent: AgentOverrides | None = None
     verifier: VerifierOverrides | None = None
     artifacts: list[str] = []                                       # POSIX globs
+    required_artifacts: list[str] = []                              # verifier-required POSIX globs
     min_reward: dict[str, float] | float | None = None
     network: StepNetworkPlan | None = None
     healthcheck: HealthcheckSpec | None = None

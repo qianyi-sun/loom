@@ -1,3 +1,5 @@
+import fnmatch
+import shlex
 from pathlib import Path
 from uuid import uuid4
 
@@ -321,6 +323,98 @@ async def test_run_step_records_verifier_timeout_as_structured_result(
     assert sr.verifier_result.error.detail["elapsed_sec"] >= 0.0
     assert "post_mortem_probe" in sr.verifier_result.error.detail
     assert isinstance(sr.verifier_result.error.detail["post_mortem_probe"], str)
+
+
+async def test_run_step_collects_verifier_required_artifacts_after_verifier(
+    context: TrialContext,
+):
+    class _WritesRequiredArtifactVerifier:
+        name = "script"
+
+        async def verify(self, *, task, env, artifacts_dir, trajectory):  # type: ignore[no-untyped-def]
+            env.filesystem[artifacts_dir / "design_parameters.brand"] = b"brand\n"
+            return VerifierResult(rewards={"score": 1.0})
+
+    def handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        if cmd.startswith("find "):
+            pattern = shlex.split(cmd)[3]
+            matches = [
+                path.as_posix().encode()
+                for path in sorted(context.driver.filesystem)
+                if fnmatch.fnmatch(path.as_posix(), pattern)
+            ]
+            return ExecResult(
+                return_code=0,
+                stdout=b"\x00".join(matches) + (b"\x00" if matches else b""),
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.01,
+            )
+        return ExecResult(
+            return_code=0,
+            stdout=b"",
+            stderr=b"",
+            truncated=False,
+            duration_sec=0.01,
+        )
+
+    context.driver.exec_handler = handler
+    context.verifier = _WritesRequiredArtifactVerifier()  # type: ignore[assignment]
+    step = StepConfig(
+        name="main",
+        artifacts=[],
+        required_artifacts=["design_parameters.brand"],
+    )
+    writer = TrajectoryWriter(
+        local_path=context.local_trajectory_path,
+        store=context.object_store,
+        bucket=context.trajectory_bucket,
+        key=context.trajectory_key,
+        min_part_bytes=0,
+    )
+
+    async with writer:
+        sr = await run_step(
+            ctx=context, step=step,
+            trajectory=writer, baseline_policy=Public(),
+        )
+
+    assert sr.error is None
+    assert [artifact.key for artifact in sr.artifacts] == [
+        f"{context.team_id}/{context.trial_id}/main/design_parameters.brand",
+    ]
+    assert (
+        "artifacts",
+        f"{context.team_id}/{context.trial_id}/main/design_parameters.brand",
+    ) in context.object_store.objects
+
+
+async def test_run_step_marks_missing_required_artifact_invalid(
+    context: TrialContext,
+):
+    step = StepConfig(
+        name="main",
+        artifacts=[],
+        required_artifacts=["missing-required.asset"],
+    )
+    writer = TrajectoryWriter(
+        local_path=context.local_trajectory_path,
+        store=context.object_store,
+        bucket=context.trajectory_bucket,
+        key=context.trajectory_key,
+        min_part_bytes=0,
+    )
+
+    async with writer:
+        sr = await run_step(
+            ctx=context, step=step,
+            trajectory=writer, baseline_policy=Public(),
+        )
+
+    assert sr.error is not None
+    assert sr.error.phase == "artifacts"
+    assert sr.error.reason == "missing_artifacts"
+    assert "missing-required.asset" in sr.error.message
 
 
 async def test_run_step_skip_verifier(context: TrialContext):

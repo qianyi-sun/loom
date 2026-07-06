@@ -12,6 +12,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import PurePosixPath
 from typing import Any, cast
 from uuid import UUID
 
@@ -300,6 +301,167 @@ def _artifact_refs(
     return refs
 
 
+def _normalize_required_artifact_pattern(value: str, *, workdir: str = "/root") -> str | None:
+    pattern = value.strip()
+    if not pattern or "\x00" in pattern:
+        return None
+    workdir_prefix = workdir.rstrip("/") + "/"
+    if pattern.startswith(workdir_prefix):
+        pattern = pattern[len(workdir_prefix):]
+    elif pattern == workdir.rstrip("/"):
+        return None
+    elif pattern.startswith("/"):
+        pattern = pattern.lstrip("/")
+    parts = [part for part in pattern.split("/") if part]
+    if not parts or any(part == ".." for part in parts):
+        return None
+    return "/".join(parts)
+
+
+def _task_required_artifacts(task: Task | None) -> list[dict[str, str]]:
+    config = getattr(task, "config", None) if task is not None else None
+    if not isinstance(config, dict):
+        return []
+    environment = config.get("environment")
+    workdir = (
+        str(environment.get("workdir"))
+        if isinstance(environment, dict) and environment.get("workdir")
+        else "/root"
+    )
+    expected: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    raw_steps = config.get("steps")
+    if isinstance(raw_steps, list):
+        for raw_step in raw_steps:
+            if not isinstance(raw_step, dict):
+                continue
+            step_name = str(raw_step.get("name") or "main")
+            raw_required = raw_step.get("required_artifacts")
+            if not isinstance(raw_required, list):
+                continue
+            for item in raw_required:
+                if not isinstance(item, str):
+                    continue
+                pattern = _normalize_required_artifact_pattern(item, workdir=workdir)
+                if pattern is None or (step_name, pattern) in seen:
+                    continue
+                seen.add((step_name, pattern))
+                expected.append({"step_name": step_name, "pattern": pattern})
+
+    evaluation = config.get("evaluation")
+    if isinstance(evaluation, dict) and isinstance(evaluation.get("required_files"), list):
+        for item in evaluation["required_files"]:
+            if not isinstance(item, str):
+                continue
+            pattern = _normalize_required_artifact_pattern(item, workdir=workdir)
+            if pattern is None or ("main", pattern) in seen:
+                continue
+            seen.add(("main", pattern))
+            expected.append({"step_name": "main", "pattern": pattern})
+    return expected
+
+
+def _artifact_matches_required(
+    artifact: Mapping[str, Any],
+    *,
+    step_name: str,
+    pattern: str,
+) -> bool:
+    artifact_step = artifact.get("step_name")
+    if isinstance(artifact_step, str) and artifact_step and artifact_step != step_name:
+        return False
+    key = artifact.get("key")
+    if not isinstance(key, str) or not key:
+        return False
+    key_path = PurePosixPath(key)
+    candidates = [key_path]
+    parts = key_path.parts
+    for idx in range(len(parts) - 1, -1, -1):
+        if parts[idx] == step_name and idx + 1 < len(parts):
+            candidates.append(PurePosixPath(*parts[idx + 1:]))
+            break
+    candidates.append(PurePosixPath(key_path.name))
+    return any(candidate.match(pattern) for candidate in candidates)
+
+
+def _required_artifact_refs(
+    *,
+    task: Task | None,
+    trajectory_index: dict[str, Any] | None,
+) -> dict[str, Any]:
+    expected = _task_required_artifacts(task)
+    raw_artifacts = []
+    if isinstance(trajectory_index, dict) and isinstance(
+        trajectory_index.get("artifacts"),
+        list,
+    ):
+        raw_artifacts = [
+            item for item in trajectory_index["artifacts"] if isinstance(item, dict)
+        ]
+    present: list[dict[str, str]] = []
+    missing: list[dict[str, str]] = []
+    for required in expected:
+        if any(
+            _artifact_matches_required(
+                artifact,
+                step_name=required["step_name"],
+                pattern=required["pattern"],
+            )
+            for artifact in raw_artifacts
+        ):
+            present.append(required)
+        else:
+            missing.append(required)
+    return {
+        "status": (
+            "not_declared"
+            if not expected
+            else "missing"
+            if missing
+            else "complete"
+        ),
+        "expected": expected,
+        "present": present,
+        "missing": missing,
+    }
+
+
+def _missing_required_artifacts_failure(
+    trial: Trial,
+    required_artifacts: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if trial.state != "succeeded" or required_artifacts.get("status") != "missing":
+        return None
+    missing = required_artifacts.get("missing")
+    missing_patterns = []
+    if isinstance(missing, list):
+        missing_patterns = [
+            str(item.get("pattern"))
+            for item in missing
+            if isinstance(item, dict) and item.get("pattern")
+        ]
+    message = (
+        "Verifier-required artifact evidence is incomplete"
+        + (f": {', '.join(missing_patterns)}" if missing_patterns else "")
+    )
+    return {
+        "reason_code": "trial.missing_required_artifacts",
+        "reason": "missing_required_artifacts",
+        "category": "artifact",
+        "attribution": "platform",
+        "message": message,
+        "failure_class": "artifact_failure",
+        "root_cause": "missing_required_artifacts",
+        "platform_outcome": "invalid_evidence",
+        "score_outcome": "unscored",
+        "rerun_recommendation": "auto_safe",
+        "rerunnable": True,
+        "requires_operator_approval": False,
+        "requires_task_change": False,
+    }
+
+
 def _provider_summary(llm_calls: Sequence[LlmCall]) -> dict[str, Any]:
     models = sorted({call.model for call in llm_calls if call.model})
     dialects = sorted({call.dialect for call in llm_calls if call.dialect})
@@ -503,6 +665,10 @@ def build_trial_debug_evidence(
         ),
         "provider_model_id": trial.provider_model_id,
     }
+    required_artifacts = _required_artifact_refs(
+        task=task,
+        trajectory_index=trajectory_index,
+    )
     failure = _failure_for_trial(trial)
     no_call_failure = classify_no_call_evidence_failure(
         trial,
@@ -510,6 +676,13 @@ def build_trial_debug_evidence(
     )
     if no_call_failure is not None:
         failure = no_call_failure
+    elif (
+        missing_required_failure := _missing_required_artifacts_failure(
+            trial,
+            required_artifacts,
+        )
+    ) is not None:
+        failure = missing_required_failure
     evidence = {
         "schema_version": "1",
         "generated_at": generated_at.isoformat(),
@@ -583,6 +756,7 @@ def build_trial_debug_evidence(
                 trial_id=trial.id,
                 trajectory_index=trajectory_index,
             ),
+            "required_artifacts": required_artifacts,
         },
         "next_actions": (
             [
@@ -590,6 +764,11 @@ def build_trial_debug_evidence(
                 "Rerun after the model path records LLM calls.",
             ]
             if provider_summary["llm_evidence_status"] == "no_calls_invalid"
+            else [
+                "Rerun this trial because verifier-required artifact evidence is incomplete.",
+                "Confirm the task writes required files under the task workdir before verifier exit.",
+            ]
+            if required_artifacts["status"] == "missing"
             else _next_actions_for_trial(trial)
         ),
     }

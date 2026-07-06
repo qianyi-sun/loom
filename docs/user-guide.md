@@ -407,9 +407,12 @@ ATIF/trajectory/artifact links, and `next_actions`. These payloads are
 team-scoped and redacted the same way as normal detail responses. Required
 production failure reasons are typed distinctly: reward `0` with verifier
 output is `score_failure`, missing verifier output is `verifier_failure`,
-missing trajectory/ATIF is `artifact_failure`, provider no-call/timeout is
-`provider_failure`, and setup/build/image/preflight failures remain separated
-between `platform_failure` and `task_failure`.
+missing trajectory/ATIF or verifier-required artifacts is `artifact_failure`,
+provider no-call/timeout is `provider_failure`, and
+setup/build/image/preflight failures remain separated between
+`platform_failure` and `task_failure`. Missing verifier-required artifacts are
+reported as invalid, retryable evidence because the score row cannot be audited
+against the verifier's output-file contract.
 
 Use `loom eval batch rerun-plan <batch-id>` or
 `GET /api/v1/batches/{id}/rerun-plan` before launching supplemental work. The

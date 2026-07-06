@@ -76,38 +76,8 @@ async def run_step(
         seq=seq,
     )
 
-    # Artifact collection ──────────────────────────────────────────────────
-    collector = ArtifactCollector(
-        store=ctx.object_store, bucket=ctx.artifacts_bucket,
-        team_id=str(ctx.team_id), trial_id=str(ctx.trial_id),
-        step_name=step.name,
-        local_root=ctx.local_trajectory_path.parent / "artifacts" / step.name,
-        workspace_root=workdir,
-    )
     artifacts_uri: str | None = None
     artifacts: list[ArtifactRef] = []
-    try:
-        collection = await collector.collect(
-            env=ctx.driver, patterns=list(step.artifacts),
-        )
-        artifacts_uri = collection.prefix
-        artifacts = [
-            ArtifactRef(
-                step_name=step.name,
-                bucket=artifact.bucket,
-                key=artifact.key,
-                size=artifact.size,
-                content_hash=artifact.content_hash,
-                share_status=artifact.share_status,
-                blocked_reason=artifact.blocked_reason,
-            )
-            for artifact in collection.artifacts
-        ]
-    except Exception as exc:
-        sr_error = StepError(
-            phase="artifacts", reason="exception",
-            message=str(exc), occurred_at=datetime.now(UTC),
-        )
 
     # Verifier phase ───────────────────────────────────────────────────────
     verifier_result = None
@@ -171,6 +141,56 @@ async def run_step(
                     phase="verifier", reason="exception",
                     message=str(exc), occurred_at=datetime.now(UTC),
                 )
+
+    # Artifact collection ──────────────────────────────────────────────────
+    # Preserve the final workspace state, after the verifier has inspected the
+    # same files. This keeps verifier-required outputs from being invisible
+    # when they are not part of the generic artifact glob list.
+    collector = ArtifactCollector(
+        store=ctx.object_store, bucket=ctx.artifacts_bucket,
+        team_id=str(ctx.team_id), trial_id=str(ctx.trial_id),
+        step_name=step.name,
+        local_root=ctx.local_trajectory_path.parent / "artifacts" / step.name,
+        workspace_root=workdir,
+    )
+    try:
+        collection = await collector.collect(
+            env=ctx.driver,
+            patterns=list(step.artifacts),
+            required_patterns=list(step.required_artifacts),
+        )
+        artifacts_uri = collection.prefix
+        artifacts = [
+            ArtifactRef(
+                step_name=step.name,
+                bucket=artifact.bucket,
+                key=artifact.key,
+                size=artifact.size,
+                content_hash=artifact.content_hash,
+                share_status=artifact.share_status,
+                blocked_reason=artifact.blocked_reason,
+            )
+            for artifact in collection.artifacts
+        ]
+        if collection.missing_required and sr_error is None:
+            missing = ", ".join(collection.missing_required)
+            sr_error = StepError(
+                phase="artifacts",
+                reason="missing_artifacts",
+                message=(
+                    f"missing verifier-required artifacts for step {step.name}: "
+                    f"{missing}; write these files under {workdir.as_posix()} "
+                    "before verifier exit, or rerun because this trial's "
+                    "artifact evidence is incomplete"
+                ),
+                occurred_at=datetime.now(UTC),
+            )
+    except Exception as exc:
+        if sr_error is None:
+            sr_error = StepError(
+                phase="artifacts", reason="exception",
+                message=str(exc), occurred_at=datetime.now(UTC),
+            )
 
     sr_finished = datetime.now(UTC)
     step_result = StepResult(

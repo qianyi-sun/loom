@@ -69,7 +69,7 @@ def load_official(output_dir: Path) -> dict[str, dict[str, Any]]:
     for path in sorted(output_dir.rglob("result.json")):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
+        except Exception:
             continue
         task_id = str(data.get("task_id") or "")
         if not task_id:
