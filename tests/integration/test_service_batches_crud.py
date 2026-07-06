@@ -1956,6 +1956,10 @@ async def test_get_batch_detail_marks_real_provider_zero_call_evidence_invalid(
     body = r.json()
     assert body["llm_calls_count"] == 0
     assert body["no_call_trial_count"] == 2
+    assert body["no_call_reason_counts"] == {
+        "agent_step_no_call": 1,
+        "terminal_model_backed_no_call": 1,
+    }
     assert body["llm_evidence_status"] == "no_calls_invalid"
     assert body["diagnosis"]["primary_cause"]["reason_code"] == "batch.no_llm_calls"
     assert "did not record any LLM calls" in body["diagnosis"]["summary"]
@@ -2470,6 +2474,7 @@ async def test_batch_detail_default_does_not_materialize_llm_call_rows(
     body = response.json()
     assert body["llm_calls_count"] == 0
     assert body["llm_evidence_status"] == "no_calls_invalid"
+    assert body["no_call_reason_counts"] == {"terminal_model_backed_no_call": 1}
 
 
 async def test_batch_detail_default_does_not_select_trajectory_index(

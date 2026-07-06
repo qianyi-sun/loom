@@ -701,6 +701,9 @@ async def test_trial_detail_marks_real_provider_zero_call_evidence_invalid(
     assert body["llm_calls_count"] == 0
     assert body["llm_evidence_status"] == "no_calls_invalid"
     assert body["no_call"] is True
+    assert body["no_call_reason"] == "terminal_model_backed_no_call"
+    assert "clean parity" in body["no_call_message"]
+    assert body["no_call_retryable"] is False
 
 
 async def test_trial_debug_evidence_is_structured_and_redacted(

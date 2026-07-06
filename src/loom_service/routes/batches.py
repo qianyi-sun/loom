@@ -1584,9 +1584,11 @@ async def get_batch(
         "effective_usage_reporting_status": effective_usage["usage_reporting_status"],
         "effective_usage_estimate_confidence": effective_usage["usage_estimate_confidence"],
         "no_call_trial_count": llm_evidence["no_call_trial_count"],
+        "no_call_reason_counts": llm_evidence["no_call_reason_counts"],
         "llm_evidence_status": llm_evidence["llm_evidence_status"],
         "model_backed_terminal_trial_count": llm_evidence["model_backed_terminal_trial_count"],
         "effective_no_call_trial_count": effective_llm_evidence["no_call_trial_count"],
+        "effective_no_call_reason_counts": effective_llm_evidence["no_call_reason_counts"],
         "effective_llm_evidence_status": effective_llm_evidence["llm_evidence_status"],
         "effective_model_backed_terminal_trial_count": effective_llm_evidence[
             "model_backed_terminal_trial_count"

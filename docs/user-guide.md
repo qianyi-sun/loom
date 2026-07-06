@@ -386,7 +386,11 @@ If `loom eval batch show <batch-id>` prints
 `llm_evidence_status: no_calls_invalid` or a no-call warning, treat the batch
 as invalid benchmark evidence. A model-backed terminal trial finished without
 persisting gateway call records, so a reward of `0` in that state is not a
-clean model-quality score.
+clean model-quality score. Trial JSON includes `no_call_reason`,
+`no_call_message`, and `no_call_retryable`; batch JSON includes
+`no_call_reason_counts`. If the reason is `codex_high_demand_no_call`, Codex
+exited before any Gateway request, and the trial must be excluded from clean
+parity/request-parameter baselines unless a retry records real calls.
 
 Use `loom eval batch debug <batch-id>` or
 `loom eval trial debug <trial-id>` when an API agent needs structured failure

@@ -284,8 +284,10 @@ The projection carries two durable outputs:
   `llm_calls_count`. Model-backed terminal trials also project
   `llm_evidence_status`; `no_calls_invalid` means the run cannot be used as
   benchmark evidence because the selected model path did not persist any
-  gateway calls. Batch detail includes `no_call_trial_count` and promotes a
-  zero-call model-backed batch to diagnosis reason `batch.no_llm_calls`.
+  gateway calls. Trial detail includes `no_call_reason`,
+  `no_call_message`, and `no_call_retryable`; batch detail includes
+  `no_call_trial_count`, `no_call_reason_counts`, and promotes a zero-call
+  model-backed batch to diagnosis reason `batch.no_llm_calls`.
 - `trials.trajectory_index`: trajectory URI, ATIF URI/schema version,
   and the actual uploaded artifact object keys and sizes.
 
@@ -304,7 +306,10 @@ The same detail API also exposes user-facing diagnosis and debug evidence:
   `call_status_counts`, `failed_llm_calls_count`, and
   `failure_category_counts`, so a terminal model-backed trial with an
   upstream provider failure is distinguishable from a trial where no
-  provider request was attempted.
+  provider request was attempted. For Codex, `codex_high_demand_no_call`
+  marks a subprocess high-demand/runtime exit before the Gateway saw a
+  request; request-parameter audits must exclude that trial unless a retry
+  records `calls_observed`.
 - `GET /api/v1/batches/{batch_id}` is lightweight by default for large
   batches and omits `debug_evidence`; pass `include_debug=true` or call
   `GET /api/v1/batches/{batch_id}/debug` to load that object. Batch debug

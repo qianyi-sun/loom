@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -519,6 +520,54 @@ def hard_budget_exceeded_diagnostic(
 _TERMINAL_TRIAL_STATES: frozenset[str] = frozenset(
     {"succeeded", "failed", "cancelled"},
 )
+_CODEX_RUNTIME_EXIT_RE = re.compile(r"\bcodex exited rc=\d+\b", re.IGNORECASE)
+_CODEX_HIGH_DEMAND_RE = re.compile(
+    r"currently experiencing high demand|high demand, which may cause temporary errors",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class NoCallEvidenceReason:
+    reason: str
+    message: str
+    retryable: bool
+
+
+_TERMINAL_MODEL_BACKED_NO_CALL = NoCallEvidenceReason(
+    reason="terminal_model_backed_no_call",
+    message=(
+        "Terminal model-backed trial did not record any LLM calls; exclude this "
+        "trial from clean parity/request-parameter evidence unless a retry "
+        "succeeds."
+    ),
+    retryable=False,
+)
+_AGENT_STEP_NO_CALL = NoCallEvidenceReason(
+    reason="agent_step_no_call",
+    message=(
+        "Agent step failed before any gateway request; exclude this trial from "
+        "clean parity/request-parameter evidence unless a retry succeeds."
+    ),
+    retryable=False,
+)
+_CODEX_RUNTIME_NO_CALL = NoCallEvidenceReason(
+    reason="codex_runtime_no_call",
+    message=(
+        "Codex subprocess exited before any gateway request; exclude this trial "
+        "from clean parity/request-parameter evidence unless a retry succeeds."
+    ),
+    retryable=True,
+)
+_CODEX_HIGH_DEMAND_NO_CALL = NoCallEvidenceReason(
+    reason="codex_high_demand_no_call",
+    message=(
+        "Codex exited before any gateway request because the Codex service "
+        "reported high demand; exclude this trial from clean parity/"
+        "request-parameter evidence unless a retry succeeds."
+    ),
+    retryable=True,
+)
 
 
 def _model_from_config(config: Any) -> Mapping[str, Any] | None:
@@ -546,6 +595,50 @@ def trial_requires_llm(trial: Any) -> bool:
     return _model_from_config(getattr(trial, "config", None)) is not None
 
 
+def _step_error_messages(result: Any) -> list[str]:
+    if not isinstance(result, Mapping):
+        return []
+    raw_steps = result.get("steps")
+    if not isinstance(raw_steps, Sequence) or isinstance(raw_steps, (str, bytes)):
+        return []
+    messages: list[str] = []
+    for raw_step in raw_steps:
+        if not isinstance(raw_step, Mapping):
+            continue
+        raw_error = raw_step.get("error")
+        if not isinstance(raw_error, Mapping):
+            continue
+        if raw_error.get("phase") != "agent":
+            continue
+        message = raw_error.get("message")
+        if isinstance(message, str) and message:
+            messages.append(message)
+    return messages
+
+
+def no_call_evidence_reason(trial: Any) -> NoCallEvidenceReason:
+    """Classify why a terminal model-backed trial has no LLM-call evidence."""
+
+    candidates = [
+        item
+        for item in (
+            getattr(trial, "failure_message", None),
+            *_step_error_messages(getattr(trial, "result", None)),
+        )
+        if isinstance(item, str) and item
+    ]
+    if any(
+        _CODEX_RUNTIME_EXIT_RE.search(item) and _CODEX_HIGH_DEMAND_RE.search(item)
+        for item in candidates
+    ):
+        return _CODEX_HIGH_DEMAND_NO_CALL
+    if any(_CODEX_RUNTIME_EXIT_RE.search(item) for item in candidates):
+        return _CODEX_RUNTIME_NO_CALL
+    if candidates:
+        return _AGENT_STEP_NO_CALL
+    return _TERMINAL_MODEL_BACKED_NO_CALL
+
+
 def project_trial_llm_evidence(
     trial: Any,
     *,
@@ -560,20 +653,69 @@ def project_trial_llm_evidence(
         return {
             "llm_evidence_status": "not_applicable",
             "no_call": False,
+            "no_call_reason": None,
+            "no_call_message": None,
+            "no_call_retryable": False,
         }
     if state not in _TERMINAL_TRIAL_STATES:
         return {
             "llm_evidence_status": "pending",
             "no_call": False,
+            "no_call_reason": None,
+            "no_call_message": None,
+            "no_call_retryable": False,
         }
     if calls == 0:
+        reason = no_call_evidence_reason(trial)
         return {
             "llm_evidence_status": "no_calls_invalid",
             "no_call": True,
+            "no_call_reason": reason.reason,
+            "no_call_message": reason.message,
+            "no_call_retryable": reason.retryable,
         }
     return {
         "llm_evidence_status": "calls_observed",
         "no_call": False,
+        "no_call_reason": None,
+        "no_call_message": None,
+        "no_call_retryable": False,
+    }
+
+
+def classify_no_call_evidence_failure(
+    trial: Any,
+    *,
+    llm_calls_count: int,
+) -> dict[str, Any] | None:
+    evidence = project_trial_llm_evidence(trial, llm_calls_count=llm_calls_count)
+    if evidence["llm_evidence_status"] != "no_calls_invalid":
+        return None
+    reason = str(evidence["no_call_reason"] or "terminal_model_backed_no_call")
+    retryable = bool(evidence["no_call_retryable"])
+    if reason.startswith("codex_"):
+        category = "agent"
+        attribution = "provider" if reason == "codex_high_demand_no_call" else "platform"
+    elif reason == "agent_step_no_call":
+        category = "agent"
+        attribution = "model"
+    else:
+        category = "gateway"
+        attribution = "platform"
+    return {
+        "reason_code": f"trial.{reason}",
+        "reason": reason,
+        "category": category,
+        "attribution": attribution,
+        "message": evidence["no_call_message"],
+        "failure_class": "platform_failure",
+        "root_cause": reason,
+        "platform_outcome": "failed",
+        "score_outcome": "unscored",
+        "rerun_recommendation": "auto_safe" if retryable else "operator_approval",
+        "rerunnable": True,
+        "requires_operator_approval": not retryable,
+        "requires_task_change": False,
     }
 
 
@@ -595,6 +737,7 @@ def summarize_llm_evidence_for_trials(
 ) -> dict[str, Any]:
     terminal_model_backed = 0
     no_call = 0
+    no_call_reason_counts: dict[str, int] = {}
     for trial in trials:
         if str(getattr(trial, "state", "")) not in _TERMINAL_TRIAL_STATES:
             continue
@@ -604,6 +747,8 @@ def summarize_llm_evidence_for_trials(
         calls = int(llm_call_counts.get(trial.id, 0) or 0)
         if calls == 0:
             no_call += 1
+            reason = no_call_evidence_reason(trial).reason
+            no_call_reason_counts[reason] = no_call_reason_counts.get(reason, 0) + 1
 
     total_calls = sum(max(int(value or 0), 0) for value in llm_call_counts.values())
     if terminal_model_backed == 0:
@@ -618,6 +763,7 @@ def summarize_llm_evidence_for_trials(
     return {
         "llm_evidence_status": status,
         "no_call_trial_count": no_call,
+        "no_call_reason_counts": dict(sorted(no_call_reason_counts.items())),
         "model_backed_terminal_trial_count": terminal_model_backed,
     }
 
