@@ -197,6 +197,15 @@ non-sensitive controls in `llm_calls.request_params`. Do not use
 `codex exec --settings` for this; pinned `@openai/codex@0.141.0` does
 not support that flag.
 
+For SkillLearnBench alignment reports, use
+`scripts/alignment/skilllearnbench_effective_params.py` to record the
+effective-parameter conclusion. The helper compares the official
+runner's computed `extra_flags` with the selected agent command
+template and the Loom submitted/observed request-param audit payloads.
+If the official Codex template does not consume `{extra_flags}`, the
+report must classify the official side as provider defaults rather
+than treating computed flags as effective params.
+
 For the service-mode `litellm` worker path, callers can also set
 `trial_config.request_params` to safe generation controls such as
 `{"temperature":0,"top_p":0.5,"seed":1234}`. The worker strips

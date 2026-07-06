@@ -23,6 +23,30 @@ is the human-readable narrative; the machine-readable form lives in
 `benchmark-score-alignment.json` under each benchmark's
 `layer3_evidence` field.
 
+For SkillLearnBench Codex reference runs, Layer 3 reports must also
+attach effective request-parameter evidence. Generate it offline with:
+
+```
+python scripts/alignment/skilllearnbench_effective_params.py \
+  --official-plan-json <redacted-official-plan.json> \
+  --loom-debug-json <redacted-loom-debug.json> \
+  --out-json <effective-params.json> \
+  --out-md <effective-params.md>
+```
+
+The official-plan input records the agent id, template id, computed
+`extra_flags`, command template, and rendered command. The helper emits
+only a redacted command summary; prompt bodies, env values, paths,
+tokens, and secret-looking option values are omitted. If the selected
+template does not contain `{extra_flags}`, computed settings such as
+`--settings '{"temperature":0}'` are classified as
+`provider_defaults_extra_flags_not_consumed`, so reports do not confuse
+computed runner flags with effective model request params. The Loom
+debug input records sanitized `trial_config.request_params` and
+gateway/provider `request_params` audit summaries, and the output
+classifies each task as aligned by provider defaults, aligned by
+explicit params, or mismatched.
+
 ## skilllearnbench — oracle × human_authored
 
 - **Upstream pin:** `cxcscmu/SkillLearnBench@2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46`
