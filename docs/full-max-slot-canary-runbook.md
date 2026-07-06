@@ -110,12 +110,19 @@ loom cluster release-manifest \
   --expected-image-identities-json "$CANARY_DIR/00-anchor/image-identities-$IMAGE_TAG.json" \
   --output "$CANARY_DIR/00-anchor/release-manifest-$IMAGE_TAG.json"
 
+loom cluster minio-storage-preflight \
+  --namespace "$K8S_NAMESPACE" \
+  --output "$CANARY_DIR/01-clean-anchor/minio-storage-preflight-$IMAGE_TAG.json" \
+  --format json \
+  | tee "$CANARY_DIR/01-clean-anchor/minio-storage-preflight-$IMAGE_TAG.stdout.json"
+
 loom cluster release-gate \
   --manifest "$CANARY_DIR/00-anchor/release-manifest-$IMAGE_TAG.json" \
   --config "$CLUSTER_CONFIG" \
   --rendered-manifest "$CANARY_DIR/00-anchor/rendered.yaml" \
   --namespace "$K8S_NAMESPACE" \
   --environment staging \
+  --minio-storage-preflight "$CANARY_DIR/01-clean-anchor/minio-storage-preflight-$IMAGE_TAG.json" \
   --format json \
   | tee "$CANARY_DIR/01-clean-anchor/release-gate-$IMAGE_TAG.json"
 
@@ -307,11 +314,18 @@ loom eval batch create \
   --agent codex \
   --n-per-task "$N_PER_TASK" \
   --backend docker \
+  --storage-preflight-evidence "$CANARY_DIR/01-clean-anchor/minio-storage-preflight-$IMAGE_TAG.json" \
   --required-worker-pool oldlab \
   --required-worker-pool k8s-worker \
   --required-worker-pool gb10-arm64 \
   | tee "$CANARY_DIR/04-submit/batch-create.txt"
 ```
+
+Stop if the storage preflight artifact has `outcome="stop"`. Reclaim MinIO
+space or provision backing storage before submission. Only use
+`--override-storage-preflight-stop` after an explicit coordinator GO that is
+recorded in `$CANARY_DIR/07-summary`; the override means the operator accepts
+the object-store capacity risk for this run.
 
 Immediately record the batch id and expected count:
 

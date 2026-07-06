@@ -300,7 +300,8 @@ Each verb:
 | `loom cluster backup manifest/check` | Write or verify metadata-only backup manifests for staging/staging destructive-operation guards | 0 verified / 1 invalid manifest / 2 bad input |
 | `loom cluster render` | Print the rendered YAML to stdout (no cluster contact) | 0 / 2 on bad config |
 | `loom cluster release-manifest` | Write a safe pre-apply rollout artifact with the candidate git SHA/image tag, CLI version, cluster-config and rendered-manifest hashes, intended Deployment images, optional expected image digests/IDs from `--expected-image-identities-json`, Alembic heads, and environment-state worker desired-state fingerprints | 0 written / 2 bad input |
-| `loom cluster release-gate` | Compare the release manifest against the saved rendered/config hashes, live target-generation image evidence, live DB Alembic heads queried through `deploy/loom-control-plane`, the `loom admin environment-state check --format json` artifact when the manifest records external-worker desired state, and the `loom admin gb10-workers status --format json` artifact when the manifest records GB10 desired state. Running Deployments use exact Ready-pod runtime digest/image-ID comparison when available; kind-loaded `import-YYYY-MM-DD@sha256:...` runtime identities are accepted only with matching target-generation pod spec and Deployment template images; zero-replica managed Deployments use template-image convergence evidence. JSON output includes `component_evidence`; `--format markdown` writes the pasteable per-component release evidence table for issue comments. | 0 pass / 1 hard-check fail / 2 bad input or unreachable |
+| `loom cluster minio-storage-preflight` | Execs into `loom-minio-0` and records `/data` filesystem size/used/free/percent, bucket usage for artifacts/trajectories/benchmark-task data, configured warning/stop thresholds, optional estimated batch headroom, and rapid artifact/trajectory growth when `--previous-evidence` is supplied. Writes JSON with `--output`; exits 1 on stop unless `--allow-storage-stop-override` is supplied. | 0 pass or warning / 1 stop threshold / 2 bad input or unreachable |
+| `loom cluster release-gate` | Compare the release manifest against the saved rendered/config hashes, live target-generation image evidence, live DB Alembic heads queried through `deploy/loom-control-plane`, the `loom admin environment-state check --format json` artifact when the manifest records external-worker desired state, the `loom admin gb10-workers status --format json` artifact when the manifest records GB10 desired state, and the optional `--minio-storage-preflight` artifact for a `minio-storage-pressure` component row. Running Deployments use exact Ready-pod runtime digest/image-ID comparison when available; kind-loaded `import-YYYY-MM-DD@sha256:...` runtime identities are accepted only with matching target-generation pod spec and Deployment template images; zero-replica managed Deployments use template-image convergence evidence. JSON output includes `component_evidence`; `--format markdown` writes the pasteable per-component release evidence table for issue comments. | 0 pass / 1 hard-check fail / 2 bad input or unreachable |
 | `loom cluster audit` | Static public/internal boundary check on rendered manifests: TLS ingress, only `/api/v1` → `loom-service` and `/` → `loom-web`, no LoadBalancer/NodePort, no unsafe hostPort, required NetworkPolicies present | 0 clean / 1 violation / 2 bad config |
 | `loom cluster up` | Preflight → render → protected-environment rollout mutation lease acquisition → `kubectl apply` → wait for components ready, Deployment generations observed, updated replicas converged, managed Deployment pods inspectable and free of blocking CrashLoop/image/config/start failures, kube-system rollout controllers healthy, and live Deployment images matching the rendered manifests; prints rendered/live image evidence for managed Deployments. For staging/staging/production, pass `--rollout-id` and `--rollout-lock-evidence` so evidence records acquisition and release/failure state. | 0 ready / 1 lock contention, not-ready, or image drift / 2 unreachable or kubectl missing |
 | `loom cluster status` | Live readiness snapshot with ingress endpoints; marks stale Deployment generations, incomplete updated replicas, failed managed-pod inspection, managed Deployment pod CrashLoop/image/config/start failures, and visible kube-system controller/scheduler/etcd/API pod failures as not-ready | 0 all-ready / 1 not-ready / 2 unreachable |
@@ -1104,7 +1105,7 @@ observability and mutation contract:
 | 10 | env-state | candidate-source apply + check (#331 fix for stop-on-disable). Pure GB10 node-status convergence drift is retried for up to 15 minutes so node-agent image builds can finish; mixed drift still fails immediately. |
 | 11 | cluster-up | candidate-source `loom cluster up` (#203 fix for updated replicas) |
 | 12 | production-defaults | candidate-source `loom admin rate-cards sync-yibuapi --format json`, then `loom providers update/show` for hosted provider pricing defaults declared in the environment-state profile. This keeps DB-backed cost-attribution defaults from disappearing after a fresh rollout. |
-| 13 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment`, then `loom cluster release-gate --manifest <that file>` (#339 fix for stale kind-import). GB10 convergence mismatches are retried for up to 15 minutes so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. |
+| 13 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, run `loom cluster minio-storage-preflight --output minio-storage-preflight-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment`, then `loom cluster release-gate --manifest <that file> --minio-storage-preflight <that storage artifact>` (#339 fix for stale kind-import). GB10 convergence mismatches are retried for up to 15 minutes so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. |
 | 14 | smoke | HTTP health + user-owned smoke token whoami + benchmarks + smoke task lookup + trial submit + poll + trajectory HEAD |
 | 99 | summary | write `summary.md` from every prior step's result.json |
 
@@ -1909,9 +1910,13 @@ but operators want durable storage.
 
 ### MinIO PVC usage
 
-MinIO ships as a single-replica `StatefulSet` with a 500Gi PVC
-(`deploy/k8s/minio.yaml`). The PVC name is `data-loom-minio-0` and
-appears in `kubelet_volume_stats_*` metrics from that name.
+MinIO ships as a single-replica `StatefulSet`. The default static manifest
+requests a 500Gi PVC (`deploy/k8s/minio.yaml`), while rendered
+environment profiles may request a different PVC/PV size. In the
+public-beta hostPath/local-PV contract, that Kubernetes capacity is allocation
+metadata, not the effective quota. The effective storage limit is the
+filesystem mounted at `/data` inside `loom-minio-0`; operators must treat
+`df /data` as the source of truth before large public-beta batches.
 
 `LoomMinioPVCUsageHigh` (warning) fires when utilization is above
 80% for 15 minutes; `LoomMinioPVCUsageCritical` (critical) at >95%
@@ -1926,6 +1931,32 @@ kubectl exec -n loom loom-minio-0 -- df -h /data
 # Per-bucket breakdown (run from any host with `mc` configured).
 mc du loom-minio/trajectories loom-minio/artifacts loom-minio/atif
 ```
+
+Before any full-batch, full-max-slot, or large public-beta run, write a
+storage preflight artifact into the run evidence directory:
+
+```bash
+loom cluster minio-storage-preflight \
+  --namespace loom-public-beta \
+  --output "$RUN_EVIDENCE_DIR/minio-storage-preflight.json" \
+  --format json
+```
+
+The artifact records `/data` size/used/free/percent, bucket usage for
+`artifacts`, `trajectories`, `loom-benchmarks`, and `loom-tasks`, configured
+warning/stop thresholds, optional estimated batch headroom, and an
+artifact/trajectory growth row when a previous preflight is supplied with
+`--previous-evidence`. The default thresholds are warning below 25% free and
+stop below 15% free.
+
+If the artifact outcome is `stop`, do not submit the batch. Reclaim MinIO
+space, shorten retention, or provision backing storage first. `loom eval batch
+create --storage-preflight-evidence ...` refuses a stopped artifact unless the
+operator also passes `--override-storage-preflight-stop`; using that override
+must be recorded in the evidence summary with the accepted risk. `loom cluster
+release-gate --minio-storage-preflight ...` also renders a
+`minio-storage-pressure` component row and fails when the artifact outcome is
+`stop`.
 
 Remediation paths, in priority order:
 

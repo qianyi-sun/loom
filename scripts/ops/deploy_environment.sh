@@ -130,6 +130,11 @@ if [[ "${LOOM_RELEASE_GATE_HARD_CHECKS:-false}" == "true" ]]; then
     --format json \
     > "${evidence_dir}/gb10-workers-status-${LOOM_IMAGE_TAG}.json"
 
+  uv run loom cluster minio-storage-preflight \
+    --namespace "${namespace}" \
+    --output "${evidence_dir}/minio-storage-preflight-${LOOM_IMAGE_TAG}.json" \
+    --format json
+
   release_gate_common_args=(
     cluster
     release-gate
@@ -138,6 +143,7 @@ if [[ "${LOOM_RELEASE_GATE_HARD_CHECKS:-false}" == "true" ]]; then
     --rendered-manifest "${evidence_dir}/rendered.yaml"
     --namespace "${namespace}"
     --environment "${LOOM_DEPLOY_ENVIRONMENT}"
+    --minio-storage-preflight "${evidence_dir}/minio-storage-preflight-${LOOM_IMAGE_TAG}.json"
     --gb10-workers-status "${evidence_dir}/gb10-workers-status-${LOOM_IMAGE_TAG}.json"
   )
   if [[ -n "${LOOM_ENVIRONMENT_STATE_CHECK_JSON:-}" ]]; then

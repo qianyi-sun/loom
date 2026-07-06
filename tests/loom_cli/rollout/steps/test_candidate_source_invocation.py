@@ -772,6 +772,18 @@ def test_release_gate_run_generates_manifest_then_gates(
         )
         if list(argv[:3]) == ["docker", "image", "inspect"]:
             return _docker_inspect_success(list(argv))
+        if "minio-storage-preflight" in argv:
+            output = Path(argv[argv.index("--output") + 1])
+            output.write_text(
+                json.dumps({
+                    "outcome": "pass",
+                    "filesystem": {"free_percent": 42.0},
+                    "thresholds": {"stop_free_percent": 15.0},
+                    "checks": [],
+                })
+                + "\n",
+                encoding="utf-8",
+            )
         if "release-manifest" in argv:
             output = Path(argv[argv.index("--output") + 1])
             output.write_text(_release_manifest_with_gb10_contract())
@@ -791,18 +803,23 @@ def test_release_gate_run_generates_manifest_then_gates(
     result = ReleaseGateStep().run(ctx, step_dir)
 
     assert result.exit_code == 0
-    assert len(calls) == 4
+    assert len(calls) == 5
     assert calls[0]["argv"][:3] == ["docker", "image", "inspect"]
     for call in calls[1:]:
         _assert_candidate_invocation(call, worktree=worktree)
     assert calls[1]["argv"][3:5] == ["cluster", "release-manifest"]
-    assert calls[2]["argv"][3:6] == ["admin", "gb10-workers", "status"]
-    assert calls[2]["argv"][calls[2]["argv"].index("--environment") + 1] == "production"
-    assert calls[3]["argv"][3:5] == ["cluster", "release-gate"]
+    assert calls[2]["argv"][3:5] == ["cluster", "minio-storage-preflight"]
+    assert calls[2]["argv"][calls[2]["argv"].index("--namespace") + 1] == ctx.namespace
+    assert calls[3]["argv"][3:6] == ["admin", "gb10-workers", "status"]
+    assert calls[3]["argv"][calls[3]["argv"].index("--environment") + 1] == "production"
+    assert calls[4]["argv"][3:5] == ["cluster", "release-gate"]
     manifest = step_dir.artifact_path("release-manifest-public-beta-abc123.json")
+    storage = step_dir.artifact_path("minio-storage-preflight-public-beta-abc123.json")
     assert calls[1]["argv"][calls[1]["argv"].index("--output") + 1] == str(manifest)
-    assert calls[3]["argv"][calls[3]["argv"].index("--manifest") + 1] == str(manifest)
-    assert "--gb10-workers-status" in calls[3]["argv"]
+    assert calls[2]["argv"][calls[2]["argv"].index("--output") + 1] == str(storage)
+    assert calls[4]["argv"][calls[4]["argv"].index("--manifest") + 1] == str(manifest)
+    assert calls[4]["argv"][calls[4]["argv"].index("--minio-storage-preflight") + 1] == str(storage)
+    assert "--gb10-workers-status" in calls[4]["argv"]
 
 
 def test_release_gate_records_expected_image_identities_before_manifest(
@@ -929,6 +946,15 @@ def test_release_gate_run_fails_fast_when_gb10_status_fails(
                 stdout="manifest\n",
                 stderr="",
             )
+        if "minio-storage-preflight" in argv:
+            output = Path(argv[argv.index("--output") + 1])
+            output.write_text('{"outcome":"pass","checks":[]}\n', encoding="utf-8")
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout='{"outcome":"pass","checks":[]}\n',
+                stderr="",
+            )
         if "gb10-workers" in argv:
             if kwargs.get("stderr_log"):
                 kwargs["stderr_log"].write_text("GB10 rollout target mismatch\n")
@@ -952,6 +978,7 @@ def test_release_gate_run_fails_fast_when_gb10_status_fails(
     ]
     assert [call[3:6] for call in non_docker_calls] == [
         ["cluster", "release-manifest", "--config"],
+        ["cluster", "minio-storage-preflight", "--namespace"],
         ["admin", "gb10-workers", "status"],
     ]
 
@@ -1039,6 +1066,15 @@ def test_release_gate_retries_transient_gb10_status_cp_unreachable(
                 stdout="manifest\n",
                 stderr="",
             )
+        if "minio-storage-preflight" in argv:
+            output = Path(argv[argv.index("--output") + 1])
+            output.write_text('{"outcome":"pass","checks":[]}\n', encoding="utf-8")
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout='{"outcome":"pass","checks":[]}\n',
+                stderr="",
+            )
         if "gb10-workers" in argv:
             gb10_attempts += 1
             if gb10_attempts < 3:
@@ -1088,6 +1124,7 @@ def test_release_gate_retries_transient_gb10_status_cp_unreachable(
     ]
     assert [call[3:6] for call in non_docker_calls] == [
         ["cluster", "release-manifest", "--config"],
+        ["cluster", "minio-storage-preflight", "--namespace"],
         ["admin", "gb10-workers", "status"],
         ["admin", "gb10-workers", "status"],
         ["admin", "gb10-workers", "status"],
@@ -1119,6 +1156,15 @@ def test_release_gate_retries_gb10_convergence_until_node_agent_reports_current(
                 argv=list(argv),
                 returncode=0,
                 stdout="manifest\n",
+                stderr="",
+            )
+        if "minio-storage-preflight" in argv:
+            output = Path(argv[argv.index("--output") + 1])
+            output.write_text('{"outcome":"pass","checks":[]}\n', encoding="utf-8")
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout='{"outcome":"pass","checks":[]}\n',
                 stderr="",
             )
         if "gb10-workers" in argv:

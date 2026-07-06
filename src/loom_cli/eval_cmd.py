@@ -31,6 +31,7 @@ from typing import Any, cast
 import httpx
 
 from loom.security.redaction import redact_mapping
+from loom_cli.minio_storage_preflight import validate_minio_storage_preflight_artifact
 from loom_cli.providers_cmd import (
     _resolve_by_name,
     _run_with_error_handling,
@@ -470,6 +471,14 @@ def _print_batch_summary(item: dict[str, Any]) -> None:
 
 def _batch_create(args: argparse.Namespace) -> int:
     def _body() -> int:
+        if args.storage_preflight_evidence is not None:
+            validation = validate_minio_storage_preflight_artifact(
+                Path(args.storage_preflight_evidence).resolve(),
+                allow_stop_override=args.override_storage_preflight_stop,
+            )
+            if not validation.ok:
+                sys.stderr.write(f"error: {validation.message}\n")
+                return 1
         cfg = require_logged_in()
         with authed_client(cfg) as c:
             needs_model, agent_err = _agent_needs_model(c, args.agent)
@@ -1253,6 +1262,24 @@ def dispatch(argv: list[str]) -> int:
         help=(
             "Require one extra coverage trial to run on this worker pool. "
             "Repeat for mixed-pool release canaries."
+        ),
+    )
+    p_bc.add_argument(
+        "--storage-preflight-evidence",
+        default=None,
+        help=(
+            "MinIO storage preflight JSON from "
+            "`loom cluster minio-storage-preflight --output`. If the artifact "
+            "reports stop, batch creation is refused unless "
+            "--override-storage-preflight-stop is also supplied."
+        ),
+    )
+    p_bc.add_argument(
+        "--override-storage-preflight-stop",
+        action="store_true",
+        help=(
+            "Explicit operator override for a stopped MinIO storage preflight. "
+            "Use only after accepting the object-store capacity risk."
         ),
     )
     p_bc.add_argument(
