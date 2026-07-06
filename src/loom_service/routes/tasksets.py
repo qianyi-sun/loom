@@ -133,6 +133,7 @@ async def create_task_set(
         verifier_upload=verifier,
         transform_upload=transform,
         taskset_quota_max_count=settings.taskset_quota_max_count_per_team,
+        manifest_max_bytes=settings.taskset_manifest_max_bytes,
     )
     return TaskSetSubmitResponse.model_validate(intake_result_to_response(result))
 
