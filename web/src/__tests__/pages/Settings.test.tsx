@@ -2,6 +2,7 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { setFrontendConfigForTests } from "../../lib/frontendConfig";
 import Settings from "../../pages/Settings";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
@@ -65,10 +66,18 @@ const teamDetail = {
 
 describe("Settings", () => {
   afterEach(() => {
+    setFrontendConfigForTests(null);
     vi.restoreAllMocks();
   });
 
   it("shows admin-reviewed onboarding choices and CLI setup guidance when signed out", async () => {
+    setFrontendConfigForTests({
+      environment: "staging",
+      environmentLabel: "Staging",
+      routePath: "/dev",
+      apiBase: "/dev",
+      apiRouteBase: `${window.location.origin}/dev/api`,
+    });
     const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(async (
       input: RequestInfo | URL,
       init?: RequestInit,
@@ -144,7 +153,7 @@ describe("Settings", () => {
     expect(screen.getByText(/export LOOM_PASSWORD=\.\.\./)).toBeInTheDocument();
     expect(screen.getByText(/loom auth whoami/)).toBeInTheDocument();
     const cliCommand = screen.getByText(/loom auth login --server/i);
-    expect(cliCommand).toHaveTextContent(window.location.origin);
+    expect(cliCommand).toHaveTextContent(`${window.location.origin}/dev`);
     expect(cliCommand).toHaveTextContent("--username USER --password env:LOOM_PASSWORD");
     expect(cliCommand).not.toHaveTextContent("<server-url>");
     expect(cliCommand).not.toHaveTextContent("LOOM_API_TOKEN");
