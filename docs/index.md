@@ -29,6 +29,10 @@ What you're looking for, where it lives:
 - **[operator-runbook.md](operator-runbook.md)** — deployment,
   upgrade/rollback, rate-card management, token rotation, alarm
   response, backup/restore, capacity planning
+- **[first-prod-release-runbook.md](first-prod-release-runbook.md)** —
+  executable first `main`-based production runbook for bootstrap,
+  temporary beta leases, frontend route checks, prod release, rollback prep,
+  and emergency beta drain
 - **[staging-launch.md](staging-launch.md)** — staging release
   gate, username/password onboarding evidence, two-team Run Library smoke, and
   launch decision checklist
