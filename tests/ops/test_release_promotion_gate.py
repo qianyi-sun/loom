@@ -193,6 +193,24 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
             "manifest": "docs/benchmark-score-alignment.json",
             "benchmarks": ["aime-24", "aime-25", "humaneval", "mbpp"],
         },
+        "hf_mirror_token_boundary": {
+            "status": "pass",
+            "url": "https://github.com/qianyi-sun/loom/issues/320#issuecomment-hf-boundary",
+            "benchmark_id": "skilllearnbench",
+            "environment": "staging",
+            "runtime_source_scheme": "s3",
+            "runtime_source_prefix": "s3://loom-benchmarks/skilllearnbench/",
+            "runnable_tasks": 100,
+            "internal_s3_sources": 100,
+            "total_task_sources": 100,
+            "hf_provenance_retained": True,
+            "upstream_kind": "huggingface",
+            "upstream_locator": "PRHW/SkillLearnBench",
+            "upstream_revision": "abc123def456",
+            "worker_hf_token_present": False,
+            "direct_hf_egress_required": False,
+            "secret_safe": True,
+        },
         "worker_capacity_smoke": {
             "status": "pass",
             "url": "https://github.com/qianyi-sun/loom/actions/runs/1009",
@@ -317,10 +335,57 @@ def test_release_gate_accepts_complete_manifest_and_writes_artifacts(tmp_path: P
     assert "benchmark_reward_gate" in markdown
     assert "score_positive_canary" in markdown
     assert "benchmark_score_alignment" in markdown
+    assert "hf_mirror_token_boundary" in markdown
     assert "worker_capacity_smoke" in markdown
     assert "frontend_route_evidence" in markdown
     assert "prod_beta_isolation" in markdown
     assert "raw_delivery_export_status" in markdown
+
+
+def test_release_gate_requires_hf_mirror_token_boundary_check(tmp_path: Path) -> None:
+    manifest = _passing_evidence()
+    manifest["checks"].pop("hf_mirror_token_boundary")
+
+    result = _run_release_gate(
+        tmp_path,
+        manifest,
+        "validate",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "release-0123456789ab",
+    )
+
+    assert result.returncode == 1
+    assert "missing required check 'hf_mirror_token_boundary'" in result.stderr
+
+
+def test_release_gate_rejects_hf_boundary_worker_token_or_direct_egress(
+    tmp_path: Path,
+) -> None:
+    manifest = _passing_evidence()
+    manifest["checks"]["hf_mirror_token_boundary"].update(
+        {
+            "runtime_source_scheme": "hf",
+            "worker_hf_token_present": True,
+            "direct_hf_egress_required": True,
+        }
+    )
+
+    result = _run_release_gate(
+        tmp_path,
+        manifest,
+        "validate",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "release-0123456789ab",
+    )
+
+    assert result.returncode == 1
+    assert "hf_mirror_token_boundary.runtime_source_scheme must be 's3'" in result.stderr
+    assert "hf_mirror_token_boundary.worker_hf_token_present must be false" in result.stderr
+    assert "hf_mirror_token_boundary.direct_hf_egress_required must be false" in result.stderr
 
 
 @pytest.mark.parametrize(

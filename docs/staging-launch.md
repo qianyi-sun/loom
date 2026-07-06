@@ -94,6 +94,15 @@ Attach these to the release issue or release PR:
   still receive optional `loom-secrets/huggingface-api-key` as legacy `hf://`
   compatibility, but mirrored release evidence should not depend on worker
   direct HF fetches.
+- SkillLearnBench HF mirror/token-boundary evidence JSON saved as
+  `$ROLLOUT_DIR/hf-mirror-boundary-evidence-$IMAGE_TAG.json`. It must be
+  secret-safe and prove `benchmark_id=skilllearnbench`, runnable rows,
+  `requires_caps.cpu_arch=any`, all sampled runtime sources are internal
+  `s3://` bundle prefixes, HF upstream kind/locator/revision are retained, the
+  service canary reached `started` and a terminal state from the internal
+  source, `worker_boundary.hf_token_present=false`, and
+  `direct_hf_egress_required=false`. Do not paste raw HF/API/MinIO values into
+  the artifact; use paths, counts, prefixes, and redacted references only.
 - Environment desired-state transcript showing
   `loom admin environment-state apply` and
   `loom admin environment-state check` against
@@ -258,6 +267,7 @@ loom cluster release-gate \
   --config "$CLUSTER_CONFIG" \
   --rendered-manifest "$ROLLOUT_DIR/rendered.yaml" \
   --environment-state-check "$ROLLOUT_DIR/environment-state-check-$IMAGE_TAG.json" \
+  --hf-mirror-boundary-evidence "$ROLLOUT_DIR/hf-mirror-boundary-evidence-$IMAGE_TAG.json" \
   --namespace "$K8S_NAMESPACE" \
   --environment staging \
   --format json \
@@ -268,6 +278,7 @@ loom cluster release-gate \
   --config "$CLUSTER_CONFIG" \
   --rendered-manifest "$ROLLOUT_DIR/rendered.yaml" \
   --environment-state-check "$ROLLOUT_DIR/environment-state-check-$IMAGE_TAG.json" \
+  --hf-mirror-boundary-evidence "$ROLLOUT_DIR/hf-mirror-boundary-evidence-$IMAGE_TAG.json" \
   --namespace "$K8S_NAMESPACE" \
   --environment staging \
   --format markdown \
@@ -285,9 +296,13 @@ release-gate artifact red and blocks workload-validation anchors. When the
 manifest records GB10 desired state, also pass
 `loom admin gb10-workers status --format json` via
 `--gb10-workers-status`; stale, missing, unreachable, non-applied, dirty, or
-capacity-mismatched active GB10 nodes keep the release gate red. For normal
-runtime image IDs, it compares the Ready pod `imageID` against the manifest
-digest or image ID. For kind-loaded staging images, Kubernetes may report
+capacity-mismatched active GB10 nodes keep the release gate red. For staging
+and production, pass `--hf-mirror-boundary-evidence`; missing evidence,
+non-S3 SkillLearnBench runtime sources, missing HF provenance, worker
+`HF_TOKEN` presence, direct worker HF egress dependence, or raw secret-looking
+values keep the release gate red. For normal runtime image IDs, it compares the
+Ready pod `imageID` against the manifest digest or image ID. For kind-loaded
+staging images, Kubernetes may report
 `docker.io/library/import-YYYY-MM-DD@sha256:...`; in that case the gate accepts
 the target-generation pod only when its pod spec and Deployment template image
 match the release manifest, and records the kind-import identity plus any stale

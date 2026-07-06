@@ -634,6 +634,23 @@ def test_release_gate_argv_passes_generated_release_manifest(tmp_path: Path) -> 
     assert manifest == step_dir.artifact_path("release-manifest-public-beta-abc123.json")
 
 
+def test_release_gate_argv_passes_hf_mirror_boundary_evidence_for_staging(
+    tmp_path: Path,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123", environment="staging")
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(13, "release-gate")
+
+    argv = list(ReleaseGateStep().argv(ctx, step_dir))
+
+    assert "--hf-mirror-boundary-evidence" in argv
+    evidence = Path(argv[argv.index("--hf-mirror-boundary-evidence") + 1])
+    assert evidence == step_dir.artifact_path(
+        "hf-mirror-boundary-evidence-staging-abc123.json",
+    )
+
+
 def test_rollout_cluster_commands_use_config_with_context_image_tag(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

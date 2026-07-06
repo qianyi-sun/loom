@@ -21,6 +21,14 @@ from loom_cli.cluster_sandbox_deadline import (
 from loom_cli.gb10_release_gate import gb10_release_target_mismatches
 
 _Outcome = Literal["pass", "fail"]
+_HF_MIRROR_BOUNDARY_ENVIRONMENTS = frozenset({"staging", "production"})
+_HF_MIRROR_BENCHMARK_ID = "skilllearnbench"
+_RAW_SECRET_RE = re.compile(
+    r"(?i)\b(?:HF_TOKEN|TOKEN|SECRET|API_KEY|ACCESS_KEY|SECRET_KEY)\s*[:=]\s*"
+    r"(?!<redacted>|redacted|false|none|null|absent|isolated)[^\s,\"']{8,}"
+    r"|\bhf_[A-Za-z0-9_]{20,}\b"
+    r"|\b(?:sk|ghp|github_pat)_[A-Za-z0-9_]{20,}\b",
+)
 
 
 @dataclass(frozen=True)
@@ -1050,6 +1058,244 @@ def _minio_storage_preflight_check(
     )
 
 
+def _hf_mirror_boundary_required(manifest: dict[str, Any]) -> bool:
+    release_environment = str(manifest.get("release", {}).get("environment") or "")
+    if release_environment not in _HF_MIRROR_BOUNDARY_ENVIRONMENTS:
+        return False
+    catalog = manifest.get("catalog_provisioning")
+    if not isinstance(catalog, dict):
+        return release_environment == "production"
+    command = str(catalog.get("command") or "").lower()
+    if _HF_MIRROR_BENCHMARK_ID in command:
+        return catalog.get("required") is True
+    return release_environment == "production" and catalog.get("required") is True
+
+
+def _int_field(mapping: dict[str, Any], key: str) -> int | None:
+    value = mapping.get(key)
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _secret_leak_paths(value: Any, *, path: str = "") -> list[str]:
+    if isinstance(value, str):
+        return [path or "$"] if _RAW_SECRET_RE.search(value) else []
+    if isinstance(value, dict):
+        paths: list[str] = []
+        for key, child in value.items():
+            child_path = str(key) if not path else f"{path}.{key}"
+            paths.extend(_secret_leak_paths(child, path=child_path))
+        return paths
+    if isinstance(value, list):
+        paths = []
+        for index, child in enumerate(value):
+            child_path = f"{path}[{index}]" if path else f"[{index}]"
+            paths.extend(_secret_leak_paths(child, path=child_path))
+        return paths
+    return []
+
+
+def _hf_mirror_boundary_evidence(
+    *,
+    manifest: dict[str, Any],
+    artifact: dict[str, Any] | None,
+    artifact_path: str | None,
+) -> dict[str, Any]:
+    catalog = manifest.get("catalog_provisioning")
+    catalog_required = catalog.get("required") is True if isinstance(catalog, dict) else False
+    release_environment = str(manifest.get("release", {}).get("environment") or "")
+    evidence: dict[str, Any] = {
+        "artifact": artifact_path,
+        "benchmark_id": _HF_MIRROR_BENCHMARK_ID,
+        "catalog_provisioning_required": catalog_required,
+        "release_environment": release_environment,
+    }
+    if artifact is None:
+        return evidence
+
+    runtime_sources = artifact.get("runtime_sources")
+    if not isinstance(runtime_sources, dict):
+        runtime_sources = {}
+    hf_provenance = artifact.get("hf_provenance")
+    if not isinstance(hf_provenance, dict):
+        hf_provenance = {}
+    worker_boundary = artifact.get("worker_boundary")
+    if not isinstance(worker_boundary, dict):
+        worker_boundary = {}
+    secret_scan = artifact.get("secret_scan")
+    if not isinstance(secret_scan, dict):
+        secret_scan = {}
+    catalog_evidence = artifact.get("catalog")
+    if not isinstance(catalog_evidence, dict):
+        catalog_evidence = {}
+    requires_caps = catalog_evidence.get("requires_caps")
+    if not isinstance(requires_caps, dict):
+        requires_caps = {}
+
+    total_sources = _int_field(runtime_sources, "total_task_sources")
+    internal_sources = _int_field(runtime_sources, "internal_s3_sources")
+    non_internal_sources = runtime_sources.get("non_internal_sources")
+    if not isinstance(non_internal_sources, list):
+        non_internal_sources = []
+    sample_source = runtime_sources.get("sample_s3_source")
+    upstream_kind = hf_provenance.get("upstream_kind")
+    upstream_locator = hf_provenance.get("upstream_locator")
+    upstream_revision = hf_provenance.get("upstream_revision")
+    worker_hf_token_present = worker_boundary.get("hf_token_present")
+    direct_hf_egress_required = worker_boundary.get("direct_hf_egress_required")
+    secret_leaks = _secret_leak_paths(artifact)
+
+    evidence.update({
+        "environment": artifact.get("environment"),
+        "runnable_tasks": _int_field(catalog_evidence, "runnable_tasks"),
+        "requires_cpu_arch": requires_caps.get("cpu_arch"),
+        "total_task_sources": total_sources,
+        "internal_s3_sources": internal_sources,
+        "non_internal_source_count": len(non_internal_sources),
+        "sample_s3_source": sample_source,
+        "hf_upstream_kind": upstream_kind,
+        "hf_upstream_locator": upstream_locator,
+        "hf_upstream_revision": upstream_revision,
+        "hf_provenance_retained": (
+            upstream_kind == "huggingface"
+            and isinstance(upstream_locator, str)
+            and bool(upstream_locator.strip())
+            and isinstance(upstream_revision, str)
+            and bool(upstream_revision.strip())
+        ),
+        "canary_started": worker_boundary.get("canary_started"),
+        "terminal_state": worker_boundary.get("terminal_state"),
+        "worker_hf_token_present": worker_hf_token_present,
+        "direct_hf_egress_required": direct_hf_egress_required,
+        "materialized_from_internal_source": (
+            worker_boundary.get("materialized_from_internal_source")
+        ),
+        "secret_safe": (
+            not secret_leaks
+            and secret_scan.get("raw_secret_values_present") is False
+        ),
+        "secret_leak_paths": secret_leaks,
+    })
+    return evidence
+
+
+def _hf_mirror_boundary_check(
+    *,
+    manifest: dict[str, Any],
+    artifact: dict[str, Any] | None,
+    artifact_path: str | None,
+    artifact_error: str | None,
+) -> ReleaseGateCheck | None:
+    required = _hf_mirror_boundary_required(manifest)
+    if not required and artifact is None and artifact_error is None:
+        return None
+
+    remediation = (
+        "collect secret-safe staging HF mirror boundary evidence after catalog "
+        "provisioning/audit and a SkillLearnBench canary, then pass it to "
+        "`loom cluster release-gate --hf-mirror-boundary-evidence`"
+    )
+    if artifact_error is not None:
+        return ReleaseGateCheck(
+            name="hf-mirror-token-boundary",
+            outcome="fail",
+            detail="HF mirror/token boundary evidence artifact is unreadable",
+            evidence={
+                **_hf_mirror_boundary_evidence(
+                    manifest=manifest,
+                    artifact=None,
+                    artifact_path=artifact_path,
+                ),
+                "error": artifact_error,
+            },
+            remediation=remediation,
+        )
+    if artifact is None:
+        return ReleaseGateCheck(
+            name="hf-mirror-token-boundary",
+            outcome="fail",
+            detail="HF mirror/token boundary evidence artifact is required",
+            evidence=_hf_mirror_boundary_evidence(
+                manifest=manifest,
+                artifact=None,
+                artifact_path=artifact_path,
+            ),
+            remediation=remediation,
+        )
+    if not isinstance(artifact, dict):
+        return ReleaseGateCheck(
+            name="hf-mirror-token-boundary",
+            outcome="fail",
+            detail="HF mirror/token boundary evidence artifact is invalid",
+            evidence={
+                **_hf_mirror_boundary_evidence(
+                    manifest=manifest,
+                    artifact=None,
+                    artifact_path=artifact_path,
+                ),
+                "artifact_type": type(artifact).__name__,
+            },
+            remediation=remediation,
+        )
+
+    evidence = _hf_mirror_boundary_evidence(
+        manifest=manifest,
+        artifact=artifact,
+        artifact_path=artifact_path,
+    )
+    release_environment = evidence.get("release_environment")
+    issues: list[str] = []
+    if artifact.get("environment") != release_environment:
+        issues.append("evidence environment must match the release manifest")
+    if artifact.get("benchmark_id") != _HF_MIRROR_BENCHMARK_ID:
+        issues.append("evidence benchmark_id must be skilllearnbench")
+    if not evidence.get("runnable_tasks"):
+        issues.append("SkillLearnBench catalog must report runnable tasks")
+    if evidence.get("requires_cpu_arch") != "any":
+        issues.append("SkillLearnBench requires_caps.cpu_arch must remain any")
+    total_sources = evidence.get("total_task_sources")
+    internal_sources = evidence.get("internal_s3_sources")
+    if (
+        not isinstance(total_sources, int)
+        or total_sources <= 0
+        or internal_sources != total_sources
+        or evidence.get("non_internal_source_count") != 0
+        or not str(evidence.get("sample_s3_source") or "").startswith("s3://")
+    ):
+        issues.append("SkillLearnBench must use internal s3:// runtime sources")
+    if not evidence.get("hf_provenance_retained"):
+        issues.append("HF provenance must retain upstream kind, locator, and revision")
+    if evidence.get("worker_hf_token_present") is not False:
+        issues.append("worker HF_TOKEN must be absent in canary evidence")
+    if evidence.get("direct_hf_egress_required") is not False:
+        issues.append("canary must not require direct worker HF egress")
+    if evidence.get("materialized_from_internal_source") is not True:
+        issues.append("canary must materialize from the internal mirror source")
+    if evidence.get("canary_started") is not True or not evidence.get("terminal_state"):
+        issues.append("canary must reach started and terminal state")
+    if not evidence.get("secret_safe"):
+        issues.append("evidence must not contain raw HF/API/object-store secrets")
+
+    if issues:
+        return ReleaseGateCheck(
+            name="hf-mirror-token-boundary",
+            outcome="fail",
+            detail=issues[0],
+            evidence={**evidence, "issues": issues},
+            remediation=remediation,
+        )
+    return ReleaseGateCheck(
+        name="hf-mirror-token-boundary",
+        outcome="pass",
+        detail="SkillLearnBench HF mirror/token boundary evidence passed",
+        evidence=evidence,
+    )
+
+
 def collect_release_gate_report(
     *,
     manifest: dict[str, Any],
@@ -1071,6 +1317,9 @@ def collect_release_gate_report(
     minio_storage_preflight_artifact: dict[str, Any] | None = None,
     minio_storage_preflight_path: str | None = None,
     minio_storage_preflight_error: str | None = None,
+    hf_mirror_boundary_artifact: dict[str, Any] | None = None,
+    hf_mirror_boundary_path: str | None = None,
+    hf_mirror_boundary_error: str | None = None,
 ) -> ReleaseGateReport:
     environment = str(manifest.get("release", {}).get("environment") or "")
     expected_rendered = manifest.get("rendered_manifest", {}).get("sha256")
@@ -1139,6 +1388,14 @@ def collect_release_gate_report(
     )
     if minio_storage_check is not None:
         checks.append(minio_storage_check)
+    hf_mirror_boundary_check = _hf_mirror_boundary_check(
+        manifest=manifest,
+        artifact=hf_mirror_boundary_artifact,
+        artifact_path=hf_mirror_boundary_path,
+        artifact_error=hf_mirror_boundary_error,
+    )
+    if hf_mirror_boundary_check is not None:
+        checks.append(hf_mirror_boundary_check)
     return ReleaseGateReport(
         environment=environment,
         namespace=namespace,
@@ -1470,6 +1727,36 @@ def _minio_storage_component_row(check: ReleaseGateCheck) -> dict[str, Any] | No
     }
 
 
+def _hf_mirror_boundary_component_row(check: ReleaseGateCheck) -> dict[str, Any] | None:
+    if check.name != "hf-mirror-token-boundary":
+        return None
+    evidence = check.evidence
+    row_evidence = []
+    if evidence.get("artifact"):
+        row_evidence.append(str(evidence["artifact"]))
+    if evidence.get("sample_s3_source"):
+        row_evidence.append(str(evidence["sample_s3_source"]))
+    readiness = (
+        "s3 mirror, HF provenance, no worker HF_TOKEN"
+        if check.outcome == "pass"
+        else check.detail
+    )
+    return {
+        "surface": "catalog",
+        "component": "skilllearnbench-hf-mirror-boundary",
+        "expected_release": "s3:// runtime sources + HF provenance",
+        "expected_digest": "",
+        "live_release": _first_text(evidence.get("terminal_state")),
+        "live_digest": _first_text(evidence.get("hf_upstream_revision")),
+        "generation": "",
+        "readiness": readiness,
+        "restart_crash_reason": "" if check.outcome == "pass" else check.detail,
+        "evidence": row_evidence,
+        "outcome": check.outcome,
+        "detail": check.detail,
+    }
+
+
 def build_component_evidence_rows(report: ReleaseGateReport) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for check in report.checks:
@@ -1480,6 +1767,9 @@ def build_component_evidence_rows(report: ReleaseGateReport) -> list[dict[str, A
         minio_storage_row = _minio_storage_component_row(check)
         if minio_storage_row is not None:
             rows.append(minio_storage_row)
+        hf_mirror_boundary_row = _hf_mirror_boundary_component_row(check)
+        if hf_mirror_boundary_row is not None:
+            rows.append(hf_mirror_boundary_row)
     return rows
 
 

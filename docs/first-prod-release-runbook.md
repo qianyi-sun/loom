@@ -479,6 +479,24 @@ manifest = {
             "manifest": "docs/benchmark-score-alignment.md",
             "benchmarks": ["humaneval"],
         },
+        "hf_mirror_token_boundary": {
+            "status": "pass",
+            "url": "https://example.invalid/hf-mirror-token-boundary",
+            "benchmark_id": "skilllearnbench",
+            "environment": "staging",
+            "runtime_source_scheme": "s3",
+            "runtime_source_prefix": "s3://loom-benchmarks/skilllearnbench/",
+            "runnable_tasks": 100,
+            "internal_s3_sources": 100,
+            "total_task_sources": 100,
+            "hf_provenance_retained": True,
+            "upstream_kind": "huggingface",
+            "upstream_locator": "PRHW/SkillLearnBench",
+            "upstream_revision": candidate[:12],
+            "worker_hf_token_present": False,
+            "direct_hf_egress_required": False,
+            "secret_safe": True,
+        },
         "worker_capacity_smoke": {
             "status": "pass",
             "url": "https://example.invalid/worker-capacity",
@@ -643,8 +661,10 @@ Release gate validation: FAIL
 
 Stop condition: missing required checks, stale candidate/image mismatch, active
 beta capacity without override, shared prod/dev state, route mismatch, missing
-final `service.no_oom_restarts` smoke evidence after route probes, or any
-forbidden evidence value blocks promotion.
+final `service.no_oom_restarts` smoke evidence after route probes, missing or
+failing `hf_mirror_token_boundary` evidence for SkillLearnBench mirrored
+`s3://` runtime sources and worker HF token absence, or any forbidden evidence
+value blocks promotion.
 
 ### 8. Production Release Workflow
 
@@ -674,8 +694,8 @@ Created workflow_dispatch event for release-promotion-gate.yml at dev
 
 Prepare the release PR from `dev` to `main`; attach the release-gate run,
 frontend route evidence, worker-capacity evidence, raw-delivery/user-E2E
-status, and rollback plan. After merge, tag the merged `main` commit exactly
-once:
+status, HF mirror/token-boundary evidence, and rollback plan. After merge, tag
+the merged `main` commit exactly once:
 
 ```bash
 git fetch origin main --tags

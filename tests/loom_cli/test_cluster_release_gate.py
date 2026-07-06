@@ -183,6 +183,64 @@ def _external_workers_manifest_section() -> dict[str, Any]:
     }
 
 
+def _catalog_manifest_section() -> dict[str, Any]:
+    return {
+        "required": True,
+        "command": (
+            "loom datasets provision-catalog && "
+            "loom datasets register skilllearnbench --hf-org PRHW "
+            "--revision \"$PUBLISHED_SHA\" --mirror-to-object-store "
+            "--bucket loom-benchmarks && "
+            "loom datasets audit --all --verify-bundles"
+        ),
+        "required_env": [
+            "HF_TOKEN",
+            "LOOM_SVC_DB_URL",
+            "LOOM_SVC_MINIO_ENDPOINT",
+            "LOOM_SVC_MINIO_ACCESS_KEY",
+            "LOOM_SVC_MINIO_SECRET_KEY",
+        ],
+    }
+
+
+def _hf_boundary_evidence(**overrides: Any) -> dict[str, Any]:
+    evidence: dict[str, Any] = {
+        "schema_version": 1,
+        "environment": "staging",
+        "benchmark_id": "skilllearnbench",
+        "catalog": {
+            "runnable_tasks": 100,
+            "requires_caps": {"cpu_arch": "any"},
+        },
+        "runtime_sources": {
+            "total_task_sources": 100,
+            "internal_s3_sources": 100,
+            "non_internal_sources": [],
+            "sample_s3_source": "s3://loom-benchmarks/skilllearnbench/task-000/",
+        },
+        "hf_provenance": {
+            "upstream_kind": "huggingface",
+            "upstream_locator": "PRHW/SkillLearnBench",
+            "upstream_revision": "abc123def456",
+        },
+        "worker_boundary": {
+            "canary_started": True,
+            "terminal_state": "succeeded",
+            "hf_token_present": False,
+            "hf_token_isolated": True,
+            "direct_hf_egress_required": False,
+            "materialized_from_internal_source": True,
+        },
+        "secret_scan": {"raw_secret_values_present": False},
+    }
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(evidence.get(key), dict):
+            evidence[key] = {**evidence[key], **value}
+        else:
+            evidence[key] = value
+    return evidence
+
+
 def test_release_gate_passes_when_ready_pod_image_id_matches_expected_digest() -> None:
     manifest = _manifest(expected_digest="sha256:" + "1" * 64)
     apps = _FakeAppsV1({
@@ -892,6 +950,129 @@ def test_release_gate_requires_environment_state_check_when_manifest_records_ext
     assert check.evidence["expected_profile_sha256"] == "state-sha"
 
 
+def test_release_gate_requires_hf_mirror_boundary_evidence_for_staging_catalog_gate() -> None:
+    manifest = _manifest()
+    manifest["catalog_provisioning"] = _catalog_manifest_section()
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=_FakeAppsV1({
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+            ),
+        }),
+        core_v1=_FakeCoreV1([
+            _ready_pod(
+                name="loom-service-new",
+                app="loom-service",
+                image="loom-service:staging-abc123",
+                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+            ),
+        ]),
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+    )
+
+    assert not report.all_pass
+    check = next(
+        check for check in report.checks
+        if check.name == "hf-mirror-token-boundary"
+    )
+    assert check.outcome == "fail"
+    assert check.detail == "HF mirror/token boundary evidence artifact is required"
+    assert check.evidence["benchmark_id"] == "skilllearnbench"
+    assert check.evidence["catalog_provisioning_required"] is True
+    assert "release-gate --hf-mirror-boundary-evidence" in (check.remediation or "")
+
+
+def test_release_gate_accepts_secret_safe_hf_mirror_boundary_evidence() -> None:
+    manifest = _manifest()
+    manifest["catalog_provisioning"] = _catalog_manifest_section()
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=_FakeAppsV1({
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+            ),
+        }),
+        core_v1=_FakeCoreV1([
+            _ready_pod(
+                name="loom-service-new",
+                app="loom-service",
+                image="loom-service:staging-abc123",
+                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+            ),
+        ]),
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+        hf_mirror_boundary_artifact=_hf_boundary_evidence(),
+        hf_mirror_boundary_path="hf-mirror-boundary-staging-abc123.json",
+    )
+
+    assert report.all_pass
+    check = next(
+        check for check in report.checks
+        if check.name == "hf-mirror-token-boundary"
+    )
+    assert check.outcome == "pass"
+    assert check.evidence["internal_s3_sources"] == 100
+    assert check.evidence["hf_provenance_retained"] is True
+    assert check.evidence["worker_hf_token_present"] is False
+    assert check.evidence["direct_hf_egress_required"] is False
+
+
+def test_release_gate_rejects_non_s3_or_secret_leaking_hf_boundary_evidence() -> None:
+    manifest = _manifest()
+    manifest["catalog_provisioning"] = _catalog_manifest_section()
+    evidence = _hf_boundary_evidence(
+        runtime_sources={
+            "internal_s3_sources": 99,
+            "non_internal_sources": ["hf://PRHW/SkillLearnBench/task-099"],
+        },
+        worker_boundary={"hf_token_present": True},
+        operator_note="HF_TOKEN=hf_FAKESECRET12345678901234567890",
+    )
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=_FakeAppsV1({
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+            ),
+        }),
+        core_v1=_FakeCoreV1([
+            _ready_pod(
+                name="loom-service-new",
+                app="loom-service",
+                image="loom-service:staging-abc123",
+                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+            ),
+        ]),
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+        hf_mirror_boundary_artifact=evidence,
+        hf_mirror_boundary_path="hf-mirror-boundary-staging-abc123.json",
+    )
+
+    assert not report.all_pass
+    check = next(
+        check for check in report.checks
+        if check.name == "hf-mirror-token-boundary"
+    )
+    assert check.outcome == "fail"
+    assert "must use internal s3:// runtime sources" in check.detail
+    assert check.evidence["secret_safe"] is False
+    assert check.evidence["secret_leak_paths"] == ["operator_note"]
+    assert check.evidence["worker_hf_token_present"] is True
+
+
 def test_release_gate_fails_when_environment_state_check_reports_drift() -> None:
     report = collect_release_gate_report(
         manifest=_manifest(external_workers=_external_workers_manifest_section()),
@@ -1449,6 +1630,64 @@ def test_cluster_release_gate_cli_passes_environment_state_check_artifact(
     assert rc == 0
     assert captured["environment_state_check_artifact"]["ok"] is True
     assert captured["environment_state_check_path"] == str(environment_state_check_path.resolve())
+
+
+def test_cluster_release_gate_cli_passes_hf_mirror_boundary_artifact(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    manifest = _manifest()
+    manifest["catalog_provisioning"] = _catalog_manifest_section()
+    manifest_path = tmp_path / "release-manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    boundary_path = tmp_path / "hf-mirror-boundary.json"
+    boundary_path.write_text(json.dumps(_hf_boundary_evidence()), encoding="utf-8")
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._load_clients",
+        lambda _context: (object(), object(), object(), object()),
+    )
+
+    def _fake_collect_release_gate_report(**kwargs: Any) -> ReleaseGateReport:
+        captured.update(kwargs)
+        return ReleaseGateReport(
+            environment="staging",
+            namespace="loom",
+            checks=[
+                ReleaseGateCheck(
+                    name="hf-mirror-token-boundary",
+                    outcome="pass",
+                    detail="SkillLearnBench HF mirror/token boundary evidence passed",
+                    evidence={},
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd.collect_release_gate_report",
+        _fake_collect_release_gate_report,
+    )
+
+    rc = main([
+        "cluster",
+        "release-gate",
+        "--manifest",
+        str(manifest_path),
+        "--namespace",
+        "loom",
+        "--environment",
+        "staging",
+        "--hf-mirror-boundary-evidence",
+        str(boundary_path),
+        "--dry-run",
+        "--format",
+        "json",
+    ])
+
+    assert rc == 0
+    assert captured["hf_mirror_boundary_artifact"]["benchmark_id"] == "skilllearnbench"
+    assert captured["hf_mirror_boundary_path"] == str(boundary_path.resolve())
 
 
 def test_release_gate_requires_gb10_status_artifact_when_manifest_declares_gb10() -> None:

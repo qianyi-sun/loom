@@ -41,6 +41,13 @@ REQUIRED_CHECKS: dict[str, tuple[str, ...]] = {
     "benchmark_reward_gate": ("url", "batch_id", "benchmarks"),
     "score_positive_canary": ("url", "batch_id"),
     "benchmark_score_alignment": ("url", "manifest", "benchmarks"),
+    "hf_mirror_token_boundary": (
+        "url",
+        "benchmark_id",
+        "runtime_source_prefix",
+        "upstream_locator",
+        "upstream_revision",
+    ),
     "worker_capacity_smoke": ("url", "batch_id", "k8s_workers", "oldlab_workers"),
     "prod_beta_isolation": (
         "url",
@@ -108,6 +115,7 @@ SECRET_VALUE_PATTERNS = (
     re.compile(r"authorization:\s*bearer", re.IGNORECASE),
     re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE),
     re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{10,}"),
+    re.compile(r"\bhf_[A-Za-z0-9_]{20,}"),
     re.compile(r"\bghp_[A-Za-z0-9_]{10,}"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{10,}"),
     re.compile(r"\bloom_(?:api|w)_[A-Za-z0-9._-]{8,}", re.IGNORECASE),
@@ -260,9 +268,50 @@ def _validate_checks(manifest: dict[str, Any]) -> list[str]:
             errors.extend(_validate_score_positive_canary(check))
         if check_name == "frontend_route_evidence":
             errors.extend(_validate_frontend_route_evidence(check))
+        if check_name == "hf_mirror_token_boundary":
+            errors.extend(_validate_hf_mirror_token_boundary(check))
         if check_name == "prod_beta_isolation":
             errors.extend(_validate_prod_beta_isolation(check, manifest=manifest))
 
+    return errors
+
+
+def _validate_hf_mirror_token_boundary(check: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    if check.get("benchmark_id") != "skilllearnbench":
+        errors.append("hf_mirror_token_boundary.benchmark_id must be 'skilllearnbench'")
+    if check.get("environment") not in {"staging", "production"}:
+        errors.append("hf_mirror_token_boundary.environment must be staging or production")
+    if check.get("runtime_source_scheme") != "s3":
+        errors.append("hf_mirror_token_boundary.runtime_source_scheme must be 's3'")
+    runtime_prefix = check.get("runtime_source_prefix")
+    if not isinstance(runtime_prefix, str) or not runtime_prefix.startswith("s3://"):
+        errors.append("hf_mirror_token_boundary.runtime_source_prefix must start with s3://")
+    runnable_tasks = check.get("runnable_tasks")
+    if not isinstance(runnable_tasks, int) or runnable_tasks <= 0:
+        errors.append("hf_mirror_token_boundary.runnable_tasks must be an integer > 0")
+    total_sources = check.get("total_task_sources")
+    internal_sources = check.get("internal_s3_sources")
+    if not isinstance(total_sources, int) or total_sources <= 0:
+        errors.append("hf_mirror_token_boundary.total_task_sources must be an integer > 0")
+    if internal_sources != total_sources:
+        errors.append(
+            "hf_mirror_token_boundary.internal_s3_sources must equal total_task_sources",
+        )
+    if check.get("hf_provenance_retained") is not True:
+        errors.append("hf_mirror_token_boundary.hf_provenance_retained must be true")
+    if check.get("upstream_kind") != "huggingface":
+        errors.append("hf_mirror_token_boundary.upstream_kind must be 'huggingface'")
+    if not _is_non_empty_string(check.get("upstream_locator")):
+        errors.append("hf_mirror_token_boundary.upstream_locator must be a non-empty string")
+    if not _is_non_empty_string(check.get("upstream_revision")):
+        errors.append("hf_mirror_token_boundary.upstream_revision must be a non-empty string")
+    if check.get("worker_hf_token_present") is not False:
+        errors.append("hf_mirror_token_boundary.worker_hf_token_present must be false")
+    if check.get("direct_hf_egress_required") is not False:
+        errors.append("hf_mirror_token_boundary.direct_hf_egress_required must be false")
+    if check.get("secret_safe") is not True:
+        errors.append("hf_mirror_token_boundary.secret_safe must be true")
     return errors
 
 
