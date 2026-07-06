@@ -164,6 +164,36 @@
     "default": "0",
     "required": false
   },
+  "setup_health_dstate_max": {
+    "annotation": "<class 'int'>",
+    "default": "32",
+    "required": false
+  },
+  "setup_health_guard_enabled": {
+    "annotation": "<class 'bool'>",
+    "default": "True",
+    "required": false
+  },
+  "setup_health_io_full_avg10_max": {
+    "annotation": "<class 'float'>",
+    "default": "50.0",
+    "required": false
+  },
+  "setup_health_min_swap_free_mb": {
+    "annotation": "<class 'int'>",
+    "default": "1024",
+    "required": false
+  },
+  "setup_health_poll_interval_sec": {
+    "annotation": "<class 'float'>",
+    "default": "5.0",
+    "required": false
+  },
+  "setup_health_wait_timeout_sec": {
+    "annotation": "<class 'float'>",
+    "default": "300.0",
+    "required": false
+  },
   "storage_auth_kind": {
     "annotation": "<class 'str'>",
     "default": "'static_keys'",

@@ -56,6 +56,9 @@ class StartOptions:
     # Docker tmpfs mount specs, in docker-compose form such as
     # "/root:size=100M,mode=755" or just "/run".
     tmpfs: tuple[str, ...] = ()
+    # Docker labels applied to the primary sandbox container. Workers use this
+    # for operator-safe inspection/reaping of Loom-owned containers.
+    labels: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass

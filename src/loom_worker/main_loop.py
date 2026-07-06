@@ -799,6 +799,9 @@ async def _spawn_trial(
                 task_checksum=task_checksum,
                 trial_id=trial_id,
                 docker_api_timeout_sec=settings.docker_api_timeout_sec,
+                setup_slot_provider=lambda: _daemon_build_slot(
+                    cp_client, settings, worker_id,
+                ),
             ),
         )
 
@@ -1083,6 +1086,8 @@ def _setup_failure_diagnostic_head(detail: str, max_chars: int) -> str:
 
 
 def _classify_setup_failure(detail: str) -> FailureReason:
+    if "SETUP_ADMISSION_BLOCKED" in detail:
+        return FailureReason.NODE_SETUP_HEALTH
     if "TASK_COMPAT_" in detail:
         return FailureReason.TASK_COMPATIBILITY
     if (

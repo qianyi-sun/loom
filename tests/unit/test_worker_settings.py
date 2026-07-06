@@ -28,6 +28,12 @@ _LOOM_WORKER_ENVS = [
     "LOOM_WORKER_SUBPROCESS_GATEWAY_URL",
     "LOOM_WORKER_HOSTNAME",
     "LOOM_WORKER_HUGGINGFACE_API_KEY",
+    "LOOM_WORKER_SETUP_HEALTH_GUARD_ENABLED",
+    "LOOM_WORKER_SETUP_HEALTH_IO_FULL_AVG10_MAX",
+    "LOOM_WORKER_SETUP_HEALTH_MIN_SWAP_FREE_MB",
+    "LOOM_WORKER_SETUP_HEALTH_DSTATE_MAX",
+    "LOOM_WORKER_SETUP_HEALTH_WAIT_TIMEOUT_SEC",
+    "LOOM_WORKER_SETUP_HEALTH_POLL_INTERVAL_SEC",
     "HF_TOKEN",
 ]
 
@@ -64,6 +70,12 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     monkeypatch.setenv("LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS", "300")
     monkeypatch.setenv("LOOM_WORKER_TRAJECTORY_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("LOOM_WORKER_HOSTNAME", "trt-gb10-7")
+    monkeypatch.setenv("LOOM_WORKER_SETUP_HEALTH_GUARD_ENABLED", "true")
+    monkeypatch.setenv("LOOM_WORKER_SETUP_HEALTH_IO_FULL_AVG10_MAX", "45.5")
+    monkeypatch.setenv("LOOM_WORKER_SETUP_HEALTH_MIN_SWAP_FREE_MB", "2048")
+    monkeypatch.setenv("LOOM_WORKER_SETUP_HEALTH_DSTATE_MAX", "12")
+    monkeypatch.setenv("LOOM_WORKER_SETUP_HEALTH_WAIT_TIMEOUT_SEC", "60")
+    monkeypatch.setenv("LOOM_WORKER_SETUP_HEALTH_POLL_INTERVAL_SEC", "2")
     monkeypatch.setenv(
         "LOOM_WORKER_SUBPROCESS_GATEWAY_URL",
         "http://host.docker.internal:30443/openai/v1",
@@ -86,6 +98,12 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     assert s.heartbeat_interval_sec == 5.0
     assert s.trajectory_cache_dir == tmp_path
     assert s.hostname == "trt-gb10-7"
+    assert s.setup_health_guard_enabled is True
+    assert s.setup_health_io_full_avg10_max == 45.5
+    assert s.setup_health_min_swap_free_mb == 2048
+    assert s.setup_health_dstate_max == 12
+    assert s.setup_health_wait_timeout_sec == 60
+    assert s.setup_health_poll_interval_sec == 2
     assert str(s.subprocess_gateway_url) == ("http://host.docker.internal:30443/openai/v1")
     assert s.token.get_secret_value() == "loom_w_test"
 
@@ -102,6 +120,12 @@ def test_idle_exit_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert s.idle_exit_after_seconds is None
     assert s.trial_cache_build_max_concurrent == 1
+    assert s.setup_health_guard_enabled is True
+    assert s.setup_health_io_full_avg10_max == 50.0
+    assert s.setup_health_min_swap_free_mb == 1024
+    assert s.setup_health_dstate_max == 32
+    assert s.setup_health_wait_timeout_sec == 300.0
+    assert s.setup_health_poll_interval_sec == 5.0
 
 
 def test_token_is_secret(monkeypatch: pytest.MonkeyPatch) -> None:

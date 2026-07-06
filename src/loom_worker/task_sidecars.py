@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import hashlib
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -29,6 +30,7 @@ from loom_worker.task_image import (
 )
 
 _NAME_RE = re.compile(r"[^A-Za-z0-9_.-]")
+SetupSlotProvider = Callable[[], contextlib.AbstractAsyncContextManager[Any]]
 
 
 def task_sidecar_image_tag(
@@ -64,6 +66,7 @@ class DockerTaskSidecarRuntime:
         trial_id: UUID,
         health_poll_interval_sec: float = 0.5,
         docker_api_timeout_sec: int | None = None,
+        setup_slot_provider: SetupSlotProvider | None = None,
     ) -> None:
         self.task_config = task_config
         self.task_dir = task_dir
@@ -71,6 +74,7 @@ class DockerTaskSidecarRuntime:
         self.trial_id = trial_id
         self.health_poll_interval_sec = health_poll_interval_sec
         self.docker_api_timeout_sec = docker_api_timeout_sec
+        self.setup_slot_provider = setup_slot_provider
         self._client: Any | None = None
         self._containers: list[Any] = []
         self._network: Any | None = None
@@ -150,7 +154,10 @@ class DockerTaskSidecarRuntime:
 
     async def _resolve_sidecar_image(self, sidecar: TaskSidecarConfig) -> str:
         if sidecar.docker_image:
-            await asyncio.to_thread(self._ensure_pulled_image, sidecar.docker_image)
+            if await asyncio.to_thread(self._image_exists, sidecar.docker_image):
+                return sidecar.docker_image
+            async with self._setup_slot():
+                await asyncio.to_thread(self._ensure_pulled_image, sidecar.docker_image)
             return sidecar.docker_image
         if sidecar.dockerfile is None:
             raise TaskImageBuildError(
@@ -171,14 +178,30 @@ class DockerTaskSidecarRuntime:
             sidecar,
             task_checksum=self.task_checksum,
         )
-        await asyncio.to_thread(
-            self._ensure_built_image,
-            tag=tag,
-            sidecar=sidecar,
-            dockerfile=dockerfile,
-            build_context=build_context,
-        )
+        if await asyncio.to_thread(self._image_exists, tag):
+            return tag
+        async with self._setup_slot():
+            await asyncio.to_thread(
+                self._ensure_built_image,
+                tag=tag,
+                sidecar=sidecar,
+                dockerfile=dockerfile,
+                build_context=build_context,
+            )
         return tag
+
+    def _setup_slot(self) -> contextlib.AbstractAsyncContextManager[Any]:
+        if self.setup_slot_provider is None:
+            return contextlib.nullcontext()
+        return self.setup_slot_provider()
+
+    def _image_exists(self, image: str) -> bool:
+        assert self._client is not None
+        try:
+            self._client.images.get(image)
+        except ImageNotFound:
+            return False
+        return True
 
     def _ensure_pulled_image(self, image: str) -> None:
         assert self._client is not None
@@ -211,6 +234,8 @@ class DockerTaskSidecarRuntime:
             forcerm=True,
             pull=False,
             labels={
+                "loom.setup-build": "true",
+                "loom.setup-kind": "task-sidecar",
                 "loom.task_id": self.task_config.task.id,
                 "loom.task_checksum": self.task_checksum,
                 "loom.task_sidecar": sidecar.name,
@@ -235,6 +260,13 @@ class DockerTaskSidecarRuntime:
                 network_name: self._client.api.create_endpoint_config(
                     aliases=[sidecar.name],
                 ),
+            },
+            "labels": {
+                "loom.setup-container": "true",
+                "loom.task-sidecar": "true",
+                "loom.task_id": self.task_config.task.id,
+                "loom.task_sidecar": sidecar.name,
+                "loom.trial_id": str(self.trial_id),
             },
             "remove": False,
         }

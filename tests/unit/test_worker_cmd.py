@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from loom_cli import worker_cmd
+from loom_worker.setup_admission import NodeHealthSnapshot
 
 # ─── Format helpers ────────────────────────────────────────────────
 
@@ -121,6 +122,72 @@ def test_gather_cache_images_raises_on_unreachable_daemon() -> None:
             worker_cmd._gather_cache_images()
 
 
+# ─── setup status (#275) ───────────────────────────────────────────
+
+
+def _stub_container(
+    *,
+    name: str,
+    status: str,
+    labels: dict[str, str],
+) -> MagicMock:
+    container = MagicMock()
+    container.id = "1234567890abcdef"
+    container.name = name
+    container.status = status
+    container.attrs = {"Config": {"Labels": labels}}
+    return container
+
+
+def test_gather_setup_status_reports_health_and_labeled_containers() -> None:
+    client = MagicMock()
+    client.containers.list.return_value = [
+        _stub_container(
+            name="loom-sidecar-trial-api",
+            status="running",
+            labels={
+                "loom.setup-container": "true",
+                "loom.task-sidecar": "true",
+                "loom.trial_id": "trial-1",
+                "loom.task_id": "task-1",
+                "loom.task_sidecar": "api",
+            },
+        )
+    ]
+
+    with patch("docker.from_env", return_value=client):
+        status = worker_cmd._gather_setup_status(
+            read_snapshot=lambda: NodeHealthSnapshot(
+                io_full_avg10=76.15,
+                swap_total_mb=4096,
+                swap_free_mb=2048,
+                d_state_processes=1,
+            ),
+        )
+
+    assert status["health"]["ok"] is False
+    assert status["health"]["reason"] == "node_io_pressure"
+    assert status["containers"] == [
+        {
+            "id": "1234567890ab",
+            "name": "loom-sidecar-trial-api",
+            "status": "running",
+            "kind": "setup-sidecar",
+            "trial_id": "trial-1",
+            "task_id": "task-1",
+            "detail": "api",
+        }
+    ]
+    assert client.containers.list.call_args_list[0].kwargs == {
+        "all": True,
+        "filters": {"label": "loom.setup-container=true"},
+    }
+    assert client.containers.list.call_args_list[1].kwargs == {
+        "all": True,
+        "filters": {"label": "loom.trial-container=true"},
+    }
+
+
 # ─── dispatch (handler integration) ────────────────────────────────
 
 
@@ -167,6 +234,28 @@ def test_dispatch_cache_stats_table_with_rows(
     assert "abc123" in out
     assert "1 cached image(s)" in out
     assert "CACHE_KEY" in out  # header
+
+
+def test_dispatch_setup_status_json(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    client = MagicMock()
+    client.containers.list.return_value = []
+    with patch("docker.from_env", return_value=client):
+        with patch(
+            "loom_cli.worker_cmd.read_node_health_snapshot",
+            return_value=NodeHealthSnapshot(
+                io_full_avg10=0.0,
+                swap_total_mb=0,
+                swap_free_mb=0,
+                d_state_processes=0,
+            ),
+        ):
+            rc = worker_cmd.dispatch(["setup", "status", "--json"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["health"]["reason"] == "healthy"
+    assert out["containers"] == []
 
 
 def test_dispatch_unknown_subcommand_errors() -> None:

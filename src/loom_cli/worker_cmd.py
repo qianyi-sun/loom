@@ -3,6 +3,8 @@
 Currently:
 - ``loom worker cache stats`` — inspect the trial-cache layered images
   on the worker's local Docker daemon (label=loom.trial-cache=true).
+- ``loom worker setup status`` — inspect setup-health admission and
+  Loom-labeled setup/trial containers on the worker host.
 
 Runs on the worker host (where the Docker daemon is). Fleet-wide
 aggregation is not in v1 — operators run this per-host via ssh or
@@ -14,8 +16,16 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import os
 import sys
+from collections.abc import Callable
 from typing import Any
+
+from loom_worker.setup_admission import (
+    NodeHealthPolicy,
+    NodeHealthSnapshot,
+    read_node_health_snapshot,
+)
 
 
 def _human_age(seconds: float) -> str:
@@ -101,6 +111,110 @@ def _gather_cache_images() -> list[dict[str, Any]]:
     return rows
 
 
+def _setup_policy_from_env() -> NodeHealthPolicy:
+    return NodeHealthPolicy(
+        enabled=_env_bool("LOOM_WORKER_SETUP_HEALTH_GUARD_ENABLED", True),
+        io_full_avg10_max=_env_float(
+            "LOOM_WORKER_SETUP_HEALTH_IO_FULL_AVG10_MAX",
+            50.0,
+        ),
+        min_swap_free_mb=_env_int(
+            "LOOM_WORKER_SETUP_HEALTH_MIN_SWAP_FREE_MB",
+            1024,
+        ),
+        d_state_process_max=_env_int("LOOM_WORKER_SETUP_HEALTH_DSTATE_MAX", 32),
+        wait_timeout_sec=_env_float(
+            "LOOM_WORKER_SETUP_HEALTH_WAIT_TIMEOUT_SEC",
+            300.0,
+        ),
+        poll_interval_sec=_env_float(
+            "LOOM_WORKER_SETUP_HEALTH_POLL_INTERVAL_SEC",
+            5.0,
+        ),
+    )
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _gather_setup_status(
+    *,
+    read_snapshot: Callable[[], NodeHealthSnapshot] = read_node_health_snapshot,
+) -> dict[str, Any]:
+    import docker
+    from docker.errors import DockerException
+
+    policy = _setup_policy_from_env()
+    decision = policy.evaluate(read_snapshot())
+    try:
+        client = docker.from_env()
+    except DockerException as exc:
+        raise RuntimeError(f"cannot reach Docker daemon: {exc}") from exc
+
+    containers_by_id: dict[str, Any] = {}
+    for label in ("loom.setup-container=true", "loom.trial-container=true"):
+        for container in client.containers.list(
+            all=True,
+            filters={"label": label},
+        ):
+            container_id = str(getattr(container, "id", "") or id(container))
+            containers_by_id[container_id] = container
+    containers = list(containers_by_id.values())
+    rows = [_setup_container_row(container) for container in containers]
+    rows.sort(key=lambda row: (row["kind"], row["name"]))
+    return {
+        "health": {
+            "ok": decision.ok,
+            "reason": decision.reason,
+            "detail": decision.detail,
+        },
+        "containers": rows,
+    }
+
+
+def _setup_container_row(container: Any) -> dict[str, str]:
+    labels = getattr(container, "attrs", {}).get("Config", {}).get("Labels", {}) or {}
+    is_setup = labels.get("loom.setup-container") == "true"
+    kind = "setup-sidecar" if is_setup and labels.get("loom.task-sidecar") else "setup"
+    if not is_setup and labels.get("loom.trial-container") == "true":
+        kind = "trial"
+    detail = labels.get("loom.task_sidecar") or ""
+    container_id = str(getattr(container, "id", "") or "")
+    return {
+        "id": container_id[:12],
+        "name": str(getattr(container, "name", "") or ""),
+        "status": str(getattr(container, "status", "") or ""),
+        "kind": kind,
+        "trial_id": str(labels.get("loom.trial_id") or ""),
+        "task_id": str(labels.get("loom.task_id") or ""),
+        "detail": str(detail),
+    }
+
+
 def _cache_stats_handler(args: argparse.Namespace) -> int:
     try:
         rows = _gather_cache_images()
@@ -128,6 +242,37 @@ def _cache_stats_handler(args: argparse.Namespace) -> int:
         print(
             f"{key:<34}  {_human_age(r['age_sec']):>6}  "
             f"{_human_size(r['size_bytes']):>10}  {tag}",
+        )
+    return 0
+
+
+def _setup_status_handler(args: argparse.Namespace) -> int:
+    try:
+        status = _gather_setup_status()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(status, indent=2))
+        return 0
+
+    health = status["health"]
+    print(
+        "setup health: "
+        f"{'ok' if health['ok'] else 'blocked'} "
+        f"{health['reason']} ({health['detail']})",
+    )
+    rows = status["containers"]
+    if not rows:
+        print("no Loom setup/trial containers on this host.")
+        return 0
+
+    print(f"\n{'KIND':<14} {'STATUS':<12} {'NAME':<36} {'TRIAL_ID':<36} DETAIL")
+    for row in rows:
+        print(
+            f"{row['kind']:<14} {row['status']:<12} {row['name']:<36} "
+            f"{row['trial_id']:<36} {row['detail']}",
         )
     return 0
 
@@ -164,6 +309,23 @@ def dispatch(argv: list[str]) -> int:
         help="Emit JSON instead of a human-readable table.",
     )
     p_stats.set_defaults(handler=_cache_stats_handler)
+
+    p_setup = sub.add_parser(
+        "setup", help="Inspect setup/build admission and Loom containers.",
+    )
+    setup_sub = p_setup.add_subparsers(dest="setup_cmd", required=True)
+    p_setup_status = setup_sub.add_parser(
+        "status",
+        help=(
+            "Show node setup-health admission state and Loom-labeled "
+            "setup/trial containers on this worker host."
+        ),
+    )
+    p_setup_status.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON instead of a human-readable table.",
+    )
+    p_setup_status.set_defaults(handler=_setup_status_handler)
 
     args = parser.parse_args(argv)
     return int(args.handler(args))

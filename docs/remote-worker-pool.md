@@ -952,13 +952,38 @@ materialization is reachable but legitimately slow; `hf://` sources that need
 private internet access should normally be mirrored into internal object
 storage before runtime.
 
-Layered trial-cache image builds also have a daemon-wide concurrency cap:
-`LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT`. Keep the default `1` on shared
-OLDLAB, shared k8s node, or host-network remote-worker daemons so different
-cold cache keys serialize their setup containers. Raise it only for isolated
-Docker daemons after a load-test issue records CPU, memory, disk I/O,
-containerd, and cleanup headroom. This cap does not reduce warm trial
-concurrency controlled by `LOOM_WORKER_MAX_CONCURRENT`.
+Cold Docker setup work has a daemon-wide admission boundary separate from warm
+trial execution concurrency. `LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT`
+sets the number of concurrent setup/build slots per daemon fingerprint
+(`pool_name`, hostname, Docker socket). Keep the default `1` on shared OLDLAB,
+shared k8s node, or host-network remote-worker daemons so task Dockerfile
+builds, layered trial-cache builds, and sidecar image pulls/builds serialize
+their setup pressure even when `LOOM_WORKER_MAX_CONCURRENT` admits many warm
+trials. Raise it only for isolated Docker daemons after a load-test issue
+records CPU, memory, disk I/O, containerd, and cleanup headroom.
+
+The #275 OLDLAB incident was caused by that boundary being incomplete: cold
+setup/build paths could fan out apt/dpkg work before a trial reached
+`started_at`, saturating host I/O and swap while unrelated users saw SSH or
+login hangs. Workers now also run a setup-health gate before admitting Docker
+setup/build work. The guard reads Linux `/proc/pressure/io` full avg10,
+`SwapTotal`/`SwapFree`, and D-state process counts; if a threshold is crossed,
+the claimed trial keeps pre-start heartbeats running, waits up to
+`LOOM_WORKER_SETUP_HEALTH_WAIT_TIMEOUT_SEC`, then fails setup as
+`failure_reason=node_setup_health` if the node does not recover. Tune:
+
+- `LOOM_WORKER_SETUP_HEALTH_IO_FULL_AVG10_MAX` (default `50.0`)
+- `LOOM_WORKER_SETUP_HEALTH_MIN_SWAP_FREE_MB` (default `1024`; ignored when
+  `SwapTotal=0`)
+- `LOOM_WORKER_SETUP_HEALTH_DSTATE_MAX` (default `32`)
+- `LOOM_WORKER_SETUP_HEALTH_WAIT_TIMEOUT_SEC` (default `300.0`)
+- `LOOM_WORKER_SETUP_HEALTH_POLL_INTERVAL_SEC` (default `5.0`)
+
+Run `loom worker setup status` on the worker host to inspect the current
+setup-health decision and Loom-labeled setup/trial containers. Use it together
+with `loom admin worker-pools autoscaler status` or the environment-state drain
+controls before doing targeted manual Docker cleanup; do not prune retained
+`loom.trial-cache=true` images as part of setup-container reaping.
 
 Service-mode tasks that carry `environment.dockerfile` are built on the worker
 host from the materialized task bundle, or from

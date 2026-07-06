@@ -35,6 +35,12 @@ class _StubSettings:
         trial_cache_build_lock_timeout_sec: float = 1800.0,
         trial_cache_build_max_concurrent: int = 1,
         docker_api_timeout_sec: int = 900,
+        setup_health_guard_enabled: bool = True,
+        setup_health_io_full_avg10_max: float = 50.0,
+        setup_health_min_swap_free_mb: int = 1024,
+        setup_health_dstate_max: int = 32,
+        setup_health_wait_timeout_sec: float = 0.0,
+        setup_health_poll_interval_sec: float = 0.0,
     ) -> None:
         self.trial_cache_registry_repo = trial_cache_registry_repo
         self.trial_cache_registry_pull_timeout_sec = trial_cache_registry_pull_timeout_sec
@@ -44,6 +50,12 @@ class _StubSettings:
         self.trial_cache_build_lock_timeout_sec = trial_cache_build_lock_timeout_sec
         self.trial_cache_build_max_concurrent = trial_cache_build_max_concurrent
         self.docker_api_timeout_sec = docker_api_timeout_sec
+        self.setup_health_guard_enabled = setup_health_guard_enabled
+        self.setup_health_io_full_avg10_max = setup_health_io_full_avg10_max
+        self.setup_health_min_swap_free_mb = setup_health_min_swap_free_mb
+        self.setup_health_dstate_max = setup_health_dstate_max
+        self.setup_health_wait_timeout_sec = setup_health_wait_timeout_sec
+        self.setup_health_poll_interval_sec = setup_health_poll_interval_sec
 
 
 class _StubAdapter:
@@ -484,6 +496,74 @@ async def test_resolve_trial_image_serializes_builds_across_cache_keys(
     assert out1.startswith("loom-trial-cache:")
     assert out2.startswith("loom-trial-cache:")
     assert len(entered) == 2
+
+
+@pytest.mark.asyncio
+async def test_daemon_build_slot_checks_node_health_before_claiming_slot() -> None:
+    """#275: the daemon-wide setup slot must not be claimed while the
+    host is already under setup-blocking pressure. Otherwise a worker
+    can keep admitting new Docker setup containers on an unhealthy
+    OLDLAB node and make SSH/login symptoms worse.
+    """
+    cp = _StubCPClient()
+    worker_id = uuid4()
+    settings = _StubSettings(setup_health_wait_timeout_sec=0.0)
+
+    from loom_worker.setup_admission import NodeHealthSnapshot, SetupAdmissionError
+
+    with pytest.raises(SetupAdmissionError) as exc:
+        async with trial_cache._daemon_build_slot(
+            cp,
+            settings,
+            worker_id,
+            read_setup_health=lambda: NodeHealthSnapshot(
+                io_full_avg10=90.0,
+                swap_total_mb=4096,
+                swap_free_mb=4096,
+                d_state_processes=1,
+            ),
+        ):
+            raise AssertionError("slot should not be yielded")
+
+    assert exc.value.reason == "node_io_pressure"
+    assert cp.slots == {}
+
+
+@pytest.mark.asyncio
+async def test_daemon_build_slot_releases_slot_if_health_fails_after_claim() -> None:
+    cp = _StubCPClient()
+    worker_id = uuid4()
+    settings = _StubSettings(setup_health_wait_timeout_sec=0.0)
+
+    from loom_worker.setup_admission import NodeHealthSnapshot, SetupAdmissionError
+
+    snapshots = [
+        NodeHealthSnapshot(
+            io_full_avg10=1.0,
+            swap_total_mb=4096,
+            swap_free_mb=4096,
+            d_state_processes=1,
+        ),
+        NodeHealthSnapshot(
+            io_full_avg10=90.0,
+            swap_total_mb=4096,
+            swap_free_mb=4096,
+            d_state_processes=1,
+        ),
+    ]
+
+    with pytest.raises(SetupAdmissionError):
+        async with trial_cache._daemon_build_slot(
+            cp,
+            settings,
+            worker_id,
+            read_setup_health=lambda: snapshots.pop(0),
+        ):
+            raise AssertionError("slot should not be yielded")
+
+    assert cp.slots == {}
+    assert len(cp.release_calls) == 1
+    assert cp.release_calls[0][1] == worker_id
 
 
 @pytest.mark.asyncio

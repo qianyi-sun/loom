@@ -27,6 +27,17 @@ Gateway/provider, and Control Plane state-patch health.
 Keep `LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT=1` for OLDLAB shared Docker
 daemons unless a focused load-test issue proves concurrent layered image builds
 do not saturate Docker/containerd or node disk I/O.
+The #275 root cause was that trial execution slots and cold setup/build work
+were not the same resource: a worker could keep claiming warm-trial capacity
+while task Dockerfile builds, layered agent-cache builds, and sidecar image
+preparation all created Docker setup pressure before `started_at`. On shared
+OLDLAB this manifested as apt/dpkg build containers driving high I/O pressure,
+full swap, and SSH/login symptoms. Keep the setup-health guard enabled so new
+setup work waits before launching Docker setup/build work when
+`/proc/pressure/io` full avg10, free swap, or D-state process counts cross the
+configured thresholds. Use `loom worker setup status` on a worker host to see
+the current guard decision and Loom-labeled setup/trial containers before doing
+any targeted manual cleanup.
 
 For the worker-pool autoscaler, prefer the resource-aware policy rather than
 raising the fixed slice. Use `min_slots=1`, `max_slots=40`, `max_jobs=5`, and

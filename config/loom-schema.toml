@@ -873,6 +873,42 @@ python_type = "int"
 default     = 1
 description = "Maximum concurrent layered trial-cache image builds allowed for the same worker daemon group. Workers coordinate daemon-wide synthetic slots through active_trial_cache_builds using pool_name, hostname, and docker_socket as the daemon fingerprint. Keep 1 for shared OLDLAB/k8s Docker daemons; raise only for isolated daemon hosts."
 
+[service_config.setup_health_guard_enabled]
+used_by     = ["worker"]
+python_type = "bool"
+default     = true
+description = "Enable worker-side node-health admission before Docker setup/build work. When enabled, task-image builds, layered trial-cache builds, and sidecar image pulls/builds wait or fail before launching setup containers if host I/O pressure, swap, or D-state process counts exceed configured thresholds."
+
+[service_config.setup_health_io_full_avg10_max]
+used_by     = ["worker"]
+python_type = "float"
+default     = 50.0
+description = "Maximum Linux /proc/pressure/io full avg10 value allowed before a worker admits new Docker setup/build work. Values above this indicate sustained host I/O stalls; shared OLDLAB incident evidence saw avg10 around 76 during SSH/login symptoms."
+
+[service_config.setup_health_min_swap_free_mb]
+used_by     = ["worker"]
+python_type = "int"
+default     = 1024
+description = "Minimum free swap in MiB required before a worker admits new Docker setup/build work on hosts with swap configured. Hosts with SwapTotal=0 are treated as no-swap systems and are not blocked by this threshold."
+
+[service_config.setup_health_dstate_max]
+used_by     = ["worker"]
+python_type = "int"
+default     = 32
+description = "Maximum number of Linux D-state processes allowed before a worker admits new Docker setup/build work. D-state pressure is a strong signal of storage or kernel I/O stalls on shared worker hosts."
+
+[service_config.setup_health_wait_timeout_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 300.0
+description = "Maximum seconds a claimed trial waits for setup-health recovery before failing setup with failure_reason=node_setup_health. The worker keeps pre-start heartbeats running while it waits."
+
+[service_config.setup_health_poll_interval_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 5.0
+description = "Polling interval while a claimed trial waits for setup-health recovery before Docker setup/build admission."
+
 [service_config.k8s_worker_enabled]
 used_by     = ["loom-service"]
 python_type = "bool"

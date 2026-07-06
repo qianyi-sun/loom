@@ -178,6 +178,27 @@ class _FakeDockerClient:
         self.closed = True
 
 
+class _TrackingSlot:
+    def __init__(self) -> None:
+        self.depth = 0
+        self.entered = 0
+        self.exited = 0
+
+    def __call__(self):
+        slot = self
+
+        class _Ctx:
+            async def __aenter__(self) -> None:
+                slot.entered += 1
+                slot.depth += 1
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
+                slot.depth -= 1
+                slot.exited += 1
+
+        return _Ctx()
+
+
 async def test_sidecar_runtime_builds_and_starts_in_dependency_order(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
@@ -213,6 +234,13 @@ async def test_sidecar_runtime_builds_and_starts_in_dependency_order(
     ]
     api_call = fake_client.containers.create_calls[1]
     assert api_call["network"] == "loom-task-net"
+    assert api_call["labels"] == {
+        "loom.setup-container": "true",
+        "loom.task-sidecar": "true",
+        "loom.task_id": "tb2/api-task",
+        "loom.task_sidecar": "api",
+        "loom.trial_id": str(trial_id),
+    }
     assert "network_aliases" not in api_call
     assert api_call["networking_config"] == {
         "loom-task-net": {"EndpointConfig": {"aliases": ["api"]}},
@@ -237,6 +265,42 @@ async def test_sidecar_runtime_builds_and_starts_in_dependency_order(
         True,
     ]
     assert fake_client.closed is True
+
+
+async def test_sidecar_runtime_enters_setup_slot_for_pull_and_build(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """#275: sidecar image pull/build is trial setup work and must use
+    the same daemon-wide admission boundary as task-image and layered
+    trial-cache builds. Without this, sidecar-heavy benchmarks can
+    still fan out Docker setup pressure at trial concurrency.
+    """
+    task_dir = tmp_path / "task"
+    api_context = task_dir / ".loom-build" / "sidecars" / "api"
+    api_context.mkdir(parents=True)
+    (api_context / "Dockerfile").write_text("FROM python:3.11-slim\n")
+    fake_client = _FakeDockerClient()
+    monkeypatch.setattr(
+        task_sidecars.docker,
+        "from_env",
+        lambda: fake_client,
+    )
+    slot = _TrackingSlot()
+    runtime = DockerTaskSidecarRuntime(
+        task_config=_task_config(),
+        task_dir=task_dir,
+        task_checksum="abc123",
+        trial_id=uuid4(),
+        health_poll_interval_sec=0,
+        setup_slot_provider=slot,
+    )
+
+    await runtime.start(network_name="loom-task-net")
+    await runtime.stop()
+
+    assert slot.entered == 2
+    assert slot.exited == 2
+    assert slot.depth == 0
 
 
 async def test_sidecar_runtime_removes_container_when_start_fails_after_create(

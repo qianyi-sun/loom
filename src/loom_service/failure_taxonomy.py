@@ -56,6 +56,7 @@ _PLATFORM_SETUP_REASONS: frozenset[str] = frozenset(
         "env_start_failure",
         "env_healthcheck_failed",
         "internal_error",
+        "node_setup_health",
         "setup_failure",
     }
 )
