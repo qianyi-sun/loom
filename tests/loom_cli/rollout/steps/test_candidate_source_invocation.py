@@ -267,6 +267,87 @@ def test_env_state_resolves_loom_cli_without_global_executable(
         assert f"GIT_SHA={ctx.resolved_sha}" in call["argv"]
 
 
+def test_env_state_retries_gb10_source_convergence_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="public-beta-80f7e01")
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    step_dir = ev.step_dir(10, "env-state")
+    profile = tmp_path / "staging.toml"
+    profile.write_text("[worker_service]\n")
+    calls: list[list[str]] = []
+    check_attempts = 0
+
+    def fake_run(argv, **kwargs):
+        nonlocal check_attempts
+        calls.append(list(argv))
+        if "apply" in argv:
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout="applied\n",
+                stderr="",
+            )
+        if "check" in argv:
+            check_attempts += 1
+            if check_attempts == 1:
+                return SubprocessResult(
+                    argv=list(argv),
+                    returncode=1,
+                    stdout=json.dumps(
+                        {
+                            "ok": False,
+                            "drift": [
+                                {
+                                    "path": (
+                                        "gb10_worker_node_status"
+                                        "[production/gb10-arm64/trt-gb10-1]"
+                                        ".source_git_commit"
+                                    ),
+                                    "desired": "80f7e01",
+                                    "live": "2e6cf2f",
+                                },
+                            ],
+                        }
+                    ),
+                    stderr="",
+                )
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout=json.dumps({"ok": True, "drift": []}),
+                stderr="",
+            )
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._profile_path_for",
+        lambda ctx: str(profile),
+    )
+    monkeypatch.setattr("loom_cli.rollout.steps.s10_env_state.run_captured", fake_run)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._ENV_STATE_CHECK_MAX_ATTEMPTS",
+        2,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._ENV_STATE_CHECK_RETRY_DELAY_SEC",
+        0.0,
+        raising=False,
+    )
+
+    result = EnvStateStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    assert check_attempts == 2
+    assert len([call for call in calls if "check" in call]) == 2
+    retry_log = step_dir.artifact_path("environment-state-check.retries.log")
+    assert "gb10 convergence drift" in retry_log.read_text()
+
+
 def test_env_state_profile_path_resolves_from_cluster_config_dir(
     tmp_path: Path,
 ) -> None:

@@ -540,6 +540,11 @@ knob you need.
    to `loom cluster release-gate --environment-state-check`; a missing artifact,
    `ok=false`, or non-empty `drift` array keeps the protected release gate red
    and blocks workload-validation anchors.
+   `loom cluster rollout` step 10 applies the profile once and then retries
+   pure `gb10_worker_node_status[...]` drift for a bounded window so asynchronous
+   GB10 node-agent source-checkout updates can report back. Mixed drift, such
+   as OLDLAB jobs or missing external-runner prerequisites, is not retried and
+   must be corrected in the operator profile or live state before rerunning.
    When the release manifest records GB10 desired state, also generate
    `loom admin gb10-workers status --format json` with the release image/env
    target and pass it to `loom cluster release-gate --gb10-workers-status`.

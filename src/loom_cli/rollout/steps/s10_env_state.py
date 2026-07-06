@@ -8,6 +8,8 @@ declared path) and then runs the check to confirm convergence. The
 
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
 
 from loom_cli.rollout.context import RolloutContext
@@ -21,6 +23,28 @@ from loom_cli.rollout.steps.candidate_source import (
     candidate_relative_path,
 )
 from loom_cli.rollout.steps.subprocess_util import run_captured
+
+_ENV_STATE_CHECK_MAX_ATTEMPTS = 30
+_ENV_STATE_CHECK_RETRY_DELAY_SEC = 2.0
+
+
+def _is_retryable_gb10_convergence_drift(stdout: str) -> bool:
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return False
+    drift = payload.get("drift")
+    if not isinstance(drift, list) or not drift:
+        return False
+    for item in drift:
+        if not isinstance(item, dict):
+            return False
+        path = item.get("path")
+        if not isinstance(path, str):
+            return False
+        if not path.startswith("gb10_worker_node_status["):
+            return False
+    return True
 
 
 def _profile_path_for(ctx: RolloutContext, config_path: Path | None = None) -> str | None:
@@ -85,29 +109,45 @@ class EnvStateStep(BaseStep):
             cwd=cwd,
             env=env,
         )
-        check = run_captured(
-            candidate_loom_argv(
-                "admin", "environment-state", "check",
-                "--cp-url", ctx.cp_url,
-                "--file", str(profile_path),
-                "--environment", ctx.environment,
-                *release_vars,
-                "--format", "json",
-            ),
-            cwd=cwd,
-            env=env,
+        check_argv = candidate_loom_argv(
+            "admin", "environment-state", "check",
+            "--cp-url", ctx.cp_url,
+            "--file", str(profile_path),
+            "--environment", ctx.environment,
+            *release_vars,
+            "--format", "json",
         )
+        check_attempt_logs: list[str] = []
+        check = run_captured(check_argv, cwd=cwd, env=env)
+        for attempt in range(1, _ENV_STATE_CHECK_MAX_ATTEMPTS + 1):
+            if attempt > 1:
+                check = run_captured(check_argv, cwd=cwd, env=env)
+            step_dir.artifact_path(
+                f"environment-state-check-attempt-{attempt}.json",
+            ).write_text(check.stdout, encoding="utf-8")
+            if check.returncode == 0:
+                break
+            if not _is_retryable_gb10_convergence_drift(check.stdout):
+                break
+            check_attempt_logs.append(
+                f"attempt {attempt}/{_ENV_STATE_CHECK_MAX_ATTEMPTS}: "
+                "gb10 convergence drift; waiting for node-agent status\n",
+            )
+            if attempt < _ENV_STATE_CHECK_MAX_ATTEMPTS:
+                time.sleep(_ENV_STATE_CHECK_RETRY_DELAY_SEC)
+        retry_log = step_dir.artifact_path("environment-state-check.retries.log")
+        retry_log.write_text("".join(check_attempt_logs), encoding="utf-8")
         step_dir.artifact_path("environment-state-check.json").write_text(
             check.stdout,
             encoding="utf-8",
         )
         step_dir.stdout_path().write_text(
             f"# apply\n{apply_.stdout}\n"
-            f"# check\n{check.stdout}\n"
+            f"# check\n{check.stdout}\n",
         )
         step_dir.stderr_path().write_text(
             f"# apply\n{apply_.stderr}\n"
-            f"# check\n{check.stderr}\n"
+            f"# check\n{check.stderr}\n",
         )
         if apply_.returncode != 0:
             return RunResult(
