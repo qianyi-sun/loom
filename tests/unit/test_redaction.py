@@ -59,8 +59,7 @@ def test_redact_mapping_preserves_shape_but_redacts_sensitive_values() -> None:
         "errors": [
             {
                 "detail": (
-                    "upstream 403 from http://loom-llm-gateway:9100/chat "
-                    "for key sk-provider-secret"
+                    "upstream 403 from http://loom-llm-gateway:9100/chat for key sk-provider-secret"
                 ),
             },
         ],
@@ -120,10 +119,7 @@ def test_redact_environment_mapping_uses_digest_fingerprints_for_secret_keys() -
     monkey_entry = entries["LOOM_TEST_MONKEY_PATCH"]
 
     assert token_entry["value"] == "[REDACTED]"
-    assert (
-        token_entry["fingerprint"]
-        == f"sha256:{hashlib.sha256(token.encode()).hexdigest()[:12]}"
-    )
+    assert token_entry["fingerprint"] == f"sha256:{hashlib.sha256(token.encode()).hexdigest()[:12]}"
     assert token_entry["length"] == len(token)
     assert token not in str(token_entry)
     assert token[:12] not in str(token_entry)
@@ -148,7 +144,7 @@ def test_redacted_environment_entries_are_safe_for_logs_and_exceptions(
     entries = redaction.redact_environment_mapping(
         {
             "LOOM_TEST_BATCH_RUNNER_CP_TOKEN": raw_token,
-            "LOOM_TEST_MODE": "public-beta",
+            "LOOM_TEST_MODE": "staging",
         },
         prefixes=("LOOM_TEST_",),
     )

@@ -12,7 +12,7 @@ frontend_api_base_path = ""
 frontend_environment = "local"
 # Human-readable public SPA environment label shown in the UI chrome.
 frontend_environment_label = "Local development"
-# Public SPA path prefix on ingress_host. Empty means host root; production uses /prod and development/public-beta uses /dev.
+# Public SPA path prefix on ingress_host. Empty means host root; production uses /prod and staging uses /dev.
 frontend_route_path = ""
 # Image tag applied to every loom-* image.
 image_tag = "0.7"

@@ -65,7 +65,7 @@ def test_env_diagnostics_json_and_markdown_do_not_leak_sensitive_values(
     api_key = "sk-synthetic-api-key-value"
     monkeypatch.setenv("LOOM_TEST_BATCH_RUNNER_CP_TOKEN", token)
     monkeypatch.setenv("LOOM_TEST_PROVIDER_API_KEY", api_key)
-    monkeypatch.setenv("LOOM_TEST_MODE", "public-beta")
+    monkeypatch.setenv("LOOM_TEST_MODE", "staging")
 
     json_rc = main(
         [
@@ -84,7 +84,7 @@ def test_env_diagnostics_json_and_markdown_do_not_leak_sensitive_values(
     assert entries["LOOM_TEST_BATCH_RUNNER_CP_TOKEN"]["value"] == "[REDACTED]"
     assert entries["LOOM_TEST_BATCH_RUNNER_CP_TOKEN"]["fingerprint"].startswith("sha256:")
     assert entries["LOOM_TEST_PROVIDER_API_KEY"]["value"] == "[REDACTED]"
-    assert entries["LOOM_TEST_MODE"]["value"] == "public-beta"
+    assert entries["LOOM_TEST_MODE"]["value"] == "staging"
 
     markdown_rc = main(
         [
@@ -99,7 +99,7 @@ def test_env_diagnostics_json_and_markdown_do_not_leak_sensitive_values(
     assert markdown_rc == 0
     markdown_out = capsys.readouterr().out
     assert "| LOOM_TEST_BATCH_RUNNER_CP_TOKEN | sensitive |" in markdown_out
-    assert "| LOOM_TEST_MODE | value | public-beta |" in markdown_out
+    assert "| LOOM_TEST_MODE | value | staging |" in markdown_out
 
     combined = json_out + markdown_out
     assert token not in combined
@@ -946,9 +946,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_unhealthy_active_node(
                         "desired_env_config_version": "staging-76875ac",
                         "current_intent": "active",
                         "desired_intent": "active",
-                        "source_git_commit": (
-                            "76875ac6d38c91c947c44b22788348db27a8d45b"
-                        ),
+                        "source_git_commit": ("76875ac6d38c91c947c44b22788348db27a8d45b"),
                         "source_git_dirty": False,
                     },
                 ],
@@ -1008,9 +1006,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_capacity_mismatch(
                         "desired_env_config_version": "staging-76875ac",
                         "current_intent": "active",
                         "desired_intent": "active",
-                        "source_git_commit": (
-                            "76875ac6d38c91c947c44b22788348db27a8d45b"
-                        ),
+                        "source_git_commit": ("76875ac6d38c91c947c44b22788348db27a8d45b"),
                         "source_git_dirty": False,
                     },
                 ],
@@ -1073,12 +1069,9 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_source_checkout(
                         "last_apply_result": "already current",
                         "error_message": None,
                         "compose_project_dir": (
-                            "/home/trt/loom-remote-worker/"
-                            "loom-staging-b453057/deploy"
+                            "/home/trt/loom-remote-worker/loom-staging-b453057/deploy"
                         ),
-                        "source_git_commit": (
-                            "b45305709414b1e88cbb1f3d92e5f28375ee93b9"
-                        ),
+                        "source_git_commit": ("b45305709414b1e88cbb1f3d92e5f28375ee93b9"),
                         "source_git_dirty": False,
                     },
                 ],
@@ -1143,8 +1136,7 @@ def test_gb10_workers_status_release_target_gate_fails_without_source_provenance
                         "last_apply_result": "already current",
                         "error_message": None,
                         "compose_project_dir": (
-                            "/home/trt/loom-remote-worker/"
-                            "loom-staging-b453057/deploy"
+                            "/home/trt/loom-remote-worker/loom-staging-b453057/deploy"
                         ),
                     },
                 ],
@@ -1217,10 +1209,16 @@ def test_worker_pool_autoscaler_status_gets_cp_decisions(
     monkeypatch.setattr(httpx, "get", _fake_get)
     monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
 
-    rc = main([
-        "admin", "worker-pools", "autoscaler", "status",
-        "--cp-url", "http://cp:8080/",
-    ])
+    rc = main(
+        [
+            "admin",
+            "worker-pools",
+            "autoscaler",
+            "status",
+            "--cp-url",
+            "http://cp:8080/",
+        ]
+    )
 
     assert rc == 0
     assert captured["url"] == "http://cp:8080/admin/worker-pool-autoscalers/status"
@@ -1300,9 +1298,16 @@ def test_worker_pool_autoscaler_status_json_format_emits_raw_json(
     monkeypatch.setattr(httpx, "get", _fake_get)
     monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
 
-    rc = main([
-        "admin", "worker-pools", "autoscaler", "status", "--format", "json",
-    ])
+    rc = main(
+        [
+            "admin",
+            "worker-pools",
+            "autoscaler",
+            "status",
+            "--format",
+            "json",
+        ]
+    )
     assert rc == 0
     assert json.loads(capsys.readouterr().out) == payload
 

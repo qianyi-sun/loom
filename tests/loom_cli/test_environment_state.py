@@ -1494,7 +1494,6 @@ active = false
     ("path", "environment"),
     [
         (Path("deploy/environment-state/staging.toml"), "staging"),
-        (Path("deploy/environment-state/staging.toml"), "staging"),
     ],
 )
 def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
@@ -1527,11 +1526,7 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
         gb10_policy["actuator_config"]["env_file"]
         == f"/shared_work/qianyi/loom-worker-capacity/{environment}-gb10-worker-staging-test.env"
     )
-    suffix = (
-        "loom-remote-worker-staging-test"
-        if environment == "staging"
-        else "loom-remote-worker-staging-staging-test"
-    )
+    suffix = "loom-remote-worker-staging-test"
     assert gb10_policy["actuator_config"]["repo_dir"].endswith(suffix)
 
     gb10_state = next(
@@ -1542,7 +1537,7 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert gb10_state["env_config_version"] == "staging-test"
     assert gb10_state["source_git_commit"] == ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     assert gb10_state["max_concurrent"] == 10
-    assert gb10_state["target_slots"] == 150
+    assert gb10_state["target_slots"] == 140
     assert profile.catalog_provisioning["required"] is True
     command = profile.catalog_provisioning["command"]
     assert "loom datasets provision-catalog" in command
@@ -1557,14 +1552,11 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
         "LOOM_SVC_MINIO_ACCESS_KEY",
         "LOOM_SVC_MINIO_SECRET_KEY",
     ]
-    assert set(profile.external_slurm_runner_prerequisites["pools"]) == {
-        "oldlab",
-        "gb10-arm64",
-    }
+    assert set(profile.external_slurm_runner_prerequisites["pools"]) == {"gb10-arm64"}
     assert profile.external_slurm_runner_prerequisites["require_worker_token_parity"] is True
 
 
-def test_staging_oldlab_policy_allows_all_five_oldlab_submit_nodes() -> None:
+def test_staging_profile_is_gb10_only_for_first_prod_validation() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables={
@@ -1575,16 +1567,10 @@ def test_staging_oldlab_policy_allows_all_five_oldlab_submit_nodes() -> None:
         expected_environment="staging",
     )
 
-    oldlab_policy = next(
-        policy for policy in profile.autoscaler_policies if policy["pool_name"] == "oldlab"
-    )
+    pool_names = {policy["pool_name"] for policy in profile.autoscaler_policies}
+    assert pool_names == {"gb10-arm64"}
 
-    assert oldlab_policy["environment"] == "production"
-    assert oldlab_policy["actuator_config"]["allowed_nodes"] == [
-        "TRT-EAI-OLDLAB-1",
-        "trt-EAI-OLDLAB-2",
-        "trt-eai-oldlab-3",
-        "trt-eai-oldlab-4",
-        "trt-eai-oldlab-5",
-    ]
-    assert oldlab_policy["actuator_config"]["max_jobs"] == 5
+    gb10_state = next(
+        state for state in profile.gb10_desired_states if state["pool_name"] == "gb10-arm64"
+    )
+    assert gb10_state["host_intents"]["trt-gb10-14"] == "draining"

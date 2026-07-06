@@ -209,9 +209,7 @@ def _acquire_protected_rollout_lock(
         diagnostic = getattr(exc, "diagnostic", None)
         if isinstance(diagnostic, dict):
             sys.stderr.write(
-                "rollout lock diagnostic: "
-                + json.dumps(diagnostic, sort_keys=True)
-                + "\n",
+                "rollout lock diagnostic: " + json.dumps(diagnostic, sort_keys=True) + "\n",
             )
         raise
     sys.stderr.write(
@@ -481,21 +479,14 @@ def _deployment_convergence_note(
 ) -> str | None:
     if generation is not None and observed_generation is not None:
         if observed_generation < generation:
-            return (
-                "stale-generation: "
-                f"observed {observed_generation} < generation {generation}"
-            )
+            return f"stale-generation: observed {observed_generation} < generation {generation}"
     if updated is None and desired > 0:
         return f"updated-replicas: unknown/{desired}"
     if updated is not None and updated < desired:
         return f"updated-replicas: {updated}/{desired}"
     # #203: report old pods still around even after the updated count
     # matches desired.
-    if (
-        updated is not None
-        and total_replicas is not None
-        and total_replicas > updated
-    ):
+    if updated is not None and total_replicas is not None and total_replicas > updated:
         return f"stale-pods: {total_replicas - updated} old"
     return None
 
@@ -507,21 +498,25 @@ def _combine_notes(*notes: str | None) -> str | None:
     return "; ".join(present)
 
 
-_BLOCKING_POD_WAITING_REASONS = frozenset({
-    "CrashLoopBackOff",
-    "CreateContainerConfigError",
-    "CreateContainerError",
-    "ErrImagePull",
-    "ImagePullBackOff",
-    "InvalidImageName",
-    "RunContainerError",
-})
+_BLOCKING_POD_WAITING_REASONS = frozenset(
+    {
+        "CrashLoopBackOff",
+        "CreateContainerConfigError",
+        "CreateContainerError",
+        "ErrImagePull",
+        "ImagePullBackOff",
+        "InvalidImageName",
+        "RunContainerError",
+    }
+)
 
-_BLOCKING_POD_TERMINATED_REASONS = frozenset({
-    "Error",
-    "OOMKilled",
-    "StartError",
-})
+_BLOCKING_POD_TERMINATED_REASONS = frozenset(
+    {
+        "Error",
+        "OOMKilled",
+        "StartError",
+    }
+)
 
 
 def _get_field(obj: Any, name: str, default: Any = None) -> Any:
@@ -683,11 +678,15 @@ def _collect_workload(
                 events=events or [],
             )
             sandbox_note = format_sandbox_deadline_note(sandbox_diagnostics)
-            pod_health_note = _deployment_pod_health_note(
-                d,
-                k8s_name=k8s_name,
-                pods=pods or [],
-            ) if desired > 0 else None
+            pod_health_note = (
+                _deployment_pod_health_note(
+                    d,
+                    k8s_name=k8s_name,
+                    pods=pods or [],
+                )
+                if desired > 0
+                else None
+            )
             pod_health_ok = pod_health_note is None and not sandbox_diagnostics
             out.append(
                 ComponentStatus(
@@ -706,13 +705,9 @@ def _collect_workload(
                         sandbox_note,
                         pod_health_note,
                     ),
-                    failure_class=(
-                        SANDBOX_DEADLINE_FAILURE_CLASS
-                        if sandbox_diagnostics else None
-                    ),
+                    failure_class=(SANDBOX_DEADLINE_FAILURE_CLASS if sandbox_diagnostics else None),
                     runtime_recovery=(
-                        SANDBOX_DEADLINE_RECOVERY_KIND
-                        if sandbox_diagnostics else None
+                        SANDBOX_DEADLINE_RECOVERY_KIND if sandbox_diagnostics else None
                     ),
                     runtime_failure_diagnostics=diagnostic_summaries(
                         sandbox_diagnostics,
@@ -893,8 +888,7 @@ def _list_namespace_pods(core_v1: Any, namespace: str) -> tuple[list[Any], str |
         return list(core_v1.list_namespaced_pod(namespace=namespace).items), None
     except Exception as exc:
         return [], (
-            f"cannot inspect managed pods in namespace {namespace}: "
-            f"{_exception_to_note(exc)}"
+            f"cannot inspect managed pods in namespace {namespace}: {_exception_to_note(exc)}"
         )
 
 
@@ -905,8 +899,7 @@ def _list_namespace_events(core_v1: Any, namespace: str) -> tuple[list[Any], str
         return [], None
     except Exception as exc:
         return [], (
-            f"cannot inspect pod events in namespace {namespace}: "
-            f"{_exception_to_note(exc)}"
+            f"cannot inspect pod events in namespace {namespace}: {_exception_to_note(exc)}"
         )
 
 
@@ -1013,16 +1006,20 @@ _TEMPLATE_ORDER: tuple[str, ...] = (
 
 _PERSISTENT_STORAGE_DYNAMIC = "dynamic"
 _PERSISTENT_STORAGE_STATIC_HOST_PATH = "static-host-path"
-_PERSISTENT_STORAGE_BACKENDS = frozenset({
-    _PERSISTENT_STORAGE_DYNAMIC,
-    _PERSISTENT_STORAGE_STATIC_HOST_PATH,
-})
-_FRONTEND_ENVIRONMENTS = frozenset({
-    "local",
-    "development",
-    "staging",
-    "production",
-})
+_PERSISTENT_STORAGE_BACKENDS = frozenset(
+    {
+        _PERSISTENT_STORAGE_DYNAMIC,
+        _PERSISTENT_STORAGE_STATIC_HOST_PATH,
+    }
+)
+_FRONTEND_ENVIRONMENTS = frozenset(
+    {
+        "local",
+        "development",
+        "staging",
+        "production",
+    }
+)
 
 
 def _normalise_static_host_path_root(config: ClusterConfig) -> str | None:
@@ -1128,8 +1125,7 @@ def _frontend_route_context(config: ClusterConfig) -> dict[str, Any]:
     )
     if api_base_path != route_path:
         raise ValueError(
-            "frontend_api_base_path must match frontend_route_path for "
-            "prod/dev route isolation",
+            "frontend_api_base_path must match frontend_route_path for prod/dev route isolation",
         )
     if environment == "production" and route_path != "/prod":
         raise ValueError("production frontend_environment must use frontend_route_path=/prod")
@@ -1176,19 +1172,13 @@ def _parse_provider_egress_target(raw: str) -> ProviderEgressRule:
     if target.startswith("["):
         host_end = target.find("]")
         if host_end == -1 or len(target) <= host_end + 2 or target[host_end + 1] != ":":
-            raise ValueError(
-                f"provider_egress_allowlist entry {raw!r} must be "
-                "IP-or-CIDR:TCP-port"
-            )
+            raise ValueError(f"provider_egress_allowlist entry {raw!r} must be IP-or-CIDR:TCP-port")
         host = target[1:host_end]
-        port_text = target[host_end + 2:]
+        port_text = target[host_end + 2 :]
     else:
         host, sep, port_text = target.rpartition(":")
         if not sep or not host:
-            raise ValueError(
-                f"provider_egress_allowlist entry {raw!r} must be "
-                "IP-or-CIDR:TCP-port"
-            )
+            raise ValueError(f"provider_egress_allowlist entry {raw!r} must be IP-or-CIDR:TCP-port")
         if ":" in host:
             raise ValueError(
                 f"provider_egress_allowlist entry {raw!r} uses IPv6; wrap IPv6 "
@@ -1204,8 +1194,7 @@ def _parse_provider_egress_target(raw: str) -> ProviderEgressRule:
         ) from exc
     if port < 1 or port > 65535:
         raise ValueError(
-            f"provider_egress_allowlist entry {raw!r} has invalid TCP port "
-            f"{port}; expected 1-65535"
+            f"provider_egress_allowlist entry {raw!r} has invalid TCP port {port}; expected 1-65535"
         )
 
     try:
@@ -1235,10 +1224,7 @@ def _parse_provider_egress_target(raw: str) -> ProviderEgressRule:
 
 
 def _provider_egress_rules(config: ClusterConfig) -> list[dict[str, int | str]]:
-    rules = {
-        _parse_provider_egress_target(target)
-        for target in config.provider_egress_allowlist
-    }
+    rules = {_parse_provider_egress_target(target) for target in config.provider_egress_allowlist}
     return [
         {"cidr": rule.cidr, "port": rule.port}
         for rule in sorted(
@@ -1475,7 +1461,9 @@ def _release_manifest(args: argparse.Namespace) -> int:
 
         if args.expected_image_identities_json:
             expected_image_identities = json.loads(
-                Path(args.expected_image_identities_json).resolve().read_text(
+                Path(args.expected_image_identities_json)
+                .resolve()
+                .read_text(
                     encoding="utf-8",
                 )
             )
@@ -1492,8 +1480,7 @@ def _release_manifest(args: argparse.Namespace) -> int:
             image_tag=args.image_tag,
             git_sha=args.git_sha,
             environment_state_path=(
-                Path(args.environment_state_file).resolve()
-                if args.environment_state_file else None
+                Path(args.environment_state_file).resolve() if args.environment_state_file else None
             ),
             env_config_version=args.env_config_version,
             generated_at=args.generated_at,
@@ -1616,8 +1603,12 @@ def _release_gate(args: argparse.Namespace) -> int:
         else:
             cluster_config_sha256 = manifest.get("cluster_config", {}).get("sha256")
         if args.rendered_manifest:
-            rendered_manifest_text = Path(args.rendered_manifest).resolve().read_text(
-                encoding="utf-8",
+            rendered_manifest_text = (
+                Path(args.rendered_manifest)
+                .resolve()
+                .read_text(
+                    encoding="utf-8",
+                )
             )
             rendered_manifest_sha256 = hashlib.sha256(
                 rendered_manifest_text.encode("utf-8"),
@@ -1708,9 +1699,7 @@ def _release_gate(args: argparse.Namespace) -> int:
         rendered_manifest_sha256=(
             str(rendered_manifest_sha256) if rendered_manifest_sha256 else None
         ),
-        cluster_config_sha256=(
-            str(cluster_config_sha256) if cluster_config_sha256 else None
-        ),
+        cluster_config_sha256=(str(cluster_config_sha256) if cluster_config_sha256 else None),
         live_alembic_heads=live_alembic_heads,
         database_target=database_target,
         live_alembic_error=live_alembic_error,
@@ -1844,11 +1833,15 @@ def _rollout_evidence_cluster_status(args: argparse.Namespace) -> int:
         return 2
 
     if diagnostics:
-        sys.stderr.write(render_rollout_evidence_json({
-            "schema_version": 1,
-            "ok": True,
-            "diagnostics": diagnostics,
-        }))
+        sys.stderr.write(
+            render_rollout_evidence_json(
+                {
+                    "schema_version": 1,
+                    "ok": True,
+                    "diagnostics": diagnostics,
+                }
+            )
+        )
     try:
         apps_v1, net_v1, core_v1, _storage_v1 = _load_clients(args.context)
         status = collect_status(
@@ -2127,11 +2120,7 @@ def _pv_claim_ref(pv: Any) -> tuple[str, str]:
 
 
 def _storage_class_map(storage_classes: list[Any]) -> dict[str, Any]:
-    return {
-        _object_metadata_name(sc): sc
-        for sc in storage_classes
-        if _object_metadata_name(sc)
-    }
+    return {_object_metadata_name(sc): sc for sc in storage_classes if _object_metadata_name(sc)}
 
 
 def _storage_class_provisioner(
@@ -2175,9 +2164,7 @@ def _check_existing_critical_pvc_storage(
         return None
 
     pvs = {
-        _object_metadata_name(pv): pv
-        for pv in (pv_result.items or [])
-        if _object_metadata_name(pv)
+        _object_metadata_name(pv): pv for pv in (pv_result.items or []) if _object_metadata_name(pv)
     }
     storage_classes_by_name = _storage_class_map(storage_classes)
     problems: list[str] = []
@@ -2203,24 +2190,17 @@ def _check_existing_critical_pvc_storage(
             continue
 
         pv_spec = getattr(pv, "spec", None)
-        reclaim_policy = str(
-            getattr(pv_spec, "persistent_volume_reclaim_policy", "") or ""
-        )
+        reclaim_policy = str(getattr(pv_spec, "persistent_volume_reclaim_policy", "") or "")
         if reclaim_policy != "Retain":
             problems.append(
-                f"{pvc_name}->{volume_name} reclaimPolicy="
-                f"{reclaim_policy or '<unset>'}"
+                f"{pvc_name}->{volume_name} reclaimPolicy={reclaim_policy or '<unset>'}"
             )
 
         claim_namespace, claim_name = _pv_claim_ref(pv)
         if claim_namespace and claim_namespace != namespace:
-            problems.append(
-                f"{pvc_name}->{volume_name} claimRef namespace={claim_namespace}"
-            )
+            problems.append(f"{pvc_name}->{volume_name} claimRef namespace={claim_namespace}")
         if claim_name and claim_name != pvc_name:
-            problems.append(
-                f"{pvc_name}->{volume_name} claimRef name={claim_name}"
-            )
+            problems.append(f"{pvc_name}->{volume_name} claimRef name={claim_name}")
 
         storage_class_name = str(
             getattr(pv_spec, "storage_class_name", "")
@@ -2234,27 +2214,17 @@ def _check_existing_critical_pvc_storage(
         host_path = _pv_host_path(pv)
         local_path = _pv_local_path(pv)
         if "local-path" in provisioner:
-            problems.append(
-                f"{pvc_name}->{volume_name} provisioner={provisioner}"
-            )
+            problems.append(f"{pvc_name}->{volume_name} provisioner={provisioner}")
         if local_path:
             if "local-path-provisioner" in local_path:
-                problems.append(
-                    f"{pvc_name}->{volume_name} localPath={local_path}"
-                )
+                problems.append(f"{pvc_name}->{volume_name} localPath={local_path}")
             else:
-                problems.append(
-                    f"{pvc_name}->{volume_name} uses local volume path={local_path}"
-                )
+                problems.append(f"{pvc_name}->{volume_name} uses local volume path={local_path}")
         if host_path and not host_path.startswith("/data/"):
-            problems.append(
-                f"{pvc_name}->{volume_name} hostPath={host_path} "
-                "is outside /data"
-            )
+            problems.append(f"{pvc_name}->{volume_name} hostPath={host_path} is outside /data")
         if not host_path and not local_path and not storage_class_name:
             problems.append(
-                f"{pvc_name}->{volume_name} has no hostPath, local volume, "
-                "or StorageClass to audit"
+                f"{pvc_name}->{volume_name} has no hostPath, local volume, or StorageClass to audit"
             )
         if not problems or not any(pvc_name in problem for problem in problems):
             ok_bindings.append(f"{pvc_name}->{volume_name}")
@@ -2477,10 +2447,7 @@ def _check_protected_storage_boundary(
         return PreflightCheck(
             name="protected-storage-boundary",
             outcome="fail",
-            detail=(
-                f"protected environment {environment!r} has no default "
-                "StorageClass to audit"
-            ),
+            detail=(f"protected environment {environment!r} has no default StorageClass to audit"),
         )
     unsafe: list[str] = []
     for sc in default_classes:
@@ -2704,21 +2671,24 @@ def _append_schema_doctor_check(
     doctor_report: DoctorReport,
 ) -> None:
     if doctor_report.ok:
-        report.checks.append(PreflightCheck(
-            name="schema-doctor",
-            outcome="pass",
-            detail="schema reconciliation clean",
-        ))
+        report.checks.append(
+            PreflightCheck(
+                name="schema-doctor",
+                outcome="pass",
+                detail="schema reconciliation clean",
+            )
+        )
         return
-    report.checks.append(PreflightCheck(
-        name="schema-doctor",
-        outcome="fail",
-        detail=f"{len(doctor_report.violations)} schema violation(s)",
-        remediation="\n".join(
-            f"  - {v.kind}: {v.entry}: {v.detail}"
-            for v in doctor_report.violations
-        ),
-    ))
+    report.checks.append(
+        PreflightCheck(
+            name="schema-doctor",
+            outcome="fail",
+            detail=f"{len(doctor_report.violations)} schema violation(s)",
+            remediation="\n".join(
+                f"  - {v.kind}: {v.entry}: {v.detail}" for v in doctor_report.violations
+            ),
+        )
+    )
 
 
 def _append_target_schema_doctor_check(
@@ -2739,11 +2709,13 @@ def _append_target_schema_doctor_check(
             rendered_manifests=manifests,
         )
     except Exception as exc:
-        report.checks.append(PreflightCheck(
-            name="schema-doctor",
-            outcome="warn",
-            detail=f"doctor could not run: {type(exc).__name__}: {exc}",
-        ))
+        report.checks.append(
+            PreflightCheck(
+                name="schema-doctor",
+                outcome="warn",
+                detail=f"doctor could not run: {type(exc).__name__}: {exc}",
+            )
+        )
     else:
         _append_schema_doctor_check(report, doctor_report)
 
@@ -2776,8 +2748,7 @@ def _preflight(args: argparse.Namespace) -> int:
             context=effective_context,
             environment=args.environment,
             backup_manifest=(
-                Path(args.backup_manifest).resolve()
-                if args.backup_manifest else None
+                Path(args.backup_manifest).resolve() if args.backup_manifest else None
             ),
             backup_max_age_hours=args.backup_max_age_hours,
             cluster_config=cluster_config,
@@ -2900,9 +2871,8 @@ def _doctor_check_storage_lifecycle(
     )
 
     auth_kind = os.environ.get("LOOM_SVC_STORAGE_AUTH_KIND", "static_keys")
-    endpoint = (
-        getattr(args, "storage_lifecycle_endpoint", None)
-        or os.environ.get("LOOM_SVC_MINIO_ENDPOINT", "http://loom-minio:9000")
+    endpoint = getattr(args, "storage_lifecycle_endpoint", None) or os.environ.get(
+        "LOOM_SVC_MINIO_ENDPOINT", "http://loom-minio:9000"
     )
     region = os.environ.get("LOOM_SVC_MINIO_REGION", "us-east-1")
     access_key = os.environ.get(
@@ -2930,8 +2900,7 @@ def _doctor_check_storage_lifecycle(
         drifts = check_lifecycle_drift(s3, cfg)
     except Exception as exc:
         sys.stderr.write(
-            f"  [fail] storage_lifecycle: cannot reach object store: "
-            f"{type(exc).__name__}: {exc}\n",
+            f"  [fail] storage_lifecycle: cannot reach object store: {type(exc).__name__}: {exc}\n",
         )
         return False
 
@@ -3162,7 +3131,8 @@ def _up(args: argparse.Namespace) -> int:
             "cluster",
             "up",
             "--environment",
-            args.environment or infer_environment(
+            args.environment
+            or infer_environment(
                 environment=args.environment,
                 namespace=args.namespace,
             ),
@@ -3231,8 +3201,7 @@ def _up_impl(args: argparse.Namespace) -> int:
                 context=effective_context,
                 environment=args.environment,
                 backup_manifest=(
-                    Path(args.backup_manifest).resolve()
-                    if args.backup_manifest else None
+                    Path(args.backup_manifest).resolve() if args.backup_manifest else None
                 ),
                 backup_max_age_hours=args.backup_max_age_hours,
                 cluster_config=config,
@@ -3340,8 +3309,7 @@ def _up_impl(args: argparse.Namespace) -> int:
             )
         except Exception as exc:
             sys.stderr.write(
-                "error: sandbox deadline recovery failed: "
-                f"{type(exc).__name__}: {exc}\n",
+                f"error: sandbox deadline recovery failed: {type(exc).__name__}: {exc}\n",
             )
             return 1
         if recovered_pods:
@@ -3542,10 +3510,7 @@ def _guard_protected_destructive_down(args: argparse.Namespace) -> int | None:
         environment=args.environment,
         namespace=args.namespace,
     )
-    manifest = (
-        Path(args.backup_manifest).resolve()
-        if args.backup_manifest else None
-    )
+    manifest = Path(args.backup_manifest).resolve() if args.backup_manifest else None
     problems = validate_backup_manifest(
         manifest,
         environment=environment,
@@ -3743,25 +3708,17 @@ def _load_images(args: argparse.Namespace) -> int:
     if args.check_only:
         if result.missing:
             sys.stderr.write(
-                "error: kind cluster is missing images that a rollout "
-                "would require:\n"
+                "error: kind cluster is missing images that a rollout would require:\n"
             )
             for image in result.missing:
                 sys.stderr.write(f"  - {image}\n")
-            fix_cmd = (
-                f"  loom cluster load-images --cluster-name "
-                f"{args.cluster_name} " + " ".join(
-                    f"--image {img}" for img in result.missing
-                )
+            fix_cmd = f"  loom cluster load-images --cluster-name {args.cluster_name} " + " ".join(
+                f"--image {img}" for img in result.missing
             )
-            sys.stderr.write(
-                "\nTo fix, load them into the kind node cache:\n"
-                f"{fix_cmd}\n"
-            )
+            sys.stderr.write(f"\nTo fix, load them into the kind node cache:\n{fix_cmd}\n")
             return 1
         sys.stdout.write(
-            f"all {len(images)} image(s) present in kind cluster "
-            f"'{args.cluster_name}'\n"
+            f"all {len(images)} image(s) present in kind cluster '{args.cluster_name}'\n"
         )
         return 0
 
@@ -3794,9 +3751,7 @@ def _bootstrap_evidence_paths(args: argparse.Namespace) -> int:
 
     operator_user = args.operator_user or os.environ.get("USER")
     if not operator_user:
-        sys.stderr.write(
-            "error: --operator-user not supplied and $USER unset\n"
-        )
+        sys.stderr.write("error: --operator-user not supplied and $USER unset\n")
         return 2
 
     if args.evidence_paths is None:
@@ -3827,13 +3782,16 @@ def _bootstrap_evidence_paths(args: argparse.Namespace) -> int:
 
 def _bootstrap_secrets(args: argparse.Namespace) -> int:
     from loom_config.bootstrap import render_bootstrap_command
+
     schema = _load_schema(_REPO_ROOT / "config" / "loom-schema.toml")
-    print(render_bootstrap_command(
-        schema,
-        namespace=args.namespace,
-        smoke_defaults=args.smoke_defaults,
-        rotate=args.rotate,
-    ))
+    print(
+        render_bootstrap_command(
+            schema,
+            namespace=args.namespace,
+            smoke_defaults=args.smoke_defaults,
+            rotate=args.rotate,
+        )
+    )
     return 0
 
 
@@ -3873,11 +3831,11 @@ def _bootstrap_storage_lifecycle(args: argparse.Namespace) -> int:
         rendered: dict[str, Any] = {}
         for bucket in sorted({r.bucket for r in cfg.rules}):
             from loom.storage_retention import render_bucket_lifecycle
+
             rb = render_bucket_lifecycle(cfg, bucket=bucket)
             if rb["Rules"]:
                 rendered[bucket] = rb
-        json.dump({"backend": cfg.backend, "lifecycle": rendered},
-                  sys.stdout, indent=2)
+        json.dump({"backend": cfg.backend, "lifecycle": rendered}, sys.stdout, indent=2)
         sys.stdout.write("\n")
         return 0
 
@@ -3905,7 +3863,8 @@ def _bootstrap_storage_lifecycle(args: argparse.Namespace) -> int:
 
     auth_kind = os.environ.get("LOOM_SVC_STORAGE_AUTH_KIND", "static_keys")
     endpoint = args.endpoint or os.environ.get(
-        "LOOM_SVC_MINIO_ENDPOINT", "http://loom-minio:9000",
+        "LOOM_SVC_MINIO_ENDPOINT",
+        "http://loom-minio:9000",
     )
     region = os.environ.get("LOOM_SVC_MINIO_REGION", "us-east-1")
     access_key = os.environ.get(
@@ -4079,7 +4038,7 @@ def dispatch(argv: list[str]) -> int:
         default=None,
         help=(
             "Logical environment name. Protected environments "
-            "(staging/staging/production) get storage and backup "
+            "(staging/production) get storage and backup "
             "guard checks. If omitted, inferred from namespace when possible."
         ),
     )
@@ -4127,10 +4086,7 @@ def dispatch(argv: list[str]) -> int:
 
     p_backup = sub.add_parser(
         "backup",
-        help=(
-            "Create or verify metadata manifests for protected "
-            "staging/staging backups."
-        ),
+        help=("Create or verify metadata manifests for protected staging backups."),
     )
     backup_sub = p_backup.add_subparsers(dest="backup_cmd", required=True)
     p_backup_manifest = backup_sub.add_parser(
@@ -4293,7 +4249,7 @@ def dispatch(argv: list[str]) -> int:
         default=None,
         help=(
             "Logical environment name. Protected environments "
-            "(staging/staging/production) require a recent backup "
+            "(staging/production) require a recent backup "
             "manifest and acknowledgement before --with-volumes or "
             "--delete-namespace."
         ),
@@ -4390,10 +4346,7 @@ def dispatch(argv: list[str]) -> int:
 
     p_release_manifest = sub.add_parser(
         "release-manifest",
-        help=(
-            "Render a safe release manifest artifact before applying a "
-            "protected rollout."
-        ),
+        help=("Render a safe release manifest artifact before applying a protected rollout."),
     )
     p_release_manifest.add_argument(
         "--config",
@@ -4403,7 +4356,7 @@ def dispatch(argv: list[str]) -> int:
     p_release_manifest.add_argument(
         "--environment",
         required=True,
-        help="Logical rollout environment, for example staging or staging.",
+        help="Logical rollout environment, for example staging.",
     )
     p_release_manifest.add_argument(
         "--image-tag",
@@ -4455,7 +4408,7 @@ def dispatch(argv: list[str]) -> int:
         "minio-storage-preflight",
         help=(
             "Record MinIO /data filesystem, bucket usage, thresholds, and "
-            "headroom before a large public-beta run."
+            "headroom before a large staging run."
         ),
     )
     p_minio_storage.add_argument(
@@ -4537,10 +4490,7 @@ def dispatch(argv: list[str]) -> int:
 
     p_release_gate = sub.add_parser(
         "release-gate",
-        help=(
-            "Compare a release manifest against live cluster image, render, "
-            "and Alembic state."
-        ),
+        help=("Compare a release manifest against live cluster image, render, and Alembic state."),
     )
     p_release_gate.add_argument(
         "--manifest",
@@ -4720,17 +4670,12 @@ def dispatch(argv: list[str]) -> int:
     p_evidence.add_argument(
         "--rollout-root",
         required=True,
-        help=(
-            "Absolute path to the environment data root (e.g. "
-            "/data/loom-staging)."
-        ),
+        help=("Absolute path to the environment data root (e.g. /data/loom-staging)."),
     )
     p_evidence.add_argument(
         "--operator-user",
         default=None,
-        help=(
-            "POSIX username to own the created dirs. Defaults to $USER."
-        ),
+        help=("POSIX username to own the created dirs. Defaults to $USER."),
     )
     p_evidence.add_argument(
         "--evidence-paths",
@@ -4801,8 +4746,7 @@ def dispatch(argv: list[str]) -> int:
         "--image-tag",
         required=True,
         help=(
-            "Release image tag. The Job runs "
-            "loom-control-plane:<image-tag> alembic upgrade head."
+            "Release image tag. The Job runs loom-control-plane:<image-tag> alembic upgrade head."
         ),
     )
     p_render_migration.add_argument(
@@ -4833,6 +4777,7 @@ def dispatch(argv: list[str]) -> int:
     )
     from loom_cli.rollout.cli import build_parser as _rollout_build_parser
     from loom_cli.rollout.cli import handle as _rollout_handle
+
     _rollout_build_parser(p_rollout)
     p_rollout.set_defaults(handler=_rollout_handle)
 

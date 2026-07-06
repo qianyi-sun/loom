@@ -74,19 +74,19 @@ def test_build_plan_detects_source_git_commit_drift() -> None:
     desired = DesiredState(
         environment="production",
         pool_name="gb10-arm64",
-        image_tag="public-beta-53897aa",
+        image_tag="staging-53897aa",
         max_concurrent=10,
-        env_config_version="public-beta-53897aa",
+        env_config_version="staging-53897aa",
         source_git_commit="53897aa3d6917dfe0800b6291012ab512bbfc6df",
         rollout_policy={"mode": "all"},
         env={},
     )
     local = LocalWorkerState(
         hostname="trt-gb10-1",
-        image_tag="public-beta-53897aa",
+        image_tag="staging-53897aa",
         pool_name="gb10-arm64",
         max_concurrent=10,
-        env_config_version="public-beta-53897aa",
+        env_config_version="staging-53897aa",
         source_git_commit="7b61049ffffffffff00000000000000000000000",
         source_git_dirty=False,
     )
@@ -96,31 +96,27 @@ def test_build_plan_detects_source_git_commit_drift() -> None:
     assert plan.needs_apply is True
     assert plan.blocked_reason is None
     assert plan.changes == ["source_git_commit"]
-    assert plan.desired["source_git_commit"] == (
-        "53897aa3d6917dfe0800b6291012ab512bbfc6df"
-    )
-    assert plan.current["source_git_commit"] == (
-        "7b61049ffffffffff00000000000000000000000"
-    )
+    assert plan.desired["source_git_commit"] == ("53897aa3d6917dfe0800b6291012ab512bbfc6df")
+    assert plan.current["source_git_commit"] == ("7b61049ffffffffff00000000000000000000000")
 
 
 def test_build_plan_detects_dirty_source_checkout() -> None:
     desired = DesiredState(
         environment="production",
         pool_name="gb10-arm64",
-        image_tag="public-beta-53897aa",
+        image_tag="staging-53897aa",
         max_concurrent=10,
-        env_config_version="public-beta-53897aa",
+        env_config_version="staging-53897aa",
         source_git_commit="53897aa3d6917dfe0800b6291012ab512bbfc6df",
         rollout_policy={"mode": "all"},
         env={},
     )
     local = LocalWorkerState(
         hostname="trt-gb10-1",
-        image_tag="public-beta-53897aa",
+        image_tag="staging-53897aa",
         pool_name="gb10-arm64",
         max_concurrent=10,
-        env_config_version="public-beta-53897aa",
+        env_config_version="staging-53897aa",
         source_git_commit="53897aa3d6917dfe0800b6291012ab512bbfc6df",
         source_git_dirty=True,
     )
@@ -238,8 +234,7 @@ def test_report_node_includes_compose_source_git_provenance(
     )
 
     assert captured["url"] == (
-        "http://cp:8080/admin/gb10-worker-pools/production/"
-        "gb10-arm64/nodes/trt-gb10-1/report"
+        "http://cp:8080/admin/gb10-worker-pools/production/gb10-arm64/nodes/trt-gb10-1/report"
     )
     body = captured["json"]
     assert isinstance(body, dict)
@@ -251,9 +246,7 @@ def test_report_node_includes_compose_source_git_provenance(
 def test_render_env_updates_preserves_comments_and_appends_missing_keys(tmp_path: Path) -> None:
     env_file = tmp_path / "remote-worker.env"
     env_file.write_text(
-        "# operator note\n"
-        "LOOM_IMAGE_TAG=old-image\n"
-        "LOOM_WORKER_MAX_CONCURRENT=5\n",
+        "# operator note\nLOOM_IMAGE_TAG=old-image\nLOOM_WORKER_MAX_CONCURRENT=5\n",
         encoding="utf-8",
     )
 
@@ -314,21 +307,23 @@ def test_apply_dry_run_uses_every_compose_file(
         lambda argv, *, dry_run: commands.append(list(argv)),
     )
 
-    rc = gb10_agent._apply(SimpleNamespace(
-        cp_url="http://cp:8080",
-        admin_token="env:LOOM_ADMIN_TOKEN",
-        environment="production",
-        pool_name="gb10-arm64",
-        hostname="trt-gb10-1",
-        env_file=env_file,
-        compose_file=[base, hostnet],
-        service="worker",
-        drain_timeout_sec=600,
-        dry_run=True,
-        rollback=False,
-        force=False,
-        format="text",
-    ))
+    rc = gb10_agent._apply(
+        SimpleNamespace(
+            cp_url="http://cp:8080",
+            admin_token="env:LOOM_ADMIN_TOKEN",
+            environment="production",
+            pool_name="gb10-arm64",
+            hostname="trt-gb10-1",
+            env_file=env_file,
+            compose_file=[base, hostnet],
+            service="worker",
+            drain_timeout_sec=600,
+            dry_run=True,
+            rollback=False,
+            force=False,
+            format="text",
+        )
+    )
 
     assert rc == 0
     assert len(commands) == 3
@@ -379,22 +374,24 @@ def test_apply_dry_run_detects_worker_token_drift(
         lambda argv, *, dry_run: commands.append(list(argv)),
     )
 
-    rc = gb10_agent._apply(SimpleNamespace(
-        cp_url="http://cp:8080",
-        admin_token="env:LOOM_ADMIN_TOKEN",
-        worker_token=f"file:{worker_token_file}",
-        environment="production",
-        pool_name="gb10-arm64",
-        hostname="trt-gb10-1",
-        env_file=env_file,
-        compose_file=[compose_file],
-        service="worker",
-        drain_timeout_sec=600,
-        dry_run=True,
-        rollback=False,
-        force=False,
-        format="text",
-    ))
+    rc = gb10_agent._apply(
+        SimpleNamespace(
+            cp_url="http://cp:8080",
+            admin_token="env:LOOM_ADMIN_TOKEN",
+            worker_token=f"file:{worker_token_file}",
+            environment="production",
+            pool_name="gb10-arm64",
+            hostname="trt-gb10-1",
+            env_file=env_file,
+            compose_file=[compose_file],
+            service="worker",
+            drain_timeout_sec=600,
+            dry_run=True,
+            rollback=False,
+            force=False,
+            format="text",
+        )
+    )
 
     assert rc == 0
     assert len(commands) == 3
@@ -410,10 +407,10 @@ def test_apply_updates_source_checkout_before_compose(
 ) -> None:
     env_file = tmp_path / ".env.remote-worker"
     env_file.write_text(
-        "LOOM_IMAGE_TAG=public-beta-old\n"
+        "LOOM_IMAGE_TAG=staging-old\n"
         "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
         "LOOM_WORKER_MAX_CONCURRENT=10\n"
-        "LOOM_WORKER_ENV_CONFIG_VERSION=public-beta-old\n",
+        "LOOM_WORKER_ENV_CONFIG_VERSION=staging-old\n",
         encoding="utf-8",
     )
     source_dir = tmp_path / "loom"
@@ -424,9 +421,9 @@ def test_apply_updates_source_checkout_before_compose(
     desired = DesiredState(
         environment="production",
         pool_name="gb10-arm64",
-        image_tag="public-beta-53897aa",
+        image_tag="staging-53897aa",
         max_concurrent=10,
-        env_config_version="public-beta-53897aa",
+        env_config_version="staging-53897aa",
         source_git_commit="53897aa3d6917dfe0800b6291012ab512bbfc6df",
         rollout_policy={"mode": "all"},
         env={},
@@ -446,23 +443,25 @@ def test_apply_updates_source_checkout_before_compose(
         lambda argv, *, dry_run: commands.append(list(argv)),
     )
 
-    rc = gb10_agent._apply(SimpleNamespace(
-        cp_url="http://cp:8080",
-        admin_token="env:LOOM_ADMIN_TOKEN",
-        environment="production",
-        pool_name="gb10-arm64",
-        hostname="trt-gb10-1",
-        env_file=env_file,
-        compose_file=[compose_file],
-        source_dir=source_dir,
-        worker_token=None,
-        service="worker",
-        drain_timeout_sec=600,
-        dry_run=False,
-        rollback=False,
-        force=False,
-        format="text",
-    ))
+    rc = gb10_agent._apply(
+        SimpleNamespace(
+            cp_url="http://cp:8080",
+            admin_token="env:LOOM_ADMIN_TOKEN",
+            environment="production",
+            pool_name="gb10-arm64",
+            hostname="trt-gb10-1",
+            env_file=env_file,
+            compose_file=[compose_file],
+            source_dir=source_dir,
+            worker_token=None,
+            service="worker",
+            drain_timeout_sec=600,
+            dry_run=False,
+            rollback=False,
+            force=False,
+            format="text",
+        )
+    )
 
     assert rc == 0
     assert commands[:2] == [
@@ -521,21 +520,23 @@ def test_apply_stopped_intent_stops_without_restart(
         lambda argv, *, dry_run: commands.append(list(argv)),
     )
 
-    rc = gb10_agent._apply(SimpleNamespace(
-        cp_url="http://cp:8080",
-        admin_token="env:LOOM_ADMIN_TOKEN",
-        environment="production",
-        pool_name="gb10-arm64",
-        hostname="trt-gb10-1",
-        env_file=env_file,
-        compose_file=[compose_file],
-        service="worker",
-        drain_timeout_sec=600,
-        dry_run=False,
-        rollback=False,
-        force=False,
-        format="text",
-    ))
+    rc = gb10_agent._apply(
+        SimpleNamespace(
+            cp_url="http://cp:8080",
+            admin_token="env:LOOM_ADMIN_TOKEN",
+            environment="production",
+            pool_name="gb10-arm64",
+            hostname="trt-gb10-1",
+            env_file=env_file,
+            compose_file=[compose_file],
+            service="worker",
+            drain_timeout_sec=600,
+            dry_run=False,
+            rollback=False,
+            force=False,
+            format="text",
+        )
+    )
 
     assert rc == 0
     assert [command[-2:] for command in commands] == [["600", "worker"]]
@@ -577,21 +578,23 @@ def test_apply_failure_leaves_env_file_retryable(
 
     monkeypatch.setattr(gb10_agent, "_run", _raise)
 
-    rc = gb10_agent._apply(SimpleNamespace(
-        cp_url="http://cp:8080",
-        admin_token="env:LOOM_ADMIN_TOKEN",
-        environment="production",
-        pool_name="gb10-arm64",
-        hostname="trt-gb10-1",
-        env_file=env_file,
-        compose_file=[compose_file],
-        service="worker",
-        drain_timeout_sec=600,
-        dry_run=False,
-        rollback=False,
-        force=False,
-        format="text",
-    ))
+    rc = gb10_agent._apply(
+        SimpleNamespace(
+            cp_url="http://cp:8080",
+            admin_token="env:LOOM_ADMIN_TOKEN",
+            environment="production",
+            pool_name="gb10-arm64",
+            hostname="trt-gb10-1",
+            env_file=env_file,
+            compose_file=[compose_file],
+            service="worker",
+            drain_timeout_sec=600,
+            dry_run=False,
+            rollback=False,
+            force=False,
+            format="text",
+        )
+    )
 
     assert rc == 1
     assert "LOOM_IMAGE_TAG=old-image" in env_file.read_text(encoding="utf-8")
@@ -643,21 +646,23 @@ def test_apply_builds_local_worker_image_when_registry_pull_fails(
 
     monkeypatch.setattr(gb10_agent, "_run", _run)
 
-    rc = gb10_agent._apply(SimpleNamespace(
-        cp_url="http://cp:8080",
-        admin_token="env:LOOM_ADMIN_TOKEN",
-        environment="production",
-        pool_name="gb10-arm64",
-        hostname="trt-gb10-1",
-        env_file=env_file,
-        compose_file=[compose_file],
-        service="worker",
-        drain_timeout_sec=600,
-        dry_run=False,
-        rollback=False,
-        force=False,
-        format="text",
-    ))
+    rc = gb10_agent._apply(
+        SimpleNamespace(
+            cp_url="http://cp:8080",
+            admin_token="env:LOOM_ADMIN_TOKEN",
+            environment="production",
+            pool_name="gb10-arm64",
+            hostname="trt-gb10-1",
+            env_file=env_file,
+            compose_file=[compose_file],
+            service="worker",
+            drain_timeout_sec=600,
+            dry_run=False,
+            rollback=False,
+            force=False,
+            format="text",
+        )
+    )
 
     assert rc == 0
     assert [command[-2:] for command in commands] == [
@@ -719,26 +724,27 @@ def test_rollback_apply_publishes_previous_state_to_control_plane(
     monkeypatch.setattr(gb10_agent, "_report_node", lambda *args, **kwargs: None)
     monkeypatch.setattr(gb10_agent, "_run", lambda argv, *, dry_run: None)
 
-    rc = gb10_agent._apply(SimpleNamespace(
-        cp_url="http://cp:8080",
-        admin_token="env:LOOM_ADMIN_TOKEN",
-        environment="production",
-        pool_name="gb10-arm64",
-        hostname="trt-gb10-1",
-        env_file=env_file,
-        compose_file=[compose_file],
-        service="worker",
-        drain_timeout_sec=600,
-        dry_run=False,
-        rollback=True,
-        force=True,
-        format="text",
-    ))
+    rc = gb10_agent._apply(
+        SimpleNamespace(
+            cp_url="http://cp:8080",
+            admin_token="env:LOOM_ADMIN_TOKEN",
+            environment="production",
+            pool_name="gb10-arm64",
+            hostname="trt-gb10-1",
+            env_file=env_file,
+            compose_file=[compose_file],
+            service="worker",
+            drain_timeout_sec=600,
+            dry_run=False,
+            rollback=True,
+            force=True,
+            format="text",
+        )
+    )
 
     assert rc == 0
     assert captured["url"] == (
-        "http://cp:8080/admin/gb10-worker-pools/production/"
-        "gb10-arm64/desired-state"
+        "http://cp:8080/admin/gb10-worker-pools/production/gb10-arm64/desired-state"
     )
     assert captured["json"] == {
         "image_tag": "good-image",

@@ -216,9 +216,9 @@ uv run python scripts/staging_smoke_gate.py \
   --server-url "$PUBLIC_URL" \
   --team-a-token env:TEAM_A_TOKEN \
   --team-b-token env:TEAM_B_TOKEN \
-  --catalog-minio-endpoint "$PUBLIC_BETA_MINIO_ENDPOINT" \
-  --catalog-minio-access-key env:PUBLIC_BETA_MINIO_ACCESS_KEY \
-  --catalog-minio-secret-key env:PUBLIC_BETA_MINIO_SECRET_KEY \
+  --catalog-minio-endpoint "$STAGING_MINIO_ENDPOINT" \
+  --catalog-minio-access-key env:STAGING_MINIO_ACCESS_KEY \
+  --catalog-minio-secret-key env:STAGING_MINIO_SECRET_KEY \
   --object-store-write-check-only \
   --object-store-write-check-bucket trajectories \
   --object-store-write-check-count 64 \
@@ -438,9 +438,9 @@ uv run python scripts/staging_smoke_gate.py \
   --provider-model-provider "$PROVIDER_MODEL_PROVIDER" \
   --provider-model-name "$PROVIDER_MODEL_NAME" \
   --batch-id "$CANARY_BATCH_ID" \
-  --catalog-minio-endpoint "$PUBLIC_BETA_MINIO_ENDPOINT" \
-  --catalog-minio-access-key env:PUBLIC_BETA_MINIO_ACCESS_KEY \
-  --catalog-minio-secret-key env:PUBLIC_BETA_MINIO_SECRET_KEY \
+  --catalog-minio-endpoint "$STAGING_MINIO_ENDPOINT" \
+  --catalog-minio-access-key env:STAGING_MINIO_ACCESS_KEY \
+  --catalog-minio-secret-key env:STAGING_MINIO_SECRET_KEY \
   --object-store-write-check \
   --object-store-write-check-bucket trajectories \
   --object-store-write-check-count 64 \
@@ -448,7 +448,7 @@ uv run python scripts/staging_smoke_gate.py \
   --k8s-namespace "$K8S_NAMESPACE" \
   --required-worker-pool oldlab \
   --required-worker-pool gb10-arm64 \
-  --secret-needle env:PUBLIC_BETA_SECRET_NEEDLE \
+  --secret-needle env:STAGING_SECRET_NEEDLE \
   --internal-url-needle loom-minio.loom.svc.cluster.local \
   --fail-on-skip \
   --markdown-output "$CANARY_DIR/06-terminal/staging-smoke.md" \

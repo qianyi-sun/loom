@@ -189,7 +189,7 @@ def _catalog_manifest_section() -> dict[str, Any]:
         "command": (
             "loom datasets provision-catalog && "
             "loom datasets register skilllearnbench --hf-org PRHW "
-            "--revision \"$PUBLISHED_SHA\" --mirror-to-object-store "
+            '--revision "$PUBLISHED_SHA" --mirror-to-object-store '
             "--bucket loom-benchmarks && "
             "loom datasets audit --all --verify-bundles"
         ),
@@ -243,20 +243,24 @@ def _hf_boundary_evidence(**overrides: Any) -> dict[str, Any]:
 
 def test_release_gate_passes_when_ready_pod_image_id_matches_expected_digest() -> None:
     manifest = _manifest(expected_digest="sha256:" + "1" * 64)
-    apps = _FakeAppsV1({
-        "loom-service": _deployment(
-            name="loom-service",
-            image="loom-service:staging-abc123",
-        ),
-    })
-    core = _FakeCoreV1([
-        _ready_pod(
-            name="loom-service-abc",
-            app="loom-service",
-            image="loom-service:staging-abc123",
-            image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
-        ),
-    ])
+    apps = _FakeAppsV1(
+        {
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+            ),
+        }
+    )
+    core = _FakeCoreV1(
+        [
+            _ready_pod(
+                name="loom-service-abc",
+                app="loom-service",
+                image="loom-service:staging-abc123",
+                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+            ),
+        ]
+    )
 
     report = collect_release_gate_report(
         manifest=manifest,
@@ -270,8 +274,7 @@ def test_release_gate_passes_when_ready_pod_image_id_matches_expected_digest() -
 
     assert report.all_pass
     image_check = next(
-        check for check in report.checks
-        if check.name == "image-identity:loom-service/app"
+        check for check in report.checks if check.name == "image-identity:loom-service/app"
     )
     assert image_check.outcome == "pass"
     assert image_check.evidence["pod"] == "loom-service-abc"
@@ -280,20 +283,24 @@ def test_release_gate_passes_when_ready_pod_image_id_matches_expected_digest() -
 
 def test_release_gate_fails_when_ready_pod_image_id_does_not_match_manifest() -> None:
     manifest = _manifest(expected_digest="sha256:" + "1" * 64)
-    apps = _FakeAppsV1({
-        "loom-service": _deployment(
-            name="loom-service",
-            image="loom-service:staging-abc123",
-        ),
-    })
-    core = _FakeCoreV1([
-        _ready_pod(
-            name="loom-service-abc",
-            app="loom-service",
-            image="loom-service:staging-abc123",
-            image_id="docker-pullable://loom-service@sha256:" + "9" * 64,
-        ),
-    ])
+    apps = _FakeAppsV1(
+        {
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+            ),
+        }
+    )
+    core = _FakeCoreV1(
+        [
+            _ready_pod(
+                name="loom-service-abc",
+                app="loom-service",
+                image="loom-service:staging-abc123",
+                image_id="docker-pullable://loom-service@sha256:" + "9" * 64,
+            ),
+        ]
+    )
 
     report = collect_release_gate_report(
         manifest=manifest,
@@ -307,8 +314,7 @@ def test_release_gate_fails_when_ready_pod_image_id_does_not_match_manifest() ->
 
     assert not report.all_pass
     check = next(
-        check for check in report.checks
-        if check.name == "image-identity:loom-service/app"
+        check for check in report.checks if check.name == "image-identity:loom-service/app"
     )
     assert check.outcome == "fail"
     assert check.evidence["expected_digest"] == "sha256:" + "1" * 64
@@ -320,20 +326,24 @@ def test_release_gate_fails_when_ready_pod_image_id_does_not_match_manifest() ->
 
 def test_release_gate_accepts_kind_import_runtime_identity_when_template_matches() -> None:
     manifest = _manifest(expected_digest="sha256:" + "1" * 64)
-    apps = _FakeAppsV1({
-        "loom-service": _deployment(
-            name="loom-service",
-            image="loom-service:staging-abc123",
-        ),
-    })
-    core = _FakeCoreV1([
-        _ready_pod(
-            name="loom-service-kind",
-            app="loom-service",
-            image="loom-service:staging-abc123",
-            image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
-        ),
-    ])
+    apps = _FakeAppsV1(
+        {
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+            ),
+        }
+    )
+    core = _FakeCoreV1(
+        [
+            _ready_pod(
+                name="loom-service-kind",
+                app="loom-service",
+                image="loom-service:staging-abc123",
+                image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
+            ),
+        ]
+    )
 
     report = collect_release_gate_report(
         manifest=manifest,
@@ -347,11 +357,12 @@ def test_release_gate_accepts_kind_import_runtime_identity_when_template_matches
 
     assert report.all_pass
     check = next(
-        check for check in report.checks
-        if check.name == "image-identity:loom-service/app"
+        check for check in report.checks if check.name == "image-identity:loom-service/app"
     )
     assert check.outcome == "pass"
-    assert check.detail == "Ready pod uses kind-imported runtime identity for release template image"
+    assert (
+        check.detail == "Ready pod uses kind-imported runtime identity for release template image"
+    )
     assert check.evidence["identity_strategy"] == "kind-import-template-image"
     assert check.evidence["runtime_identity_kind"] == "kind-import"
     assert check.evidence["runtime_identity_mismatch"] is True
@@ -366,21 +377,25 @@ def test_release_gate_rejects_stale_status_image_on_kind_import_pod() -> None:
     before treating a kind-import runtime identity as acceptable.
     """
     manifest = _manifest(expected_digest="sha256:" + "1" * 64)
-    apps = _FakeAppsV1({
-        "loom-service": _deployment(
-            name="loom-service",
-            image="loom-service:staging-abc123",
-        ),
-    })
-    core = _FakeCoreV1([
-        _ready_pod(
-            name="loom-service-kind",
-            app="loom-service",
-            image="loom-service:staging-old",
-            status_image="loom-service:staging-old",
-            image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
-        ),
-    ])
+    apps = _FakeAppsV1(
+        {
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+            ),
+        }
+    )
+    core = _FakeCoreV1(
+        [
+            _ready_pod(
+                name="loom-service-kind",
+                app="loom-service",
+                image="loom-service:staging-old",
+                status_image="loom-service:staging-old",
+                image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
+            ),
+        ]
+    )
 
     report = collect_release_gate_report(
         manifest=manifest,
@@ -394,8 +409,7 @@ def test_release_gate_rejects_stale_status_image_on_kind_import_pod() -> None:
 
     assert not report.all_pass
     check = next(
-        check for check in report.checks
-        if check.name == "image-identity:loom-service/app"
+        check for check in report.checks if check.name == "image-identity:loom-service/app"
     )
     assert check.outcome == "fail"
     assert check.detail == "no target-generation Ready pods found for managed Deployment"
@@ -412,21 +426,25 @@ def test_release_gate_accepts_kind_import_status_image_alias_on_target_pod() -> 
     status.containerStatuses[].image tag can be a containerd display alias.
     """
     manifest = _manifest(expected_digest="sha256:" + "1" * 64)
-    apps = _FakeAppsV1({
-        "loom-service": _deployment(
-            name="loom-service",
-            image="loom-service:staging-abc123",
-        ),
-    })
-    core = _FakeCoreV1([
-        _ready_pod(
-            name="loom-service-kind",
-            app="loom-service",
-            image="loom-service:staging-abc123",
-            status_image="docker.io/library/loom-service:staging-old",
-            image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
-        ),
-    ])
+    apps = _FakeAppsV1(
+        {
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+            ),
+        }
+    )
+    core = _FakeCoreV1(
+        [
+            _ready_pod(
+                name="loom-service-kind",
+                app="loom-service",
+                image="loom-service:staging-abc123",
+                status_image="docker.io/library/loom-service:staging-old",
+                image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
+            ),
+        ]
+    )
 
     report = collect_release_gate_report(
         manifest=manifest,
@@ -440,8 +458,7 @@ def test_release_gate_accepts_kind_import_status_image_alias_on_target_pod() -> 
 
     assert report.all_pass
     check = next(
-        check for check in report.checks
-        if check.name == "image-identity:loom-service/app"
+        check for check in report.checks if check.name == "image-identity:loom-service/app"
     )
     assert check.outcome == "pass"
     assert check.evidence["identity_strategy"] == "kind-import-template-image"
@@ -452,21 +469,25 @@ def test_release_gate_accepts_kind_import_status_image_alias_on_target_pod() -> 
 
 def test_release_gate_does_not_mark_default_docker_prefix_status_image_stale() -> None:
     manifest = _manifest(expected_digest="sha256:" + "1" * 64)
-    apps = _FakeAppsV1({
-        "loom-service": _deployment(
-            name="loom-service",
-            image="loom-service:staging-abc123",
-        ),
-    })
-    core = _FakeCoreV1([
-        _ready_pod(
-            name="loom-service-kind",
-            app="loom-service",
-            image="loom-service:staging-abc123",
-            status_image="docker.io/library/loom-service:staging-abc123",
-            image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
-        ),
-    ])
+    apps = _FakeAppsV1(
+        {
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+            ),
+        }
+    )
+    core = _FakeCoreV1(
+        [
+            _ready_pod(
+                name="loom-service-kind",
+                app="loom-service",
+                image="loom-service:staging-abc123",
+                status_image="docker.io/library/loom-service:staging-abc123",
+                image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
+            ),
+        ]
+    )
 
     report = collect_release_gate_report(
         manifest=manifest,
@@ -480,8 +501,7 @@ def test_release_gate_does_not_mark_default_docker_prefix_status_image_stale() -
 
     assert report.all_pass
     check = next(
-        check for check in report.checks
-        if check.name == "image-identity:loom-service/app"
+        check for check in report.checks if check.name == "image-identity:loom-service/app"
     )
     assert check.evidence["live_image"] == "docker.io/library/loom-service:staging-abc123"
     assert check.evidence["status_image_matches_template"] is True
@@ -510,8 +530,7 @@ def test_release_gate_passes_zero_replica_deployment_when_template_matches() -> 
 
     assert report.all_pass
     check = next(
-        check for check in report.checks
-        if check.name == "image-identity:loom-service/app"
+        check for check in report.checks if check.name == "image-identity:loom-service/app"
     )
     assert check.outcome == "pass"
     assert check.detail == "zero-replica Deployment template image matches release manifest"
@@ -541,8 +560,7 @@ def test_release_gate_fails_zero_replica_deployment_when_template_drifts() -> No
 
     assert not report.all_pass
     check = next(
-        check for check in report.checks
-        if check.name == "image-identity:loom-service/app"
+        check for check in report.checks if check.name == "image-identity:loom-service/app"
     )
     assert check.outcome == "fail"
     assert check.detail == "Deployment template image does not match release manifest"
@@ -551,20 +569,24 @@ def test_release_gate_fails_zero_replica_deployment_when_template_drifts() -> No
 
 def test_release_gate_ignores_ready_pods_not_from_deployment_template() -> None:
     manifest = _manifest(expected_digest="sha256:" + "1" * 64)
-    apps = _FakeAppsV1({
-        "loom-service": _deployment(
-            name="loom-service",
-            image="loom-service:staging-abc123",
-        ),
-    })
-    core = _FakeCoreV1([
-        _ready_pod(
-            name="loom-service-old",
-            app="loom-service",
-            image="loom-service:old-tag",
-            image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
-        ),
-    ])
+    apps = _FakeAppsV1(
+        {
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+            ),
+        }
+    )
+    core = _FakeCoreV1(
+        [
+            _ready_pod(
+                name="loom-service-old",
+                app="loom-service",
+                image="loom-service:old-tag",
+                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+            ),
+        ]
+    )
 
     report = collect_release_gate_report(
         manifest=manifest,
@@ -578,8 +600,7 @@ def test_release_gate_ignores_ready_pods_not_from_deployment_template() -> None:
 
     assert not report.all_pass
     check = next(
-        check for check in report.checks
-        if check.name == "image-identity:loom-service/app"
+        check for check in report.checks if check.name == "image-identity:loom-service/app"
     )
     assert check.outcome == "fail"
     assert check.detail == "no target-generation Ready pods found for managed Deployment"
@@ -588,20 +609,24 @@ def test_release_gate_ignores_ready_pods_not_from_deployment_template() -> None:
 
 def test_release_gate_fails_when_target_generation_pod_lacks_runtime_image_id() -> None:
     manifest = _manifest(expected_digest="sha256:" + "1" * 64)
-    apps = _FakeAppsV1({
-        "loom-service": _deployment(
-            name="loom-service",
-            image="loom-service:staging-abc123",
-        ),
-    })
-    core = _FakeCoreV1([
-        _ready_pod(
-            name="loom-service-new",
-            app="loom-service",
-            image="loom-service:staging-abc123",
-            image_id=None,
-        ),
-    ])
+    apps = _FakeAppsV1(
+        {
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+            ),
+        }
+    )
+    core = _FakeCoreV1(
+        [
+            _ready_pod(
+                name="loom-service-new",
+                app="loom-service",
+                image="loom-service:staging-abc123",
+                image_id=None,
+            ),
+        ]
+    )
 
     report = collect_release_gate_report(
         manifest=manifest,
@@ -615,8 +640,7 @@ def test_release_gate_fails_when_target_generation_pod_lacks_runtime_image_id() 
 
     assert not report.all_pass
     check = next(
-        check for check in report.checks
-        if check.name == "image-identity:loom-service/app"
+        check for check in report.checks if check.name == "image-identity:loom-service/app"
     )
     assert check.outcome == "fail"
     assert check.detail == "Ready pod is missing runtime image identity"
@@ -625,20 +649,24 @@ def test_release_gate_fails_when_target_generation_pod_lacks_runtime_image_id() 
 
 def test_release_gate_rejects_stale_kind_import_pod_from_old_template() -> None:
     manifest = _manifest(expected_digest="sha256:" + "1" * 64)
-    apps = _FakeAppsV1({
-        "loom-service": _deployment(
-            name="loom-service",
-            image="loom-service:staging-abc123",
-        ),
-    })
-    core = _FakeCoreV1([
-        _ready_pod(
-            name="loom-service-old",
-            app="loom-service",
-            image="loom-service:staging-old",
-            image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
-        ),
-    ])
+    apps = _FakeAppsV1(
+        {
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+            ),
+        }
+    )
+    core = _FakeCoreV1(
+        [
+            _ready_pod(
+                name="loom-service-old",
+                app="loom-service",
+                image="loom-service:staging-old",
+                image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
+            ),
+        ]
+    )
 
     report = collect_release_gate_report(
         manifest=manifest,
@@ -652,8 +680,7 @@ def test_release_gate_rejects_stale_kind_import_pod_from_old_template() -> None:
 
     assert not report.all_pass
     check = next(
-        check for check in report.checks
-        if check.name == "image-identity:loom-service/app"
+        check for check in report.checks if check.name == "image-identity:loom-service/app"
     )
     assert check.outcome == "fail"
     assert check.detail == "no target-generation Ready pods found for managed Deployment"
@@ -662,22 +689,26 @@ def test_release_gate_rejects_stale_kind_import_pod_from_old_template() -> None:
 
 def test_release_gate_fails_when_deployment_generation_is_not_observed() -> None:
     manifest = _manifest(expected_digest="sha256:" + "1" * 64)
-    apps = _FakeAppsV1({
-        "loom-service": _deployment(
-            name="loom-service",
-            image="loom-service:staging-abc123",
-            generation=8,
-            observed_generation=7,
-        ),
-    })
-    core = _FakeCoreV1([
-        _ready_pod(
-            name="loom-service-new",
-            app="loom-service",
-            image="loom-service:staging-abc123",
-            image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
-        ),
-    ])
+    apps = _FakeAppsV1(
+        {
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+                generation=8,
+                observed_generation=7,
+            ),
+        }
+    )
+    core = _FakeCoreV1(
+        [
+            _ready_pod(
+                name="loom-service-new",
+                app="loom-service",
+                image="loom-service:staging-abc123",
+                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+            ),
+        ]
+    )
 
     report = collect_release_gate_report(
         manifest=manifest,
@@ -691,8 +722,7 @@ def test_release_gate_fails_when_deployment_generation_is_not_observed() -> None
 
     assert not report.all_pass
     check = next(
-        check for check in report.checks
-        if check.name == "image-identity:loom-service/app"
+        check for check in report.checks if check.name == "image-identity:loom-service/app"
     )
     assert check.outcome == "fail"
     assert check.detail == "Deployment rollout is not target-generation converged"
@@ -710,14 +740,16 @@ def test_release_gate_fails_when_deployment_updated_replicas_are_partial() -> No
     deployment.status.updated_replicas = 1
     deployment.status.ready_replicas = 1
     apps = _FakeAppsV1({"loom-service": deployment})
-    core = _FakeCoreV1([
-        _ready_pod(
-            name="loom-service-new",
-            app="loom-service",
-            image="loom-service:staging-abc123",
-            image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
-        ),
-    ])
+    core = _FakeCoreV1(
+        [
+            _ready_pod(
+                name="loom-service-new",
+                app="loom-service",
+                image="loom-service:staging-abc123",
+                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+            ),
+        ]
+    )
 
     report = collect_release_gate_report(
         manifest=manifest,
@@ -731,8 +763,7 @@ def test_release_gate_fails_when_deployment_updated_replicas_are_partial() -> No
 
     assert not report.all_pass
     check = next(
-        check for check in report.checks
-        if check.name == "image-identity:loom-service/app"
+        check for check in report.checks if check.name == "image-identity:loom-service/app"
     )
     assert check.outcome == "fail"
     assert check.evidence["desired_replicas"] == 2
@@ -795,8 +826,7 @@ def test_release_gate_classifies_node_runtime_sandbox_cleanup_failure() -> None:
 
     assert not report.all_pass
     check = next(
-        check for check in report.checks
-        if check.name == "image-identity:loom-service/app"
+        check for check in report.checks if check.name == "image-identity:loom-service/app"
     )
     assert check.outcome == "fail"
     assert check.detail == "node runtime sandbox deadline blocked Deployment rollout"
@@ -825,10 +855,7 @@ def test_release_gate_fails_on_rendered_manifest_hash_drift() -> None:
         live_alembic_heads=["0050"],
     )
 
-    check = next(
-        check for check in report.checks
-        if check.name == "rendered-manifest-sha256"
-    )
+    check = next(check for check in report.checks if check.name == "rendered-manifest-sha256")
     assert check == ReleaseGateCheck(
         name="rendered-manifest-sha256",
         outcome="fail",
@@ -844,47 +871,48 @@ def test_release_gate_fails_on_rendered_manifest_hash_drift() -> None:
 def test_release_gate_fails_when_disabled_k8s_worker_is_still_live() -> None:
     manifest = _manifest()
     manifest["cluster_config"]["k8s_worker_enabled"] = False
-    apps = _FakeAppsV1({
-        "loom-service": _deployment(
-            name="loom-service",
-            image="loom-service:staging-abc123",
-        ),
-        "loom-worker": _deployment(
-            name="loom-worker",
-            image="loom-worker:stale",
-            replicas=6,
-        ),
-    })
-    core = _FakeCoreV1([
-        _ready_pod(
-            name="loom-service-new",
-            app="loom-service",
-            image="loom-service:staging-abc123",
-            image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
-        ),
-        _ready_pod(
-            name="loom-worker-stale",
-            app="loom-worker",
-            image="loom-worker:stale",
-            image_id="docker-pullable://loom-worker@sha256:" + "9" * 64,
-        ),
-    ])
+    apps = _FakeAppsV1(
+        {
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+            ),
+            "loom-worker": _deployment(
+                name="loom-worker",
+                image="loom-worker:stale",
+                replicas=6,
+            ),
+        }
+    )
+    core = _FakeCoreV1(
+        [
+            _ready_pod(
+                name="loom-service-new",
+                app="loom-service",
+                image="loom-service:staging-abc123",
+                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+            ),
+            _ready_pod(
+                name="loom-worker-stale",
+                app="loom-worker",
+                image="loom-worker:stale",
+                image_id="docker-pullable://loom-worker@sha256:" + "9" * 64,
+            ),
+        ]
+    )
 
     report = collect_release_gate_report(
         manifest=manifest,
         apps_v1=apps,
         core_v1=core,
-        namespace="loom-public-beta",
+        namespace="loom-staging",
         rendered_manifest_sha256="rendered-sha",
         cluster_config_sha256="config-sha",
         live_alembic_heads=["0050"],
     )
 
     assert not report.all_pass
-    check = next(
-        check for check in report.checks
-        if check.name == "disabled-k8s-worker-pruned"
-    )
+    check = next(check for check in report.checks if check.name == "disabled-k8s-worker-pruned")
     assert check.outcome == "fail"
     assert check.detail == "disabled k8s worker remains live"
     assert check.evidence["deployment"] == "loom-worker"
@@ -916,23 +944,29 @@ def test_release_gate_fails_on_live_alembic_revision_mismatch() -> None:
     assert "LOOM_CP_DB_URL" in check.detail
 
 
-def test_release_gate_requires_environment_state_check_when_manifest_records_external_workers() -> None:
+def test_release_gate_requires_environment_state_check_when_manifest_records_external_workers() -> (
+    None
+):
     report = collect_release_gate_report(
         manifest=_manifest(external_workers=_external_workers_manifest_section()),
-        apps_v1=_FakeAppsV1({
-            "loom-service": _deployment(
-                name="loom-service",
-                image="loom-service:staging-abc123",
-            ),
-        }),
-        core_v1=_FakeCoreV1([
-            _ready_pod(
-                name="loom-service-new",
-                app="loom-service",
-                image="loom-service:staging-abc123",
-                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
-            ),
-        ]),
+        apps_v1=_FakeAppsV1(
+            {
+                "loom-service": _deployment(
+                    name="loom-service",
+                    image="loom-service:staging-abc123",
+                ),
+            }
+        ),
+        core_v1=_FakeCoreV1(
+            [
+                _ready_pod(
+                    name="loom-service-new",
+                    app="loom-service",
+                    image="loom-service:staging-abc123",
+                    image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+                ),
+            ]
+        ),
         namespace="loom",
         rendered_manifest_sha256="rendered-sha",
         cluster_config_sha256="config-sha",
@@ -940,10 +974,7 @@ def test_release_gate_requires_environment_state_check_when_manifest_records_ext
     )
 
     assert not report.all_pass
-    check = next(
-        check for check in report.checks
-        if check.name == "environment-state-convergence"
-    )
+    check = next(check for check in report.checks if check.name == "environment-state-convergence")
     assert check.outcome == "fail"
     assert check.detail == "environment-state check artifact is required"
     assert check.evidence["expected_profile"] == "deploy/environment-state/staging.toml"
@@ -955,20 +986,24 @@ def test_release_gate_requires_hf_mirror_boundary_evidence_for_staging_catalog_g
     manifest["catalog_provisioning"] = _catalog_manifest_section()
     report = collect_release_gate_report(
         manifest=manifest,
-        apps_v1=_FakeAppsV1({
-            "loom-service": _deployment(
-                name="loom-service",
-                image="loom-service:staging-abc123",
-            ),
-        }),
-        core_v1=_FakeCoreV1([
-            _ready_pod(
-                name="loom-service-new",
-                app="loom-service",
-                image="loom-service:staging-abc123",
-                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
-            ),
-        ]),
+        apps_v1=_FakeAppsV1(
+            {
+                "loom-service": _deployment(
+                    name="loom-service",
+                    image="loom-service:staging-abc123",
+                ),
+            }
+        ),
+        core_v1=_FakeCoreV1(
+            [
+                _ready_pod(
+                    name="loom-service-new",
+                    app="loom-service",
+                    image="loom-service:staging-abc123",
+                    image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+                ),
+            ]
+        ),
         namespace="loom",
         rendered_manifest_sha256="rendered-sha",
         cluster_config_sha256="config-sha",
@@ -976,10 +1011,7 @@ def test_release_gate_requires_hf_mirror_boundary_evidence_for_staging_catalog_g
     )
 
     assert not report.all_pass
-    check = next(
-        check for check in report.checks
-        if check.name == "hf-mirror-token-boundary"
-    )
+    check = next(check for check in report.checks if check.name == "hf-mirror-token-boundary")
     assert check.outcome == "fail"
     assert check.detail == "HF mirror/token boundary evidence artifact is required"
     assert check.evidence["benchmark_id"] == "skilllearnbench"
@@ -992,20 +1024,24 @@ def test_release_gate_accepts_secret_safe_hf_mirror_boundary_evidence() -> None:
     manifest["catalog_provisioning"] = _catalog_manifest_section()
     report = collect_release_gate_report(
         manifest=manifest,
-        apps_v1=_FakeAppsV1({
-            "loom-service": _deployment(
-                name="loom-service",
-                image="loom-service:staging-abc123",
-            ),
-        }),
-        core_v1=_FakeCoreV1([
-            _ready_pod(
-                name="loom-service-new",
-                app="loom-service",
-                image="loom-service:staging-abc123",
-                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
-            ),
-        ]),
+        apps_v1=_FakeAppsV1(
+            {
+                "loom-service": _deployment(
+                    name="loom-service",
+                    image="loom-service:staging-abc123",
+                ),
+            }
+        ),
+        core_v1=_FakeCoreV1(
+            [
+                _ready_pod(
+                    name="loom-service-new",
+                    app="loom-service",
+                    image="loom-service:staging-abc123",
+                    image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+                ),
+            ]
+        ),
         namespace="loom",
         rendered_manifest_sha256="rendered-sha",
         cluster_config_sha256="config-sha",
@@ -1015,10 +1051,7 @@ def test_release_gate_accepts_secret_safe_hf_mirror_boundary_evidence() -> None:
     )
 
     assert report.all_pass
-    check = next(
-        check for check in report.checks
-        if check.name == "hf-mirror-token-boundary"
-    )
+    check = next(check for check in report.checks if check.name == "hf-mirror-token-boundary")
     assert check.outcome == "pass"
     assert check.evidence["internal_s3_sources"] == 100
     assert check.evidence["hf_provenance_retained"] is True
@@ -1039,20 +1072,24 @@ def test_release_gate_rejects_non_s3_or_secret_leaking_hf_boundary_evidence() ->
     )
     report = collect_release_gate_report(
         manifest=manifest,
-        apps_v1=_FakeAppsV1({
-            "loom-service": _deployment(
-                name="loom-service",
-                image="loom-service:staging-abc123",
-            ),
-        }),
-        core_v1=_FakeCoreV1([
-            _ready_pod(
-                name="loom-service-new",
-                app="loom-service",
-                image="loom-service:staging-abc123",
-                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
-            ),
-        ]),
+        apps_v1=_FakeAppsV1(
+            {
+                "loom-service": _deployment(
+                    name="loom-service",
+                    image="loom-service:staging-abc123",
+                ),
+            }
+        ),
+        core_v1=_FakeCoreV1(
+            [
+                _ready_pod(
+                    name="loom-service-new",
+                    app="loom-service",
+                    image="loom-service:staging-abc123",
+                    image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+                ),
+            ]
+        ),
         namespace="loom",
         rendered_manifest_sha256="rendered-sha",
         cluster_config_sha256="config-sha",
@@ -1062,10 +1099,7 @@ def test_release_gate_rejects_non_s3_or_secret_leaking_hf_boundary_evidence() ->
     )
 
     assert not report.all_pass
-    check = next(
-        check for check in report.checks
-        if check.name == "hf-mirror-token-boundary"
-    )
+    check = next(check for check in report.checks if check.name == "hf-mirror-token-boundary")
     assert check.outcome == "fail"
     assert "must use internal s3:// runtime sources" in check.detail
     assert check.evidence["secret_safe"] is False
@@ -1076,20 +1110,24 @@ def test_release_gate_rejects_non_s3_or_secret_leaking_hf_boundary_evidence() ->
 def test_release_gate_fails_when_environment_state_check_reports_drift() -> None:
     report = collect_release_gate_report(
         manifest=_manifest(external_workers=_external_workers_manifest_section()),
-        apps_v1=_FakeAppsV1({
-            "loom-service": _deployment(
-                name="loom-service",
-                image="loom-service:staging-abc123",
-            ),
-        }),
-        core_v1=_FakeCoreV1([
-            _ready_pod(
-                name="loom-service-new",
-                app="loom-service",
-                image="loom-service:staging-abc123",
-                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
-            ),
-        ]),
+        apps_v1=_FakeAppsV1(
+            {
+                "loom-service": _deployment(
+                    name="loom-service",
+                    image="loom-service:staging-abc123",
+                ),
+            }
+        ),
+        core_v1=_FakeCoreV1(
+            [
+                _ready_pod(
+                    name="loom-service-new",
+                    app="loom-service",
+                    image="loom-service:staging-abc123",
+                    image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+                ),
+            ]
+        ),
         namespace="loom",
         rendered_manifest_sha256="rendered-sha",
         cluster_config_sha256="config-sha",
@@ -1102,8 +1140,7 @@ def test_release_gate_fails_when_environment_state_check_reports_drift() -> None
             "drift": [
                 {
                     "path": (
-                        "slurm_worker_jobs[production/oldlab/18186]."
-                        "LOOM_REMOTE_WORKER_ENV_FILE"
+                        "slurm_worker_jobs[production/oldlab/18186].LOOM_REMOTE_WORKER_ENV_FILE"
                     ),
                     "desired": "staging-d46a16c",
                     "live": "staging-cb6af75",
@@ -1117,10 +1154,7 @@ def test_release_gate_fails_when_environment_state_check_reports_drift() -> None
     )
 
     assert not report.all_pass
-    check = next(
-        check for check in report.checks
-        if check.name == "environment-state-convergence"
-    )
+    check = next(check for check in report.checks if check.name == "environment-state-convergence")
     assert check.outcome == "fail"
     assert check.detail == "live environment-state check reports drift"
     assert check.evidence["drift_count"] == 1
@@ -1131,20 +1165,24 @@ def test_release_gate_fails_when_environment_state_check_reports_drift() -> None
 def test_release_gate_passes_when_environment_state_check_is_clean() -> None:
     report = collect_release_gate_report(
         manifest=_manifest(external_workers=_external_workers_manifest_section()),
-        apps_v1=_FakeAppsV1({
-            "loom-service": _deployment(
-                name="loom-service",
-                image="loom-service:staging-abc123",
-            ),
-        }),
-        core_v1=_FakeCoreV1([
-            _ready_pod(
-                name="loom-service-new",
-                app="loom-service",
-                image="loom-service:staging-abc123",
-                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
-            ),
-        ]),
+        apps_v1=_FakeAppsV1(
+            {
+                "loom-service": _deployment(
+                    name="loom-service",
+                    image="loom-service:staging-abc123",
+                ),
+            }
+        ),
+        core_v1=_FakeCoreV1(
+            [
+                _ready_pod(
+                    name="loom-service-new",
+                    app="loom-service",
+                    image="loom-service:staging-abc123",
+                    image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+                ),
+            ]
+        ),
         namespace="loom",
         rendered_manifest_sha256="rendered-sha",
         cluster_config_sha256="config-sha",
@@ -1185,10 +1223,7 @@ def test_release_gate_passes_when_environment_state_check_is_clean() -> None:
     )
 
     assert report.all_pass
-    check = next(
-        check for check in report.checks
-        if check.name == "environment-state-convergence"
-    )
+    check = next(check for check in report.checks if check.name == "environment-state-convergence")
     assert check.outcome == "pass"
     assert check.detail == "live environment-state check passed"
     assert check.evidence["drift_count"] == 0
@@ -1198,20 +1233,24 @@ def test_release_gate_passes_when_environment_state_check_is_clean() -> None:
 def test_release_gate_fails_when_minio_storage_preflight_stops() -> None:
     report = collect_release_gate_report(
         manifest=_manifest(),
-        apps_v1=_FakeAppsV1({
-            "loom-service": _deployment(
-                name="loom-service",
-                image="loom-service:staging-abc123",
-            ),
-        }),
-        core_v1=_FakeCoreV1([
-            _ready_pod(
-                name="loom-service-new",
-                app="loom-service",
-                image="loom-service:staging-abc123",
-                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
-            ),
-        ]),
+        apps_v1=_FakeAppsV1(
+            {
+                "loom-service": _deployment(
+                    name="loom-service",
+                    image="loom-service:staging-abc123",
+                ),
+            }
+        ),
+        core_v1=_FakeCoreV1(
+            [
+                _ready_pod(
+                    name="loom-service-new",
+                    app="loom-service",
+                    image="loom-service:staging-abc123",
+                    image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+                ),
+            ]
+        ),
         namespace="loom",
         rendered_manifest_sha256="rendered-sha",
         cluster_config_sha256="config-sha",
@@ -1238,10 +1277,7 @@ def test_release_gate_fails_when_minio_storage_preflight_stops() -> None:
     )
 
     assert not report.all_pass
-    check = next(
-        check for check in report.checks
-        if check.name == "minio-storage-pressure"
-    )
+    check = next(check for check in report.checks if check.name == "minio-storage-pressure")
     assert check.outcome == "fail"
     assert check.detail == "MinIO storage preflight reports stop"
     assert check.evidence["artifact"] == "minio-storage-preflight.json"
@@ -1268,20 +1304,24 @@ def test_release_gate_evidence_includes_autoscaler_blockers() -> None:
     ]
     report = collect_release_gate_report(
         manifest=_manifest(external_workers=_external_workers_manifest_section()),
-        apps_v1=_FakeAppsV1({
-            "loom-service": _deployment(
-                name="loom-service",
-                image="loom-service:staging-abc123",
-            ),
-        }),
-        core_v1=_FakeCoreV1([
-            _ready_pod(
-                name="loom-service-new",
-                app="loom-service",
-                image="loom-service:staging-abc123",
-                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
-            ),
-        ]),
+        apps_v1=_FakeAppsV1(
+            {
+                "loom-service": _deployment(
+                    name="loom-service",
+                    image="loom-service:staging-abc123",
+                ),
+            }
+        ),
+        core_v1=_FakeCoreV1(
+            [
+                _ready_pod(
+                    name="loom-service-new",
+                    app="loom-service",
+                    image="loom-service:staging-abc123",
+                    image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+                ),
+            ]
+        ),
         namespace="loom",
         rendered_manifest_sha256="rendered-sha",
         cluster_config_sha256="config-sha",
@@ -1298,10 +1338,7 @@ def test_release_gate_evidence_includes_autoscaler_blockers() -> None:
     )
 
     assert not report.all_pass
-    check = next(
-        check for check in report.checks
-        if check.name == "environment-state-convergence"
-    )
+    check = next(check for check in report.checks if check.name == "environment-state-convergence")
     assert check.outcome == "fail"
     assert check.detail == "live environment-state check reports autoscaler blockers"
     assert check.evidence["drift_count"] == 0
@@ -1312,22 +1349,26 @@ def test_release_gate_evidence_includes_autoscaler_blockers() -> None:
 def test_release_gate_report_includes_component_evidence_rows() -> None:
     report = collect_release_gate_report(
         manifest=_manifest(external_workers=_external_workers_manifest_section()),
-        apps_v1=_FakeAppsV1({
-            "loom-service": _deployment(
-                name="loom-service",
-                image="loom-service:staging-abc123",
-                generation=9,
-                observed_generation=9,
-            ),
-        }),
-        core_v1=_FakeCoreV1([
-            _ready_pod(
-                name="loom-service-new",
-                app="loom-service",
-                image="loom-service:staging-abc123",
-                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
-            ),
-        ]),
+        apps_v1=_FakeAppsV1(
+            {
+                "loom-service": _deployment(
+                    name="loom-service",
+                    image="loom-service:staging-abc123",
+                    generation=9,
+                    observed_generation=9,
+                ),
+            }
+        ),
+        core_v1=_FakeCoreV1(
+            [
+                _ready_pod(
+                    name="loom-service-new",
+                    app="loom-service",
+                    image="loom-service:staging-abc123",
+                    image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+                ),
+            ]
+        ),
         namespace="loom",
         rendered_manifest_sha256="rendered-sha",
         cluster_config_sha256="config-sha",
@@ -1395,7 +1436,10 @@ def test_release_gate_markdown_formats_pasteable_component_table() -> None:
 
     markdown = format_release_gate_markdown(report)
 
-    assert "| Surface | Component | Expected | Live | Generation/job | Readiness | Restart/crash | Evidence | Result |" in markdown
+    assert (
+        "| Surface | Component | Expected | Live | Generation/job | Readiness | Restart/crash | Evidence | Result |"
+        in markdown
+    )
     assert (
         "| kubernetes | loom-service/app | "
         "`loom-service:staging-abc123 / loom-service@sha256:"
@@ -1413,10 +1457,12 @@ def test_live_alembic_query_uses_kubectl_exec_without_leaking_db_url() -> None:
         calls.append(cmd)
         return (
             0,
-            json.dumps({
-                "database_target": "env:LOOM_CP_DB_URL",
-                "heads": ["0050"],
-            }),
+            json.dumps(
+                {
+                    "database_target": "env:LOOM_CP_DB_URL",
+                    "heads": ["0050"],
+                }
+            ),
             "ignored stderr with postgresql://loom:secret@postgres/loom",
         )
 
@@ -1489,19 +1535,21 @@ def test_cluster_release_gate_cli_dry_run_reports_structured_failure(
         ),
     )
 
-    rc = main([
-        "cluster",
-        "release-gate",
-        "--manifest",
-        str(manifest_path),
-        "--namespace",
-        "loom",
-        "--environment",
-        "staging",
-        "--dry-run",
-        "--format",
-        "json",
-    ])
+    rc = main(
+        [
+            "cluster",
+            "release-gate",
+            "--manifest",
+            str(manifest_path),
+            "--namespace",
+            "loom",
+            "--environment",
+            "staging",
+            "--dry-run",
+            "--format",
+            "json",
+        ]
+    )
 
     assert rc == 1
     out = json.loads(capsys.readouterr().out)
@@ -1509,7 +1557,7 @@ def test_cluster_release_gate_cli_dry_run_reports_structured_failure(
     assert out["checks"][0]["name"] == "alembic-heads"
 
 
-def test_public_beta_cluster_release_gate_dry_run_does_not_require_prod_credentials(
+def test_staging_cluster_release_gate_dry_run_does_not_require_prod_credentials(
     tmp_path,
     monkeypatch,
     capsys,
@@ -1537,26 +1585,28 @@ def test_public_beta_cluster_release_gate_dry_run_does_not_require_prod_credenti
                 ReleaseGateCheck(
                     name="image-identity:loom-service/app",
                     outcome="pass",
-                    detail="public-beta release manifest identity matched",
+                    detail="staging release manifest identity matched",
                     evidence={},
                 ),
             ],
         ),
     )
 
-    rc = main([
-        "cluster",
-        "release-gate",
-        "--manifest",
-        str(manifest_path),
-        "--namespace",
-        "loom",
-        "--environment",
-        "staging",
-        "--dry-run",
-        "--format",
-        "json",
-    ])
+    rc = main(
+        [
+            "cluster",
+            "release-gate",
+            "--manifest",
+            str(manifest_path),
+            "--namespace",
+            "loom",
+            "--environment",
+            "staging",
+            "--dry-run",
+            "--format",
+            "json",
+        ]
+    )
 
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
@@ -1575,13 +1625,15 @@ def test_cluster_release_gate_cli_passes_environment_state_check_artifact(
     )
     environment_state_check_path = tmp_path / "environment-state-check.json"
     environment_state_check_path.write_text(
-        json.dumps({
-            "environment": "staging",
-            "control_plane_environment": "production",
-            "profile": "deploy/environment-state/staging.toml",
-            "ok": True,
-            "drift": [],
-        }),
+        json.dumps(
+            {
+                "environment": "staging",
+                "control_plane_environment": "production",
+                "profile": "deploy/environment-state/staging.toml",
+                "ok": True,
+                "drift": [],
+            }
+        ),
         encoding="utf-8",
     )
     captured: dict[str, Any] = {}
@@ -1611,21 +1663,23 @@ def test_cluster_release_gate_cli_passes_environment_state_check_artifact(
         _fake_collect_release_gate_report,
     )
 
-    rc = main([
-        "cluster",
-        "release-gate",
-        "--manifest",
-        str(manifest_path),
-        "--namespace",
-        "loom",
-        "--environment",
-        "staging",
-        "--environment-state-check",
-        str(environment_state_check_path),
-        "--dry-run",
-        "--format",
-        "json",
-    ])
+    rc = main(
+        [
+            "cluster",
+            "release-gate",
+            "--manifest",
+            str(manifest_path),
+            "--namespace",
+            "loom",
+            "--environment",
+            "staging",
+            "--environment-state-check",
+            str(environment_state_check_path),
+            "--dry-run",
+            "--format",
+            "json",
+        ]
+    )
 
     assert rc == 0
     assert captured["environment_state_check_artifact"]["ok"] is True
@@ -1669,21 +1723,23 @@ def test_cluster_release_gate_cli_passes_hf_mirror_boundary_artifact(
         _fake_collect_release_gate_report,
     )
 
-    rc = main([
-        "cluster",
-        "release-gate",
-        "--manifest",
-        str(manifest_path),
-        "--namespace",
-        "loom",
-        "--environment",
-        "staging",
-        "--hf-mirror-boundary-evidence",
-        str(boundary_path),
-        "--dry-run",
-        "--format",
-        "json",
-    ])
+    rc = main(
+        [
+            "cluster",
+            "release-gate",
+            "--manifest",
+            str(manifest_path),
+            "--namespace",
+            "loom",
+            "--environment",
+            "staging",
+            "--hf-mirror-boundary-evidence",
+            str(boundary_path),
+            "--dry-run",
+            "--format",
+            "json",
+        ]
+    )
 
     assert rc == 0
     assert captured["hf_mirror_boundary_artifact"]["benchmark_id"] == "skilllearnbench"
@@ -1692,20 +1748,24 @@ def test_cluster_release_gate_cli_passes_hf_mirror_boundary_artifact(
 
 def test_release_gate_requires_gb10_status_artifact_when_manifest_declares_gb10() -> None:
     manifest = _manifest(external_workers=_external_workers_manifest_section())
-    apps = _FakeAppsV1({
-        "loom-service": _deployment(
-            name="loom-service",
-            image="loom-service:staging-abc123",
-        ),
-    })
-    core = _FakeCoreV1([
-        _ready_pod(
-            name="loom-service-abc",
-            app="loom-service",
-            image="loom-service:staging-abc123",
-            image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
-        ),
-    ])
+    apps = _FakeAppsV1(
+        {
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+            ),
+        }
+    )
+    core = _FakeCoreV1(
+        [
+            _ready_pod(
+                name="loom-service-abc",
+                app="loom-service",
+                image="loom-service:staging-abc123",
+                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+            ),
+        ]
+    )
 
     report = collect_release_gate_report(
         manifest=manifest,
@@ -1724,10 +1784,7 @@ def test_release_gate_requires_gb10_status_artifact_when_manifest_declares_gb10(
     )
 
     assert not report.all_pass
-    check = next(
-        check for check in report.checks
-        if check.name == "gb10-worker-convergence"
-    )
+    check = next(check for check in report.checks if check.name == "gb10-worker-convergence")
     assert check.outcome == "fail"
     assert check.detail == "GB10 worker status artifact is required"
 
@@ -1741,20 +1798,24 @@ def test_release_gate_rejects_gb10_status_without_manifest_desired_state() -> No
             "gb10_desired_states": [],
         },
     )
-    apps = _FakeAppsV1({
-        "loom-service": _deployment(
-            name="loom-service",
-            image="loom-service:staging-abc123",
-        ),
-    })
-    core = _FakeCoreV1([
-        _ready_pod(
-            name="loom-service-abc",
-            app="loom-service",
-            image="loom-service:staging-abc123",
-            image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
-        ),
-    ])
+    apps = _FakeAppsV1(
+        {
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+            ),
+        }
+    )
+    core = _FakeCoreV1(
+        [
+            _ready_pod(
+                name="loom-service-abc",
+                app="loom-service",
+                image="loom-service:staging-abc123",
+                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+            ),
+        ]
+    )
 
     report = collect_release_gate_report(
         manifest=manifest,
@@ -1772,10 +1833,7 @@ def test_release_gate_rejects_gb10_status_without_manifest_desired_state() -> No
     )
 
     assert not report.all_pass
-    check = next(
-        check for check in report.checks
-        if check.name == "gb10-worker-convergence"
-    )
+    check = next(check for check in report.checks if check.name == "gb10-worker-convergence")
     assert check.outcome == "fail"
     assert check.detail == "release manifest declares no GB10 desired state"
     assert check.evidence["manifest_desired_state_count"] == 0
@@ -1783,20 +1841,24 @@ def test_release_gate_rejects_gb10_status_without_manifest_desired_state() -> No
 
 def test_release_gate_fails_when_gb10_status_reports_missing_active_host() -> None:
     manifest = _manifest(external_workers=_external_workers_manifest_section())
-    apps = _FakeAppsV1({
-        "loom-service": _deployment(
-            name="loom-service",
-            image="loom-service:staging-abc123",
-        ),
-    })
-    core = _FakeCoreV1([
-        _ready_pod(
-            name="loom-service-abc",
-            app="loom-service",
-            image="loom-service:staging-abc123",
-            image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
-        ),
-    ])
+    apps = _FakeAppsV1(
+        {
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+            ),
+        }
+    )
+    core = _FakeCoreV1(
+        [
+            _ready_pod(
+                name="loom-service-abc",
+                app="loom-service",
+                image="loom-service:staging-abc123",
+                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+            ),
+        ]
+    )
 
     report = collect_release_gate_report(
         manifest=manifest,
@@ -1828,10 +1890,7 @@ def test_release_gate_fails_when_gb10_status_reports_missing_active_host() -> No
     )
 
     assert not report.all_pass
-    check = next(
-        check for check in report.checks
-        if check.name == "gb10-worker-convergence"
-    )
+    check = next(check for check in report.checks if check.name == "gb10-worker-convergence")
     assert check.outcome == "fail"
     assert "trt-gb10-14" in check.evidence["mismatches"][0]
     assert "missing active node report" in check.evidence["mismatches"][0]
@@ -1878,21 +1937,23 @@ def test_cluster_release_gate_cli_passes_gb10_status_artifact(
         _fake_collect_release_gate_report,
     )
 
-    rc = main([
-        "cluster",
-        "release-gate",
-        "--manifest",
-        str(manifest_path),
-        "--namespace",
-        "loom",
-        "--environment",
-        "staging",
-        "--gb10-workers-status",
-        str(gb10_status_path),
-        "--dry-run",
-        "--format",
-        "json",
-    ])
+    rc = main(
+        [
+            "cluster",
+            "release-gate",
+            "--manifest",
+            str(manifest_path),
+            "--namespace",
+            "loom",
+            "--environment",
+            "staging",
+            "--gb10-workers-status",
+            str(gb10_status_path),
+            "--dry-run",
+            "--format",
+            "json",
+        ]
+    )
 
     assert rc == 0
     assert captured["gb10_workers_status_artifact"] == {
@@ -1910,12 +1971,14 @@ def test_cluster_release_gate_cli_passes_minio_storage_preflight_artifact(
     manifest_path.write_text(json.dumps(_manifest()), encoding="utf-8")
     storage_path = tmp_path / "minio-storage-preflight.json"
     storage_path.write_text(
-        json.dumps({
-            "outcome": "pass",
-            "filesystem": {"free_percent": 42.0, "free_bytes": 42 * 1024**3},
-            "thresholds": {"warn_free_percent": 25.0, "stop_free_percent": 15.0},
-            "checks": [],
-        }),
+        json.dumps(
+            {
+                "outcome": "pass",
+                "filesystem": {"free_percent": 42.0, "free_bytes": 42 * 1024**3},
+                "thresholds": {"warn_free_percent": 25.0, "stop_free_percent": 15.0},
+                "checks": [],
+            }
+        ),
         encoding="utf-8",
     )
     captured: dict[str, Any] = {}
@@ -1945,21 +2008,23 @@ def test_cluster_release_gate_cli_passes_minio_storage_preflight_artifact(
         _fake_collect_release_gate_report,
     )
 
-    rc = main([
-        "cluster",
-        "release-gate",
-        "--manifest",
-        str(manifest_path),
-        "--namespace",
-        "loom",
-        "--environment",
-        "staging",
-        "--minio-storage-preflight",
-        str(storage_path),
-        "--dry-run",
-        "--format",
-        "json",
-    ])
+    rc = main(
+        [
+            "cluster",
+            "release-gate",
+            "--manifest",
+            str(manifest_path),
+            "--namespace",
+            "loom",
+            "--environment",
+            "staging",
+            "--minio-storage-preflight",
+            str(storage_path),
+            "--dry-run",
+            "--format",
+            "json",
+        ]
+    )
 
     assert rc == 0
     assert captured["minio_storage_preflight_artifact"]["outcome"] == "pass"

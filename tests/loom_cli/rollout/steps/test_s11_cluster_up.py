@@ -15,7 +15,7 @@ class TestClusterUpStepArgv:
     def test_invokes_supported_cluster_up_subcommand(self, tmp_path: Path) -> None:
         ctx = make_ctx(
             tmp_path,
-            namespace="loom-public-beta",
+            namespace="loom-staging",
         )
         ev = EvidenceDirectory(tmp_path, "test-rid")
         ev.ensure()
@@ -31,7 +31,7 @@ class TestClusterUpStepArgv:
             "cluster",
             "up",
             "--namespace",
-            "loom-public-beta",
+            "loom-staging",
             "--config",
         ]
         assert config_path != ctx.cluster_config_path
@@ -48,7 +48,7 @@ class TestClusterUpStepArgv:
         assert "--wait" not in argv
 
     def test_enables_bounded_sandbox_deadline_recovery(self, tmp_path: Path) -> None:
-        ctx = make_ctx(tmp_path, namespace="loom-public-beta")
+        ctx = make_ctx(tmp_path, namespace="loom-staging")
         ev = EvidenceDirectory(tmp_path, "test-rid")
         ev.ensure()
         step_dir = ev.step_dir(11, "cluster-up")

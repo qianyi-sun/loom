@@ -84,7 +84,7 @@ const monitorSummaryPayload = {
         last_autoscaler_error: null,
       },
       {
-        pool_name: "public-beta-x86",
+        pool_name: "staging-x86",
         backend: "docker",
         cpu_arch: "x86_64",
         autoscaler_environment: "production",
@@ -498,7 +498,7 @@ describe("Monitor human-readable labels", () => {
       screen.getByText("2 waiting for 9 free slots."),
     ).toBeInTheDocument();
     expect(screen.getByText("gb10-arm64")).toBeInTheDocument();
-    expect(screen.getByText("public-beta-x86")).toBeInTheDocument();
+    expect(screen.getByText("staging-x86")).toBeInTheDocument();
     expect(screen.getByText("Active slots")).toBeInTheDocument();
     expect(screen.getByText("Max")).toBeInTheDocument();
     expect(screen.getAllByText("slurm").length).toBeGreaterThanOrEqual(2);

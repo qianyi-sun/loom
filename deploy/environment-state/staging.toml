@@ -14,47 +14,6 @@ environment = "staging"
 control_plane_environment = "production"
 
 [[worker_pool_autoscaler_policies]]
-pool_name = "oldlab"
-actuator = "slurm"
-enabled = true
-min_slots = 1
-max_slots = 40
-scale_up_threshold_slots = 1
-scale_down_idle_seconds = 600
-scale_up_cooldown_seconds = 60
-scale_down_cooldown_seconds = 300
-drain_timeout_seconds = 600
-force = false
-
-[worker_pool_autoscaler_policies.actuator_config]
-backend = "docker"
-cpu_arch = "x86_64"
-allowed_nodes = [
-  "TRT-EAI-OLDLAB-1",
-  "trt-EAI-OLDLAB-2",
-  "trt-eai-oldlab-3",
-  "trt-eai-oldlab-4",
-  "trt-eai-oldlab-5",
-]
-env_file = "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker-${IMAGE_TAG}.env"
-repo_dir = "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}"
-requested_cpus = 2
-requested_memory_mib = 8192
-requested_concurrency = 1
-max_jobs = 5
-pending_job_cap = 2
-time_limit = "04:00:00"
-resource_aware = true
-cpu_per_slot = 2
-memory_mib_per_slot = 8192
-reserved_cpus = 4
-reserved_memory_mib = 24576
-max_concurrency_per_node = 8
-max_cpu_load_ratio = 1.0
-exclusive = true
-external_runner = true
-
-[[worker_pool_autoscaler_policies]]
 pool_name = "gb10-arm64"
 actuator = "slurm"
 enabled = true
@@ -105,7 +64,7 @@ image_tag = "${IMAGE_TAG}"
 max_concurrent = 10
 env_config_version = "${ENV_CONFIG_VERSION}"
 source_git_commit = "${GIT_SHA}"
-target_slots = 150
+target_slots = 140
 
 [gb10_worker_pool_desired_states.host_intents]
 trt-gb10-1 = "active"
@@ -121,7 +80,7 @@ trt-gb10-10 = "active"
 trt-gb10-11 = "active"
 trt-gb10-12 = "active"
 trt-gb10-13 = "active"
-trt-gb10-14 = "active"
+trt-gb10-14 = "draining"
 trt-gb10-15 = "active"
 
 [gb10_worker_pool_desired_states.rollout_policy]
@@ -149,34 +108,7 @@ rate_card_provider = "yibuapi"
 required = true
 
 [external_slurm_runner_prerequisites]
-pools = ["oldlab", "gb10-arm64"]
+pools = ["gb10-arm64"]
 expected_repo_ref = "${IMAGE_TAG}"
 require_clean_repo = true
 require_worker_token_parity = true
-
-[[external_slurm_autoscaler_supervisors]]
-name = "oldlab"
-pool_name = "oldlab"
-service_name = "loom-oldlab-autoscaler.service"
-timer_name = "loom-oldlab-autoscaler.timer"
-working_directory = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}"
-python_path = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}/.venv/bin/python"
-script_path = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}/scripts/ops/worker_pool_autoscaler_external_once.py"
-args = [
-  "--pool-name",
-  "oldlab",
-  "--namespace",
-  "loom-staging",
-  "--kubeconfig",
-  "/home/qianyi/.kube/config",
-  "--db-local-host",
-  "127.0.0.1",
-  "--db-local-port",
-  "15447",
-]
-requires = ["network-online.target", "loom-staging-postgres-port-forward.service"]
-timer_on_boot_sec = "45"
-timer_on_unit_active_sec = "30"
-timer_accuracy_sec = "5"
-enabled = true
-active = true

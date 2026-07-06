@@ -43,25 +43,33 @@ def test_apply_manifests_invokes_kubectl_with_correct_args(
         captured["input"] = kwargs.get("input")
         # Simulate kubectl reporting one configured object.
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0,
+            args=cmd,
+            returncode=0,
             stdout="deployment.apps/loom-service configured\n",
             stderr="",
         )
 
     monkeypatch.setattr(subprocess, "run", _fake_run)
     monkeypatch.setattr(
-        "shutil.which", lambda _bin: "/usr/local/bin/kubectl",
+        "shutil.which",
+        lambda _bin: "/usr/local/bin/kubectl",
     )
 
     result = apply_manifests(
-        "apiVersion: v1\nkind: ConfigMap\n", "loom", context="prod",
+        "apiVersion: v1\nkind: ConfigMap\n",
+        "loom",
+        context="prod",
     )
     assert result.returncode == 0
     assert result.summary_lines == [
         "deployment.apps/loom-service configured",
     ]
     assert captured["cmd"][:5] == [
-        "kubectl", "apply", "-n", "loom", "-f",
+        "kubectl",
+        "apply",
+        "-n",
+        "loom",
+        "-f",
     ]
     assert "--context" in captured["cmd"]
     assert "prod" in captured["cmd"]
@@ -76,7 +84,10 @@ def test_apply_manifests_omits_context_when_none(
     def _fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
         captured["cmd"] = list(cmd)
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout="", stderr="",
+            args=cmd,
+            returncode=0,
+            stdout="",
+            stderr="",
         )
 
     monkeypatch.setattr(subprocess, "run", _fake_run)
@@ -91,7 +102,9 @@ def test_apply_manifests_propagates_nonzero_returncode(
 ) -> None:
     def _fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
         return subprocess.CompletedProcess(
-            args=cmd, returncode=1, stdout="",
+            args=cmd,
+            returncode=1,
+            stdout="",
             stderr='error: secret "loom-secrets" not found\n',
         )
 
@@ -205,11 +218,11 @@ def test_prune_disabled_worker_resources_deletes_workload_and_policy_but_retains
         net,
         core,
         cluster_cmd.ClusterConfig(),
-        namespace="loom-public-beta",
+        namespace="loom-staging",
     )
 
-    assert apps.deleted_deployments == ["loom-public-beta/loom-worker"]
-    assert net.deleted_network_policies == ["loom-public-beta/loom-worker"]
+    assert apps.deleted_deployments == ["loom-staging/loom-worker"]
+    assert net.deleted_network_policies == ["loom-staging/loom-worker"]
     assert core.deleted_pvcs == []
     assert result.deleted == [
         "deployment.apps/loom-worker",
@@ -229,20 +242,32 @@ def test_wait_for_ready_returns_on_first_pass_when_already_ready(
 
     def _collect(apps, net, core, ns, *, context):  # type: ignore[no-untyped-def]
         return ClusterStatus(
-            namespace=ns, context=context,
-            components=[ComponentStatus(
-                name="loom-service", kind="Deployment",
-                ready=2, desired=2, available=True,
-                generation=1, observed_generation=1, updated=2,
-            )],
-            ingresses=[], warnings=[],
+            namespace=ns,
+            context=context,
+            components=[
+                ComponentStatus(
+                    name="loom-service",
+                    kind="Deployment",
+                    ready=2,
+                    desired=2,
+                    available=True,
+                    generation=1,
+                    observed_generation=1,
+                    updated=2,
+                )
+            ],
+            ingresses=[],
+            warnings=[],
         )
 
     monkeypatch.setattr("loom_cli.cluster_cmd.collect_status", _collect)
 
     status = wait_for_ready(
-        _FakeApi(), _FakeApi(), _FakeApi(),
-        namespace="loom", context=None,
+        _FakeApi(),
+        _FakeApi(),
+        _FakeApi(),
+        namespace="loom",
+        context=None,
         timeout_sec=60,
         _sleep=lambda s: sleeps.append(s),
         _now=lambda: nows[0],
@@ -263,25 +288,35 @@ def test_wait_for_ready_polls_until_ready(
         call_count["n"] += 1
         ready_replicas = 2 if call_count["n"] >= 3 else 0
         return ClusterStatus(
-            namespace=ns, context=context,
-            components=[ComponentStatus(
-                name="loom-service", kind="Deployment",
-                ready=ready_replicas, desired=2,
-                available=ready_replicas > 0,
-                generation=1,
-                observed_generation=1,
-                updated=2 if ready_replicas == 2 else 0,
-            )],
-            ingresses=[], warnings=[],
+            namespace=ns,
+            context=context,
+            components=[
+                ComponentStatus(
+                    name="loom-service",
+                    kind="Deployment",
+                    ready=ready_replicas,
+                    desired=2,
+                    available=ready_replicas > 0,
+                    generation=1,
+                    observed_generation=1,
+                    updated=2 if ready_replicas == 2 else 0,
+                )
+            ],
+            ingresses=[],
+            warnings=[],
         )
 
     monkeypatch.setattr("loom_cli.cluster_cmd.collect_status", _collect)
 
     nows = iter([0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
     status = wait_for_ready(
-        _FakeApi(), _FakeApi(), _FakeApi(),
-        namespace="loom", context=None,
-        timeout_sec=60, poll_interval_sec=1.0,
+        _FakeApi(),
+        _FakeApi(),
+        _FakeApi(),
+        namespace="loom",
+        context=None,
+        timeout_sec=60,
+        poll_interval_sec=1.0,
         _sleep=lambda s: sleeps.append(s),
         _now=lambda: next(nows),
     )
@@ -300,13 +335,22 @@ def test_wait_for_ready_returns_unready_status_on_timeout(
 
     def _collect(apps, net, core, ns, *, context):  # type: ignore[no-untyped-def]
         return ClusterStatus(
-            namespace=ns, context=context,
-            components=[ComponentStatus(
-                name="loom-service", kind="Deployment",
-                ready=0, desired=2, available=False,
-                generation=1, observed_generation=1, updated=0,
-            )],
-            ingresses=[], warnings=[],
+            namespace=ns,
+            context=context,
+            components=[
+                ComponentStatus(
+                    name="loom-service",
+                    kind="Deployment",
+                    ready=0,
+                    desired=2,
+                    available=False,
+                    generation=1,
+                    observed_generation=1,
+                    updated=0,
+                )
+            ],
+            ingresses=[],
+            warnings=[],
         )
 
     monkeypatch.setattr("loom_cli.cluster_cmd.collect_status", _collect)
@@ -314,9 +358,13 @@ def test_wait_for_ready_returns_unready_status_on_timeout(
     # Clock advances past the 5s deadline on the second `_now` call.
     nows = iter([0.0, 0.0, 6.0, 6.0, 6.0])
     status = wait_for_ready(
-        _FakeApi(), _FakeApi(), _FakeApi(),
-        namespace="loom", context=None,
-        timeout_sec=5, poll_interval_sec=1.0,
+        _FakeApi(),
+        _FakeApi(),
+        _FakeApi(),
+        namespace="loom",
+        context=None,
+        timeout_sec=5,
+        poll_interval_sec=1.0,
         _sleep=lambda s: sleeps.append(s),
         _now=lambda: next(nows),
     )
@@ -405,18 +453,28 @@ def test_recover_sandbox_deadline_pods_is_bounded_and_classified_only() -> None:
 def _all_ready_status(ns: str = "loom") -> ClusterStatus:
     """Helper: a fully-ready snapshot with one Deployment."""
     return ClusterStatus(
-        namespace=ns, context=None,
-        components=[ComponentStatus(
-            name="loom-service", kind="Deployment",
-            ready=2, desired=2, available=True,
-            generation=1, observed_generation=1, updated=2,
-        )],
-        ingresses=[], warnings=[],
+        namespace=ns,
+        context=None,
+        components=[
+            ComponentStatus(
+                name="loom-service",
+                kind="Deployment",
+                ready=2,
+                desired=2,
+                available=True,
+                generation=1,
+                observed_generation=1,
+                updated=2,
+            )
+        ],
+        ingresses=[],
+        warnings=[],
     )
 
 
 def _patch_full_up_path(
-    monkeypatch: pytest.MonkeyPatch, *,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
     preflight_any_fail: bool = False,
     target_doctor_fail: bool = False,
     apply_returncode: int = 0,
@@ -434,14 +492,18 @@ def _patch_full_up_path(
     )
 
     from loom_cli.cluster_cmd import PreflightCheck, PreflightReport
+
     preflight_report = PreflightReport(
-        namespace="loom", context=None,
-        checks=[PreflightCheck(
-            name="namespace-exists",
-            outcome="fail" if preflight_any_fail else "pass",
-            detail="ok",
-            remediation="kubectl create namespace loom" if preflight_any_fail else None,
-        )],
+        namespace="loom",
+        context=None,
+        checks=[
+            PreflightCheck(
+                name="namespace-exists",
+                outcome="fail" if preflight_any_fail else "pass",
+                detail="ok",
+                remediation="kubectl create namespace loom" if preflight_any_fail else None,
+            )
+        ],
     )
 
     def _collect_preflight(*args, **kwargs):  # type: ignore[no-untyped-def]
@@ -450,25 +512,28 @@ def _patch_full_up_path(
         return preflight_report
 
     monkeypatch.setattr(
-        "loom_cli.cluster_cmd.collect_preflight", _collect_preflight,
+        "loom_cli.cluster_cmd.collect_preflight",
+        _collect_preflight,
     )
 
     def _append_target_schema_doctor_check(report, **kwargs):  # type: ignore[no-untyped-def]
         captures["target_doctor_called"] = True
         from loom_cli.cluster_cmd import PreflightCheck
 
-        report.checks.append(PreflightCheck(
-            name="schema-doctor",
-            outcome="fail" if target_doctor_fail else "pass",
-            detail=(
-                "1 schema violation(s)"
-                if target_doctor_fail else "schema reconciliation clean"
-            ),
-            remediation=(
-                "  - missing_env: LOOM_CP_EXAMPLE: Rendered Deployment missing env"
-                if target_doctor_fail else None
-            ),
-        ))
+        report.checks.append(
+            PreflightCheck(
+                name="schema-doctor",
+                outcome="fail" if target_doctor_fail else "pass",
+                detail=(
+                    "1 schema violation(s)" if target_doctor_fail else "schema reconciliation clean"
+                ),
+                remediation=(
+                    "  - missing_env: LOOM_CP_EXAMPLE: Rendered Deployment missing env"
+                    if target_doctor_fail
+                    else None
+                ),
+            )
+        )
 
     monkeypatch.setattr(
         "loom_cli.cluster_cmd._append_target_schema_doctor_check",
@@ -482,8 +547,7 @@ def _patch_full_up_path(
         return ApplyResult(
             returncode=apply_returncode,
             summary_lines=(
-                ["deployment.apps/loom-service configured"]
-                if apply_returncode == 0 else []
+                ["deployment.apps/loom-service configured"] if apply_returncode == 0 else []
             ),
             stderr="error: x" if apply_returncode != 0 else "",
         )
@@ -491,15 +555,25 @@ def _patch_full_up_path(
     monkeypatch.setattr("loom_cli.cluster_cmd.apply_manifests", _apply)
 
     final_status = (
-        _all_ready_status() if final_ready
+        _all_ready_status()
+        if final_ready
         else ClusterStatus(
-            namespace="loom", context=None,
-            components=[ComponentStatus(
-                name="loom-service", kind="Deployment",
-                ready=0, desired=2, available=False,
-                generation=1, observed_generation=1, updated=0,
-            )],
-            ingresses=[], warnings=[],
+            namespace="loom",
+            context=None,
+            components=[
+                ComponentStatus(
+                    name="loom-service",
+                    kind="Deployment",
+                    ready=0,
+                    desired=2,
+                    available=False,
+                    generation=1,
+                    observed_generation=1,
+                    updated=0,
+                )
+            ],
+            ingresses=[],
+            warnings=[],
         )
     )
 
@@ -548,13 +622,15 @@ def test_cli_up_prunes_disabled_worker_resources_before_wait(
     prune_calls: list[dict[str, Any]] = []
 
     def _prune(apps, net, core, config, *, namespace):  # type: ignore[no-untyped-def]
-        prune_calls.append({
-            "apps": apps,
-            "net": net,
-            "core": core,
-            "namespace": namespace,
-            "k8s_worker_enabled": config.k8s_worker.enabled,
-        })
+        prune_calls.append(
+            {
+                "apps": apps,
+                "net": net,
+                "core": core,
+                "namespace": namespace,
+                "k8s_worker_enabled": config.k8s_worker.enabled,
+            }
+        )
         return _FakePruneResult(
             deleted=[
                 "deployment.apps/loom-worker",
@@ -575,13 +651,15 @@ def test_cli_up_prunes_disabled_worker_resources_before_wait(
 
     assert rc == 0
     assert captures.get("waited") is True
-    assert prune_calls == [{
-        "apps": prune_calls[0]["apps"],
-        "net": prune_calls[0]["net"],
-        "core": prune_calls[0]["core"],
-        "namespace": "loom",
-        "k8s_worker_enabled": False,
-    }]
+    assert prune_calls == [
+        {
+            "apps": prune_calls[0]["apps"],
+            "net": prune_calls[0]["net"],
+            "core": prune_calls[0]["core"],
+            "namespace": "loom",
+            "k8s_worker_enabled": False,
+        }
+    ]
     out = capsys.readouterr().out
     assert "Pruned disabled-profile resources:" in out
     assert "deployment.apps/loom-worker deleted" in out
@@ -623,7 +701,8 @@ def test_cli_up_preflight_fail_blocks_apply(
 ) -> None:
     """Preflight any_fail=True → refuse to apply; exit 1."""
     captures = _patch_full_up_path(
-        monkeypatch, preflight_any_fail=True,
+        monkeypatch,
+        preflight_any_fail=True,
     )
     rc = main(["cluster", "up"])
     assert rc == 1
@@ -657,7 +736,8 @@ def test_cli_up_skip_preflight_bypasses_check(
     preflight failures (e.g. operator just created a Secret that
     hasn't propagated)."""
     captures = _patch_full_up_path(
-        monkeypatch, preflight_any_fail=True,  # would fail
+        monkeypatch,
+        preflight_any_fail=True,  # would fail
     )
     rc = main(["cluster", "up", "--skip-preflight"])
     assert rc == 0
@@ -723,10 +803,7 @@ def test_cli_up_retries_once_after_bounded_sandbox_deadline_recovery(
                 generation=1,
                 observed_generation=1,
                 updated=5,
-                note=(
-                    "node-runtime-sandbox-deadline: "
-                    "loom-worker-old FailedKillPod"
-                ),
+                note=("node-runtime-sandbox-deadline: loom-worker-old FailedKillPod"),
             ),
         ],
         ingresses=[],
@@ -765,13 +842,15 @@ def test_cli_up_retries_once_after_bounded_sandbox_deadline_recovery(
         raising=False,
     )
 
-    rc = main([
-        "cluster",
-        "up",
-        "--recover-sandbox-deadlines",
-        "--sandbox-deadline-max-pods",
-        "2",
-    ])
+    rc = main(
+        [
+            "cluster",
+            "up",
+            "--recover-sandbox-deadlines",
+            "--sandbox-deadline-max-pods",
+            "2",
+        ]
+    )
 
     assert rc == 0
     assert waits == [600, 600]
@@ -858,7 +937,8 @@ def test_cli_up_kubectl_missing_returns_2(
         )
 
     monkeypatch.setattr(
-        "loom_cli.cluster_cmd.apply_manifests", _apply_raise,
+        "loom_cli.cluster_cmd.apply_manifests",
+        _apply_raise,
     )
     rc = main(["cluster", "up"])
     assert rc == 2
@@ -881,13 +961,20 @@ def test_cli_up_backup_guard_flags_thread_to_preflight(
     manifest.write_text("{}", encoding="utf-8")
     captures = _patch_full_up_path(monkeypatch)
 
-    rc = main([
-        "cluster", "up",
-        "--namespace", "loom-staging",
-        "--environment", "staging",
-        "--backup-manifest", str(manifest),
-        "--backup-max-age-hours", "12",
-    ])
+    rc = main(
+        [
+            "cluster",
+            "up",
+            "--namespace",
+            "loom-staging",
+            "--environment",
+            "staging",
+            "--backup-manifest",
+            str(manifest),
+            "--backup-max-age-hours",
+            "12",
+        ]
+    )
 
     assert rc == 0
     assert captures["preflight_kwargs"]["environment"] == "staging"
@@ -916,7 +1003,7 @@ def test_cli_up_config_file_threads_static_host_path_to_preflight_and_render(
         == "static-host-path"
     )
     assert "kind: PersistentVolume" in captures["apply_yaml_text"]
-    assert "path: \"/data/loom-staging/postgres\"" in captures["apply_yaml_text"]
+    assert 'path: "/data/loom-staging/postgres"' in captures["apply_yaml_text"]
 
 
 def test_cli_up_config_file_invalid_returns_2(

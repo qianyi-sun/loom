@@ -1,9 +1,9 @@
 # First Prod Release Runbook
 
 This is the single operator path for the first `main`-based production
-release. It ties together first-prod bootstrap, temporary beta capacity
+release. It ties together first-prod bootstrap, temporary staging capacity
 leases, frontend route checks, the production release gate, rollback
-preparation, and emergency beta drain.
+preparation, and emergency staging drain.
 
 The current-doc gap this closes: the repo already had the right helper
 scripts, but the operator path was split across the general operator runbook,
@@ -15,8 +15,8 @@ dry run and then know exactly which commands become live production actions.
 
 | Label | Meaning |
 |---|---|
-| `DRY-RUN SAFE` | Repo-only or local-file-only. Safe for a reviewer to run without production secrets, live kubeconfig, live database access, or public-beta/prod workload authority. |
-| `READ-ONLY LIVE` | Reads public or already-sanitized live evidence. Does not mutate prod, beta, workers, DB, object storage, or Git tags, but still needs release-owner coordination when it hits canonical prod/dev URLs. |
+| `DRY-RUN SAFE` | Repo-only or local-file-only. Safe for a reviewer to run without production secrets, live kubeconfig, live database access, or staging/prod workload authority. |
+| `READ-ONLY LIVE` | Reads public or already-sanitized live evidence. Does not mutate prod, staging, workers, DB, object storage, or Git tags, but still needs release-owner coordination when it hits canonical prod/dev URLs. |
 | `LIVE PROD AUTHORITY REQUIRED` | Needs production GitHub Environment approval, production deploy rights, production kubeconfig, release tag push rights, or authority to change live desired state. Do not run from a docs review or local dry run. |
 
 Never put raw token, provider key, database password, MinIO credential,
@@ -35,10 +35,10 @@ work.
 ```bash
 export CANDIDATE_SHA="${CANDIDATE_SHA:-0123456789abcdef0123456789abcdef01234567}"
 export PROD_RELEASE_SHA="${PROD_RELEASE_SHA:-$CANDIDATE_SHA}"
-export BETA_RELEASE_SHA="${BETA_RELEASE_SHA:-abcdef0123456789abcdef0123456789abcdef01}"
+export STAGING_RELEASE_SHA="${STAGING_RELEASE_SHA:-abcdef0123456789abcdef0123456789abcdef01}"
 export IMAGE_TAG="${IMAGE_TAG:-release-0123456789ab}"
 export PROD_IMAGE_TAG="${PROD_IMAGE_TAG:-$IMAGE_TAG}"
-export BETA_IMAGE_TAG="${BETA_IMAGE_TAG:-public-beta-abcdef0}"
+export STAGING_IMAGE_TAG="${STAGING_IMAGE_TAG:-staging-abcdef0}"
 export PROD_TAG="${PROD_TAG:-v1.0.0}"
 export ROLLOUT_DIR="${ROLLOUT_DIR:-/tmp/loom-first-prod-dry-run}"
 mkdir -p "$ROLLOUT_DIR"
@@ -50,11 +50,11 @@ lowercase Git SHAs. The live release owner must choose a new immutable
 
 ## No-Secret Non-Production Dry Run
 
-This No-secret non-production dry run covers First-prod bootstrap, Beta validation lease, Frontend environment checks, Production release, Rollback preparation, and Emergency beta drain.
+This No-secret non-production dry run covers First-prod bootstrap, Staging validation lease, Frontend environment checks, Production release, Rollback preparation, and Emergency staging drain.
 
 This section is the acceptance-testable dry run. It uses only committed repo
 files, fake SHAs, synthetic evidence, and local files under `$ROLLOUT_DIR`.
-It must not touch live public-beta, production, DB, object storage, workers, or
+It must not touch live staging, production, DB, object storage, workers, or
 secrets.
 
 ### 1. First-Prod Bootstrap
@@ -95,7 +95,7 @@ runtime secret.
 `DRY-RUN SAFE`
 
 This proves the default first-prod desired state: production owns all eligible
-shared physical capacity, beta/dev owns zero borrowed slots, and unreachable
+shared physical capacity, staging/dev owns zero borrowed slots, and unreachable
 hosts stay out of both pools.
 
 ```bash
@@ -103,8 +103,8 @@ uv run python scripts/ops/worker_capacity_manifest.py status \
   --manifest deploy/worker-capacity/prod-first.toml \
   --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
   --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
-  --var BETA_IMAGE_TAG="$BETA_IMAGE_TAG" \
-  --var BETA_SOURCE_COMMIT="$BETA_RELEASE_SHA" \
+  --var STAGING_IMAGE_TAG="$STAGING_IMAGE_TAG" \
+  --var STAGING_SOURCE_COMMIT="$STAGING_RELEASE_SHA" \
   --format json \
   --evidence-out "$ROLLOUT_DIR/worker-capacity-prod-first.json"
 ```
@@ -115,11 +115,11 @@ Expected success output:
 {
   "status": "pass",
   "operation": "status",
-  "new_beta_claims_allowed": false,
+  "new_staging_claims_allowed": false,
   "lease": {"state": "none"},
   "summary": {
     "prod_slots": 180,
-    "beta_slots": 0,
+    "staging_slots": 0,
     "state_counts": {"eligible": 19, "unreachable": 1}
   }
 }
@@ -137,12 +137,12 @@ Expected failure output:
 ```
 
 Stop condition: unresolved placeholders, non-empty `errors`, non-empty
-`drift`, `beta_slots` greater than `0`, or `new_beta_claims_allowed=true`
+`drift`, `staging_slots` greater than `0`, or `new_staging_claims_allowed=true`
 blocks production promotion.
 
-### 3. Beta Validation Lease
+### 3. Staging Validation Lease
 
-Beta leases are temporary. The default prod capacity ownership must be
+Staging leases are temporary. The default prod capacity ownership must be
 restored after validation, even when validation fails or is interrupted.
 Operational shorthand: default prod capacity ownership must be restored.
 
@@ -152,13 +152,13 @@ does not mutate live state.
 `DRY-RUN SAFE`
 
 ```bash
-uv run python scripts/ops/worker_capacity_manifest.py lease-beta \
+uv run python scripts/ops/worker_capacity_manifest.py lease-staging \
   --manifest deploy/worker-capacity/prod-first.toml \
   --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
   --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
-  --var BETA_IMAGE_TAG="$BETA_IMAGE_TAG" \
-  --var BETA_SOURCE_COMMIT="$BETA_RELEASE_SHA" \
-  --reason "public-beta rollout smoke $BETA_IMAGE_TAG" \
+  --var STAGING_IMAGE_TAG="$STAGING_IMAGE_TAG" \
+  --var STAGING_SOURCE_COMMIT="$STAGING_RELEASE_SHA" \
+  --reason "staging rollout smoke $STAGING_IMAGE_TAG" \
   --ttl 45m \
   --slots-per-host 1 \
   --max-total-slots 2 \
@@ -171,15 +171,15 @@ Expected success output:
 ```json
 {
   "status": "pass",
-  "operation": "lease-beta",
+  "operation": "lease-staging",
   "applied": false,
-  "new_beta_claims_allowed": true,
+  "new_staging_claims_allowed": true,
   "lease": {
     "state": "active",
     "ttl_seconds": 2700,
     "preemptible": true
   },
-  "summary": {"prod_slots": 178, "beta_slots": 2}
+  "summary": {"prod_slots": 178, "staging_slots": 2}
 }
 ```
 
@@ -190,34 +190,34 @@ evidence, not live worker state.
 `DRY-RUN SAFE`
 
 ```bash
-export LEASE_MANIFEST="$ROLLOUT_DIR/worker-capacity-beta-lease.toml"
+export LEASE_MANIFEST="$ROLLOUT_DIR/worker-capacity-staging-lease.toml"
 
-uv run python scripts/ops/worker_capacity_manifest.py lease-beta \
+uv run python scripts/ops/worker_capacity_manifest.py lease-staging \
   --manifest deploy/worker-capacity/prod-first.toml \
   --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
   --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
-  --var BETA_IMAGE_TAG="$BETA_IMAGE_TAG" \
-  --var BETA_SOURCE_COMMIT="$BETA_RELEASE_SHA" \
-  --reason "public-beta rollout smoke $BETA_IMAGE_TAG" \
+  --var STAGING_IMAGE_TAG="$STAGING_IMAGE_TAG" \
+  --var STAGING_SOURCE_COMMIT="$STAGING_RELEASE_SHA" \
+  --reason "staging rollout smoke $STAGING_IMAGE_TAG" \
   --ttl 45m \
   --slots-per-host 1 \
   --max-total-slots 2 \
   --preemptible \
   --apply \
   --output-manifest "$LEASE_MANIFEST" \
-  --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-lease.json"
+  --evidence-out "$ROLLOUT_DIR/worker-capacity-staging-lease.json"
 ```
 
-Stop condition: do not run public-beta validation if the lease output is
-`status=fail`, assigns beta more than the approved slots, uses
+Stop condition: do not run staging validation if the lease output is
+`status=fail`, assigns staging more than the approved slots, uses
 `--non-preemptible` without an explicit approval URL, or contains secret-like
 values.
 
-### 4. Prod-Pressure Status And Emergency Beta Drain
+### 4. Prod-Pressure Status And Emergency Staging Drain
 
-Use `status` whenever production demand appears while a beta lease exists.
+Use `status` whenever production demand appears while a staging lease exists.
 Any nonzero production pending count, active count, or capacity shortfall stops
-new beta claims and returns idle beta slots to production in the desired-state
+new staging claims and returns idle staging slots to production in the desired-state
 artifact.
 
 `DRY-RUN SAFE`
@@ -231,8 +231,8 @@ uv run python scripts/ops/worker_capacity_manifest.py status \
   --prod-pressure-source "control-plane prod queue summary" \
   --preemptible-grace-period 10m \
   --apply \
-  --output-manifest "$ROLLOUT_DIR/worker-capacity-beta-status.toml" \
-  --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-status.json"
+  --output-manifest "$ROLLOUT_DIR/worker-capacity-staging-status.toml" \
+  --evidence-out "$ROLLOUT_DIR/worker-capacity-staging-status.json"
 ```
 
 Expected success output:
@@ -241,14 +241,14 @@ Expected success output:
 {
   "status": "pass",
   "operation": "status",
-  "new_beta_claims_allowed": false,
+  "new_staging_claims_allowed": false,
   "prod_pressure": {
     "has_pressure": true,
     "cause": "prod_capacity_pressure",
     "prod_pending_count": 3,
     "prod_capacity_shortfall": 1
   },
-  "summary": {"prod_slots": 180, "beta_slots": 0}
+  "summary": {"prod_slots": 180, "staging_slots": 0}
 }
 ```
 
@@ -258,12 +258,12 @@ that are not represented by the prod-pressure counts.
 `DRY-RUN SAFE`
 
 ```bash
-uv run python scripts/ops/worker_capacity_manifest.py drain-beta \
+uv run python scripts/ops/worker_capacity_manifest.py drain-staging \
   --manifest "$LEASE_MANIFEST" \
   --reason "prod pressure before release gate" \
   --apply \
-  --output-manifest "$ROLLOUT_DIR/worker-capacity-beta-draining.toml" \
-  --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-drain.json"
+  --output-manifest "$ROLLOUT_DIR/worker-capacity-staging-draining.toml" \
+  --evidence-out "$ROLLOUT_DIR/worker-capacity-staging-drain.json"
 ```
 
 Expected success output:
@@ -271,38 +271,38 @@ Expected success output:
 ```json
 {
   "status": "pass",
-  "operation": "drain-beta",
-  "new_beta_claims_allowed": false,
+  "operation": "drain-staging",
+  "new_staging_claims_allowed": false,
   "drain": {
     "idle_leased_slots": 2,
-    "running_beta_trials": 0,
+    "running_staging_trials": 0,
     "released_idle_hosts": ["trt-gb10-1", "trt-gb10-2"]
   },
-  "summary": {"prod_slots": 180, "beta_slots": 0}
+  "summary": {"prod_slots": 180, "staging_slots": 0}
 }
 ```
 
-Stop condition: if `running_beta_trials` is nonzero, record the trial IDs from
+Stop condition: if `running_staging_trials` is nonzero, record the trial IDs from
 the secret-free worker/status artifact, wait for graceful completion or use the
-approved retry/cancel path for preemptible beta work. Do not start a prod
-release gate while beta has active borrowed slots unless the release owner
+approved retry/cancel path for preemptible staging work. Do not start a prod
+release gate while staging has active borrowed slots unless the release owner
 adds an explicit override with `approved=true`, a reason, and an HTTPS
 evidence URL.
 
-### 5. Beta Release
+### 5. Staging Release
 
-Run this after beta validation completes, fails, or is cancelled. It is
-idempotent and should be rerun until evidence shows beta slots are zero.
+Run this after staging validation completes, fails, or is cancelled. It is
+idempotent and should be rerun until evidence shows staging slots are zero.
 
 `DRY-RUN SAFE`
 
 ```bash
-uv run python scripts/ops/worker_capacity_manifest.py release-beta \
+uv run python scripts/ops/worker_capacity_manifest.py release-staging \
   --manifest "$LEASE_MANIFEST" \
-  --reason "public-beta smoke complete" \
+  --reason "staging smoke complete" \
   --apply \
-  --output-manifest "$ROLLOUT_DIR/worker-capacity-beta-released.toml" \
-  --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-release.json"
+  --output-manifest "$ROLLOUT_DIR/worker-capacity-staging-released.toml" \
+  --evidence-out "$ROLLOUT_DIR/worker-capacity-staging-release.json"
 ```
 
 Expected success output:
@@ -310,19 +310,19 @@ Expected success output:
 ```json
 {
   "status": "pass",
-  "operation": "release-beta",
-  "new_beta_claims_allowed": false,
+  "operation": "release-staging",
+  "new_staging_claims_allowed": false,
   "lease": {
     "state": "released",
     "released_at": "2026-07-06T00:20:00Z"
   },
-  "summary": {"prod_slots": 180, "beta_slots": 0}
+  "summary": {"prod_slots": 180, "staging_slots": 0}
 }
 ```
 
-Stop condition: if release evidence still shows `beta_slots` greater than `0`
-or `new_beta_claims_allowed=true`, repeat `release-beta` against the latest
-lease manifest or drain status. Do not promote production with an active beta
+Stop condition: if release evidence still shows `staging_slots` greater than `0`
+or `new_staging_claims_allowed=true`, repeat `release-staging` against the latest
+lease manifest or drain status. Do not promote production with an active staging
 lease.
 
 ### 6. Frontend Environment Checks
@@ -479,7 +479,7 @@ surfaces, or prod/dev route confusion.
 
 Create a synthetic no-secret manifest for the dry run. Live releases must use
 real staging evidence, real image digests, real backup pointers, real frontend
-route smoke evidence, the latest beta capacity evidence, the latest
+route smoke evidence, the latest staging capacity evidence, the latest
 operator-free user E2E/raw-delivery status, and rollback evidence.
 
 `DRY-RUN SAFE`
@@ -602,12 +602,12 @@ manifest = {
                 }
             ],
         },
-        "prod_beta_isolation": {
+        "prod_staging_isolation": {
             "status": "pass",
-            "url": "https://example.invalid/prod-beta-isolation",
-            "state_profile_evidence": "release-evidence/prod-beta-state-profile.json",
-            "worker_identity_evidence": "release-evidence/prod-beta-worker-identity.json",
-            "frontend_api_base_evidence": "release-evidence/prod-beta-api-base.json",
+            "url": "https://example.invalid/prod-staging-isolation",
+            "state_profile_evidence": "release-evidence/prod-staging-state-profile.json",
+            "worker_identity_evidence": "release-evidence/prod-staging-worker-identity.json",
+            "frontend_api_base_evidence": "release-evidence/prod-staging-api-base.json",
             "state_profiles": {
                 "production": {
                     "environment": "production",
@@ -628,23 +628,23 @@ manifest = {
                         "yibuapi_secret_ref": "github-environment:production/YIBUAPI_API_KEY",
                     },
                 },
-                "development": {
-                    "environment": "development",
-                    "github_environment": "development",
-                    "namespace": "loom-dev",
-                    "database_name": "loom_dev",
-                    "provider_connection_namespace": "development",
+                "staging": {
+                    "environment": "staging",
+                    "github_environment": "staging",
+                    "namespace": "loom-staging",
+                    "database_name": "loom_staging",
+                    "provider_connection_namespace": "staging",
                     "object_storage": {
-                        "task_bucket": "loom-dev-tasks",
-                        "trajectories_bucket": "loom-dev-trajectories",
-                        "artifacts_bucket": "loom-dev-artifacts",
+                        "task_bucket": "loom-staging-tasks",
+                        "trajectories_bucket": "loom-staging-trajectories",
+                        "artifacts_bucket": "loom-staging-artifacts",
                     },
                     "secret_refs": {
-                        "secret_store_key_ref": "github-environment:development/LOOM_SECRET_STORE_MASTER_KEY",
-                        "service_api_token_ref": "github-environment:development/LOOM_SERVICE_API_TOKEN",
-                        "worker_token_ref": "github-environment:development/LOOM_WORKER_TOKEN",
-                        "provider_secret_ref": "github-environment:development/LOOM_PROVIDER_SECRET_REF",
-                        "yibuapi_secret_ref": "github-environment:development/YIBUAPI_API_KEY",
+                        "secret_store_key_ref": "github-environment:staging/LOOM_SECRET_STORE_MASTER_KEY",
+                        "service_api_token_ref": "github-environment:staging/LOOM_SERVICE_API_TOKEN",
+                        "worker_token_ref": "github-environment:staging/LOOM_WORKER_TOKEN",
+                        "provider_secret_ref": "github-environment:staging/LOOM_PROVIDER_SECRET_REF",
+                        "yibuapi_secret_ref": "github-environment:staging/YIBUAPI_API_KEY",
                     },
                 },
             },
@@ -655,11 +655,11 @@ manifest = {
                     "api_base": "https://yylx.world/prod/api",
                     "environment_label": "Production",
                 },
-                "development": {
-                    "environment": "development",
+                "staging": {
+                    "environment": "staging",
                     "route": "https://yylx.world/dev",
                     "api_base": "https://yylx.world/dev/api",
-                    "environment_label": "Development / public beta",
+                    "environment_label": "Staging",
                 },
             },
             "workers": {
@@ -672,20 +672,20 @@ manifest = {
                     "k8s_namespace": "loom-prod",
                     "k8s_deployment": "loom-prod-worker",
                 },
-                "development": {
-                    "environment": "development",
+                "staging": {
+                    "environment": "staging",
                     "api_url": "https://yylx.world/dev/api",
-                    "image": "ghcr.io/qianyi-sun/loom-worker:public-beta-abcdef0",
+                    "image": "ghcr.io/qianyi-sun/loom-worker:staging-abcdef0",
                     "image_digest": digest("loom-worker", "6"),
-                    "source_commit": os.environ["BETA_RELEASE_SHA"],
-                    "k8s_namespace": "loom-dev",
-                    "k8s_deployment": "loom-dev-worker",
+                    "source_commit": os.environ["STAGING_RELEASE_SHA"],
+                    "k8s_namespace": "loom-staging",
+                    "k8s_deployment": "loom-staging-worker",
                 },
             },
-            "beta_capacity": {
+            "staging_capacity": {
                 "lease_state": "none",
-                "beta_slots": 0,
-                "new_beta_claims_allowed": False,
+                "staging_slots": 0,
+                "new_staging_claims_allowed": False,
                 "override": {"approved": False},
             },
         },
@@ -743,11 +743,11 @@ Expected failure output:
 
 ```text
 Release gate validation: FAIL
-- forbidden evidence value at checks.prod_beta_isolation.state_profiles.production.operator_note
+- forbidden evidence value at checks.prod_staging_isolation.state_profiles.production.operator_note
 ```
 
 Stop condition: missing required checks, stale candidate/image mismatch, active
-beta capacity without override, shared prod/dev state, route mismatch, missing
+staging capacity without override, shared prod/dev state, route mismatch, missing
 final `service.no_oom_restarts` smoke evidence after route probes, missing or
 failing `hf_mirror_token_boundary` evidence for SkillLearnBench mirrored
 `s3://` runtime sources and worker HF token absence, or any forbidden evidence
@@ -923,18 +923,18 @@ point.
 Before declaring the first production release ready:
 
 - Release gate evidence has `"status": "pass"` and includes real
-  `prod_beta_isolation`, `frontend_route_evidence`, `worker_capacity_smoke`,
+  `prod_staging_isolation`, `frontend_route_evidence`, `worker_capacity_smoke`,
   `raw_delivery_export_status`, and `rollback_plan` records.
-- Beta capacity evidence shows `"beta_slots": 0`,
-  `"new_beta_claims_allowed": false`, and no active lease unless the release
+- Staging capacity evidence shows `"staging_slots": 0`,
+  `"new_staging_claims_allowed": false`, and no active lease unless the release
   owner approved a documented override.
 - Frontend route smoke proves `https://yylx.world/prod` resolves production
-  metadata/API base and `https://yylx.world/dev` resolves development/public
-  beta metadata/API base.
+  metadata/API base and `https://yylx.world/dev` resolves staging metadata/API
+  base.
 - Staging smoke evidence includes the final `service.no_oom_restarts` row
   after route probes and security scanning, not only the pre-route baseline.
 - The production deploy uses `main` or an immutable `vX.Y.Z` tag, never `dev`.
 - Rollback prep records previous image/tag, previous release-gate run, DB
   recovery point, object-storage recovery point, and redacted secret evidence.
-- No live prod/public-beta workload, DB change, worker cancellation, tag push,
+- No live prod/staging workload, DB change, worker cancellation, tag push,
   or deploy is run from a no-secret dry-run review.

@@ -1,4 +1,4 @@
-# Public Beta Launch Gate
+# Staging Launch Gate
 
 This page is the release-owner checklist for Loom's staging. It
 pulls together the deployment, onboarding, Run Library, security, and smoke
@@ -17,7 +17,7 @@ evidence needed before `dev` can be promoted to `main`.
   platform admin.
 - Clone config and reuse artifact create destination-team records with
   provenance. They never copy source-team provider credentials.
-- Quota and rate-limit enforcement are not launch blockers for this beta. Use
+- Quota and rate-limit enforcement are not launch blockers for this staging. Use
   cost alerts, team disable/pause controls, and provider-key rotation as
   operator responses until a separate product policy exists.
 
@@ -62,13 +62,13 @@ Attach these to the release issue or release PR:
 - For first prod, `python scripts/ops/frontend_route_smoke.py --route ...`
   output proving `https://yylx.world/prod` exposes production identity and
   `https://yylx.world/prod/api`, while `https://yylx.world/dev` exposes
-  development/public-beta identity and `https://yylx.world/dev/api`, with
+  staging identity and `https://yylx.world/dev/api`, with
   no-store runtime config responses.
-- For first prod, the release-promotion manifest's `prod_beta_isolation` check
+- For first prod, the release-promotion manifest's `prod_staging_isolation` check
   must embed structured dry-run evidence for state profiles, object storage
   buckets/prefix policy, safe token/provider refs, frontend API bases, worker
-  API URLs, worker image/source identities, and beta lease status. The
-  production gate fails active beta leases unless `beta_slots=0` or a documented
+  API URLs, worker image/source identities, and staging lease status. The
+  production gate fails active staging leases unless `staging_slots=0` or a documented
   override with an approval URL is present. Safe refs such as
   `github-environment:production/...` are expected; raw token/provider/MinIO
   values are not.
@@ -81,7 +81,7 @@ Attach these to the release issue or release PR:
   `loom eval batch show`, `loom eval trial show`, and
   `loom eval trial download`.
 - Benchmark catalog provisioning transcript showing either
-  `loom datasets provision-staging-catalog` with non-zero
+  `loom datasets provision-catalog` with non-zero
   `ready_agents`, non-zero `ready_benchmarks`, non-zero `ready_tasks`, and
   `missing=0`, or
   `loom datasets register <benchmark>` against the published HF manifest with
@@ -154,18 +154,18 @@ Attach these to the release issue or release PR:
   evidence must include the smoke batch id, runtime, failure count, and one
   `oldlab_worker_records` entry per OLDLAB worker with node name, Slurm job id,
   Loom worker id, configured concurrency, and claimed trial count.
-- For first prod, `worker_capacity_smoke` / prod-beta isolation evidence must
+- For first prod, `worker_capacity_smoke` / prod-staging isolation evidence must
   also attach the secret-safe output from
   `uv run python scripts/ops/worker_capacity_manifest.py --manifest
   deploy/worker-capacity/prod-first.toml`. The report must show production as
-  the default owner of all eligible GB10/OLDLAB slots, beta/dev at zero slots
+  the default owner of all eligible GB10/OLDLAB slots, staging/dev at zero slots
   unless an explicit bounded borrow is active, and no worker identity, API URL,
   image tag, source commit, compose service, or Kubernetes deployment crossing
-  the prod/dev boundary. If a bounded beta lease is active, the evidence must
+  the prod/dev boundary. If a bounded staging lease is active, the evidence must
   include the prod-pressure counts used by `status`; nonzero prod pressure must
   produce `prod_pressure.cause=prod_capacity_pressure`,
-  `new_beta_claims_allowed=false`, idle beta slots returned to prod, and running
-  beta slots reported as draining rather than as beta rollout failure.
+  `new_staging_claims_allowed=false`, idle staging slots returned to prod, and running
+  staging slots reported as draining rather than as staging rollout failure.
 - `scripts/staging_smoke_gate.py` Markdown evidence with `--fail-on-skip`
   and `--allow-mutating-checks` against disposable staging data. The report
   must include the final service restart/OOM row by passing `--k8s-namespace`;
@@ -349,9 +349,9 @@ python scripts/staging_smoke_gate.py \
   --server-url https://loom.example.com \
   --team-a-token env:TEAM_A_TOKEN \
   --team-b-token env:TEAM_B_TOKEN \
-  --catalog-minio-endpoint "$PUBLIC_BETA_MINIO_ENDPOINT" \
-  --catalog-minio-access-key env:PUBLIC_BETA_MINIO_ACCESS_KEY \
-  --catalog-minio-secret-key env:PUBLIC_BETA_MINIO_SECRET_KEY \
+  --catalog-minio-endpoint "$STAGING_MINIO_ENDPOINT" \
+  --catalog-minio-access-key env:STAGING_MINIO_ACCESS_KEY \
+  --catalog-minio-secret-key env:STAGING_MINIO_SECRET_KEY \
   --object-store-write-check-only \
   --object-store-write-check-bucket trajectories \
   --object-store-write-check-count 64 \
@@ -384,16 +384,16 @@ python scripts/staging_smoke_gate.py \
   --private-artifact-key "$PRIVATE_ARTIFACT_KEY" \
   --clone-provider-connection-id "$TEAM_B_PROVIDER_CONNECTION_ID" \
   --reuse-provider-connection-id "$TEAM_B_PROVIDER_CONNECTION_ID" \
-  --catalog-minio-endpoint "$PUBLIC_BETA_MINIO_ENDPOINT" \
-  --catalog-minio-access-key env:PUBLIC_BETA_MINIO_ACCESS_KEY \
-  --catalog-minio-secret-key env:PUBLIC_BETA_MINIO_SECRET_KEY \
+  --catalog-minio-endpoint "$STAGING_MINIO_ENDPOINT" \
+  --catalog-minio-access-key env:STAGING_MINIO_ACCESS_KEY \
+  --catalog-minio-secret-key env:STAGING_MINIO_SECRET_KEY \
   --object-store-write-check \
   --object-store-write-check-bucket trajectories \
   --object-store-write-check-count 64 \
   --object-store-write-check-concurrency 16 \
   --k8s-namespace loom-staging \
   --required-worker-pool oldlab \
-  --secret-needle env:PUBLIC_BETA_SECRET_NEEDLE \
+  --secret-needle env:STAGING_SECRET_NEEDLE \
   --internal-url-needle loom-minio.loom.svc.cluster.local \
   --allow-mutating-checks \
   --fail-on-skip \

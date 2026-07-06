@@ -30,16 +30,16 @@ def test_first_prod_runbook_has_executable_command_coverage() -> None:
         "LIVE PROD AUTHORITY REQUIRED",
         "DRY-RUN SAFE",
         "First-prod bootstrap",
-        "Beta validation lease",
+        "Staging validation lease",
         "Frontend environment checks",
         "Production release",
         "Rollback preparation",
-        "Emergency beta drain",
+        "Emergency staging drain",
         "scripts/validate_environment_isolation.py",
         "scripts/ops/worker_capacity_manifest.py status",
-        "scripts/ops/worker_capacity_manifest.py lease-beta",
-        "scripts/ops/worker_capacity_manifest.py release-beta",
-        "scripts/ops/worker_capacity_manifest.py drain-beta",
+        "scripts/ops/worker_capacity_manifest.py lease-staging",
+        "scripts/ops/worker_capacity_manifest.py release-staging",
+        "scripts/ops/worker_capacity_manifest.py drain-staging",
         "scripts/ops/release_gate.py validate",
         "scripts/ops/frontend_route_smoke.py",
         "scripts/ops/operator_free_user_e2e_gate.py",
@@ -60,8 +60,8 @@ def test_first_prod_runbook_documents_expected_secret_safe_outputs() -> None:
         "Expected failure output",
         '"status": "pass"',
         '"status": "fail"',
-        '"beta_slots": 0',
-        '"new_beta_claims_allowed": false',
+        '"staging_slots": 0',
+        '"new_staging_claims_allowed": false',
         '"prod_pressure"',
         "forbidden evidence value",
         "Operator-free user E2E gate: PASS",
@@ -90,7 +90,7 @@ def test_first_prod_runbook_documents_expected_secret_safe_outputs() -> None:
 def test_first_prod_runbook_requires_beta_leases_to_be_temporary() -> None:
     text = _runbook_text().lower()
 
-    assert "beta leases are temporary" in text
+    assert "staging leases are temporary" in text
     assert "default prod capacity ownership must be restored" in text
     assert "stop condition" in text
     assert "no-secret" in text
