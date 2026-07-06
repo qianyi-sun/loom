@@ -379,6 +379,67 @@ async def test_list_benchmarks_keeps_non_v1_builtin_visible_but_disabled(
     assert "v1.0 benchmark support set" in browsecomp["readiness_message"]
 
 
+async def test_list_benchmarks_hides_sample_tasks_local_benchmark(
+    benchmarks_setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    """The temporary sample-tasks bridge must not appear in the v1.0
+    production benchmark catalog, even if stale local rows still exist."""
+    app, raw = benchmarks_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Benchmark).values(
+                id="sample-tasks",
+                display_name="Sample Tasks",
+                upstream_kind="local-folder",
+                upstream_locator="fixture://sample-tasks",
+                upstream_revision="",
+                license_spdx="proprietary",
+                license_url="",
+                splits=["test"],
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id="sample-tasks/task-001",
+                benchmark_id="sample-tasks",
+                config=_valid_task_config("sample-tasks/task-001"),
+                checksum="s" * 64,
+                source="fixture://sample-tasks/task-001/",
+                license="proprietary",
+                registered_at=datetime.now(UTC),
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r_default = await ac.get(
+            "/api/v1/benchmarks",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        r_all = await ac.get(
+            "/api/v1/benchmarks?include_empty=true",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        r_detail = await ac.get(
+            "/api/v1/benchmarks/sample-tasks",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r_default.status_code == 200
+    assert "sample-tasks" not in {item["id"] for item in r_default.json()["items"]}
+    assert r_all.status_code == 200
+    assert "sample-tasks" not in {item["id"] for item in r_all.json()["items"]}
+    assert r_detail.status_code == 404
+
+
 async def test_list_benchmarks_counts_only_runnable_task_configs(
     benchmarks_setup: tuple[FastAPI, str],
     postgres_url: str,

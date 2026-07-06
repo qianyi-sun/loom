@@ -220,7 +220,7 @@ The bulk of the translator test coverage already exists under `responses_chat_co
 
 1. **Schema + probe worker only.** Ship the migration and the probe worker; no gateway routing change yet. Verify probing populates the columns correctly across all existing connections. Native providers should show `TRUE`; yibuapi should show `FALSE`.
 2. **Wire the dispatch behind the flag.** Ship the router changes with `LOOM_GW_RESPONSES_TRANSLATION_ENABLED=false`. Confirm no behaviour change on any live traffic. Run the new probe/dispatch integration suite in CI.
-3. **Single-connection enable.** Flip the flag globally but scoped to `mz_tn_canada_qianyi` only via an operator override table (or a per-connection `override_translation_enabled bool`; TBD in plan stage). Run the sample-tasks smoke from #266 with `codex + glm-5.1-thinking`; verify real completions land in `llm_calls` with non-zero token counts.
+3. **Single-connection enable.** Flip the flag globally but scoped to `mz_tn_canada_qianyi` only via an operator override table (or a per-connection `override_translation_enabled bool`; TBD in plan stage). Run a currently supported v1.0 smoke benchmark such as MBPP or HumanEval with `codex + glm-5.1-thinking`; verify real completions land in `llm_calls` with non-zero token counts.
 4. **Global enable.** Remove the per-connection scope; the flag governs everything.
 5. **Rollback path.** `LOOM_GW_RESPONSES_TRANSLATION_ENABLED=false` reverts every connection to today's behaviour (native pass-through + the existing 400-signature fallback). No DB state to unwind.
 

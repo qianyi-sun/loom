@@ -14,7 +14,7 @@ from collections import defaultdict
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import select, text
+from sqlalchemy import Select, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.benchmark_readiness import (
@@ -28,6 +28,8 @@ from loom.db.schema import Benchmark, Task
 from loom_service.dependencies import SessionAndCtx
 
 router = APIRouter()
+
+_HIDDEN_FROM_V1_CATALOG_BENCHMARK_IDS = frozenset({"sample-tasks"})
 
 
 def _load_registry_names() -> set[str]:
@@ -81,6 +83,12 @@ def _bench_row(b: Benchmark, readiness: BenchmarkReadinessItem) -> dict[str, Any
         "series": b.series,
         **readiness_fields,
     }
+
+
+def _visible_benchmarks_statement() -> Select[tuple[Benchmark]]:
+    return select(Benchmark).where(
+        ~Benchmark.id.in_(_HIDDEN_FROM_V1_CATALOG_BENCHMARK_IDS),
+    )
 
 
 async def _benchmark_rows_with_readiness(
@@ -144,7 +152,7 @@ async def list_benchmarks(
     include_empty: Annotated[bool, Query()] = False,
 ) -> dict[str, Any]:
     s, _ctx = sc
-    stmt = select(Benchmark).order_by(Benchmark.display_name)
+    stmt = _visible_benchmarks_statement().order_by(Benchmark.display_name)
     if cursor:
         stmt = stmt.where(Benchmark.display_name > cursor)
     benchmarks = list((await s.scalars(stmt)).all())
@@ -172,6 +180,11 @@ async def get_benchmark(
     sc: SessionAndCtx,
 ) -> dict[str, Any]:
     s, _ctx = sc
+    if benchmark_id in _HIDDEN_FROM_V1_CATALOG_BENCHMARK_IDS:
+        raise HTTPException(
+            status_code=404,
+            detail="benchmark not found",
+        )
     b = (
         await s.execute(select(Benchmark).where(Benchmark.id == benchmark_id))
     ).scalar_one_or_none()
