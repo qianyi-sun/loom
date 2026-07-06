@@ -223,15 +223,21 @@ def _verifier_steps(result: dict[str, Any] | None) -> list[dict[str, Any]]:
         verifier_d = verifier if isinstance(verifier, dict) else {}
         error = verifier_d.get("error")
         step_error = raw.get("error")
+        checks = verifier_d.get("checks")
+        projected: dict[str, Any] = {
+            "step_name": raw.get("step_name"),
+            "rewards": (
+                verifier_d.get("rewards") if isinstance(verifier_d.get("rewards"), dict) else {}
+            ),
+            "verifier_error": error if isinstance(error, dict) else None,
+            "step_error": step_error if isinstance(step_error, dict) else None,
+        }
+        if isinstance(checks, list):
+            projected["checks"] = [
+                check for check in checks if isinstance(check, dict)
+            ]
         steps.append(
-            {
-                "step_name": raw.get("step_name"),
-                "rewards": (
-                    verifier_d.get("rewards") if isinstance(verifier_d.get("rewards"), dict) else {}
-                ),
-                "verifier_error": error if isinstance(error, dict) else None,
-                "step_error": step_error if isinstance(step_error, dict) else None,
-            }
+            projected
         )
     return steps
 
