@@ -17,10 +17,10 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal, NoReturn
+from typing import Annotated, Any, Literal, NoReturn, cast
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select, update
 
@@ -33,6 +33,7 @@ from loom.db.schema import (
     ProviderModelCache,
     Task,
     Team,
+    TeamMembership,
     Trial,
     User,
     Worker,
@@ -44,6 +45,10 @@ from loom.security.redaction import redact_mapping, redact_text
 from loom_llm_gateway.rate_card import (
     COST_META_CONFIDENCE_KEY,
     COST_META_SOURCE_KEY,
+)
+from loom_service.admin_audit import (
+    actor_from_context,
+    write_admin_audit_event,
 )
 from loom_service.agent_catalog import (
     get_agent,
@@ -58,7 +63,7 @@ from loom_service.auth_guards import (
 )
 from loom_service.batch_identity import build_batch_identity
 from loom_service.debug_evidence import build_batch_debug_evidence
-from loom_service.dependencies import SessionAndCtx
+from loom_service.dependencies import AdminSessionAndCtx, SessionAndCtx
 from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
 from loom_service.failure_taxonomy import (
     build_supplemental_rerun_plan,
@@ -163,6 +168,11 @@ class _CreateBatch(BaseModel):
     budget_confirmed: bool = False
 
 
+class _AdminCreateBatchOnBehalf(_CreateBatch):
+    represented_user_id: UUID | None = None
+    represented_username: str | None = Field(default=None, max_length=64)
+
+
 class _RerunFailedBatch(BaseModel):
     task_ids: list[str] = Field(default_factory=list, max_length=5000)
     include_operator_approval: bool = False
@@ -250,6 +260,88 @@ async def _reject_if_team_paused(session: Any, team_id: UUID) -> None:
             status_code=403,
             detail="team submissions are paused",
         )
+
+
+async def _resolve_on_behalf_submitter(
+    session: Any,
+    payload: _AdminCreateBatchOnBehalf,
+) -> User:
+    if payload.team_id is None:
+        _reject_submission(
+            reason="invalid_input",
+            status_code=400,
+            detail="team_id is required for admin on-behalf batch submission",
+        )
+    represented_user_id = payload.represented_user_id
+    represented_username = (
+        payload.represented_username.strip()
+        if payload.represented_username is not None
+        else None
+    )
+    if bool(represented_user_id) == bool(represented_username):
+        _reject_submission(
+            reason="invalid_input",
+            status_code=400,
+            detail=(
+                "set exactly one of represented_user_id or "
+                "represented_username"
+            ),
+        )
+
+    team = (
+        await session.execute(
+            select(Team).where(Team.id == payload.team_id),
+        )
+    ).scalar_one_or_none()
+    if team is None:
+        _reject_submission(
+            reason="invalid_input",
+            status_code=404,
+            detail="team not found",
+        )
+    if team.disabled_at is not None:
+        _reject_submission(
+            reason="permission",
+            status_code=403,
+            detail="represented team is disabled",
+        )
+
+    if represented_user_id is not None:
+        stmt = select(User).where(User.id == represented_user_id)
+    else:
+        assert represented_username is not None
+        stmt = select(User).where(
+            User.username_normalized == represented_username.casefold(),
+        )
+    user = (await session.execute(stmt)).scalar_one_or_none()
+    if user is None:
+        _reject_submission(
+            reason="invalid_input",
+            status_code=404,
+            detail="represented user not found",
+        )
+    if user.status != "active" or user.disabled_at is not None:
+        _reject_submission(
+            reason="permission",
+            status_code=403,
+            detail="represented user is not active",
+        )
+
+    membership = (
+        await session.execute(
+            select(TeamMembership).where(
+                TeamMembership.team_id == payload.team_id,
+                TeamMembership.user_id == user.id,
+            ),
+        )
+    ).scalar_one_or_none()
+    if membership is None:
+        _reject_submission(
+            reason="permission",
+            status_code=403,
+            detail="represented user is not a member of the represented team",
+        )
+    return cast(User, user)
 
 
 async def _resolve_submission_team_id(
@@ -471,19 +563,14 @@ def _serialize(
     return out
 
 
-@router.post("/batches", status_code=201)
-async def create_batch(
+async def _create_batch_record(
     request: Request,
-    sc: SessionAndCtx,
+    s: Any,
+    ctx: AuthContext,
     payload: _CreateBatch,
+    *,
+    submitted_by_user_id: UUID | None,
 ) -> dict[str, Any]:
-    s, ctx = sc
-    try:
-        require_scope(ctx, "submit")
-        require_submitting_user(ctx)
-    except HTTPException:
-        SUBMISSION_REJECTS_TOTAL.labels(reason="permission").inc()
-        raise
     submission_team_id = await _resolve_submission_team_id(
         s, ctx, payload.team_id,
     )
@@ -774,7 +861,7 @@ async def create_batch(
         trial_config=trial_config,
         state="submitted",
         created_by_token_prefix=token_prefix,
-        submitted_by_user_id=ctx.user_id,
+        submitted_by_user_id=submitted_by_user_id,
         expected_trial_count=expected,
         n_per_task=payload.n_per_task,
         backend=payload.backend,
@@ -796,7 +883,7 @@ async def create_batch(
         ),
     )
     s.add(b)
-    await s.commit()
+    await s.flush()
     await s.refresh(b)
     usage_projection = _empty_usage_projection()
     budget_projection = project_batch_budget(b, usage_projection)
@@ -814,6 +901,66 @@ async def create_batch(
         "created_at": b.created_at.isoformat(),
         **budget_projection,
     }
+
+
+@router.post("/batches", status_code=201)
+async def create_batch(
+    request: Request,
+    sc: SessionAndCtx,
+    payload: _CreateBatch,
+) -> dict[str, Any]:
+    s, ctx = sc
+    try:
+        require_scope(ctx, "submit")
+        require_submitting_user(ctx)
+    except HTTPException:
+        SUBMISSION_REJECTS_TOTAL.labels(reason="permission").inc()
+        raise
+    response = await _create_batch_record(
+        request,
+        s,
+        ctx,
+        payload,
+        submitted_by_user_id=ctx.user_id,
+    )
+    await s.commit()
+    return response
+
+
+@router.post("/admin/batches/on-behalf", status_code=201)
+async def admin_create_batch_on_behalf(
+    request: Request,
+    sc: AdminSessionAndCtx,
+    payload: _AdminCreateBatchOnBehalf,
+    x_loom_admin_actor: Annotated[str | None, Header()] = None,
+) -> dict[str, Any]:
+    s, ctx = sc
+    actor = await actor_from_context(s, ctx, x_loom_admin_actor)
+    represented_user = await _resolve_on_behalf_submitter(s, payload)
+    response = await _create_batch_record(
+        request,
+        s,
+        ctx,
+        payload,
+        submitted_by_user_id=represented_user.id,
+    )
+    await write_admin_audit_event(
+        s,
+        actor=actor,
+        action="batch.submit_on_behalf",
+        target_type="batch",
+        target_id=response["batch_id"],
+        request=request,
+        metadata={
+            "represented_user_id": str(represented_user.id),
+            "represented_username": represented_user.username,
+            "represented_team_id": str(payload.team_id),
+            "expected_trial_count": response["expected_trial_count"],
+            "backend": response["backend"],
+        },
+    )
+    await s.commit()
+    return response
 
 
 def _derive_combination_label(combo: Combination) -> str:

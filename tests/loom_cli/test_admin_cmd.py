@@ -1940,6 +1940,88 @@ def test_team_mint_posts_payload(
     assert "loom_team_xyz" in out
 
 
+def test_admin_batches_submit_on_behalf_posts_payload_and_actor_header(
+    mock_server: _MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("POST", "/api/v1/admin/batches/on-behalf")] = httpx.Response(
+        201,
+        json={
+            "batch_id": "11111111-1111-1111-1111-111111111111",
+            "team_id": _TEAM_ID,
+            "name": "release canary",
+            "state": "submitted",
+            "expected_trial_count": 1,
+            "n_per_task": 1,
+            "backend": "docker",
+            "required_worker_pools": [],
+        },
+    )
+
+    rc = main(
+        [
+            "admin",
+            "batches",
+            "submit-on-behalf",
+            "--represented-username",
+            "qianyi",
+            "--team-id",
+            _TEAM_ID,
+            "--agent",
+            "oracle",
+            "--benchmark",
+            "hello-world",
+            "--name",
+            "release canary",
+            "--admin-actor",
+            "release-operator",
+        ]
+    )
+
+    assert rc == 0
+    req = mock_server.requests[0]
+    assert req.method == "POST"
+    assert req.url.path == "/api/v1/admin/batches/on-behalf"
+    assert req.headers["X-Loom-Admin-Actor"] == "release-operator"
+    body = json.loads(req.content)
+    assert body == {
+        "represented_username": "qianyi",
+        "team_id": _TEAM_ID,
+        "task_filter": {"benchmark_id": "hello-world"},
+        "trial_config": {"agent_name": "oracle", "agent_model": None},
+        "name": "release canary",
+    }
+    captured = capsys.readouterr()
+    assert "11111111-1111-1111-1111-111111111111" in captured.out
+    assert "loom_admin_abcdefgh" not in captured.out
+    assert "loom_admin_abcdefgh" not in captured.err
+
+
+def test_admin_batches_submit_on_behalf_requires_admin_actor_before_request(
+    mock_server: _MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = main(
+        [
+            "admin",
+            "batches",
+            "submit-on-behalf",
+            "--represented-username",
+            "qianyi",
+            "--team-id",
+            _TEAM_ID,
+            "--agent",
+            "oracle",
+            "--benchmark",
+            "hello-world",
+        ]
+    )
+
+    assert rc == 2
+    assert mock_server.requests == []
+    assert "--admin-actor is required" in capsys.readouterr().err
+
+
 def test_team_mint_rejects_admin_type_before_request(
     _team_logged_in: None,
     capsys: pytest.CaptureFixture[str],

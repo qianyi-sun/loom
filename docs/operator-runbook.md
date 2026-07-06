@@ -2336,6 +2336,74 @@ curl -X POST https://loom.example.com/api/v1/tokens \
 `type` is required and must be `team`. The service rejects DB-backed admin
 tokens and any requested `admin:*` scope.
 
+### Audited admin on-behalf canary batch submission
+
+Use this path only when a public-beta or release canary must represent a named
+active user/team and the user's browser session or user-owned API token is not
+available. It does not mint a user-owned token and it does not relax normal
+submission auth: legacy team tokens remain rejected by `POST /api/v1/batches`.
+
+Requirements before submission:
+
+- The real operator authenticates with an admin-capable bearer and passes
+  `--admin-actor NAME`, which becomes `X-Loom-Admin-Actor`.
+- The represented user is active, not disabled, and belongs to the represented
+  team.
+- The represented team is not disabled or paused for submissions.
+- The evidence bundle records the command, the returned batch id, the
+  represented username/team id, and the matching `batch.submit_on_behalf`
+  admin audit event. Do not record raw bearer values.
+
+No-model canary example:
+
+```bash
+loom auth login --server https://loom.example.com --token env:LOOM_ADMIN_TOKEN
+
+loom admin batches submit-on-behalf \
+  --represented-username qianyi \
+  --team-id <agentic-rl-team-id> \
+  --admin-actor <operator-name> \
+  --name-suffix oracle-smoke \
+  --task-filter '{"task_ids":["hello-world"]}' \
+  --agent oracle \
+  --n-per-task 1
+```
+
+Model-backed provider canary example:
+
+```bash
+loom admin batches submit-on-behalf \
+  --represented-username qianyi \
+  --team-id <agentic-rl-team-id> \
+  --admin-actor <operator-name> \
+  --name-suffix codex-yibuapi-smoke \
+  --task-filter '{"task_ids":["skilllearnbench/anthropic-poster-design/anthropic-poster-design-1"]}' \
+  --provider mz_tn_canada_qianyi \
+  --model gpt-4o-mini \
+  --agent codex \
+  --n-per-task 1 \
+  --backend docker \
+  --required-worker-pool oldlab
+```
+
+Audit evidence:
+
+```bash
+tmp_headers="$(mktemp)"
+chmod 600 "$tmp_headers"
+printf 'Authorization: Bearer %s\n' "$LOOM_ADMIN_TOKEN" > "$tmp_headers"
+curl -s https://loom.example.com/api/v1/admin/audit-events?limit=20 \
+  -H "@$tmp_headers" \
+  | jq '.items[] | select(.action=="batch.submit_on_behalf")'
+rm -f "$tmp_headers"
+```
+
+The event metadata records the represented user id, represented username,
+represented team id, expected trial count, and backend. It intentionally omits
+user-controlled free-text such as the batch name. Do not capture the temporary
+header file or shell trace output in evidence; the evidence artifact should
+contain only the redacted command pattern and the selected audit JSON.
+
 ### Provider API key rotation — `loom providers rotate-key`
 
 When a provider key needs to be rotated (compromise, scheduled rotation,
@@ -3626,6 +3694,12 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    adapters are absent. A fresh rollout/operator venv can therefore submit a
    service-mode `codex` batch as long as the target staging service catalog
    lists `codex` as ready.
+   If the canary must represent a named active user/team but the user's
+   browser session or user-owned API token is unavailable, use the audited
+   `loom admin batches submit-on-behalf` flow above instead of minting a
+   legacy team token or writing directly to the database. Preserve the returned
+   batch id and the `batch.submit_on_behalf` audit event in the evidence
+   bundle.
    Re-run `batch show` until `state` reaches a terminal value.
 11. **Live progress visibility.** While the batch runs, the SPA Monitor page
    shows planned trials and current state transitions, and
