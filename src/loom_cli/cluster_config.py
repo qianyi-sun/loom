@@ -127,6 +127,7 @@ if TYPE_CHECKING:
         ingress_cert_manager_cluster_issuer: str = ""
         ingress_class_name: str = "nginx"
         ingress_host: str = "loom.example.com"
+        ingress_redirect_hosts: tuple[str, ...] = ()
         ingress_tls_secret_name: str = "loom-tls"
         frontend_environment: str = "local"
         frontend_environment_label: str = "Local development"

@@ -1159,6 +1159,43 @@ def _frontend_route_context(config: ClusterConfig) -> dict[str, Any]:
     }
 
 
+def _ingress_redirect_hosts(config: ClusterConfig) -> tuple[str, ...]:
+    try:
+        ipaddress.ip_address(config.ingress_host)
+    except ValueError:
+        pass
+    else:
+        if config.ingress_redirect_hosts:
+            raise ValueError("ingress_redirect_hosts cannot be used with an IP ingress_host")
+        return ()
+
+    canonical = config.ingress_host.strip()
+    if not canonical:
+        raise ValueError("ingress_host must not be empty")
+
+    hosts: list[str] = []
+    seen: set[str] = set()
+    for raw in config.ingress_redirect_hosts:
+        host = raw.strip()
+        if not host:
+            raise ValueError("ingress_redirect_hosts entries must not be empty")
+        if "/" in host or ":" in host:
+            raise ValueError(f"ingress_redirect_hosts entries must be hostnames: {host!r}")
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            pass
+        else:
+            raise ValueError(f"ingress_redirect_hosts entries must be hostnames: {host!r}")
+        if host == canonical:
+            raise ValueError("ingress_redirect_hosts must not include ingress_host")
+        if host in seen:
+            raise ValueError(f"duplicate ingress_redirect_hosts entry: {host!r}")
+        seen.add(host)
+        hosts.append(host)
+    return tuple(hosts)
+
+
 @dataclass(frozen=True)
 class ProviderEgressRule:
     cidr: str
@@ -1295,6 +1332,7 @@ def render_manifests(config: ClusterConfig) -> str:
     ctx = config.to_render_context()
     ctx.update(_persistent_storage_context(config))
     ctx.update(_frontend_route_context(config))
+    ctx["ingress_redirect_hosts"] = _ingress_redirect_hosts(config)
     ctx["provider_egress_rules"] = _provider_egress_rules(config)
     try:
         ipaddress.ip_address(config.ingress_host)
