@@ -155,10 +155,13 @@ Attach these to the release issue or release PR:
   beta slots reported as draining rather than as beta rollout failure.
 - `scripts/staging_smoke_gate.py` Markdown evidence with `--fail-on-skip`
   and `--allow-mutating-checks` against disposable staging data. The report
-  must include the service restart/OOM row by passing `--k8s-namespace`, and
-  the `auth.team_a_whoami` / `auth.team_b_whoami` rows must show non-admin
-  user-owned API tokens. Do not use platform-admin tokens, admin-minted legacy
-  team tokens, or manual SQL token insertion for cross-team release evidence.
+  must include the final service restart/OOM row by passing `--k8s-namespace`;
+  that row is evaluated after HTTP/API route probes and fails if the service
+  restart count increased during the smoke or the final pod state reports
+  `OOMKilled`. The `auth.team_a_whoami` / `auth.team_b_whoami` rows must show
+  non-admin user-owned API tokens. Do not use platform-admin tokens,
+  admin-minted legacy team tokens, or manual SQL token insertion for cross-team
+  release evidence.
   When `--batch-id` is provided, the `runs.claimed_without_started` row must
   be `PASS`; a nonzero value means the source run still has orphaned claimed
   work and cannot be used as release evidence. For terminal failures that came
@@ -389,8 +392,8 @@ The script checks:
 - a concurrent MinIO write/delete probe against the runtime trajectory bucket,
   so `XMinioStorageFull`, connection-pool pressure, and other object-store
   write failures are caught before submitting canary or release-trial work;
-- current `loom-service` pod restart/OOM status when `--k8s-namespace` is
-  provided;
+- `loom-service` pod restart/OOM status when `--k8s-namespace` is provided,
+  with a baseline before route probes and a final verdict after route probes;
 - terminal trial coverage for required worker pools such as `oldlab` when
   `--required-worker-pool` is provided;
 - batch/trial detail and service-proxied ATIF/trajectory downloads;
@@ -692,8 +695,8 @@ The staging launch gate passes only when:
 - `scripts/staging_smoke_gate.py` exits 0 with `--fail-on-skip`;
 - the smoke report's `runs.claimed_without_started` row is `PASS` for the
   source batch used as launch evidence;
-- the smoke report's `service.no_oom_restarts` row is `PASS` for the deployed
-  `loom-service` pods;
+- the smoke report's final `service.no_oom_restarts` row is `PASS` after all
+  HTTP/API route probes for the deployed `loom-service` pods;
 - the smoke report's `runs.worker_pool_coverage` row is `PASS` for any
   release-required worker pool such as `oldlab`; create the source batch with
   matching `loom eval batch create --required-worker-pool ...` flags instead

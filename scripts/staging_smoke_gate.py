@@ -120,6 +120,27 @@ class HttpResponse:
         return json.loads(self.text)
 
 
+@dataclass(frozen=True)
+class ServiceContainerRestartEvidence:
+    pod_name: str
+    container_name: str
+    restart_count: int
+    last_reason: str
+    exit_code: Any
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.pod_name, self.container_name)
+
+
+@dataclass(frozen=True)
+class ServicePodRestartSnapshot:
+    status: str
+    detail: str
+    remediation: str = ""
+    containers: tuple[ServiceContainerRestartEvidence, ...] = ()
+
+
 def _mask_value(value: str) -> str:
     if value.startswith("loom_"):
         return "loom_..."
@@ -921,6 +942,8 @@ def run_smoke(args: argparse.Namespace) -> SmokeReport:
             response_bytes_scanned=client.response_bytes_scanned,
         )
 
+    initial_service_pod_restart_snapshot = _service_pod_restart_snapshot(args)
+
     health = client.request("GET", "/api/v1/health")
     results.append(_http_result(
         "http.health",
@@ -1011,7 +1034,6 @@ def run_smoke(args: argparse.Namespace) -> SmokeReport:
     _append_agent_catalog_checks(client, args, results)
     _append_benchmark_catalog_checks(client, args, results)
     _append_object_store_write_probe(args, results)
-    _append_service_pod_restart_check(args, results)
 
     if args.batch_id:
         batch = client.request("GET", f"/api/v1/batches/{args.batch_id}", token=args.team_a_token)
@@ -1197,6 +1219,16 @@ def run_smoke(args: argparse.Namespace) -> SmokeReport:
         internal_url_needles=args.internal_url_needle,
     )
     results.append(leak_scan)
+    final_service_pod_restart_snapshot = (
+        initial_service_pod_restart_snapshot
+        if initial_service_pod_restart_snapshot.status == "skip"
+        else _service_pod_restart_snapshot(args)
+    )
+    results.append(_service_pod_restart_result(
+        args,
+        initial=initial_service_pod_restart_snapshot,
+        final=final_service_pod_restart_snapshot,
+    ))
 
     return SmokeReport(
         server_url=args.server_url,
@@ -1473,18 +1505,20 @@ def _append_service_pod_restart_check(
     args: argparse.Namespace,
     results: list[CheckResult],
 ) -> None:
+    snapshot = _service_pod_restart_snapshot(args)
+    results.append(_service_pod_restart_result(args, initial=snapshot, final=snapshot))
+
+
+def _service_pod_restart_snapshot(args: argparse.Namespace) -> ServicePodRestartSnapshot:
     if not args.k8s_namespace:
-        results.append(CheckResult(
-            "service.no_oom_restarts",
-            "public-api",
+        return ServicePodRestartSnapshot(
             "skip",
             "--k8s-namespace was not provided.",
             (
                 "Pass --k8s-namespace during release/full100 gates so service "
                 "pod restarts and OOMKills are captured in evidence."
             ),
-        ))
-        return
+        )
 
     cmd = [
         args.kubectl_bin,
@@ -1506,66 +1540,50 @@ def _append_service_pod_restart_check(
             timeout=args.k8s_command_timeout_sec,
         )
     except subprocess.TimeoutExpired:
-        results.append(CheckResult(
-            "service.no_oom_restarts",
-            "public-api",
+        return ServicePodRestartSnapshot(
             "fail",
             f"kubectl timed out checking service pods in namespace {args.k8s_namespace}.",
             "Verify kubeconfig access and inspect loom-service pod status manually.",
-        ))
-        return
+        )
     except OSError as exc:
-        results.append(CheckResult(
-            "service.no_oom_restarts",
-            "public-api",
+        return ServicePodRestartSnapshot(
             "fail",
             f"kubectl failed to run: {type(exc).__name__}: {exc}",
             "Install kubectl or provide --kubectl-bin for release smoke evidence.",
-        ))
-        return
+        )
 
     if proc.returncode != 0:
-        results.append(CheckResult(
-            "service.no_oom_restarts",
-            "public-api",
+        return ServicePodRestartSnapshot(
             "fail",
             (
                 f"kubectl returned {proc.returncode} checking service pods: "
                 f"{proc.stderr[:300] or proc.stdout[:300]}"
             ),
             "Verify kubeconfig context, namespace, and service pod selector.",
-        ))
-        return
+        )
 
     try:
         payload = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
-        results.append(CheckResult(
-            "service.no_oom_restarts",
-            "public-api",
+        return ServicePodRestartSnapshot(
             "fail",
             f"kubectl returned non-JSON pod status: {exc}",
             "Rerun kubectl get pods -o json and inspect release gate tooling.",
-        ))
-        return
+        )
 
     items = payload.get("items") if isinstance(payload, dict) else None
     pods = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
     if not pods:
-        results.append(CheckResult(
-            "service.no_oom_restarts",
-            "public-api",
+        return ServicePodRestartSnapshot(
             "fail",
             (
                 "No service pods matched selector "
                 f"{args.service_pod_selector!r} in namespace {args.k8s_namespace}."
             ),
             "Check the service Deployment label selector before accepting release evidence.",
-        ))
-        return
+        )
 
-    offenders: list[str] = []
-    checked = 0
+    containers: list[ServiceContainerRestartEvidence] = []
     for pod in pods:
         metadata = pod.get("metadata") if isinstance(pod.get("metadata"), dict) else {}
         pod_name = str(metadata.get("name") or "<unknown-pod>")
@@ -1583,7 +1601,6 @@ def _append_service_pod_restart_check(
                 and container_name != args.service_container_name
             ):
                 continue
-            checked += 1
             try:
                 restart_count = int(container.get("restartCount") or 0)
             except (TypeError, ValueError):
@@ -1600,50 +1617,136 @@ def _append_service_pod_restart_check(
             )
             last_reason = str(terminated.get("reason") or "")
             exit_code = terminated.get("exitCode")
-            if last_reason == "OOMKilled" or restart_count > args.service_restart_max_count:
-                detail = (
-                    f"{pod_name}/{container_name} restartCount={restart_count} "
-                    f"lastReason={last_reason or 'none'}"
-                )
-                if exit_code is not None:
-                    detail += f" exitCode={exit_code}"
-                offenders.append(detail)
+            containers.append(ServiceContainerRestartEvidence(
+                pod_name=pod_name,
+                container_name=container_name,
+                restart_count=restart_count,
+                last_reason=last_reason,
+                exit_code=exit_code,
+            ))
 
-    if checked == 0:
-        results.append(CheckResult(
-            "service.no_oom_restarts",
-            "public-api",
+    if not containers:
+        return ServicePodRestartSnapshot(
             "fail",
             (
                 f"No container named {args.service_container_name!r} was found "
                 f"under selector {args.service_pod_selector!r}."
             ),
             "Check --service-container-name or the service pod template.",
-        ))
-        return
+        )
 
-    if offenders:
-        results.append(CheckResult(
+    return ServicePodRestartSnapshot(
+        "ok",
+        f"Collected {len(containers)} service container restart status record(s).",
+        containers=tuple(containers),
+    )
+
+
+def _service_pod_restart_result(
+    args: argparse.Namespace,
+    *,
+    initial: ServicePodRestartSnapshot,
+    final: ServicePodRestartSnapshot,
+) -> CheckResult:
+    if initial.status == "skip":
+        return CheckResult(
+            "service.no_oom_restarts",
+            "public-api",
+            "skip",
+            initial.detail,
+            initial.remediation,
+        )
+    if initial.status == "fail":
+        return CheckResult(
             "service.no_oom_restarts",
             "public-api",
             "fail",
-            "Service pod restart/OOM evidence: " + "; ".join(offenders[:10]),
-            (
-                "Inspect loom-service memory, batch detail/cancel request load, "
-                "and previous pod logs before accepting the full100 gate."
-            ),
-        ))
-        return
+            "Initial service pod restart/OOM check failed before route probes: "
+            f"{initial.detail}",
+            initial.remediation,
+        )
+    if final.status != "ok":
+        return CheckResult(
+            "service.no_oom_restarts",
+            "public-api",
+            "fail",
+            "Final service pod restart/OOM check failed after route probes: "
+            f"{final.detail}",
+            final.remediation,
+        )
 
-    results.append(CheckResult(
+    initial_by_container = {
+        container.key: container
+        for container in initial.containers
+    }
+    offenders: list[str] = []
+    for container in final.containers:
+        reasons: list[str] = []
+        baseline = initial_by_container.get(container.key)
+        if baseline is not None and container.restart_count > baseline.restart_count:
+            reasons.append(
+                "restartCount increased during smoke "
+                f"{baseline.restart_count} -> {container.restart_count}",
+            )
+        if container.last_reason == "OOMKilled":
+            reasons.append("lastState=OOMKilled")
+        if container.restart_count > args.service_restart_max_count:
+            reasons.append(
+                "restartCount "
+                f"{container.restart_count} exceeds allowed "
+                f"{args.service_restart_max_count}",
+            )
+        if reasons:
+            detail = (
+                f"{container.pod_name}/{container.container_name}: "
+                + ", ".join(reasons)
+            )
+            if container.exit_code is not None:
+                detail += f", exitCode={container.exit_code}"
+            offenders.append(detail)
+
+    if offenders:
+        return CheckResult(
+            "service.no_oom_restarts",
+            "public-api",
+            "fail",
+            (
+                "Final service pod restart/OOM evidence after route probes: "
+                + "; ".join(offenders[:10])
+            ),
+            (
+                "Treat route-triggered service restart/OOM/502 as the service "
+                "stability root cause. Inspect loom-service memory, the heavy "
+                "route probe load, and previous pod logs before investigating "
+                "secondary route/security rows."
+            ),
+        )
+
+    initial_summary = _service_restart_count_summary(initial.containers)
+    final_summary = _service_restart_count_summary(final.containers)
+    return CheckResult(
         "service.no_oom_restarts",
         "public-api",
         "pass",
         (
-            f"Checked {checked} service container(s); no OOMKilled lastState "
-            f"and restartCount <= {args.service_restart_max_count}."
+            "Checked service containers before and after HTTP/API route probes; "
+            "no OOMKilled lastState, no restartCount increase during smoke, "
+            f"and final restartCount <= {args.service_restart_max_count}. "
+            f"Initial: {initial_summary}. Final: {final_summary}."
         ),
-    ))
+    )
+
+
+def _service_restart_count_summary(
+    containers: tuple[ServiceContainerRestartEvidence, ...],
+) -> str:
+    return ", ".join(
+        (
+            f"{container.pod_name}/{container.container_name}="
+            f"{container.restart_count}"
+        )
+        for container in containers[:10]
+    )
 
 
 def _append_artifact_checks(

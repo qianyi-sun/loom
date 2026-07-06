@@ -4010,11 +4010,12 @@ is missing. Do not close them from local tests alone.
     release-trial work; if it reports `XMinioStorageFull`, connection failures,
     or timeouts, reclaim/provision MinIO-backed storage or reduce worker
     concurrency first instead of discovering the failure during worker
-    trajectory or artifact upload. The `service.no_oom_restarts` row must pass
-    for full100/release evidence; if it
-    reports an `OOMKilled` last state or unexpected current restart count,
-    inspect `loom-service` memory, previous pod logs, and large batch
-    detail/cancel traffic before accepting the gate. For OLDLAB-required
+    trajectory or artifact upload. The final `service.no_oom_restarts` row
+    must pass for full100/release evidence after all HTTP/API route probes; if
+    it reports a restart-count increase during the smoke, an `OOMKilled` last
+    state, or an unexpected current restart count, inspect `loom-service`
+    memory, previous pod logs, and large batch detail/cancel traffic before
+    accepting the gate. For OLDLAB-required
     full100/release evidence, the `runs.worker_pool_coverage` row must pass
     with `--required-worker-pool oldlab`; a missing pool means the batch did
     not produce deterministic terminal evidence on that worker pool. The
@@ -4046,7 +4047,7 @@ checklist:
 - **`scripts/staging_smoke_gate.py`** — covers public health, logged-out SPA
   reachability, two-team non-admin user-owned API-token auth, provider/model
   discovery, runnable benchmark catalog presence, sampled ready benchmark bundle objects,
-  concurrent object-store write/delete probing, service pod restart/OOM status,
+  concurrent object-store write/delete probing, final service pod restart/OOM status,
   batch/trial detail, `claimed_without_started=0` from batch debug evidence,
   required terminal worker-pool coverage from batch debug evidence,
   service-proxied ATIF/trajectory downloads, My team and All teams Run Library
