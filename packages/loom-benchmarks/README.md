@@ -10,7 +10,7 @@ See `docs/architecture/benchmark-adapter.md` for the framework
 reference (Protocol, canonical task layout, fetchers, how to add a
 new adapter). 21 adapters ship today.
 
-## #307 full benchmark wave
+## Full benchmark wave (historical: carinrc#307)
 
 These adapters pin full selected official task sets rather than smoke or
 sample subsets:

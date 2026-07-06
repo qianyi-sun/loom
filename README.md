@@ -211,9 +211,10 @@ token totals only.
 - **CLI adapters from `loom-launcher`:** `claude-code` (Anthropic),
   `codex` (OpenAI), `gemini-cli` (Google), `kimi-cli` (Moonshot),
   `qwen-cli` (Alibaba), plus provider-agnostic `aider`, `openhands`,
-  `openhands-sdk`, `opencode`, `swe-agent`, `mini-swe-agent`. CLI
-  adapters install on demand into the trial sandbox via a layered image;
-  the build is cached per `(task-image, agent)` pair.
+  `openhands-sdk`, `opencode`, `swe-agent`, `mini-swe-agent`,
+  `terminus_2`. CLI adapters install on demand into the trial
+  sandbox via a layered image; the build is cached per
+  `(task-image, agent)` pair.
 
 The web app's New Batch dropdown is the same list. Provider/model
 compatibility is enforced at submit time — incompatible combos fail with a

@@ -49,7 +49,7 @@ Layering:
 │  RetentionConfig                       │  ← provider-neutral
 │   RetentionRule × N                    │     dataclasses
 └─────────────────┬──────────────────────┘
-                  │ render_s3_lifecycle(rule)
+                  │ render_bucket_lifecycle(config, bucket)
        ┌──────────┴──────────┐
        ▼                     ▼
 ┌──────────────┐    ┌──────────────────┐

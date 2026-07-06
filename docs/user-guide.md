@@ -1,7 +1,7 @@
 # User Guide — `loom` CLI
 
 Everything a researcher needs to run LLMs against customizable tasks
-from a laptop. Pluggable agents (use one of the 11 shipped harnesses
+from a laptop. Pluggable agents (use one of the 12 shipped harnesses
 or write your own); pluggable task adapters (23 catalog entries ship in the
 core package, plus optional Terminal-Bench-2). One
 `uv sync`, then `loom run`.
