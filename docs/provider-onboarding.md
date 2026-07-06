@@ -133,6 +133,31 @@ issue-comment URL. The CLI rejects raw-looking bearer tokens, provider API keys,
 or signed URLs in evidence, notes, URLs, and serialized output; keep credentials
 as safe references such as `env:PROVIDER_API_KEY`.
 
+For #35 pre-submit planning, combine that compatibility JSON with an offline
+catalog snapshot before spending live provider calls:
+
+```bash
+loom qa matrix \
+  --preflight-plan \
+  --catalog-snapshot qa-catalog-snapshot.json \
+  --provider-compatibility-plan provider-harness-compatibility.json \
+  --output agent-benchmark-preflight-plan.md \
+  --json-output agent-benchmark-preflight-plan.json
+```
+
+The catalog snapshot is a local JSON object with `agents.items[]` and
+`benchmarks.items[]`, plus the offline evidence needed to select a deterministic
+representative task and avoid doomed submissions: license evidence,
+capability evidence, and worker architecture evidence. The preflight output
+uses `planned_submit`, `blocked`, and `skipped` rows. Provider mismatches come
+from the #114 compatibility plan, no-model agents are emitted once per
+benchmark as provider endpoint `no-model`, and supported-but-unsmoked provider
+cells stay blocked as `pending_live_evidence`.
+
+This is planning evidence only. It does not satisfy live #35 acceptance and it
+does not log in, call `/api/v1/*`, call a model provider, submit a batch, read
+artifact storage, or require live secrets.
+
 ## GPU Cluster Checkpoint
 
 Use this path when the user owns a checkpoint or Hugging Face model and a

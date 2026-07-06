@@ -37,6 +37,13 @@ from typing import Any, Literal
 import httpx
 
 from loom.security.redaction import contains_secret_like_content
+from loom_cli.qa_matrix_plan import (
+    build_preflight_plan,
+    load_catalog_snapshot_file,
+    load_provider_compatibility_plan_file,
+    matrix_preflight_plan_to_json_payload,
+    render_matrix_preflight_markdown,
+)
 from loom_cli.server_client import (
     HttpStatusError,
     NotLoggedInError,
@@ -1089,9 +1096,58 @@ def _compatibility_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _preflight_plan(args: argparse.Namespace) -> int:
+    if not args.catalog_snapshot:
+        sys.stderr.write(
+            "error: --catalog-snapshot is required when --preflight-plan is set.\n",
+        )
+        return 2
+    if not args.provider_compatibility_plan:
+        sys.stderr.write(
+            "error: --provider-compatibility-plan is required when "
+            "--preflight-plan is set.\n",
+        )
+        return 2
+    try:
+        catalog_snapshot = load_catalog_snapshot_file(args.catalog_snapshot)
+        compatibility_plan = load_provider_compatibility_plan_file(
+            args.provider_compatibility_plan,
+        )
+        plan = build_preflight_plan(
+            catalog_snapshot=catalog_snapshot,
+            compatibility_plan=compatibility_plan,
+        )
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        sys.stderr.write(f"preflight plan failed: {exc}\n")
+        return 2
+
+    md = render_matrix_preflight_markdown(plan)
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(md)
+    print(md, end="")
+
+    if args.json_output:
+        with open(args.json_output, "w", encoding="utf-8") as f:
+            json.dump(
+                matrix_preflight_plan_to_json_payload(plan),
+                f,
+                indent=2,
+            )
+            f.write("\n")
+    return 0
+
+
 def _matrix(args: argparse.Namespace) -> int:
+    if args.compatibility_plan and args.preflight_plan:
+        sys.stderr.write(
+            "error: choose only one of --compatibility-plan or --preflight-plan.\n",
+        )
+        return 2
     if args.compatibility_plan:
         return _compatibility_plan(args)
+    if args.preflight_plan:
+        return _preflight_plan(args)
     if not args.provider_connection:
         sys.stderr.write(
             "error: --provider-connection is required unless "
@@ -1285,10 +1341,34 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_matrix.add_argument(
+        "--preflight-plan", "--matrix-plan",
+        dest="preflight_plan",
+        action="store_true",
+        help=(
+            "Emit an offline #35 agent x benchmark pre-submit plan from "
+            "catalog snapshots and #114 compatibility-plan JSON. Does not "
+            "log in, contact /api/v1/*, call providers, or submit batches."
+        ),
+    )
+    p_matrix.add_argument(
         "--compatibility-evidence", action="append", default=None,
         help=(
             "Optional JSON evidence file with cells[] live_smoke entries to merge "
             "into --compatibility-plan output. Repeatable."
+        ),
+    )
+    p_matrix.add_argument(
+        "--catalog-snapshot", default=None,
+        help=(
+            "Offline JSON snapshot with agents.items[] and benchmarks.items[] "
+            "for --preflight-plan."
+        ),
+    )
+    p_matrix.add_argument(
+        "--provider-compatibility-plan", default=None,
+        help=(
+            "JSON output from `loom qa matrix --compatibility-plan` to consume "
+            "as provider/harness pre-submit evidence for --preflight-plan."
         ),
     )
     p_matrix.set_defaults(handler=_matrix)
