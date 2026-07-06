@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { redactText, redactValue } from "../../lib/redaction";
 
 describe("redaction helpers", () => {
-  it("redacts public-beta secret shapes from display text", () => {
+  it("redacts staging secret shapes from display text", () => {
     const text = [
       "Authorization: Bearer loom_api_abcdefghijklmnopqrstuvwxyz012345",
       "provider key sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",

@@ -1,6 +1,6 @@
 """One-off Alembic migration Job renderer (#332).
 
-The sanctioned way to run Alembic during a staging/staging rollout.
+The sanctioned way to run Alembic during a staging rollout.
 
 The problem this solves: the standing `loom-postgres` NetworkPolicy only
 permits ingress from `app=loom-control-plane`, `app=loom-service`, and
@@ -40,7 +40,7 @@ def _normalise_dns_component(text: str) -> str:
 
     Kubernetes object names must match `[a-z0-9]([-a-z0-9]*[a-z0-9])?`
     per RFC 1123. Uppercase, dots, and other punctuation are common in
-    image tags (e.g. `Public.Beta.05ab776`) so normalise here rather
+    image tags (e.g. `Staging.05ab776`) so normalise here rather
     than push the burden onto the operator.
     """
     text = text.lower()

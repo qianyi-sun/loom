@@ -48,7 +48,7 @@ def test_release_promotion_template_requires_first_prod_evidence() -> None:
     assert "Production tags are immutable SemVer Git tags on `main`" in operator_runbook
     assert "`prod_tag`" in operator_runbook
     assert "`frontend_route_evidence`" in operator_runbook
-    assert "`prod_beta_isolation`" in operator_runbook
+    assert "`prod_staging_isolation`" in operator_runbook
     assert "`raw_delivery_export_status`" in operator_runbook
 
 

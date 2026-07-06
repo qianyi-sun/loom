@@ -8,8 +8,8 @@ schema_version = 1
 
 [defaults]
 prod_gets_remaining = true
-default_beta_slots = 0
-beta_slot_limit_per_host = 1
+default_staging_slots = 0
+staging_slot_limit_per_host = 1
 
 [environments.prod]
 name = "production"
@@ -20,11 +20,11 @@ compose_service = "loom-prod-worker"
 k8s_deployment = "loom-prod-worker"
 k8s_namespace = "loom-prod"
 
-[environments.beta]
+[environments.staging]
 name = "development"
 api_url = "https://yylx.world/dev/api"
-image_tag = "${BETA_IMAGE_TAG}"
-source_commit = "${BETA_SOURCE_COMMIT}"
+image_tag = "${STAGING_IMAGE_TAG}"
+source_commit = "${STAGING_SOURCE_COMMIT}"
 compose_service = "loom-dev-worker"
 k8s_deployment = "loom-dev-worker"
 k8s_namespace = "loom-dev"

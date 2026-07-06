@@ -9,8 +9,8 @@ trajectories_bucket = "loom-staging-trajectories"
 artifacts_bucket = "loom-staging-artifacts"
 env_state_profile = "../environment-state/staging.toml"
 
-# Trial execution capacity comes from Slurm-managed pools (`oldlab`,
-# `gb10-arm64`); the in-cluster loom-worker Deployment is omitted to
-# avoid double-scheduling the OLDLAB host Docker daemon. See #383.
+# v1.0 staging validation uses GB10 only. The in-cluster loom-worker
+# Deployment is omitted so trial execution capacity comes from the
+# release-managed external GB10 pool.
 [k8s_worker]
 enabled = false

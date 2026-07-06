@@ -31,8 +31,8 @@ What you're looking for, where it lives:
   response, backup/restore, capacity planning
 - **[first-prod-release-runbook.md](first-prod-release-runbook.md)** —
   executable first `main`-based production runbook for bootstrap,
-  temporary beta leases, frontend route checks, prod release, rollback prep,
-  and emergency beta drain
+  temporary staging leases, frontend route checks, prod release, rollback prep,
+  and emergency staging drain
 - **[staging-launch.md](staging-launch.md)** — staging release
   gate, username/password onboarding evidence, two-team Run Library smoke, and
   launch decision checklist

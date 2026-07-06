@@ -66,10 +66,7 @@ def _stub_dns(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def _stub(host, port, *args, **kwargs):
         if host in test_hosts:
-            return [
-                (socket.AF_INET, socket.SOCK_STREAM, 0, "", (ip, 0))
-                for ip in test_hosts[host]
-            ]
+            return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (ip, 0)) for ip in test_hosts[host]]
         return real_getaddrinfo(host, port, *args, **kwargs)
 
     monkeypatch.setattr(
@@ -80,7 +77,8 @@ def _stub_dns(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 async def app_setup(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
 ) -> AsyncIterator[tuple[FastAPI, dict[str, str], dict[str, UUID]]]:
     """Boot a real FastAPI app with two teams + tokens, returning the
     app + the raw token strings (header value) + the team UUIDs."""
@@ -99,7 +97,8 @@ async def app_setup(
     engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
-        engine, expire_on_commit=False,
+        engine,
+        expire_on_commit=False,
     )
     app.state.admin_secret_verifier = AdminSecretVerifier.from_token(
         RAW_ADMIN_TOKEN,
@@ -130,24 +129,33 @@ async def app_setup(
         s.execute(insert(Team).values(id=team_b, name=f"team-b-{team_b}"))
         s.execute(insert(TeamQuota).values(team_id=team_a))
         s.execute(insert(TeamQuota).values(team_id=team_b))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw_a.encode()).digest(),
-            type="team", scopes=["read:own", "write:own", "providers:manage"],
-            team_id=team_a,
-            issued_at=datetime.now(UTC),
-        ))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw_b.encode()).digest(),
-            type="team", scopes=["read:own", "write:own", "providers:manage"],
-            team_id=team_b,
-            issued_at=datetime.now(UTC),
-        ))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw_a_limited.encode()).digest(),
-            type="team", scopes=["read:own", "submit"],
-            team_id=team_a,
-            issued_at=datetime.now(UTC),
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw_a.encode()).digest(),
+                type="team",
+                scopes=["read:own", "write:own", "providers:manage"],
+                team_id=team_a,
+                issued_at=datetime.now(UTC),
+            )
+        )
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw_b.encode()).digest(),
+                type="team",
+                scopes=["read:own", "write:own", "providers:manage"],
+                team_id=team_b,
+                issued_at=datetime.now(UTC),
+            )
+        )
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw_a_limited.encode()).digest(),
+                type="team",
+                scopes=["read:own", "submit"],
+                team_id=team_a,
+                issued_at=datetime.now(UTC),
+            )
+        )
         s.commit()
 
     tokens = {
@@ -194,13 +202,16 @@ def _admin_headers(token: str) -> dict[str, str]:
 def test_create_returns_201_with_public_response(app_setup) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
-    r = c.post("/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-               json={
-                   "name": "openai-prod",
-                   "type": "openai-compatible",
-                   "base_url": "https://api.openai.com/v1",
-                   "api_key": "sk-test-XXXX",
-               })
+    r = c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "openai-prod",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/v1",
+            "api_key": "sk-test-XXXX",
+        },
+    )
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["name"] == "openai-prod"
@@ -225,13 +236,16 @@ def test_create_returns_201_with_public_response(app_setup) -> None:
 def test_create_anthropic_defaults_to_rate_card(app_setup) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
-    r = c.post("/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-               json={
-                   "name": "anthropic-prod",
-                   "type": "anthropic",
-                   "base_url": "https://api.anthropic.com/",
-                   "api_key": "sk-ant-XXXX",
-               })
+    r = c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "anthropic-prod",
+            "type": "anthropic",
+            "base_url": "https://api.anthropic.com/",
+            "api_key": "sk-ant-XXXX",
+        },
+    )
     assert r.status_code == 201
     assert r.json()["pricing_source"] == "rate-card"
     assert r.json()["rate_card_provider"] == "anthropic"
@@ -240,13 +254,16 @@ def test_create_anthropic_defaults_to_rate_card(app_setup) -> None:
 def test_create_custom_defaults_to_no_rate_card_provider(app_setup) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
-    r = c.post("/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-               json={
-                   "name": "lab-vllm",
-                   "type": "custom",
-                   "base_url": "https://api.openai.com/",
-                   "api_key": "sk-custom-XXXX",
-               })
+    r = c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "lab-vllm",
+            "type": "custom",
+            "base_url": "https://api.openai.com/",
+            "api_key": "sk-custom-XXXX",
+        },
+    )
     assert r.status_code == 201
     body = r.json()
     assert body["pricing_source"] == "tokens-only"
@@ -256,14 +273,17 @@ def test_create_custom_defaults_to_no_rate_card_provider(app_setup) -> None:
 def test_create_accepts_explicit_rate_card_provider(app_setup) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
-    r = c.post("/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-               json={
-                   "name": "together-prod",
-                   "type": "openai-compatible",
-                   "base_url": "https://api.openai.com/",
-                   "api_key": "sk-together-XXXX",
-                   "rate_card_provider": "together",
-               })
+    r = c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "together-prod",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "sk-together-XXXX",
+            "rate_card_provider": "together",
+        },
+    )
     assert r.status_code == 201
     assert r.json()["rate_card_provider"] == "together"
 
@@ -271,13 +291,17 @@ def test_create_accepts_explicit_rate_card_provider(app_setup) -> None:
 def test_create_operator_supplied_requires_pricing_data(app_setup) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
-    r = c.post("/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-               json={
-                   "name": "n", "type": "openai-compatible",
-                   "base_url": "https://api.openai.com/",
-                   "api_key": "k",
-                   "pricing_source": "operator-supplied",
-               })
+    r = c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "n",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+            "pricing_source": "operator-supplied",
+        },
+    )
     assert r.status_code == 400
     assert "requires pricing_data" in r.json()["detail"]
 
@@ -285,17 +309,21 @@ def test_create_operator_supplied_requires_pricing_data(app_setup) -> None:
 def test_create_operator_supplied_negative_price_rejected(app_setup) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
-    r = c.post("/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-               json={
-                   "name": "n", "type": "custom",
-                   "base_url": "https://api.openai.com/",
-                   "api_key": "k",
-                   "pricing_source": "operator-supplied",
-                   "pricing_data": {
-                       "input_usd_per_1m": -1.0,
-                       "output_usd_per_1m": 1.0,
-                   },
-               })
+    r = c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "n",
+            "type": "custom",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+            "pricing_source": "operator-supplied",
+            "pricing_data": {
+                "input_usd_per_1m": -1.0,
+                "output_usd_per_1m": 1.0,
+            },
+        },
+    )
     assert r.status_code == 400
     assert ">= 0" in r.json()["detail"]
 
@@ -305,12 +333,16 @@ def test_create_rejects_private_ip_by_default(app_setup) -> None:
     rejected with a 400 mentioning the policy flag."""
     app, tokens, _ = app_setup
     c = _client(app)
-    r = c.post("/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-               json={
-                   "name": "n", "type": "openai-compatible",
-                   "base_url": "https://vllm.lab.local:8000/v1",
-                   "api_key": "k",
-               })
+    r = c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "n",
+            "type": "openai-compatible",
+            "base_url": "https://vllm.lab.local:8000/v1",
+            "api_key": "k",
+        },
+    )
     assert r.status_code == 400
     assert "private range" in r.json()["detail"]
     assert "allow_private_endpoints" in r.json()["detail"]
@@ -332,12 +364,16 @@ def test_create_allows_private_ip_when_team_flag_on(app_setup) -> None:
     sync_engine.dispose()
 
     c = _client(app)
-    r = c.post("/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-               json={
-                   "name": "n", "type": "openai-compatible",
-                   "base_url": "https://vllm.lab.local:8000/v1",
-                   "api_key": "k",
-               })
+    r = c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "n",
+            "type": "openai-compatible",
+            "base_url": "https://vllm.lab.local:8000/v1",
+            "api_key": "k",
+        },
+    )
     assert r.status_code == 201, r.text
     assert r.json()["resolved_egress_ips"] == ["10.0.5.42"]
 
@@ -358,12 +394,16 @@ def test_create_rejects_loopback_even_with_flag(app_setup) -> None:
     sync_engine.dispose()
 
     c = _client(app)
-    r = c.post("/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-               json={
-                   "name": "n", "type": "openai-compatible",
-                   "base_url": "https://localhost-svc.test/v1",
-                   "api_key": "k",
-               })
+    r = c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "n",
+            "type": "openai-compatible",
+            "base_url": "https://localhost-svc.test/v1",
+            "api_key": "k",
+        },
+    )
     assert r.status_code == 400
     assert "127.0.0" in r.json()["detail"]
 
@@ -384,12 +424,16 @@ def test_create_rejects_metadata_endpoint_even_with_flag(app_setup) -> None:
     sync_engine.dispose()
 
     c = _client(app)
-    r = c.post("/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-               json={
-                   "name": "n", "type": "openai-compatible",
-                   "base_url": "https://metadata.aws.test/",
-                   "api_key": "k",
-               })
+    r = c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "n",
+            "type": "openai-compatible",
+            "base_url": "https://metadata.aws.test/",
+            "api_key": "k",
+        },
+    )
     assert r.status_code == 400
     assert "169.254" in r.json()["detail"]
 
@@ -398,14 +442,18 @@ def test_create_duplicate_active_name_returns_409(app_setup) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
     payload = {
-        "name": "dup", "type": "openai-compatible",
+        "name": "dup",
+        "type": "openai-compatible",
         "base_url": "https://api.openai.com/",
         "api_key": "k",
     }
-    assert c.post("/api/v1/provider-connections",
-                  headers=_auth(tokens["team_a"]), json=payload).status_code == 201
-    r2 = c.post("/api/v1/provider-connections",
-                headers=_auth(tokens["team_a"]), json=payload)
+    assert (
+        c.post(
+            "/api/v1/provider-connections", headers=_auth(tokens["team_a"]), json=payload
+        ).status_code
+        == 201
+    )
+    r2 = c.post("/api/v1/provider-connections", headers=_auth(tokens["team_a"]), json=payload)
     assert r2.status_code == 409
     assert "already exists" in r2.json()["detail"]
 
@@ -415,12 +463,16 @@ def test_create_requires_team_scoped_token(app_setup) -> None:
     needs a team_id FK."""
     app, tokens, _ = app_setup
     c = _client(app)
-    r = c.post("/api/v1/provider-connections", headers=_auth(tokens["admin"]),
-               json={
-                   "name": "n", "type": "openai-compatible",
-                   "base_url": "https://api.openai.com/",
-                   "api_key": "k",
-               })
+    r = c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["admin"]),
+        json={
+            "name": "n",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
+    )
     assert r.status_code == 400
     assert "team-scoped" in r.json()["detail"]
 
@@ -428,13 +480,16 @@ def test_create_requires_team_scoped_token(app_setup) -> None:
 def test_create_requires_provider_management_scope(app_setup) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
-    r = c.post("/api/v1/provider-connections",
-               headers=_auth(tokens["team_a_limited"]),
-               json={
-                   "name": "n", "type": "openai-compatible",
-                   "base_url": "https://api.openai.com/",
-                   "api_key": "k",
-               })
+    r = c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a_limited"]),
+        json={
+            "name": "n",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
+    )
     assert r.status_code == 403
     assert "providers:manage" in r.json()["detail"]
 
@@ -448,9 +503,16 @@ def test_list_filters_to_calling_team(app_setup) -> None:
     """team_b creates a connection; team_a should not see it via list."""
     app, tokens, _ = app_setup
     c = _client(app)
-    c.post("/api/v1/provider-connections", headers=_auth(tokens["team_b"]),
-           json={"name": "team-b-conn", "type": "openai-compatible",
-                 "base_url": "https://api.openai.com/", "api_key": "k"})
+    c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_b"]),
+        json={
+            "name": "team-b-conn",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
+    )
 
     r = c.get("/api/v1/provider-connections", headers=_auth(tokens["team_a"]))
     assert r.status_code == 200
@@ -465,12 +527,26 @@ def test_list_filters_to_calling_team(app_setup) -> None:
 def test_list_admin_sees_all_teams(app_setup) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
-    c.post("/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-           json={"name": "a-conn", "type": "openai-compatible",
-                 "base_url": "https://api.openai.com/", "api_key": "k"})
-    c.post("/api/v1/provider-connections", headers=_auth(tokens["team_b"]),
-           json={"name": "b-conn", "type": "openai-compatible",
-                 "base_url": "https://api.openai.com/", "api_key": "k"})
+    c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "a-conn",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
+    )
+    c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_b"]),
+        json={
+            "name": "b-conn",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
+    )
 
     r = c.get("/api/v1/provider-connections", headers=_auth(tokens["admin"]))
     assert r.status_code == 200
@@ -481,12 +557,26 @@ def test_list_admin_sees_all_teams(app_setup) -> None:
 def test_list_admin_can_filter_by_team_id(app_setup) -> None:
     app, tokens, team_ids = app_setup
     c = _client(app)
-    c.post("/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-           json={"name": "a-conn", "type": "openai-compatible",
-                 "base_url": "https://api.openai.com/", "api_key": "k"})
-    c.post("/api/v1/provider-connections", headers=_auth(tokens["team_b"]),
-           json={"name": "b-conn", "type": "openai-compatible",
-                 "base_url": "https://api.openai.com/", "api_key": "k"})
+    c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "a-conn",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
+    )
+    c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_b"]),
+        json={
+            "name": "b-conn",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
+    )
 
     r = c.get(
         "/api/v1/provider-connections",
@@ -506,9 +596,14 @@ def test_get_cross_team_returns_404_not_403(app_setup) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
     create = c.post(
-        "/api/v1/provider-connections", headers=_auth(tokens["team_b"]),
-        json={"name": "b-only", "type": "openai-compatible",
-              "base_url": "https://api.openai.com/", "api_key": "k"},
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_b"]),
+        json={
+            "name": "b-only",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
     )
     b_id = create.json()["id"]
 
@@ -534,9 +629,14 @@ def test_update_base_url_re_resolves_and_re_pendings(app_setup) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
     create = c.post(
-        "/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-        json={"name": "n", "type": "openai-compatible",
-              "base_url": "https://api.openai.com/", "api_key": "k"},
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "n",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
     )
     conn_id = create.json()["id"]
 
@@ -561,9 +661,14 @@ def test_update_api_key_rotates_ref(app_setup) -> None:
     app, tokens, _team_ids = app_setup
     c = _client(app)
     create = c.post(
-        "/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-        json={"name": "n", "type": "openai-compatible",
-              "base_url": "https://api.openai.com/", "api_key": "old-key"},
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "n",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "old-key",
+        },
     )
     conn_id = create.json()["id"]
 
@@ -571,11 +676,15 @@ def test_update_api_key_rotates_ref(app_setup) -> None:
     sync_engine = create_engine(str(app.state.settings.db_url))
     sl = sessionmaker(sync_engine)
     with sl() as s:
-        orig_ref = s.execute(
-            ProviderConnection.__table__.select().where(
-                ProviderConnection.id == UUID(conn_id),
-            ),
-        ).one().encrypted_api_key_ref
+        orig_ref = (
+            s.execute(
+                ProviderConnection.__table__.select().where(
+                    ProviderConnection.id == UUID(conn_id),
+                ),
+            )
+            .one()
+            .encrypted_api_key_ref
+        )
 
     r = c.patch(
         f"/api/v1/provider-connections/{conn_id}",
@@ -585,11 +694,15 @@ def test_update_api_key_rotates_ref(app_setup) -> None:
     assert r.status_code == 200
 
     with sl() as s:
-        new_ref = s.execute(
-            ProviderConnection.__table__.select().where(
-                ProviderConnection.id == UUID(conn_id),
-            ),
-        ).one().encrypted_api_key_ref
+        new_ref = (
+            s.execute(
+                ProviderConnection.__table__.select().where(
+                    ProviderConnection.id == UUID(conn_id),
+                ),
+            )
+            .one()
+            .encrypted_api_key_ref
+        )
         secret_count = s.execute(
             Secret.__table__.select(),
         ).all()
@@ -604,9 +717,14 @@ def test_update_rate_card_provider(app_setup) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
     create = c.post(
-        "/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-        json={"name": "n", "type": "openai-compatible",
-              "base_url": "https://api.openai.com/", "api_key": "k"},
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "n",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
     )
     conn_id = create.json()["id"]
     assert create.json()["rate_card_provider"] == "openai"
@@ -624,9 +742,14 @@ def test_update_cross_team_returns_404(app_setup) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
     create = c.post(
-        "/api/v1/provider-connections", headers=_auth(tokens["team_b"]),
-        json={"name": "n", "type": "openai-compatible",
-              "base_url": "https://api.openai.com/", "api_key": "k"},
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_b"]),
+        json={
+            "name": "n",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
     )
     conn_id = create.json()["id"]
 
@@ -642,9 +765,14 @@ def test_update_to_invalid_pricing_returns_400(app_setup) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
     create = c.post(
-        "/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-        json={"name": "n", "type": "openai-compatible",
-              "base_url": "https://api.openai.com/", "api_key": "k"},
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "n",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
     )
     conn_id = create.json()["id"]
 
@@ -657,7 +785,8 @@ def test_update_to_invalid_pricing_returns_400(app_setup) -> None:
 
 
 def test_provider_mutations_write_secret_safe_audit_events(
-    app_setup, monkeypatch: pytest.MonkeyPatch,
+    app_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from loom_service.provider_connections_service import ProbeResult
 
@@ -706,9 +835,9 @@ def test_provider_mutations_write_secret_safe_audit_events(
     assert deleted.status_code == 204, deleted.text
     assert audit.status_code == 200, audit.text
     events = [
-        event for event in audit.json()["items"]
-        if event["target_type"] == "provider_connection"
-        and event["target_id"] == conn_id
+        event
+        for event in audit.json()["items"]
+        if event["target_type"] == "provider_connection" and event["target_id"] == conn_id
     ]
     assert [event["action"] for event in events] == [
         "provider_connection.delete",
@@ -734,9 +863,14 @@ def test_delete_soft_deletes_and_returns_204(app_setup) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
     create = c.post(
-        "/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-        json={"name": "n", "type": "openai-compatible",
-              "base_url": "https://api.openai.com/", "api_key": "k"},
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "n",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
     )
     conn_id = create.json()["id"]
 
@@ -766,17 +900,18 @@ def test_delete_then_recreate_with_same_name(app_setup) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
     payload = {
-        "name": "reusable", "type": "openai-compatible",
-        "base_url": "https://api.openai.com/", "api_key": "k",
+        "name": "reusable",
+        "type": "openai-compatible",
+        "base_url": "https://api.openai.com/",
+        "api_key": "k",
     }
-    create_1 = c.post("/api/v1/provider-connections",
-                      headers=_auth(tokens["team_a"]), json=payload)
+    create_1 = c.post("/api/v1/provider-connections", headers=_auth(tokens["team_a"]), json=payload)
     assert create_1.status_code == 201
-    c.delete(f"/api/v1/provider-connections/{create_1.json()['id']}",
-             headers=_auth(tokens["team_a"]))
+    c.delete(
+        f"/api/v1/provider-connections/{create_1.json()['id']}", headers=_auth(tokens["team_a"])
+    )
 
-    create_2 = c.post("/api/v1/provider-connections",
-                      headers=_auth(tokens["team_a"]), json=payload)
+    create_2 = c.post("/api/v1/provider-connections", headers=_auth(tokens["team_a"]), json=payload)
     assert create_2.status_code == 201, create_2.text
     assert create_2.json()["id"] != create_1.json()["id"]
 
@@ -785,9 +920,14 @@ def test_delete_cross_team_returns_404(app_setup) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
     create = c.post(
-        "/api/v1/provider-connections", headers=_auth(tokens["team_b"]),
-        json={"name": "n", "type": "openai-compatible",
-              "base_url": "https://api.openai.com/", "api_key": "k"},
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_b"]),
+        json={
+            "name": "n",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
     )
     conn_id = create.json()["id"]
 
@@ -804,7 +944,8 @@ def test_delete_cross_team_returns_404(app_setup) -> None:
 
 
 def test_test_valid_persists_status_and_returns_summary(
-    app_setup, monkeypatch: pytest.MonkeyPatch,
+    app_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Happy path: probe succeeds → row.status='valid',
     last_validation_error cleared, last_validated_at set."""
@@ -813,8 +954,11 @@ def test_test_valid_persists_status_and_returns_summary(
     captured_args: dict[str, object] = {}
 
     async def _fake_probe(
-        provider_type: str, base_url: str, api_key: str,
-        *, _client_factory: object = None,
+        provider_type: str,
+        base_url: str,
+        api_key: str,
+        *,
+        _client_factory: object = None,
     ) -> ProbeResult:
         captured_args["provider_type"] = provider_type
         captured_args["base_url"] = base_url
@@ -829,10 +973,14 @@ def test_test_valid_persists_status_and_returns_summary(
     app, tokens, _ = app_setup
     c = _client(app)
     create = c.post(
-        "/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-        json={"name": "openai-prod", "type": "openai-compatible",
-              "base_url": "https://api.openai.com/v1",
-              "api_key": "sk-XYZ"},
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "openai-prod",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/v1",
+            "api_key": "sk-XYZ",
+        },
     )
     conn_id = create.json()["id"]
     assert create.json()["status"] == "pending"
@@ -865,13 +1013,15 @@ def test_test_valid_persists_status_and_returns_summary(
 
 
 def test_test_invalid_persists_error_message(
-    app_setup, monkeypatch: pytest.MonkeyPatch,
+    app_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from loom_service.provider_connections_service import ProbeResult
 
     async def _fake_probe(*args, **kwargs) -> ProbeResult:  # type: ignore[no-untyped-def]
         return ProbeResult(
-            status="invalid", http_status=401,
+            status="invalid",
+            http_status=401,
             error="HTTP 401 from .../models; body excerpt: 'bad key'",
         )
 
@@ -883,9 +1033,14 @@ def test_test_invalid_persists_error_message(
     app, tokens, _ = app_setup
     c = _client(app)
     create = c.post(
-        "/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-        json={"name": "n", "type": "openai-compatible",
-              "base_url": "https://api.openai.com/", "api_key": "wrong"},
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "n",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "wrong",
+        },
     )
     conn_id = create.json()["id"]
 
@@ -908,7 +1063,8 @@ def test_test_invalid_persists_error_message(
 
 
 def test_test_revalidates_current_dns_before_probe(
-    app_setup, monkeypatch: pytest.MonkeyPatch,
+    app_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from loom_service.provider_connections_service import ProbeResult
 
@@ -927,7 +1083,9 @@ def test_test_revalidates_current_dns_before_probe(
     c = _client(app)
     conn_id = _create_conn(c, tokens["team_a"])
     _reroute_provider_dns(
-        monkeypatch, host="api.openai.com", ips=["127.0.0.1"],
+        monkeypatch,
+        host="api.openai.com",
+        ips=["127.0.0.1"],
     )
 
     r = c.post(
@@ -952,7 +1110,8 @@ def test_test_revalidates_current_dns_before_probe(
 
 
 def test_test_secret_decrypt_failure_returns_actionable_503(
-    app_setup, monkeypatch: pytest.MonkeyPatch,
+    app_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Provider test should not leak SecretStore decrypt failures as 500s."""
     called = {"count": 0}
@@ -969,9 +1128,14 @@ def test_test_secret_decrypt_failure_returns_actionable_503(
     app, tokens, _ = app_setup
     c = TestClient(app, raise_server_exceptions=False)
     create = c.post(
-        "/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-        json={"name": "n", "type": "openai-compatible",
-              "base_url": "https://api.openai.com/", "api_key": "sk-XYZ"},
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "n",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "sk-XYZ",
+        },
     )
     conn_id = create.json()["id"]
 
@@ -993,7 +1157,8 @@ def test_test_secret_decrypt_failure_returns_actionable_503(
 
 
 def test_test_cross_team_returns_404(
-    app_setup, monkeypatch: pytest.MonkeyPatch,
+    app_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cross-team /test mirrors the GET / PATCH / DELETE behavior: 404,
     not 403 — and crucially BEFORE we decrypt the api_key. The fake
@@ -1014,9 +1179,14 @@ def test_test_cross_team_returns_404(
     app, tokens, _ = app_setup
     c = _client(app)
     create = c.post(
-        "/api/v1/provider-connections", headers=_auth(tokens["team_b"]),
-        json={"name": "n", "type": "openai-compatible",
-              "base_url": "https://api.openai.com/", "api_key": "k"},
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_b"]),
+        json={
+            "name": "n",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
     )
     conn_id = create.json()["id"]
 
@@ -1029,7 +1199,8 @@ def test_test_cross_team_returns_404(
 
 
 def test_test_returns_404_for_soft_deleted_connection(
-    app_setup, monkeypatch: pytest.MonkeyPatch,
+    app_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from loom_service.provider_connections_service import ProbeResult
 
@@ -1044,9 +1215,14 @@ def test_test_returns_404_for_soft_deleted_connection(
     app, tokens, _ = app_setup
     c = _client(app)
     create = c.post(
-        "/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-        json={"name": "n", "type": "openai-compatible",
-              "base_url": "https://api.openai.com/", "api_key": "k"},
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "n",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
     )
     conn_id = create.json()["id"]
     c.delete(
@@ -1067,16 +1243,21 @@ def test_test_returns_404_for_soft_deleted_connection(
 
 
 def _stub_fetch_upstream_models(
-    monkeypatch: pytest.MonkeyPatch, returns: list[str] | None = None,
-    *, raises: Exception | None = None,
+    monkeypatch: pytest.MonkeyPatch,
+    returns: list[str] | None = None,
+    *,
+    raises: Exception | None = None,
 ) -> dict[str, object]:
     """Patch fetch_upstream_models on the routes module + record the
     call. Returns a dict the test can inspect for call_count / last_args."""
     state: dict[str, object] = {"call_count": 0, "last_args": None}
 
     async def _fake(
-        provider_type: str, base_url: str, api_key: str,
-        *, _client_factory: object = None,
+        provider_type: str,
+        base_url: str,
+        api_key: str,
+        *,
+        _client_factory: object = None,
     ) -> list[str]:
         state["call_count"] = int(state["call_count"]) + 1  # type: ignore[arg-type]
         state["last_args"] = (provider_type, base_url, api_key)
@@ -1093,7 +1274,10 @@ def _stub_fetch_upstream_models(
 
 
 def _reroute_provider_dns(
-    monkeypatch: pytest.MonkeyPatch, *, host: str, ips: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    host: str,
+    ips: list[str],
 ) -> None:
     """Replace provider DNS results after create-time validation.
 
@@ -1104,10 +1288,7 @@ def _reroute_provider_dns(
 
     def _stub(host_arg: str, port, *args, **kwargs):
         if host_arg == host:
-            return [
-                (socket.AF_INET, socket.SOCK_STREAM, 0, "", (ip, 0))
-                for ip in ips
-            ]
+            return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (ip, 0)) for ip in ips]
         raise socket.gaierror(f"no test DNS entry for {host_arg}")
 
     monkeypatch.setattr(
@@ -1128,8 +1309,12 @@ def _stub_preflight_model(
     state: dict[str, object] = {"call_count": 0, "last_args": None}
 
     async def _fake(
-        provider_type: str, base_url: str, api_key: str, model_id: str,
-        *, _client_factory: object = None,
+        provider_type: str,
+        base_url: str,
+        api_key: str,
+        model_id: str,
+        *,
+        _client_factory: object = None,
     ) -> SimpleNamespace:
         state["call_count"] = int(state["call_count"]) + 1  # type: ignore[arg-type]
         state["last_args"] = (provider_type, base_url, api_key, model_id)
@@ -1150,9 +1335,14 @@ def _stub_preflight_model(
 
 def _create_conn(c, token: str, name: str = "openai-prod") -> str:  # type: ignore[no-untyped-def]
     r = c.post(
-        "/api/v1/provider-connections", headers=_auth(token),
-        json={"name": name, "type": "openai-compatible",
-              "base_url": "https://api.openai.com/v1", "api_key": "sk-XYZ"},
+        "/api/v1/provider-connections",
+        headers=_auth(token),
+        json={
+            "name": name,
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/v1",
+            "api_key": "sk-XYZ",
+        },
     )
     assert r.status_code == 201, r.text
     return r.json()["id"]  # type: ignore[no-any-return]
@@ -1200,7 +1390,8 @@ def test_models_manual_entry_is_tied_to_connection_with_metadata(app_setup) -> N
 
 
 def test_models_manual_entry_survives_refresh_when_absent_upstream(
-    app_setup, monkeypatch: pytest.MonkeyPatch,
+    app_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
@@ -1262,10 +1453,12 @@ def test_models_manual_entry_can_be_hidden_and_unhidden_without_upstream_presenc
 
 
 def test_models_refresh_populates_cache_then_list_returns_it(
-    app_setup, monkeypatch: pytest.MonkeyPatch,
+    app_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = _stub_fetch_upstream_models(
-        monkeypatch, returns=["gpt-4o", "gpt-3.5-turbo"],
+        monkeypatch,
+        returns=["gpt-4o", "gpt-3.5-turbo"],
     )
     app, tokens, _ = app_setup
     c = _client(app)
@@ -1299,19 +1492,23 @@ def test_models_refresh_populates_cache_then_list_returns_it(
         headers=_auth(tokens["team_a"]),
     ).json()
     assert sorted(it["model_id"] for it in listed["items"]) == [
-        "gpt-3.5-turbo", "gpt-4o",
+        "gpt-3.5-turbo",
+        "gpt-4o",
     ]
 
 
 def test_models_refresh_revalidates_current_dns_before_fetch(
-    app_setup, monkeypatch: pytest.MonkeyPatch,
+    app_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
     conn_id = _create_conn(c, tokens["team_a"])
     state = _stub_fetch_upstream_models(monkeypatch, returns=["gpt-4o"])
     _reroute_provider_dns(
-        monkeypatch, host="api.openai.com", ips=["127.0.0.1"],
+        monkeypatch,
+        host="api.openai.com",
+        ips=["127.0.0.1"],
     )
 
     r = c.post(
@@ -1327,7 +1524,8 @@ def test_models_refresh_revalidates_current_dns_before_fetch(
 
 
 def test_models_preflight_valid_persists_model_status(
-    app_setup, monkeypatch: pytest.MonkeyPatch,
+    app_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
@@ -1369,7 +1567,8 @@ def test_models_preflight_valid_persists_model_status(
 
 
 def test_models_preflight_access_denied_persists_safe_error(
-    app_setup, monkeypatch: pytest.MonkeyPatch,
+    app_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
@@ -1397,14 +1596,13 @@ def test_models_preflight_access_denied_persists_safe_error(
     assert body["last_preflight_status"] == "failed"
     assert body["last_preflight_http_status"] == 403
     assert body["last_preflight_error_code"] == "access-denied"
-    assert body["last_preflight_error_message"] == (
-        "HTTP 403 from upstream: [REDACTED]"
-    )
+    assert body["last_preflight_error_message"] == ("HTTP 403 from upstream: [REDACTED]")
     assert "sk-XYZ" not in json.dumps(body)
 
 
 def test_models_preflight_revalidates_current_dns_before_upstream_call(
-    app_setup, monkeypatch: pytest.MonkeyPatch,
+    app_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
@@ -1416,7 +1614,9 @@ def test_models_preflight_revalidates_current_dns_before_upstream_call(
     )
     state = _stub_preflight_model(monkeypatch)
     _reroute_provider_dns(
-        monkeypatch, host="api.openai.com", ips=["127.0.0.1"],
+        monkeypatch,
+        host="api.openai.com",
+        ips=["127.0.0.1"],
     )
 
     r = c.post(
@@ -1450,7 +1650,8 @@ def test_models_preflight_404_for_uncached_model(app_setup) -> None:
 
 
 def test_models_refresh_marks_missing_models_unhidden_to_missing(
-    app_setup, monkeypatch: pytest.MonkeyPatch,
+    app_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A previously-cached model not in the new upstream response →
     visible=false, hidden_reason='missing-upstream', upstream_present=false."""
@@ -1459,7 +1660,8 @@ def test_models_refresh_marks_missing_models_unhidden_to_missing(
     conn_id = _create_conn(c, tokens["team_a"])
 
     _stub_fetch_upstream_models(
-        monkeypatch, returns=["gpt-4o", "gpt-3.5-turbo"],
+        monkeypatch,
+        returns=["gpt-4o", "gpt-3.5-turbo"],
     )
     c.post(
         f"/api/v1/provider-connections/{conn_id}/models/refresh",
@@ -1485,7 +1687,8 @@ def test_models_refresh_marks_missing_models_unhidden_to_missing(
 
 
 def test_models_refresh_preserves_operator_hide_across_refresh(
-    app_setup, monkeypatch: pytest.MonkeyPatch,
+    app_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A row hidden by the operator stays hidden after refresh even
     when the upstream still returns it. hidden_reason stays
@@ -1495,7 +1698,8 @@ def test_models_refresh_preserves_operator_hide_across_refresh(
     conn_id = _create_conn(c, tokens["team_a"])
 
     _stub_fetch_upstream_models(
-        monkeypatch, returns=["gpt-4o", "gpt-3.5-turbo"],
+        monkeypatch,
+        returns=["gpt-4o", "gpt-3.5-turbo"],
     )
     c.post(
         f"/api/v1/provider-connections/{conn_id}/models/refresh",
@@ -1519,11 +1723,13 @@ def test_models_refresh_preserves_operator_hide_across_refresh(
 
 
 def test_models_refresh_upstream_502_does_not_partially_commit(
-    app_setup, monkeypatch: pytest.MonkeyPatch,
+    app_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from loom_service.provider_connections_service import (
         UpstreamModelFetchError,
     )
+
     app, tokens, _ = app_setup
     c = _client(app)
     conn_id = _create_conn(c, tokens["team_a"])
@@ -1556,7 +1762,8 @@ def test_models_refresh_upstream_502_does_not_partially_commit(
 
 
 def test_models_refresh_secret_decrypt_failure_returns_actionable_503(
-    app_setup, monkeypatch: pytest.MonkeyPatch,
+    app_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Model refresh should fail before contacting upstream if key unwrap fails."""
     state = _stub_fetch_upstream_models(monkeypatch, returns=["gpt-4o"])
@@ -1593,7 +1800,8 @@ def test_models_hide_404_for_uncached_model(app_setup) -> None:
 
 
 def test_models_unhide_keeps_missing_upstream_invisible(
-    app_setup, monkeypatch: pytest.MonkeyPatch,
+    app_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unhiding a model that's no longer upstream MUST NOT make it
     visible — we can't run a trial against a model the provider
@@ -1627,7 +1835,8 @@ def test_models_unhide_keeps_missing_upstream_invisible(
 
 
 def test_models_unhide_makes_operator_hidden_visible(
-    app_setup, monkeypatch: pytest.MonkeyPatch,
+    app_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
@@ -1652,10 +1861,11 @@ def test_models_unhide_makes_operator_hidden_visible(
 
 
 def test_test_flips_status_invalid_when_stored_ref_is_malformed(
-    app_setup, postgres_url: str,
+    app_setup,
+    postgres_url: str,
 ) -> None:
     """#423: legacy staging provider rows can hold an argv-style
-    ref like `env:PUBLIC_BETA_SMOKE_OPENAI` in `encrypted_api_key_ref`
+    ref like `env:STAGING_SMOKE_OPENAI` in `encrypted_api_key_ref`
     instead of the runtime-supported `loom://<ns>/<uuid>` shape. The
     /test endpoint must surface this as an actionable failure AND flip
     `status='invalid'` so list/show surfaces stop hiding the broken
@@ -1663,9 +1873,14 @@ def test_test_flips_status_invalid_when_stored_ref_is_malformed(
     app, tokens, _ = app_setup
     c = _client(app)
     create = c.post(
-        "/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
-        json={"name": "legacy-ref", "type": "openai-compatible",
-              "base_url": "https://api.openai.com/v1", "api_key": "sk-XYZ"},
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "legacy-ref",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/v1",
+            "api_key": "sk-XYZ",
+        },
     )
     assert create.status_code == 201, create.text
     conn_id = create.json()["id"]
@@ -1687,7 +1902,7 @@ def test_test_flips_status_invalid_when_stored_ref_is_malformed(
             s.execute(
                 ProviderConnection.__table__.update()
                 .where(ProviderConnection.id == UUID(conn_id))
-                .values(encrypted_api_key_ref="env:PUBLIC_BETA_SMOKE_OPENAI"),
+                .values(encrypted_api_key_ref="env:STAGING_SMOKE_OPENAI"),
             )
             s.commit()
     finally:

@@ -57,7 +57,11 @@ class TestRenderMigrationManifest:
         container = job["spec"]["template"]["spec"]["containers"][0]
         assert container["image"] == "loom-control-plane:staging-05ab776"
         assert container["command"] == [
-            "alembic", "-c", "migrations/alembic.ini", "upgrade", "head",
+            "alembic",
+            "-c",
+            "migrations/alembic.ini",
+            "upgrade",
+            "head",
         ]
 
     def test_db_url_is_pulled_from_the_control_plane_secret_key(self) -> None:
@@ -73,8 +77,7 @@ class TestRenderMigrationManifest:
         )
         job = next(d for d in yaml.safe_load_all(text) if d)
         env_by_name = {
-            e["name"]: e for e in
-            job["spec"]["template"]["spec"]["containers"][0]["env"]
+            e["name"]: e for e in job["spec"]["template"]["spec"]["containers"][0]["env"]
         }
         assert "LOOM_DB_URL" in env_by_name, (
             "Alembic requires LOOM_DB_URL; the migration Job must not "
@@ -114,12 +117,14 @@ class TestRenderMigrationManifest:
     def test_job_name_normalizes_uppercase_and_dots(self) -> None:
         """RFC 1123 name convention: dashes + lowercase alphanumerics."""
         text = render_migration_manifest(
-            image_tag="Public.Beta.05ab776",
+            image_tag="Staging.05ab776",
             namespace="loom",
             job_suffix="a",
         )
         job = next(d for d in yaml.safe_load_all(text) if d)
-        assert job["metadata"]["name"] == "loom-migrate-public-beta-05ab776-a"  # DNS-normalization stress; keep literal
+        assert (
+            job["metadata"]["name"] == "loom-migrate-staging-05ab776-a"
+        )  # DNS-normalization stress
 
 
 class TestPostgresNetPolIncludesMigrationSelector:
@@ -129,6 +134,7 @@ class TestPostgresNetPolIncludesMigrationSelector:
 
     def test_network_policy_template_lists_migration_app(self) -> None:
         from importlib import resources
+
         pkg = resources.files("loom_cli.templates.k8s")
         text = (pkg / "network-policies.yaml.j2").read_text()
         # Find the postgres NetworkPolicy block. Simple substring check
@@ -139,7 +145,7 @@ class TestPostgresNetPolIncludesMigrationSelector:
         # Look for `app: loom-migration` inside the postgres ingress
         # section (bounded by `---` to the next document).
         next_doc = text.find("\n---", postgres_start)
-        postgres_section = text[postgres_start:next_doc if next_doc != -1 else None]
+        postgres_section = text[postgres_start : next_doc if next_doc != -1 else None]
         assert "app: loom-migration" in postgres_section, (
             "loom-postgres NetworkPolicy must permit app=loom-migration "
             "ingress so sanctioned migration Jobs can connect (#332)"
@@ -149,14 +155,17 @@ class TestPostgresNetPolIncludesMigrationSelector:
 class TestCLIDispatch:
     """End-to-end CLI: `loom cluster render-migration ...`."""
 
-    def test_prints_valid_yaml_by_default(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        rc = main([
-            "cluster", "render-migration",
-            "--image-tag", "staging-05ab776",
-            "--namespace", "loom-staging",
-        ])
+    def test_prints_valid_yaml_by_default(self, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = main(
+            [
+                "cluster",
+                "render-migration",
+                "--image-tag",
+                "staging-05ab776",
+                "--namespace",
+                "loom-staging",
+            ]
+        )
         assert rc == 0
         out = capsys.readouterr().out
         # The rendered output must be parseable YAML.
@@ -165,40 +174,47 @@ class TestCLIDispatch:
         assert docs[0]["kind"] == "Job"
         assert docs[0]["metadata"]["namespace"] == "loom-staging"
 
-    def test_requires_image_tag(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_requires_image_tag(self, capsys: pytest.CaptureFixture[str]) -> None:
         # argparse's `required=True` exits via SystemExit(2) before the
         # handler runs; catch that rather than checking the return code.
         with pytest.raises(SystemExit) as exc:
-            main([
-                "cluster", "render-migration",
-                "--namespace", "loom-staging",
-            ])
+            main(
+                [
+                    "cluster",
+                    "render-migration",
+                    "--namespace",
+                    "loom-staging",
+                ]
+            )
         assert exc.value.code == 2
         err = capsys.readouterr().err
         assert "image-tag" in err
 
-    def test_default_namespace_is_loom(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        rc = main([
-            "cluster", "render-migration",
-            "--image-tag", "staging-05ab776",
-        ])
+    def test_default_namespace_is_loom(self, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = main(
+            [
+                "cluster",
+                "render-migration",
+                "--image-tag",
+                "staging-05ab776",
+            ]
+        )
         assert rc == 0
         out = capsys.readouterr().out
         job = next(d for d in yaml.safe_load_all(out) if d)
         assert job["metadata"]["namespace"] == "loom"
 
-    def test_custom_job_suffix(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        rc = main([
-            "cluster", "render-migration",
-            "--image-tag", "staging-05ab776",
-            "--job-suffix", "20260702t172540z",
-        ])
+    def test_custom_job_suffix(self, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = main(
+            [
+                "cluster",
+                "render-migration",
+                "--image-tag",
+                "staging-05ab776",
+                "--job-suffix",
+                "20260702t172540z",
+            ]
+        )
         assert rc == 0
         out = capsys.readouterr().out
         job = next(d for d in yaml.safe_load_all(out) if d)

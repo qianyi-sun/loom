@@ -15,7 +15,7 @@ class TestAuditStepArgv:
     def test_invokes_supported_audit_subcommand(self, tmp_path: Path) -> None:
         ctx = make_ctx(
             tmp_path,
-            namespace="loom-public-beta",
+            namespace="loom-staging",
         )
         ev = EvidenceDirectory(tmp_path, "test-rid")
         ev.ensure()
@@ -35,7 +35,7 @@ class TestAuditStepArgv:
         assert tomllib.loads(config_path.read_text())["image_tag"] == ctx.image_tag
 
     def test_does_not_pass_unsupported_namespace_flag(self, tmp_path: Path) -> None:
-        ctx = make_ctx(tmp_path, namespace="loom-public-beta")
+        ctx = make_ctx(tmp_path, namespace="loom-staging")
         ev = EvidenceDirectory(tmp_path, "test-rid")
         ev.ensure()
         step_dir = ev.step_dir(6, "audit")

@@ -484,9 +484,9 @@ the next reconcile can replace missing capacity on another allowed node.
 First production runs on a separate prod control plane and state profile, but
 GB10/OLDLAB machines remain shared physical capacity. The release contract is
 `deploy/worker-capacity/prod-first.toml`: by default every eligible host slot
-belongs to production, beta/dev has `beta_slots = 0`, and any beta borrow must
+belongs to production, staging/dev has `staging_slots = 0`, and any staging borrow must
 be explicit, bounded to at most one slot per host, and drained back before the
-borrow window ends. The manifest can also represent `beta_draining`,
+borrow window ends. The manifest can also represent `staging_draining`,
 `host_draining`, and `unreachable` hosts such as the current `trt-gb10-14`
 SSH-unreachable node.
 
@@ -498,8 +498,8 @@ uv run python scripts/ops/worker_capacity_manifest.py \
   --manifest deploy/worker-capacity/prod-first.toml \
   --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
   --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
-  --var BETA_IMAGE_TAG="$BETA_IMAGE_TAG" \
-  --var BETA_SOURCE_COMMIT="$BETA_RELEASE_SHA" \
+  --var STAGING_IMAGE_TAG="$STAGING_IMAGE_TAG" \
+  --var STAGING_SOURCE_COMMIT="$STAGING_RELEASE_SHA" \
   --observed-json "$ROLLOUT_DIR/worker-registrations.json" \
   --evidence-out "$ROLLOUT_DIR/worker-capacity-prod-first.json"
 ```
@@ -512,21 +512,21 @@ Markdown and fails on prod/dev crosses in worker identity, API URL, image tag,
 source commit, compose service, Kubernetes deployment, host state, or observed
 slot counts.
 
-Short-lived beta/dev capacity borrows use the same repo-only manifest helper.
+Short-lived staging/dev capacity borrows use the same repo-only manifest helper.
 The commands below preview first and only write a new desired-state file when
 `--apply` is present; they do not contact a live control plane, mutate worker
 pools, or read secrets.
 
-Preview a two-slot public-beta smoke lease before a rollout:
+Preview a two-slot staging smoke lease before a rollout:
 
 ```bash
-uv run python scripts/ops/worker_capacity_manifest.py lease-beta \
+uv run python scripts/ops/worker_capacity_manifest.py lease-staging \
   --manifest deploy/worker-capacity/prod-first.toml \
   --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
   --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
-  --var BETA_IMAGE_TAG="$BETA_IMAGE_TAG" \
-  --var BETA_SOURCE_COMMIT="$BETA_RELEASE_SHA" \
-  --reason "public-beta rollout smoke $BETA_IMAGE_TAG" \
+  --var STAGING_IMAGE_TAG="$STAGING_IMAGE_TAG" \
+  --var STAGING_SOURCE_COMMIT="$STAGING_RELEASE_SHA" \
+  --reason "staging rollout smoke $STAGING_IMAGE_TAG" \
   --ttl 45m \
   --slots-per-host 1 \
   --max-total-slots 2 \
@@ -537,30 +537,30 @@ After reviewing the JSON preview, write the bounded lease manifest and
 sanitized evidence:
 
 ```bash
-LEASE_MANIFEST="$ROLLOUT_DIR/worker-capacity-beta-lease.toml"
+LEASE_MANIFEST="$ROLLOUT_DIR/worker-capacity-staging-lease.toml"
 
-uv run python scripts/ops/worker_capacity_manifest.py lease-beta \
+uv run python scripts/ops/worker_capacity_manifest.py lease-staging \
   --manifest deploy/worker-capacity/prod-first.toml \
   --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
   --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
-  --var BETA_IMAGE_TAG="$BETA_IMAGE_TAG" \
-  --var BETA_SOURCE_COMMIT="$BETA_RELEASE_SHA" \
-  --reason "public-beta rollout smoke $BETA_IMAGE_TAG" \
+  --var STAGING_IMAGE_TAG="$STAGING_IMAGE_TAG" \
+  --var STAGING_SOURCE_COMMIT="$STAGING_RELEASE_SHA" \
+  --reason "staging rollout smoke $STAGING_IMAGE_TAG" \
   --ttl 45m \
   --slots-per-host 1 \
   --max-total-slots 2 \
   --preemptible \
   --apply \
   --output-manifest "$LEASE_MANIFEST" \
-  --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-lease.json"
+  --evidence-out "$ROLLOUT_DIR/worker-capacity-staging-lease.json"
 ```
 
 Check lease status, including automatic TTL-expiry and prod-pressure handling,
 with the latest secret-free worker registration/status artifact when
 available. Treat `prod_pending_count > 0`, `prod_active_count > 0`, or a
-positive prod capacity shortfall as prod pressure: `status` stops new beta
-claims in the desired state, releases idle beta slots back to prod, and reports
-running beta slots as draining. Preemptible running beta trials are only marked
+positive prod capacity shortfall as prod pressure: `status` stops new staging
+claims in the desired state, releases idle staging slots back to prod, and reports
+running staging slots as draining. Preemptible running staging trials are only marked
 retryable in evidence after the configured grace period; this repo helper does
 not cancel live work.
 
@@ -574,51 +574,51 @@ uv run python scripts/ops/worker_capacity_manifest.py status \
   --prod-pressure-source "control-plane prod queue summary" \
   --preemptible-grace-period 10m \
   --apply \
-  --output-manifest "$ROLLOUT_DIR/worker-capacity-beta-status.toml" \
-  --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-status.json"
+  --output-manifest "$ROLLOUT_DIR/worker-capacity-staging-status.toml" \
+  --evidence-out "$ROLLOUT_DIR/worker-capacity-staging-status.json"
 ```
 
-The evidence distinguishes prod-driven pauses from beta rollout failures:
+The evidence distinguishes prod-driven pauses from staging rollout failures:
 `prod_pressure.cause=prod_capacity_pressure` means prod demand triggered the
 drain, while `drift` or `errors` still indicate manifest/worker mismatch. If
 pressure clears before the lease TTL expires, rerun `status` with zero
-prod-pressure counts to recover the bounded beta desired slots from the lease
+prod-pressure counts to recover the bounded staging desired slots from the lease
 metadata.
 
 Use an explicit manual drain only for operator-initiated pause scenarios that
 are not represented by the prod-pressure counts. The report separates
-`running_beta_trials` from `idle_leased_slots` so operators can see what is
+`running_staging_trials` from `idle_leased_slots` so operators can see what is
 still active and what was released from the desired state:
 
 ```bash
-uv run python scripts/ops/worker_capacity_manifest.py drain-beta \
+uv run python scripts/ops/worker_capacity_manifest.py drain-staging \
   --manifest "$LEASE_MANIFEST" \
   --observed-json "$ROLLOUT_DIR/worker-registrations.json" \
   --reason "prod pressure before release gate" \
   --apply \
-  --output-manifest "$ROLLOUT_DIR/worker-capacity-beta-draining.toml" \
-  --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-drain.json"
+  --output-manifest "$ROLLOUT_DIR/worker-capacity-staging-draining.toml" \
+  --evidence-out "$ROLLOUT_DIR/worker-capacity-staging-drain.json"
 ```
 
-Immediately release beta capacity after validation finishes. This action is
-idempotent: rerunning it keeps beta desired slots at zero and leaves prod slots
+Immediately release staging capacity after validation finishes. This action is
+idempotent: rerunning it keeps staging desired slots at zero and leaves prod slots
 on eligible hosts:
 
 ```bash
-uv run python scripts/ops/worker_capacity_manifest.py release-beta \
+uv run python scripts/ops/worker_capacity_manifest.py release-staging \
   --manifest "$LEASE_MANIFEST" \
-  --reason "public-beta smoke complete" \
+  --reason "staging smoke complete" \
   --apply \
-  --output-manifest "$ROLLOUT_DIR/worker-capacity-beta-released.toml" \
-  --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-release.json"
+  --output-manifest "$ROLLOUT_DIR/worker-capacity-staging-released.toml" \
+  --evidence-out "$ROLLOUT_DIR/worker-capacity-staging-release.json"
 ```
 
-Before production promotion, copy the latest `status`, `drain-beta`, or
-`release-beta` summary into the release-promotion manifest under
-`checks.prod_beta_isolation.beta_capacity`. The production gate accepts
+Before production promotion, copy the latest `status`, `drain-staging`, or
+`release-staging` summary into the release-promotion manifest under
+`checks.prod_staging_isolation.staging_capacity`. The production gate accepts
 `lease_state=none`, `released`, or an expired/drained state only when
-`beta_slots=0` and `new_beta_claims_allowed=false`. Any active beta lease,
-remaining beta slot, or open beta claims fail promotion unless the same object
+`staging_slots=0` and `new_staging_claims_allowed=false`. Any active staging lease,
+remaining staging slot, or open staging claims fail promotion unless the same object
 contains a documented override with `approved=true`, a reason, and an HTTPS
 approval/evidence URL.
 

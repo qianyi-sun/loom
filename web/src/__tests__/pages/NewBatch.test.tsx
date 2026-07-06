@@ -613,7 +613,7 @@ describe("NewBatch", () => {
       await screen.findByText(/No runnable benchmarks are provisioned/i),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/public beta catalog provisioning/i),
+      screen.getByText(/staging catalog provisioning/i),
     ).toBeInTheDocument();
     expect(screen.queryByText(/loom_benchmark_tool import/i)).not.toBeInTheDocument();
     expect(

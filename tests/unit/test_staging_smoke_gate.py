@@ -170,14 +170,22 @@ def test_resolve_smoke_secret_args_supports_env_file_and_stdin(
     monkeypatch.setenv("SMOKE_MINIO_ACCESS", "resolved-minio-access")
     monkeypatch.setattr(sys, "stdin", io.StringIO("stdin-secret-needle\n"))
 
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "env:SMOKE_TEAM_A_TOKEN",
-        "--team-b-token", "env:SMOKE_TEAM_B_TOKEN",
-        "--catalog-minio-access-key", "env:SMOKE_MINIO_ACCESS",
-        "--catalog-minio-secret-key", f"file:{secret_file}",
-        "--secret-needle", "-",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "env:SMOKE_TEAM_A_TOKEN",
+            "--team-b-token",
+            "env:SMOKE_TEAM_B_TOKEN",
+            "--catalog-minio-access-key",
+            "env:SMOKE_MINIO_ACCESS",
+            "--catalog-minio-secret-key",
+            f"file:{secret_file}",
+            "--secret-needle",
+            "-",
+        ]
+    )
 
     resolved = gate.resolve_smoke_secret_args(args)
 
@@ -237,13 +245,20 @@ def test_main_resolves_token_sources_before_requests_and_redacts_evidence(
 
     monkeypatch.setattr(gate, "SmokeClient", FakeClient)
 
-    rc = gate.main([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "env:SMOKE_TEAM_A_TOKEN",
-        "--team-b-token", "env:SMOKE_TEAM_B_TOKEN",
-        "--markdown-output", str(markdown_path),
-        "--json-output", str(json_path),
-    ])
+    rc = gate.main(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "env:SMOKE_TEAM_A_TOKEN",
+            "--team-b-token",
+            "env:SMOKE_TEAM_B_TOKEN",
+            "--markdown-output",
+            str(markdown_path),
+            "--json-output",
+            str(json_path),
+        ]
+    )
 
     assert rc == 0
     assert "resolved-team-a-token" in observed_tokens
@@ -277,15 +292,23 @@ def test_main_rejects_literal_minio_secret_before_s3_use(
     )
 
     with pytest.raises(SystemExit) as exc_info:
-        gate.main([
-            "--server-url", "https://loom.example.com",
-            "--team-a-token", "env:SMOKE_TEAM_A_TOKEN",
-            "--team-b-token", "env:SMOKE_TEAM_B_TOKEN",
-            "--catalog-minio-endpoint", "http://minio:9000",
-            "--catalog-minio-access-key", "env:SMOKE_MINIO_ACCESS",
-            "--catalog-minio-secret-key", raw_secret,
-            "--object-store-write-check-only",
-        ])
+        gate.main(
+            [
+                "--server-url",
+                "https://loom.example.com",
+                "--team-a-token",
+                "env:SMOKE_TEAM_A_TOKEN",
+                "--team-b-token",
+                "env:SMOKE_TEAM_B_TOKEN",
+                "--catalog-minio-endpoint",
+                "http://minio:9000",
+                "--catalog-minio-access-key",
+                "env:SMOKE_MINIO_ACCESS",
+                "--catalog-minio-secret-key",
+                raw_secret,
+                "--object-store-write-check-only",
+            ]
+        )
 
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
@@ -313,12 +336,18 @@ def test_run_smoke_uses_parser_max_response_scan_bytes(monkeypatch) -> None:
             return gate.HttpResponse(status_code=200, headers={}, body=body)
 
     monkeypatch.setattr(gate, "SmokeClient", FakeClient)
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-        "--max-response-scan-bytes", "12345",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+            "--max-response-scan-bytes",
+            "12345",
+        ]
+    )
 
     gate.run_smoke(args)
 
@@ -366,11 +395,16 @@ def test_run_smoke_fails_when_team_b_uses_legacy_team_token(monkeypatch) -> None
             return gate.HttpResponse(status_code=200, headers={}, body=body)
 
     monkeypatch.setattr(gate, "SmokeClient", FakeClient)
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+        ]
+    )
 
     report = gate.run_smoke(args)
     result = next(r for r in report.results if r.check_id == "auth.team_b_whoami")
@@ -422,11 +456,16 @@ def test_run_smoke_fails_when_team_b_token_restores_platform_admin(monkeypatch) 
             return gate.HttpResponse(status_code=200, headers={}, body=body)
 
     monkeypatch.setattr(gate, "SmokeClient", FakeClient)
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+        ]
+    )
 
     report = gate.run_smoke(args)
     result = next(r for r in report.results if r.check_id == "auth.team_b_whoami")
@@ -521,20 +560,26 @@ def test_main_writes_evidence_when_run_library_list_times_out(
                 b'"unknown_terminal":0}}}}'
             )
         if path == "/api/v1/run-library/batches/batch-1":
-            return FakeResponse(
-                b'{"id":"batch-1","owner_team":{"id":"team-a","name":"Team A"}}'
-            )
+            return FakeResponse(b'{"id":"batch-1","owner_team":{"id":"team-a","name":"Team A"}}')
         return FakeResponse(b'{"items":[{"id":"batch-1"}]}')
 
     monkeypatch.setattr(gate, "urlopen", fake_urlopen)
-    rc = gate.main([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "env:SMOKE_TEAM_A_TOKEN",
-        "--team-b-token", "env:SMOKE_TEAM_B_TOKEN",
-        "--batch-id", "batch-1",
-        "--markdown-output", str(markdown_path),
-        "--json-output", str(json_path),
-    ])
+    rc = gate.main(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "env:SMOKE_TEAM_A_TOKEN",
+            "--team-b-token",
+            "env:SMOKE_TEAM_B_TOKEN",
+            "--batch-id",
+            "batch-1",
+            "--markdown-output",
+            str(markdown_path),
+            "--json-output",
+            str(json_path),
+        ]
+    )
 
     assert rc == 1
     assert markdown_path.exists()
@@ -605,21 +650,24 @@ def test_run_smoke_fails_when_batch_debug_reports_claimed_without_started(
             elif path == "/api/v1/run-library/batches":
                 body = b'{"items":[{"id":"batch-1"}]}'
             elif path == "/api/v1/run-library/batches/batch-1":
-                body = (
-                    b'{"id":"batch-1","owner_team":'
-                    b'{"id":"team-1","name":"Agentic RL"}}'
-                )
+                body = b'{"id":"batch-1","owner_team":{"id":"team-1","name":"Agentic RL"}}'
             else:
                 body = b'{"items":[]}'
             return gate.HttpResponse(status_code=200, headers={}, body=body)
 
     monkeypatch.setattr(gate, "SmokeClient", FakeClient)
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-        "--batch-id", "batch-1",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+            "--batch-id",
+            "batch-1",
+        ]
+    )
 
     report = gate.run_smoke(args)
     result = next(r for r in report.results if r.check_id == "runs.claimed_without_started")
@@ -665,22 +713,26 @@ def test_run_smoke_fails_when_required_worker_pool_has_no_terminal_trials(
             elif path == "/api/v1/run-library/batches":
                 body = b'{"items":[{"id":"batch-1"}]}'
             elif path == "/api/v1/run-library/batches/batch-1":
-                body = (
-                    b'{"id":"batch-1","owner_team":'
-                    b'{"id":"team-1","name":"Agentic RL"}}'
-                )
+                body = b'{"id":"batch-1","owner_team":{"id":"team-1","name":"Agentic RL"}}'
             else:
                 body = b'{"items":[]}'
             return gate.HttpResponse(status_code=200, headers={}, body=body)
 
     monkeypatch.setattr(gate, "SmokeClient", FakeClient)
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-        "--batch-id", "batch-1",
-        "--required-worker-pool", "oldlab",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+            "--batch-id",
+            "batch-1",
+            "--required-worker-pool",
+            "oldlab",
+        ]
+    )
 
     report = gate.run_smoke(args)
     result = next(r for r in report.results if r.check_id == "runs.worker_pool_coverage")
@@ -757,12 +809,18 @@ def test_run_smoke_fails_when_service_pod_reports_oom_restart(monkeypatch) -> No
 
     monkeypatch.setattr(gate, "SmokeClient", FakeClient)
     monkeypatch.setattr(gate, "subprocess", FakeSubprocess, raising=False)
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-        "--k8s-namespace", "loom-staging",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+            "--k8s-namespace",
+            "loom-staging",
+        ]
+    )
 
     report = gate.run_smoke(args)
     result = next(r for r in report.results if r.check_id == "service.no_oom_restarts")
@@ -845,13 +903,20 @@ def test_run_smoke_rechecks_service_stability_after_route_probe_oom(
 
     monkeypatch.setattr(gate, "SmokeClient", FakeClient)
     monkeypatch.setattr(gate, "subprocess", FakeSubprocess, raising=False)
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-        "--batch-id", "batch-1",
-        "--k8s-namespace", "loom-staging",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+            "--batch-id",
+            "batch-1",
+            "--k8s-namespace",
+            "loom-staging",
+        ]
+    )
 
     report = gate.run_smoke(args)
     service_index = next(
@@ -898,11 +963,16 @@ def test_run_smoke_fails_when_provider_connection_catalog_is_empty(monkeypatch) 
             return gate.HttpResponse(status_code=200, headers={}, body=body)
 
     monkeypatch.setattr(gate, "SmokeClient", FakeClient)
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+        ]
+    )
 
     report = gate.run_smoke(args)
     result = next(r for r in report.results if r.check_id == "providers.list")
@@ -934,12 +1004,18 @@ def test_run_smoke_requires_exact_named_provider_connection(monkeypatch) -> None
             return gate.HttpResponse(status_code=200, headers={}, body=body)
 
     monkeypatch.setattr(gate, "SmokeClient", FakeClient)
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-        "--provider-connection-name", "mz_tn_canada_qianyi",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+            "--provider-connection-name",
+            "mz_tn_canada_qianyi",
+        ]
+    )
 
     report = gate.run_smoke(args)
     result = next(r for r in report.results if r.check_id == "providers.list")
@@ -968,14 +1044,22 @@ def test_run_smoke_requires_expected_provider_model_when_configured(monkeypatch)
             return gate.HttpResponse(status_code=200, headers={}, body=body)
 
     monkeypatch.setattr(gate, "SmokeClient", FakeClient)
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-        "--provider-connection-name", "mz_tn_canada_qianyi",
-        "--provider-model-provider", "yibuapi",
-        "--provider-model-name", "qwen3.6-35b-a3b",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+            "--provider-connection-name",
+            "mz_tn_canada_qianyi",
+            "--provider-model-provider",
+            "yibuapi",
+            "--provider-model-name",
+            "qwen3.6-35b-a3b",
+        ]
+    )
 
     report = gate.run_smoke(args)
     result = next(r for r in report.results if r.check_id == "providers.models")
@@ -1002,21 +1086,29 @@ def test_run_smoke_reports_expected_provider_model_match(monkeypatch) -> None:
                     b'{"items":['
                     b'{"provider":"openai","name":"gpt-4o-mini"},'
                     b'{"provider":"yibuapi","name":"gpt-4o-mini"}'
-                    b']}'
+                    b"]}"
                 )
             else:
                 body = b'{"items":[]}'
             return gate.HttpResponse(status_code=200, headers={}, body=body)
 
     monkeypatch.setattr(gate, "SmokeClient", FakeClient)
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-        "--provider-connection-name", "mz_tn_canada_qianyi",
-        "--provider-model-provider", "yibuapi",
-        "--provider-model-name", "gpt-4o-mini",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+            "--provider-connection-name",
+            "mz_tn_canada_qianyi",
+            "--provider-model-provider",
+            "yibuapi",
+            "--provider-model-name",
+            "gpt-4o-mini",
+        ]
+    )
 
     report = gate.run_smoke(args)
     result = next(r for r in report.results if r.check_id == "providers.models")
@@ -1046,11 +1138,16 @@ def test_run_smoke_fails_when_runnable_benchmark_catalog_is_empty(monkeypatch) -
             return gate.HttpResponse(status_code=200, headers={}, body=body)
 
     monkeypatch.setattr(gate, "SmokeClient", FakeClient)
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+        ]
+    )
 
     report = gate.run_smoke(args)
     result = next(r for r in report.results if r.check_id == "benchmarks.runnable_catalog")
@@ -1075,20 +1172,22 @@ def test_run_smoke_fails_when_ready_agent_catalog_is_empty(monkeypatch) -> None:
             elif path == "/api/v1/agents":
                 body = b'{"items":[]}'
             elif path == "/api/v1/benchmarks":
-                body = (
-                    b'{"items":[{"id":"humaneval","task_count":1,'
-                    b'"readiness_state":"runnable"}]}'
-                )
+                body = b'{"items":[{"id":"humaneval","task_count":1,"readiness_state":"runnable"}]}'
             else:
                 body = b'{"items":[]}'
             return gate.HttpResponse(status_code=200, headers={}, body=body)
 
     monkeypatch.setattr(gate, "SmokeClient", FakeClient)
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+        ]
+    )
 
     report = gate.run_smoke(args)
     result = next(r for r in report.results if r.check_id == "agents.ready_catalog")
@@ -1113,10 +1212,7 @@ def test_run_smoke_fails_when_ready_task_bundle_prefix_is_missing(monkeypatch) -
             elif path == "/api/v1/agents":
                 body = b'{"items":[{"name":"oracle","service_mode_ready":true}]}'
             elif path == "/api/v1/benchmarks":
-                body = (
-                    b'{"items":[{"id":"humaneval","task_count":1,'
-                    b'"readiness_state":"runnable"}]}'
-                )
+                body = b'{"items":[{"id":"humaneval","task_count":1,"readiness_state":"runnable"}]}'
             elif path == "/api/v1/tasks":
                 body = (
                     b'{"items":[{"id":"humaneval/HumanEval/0",'
@@ -1128,17 +1224,22 @@ def test_run_smoke_fails_when_ready_task_bundle_prefix_is_missing(monkeypatch) -
 
     monkeypatch.setattr(gate, "SmokeClient", FakeClient)
     monkeypatch.setattr(gate, "_s3_prefix_has_objects", lambda **_kwargs: False)
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-        "--catalog-minio-endpoint",
-        "http://minio:9000",
-        "--catalog-minio-access-key",
-        "access",
-        "--catalog-minio-secret-key",
-        "secret",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+            "--catalog-minio-endpoint",
+            "http://minio:9000",
+            "--catalog-minio-access-key",
+            "access",
+            "--catalog-minio-secret-key",
+            "secret",
+        ]
+    )
 
     report = gate.run_smoke(args)
     result = next(r for r in report.results if r.check_id == "benchmarks.ready_bundle_objects")
@@ -1165,18 +1266,23 @@ def test_run_smoke_fails_when_minio_write_probe_hits_storage_full(monkeypatch) -
 
     monkeypatch.setattr(gate, "SmokeClient", _empty_catalog_client(gate))
     monkeypatch.setattr(gate.boto3, "client", lambda *_args, **_kwargs: StorageFullS3())
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-        "--catalog-minio-endpoint",
-        "http://minio:9000",
-        "--catalog-minio-access-key",
-        "access",
-        "--catalog-minio-secret-key",
-        "secret",
-        "--object-store-write-check",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+            "--catalog-minio-endpoint",
+            "http://minio:9000",
+            "--catalog-minio-access-key",
+            "access",
+            "--catalog-minio-secret-key",
+            "secret",
+            "--object-store-write-check",
+        ]
+    )
 
     report = gate.run_smoke(args)
     result = next(r for r in report.results if r.check_id == "object_store.minio_write_probe")
@@ -1192,18 +1298,23 @@ def test_run_smoke_minio_write_probe_deletes_probe_object(monkeypatch) -> None:
 
     monkeypatch.setattr(gate, "SmokeClient", _empty_catalog_client(gate))
     monkeypatch.setattr(gate.boto3, "client", lambda *_args, **_kwargs: s3)
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-        "--catalog-minio-endpoint",
-        "http://minio:9000",
-        "--catalog-minio-access-key",
-        "access",
-        "--catalog-minio-secret-key",
-        "secret",
-        "--object-store-write-check",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+            "--catalog-minio-endpoint",
+            "http://minio:9000",
+            "--catalog-minio-access-key",
+            "access",
+            "--catalog-minio-secret-key",
+            "secret",
+            "--object-store-write-check",
+        ]
+    )
 
     report = gate.run_smoke(args)
     result = next(r for r in report.results if r.check_id == "object_store.minio_write_probe")
@@ -1222,17 +1333,22 @@ def test_run_smoke_skips_minio_write_probe_without_explicit_opt_in(monkeypatch) 
 
     monkeypatch.setattr(gate, "SmokeClient", _empty_catalog_client(gate))
     monkeypatch.setattr(gate.boto3, "client", lambda *_args, **_kwargs: ExplodingS3())
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-        "--catalog-minio-endpoint",
-        "http://minio:9000",
-        "--catalog-minio-access-key",
-        "access",
-        "--catalog-minio-secret-key",
-        "secret",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+            "--catalog-minio-endpoint",
+            "http://minio:9000",
+            "--catalog-minio-access-key",
+            "access",
+            "--catalog-minio-secret-key",
+            "secret",
+        ]
+    )
 
     report = gate.run_smoke(args)
     result = next(r for r in report.results if r.check_id == "object_store.minio_write_probe")
@@ -1247,18 +1363,23 @@ def test_run_smoke_can_run_only_minio_write_probe(monkeypatch) -> None:
 
     monkeypatch.setattr(gate, "SmokeClient", _empty_catalog_client(gate))
     monkeypatch.setattr(gate.boto3, "client", lambda *_args, **_kwargs: s3)
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-        "--catalog-minio-endpoint",
-        "http://minio:9000",
-        "--catalog-minio-access-key",
-        "access",
-        "--catalog-minio-secret-key",
-        "secret",
-        "--object-store-write-check-only",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+            "--catalog-minio-endpoint",
+            "http://minio:9000",
+            "--catalog-minio-access-key",
+            "access",
+            "--catalog-minio-secret-key",
+            "secret",
+            "--object-store-write-check-only",
+        ]
+    )
 
     report = gate.run_smoke(args)
 
@@ -1282,20 +1403,25 @@ def test_object_store_write_check_only_does_not_collect_service_pods(
     monkeypatch.setattr(gate, "SmokeClient", _empty_catalog_client(gate))
     monkeypatch.setattr(gate.boto3, "client", lambda *_args, **_kwargs: s3)
     monkeypatch.setattr(gate, "subprocess", ExplodingSubprocess, raising=False)
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-        "--catalog-minio-endpoint",
-        "http://minio:9000",
-        "--catalog-minio-access-key",
-        "access",
-        "--catalog-minio-secret-key",
-        "secret",
-        "--object-store-write-check-only",
-        "--k8s-namespace",
-        "loom-staging",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+            "--catalog-minio-endpoint",
+            "http://minio:9000",
+            "--catalog-minio-access-key",
+            "access",
+            "--catalog-minio-secret-key",
+            "secret",
+            "--object-store-write-check-only",
+            "--k8s-namespace",
+            "loom-staging",
+        ]
+    )
 
     report = gate.run_smoke(args)
 
@@ -1310,22 +1436,27 @@ def test_run_smoke_minio_write_probe_can_exercise_concurrent_objects(
 
     monkeypatch.setattr(gate, "SmokeClient", _empty_catalog_client(gate))
     monkeypatch.setattr(gate.boto3, "client", lambda *_args, **_kwargs: s3)
-    args = gate._build_parser().parse_args([
-        "--server-url", "https://loom.example.com",
-        "--team-a-token", "loom_api_team_a",
-        "--team-b-token", "loom_api_team_b",
-        "--catalog-minio-endpoint",
-        "http://minio:9000",
-        "--catalog-minio-access-key",
-        "access",
-        "--catalog-minio-secret-key",
-        "secret",
-        "--object-store-write-check-only",
-        "--object-store-write-check-count",
-        "5",
-        "--object-store-write-check-concurrency",
-        "3",
-    ])
+    args = gate._build_parser().parse_args(
+        [
+            "--server-url",
+            "https://loom.example.com",
+            "--team-a-token",
+            "loom_api_team_a",
+            "--team-b-token",
+            "loom_api_team_b",
+            "--catalog-minio-endpoint",
+            "http://minio:9000",
+            "--catalog-minio-access-key",
+            "access",
+            "--catalog-minio-secret-key",
+            "secret",
+            "--object-store-write-check-only",
+            "--object-store-write-check-count",
+            "5",
+            "--object-store-write-check-concurrency",
+            "3",
+        ]
+    )
 
     report = gate.run_smoke(args)
 

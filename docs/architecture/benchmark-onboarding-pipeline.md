@@ -173,7 +173,7 @@ Source materialization stays behind the existing worker materializer boundary:
 
 - `hf://...`: fetch one bundle path from a HuggingFace dataset repo. This is
   acceptable for local development and short-lived validation, but it should not
-  be the staging/staging runtime boundary for private or gated benchmarks.
+  be the staging runtime boundary for private or gated benchmarks.
 - `s3://...`: fetch one object-store prefix from S3-compatible storage.
 - `fixture://...`: dev/test fixture path only.
 - no `source`: allowed only for inline rows whose validated `TaskConfig` is

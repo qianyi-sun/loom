@@ -33,7 +33,7 @@ def test_validate_config_document_rejects_cross_environment_api_base() -> None:
         cache_control="max-age=3600",
         document={
             "environment": "development",
-            "environmentLabel": "Development / public beta",
+            "environmentLabel": "Development / staging",
             "routePath": "/dev",
             "apiBase": "/prod",
             "apiRouteBase": "https://yylx.world/prod/api",

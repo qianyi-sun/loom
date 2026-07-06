@@ -202,7 +202,7 @@ raw `task_config` for each task, alongside the bundle checksum,
 `hf_path`, split, tags, and license metadata. The register command
 validates that payload again, verifies `task_config.task.id` matches
 the manifest `task_id`, and writes it to `tasks.config`. In
-staging/staging/production, registration should also mirror the exact HF
+staging/production, registration should also mirror the exact HF
 revision into internal object storage and write `s3://...` task sources so
 workers do not need HF tokens or direct HF egress.
 

@@ -34,7 +34,7 @@ connections, but it does not run vLLM jobs or serve checkpoints for users.
 └─────────────────────────────────────────────────┘    └─────────────────────────────────────────┘
 ```
 
-Storage is an orthogonal flag: `--storage embedded` (in-cluster Postgres + MinIO; the default) or `--storage external` (managed Postgres + S3). External is the only HA path; embedded is intentionally simple. For staging, staging, and production-like evidence environments, kind node-local `local-path` volumes are not a durable boundary by themselves; protected environments need host-managed/external storage or a fresh verified backup manifest before any operation that can delete PVCs, namespaces, kind clusters, or Docker volumes.
+Storage is an orthogonal flag: `--storage embedded` (in-cluster Postgres + MinIO; the default) or `--storage external` (managed Postgres + S3). External is the only HA path; embedded is intentionally simple. For development, staging, and production-like evidence environments, kind node-local `local-path` volumes are not a durable boundary by themselves; protected environments need host-managed/external storage or a fresh verified backup manifest before any operation that can delete PVCs, namespaces, kind clusters, or Docker volumes.
 
 The short-term durable embedded path is explicit static host storage. Set
 `persistent_storage_backend = "static-host-path"` and
@@ -644,7 +644,7 @@ loom cluster up --nodes hostfile --import /tmp/loom-export.tar.gz.age \
 
 Same encrypted-tarball format as the backup CronJob's output, so DR and migration share a code path. Passphrase is operator-owned; loss = loss of the encrypted bundle.
 
-For the current staging/staging first-phase durability guard, operators
+For the current staging first-phase durability guard, operators
 create component backups first, then write a metadata-only manifest:
 
 ```bash

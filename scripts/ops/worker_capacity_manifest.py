@@ -2,17 +2,17 @@
 """Validate and stage prod-first shared worker capacity desired state.
 
 The manifest is a release contract, not a live mutator. It describes how shared
-physical GB10/OLDLAB hosts are assigned between production and beta/dev, then
+physical GB10/OLDLAB hosts are assigned between production and staging/dev, then
 optionally compares that desired state with a secret-free observed worker
 registration artifact.
 
 Lifecycle commands are file-only:
 
-* ``status`` reports the effective beta lease state, TTL expiry, and optional
+* ``status`` reports the effective staging lease state, TTL expiry, and optional
   prod-pressure drain/recovery evidence.
-* ``lease-beta`` previews or writes a bounded beta/dev lease.
-* ``drain-beta`` stops new beta claims and reports running vs. idle beta slots.
-* ``release-beta`` idempotently returns beta desired slots to zero.
+* ``lease-staging`` previews or writes a bounded staging/dev lease.
+* ``drain-staging`` stops new staging claims and reports running vs. idle staging slots.
+* ``release-staging`` idempotently returns staging desired slots to zero.
 """
 
 from __future__ import annotations
@@ -33,10 +33,10 @@ from typing import Any, cast
 import tomli_w
 
 SCHEMA_VERSION = 1
-HOST_STATES = frozenset({"eligible", "beta_draining", "host_draining", "unreachable"})
+HOST_STATES = frozenset({"eligible", "staging_draining", "host_draining", "unreachable"})
 INACTIVE_WORKER_STATES = frozenset({"drained", "stopped", "offline", "unreachable"})
-BETA_DRAINING_STATES = frozenset({"draining", "drained", "stopped", "offline"})
-COMMANDS = frozenset({"status", "lease-beta", "release-beta", "drain-beta"})
+STAGING_DRAINING_STATES = frozenset({"draining", "drained", "stopped", "offline"})
+COMMANDS = frozenset({"status", "lease-staging", "release-staging", "drain-staging"})
 
 _PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _SECRET_KEY_RE = re.compile(
@@ -84,10 +84,10 @@ class HostIntent:
     total_slots: int
     state: str
     prod_slots: int
-    beta_slots: int
+    staging_slots: int
     reason: str | None
 
-    def public_dict(self, prod: EnvironmentTarget, beta: EnvironmentTarget) -> dict[str, Any]:
+    def public_dict(self, prod: EnvironmentTarget, staging: EnvironmentTarget) -> dict[str, Any]:
         return {
             "host": self.name,
             "pool": self.pool,
@@ -95,7 +95,7 @@ class HostIntent:
             "reason": self.reason,
             "total_slots": self.total_slots,
             "prod_slots": self.prod_slots,
-            "beta_slots": self.beta_slots,
+            "staging_slots": self.staging_slots,
             "prod": {
                 "environment": prod.name,
                 "api_url": prod.api_url,
@@ -103,12 +103,12 @@ class HostIntent:
                 "source_commit": prod.source_commit,
                 "drain_state": "active" if self.prod_slots > 0 else "idle",
             },
-            "beta": {
-                "environment": beta.name,
-                "api_url": beta.api_url,
-                "image_tag": beta.image_tag,
-                "source_commit": beta.source_commit,
-                "drain_state": _beta_drain_state(self),
+            "staging": {
+                "environment": staging.name,
+                "api_url": staging.api_url,
+                "image_tag": staging.image_tag,
+                "source_commit": staging.source_commit,
+                "drain_state": _staging_drain_state(self),
             },
         }
 
@@ -117,33 +117,33 @@ class HostIntent:
 class CapacityManifest:
     path: Path
     prod: EnvironmentTarget
-    beta: EnvironmentTarget
+    staging: EnvironmentTarget
     hosts: tuple[HostIntent, ...]
     unresolved_placeholders: tuple[str, ...]
 
     def summary(self) -> dict[str, Any]:
         prod_slots = sum(host.prod_slots for host in self.hosts)
-        beta_slots = sum(host.beta_slots for host in self.hosts)
+        staging_slots = sum(host.staging_slots for host in self.hosts)
         state_counts: dict[str, int] = defaultdict(int)
         pool_slots: dict[str, dict[str, int]] = defaultdict(
-            lambda: {"total_slots": 0, "prod_slots": 0, "beta_slots": 0},
+            lambda: {"total_slots": 0, "prod_slots": 0, "staging_slots": 0},
         )
         for host in self.hosts:
             state_counts[host.state] += 1
             pool_slots[host.pool]["total_slots"] += host.total_slots
             pool_slots[host.pool]["prod_slots"] += host.prod_slots
-            pool_slots[host.pool]["beta_slots"] += host.beta_slots
+            pool_slots[host.pool]["staging_slots"] += host.staging_slots
         return {
             "host_count": len(self.hosts),
             "total_slots": sum(host.total_slots for host in self.hosts),
             "prod_slots": prod_slots,
-            "beta_slots": beta_slots,
+            "staging_slots": staging_slots,
             "state_counts": dict(sorted(state_counts.items())),
             "pool_slots": dict(sorted(pool_slots.items())),
         }
 
     def public_hosts(self) -> list[dict[str, Any]]:
-        return [host.public_dict(self.prod, self.beta) for host in self.hosts]
+        return [host.public_dict(self.prod, self.staging) for host in self.hosts]
 
 
 @dataclass(frozen=True)
@@ -232,10 +232,10 @@ class ProdPressure:
         )
 
 
-def _beta_drain_state(host: HostIntent) -> str:
-    if host.beta_slots <= 0:
+def _staging_drain_state(host: HostIntent) -> str:
+    if host.staging_slots <= 0:
         return "idle"
-    if host.state == "beta_draining":
+    if host.state == "staging_draining":
         return "draining"
     return "leased"
 
@@ -347,11 +347,11 @@ def _manifest_from_raw(
         raise ManifestError(f"{path}: schema_version must be {SCHEMA_VERSION}")
 
     defaults = _expect_dict(raw, path, "defaults")
-    default_beta_slots = _expect_int(defaults, path, "defaults.default_beta_slots", default=0)
-    beta_limit = _expect_int(
+    default_staging_slots = _expect_int(defaults, path, "defaults.default_staging_slots", default=0)
+    staging_limit = _expect_int(
         defaults,
         path,
-        "defaults.beta_slot_limit_per_host",
+        "defaults.staging_slot_limit_per_host",
         default=1,
     )
     prod_gets_remaining = _expect_bool(
@@ -360,15 +360,17 @@ def _manifest_from_raw(
         "defaults.prod_gets_remaining",
         default=True,
     )
-    if default_beta_slots < 0 or beta_limit < 0:
-        raise ManifestError(f"{path}: beta slot defaults must be non-negative")
-    if default_beta_slots > beta_limit:
-        raise ManifestError(f"{path}: default_beta_slots cannot exceed beta_slot_limit_per_host")
+    if default_staging_slots < 0 or staging_limit < 0:
+        raise ManifestError(f"{path}: staging slot defaults must be non-negative")
+    if default_staging_slots > staging_limit:
+        raise ManifestError(
+            f"{path}: default_staging_slots cannot exceed staging_slot_limit_per_host"
+        )
 
     environments = _expect_dict(raw, path, "environments")
     prod = _load_environment(environments, path, "prod")
-    beta = _load_environment(environments, path, "beta")
-    _validate_environment_pair(path, prod, beta)
+    staging = _load_environment(environments, path, "staging")
+    _validate_environment_pair(path, prod, staging)
 
     hosts_raw = raw.get("hosts")
     if not isinstance(hosts_raw, list) or not hosts_raw:
@@ -382,8 +384,8 @@ def _manifest_from_raw(
             path,
             item,
             index=index,
-            default_beta_slots=default_beta_slots,
-            beta_limit=beta_limit,
+            default_staging_slots=default_staging_slots,
+            staging_limit=staging_limit,
             prod_gets_remaining=prod_gets_remaining,
         )
         if host.name in seen_hosts:
@@ -394,7 +396,7 @@ def _manifest_from_raw(
     return CapacityManifest(
         path=path,
         prod=prod,
-        beta=beta,
+        staging=staging,
         hosts=tuple(hosts),
         unresolved_placeholders=unresolved,
     )
@@ -434,13 +436,15 @@ def _load_environment(
 
 
 def _validate_environment_pair(
-    path: Path, prod: EnvironmentTarget, beta: EnvironmentTarget
+    path: Path, prod: EnvironmentTarget, staging: EnvironmentTarget
 ) -> None:
     distinct_fields = ("name", "api_url", "compose_service", "k8s_deployment", "k8s_namespace")
     for field in distinct_fields:
-        if getattr(prod, field) == getattr(beta, field):
-            raise ManifestError(f"{path}: environments.prod.{field} and beta.{field} must differ")
-    for target in (prod, beta):
+        if getattr(prod, field) == getattr(staging, field):
+            raise ManifestError(
+                f"{path}: environments.prod.{field} and staging.{field} must differ"
+            )
+    for target in (prod, staging):
         if not target.api_url.startswith("https://"):
             raise ManifestError(f"{path}: environments.{target.key}.api_url must be https")
 
@@ -450,8 +454,8 @@ def _load_host(
     raw: dict[str, Any],
     *,
     index: int,
-    default_beta_slots: int,
-    beta_limit: int,
+    default_staging_slots: int,
+    staging_limit: int,
     prod_gets_remaining: bool,
 ) -> HostIntent:
     prefix = f"hosts[{index}]"
@@ -467,28 +471,28 @@ def _load_host(
 
     if state in {"host_draining", "unreachable"}:
         prod_slots = _expect_int(raw, path, f"{prefix}.prod_slots", default=0)
-        beta_slots = _expect_int(raw, path, f"{prefix}.beta_slots", default=0)
-        if prod_slots != 0 or beta_slots != 0:
+        staging_slots = _expect_int(raw, path, f"{prefix}.staging_slots", default=0)
+        if prod_slots != 0 or staging_slots != 0:
             raise ManifestError(f"{path}: {prefix} {state} hosts must have zero slots")
-        return HostIntent(name, pool, total_slots, state, prod_slots, beta_slots, reason)
+        return HostIntent(name, pool, total_slots, state, prod_slots, staging_slots, reason)
 
-    beta_slots = _expect_int(raw, path, f"{prefix}.beta_slots", default=default_beta_slots)
-    if beta_slots < 0:
-        raise ManifestError(f"{path}: {prefix}.beta_slots must be non-negative")
-    if beta_slots > beta_limit:
-        raise ManifestError(f"{path}: {prefix}.beta_slots cannot exceed {beta_limit}")
+    staging_slots = _expect_int(raw, path, f"{prefix}.staging_slots", default=default_staging_slots)
+    if staging_slots < 0:
+        raise ManifestError(f"{path}: {prefix}.staging_slots must be non-negative")
+    if staging_slots > staging_limit:
+        raise ManifestError(f"{path}: {prefix}.staging_slots cannot exceed {staging_limit}")
 
     if "prod_slots" in raw:
         prod_slots = _expect_int(raw, path, f"{prefix}.prod_slots")
     elif prod_gets_remaining:
-        prod_slots = total_slots - beta_slots
+        prod_slots = total_slots - staging_slots
     else:
         prod_slots = 0
     if prod_slots < 0:
         raise ManifestError(f"{path}: {prefix}.prod_slots must be non-negative")
-    if prod_slots + beta_slots > total_slots:
-        raise ManifestError(f"{path}: {prefix} prod_slots + beta_slots exceeds total_slots")
-    return HostIntent(name, pool, total_slots, state, prod_slots, beta_slots, reason)
+    if prod_slots + staging_slots > total_slots:
+        raise ManifestError(f"{path}: {prefix} prod_slots + staging_slots exceeds total_slots")
+    return HostIntent(name, pool, total_slots, state, prod_slots, staging_slots, reason)
 
 
 def _find_secret_bearing_keys(value: Any, path: str = "") -> list[str]:
@@ -552,7 +556,7 @@ def load_observed_workers(path: Path) -> list[ObservedWorker]:
                     item,
                     (
                         "running_trials",
-                        "running_beta_trials",
+                        "running_staging_trials",
                         "active_trials",
                         "claimed_trials",
                     ),
@@ -590,7 +594,7 @@ def diff_observed_workers(
 ) -> list[Drift]:
     drift: list[Drift] = []
     hosts = {host.name: host for host in manifest.hosts}
-    env_targets = {manifest.prod.name: manifest.prod, manifest.beta.name: manifest.beta}
+    env_targets = {manifest.prod.name: manifest.prod, manifest.staging.name: manifest.staging}
     worker_id_bindings: dict[str, tuple[str | None, str | None]] = {}
     registered_slots: dict[tuple[str, str], int] = defaultdict(int)
 
@@ -657,11 +661,13 @@ def diff_observed_workers(
                 ),
             )
         if (
-            host.state == "beta_draining"
-            and target == manifest.beta
-            and worker.drain_state not in BETA_DRAINING_STATES
+            host.state == "staging_draining"
+            and target == manifest.staging
+            and worker.drain_state not in STAGING_DRAINING_STATES
         ):
-            drift.append(Drift(f"{path}.drain_state", "draining beta worker", worker.drain_state))
+            drift.append(
+                Drift(f"{path}.drain_state", "draining staging worker", worker.drain_state)
+            )
 
         if worker.is_registered():
             registered_slots[(host.name, target.name)] += worker.slots
@@ -669,7 +675,7 @@ def diff_observed_workers(
     for host in manifest.hosts:
         expected = {
             manifest.prod.name: host.prod_slots,
-            manifest.beta.name: host.beta_slots,
+            manifest.staging.name: host.staging_slots,
         }
         for environment, desired_slots in expected.items():
             observed_slots = registered_slots[(host.name, environment)]
@@ -703,7 +709,7 @@ def build_report(
         "summary": manifest.summary(),
         "environments": {
             "prod": manifest.prod.public_dict(),
-            "beta": manifest.beta.public_dict(),
+            "staging": manifest.staging.public_dict(),
         },
         "desired_hosts": manifest.public_hosts(),
         "drift": public_drift,
@@ -728,7 +734,7 @@ def format_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- Operation: `{operation}`")
     lease = report.get("lease")
     if isinstance(lease, dict):
-        lines.append(f"- Beta lease: `{lease.get('state', 'none')}`")
+        lines.append(f"- Staging lease: `{lease.get('state', 'none')}`")
     prod_pressure = report.get("prod_pressure")
     if isinstance(prod_pressure, dict):
         lines.append(
@@ -745,7 +751,7 @@ def format_markdown(report: dict[str, Any]) -> str:
                 f"- Hosts: `{summary['host_count']}`",
                 f"- Total slots: `{summary['total_slots']}`",
                 f"- Prod slots: `{summary['prod_slots']}`",
-                f"- Beta slots: `{summary['beta_slots']}`",
+                f"- Staging slots: `{summary['staging_slots']}`",
             ],
         )
     if report.get("drift"):
@@ -793,7 +799,7 @@ def _parse_timestamp(value: Any) -> datetime | None:
 
 def _parse_ttl_seconds(value: str | None) -> int:
     if value is None:
-        raise ManifestError("lease-beta requires --ttl; unbounded beta leases are refused")
+        raise ManifestError("lease-staging requires --ttl; unbounded staging leases are refused")
     match = re.fullmatch(r"\s*(\d+)\s*([smhd])\s*", value)
     if not match:
         raise ManifestError("--ttl must be a bounded duration like 30m, 2h, or 1d")
@@ -823,11 +829,11 @@ def _safe_reason(value: str | None, *, fallback: str) -> str:
 
 
 def _lease_table(raw: dict[str, Any]) -> dict[str, Any]:
-    lease = raw.get("beta_capacity_lease")
+    lease = raw.get("staging_capacity_lease")
     if lease is None:
         return {}
     if not isinstance(lease, dict):
-        raise ManifestError("beta_capacity_lease must be a table")
+        raise ManifestError("staging_capacity_lease must be a table")
     return lease
 
 
@@ -869,15 +875,17 @@ def _set_host_capacity(
     *,
     state: str,
     total_slots: int,
-    beta_slots: int,
+    staging_slots: int,
 ) -> None:
     row["state"] = state
-    row["beta_slots"] = beta_slots
-    row["prod_slots"] = 0 if state in {"host_draining", "unreachable"} else total_slots - beta_slots
+    row["staging_slots"] = staging_slots
+    row["prod_slots"] = (
+        0 if state in {"host_draining", "unreachable"} else total_slots - staging_slots
+    )
 
 
 def _host_signatures(manifest: CapacityManifest) -> dict[str, tuple[str, int, int]]:
-    return {host.name: (host.state, host.prod_slots, host.beta_slots) for host in manifest.hosts}
+    return {host.name: (host.state, host.prod_slots, host.staging_slots) for host in manifest.hosts}
 
 
 def _changed_host_count(
@@ -892,7 +900,7 @@ def _changed_host_count(
     )
 
 
-def _running_beta_trials_by_host(
+def _running_staging_trials_by_host(
     manifest: CapacityManifest,
     workers: list[ObservedWorker] | None,
 ) -> dict[str, int]:
@@ -900,12 +908,12 @@ def _running_beta_trials_by_host(
     if workers is None:
         return running
     for worker in workers:
-        if worker.host and worker.environment == manifest.beta.name and worker.is_registered():
+        if worker.host and worker.environment == manifest.staging.name and worker.is_registered():
             running[worker.host] += worker.running_trials
     return running
 
 
-def _drain_beta_capacity_raw(
+def _drain_staging_capacity_raw(
     raw: dict[str, Any],
     *,
     path: Path,
@@ -913,7 +921,7 @@ def _drain_beta_capacity_raw(
     workers: list[ObservedWorker] | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     before = _manifest_from_raw(path, raw, unresolved=unresolved)
-    running = _running_beta_trials_by_host(before, workers)
+    running = _running_staging_trials_by_host(before, workers)
     next_raw = copy.deepcopy(raw)
     rows = {str(row.get("name")): row for row in _host_rows(next_raw)}
     running_total = sum(running.values())
@@ -921,38 +929,38 @@ def _drain_beta_capacity_raw(
     draining_hosts: list[str] = []
     released_idle_hosts: list[str] = []
     for host in before.hosts:
-        if host.beta_slots <= 0:
+        if host.staging_slots <= 0:
             continue
         row = rows[host.name]
         host_running = running.get(host.name, 0)
         if host_running > 0:
-            retained_slots = max(1, min(host.beta_slots, host_running))
+            retained_slots = max(1, min(host.staging_slots, host_running))
             _set_host_capacity(
                 row,
-                state="beta_draining",
+                state="staging_draining",
                 total_slots=host.total_slots,
-                beta_slots=retained_slots,
+                staging_slots=retained_slots,
             )
             draining_hosts.append(host.name)
-            idle_leased_slots += max(0, host.beta_slots - retained_slots)
+            idle_leased_slots += max(0, host.staging_slots - retained_slots)
         else:
             _set_host_capacity(
                 row,
                 state="eligible",
                 total_slots=host.total_slots,
-                beta_slots=0,
+                staging_slots=0,
             )
             released_idle_hosts.append(host.name)
-            idle_leased_slots += host.beta_slots
+            idle_leased_slots += host.staging_slots
     return next_raw, {
-        "running_beta_trials": running_total,
+        "running_staging_trials": running_total,
         "idle_leased_slots": idle_leased_slots,
         "draining_hosts": draining_hosts,
         "released_idle_hosts": released_idle_hosts,
     }
 
 
-def _lease_beta_capacity_raw(
+def _lease_staging_capacity_raw(
     raw: dict[str, Any],
     *,
     path: Path,
@@ -965,9 +973,9 @@ def _lease_beta_capacity_raw(
     preemptible: bool,
 ) -> dict[str, Any]:
     before = _manifest_from_raw(path, raw, unresolved=unresolved)
-    if any(host.beta_slots > 0 for host in before.hosts):
+    if any(host.staging_slots > 0 for host in before.hosts):
         raise ManifestError(
-            "lease-beta refused: beta slots are already leased; drain or release first"
+            "lease-staging refused: staging slots are already leased; drain or release first"
         )
     next_raw = copy.deepcopy(raw)
     rows = {str(row.get("name")): row for row in _host_rows(next_raw)}
@@ -983,15 +991,15 @@ def _lease_beta_capacity_raw(
             row,
             state="eligible",
             total_slots=host.total_slots,
-            beta_slots=slots_per_host,
+            staging_slots=slots_per_host,
         )
         leased_hosts.append(host.name)
         remaining -= slots_per_host
     if not leased_hosts:
-        raise ManifestError("lease-beta found no eligible hosts for the requested beta lease")
-    next_raw["beta_capacity_lease"] = {
+        raise ManifestError("lease-staging found no eligible hosts for the requested staging lease")
+    next_raw["staging_capacity_lease"] = {
         "state": "active",
-        "reason": _safe_reason(reason, fallback="beta capacity lease"),
+        "reason": _safe_reason(reason, fallback="staging capacity lease"),
         "created_at": _format_time(now),
         "expires_at": _format_time(now + timedelta(seconds=ttl_seconds)),
         "ttl_seconds": ttl_seconds,
@@ -1003,7 +1011,7 @@ def _lease_beta_capacity_raw(
     return next_raw
 
 
-def _release_beta_capacity_raw(
+def _release_staging_capacity_raw(
     raw: dict[str, Any],
     *,
     path: Path,
@@ -1013,7 +1021,7 @@ def _release_beta_capacity_raw(
 ) -> dict[str, Any]:
     before = _manifest_from_raw(path, raw, unresolved=unresolved)
     already_released = _lease_table(raw).get("state") == "released" and all(
-        host.beta_slots == 0 for host in before.hosts
+        host.staging_slots == 0 for host in before.hosts
     )
     if already_released:
         return copy.deepcopy(raw)
@@ -1027,26 +1035,26 @@ def _release_beta_capacity_raw(
                 row,
                 state=host.state,
                 total_slots=host.total_slots,
-                beta_slots=0,
+                staging_slots=0,
             )
             continue
         _set_host_capacity(
             row,
             state="eligible",
             total_slots=host.total_slots,
-            beta_slots=0,
+            staging_slots=0,
         )
-    next_raw["beta_capacity_lease"] = {
+    next_raw["staging_capacity_lease"] = {
         **_lease_table(raw),
         "state": "released",
-        "release_reason": _safe_reason(reason, fallback="beta capacity released"),
+        "release_reason": _safe_reason(reason, fallback="staging capacity released"),
         "released_at": _format_time(now),
         "leased_hosts": [],
     }
     return next_raw
 
 
-def _mark_beta_draining_raw(
+def _mark_staging_draining_raw(
     raw: dict[str, Any],
     *,
     now: datetime,
@@ -1059,11 +1067,11 @@ def _mark_beta_draining_raw(
     lease["stopped_new_claims"] = True
     if expired:
         lease.setdefault("expired_at", lease.get("expires_at") or _format_time(now))
-        lease["expiry_reason"] = _safe_reason(reason, fallback="beta capacity lease expired")
+        lease["expiry_reason"] = _safe_reason(reason, fallback="staging capacity lease expired")
     else:
-        lease["drain_reason"] = _safe_reason(reason, fallback="beta capacity drain")
+        lease["drain_reason"] = _safe_reason(reason, fallback="staging capacity drain")
         lease["drained_at"] = _format_time(now)
-    next_raw["beta_capacity_lease"] = lease
+    next_raw["staging_capacity_lease"] = lease
     return next_raw
 
 
@@ -1088,7 +1096,7 @@ def _mark_prod_pressure_draining_raw(
         pressure.source,
         fallback="operator supplied prod pressure summary",
     )
-    next_raw["beta_capacity_lease"] = lease
+    next_raw["staging_capacity_lease"] = lease
     return next_raw
 
 
@@ -1130,7 +1138,7 @@ def _recover_prod_pressure_lease_raw(
             row,
             state="eligible",
             total_slots=host.total_slots,
-            beta_slots=slots_per_host,
+            staging_slots=slots_per_host,
         )
         recovered_hosts.append(host_name)
         remaining -= slots_per_host
@@ -1140,7 +1148,7 @@ def _recover_prod_pressure_lease_raw(
     lease["recovered_at"] = _format_time(now)
     lease["recovery_reason"] = "prod pressure cleared"
     lease["recovered_hosts"] = recovered_hosts
-    next_raw["beta_capacity_lease"] = lease
+    next_raw["staging_capacity_lease"] = lease
     return next_raw
 
 
@@ -1149,7 +1157,7 @@ def _write_capacity_manifest(path: Path, raw: dict[str, Any]) -> None:
     path.write_text(tomli_w.dumps(raw), encoding="utf-8")
 
 
-def _new_beta_claims_allowed(
+def _new_staging_claims_allowed(
     manifest: CapacityManifest,
     raw: dict[str, Any],
     *,
@@ -1157,24 +1165,24 @@ def _new_beta_claims_allowed(
 ) -> bool:
     if _effective_lease_state(raw, now=now) != "active":
         return False
-    if manifest.summary()["beta_slots"] <= 0:
+    if manifest.summary()["staging_slots"] <= 0:
         return False
-    return all(host.state != "beta_draining" for host in manifest.hosts if host.beta_slots > 0)
+    return all(
+        host.state != "staging_draining" for host in manifest.hosts if host.staging_slots > 0
+    )
 
 
 def _build_preemptible_drain_evidence(
     *,
     raw: dict[str, Any],
-    running_beta_trials: int,
+    running_staging_trials: int,
     now: datetime,
     grace_seconds: int,
 ) -> dict[str, Any]:
     lease = _lease_table(raw)
     preemptible = bool(lease.get("preemptible", False))
     started_at = _parse_timestamp(
-        lease.get("prod_pressure_started_at")
-        or lease.get("drained_at")
-        or lease.get("expired_at")
+        lease.get("prod_pressure_started_at") or lease.get("drained_at") or lease.get("expired_at")
     )
     cancel_after = (
         started_at + timedelta(seconds=grace_seconds)
@@ -1182,19 +1190,19 @@ def _build_preemptible_drain_evidence(
         else None
     )
     eligible = (
-        running_beta_trials
+        running_staging_trials
         if preemptible
-        and running_beta_trials > 0
+        and running_staging_trials > 0
         and cancel_after is not None
         and now >= cancel_after
         else 0
     )
     if not preemptible:
         action = "not_preemptible"
-        reason = "beta lease is non-preemptible"
-    elif running_beta_trials <= 0:
+        reason = "staging lease is non-preemptible"
+    elif running_staging_trials <= 0:
         action = "none"
-        reason = "no running beta trials"
+        reason = "no running staging trials"
     elif cancel_after is None:
         action = "wait"
         reason = "missing drain start timestamp"
@@ -1209,7 +1217,7 @@ def _build_preemptible_drain_evidence(
         "grace_period_seconds": grace_seconds,
         "started_at": _format_time(started_at) if started_at else None,
         "cancel_after": _format_time(cancel_after) if cancel_after else None,
-        "eligible_running_beta_trials": eligible,
+        "eligible_running_staging_trials": eligible,
         "retryable": eligible > 0,
         "action": action,
         "reason": reason,
@@ -1236,20 +1244,20 @@ def _build_lifecycle_report(
     report = build_report(manifest, workers=workers, drift=[])
     report["operation"] = operation
     report["applied"] = applied
-    report["new_beta_claims_allowed"] = _new_beta_claims_allowed(manifest, raw, now=now)
+    report["new_staging_claims_allowed"] = _new_staging_claims_allowed(manifest, raw, now=now)
     report["lease"] = _public_lease(raw, now=now)
     report["changes"] = {
         "changed_host_count": _changed_host_count(before, manifest),
     }
     drain_report = drain or {
-        "running_beta_trials": sum(_running_beta_trials_by_host(manifest, workers).values()),
+        "running_staging_trials": sum(_running_staging_trials_by_host(manifest, workers).values()),
         "idle_leased_slots": 0,
         "draining_hosts": [],
         "released_idle_hosts": [],
     }
     drain_report["preemptible"] = _build_preemptible_drain_evidence(
         raw=raw,
-        running_beta_trials=int(drain_report.get("running_beta_trials") or 0),
+        running_staging_trials=int(drain_report.get("running_staging_trials") or 0),
         now=now,
         grace_seconds=preemptible_grace_seconds,
     )
@@ -1342,7 +1350,7 @@ def main(argv: list[str] | None = None) -> int:
         default="status",
         help=(
             "Lifecycle operation. Omit for the legacy desired-vs-observed "
-            "validator; use explicit status for beta lease lifecycle status."
+            "validator; use explicit status for staging lease lifecycle status."
         ),
     )
     parser.add_argument(
@@ -1389,19 +1397,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--ttl",
         default=None,
-        help="bounded beta lease TTL such as 30m, 2h, or 1d",
+        help="bounded staging lease TTL such as 30m, 2h, or 1d",
     )
     parser.add_argument(
         "--slots-per-host",
         type=int,
         default=1,
-        help="beta slots per leased host; first version supports 1",
+        help="staging slots per leased host; first version supports 1",
     )
     parser.add_argument(
         "--max-total-slots",
         type=int,
         default=None,
-        help="maximum total beta slots to lease",
+        help="maximum total staging slots to lease",
     )
     parser.set_defaults(preemptible=None)
     preemptible = parser.add_mutually_exclusive_group()
@@ -1409,18 +1417,18 @@ def main(argv: list[str] | None = None) -> int:
         "--preemptible",
         dest="preemptible",
         action="store_true",
-        help="mark beta capacity as preemptible",
+        help="mark staging capacity as preemptible",
     )
     preemptible.add_argument(
         "--non-preemptible",
         dest="preemptible",
         action="store_false",
-        help="request non-preemptible beta capacity; requires explicit override",
+        help="request non-preemptible staging capacity; requires explicit override",
     )
     parser.add_argument(
         "--allow-non-preemptible",
         action="store_true",
-        help="allow --non-preemptible beta capacity for an explicit operator exception",
+        help="allow --non-preemptible staging capacity for an explicit operator exception",
     )
     parser.add_argument(
         "--now",
@@ -1431,7 +1439,7 @@ def main(argv: list[str] | None = None) -> int:
         "--prod-pending-count",
         type=_non_negative_int,
         default=0,
-        help="secret-free count of queued production work that should preempt beta capacity",
+        help="secret-free count of queued production work that should preempt staging capacity",
     )
     parser.add_argument(
         "--prod-active-count",
@@ -1453,25 +1461,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--preemptible-grace-period",
         default="10m",
-        help="grace period before preemptible running beta work is retryable, e.g. 10m",
+        help="grace period before preemptible running staging work is retryable, e.g. 10m",
     )
     args = parser.parse_args(raw_argv)
 
-    if args.command == "lease-beta":
+    if args.command == "lease-staging":
         if args.ttl is None:
-            parser.error("lease-beta requires --ttl; unbounded beta leases are refused")
+            parser.error("lease-staging requires --ttl; unbounded staging leases are refused")
         if args.reason is None or not args.reason.strip():
-            parser.error("lease-beta requires --reason")
+            parser.error("lease-staging requires --reason")
         if args.max_total_slots is None:
-            parser.error("lease-beta requires --max-total-slots")
+            parser.error("lease-staging requires --max-total-slots")
         if args.max_total_slots <= 0:
             parser.error("--max-total-slots must be greater than zero")
         if args.slots_per_host != 1:
-            parser.error("--slots-per-host must be 1 in the first beta lease version")
+            parser.error("--slots-per-host must be 1 in the first staging lease version")
         if args.preemptible is None:
-            parser.error("lease-beta requires --preemptible or --non-preemptible")
+            parser.error("lease-staging requires --preemptible or --non-preemptible")
         if args.preemptible is False and not args.allow_non_preemptible:
-            parser.error("--non-preemptible beta capacity requires --allow-non-preemptible")
+            parser.error("--non-preemptible staging capacity requires --allow-non-preemptible")
 
     try:
         variables = _parse_vars(args.var)
@@ -1502,23 +1510,23 @@ def main(argv: list[str] | None = None) -> int:
             drain: dict[str, Any] | None = None
             recovered_from_prod_pressure = False
             if _effective_lease_state(raw, now=now) == "expired":
-                drained_raw, drain = _drain_beta_capacity_raw(
+                drained_raw, drain = _drain_staging_capacity_raw(
                     raw,
                     path=args.manifest,
                     unresolved=unresolved,
                     workers=workers,
                 )
-                effective_raw = _mark_beta_draining_raw(
+                effective_raw = _mark_staging_draining_raw(
                     drained_raw,
                     now=now,
-                    reason="beta capacity lease expired",
+                    reason="staging capacity lease expired",
                     expired=True,
                 )
             elif prod_pressure.has_pressure and _effective_lease_state(
                 raw,
                 now=now,
             ) in {"active", "prod_pressure_draining"}:
-                drained_raw, drain = _drain_beta_capacity_raw(
+                drained_raw, drain = _drain_staging_capacity_raw(
                     raw,
                     path=args.manifest,
                     unresolved=unresolved,
@@ -1557,9 +1565,9 @@ def main(argv: list[str] | None = None) -> int:
                 prod_pressure_recovered=recovered_from_prod_pressure,
                 preemptible_grace_seconds=preemptible_grace_seconds,
             )
-        elif args.command == "lease-beta":
+        elif args.command == "lease-staging":
             ttl_seconds = _parse_ttl_seconds(args.ttl)
-            next_raw = _lease_beta_capacity_raw(
+            next_raw = _lease_staging_capacity_raw(
                 raw,
                 path=args.manifest,
                 unresolved=unresolved,
@@ -1584,13 +1592,13 @@ def main(argv: list[str] | None = None) -> int:
                 argv=raw_argv,
                 preemptible_grace_seconds=preemptible_grace_seconds,
             )
-        elif args.command == "release-beta":
-            next_raw = _release_beta_capacity_raw(
+        elif args.command == "release-staging":
+            next_raw = _release_staging_capacity_raw(
                 raw,
                 path=args.manifest,
                 unresolved=unresolved,
                 now=now,
-                reason=_safe_reason(args.reason, fallback="beta capacity released"),
+                reason=_safe_reason(args.reason, fallback="staging capacity released"),
             )
             if args.apply:
                 _write_capacity_manifest(args.output_manifest or args.manifest, next_raw)
@@ -1606,17 +1614,17 @@ def main(argv: list[str] | None = None) -> int:
                 argv=raw_argv,
                 preemptible_grace_seconds=preemptible_grace_seconds,
             )
-        elif args.command == "drain-beta":
-            drained_raw, drain = _drain_beta_capacity_raw(
+        elif args.command == "drain-staging":
+            drained_raw, drain = _drain_staging_capacity_raw(
                 raw,
                 path=args.manifest,
                 unresolved=unresolved,
                 workers=workers,
             )
-            next_raw = _mark_beta_draining_raw(
+            next_raw = _mark_staging_draining_raw(
                 drained_raw,
                 now=now,
-                reason=_safe_reason(args.reason, fallback="beta capacity drain"),
+                reason=_safe_reason(args.reason, fallback="staging capacity drain"),
                 expired=False,
             )
             if args.apply:

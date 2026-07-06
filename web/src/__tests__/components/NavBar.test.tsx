@@ -55,7 +55,7 @@ describe("NavBar", () => {
   it("shows a clear non-production environment identity in the global navigation", () => {
     setFrontendConfigForTests({
       environment: "development",
-      environmentLabel: "Development / public beta",
+      environmentLabel: "Development / staging",
       routePath: "/dev",
       apiBase: "/dev",
       apiRouteBase: "https://yylx.world/dev/api",
@@ -64,7 +64,7 @@ describe("NavBar", () => {
     renderNav(false, "member", "EAI", "Dev User");
 
     const environment = screen.getByLabelText("Frontend environment");
-    expect(environment).toHaveTextContent("Development / public beta");
+    expect(environment).toHaveTextContent("Development / staging");
     expect(environment).toHaveTextContent("https://yylx.world/dev/api");
   });
 

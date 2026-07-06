@@ -39,7 +39,7 @@ def _stopped_artifact() -> dict[str, Any]:
     return {
         "schema_version": 1,
         "outcome": "stop",
-        "namespace": "loom-public-beta",
+        "namespace": "loom-staging",
         "pod": "loom-minio-0",
         "generated_at": "2026-07-06T00:00:00Z",
         "filesystem": {
@@ -69,7 +69,7 @@ def test_build_minio_storage_preflight_records_filesystem_buckets_and_headroom()
     runner = _FakeRunner()
 
     report = build_minio_storage_preflight(
-        namespace="loom-public-beta",
+        namespace="loom-staging",
         pod="loom-minio-0",
         thresholds=MinioStorageThresholds(
             warn_free_percent=25.0,
@@ -94,7 +94,7 @@ def test_build_minio_storage_preflight_records_filesystem_buckets_and_headroom()
     assert report["headroom"]["estimated_batch_bytes"] == 512 * 1024 * 1024
     assert "kubectl" in runner.calls[0][0]
     assert "-n" in runner.calls[0]
-    assert "loom-public-beta" in runner.calls[0]
+    assert "loom-staging" in runner.calls[0]
 
 
 def test_validate_minio_storage_preflight_artifact_requires_override_on_stop(
@@ -121,16 +121,18 @@ def test_minio_storage_preflight_cli_writes_json_and_fails_without_override(
     )
     output = tmp_path / "storage-preflight.json"
 
-    rc = main([
-        "cluster",
-        "minio-storage-preflight",
-        "--namespace",
-        "loom-public-beta",
-        "--output",
-        str(output),
-        "--format",
-        "json",
-    ])
+    rc = main(
+        [
+            "cluster",
+            "minio-storage-preflight",
+            "--namespace",
+            "loom-staging",
+            "--output",
+            str(output),
+            "--format",
+            "json",
+        ]
+    )
 
     assert rc == 1
     assert json.loads(output.read_text(encoding="utf-8"))["outcome"] == "stop"
@@ -146,14 +148,16 @@ def test_minio_storage_preflight_cli_allows_explicit_stop_override(
         lambda **_kwargs: _stopped_artifact(),
     )
 
-    rc = main([
-        "cluster",
-        "minio-storage-preflight",
-        "--namespace",
-        "loom-public-beta",
-        "--output",
-        str(tmp_path / "storage-preflight.json"),
-        "--allow-storage-stop-override",
-    ])
+    rc = main(
+        [
+            "cluster",
+            "minio-storage-preflight",
+            "--namespace",
+            "loom-staging",
+            "--output",
+            str(tmp_path / "storage-preflight.json"),
+            "--allow-storage-stop-override",
+        ]
+    )
 
     assert rc == 0

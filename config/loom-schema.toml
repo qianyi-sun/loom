@@ -977,7 +977,7 @@ description = "Human-readable public SPA environment label shown in the UI chrom
 [render_config.frontend_route_path]
 python_type = "str"
 default     = ""
-description = "Public SPA path prefix on ingress_host. Empty means host root; production uses /prod and development/public-beta uses /dev."
+description = "Public SPA path prefix on ingress_host. Empty means host root; production uses /prod and staging uses /dev."
 
 [render_config.frontend_api_base_path]
 python_type = "str"
