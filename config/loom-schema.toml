@@ -608,6 +608,12 @@ python_type = "int"
 default     = 3600
 description = "Poll interval in seconds for the TaskSet garbage collection background loop."
 
+[service_config.taskset_manifest_max_bytes]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 1048576
+description = "Maximum allowed manifest upload size in bytes (1 MiB). Rejected with 413 before parsing."
+
 [service_config.taskset_materializer_transforms_enabled]
 used_by     = ["loom-service"]
 python_type = "bool"

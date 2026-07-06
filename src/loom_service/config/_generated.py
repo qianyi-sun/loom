@@ -56,6 +56,7 @@ class LoomServiceSettings(BaseSettings):
     storage_backend: str = "minio"
     taskset_gc_poll_interval_sec: int = 3600
     taskset_gc_retention_days: int = 7
+    taskset_manifest_max_bytes: int = 1048576
     taskset_materializer_batch_size: int = 1
     taskset_materializer_claim_ttl_sec: int = 600
     taskset_materializer_poll_interval_sec: int = 5

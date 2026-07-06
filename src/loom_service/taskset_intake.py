@@ -75,9 +75,22 @@ async def _read_upload(upload: UploadFile) -> bytes:
     return data
 
 
-async def parse_manifest_upload(manifest: UploadFile) -> tuple[UserTaskSetManifest, dict[str, Any]]:
+async def _read_upload_with_size_cap(upload: UploadFile, *, max_bytes: int) -> bytes:
+    data = await upload.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty upload part")
+    if len(data) > max_bytes:
+        raise HTTPException(status_code=413, detail="manifest_too_large")
+    return data
+
+
+async def parse_manifest_upload(
+    manifest: UploadFile,
+    *,
+    max_bytes: int = 1_048_576,
+) -> tuple[UserTaskSetManifest, dict[str, Any]]:
     _reject_unsafe_filename(manifest.filename or "manifest")
-    raw_bytes = await _read_upload(manifest)
+    raw_bytes = await _read_upload_with_size_cap(manifest, max_bytes=max_bytes)
     try:
         parsed = yaml.safe_load(raw_bytes.decode("utf-8"))
     except (UnicodeDecodeError, yaml.YAMLError) as exc:
@@ -157,11 +170,15 @@ async def submit_task_set(
     verifier_upload: UploadFile | None,
     transform_upload: UploadFile | None,
     taskset_quota_max_count: int = 50,
+    manifest_max_bytes: int = 1_048_576,
 ) -> TaskSetIntakeResult:
     await check_taskset_count_quota(
         session, team_id=team_id, default_max_count=taskset_quota_max_count,
     )
-    manifest_model, raw_manifest = await parse_manifest_upload(manifest_upload)
+    manifest_model, raw_manifest = await parse_manifest_upload(
+        manifest_upload,
+        max_bytes=manifest_max_bytes,
+    )
     slug = manifest_model.slug
     task_set_id = task_set_id_for(team_id=str(team_id), slug=slug)
     prefix = _storage_prefix(team_id=team_id, slug=slug)

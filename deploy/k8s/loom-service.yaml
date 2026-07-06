@@ -103,6 +103,8 @@ spec:
           value: '3600'
         - name: LOOM_SVC_TASKSET_GC_RETENTION_DAYS
           value: '7'
+        - name: LOOM_SVC_TASKSET_MANIFEST_MAX_BYTES
+          value: '1048576'
         - name: LOOM_SVC_TASKSET_MATERIALIZER_BATCH_SIZE
           value: '1'
         - name: LOOM_SVC_TASKSET_MATERIALIZER_CLAIM_TTL_SEC
