@@ -273,7 +273,7 @@ environments. Remote OLDLAB/Lux capacity attaches behind the environment's own
 worker token and service URLs; it does not own production control-plane state.
 
 **OLDLAB x86 execution capacity is Slurm-managed, not in-cluster.**
-Staging, staging, and production profiles render with
+Staging and production profiles render with
 `k8s_worker.enabled=false` (#383). On these clusters, the in-cluster
 `loom-worker` Deployment is not present and `POST /api/v1/batches`
 rejects submissions whose `required_worker_pools` list contains
@@ -3126,11 +3126,11 @@ subsequent rollout evidence dirs (per-SHA subdirectories under
 
 ## Backup + restore
 
-Staging are protected environments. Before any operation that
+Staging and production are protected environments. Before any operation that
 can destroy or orphan cluster state, create a fresh backup bundle and metadata
 manifest. The first-phase guard is intentionally conservative: `loom cluster
 down --with-volumes` or `--delete-namespace` refuses to run against
-`staging`, `staging`, or `production` unless a recent verified manifest is
+`staging` or `production` unless a recent verified manifest is
 provided and the operator passes an explicit acknowledgement.
 
 Backup bundle layout:
@@ -3262,7 +3262,7 @@ loom cluster down \
 
 Do not use unbacked `kind delete cluster`, namespace deletion, PVC deletion,
 Docker volume cleanup, or `loom cluster down --with-volumes` for staging or
-staging. Ordinary pod/service restarts and `loom cluster down --yes` without
+production. Ordinary pod/service restarts and `loom cluster down --yes` without
 `--with-volumes` or `--delete-namespace` preserve PVCs and do not require the
 destructive-operation acknowledgement.
 
