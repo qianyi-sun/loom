@@ -2890,6 +2890,82 @@ class ApplyResult:
     stderr: str
 
 
+@dataclass(frozen=True)
+class PruneResult:
+    deleted: list[str]
+    retained: list[str]
+    not_found: list[str]
+    failed: list[tuple[str, str]]
+
+    @property
+    def has_evidence(self) -> bool:
+        return bool(self.deleted or self.retained or self.not_found or self.failed)
+
+    @property
+    def ok(self) -> bool:
+        return not self.failed
+
+
+def _is_k8s_not_found(exc: Exception) -> bool:
+    return type(exc).__name__ == "ApiException" and getattr(exc, "status", None) == 404
+
+
+def prune_disabled_profile_resources(
+    apps_v1: Any,
+    networking_v1: Any,
+    _core_v1: Any,
+    config: ClusterConfig,
+    *,
+    namespace: str,
+) -> PruneResult:
+    """Remove resources intentionally omitted by profile toggles.
+
+    The #440 contract is deliberately narrow: when a profile disables the
+    in-cluster worker, remove stale live worker compute/network resources but
+    preserve the worker trajectory PVC unless an operator uses an explicit
+    destructive teardown path.
+    """
+    if config.k8s_worker.enabled:
+        return PruneResult(deleted=[], retained=[], not_found=[], failed=[])
+
+    deleted: list[str] = []
+    not_found: list[str] = []
+    failed: list[tuple[str, str]] = []
+
+    def _delete(label: str, fn: Any) -> None:
+        try:
+            fn()
+        except Exception as exc:
+            if _is_k8s_not_found(exc):
+                not_found.append(label)
+                return
+            failed.append((label, _exception_to_note(exc)))
+            return
+        deleted.append(label)
+
+    _delete(
+        "deployment.apps/loom-worker",
+        lambda: apps_v1.delete_namespaced_deployment(
+            name="loom-worker",
+            namespace=namespace,
+        ),
+    )
+    _delete(
+        "networkpolicy.networking.k8s.io/loom-worker",
+        lambda: networking_v1.delete_namespaced_network_policy(
+            name="loom-worker",
+            namespace=namespace,
+        ),
+    )
+
+    return PruneResult(
+        deleted=deleted,
+        retained=["persistentvolumeclaim/loom-worker-trajectories"],
+        not_found=not_found,
+        failed=failed,
+    )
+
+
 def apply_manifests(
     yaml_text: str,
     namespace: str,
@@ -3097,6 +3173,30 @@ def _up_impl(args: argparse.Namespace) -> int:
         return 1
     for line in result.summary_lines:
         sys.stdout.write(f"  {line}\n")
+
+    prune_result = prune_disabled_profile_resources(
+        apps_v1,
+        net_v1,
+        core_v1,
+        config,
+        namespace=args.namespace,
+    )
+    if prune_result.has_evidence:
+        sys.stdout.write("Pruned disabled-profile resources:\n")
+        for label in prune_result.deleted:
+            sys.stdout.write(f"  {label} deleted\n")
+        for label in prune_result.not_found:
+            sys.stdout.write(f"  {label} already absent\n")
+        for label in prune_result.retained:
+            sys.stdout.write(f"  {label} retained\n")
+        for label, error in prune_result.failed:
+            sys.stderr.write(f"  {label} prune FAILED: {error}\n")
+    if not prune_result.ok:
+        sys.stderr.write(
+            "error: disabled-profile resource prune failed; refusing to accept "
+            "rollout with stale resources.\n",
+        )
+        return 1
 
     if args.no_wait:
         sys.stdout.write(

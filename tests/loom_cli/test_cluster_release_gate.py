@@ -680,6 +680,59 @@ def test_release_gate_fails_on_rendered_manifest_hash_drift() -> None:
     )
 
 
+def test_release_gate_fails_when_disabled_k8s_worker_is_still_live() -> None:
+    manifest = _manifest()
+    manifest["cluster_config"]["k8s_worker_enabled"] = False
+    apps = _FakeAppsV1({
+        "loom-service": _deployment(
+            name="loom-service",
+            image="loom-service:staging-abc123",
+        ),
+        "loom-worker": _deployment(
+            name="loom-worker",
+            image="loom-worker:stale",
+            replicas=6,
+        ),
+    })
+    core = _FakeCoreV1([
+        _ready_pod(
+            name="loom-service-new",
+            app="loom-service",
+            image="loom-service:staging-abc123",
+            image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+        ),
+        _ready_pod(
+            name="loom-worker-stale",
+            app="loom-worker",
+            image="loom-worker:stale",
+            image_id="docker-pullable://loom-worker@sha256:" + "9" * 64,
+        ),
+    ])
+
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=apps,
+        core_v1=core,
+        namespace="loom-public-beta",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+    )
+
+    assert not report.all_pass
+    check = next(
+        check for check in report.checks
+        if check.name == "disabled-k8s-worker-pruned"
+    )
+    assert check.outcome == "fail"
+    assert check.detail == "disabled k8s worker remains live"
+    assert check.evidence["deployment"] == "loom-worker"
+    assert check.evidence["desired_replicas"] == 6
+    assert check.evidence["ready_replicas"] == 6
+    assert check.evidence["ready_pods"] == ["loom-worker-stale"]
+    assert "loom cluster up" in (check.remediation or "")
+
+
 def test_release_gate_fails_on_live_alembic_revision_mismatch() -> None:
     report = collect_release_gate_report(
         manifest=_manifest(alembic_heads=["0050"]),

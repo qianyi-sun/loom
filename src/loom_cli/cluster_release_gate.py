@@ -110,6 +110,12 @@ def _exception_note(exc: Exception) -> str:
     return f"{cls}: {str(exc)[:80]}"
 
 
+def _is_not_found(exc: Exception) -> bool:
+    if type(exc).__name__ == "ApiException" and getattr(exc, "status", None) == 404:
+        return True
+    return isinstance(exc, KeyError)
+
+
 def _safe_text(value: Any) -> str:
     if value is None:
         return ""
@@ -705,6 +711,102 @@ def _environment_state_check(
     )
 
 
+def _disabled_k8s_worker_check(
+    *,
+    manifest: dict[str, Any],
+    apps_v1: Any,
+    core_v1: Any,
+    namespace: str,
+) -> ReleaseGateCheck | None:
+    cluster_config = manifest.get("cluster_config")
+    if not isinstance(cluster_config, dict):
+        return None
+    if cluster_config.get("k8s_worker_enabled") is not False:
+        return None
+
+    deployment_found = False
+    deployment_error: str | None = None
+    desired_replicas: int | None = None
+    ready_replicas: int | None = None
+    updated_replicas: int | None = None
+    try:
+        deployment = apps_v1.read_namespaced_deployment(
+            name="loom-worker",
+            namespace=namespace,
+        )
+    except Exception as exc:
+        if not _is_not_found(exc):
+            deployment_error = _exception_note(exc)
+    else:
+        deployment_found = True
+        desired_replicas = _int_or_none(_get_field(_get_field(deployment, "spec"), "replicas")) or 0
+        status = _get_field(deployment, "status")
+        ready_replicas = _int_or_none(_get_field(status, "ready_replicas")) or 0
+        updated_replicas = _int_or_none(_get_field(status, "updated_replicas")) or 0
+
+    ready_pods: list[str] = []
+    pod_list_error: str | None = None
+    try:
+        pods = list(core_v1.list_namespaced_pod(namespace=namespace).items)
+    except Exception as exc:
+        pod_list_error = _exception_note(exc)
+    else:
+        for pod in pods:
+            labels = _labels(_get_field(pod, "metadata"))
+            if labels.get("app") != "loom-worker":
+                continue
+            if not _pod_ready(pod):
+                continue
+            name = _get_field(_get_field(pod, "metadata"), "name")
+            if name:
+                ready_pods.append(str(name))
+
+    evidence: dict[str, Any] = {
+        "deployment": "loom-worker",
+        "namespace": namespace,
+        "deployment_found": deployment_found,
+        "desired_replicas": desired_replicas,
+        "ready_replicas": ready_replicas,
+        "updated_replicas": updated_replicas,
+        "ready_pods": ready_pods,
+    }
+    if deployment_error is not None:
+        return ReleaseGateCheck(
+            name="disabled-k8s-worker-pruned",
+            outcome="fail",
+            detail="disabled k8s worker prune state is unverifiable",
+            evidence={**evidence, "deployment_error": deployment_error},
+            remediation="restore Kubernetes Deployment read access and rerun release-gate",
+        )
+    if pod_list_error is not None:
+        return ReleaseGateCheck(
+            name="disabled-k8s-worker-pruned",
+            outcome="fail",
+            detail="disabled k8s worker pod state is unverifiable",
+            evidence={**evidence, "pod_list_error": pod_list_error},
+            remediation="restore Kubernetes Pod list access and rerun release-gate",
+        )
+    if deployment_found or ready_pods:
+        return ReleaseGateCheck(
+            name="disabled-k8s-worker-pruned",
+            outcome="fail",
+            detail="disabled k8s worker remains live",
+            evidence=evidence,
+            remediation=(
+                "rerun `loom cluster up` with the disabled-worker profile or "
+                "delete stale deploy/loom-worker and networkpolicy/loom-worker; "
+                "preserve persistentvolumeclaim/loom-worker-trajectories unless "
+                "an operator explicitly approves artifact deletion"
+            ),
+        )
+    return ReleaseGateCheck(
+        name="disabled-k8s-worker-pruned",
+        outcome="pass",
+        detail="disabled k8s worker resources are absent",
+        evidence=evidence,
+    )
+
+
 def _gb10_worker_check(
     *,
     manifest: dict[str, Any],
@@ -942,6 +1044,14 @@ def collect_release_gate_report(
             live_alembic_evidence=live_alembic_evidence,
         )
     )
+    disabled_k8s_worker_check = _disabled_k8s_worker_check(
+        manifest=manifest,
+        apps_v1=apps_v1,
+        core_v1=core_v1,
+        namespace=namespace,
+    )
+    if disabled_k8s_worker_check is not None:
+        checks.append(disabled_k8s_worker_check)
     environment_state_check = _environment_state_check(
         manifest=manifest,
         artifact=environment_state_check_artifact,

@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from loom_cli import cluster_cmd
 from loom_cli.__main__ import main
 from loom_cli.cluster_cmd import (
     ApplyResult,
@@ -121,6 +122,100 @@ class _FakeApi:
     loop only calls `collect_status`, which only touches the clients
     via the workload methods. We patch `collect_status` directly so
     the fake API just needs to exist."""
+
+
+class _FakeApiException(Exception):  # noqa: N818
+    def __init__(self, status: int) -> None:
+        super().__init__(f"status={status}")
+        self.status = status
+
+
+_FakeApiException.__name__ = "ApiException"
+
+
+class _FakeAppsForPrune:
+    def __init__(self, deployments: set[str]) -> None:
+        self.deployments = set(deployments)
+        self.deleted_deployments: list[str] = []
+
+    def delete_namespaced_deployment(self, *, name: str, namespace: str) -> None:
+        if name not in self.deployments:
+            raise _FakeApiException(404)
+        self.deleted_deployments.append(f"{namespace}/{name}")
+        self.deployments.remove(name)
+
+
+class _FakeNetworkingForPrune:
+    def __init__(self, network_policies: set[str]) -> None:
+        self.network_policies = set(network_policies)
+        self.deleted_network_policies: list[str] = []
+
+    def delete_namespaced_network_policy(self, *, name: str, namespace: str) -> None:
+        if name not in self.network_policies:
+            raise _FakeApiException(404)
+        self.deleted_network_policies.append(f"{namespace}/{name}")
+        self.network_policies.remove(name)
+
+
+class _FakeCoreForPrune:
+    def __init__(self, pvcs: set[str]) -> None:
+        self.pvcs = set(pvcs)
+        self.deleted_pvcs: list[str] = []
+
+    def read_namespaced_persistent_volume_claim(self, *, name: str, namespace: str) -> object:
+        if name not in self.pvcs:
+            raise _FakeApiException(404)
+        return object()
+
+    def delete_namespaced_persistent_volume_claim(self, *, name: str, namespace: str) -> None:
+        self.deleted_pvcs.append(f"{namespace}/{name}")
+
+
+class _FakePruneResult:
+    def __init__(
+        self,
+        *,
+        deleted: list[str],
+        retained: list[str],
+        not_found: list[str],
+        failed: list[tuple[str, str]],
+    ) -> None:
+        self.deleted = deleted
+        self.retained = retained
+        self.not_found = not_found
+        self.failed = failed
+
+    @property
+    def has_evidence(self) -> bool:
+        return bool(self.deleted or self.retained or self.not_found or self.failed)
+
+    @property
+    def ok(self) -> bool:
+        return not self.failed
+
+
+def test_prune_disabled_worker_resources_deletes_workload_and_policy_but_retains_pvc() -> None:
+    apps = _FakeAppsForPrune({"loom-worker"})
+    net = _FakeNetworkingForPrune({"loom-worker"})
+    core = _FakeCoreForPrune({"loom-worker-trajectories"})
+
+    result = cluster_cmd.prune_disabled_profile_resources(
+        apps,
+        net,
+        core,
+        cluster_cmd.ClusterConfig(),
+        namespace="loom-public-beta",
+    )
+
+    assert apps.deleted_deployments == ["loom-public-beta/loom-worker"]
+    assert net.deleted_network_policies == ["loom-public-beta/loom-worker"]
+    assert core.deleted_pvcs == []
+    assert result.deleted == [
+        "deployment.apps/loom-worker",
+        "networkpolicy.networking.k8s.io/loom-worker",
+    ]
+    assert result.retained == ["persistentvolumeclaim/loom-worker-trajectories"]
+    assert result.failed == []
 
 
 def test_wait_for_ready_returns_on_first_pass_when_already_ready(
@@ -342,6 +437,15 @@ def _patch_full_up_path(
         "loom_cli.cluster_cmd.rendered_image_checks",
         lambda *_args, **_kwargs: [],
     )
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd.prune_disabled_profile_resources",
+        lambda *_args, **_kwargs: _FakePruneResult(
+            deleted=[],
+            retained=[],
+            not_found=[],
+            failed=[],
+        ),
+    )
     return captures
 
 
@@ -359,6 +463,54 @@ def test_cli_up_happy_path(
     out = capsys.readouterr().out
     assert "Preflight" in out
     assert "loom-service configured" in out
+
+
+def test_cli_up_prunes_disabled_worker_resources_before_wait(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captures = _patch_full_up_path(monkeypatch)
+    prune_calls: list[dict[str, Any]] = []
+
+    def _prune(apps, net, core, config, *, namespace):  # type: ignore[no-untyped-def]
+        prune_calls.append({
+            "apps": apps,
+            "net": net,
+            "core": core,
+            "namespace": namespace,
+            "k8s_worker_enabled": config.k8s_worker.enabled,
+        })
+        return _FakePruneResult(
+            deleted=[
+                "deployment.apps/loom-worker",
+                "networkpolicy.networking.k8s.io/loom-worker",
+            ],
+            retained=["persistentvolumeclaim/loom-worker-trajectories"],
+            not_found=[],
+            failed=[],
+        )
+
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd.prune_disabled_profile_resources",
+        _prune,
+        raising=False,
+    )
+
+    rc = main(["cluster", "up"])
+
+    assert rc == 0
+    assert captures.get("waited") is True
+    assert prune_calls == [{
+        "apps": prune_calls[0]["apps"],
+        "net": prune_calls[0]["net"],
+        "core": prune_calls[0]["core"],
+        "namespace": "loom",
+        "k8s_worker_enabled": False,
+    }]
+    out = capsys.readouterr().out
+    assert "Pruned disabled-profile resources:" in out
+    assert "deployment.apps/loom-worker deleted" in out
+    assert "persistentvolumeclaim/loom-worker-trajectories retained" in out
 
 
 def test_cli_up_prints_deployment_image_convergence_evidence(

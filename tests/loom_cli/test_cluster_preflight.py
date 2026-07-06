@@ -109,6 +109,14 @@ class _FakeNetworkingV1:
         items = [_Spec(metadata=_Spec(name=n)) for n in self.ingress_classes]
         return _Spec(items=items)
 
+    def delete_namespaced_network_policy(self, *, name: str, namespace: str) -> None:
+        raise _FakeApiException(404)
+
+
+class _FakeAppsV1:
+    def delete_namespaced_deployment(self, *, name: str, namespace: str) -> None:
+        raise _FakeApiException(404)
+
 
 _StorageClassSpec = tuple[str, bool] | tuple[str, bool, str, str]
 
@@ -753,7 +761,7 @@ def _patch_clients(
     destructure works."""
     monkeypatch.setattr(
         "loom_cli.cluster_cmd._load_clients",
-        lambda _ctx: (apps or object(), net, core, storage),
+        lambda _ctx: (apps or _FakeAppsV1(), net, core, storage),
     )
 
 
