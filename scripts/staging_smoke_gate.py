@@ -2005,7 +2005,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--provider-model-name",
         default=None,
-        help="Expected model id in /api/v1/models, for example `gpt-4o-mini`.",
+        help="Expected model id in /api/v1/models, for example `glm5.1-thinking`.",
     )
     parser.add_argument("--batch-id", default=None, help="Completed Team A batch id.")
     parser.add_argument(

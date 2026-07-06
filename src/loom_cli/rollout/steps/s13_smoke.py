@@ -47,10 +47,7 @@ from loom_cli.secret_source import SecretSourceError, resolve_secret_source
 DEFAULT_TERMINAL_TIMEOUT_SEC = 300.0
 DEFAULT_POLL_INTERVAL_SEC = 5.0
 DEFAULT_SMOKE_TASK_ID = "terminal-bench-2/hello-world"
-DEFAULT_ADMIN_CURRENT_GB10_SMOKE_TASK_ID = "loom-smoke/gb10-oracle-hello-world"
-DEFAULT_CURRENT_GB10_SMOKE_TASK_ID = (
-    "skilllearnbench/anthropic-poster-design/anthropic-poster-design-1"
-)
+DEFAULT_CURRENT_GB10_SMOKE_TASK_ID = "loom-smoke/gb10-oracle-hello-world"
 DEFAULT_CURRENT_GB10_REQUIRED_WORKER_POOL = "gb10-arm64"
 DEFAULT_SMOKE_AGENT = "oracle"
 _NONRECOVERABLE_BATCH_RESULT_STATUSES = frozenset({"partial_failed", "all_failed"})
@@ -93,8 +90,6 @@ def _smoke_task_id(ctx: RolloutContext, *, submit_mode: str = "user-token") -> s
     task_id = _explicit_smoke_task_id(ctx)
     if isinstance(task_id, str) and task_id.strip():
         return task_id.strip()
-    if submit_mode == "admin-on-behalf" and ctx.scope == "current-gb10":
-        return DEFAULT_ADMIN_CURRENT_GB10_SMOKE_TASK_ID
     if ctx.scope == "current-gb10":
         return DEFAULT_CURRENT_GB10_SMOKE_TASK_ID
     return DEFAULT_SMOKE_TASK_ID

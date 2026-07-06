@@ -15,7 +15,10 @@ def test_operator_runbook_uses_current_provider_model_syntax() -> None:
     assert "loom providers models refresh" not in runbook
     assert "loom providers models list" not in runbook
     assert "loom providers models mz_tn_canada_qianyi --refresh" in runbook
-    assert "loom providers models mz_tn_canada_qianyi --preflight gpt-4o-mini" in runbook
+    assert (
+        "loom providers models mz_tn_canada_qianyi --preflight glm5.1-thinking"
+        in runbook
+    )
 
 
 def test_operator_runbook_staging_batch_smoke_matches_cli_contract() -> None:
@@ -23,10 +26,14 @@ def test_operator_runbook_staging_batch_smoke_matches_cli_contract() -> None:
 
     assert "--benchmark hello-world" not in runbook
     assert "--provider smoke-openai --model gpt-4o-mini --agent oracle" not in runbook
-    assert "--task-filter '{\"task_ids\":[\"hello-world\"]}'" in runbook
+    assert (
+        "--task-filter '{\"task_ids\":[\"loom-smoke/gb10-oracle-hello-world\"]}'"
+        in runbook
+    )
     assert "--provider mz_tn_canada_qianyi" in runbook
-    assert "--model gpt-4o-mini" in runbook
-    assert "--agent codex" in runbook
+    assert "--model glm5.1-thinking" in runbook
+    assert "--agent opencode" in runbook
+    assert "--required-worker-pool gb10-arm64" in runbook
 
 
 def test_operator_runbook_staging_gate_matches_current_launch_scope() -> None:
