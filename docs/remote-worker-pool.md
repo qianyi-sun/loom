@@ -510,9 +510,87 @@ not include raw service tokens, provider keys, MinIO credentials, or signed
 URLs. The validator redacts secret-bearing fields before writing JSON or
 Markdown and fails on prod/dev crosses in worker identity, API URL, image tag,
 source commit, compose service, Kubernetes deployment, host state, or observed
-slot counts. This check complements `environment-state apply/check`; it does
-not allocate, drain, or reclaim beta capacity. Lease creation and automatic
-prod-pressure drain remain separate actuator work.
+slot counts.
+
+Short-lived beta/dev capacity borrows use the same repo-only manifest helper.
+The commands below preview first and only write a new desired-state file when
+`--apply` is present; they do not contact a live control plane, mutate worker
+pools, or read secrets.
+
+Preview a two-slot public-beta smoke lease before a rollout:
+
+```bash
+uv run python scripts/ops/worker_capacity_manifest.py lease-beta \
+  --manifest deploy/worker-capacity/prod-first.toml \
+  --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
+  --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
+  --var BETA_IMAGE_TAG="$BETA_IMAGE_TAG" \
+  --var BETA_SOURCE_COMMIT="$BETA_RELEASE_SHA" \
+  --reason "public-beta rollout smoke $BETA_IMAGE_TAG" \
+  --ttl 45m \
+  --slots-per-host 1 \
+  --max-total-slots 2 \
+  --preemptible
+```
+
+After reviewing the JSON preview, write the bounded lease manifest and
+sanitized evidence:
+
+```bash
+LEASE_MANIFEST="$ROLLOUT_DIR/worker-capacity-beta-lease.toml"
+
+uv run python scripts/ops/worker_capacity_manifest.py lease-beta \
+  --manifest deploy/worker-capacity/prod-first.toml \
+  --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
+  --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
+  --var BETA_IMAGE_TAG="$BETA_IMAGE_TAG" \
+  --var BETA_SOURCE_COMMIT="$BETA_RELEASE_SHA" \
+  --reason "public-beta rollout smoke $BETA_IMAGE_TAG" \
+  --ttl 45m \
+  --slots-per-host 1 \
+  --max-total-slots 2 \
+  --preemptible \
+  --apply \
+  --output-manifest "$LEASE_MANIFEST" \
+  --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-lease.json"
+```
+
+Check lease status, including automatic TTL-expiry handling, with the latest
+secret-free worker registration/status artifact when available:
+
+```bash
+uv run python scripts/ops/worker_capacity_manifest.py status \
+  --manifest "$LEASE_MANIFEST" \
+  --observed-json "$ROLLOUT_DIR/worker-registrations.json" \
+  --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-status.json"
+```
+
+If prod pressure appears while beta trials are still running, drain beta. The
+report separates `running_beta_trials` from `idle_leased_slots` so operators
+can see what is still active and what was released from the desired state:
+
+```bash
+uv run python scripts/ops/worker_capacity_manifest.py drain-beta \
+  --manifest "$LEASE_MANIFEST" \
+  --observed-json "$ROLLOUT_DIR/worker-registrations.json" \
+  --reason "prod pressure before release gate" \
+  --apply \
+  --output-manifest "$ROLLOUT_DIR/worker-capacity-beta-draining.toml" \
+  --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-drain.json"
+```
+
+Immediately release beta capacity after validation finishes. This action is
+idempotent: rerunning it keeps beta desired slots at zero and leaves prod slots
+on eligible hosts:
+
+```bash
+uv run python scripts/ops/worker_capacity_manifest.py release-beta \
+  --manifest "$LEASE_MANIFEST" \
+  --reason "public-beta smoke complete" \
+  --apply \
+  --output-manifest "$ROLLOUT_DIR/worker-capacity-beta-released.toml" \
+  --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-release.json"
+```
 
 ## GB10 Node-Agent Compatibility Lifecycle
 

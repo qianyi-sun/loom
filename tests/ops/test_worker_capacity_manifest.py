@@ -263,3 +263,411 @@ api_token = "sk-do-not-print-this-value"
     assert "# Worker Capacity Desired State" in completed.stdout
     assert "api_token is not allowed" in completed.stdout
     assert "sk-do-not-print-this-value" not in completed.stdout
+
+
+def test_lease_beta_previews_before_apply_and_writes_bounded_lease(tmp_path: Path) -> None:
+    manifest = tmp_path / "capacity.toml"
+    _write_manifest(
+        manifest,
+        """
+[[hosts]]
+name = "gb10-1"
+pool = "gb10-arm64"
+total_slots = 10
+state = "eligible"
+
+[[hosts]]
+name = "gb10-2"
+pool = "gb10-arm64"
+total_slots = 10
+state = "eligible"
+""",
+    )
+    before = manifest.read_text(encoding="utf-8")
+
+    preview = _run_capacity(
+        "lease-beta",
+        "--manifest",
+        manifest,
+        "--reason",
+        "public beta rollout smoke",
+        "--ttl",
+        "30m",
+        "--slots-per-host",
+        "1",
+        "--max-total-slots",
+        "2",
+        "--preemptible",
+        "--now",
+        "2026-07-06T12:00:00Z",
+    )
+
+    assert preview.returncode == 0, preview.stderr
+    assert manifest.read_text(encoding="utf-8") == before
+    preview_report = json.loads(preview.stdout)
+    assert preview_report["applied"] is False
+    assert preview_report["lease"]["state"] == "active"
+    assert preview_report["lease"]["expires_at"] == "2026-07-06T12:30:00Z"
+    assert preview_report["summary"]["beta_slots"] == 2
+    assert preview_report["summary"]["prod_slots"] == 18
+    assert preview_report["new_beta_claims_allowed"] is True
+
+    leased_manifest = tmp_path / "leased-capacity.toml"
+    applied = _run_capacity(
+        "lease-beta",
+        "--manifest",
+        manifest,
+        "--reason",
+        "public beta rollout smoke",
+        "--ttl",
+        "30m",
+        "--slots-per-host",
+        "1",
+        "--max-total-slots",
+        "2",
+        "--preemptible",
+        "--now",
+        "2026-07-06T12:00:00Z",
+        "--apply",
+        "--output-manifest",
+        leased_manifest,
+    )
+
+    assert applied.returncode == 0, applied.stderr
+    assert leased_manifest.is_file()
+    status = _run_capacity(
+        "status",
+        "--manifest",
+        leased_manifest,
+        "--now",
+        "2026-07-06T12:05:00Z",
+    )
+    assert status.returncode == 0, status.stderr
+    status_report = json.loads(status.stdout)
+    assert status_report["lease"]["state"] == "active"
+    assert status_report["summary"]["beta_slots"] == 2
+
+
+def test_lease_beta_rejects_unbounded_ttl_multi_slot_and_non_preemptible(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "capacity.toml"
+    _write_manifest(
+        manifest,
+        """
+[[hosts]]
+name = "gb10-1"
+pool = "gb10-arm64"
+total_slots = 10
+state = "eligible"
+""",
+    )
+
+    missing_ttl = _run_capacity(
+        "lease-beta",
+        "--manifest",
+        manifest,
+        "--reason",
+        "smoke",
+        "--slots-per-host",
+        "1",
+        "--max-total-slots",
+        "1",
+        "--preemptible",
+    )
+    assert missing_ttl.returncode == 2
+    assert "ttl" in missing_ttl.stderr.lower()
+
+    multi_slot = _run_capacity(
+        "lease-beta",
+        "--manifest",
+        manifest,
+        "--reason",
+        "smoke",
+        "--ttl",
+        "30m",
+        "--slots-per-host",
+        "2",
+        "--max-total-slots",
+        "2",
+        "--preemptible",
+    )
+    assert multi_slot.returncode == 2
+    assert "slots-per-host" in multi_slot.stderr
+    assert "1" in multi_slot.stderr
+
+    non_preemptible = _run_capacity(
+        "lease-beta",
+        "--manifest",
+        manifest,
+        "--reason",
+        "smoke",
+        "--ttl",
+        "30m",
+        "--slots-per-host",
+        "1",
+        "--max-total-slots",
+        "1",
+        "--non-preemptible",
+    )
+    assert non_preemptible.returncode == 2
+    assert "non-preemptible" in non_preemptible.stderr
+    assert "--allow-non-preemptible" in non_preemptible.stderr
+
+
+def test_status_expires_beta_lease_and_reports_running_vs_idle_drain_slots(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "capacity.toml"
+    _write_manifest(
+        manifest,
+        """
+[[hosts]]
+name = "gb10-1"
+pool = "gb10-arm64"
+total_slots = 10
+state = "eligible"
+
+[[hosts]]
+name = "gb10-2"
+pool = "gb10-arm64"
+total_slots = 10
+state = "eligible"
+""",
+    )
+    leased_manifest = tmp_path / "leased.toml"
+    lease = _run_capacity(
+        "lease-beta",
+        "--manifest",
+        manifest,
+        "--reason",
+        "short smoke",
+        "--ttl",
+        "1s",
+        "--slots-per-host",
+        "1",
+        "--max-total-slots",
+        "2",
+        "--preemptible",
+        "--now",
+        "2026-07-06T12:00:00Z",
+        "--apply",
+        "--output-manifest",
+        leased_manifest,
+    )
+    assert lease.returncode == 0, lease.stderr
+    observed = tmp_path / "observed.json"
+    observed.write_text(
+        json.dumps(
+            {
+                "workers": [
+                    {
+                        "worker_id": "beta-worker-1",
+                        "host": "gb10-1",
+                        "environment": "development",
+                        "api_url": "https://yylx.world/dev/api",
+                        "image_tag": "dev-2222222",
+                        "source_git_commit": "2222222222222222222222222222222222222222",
+                        "max_concurrent": 1,
+                        "running_trials": 1,
+                    },
+                    {
+                        "worker_id": "beta-worker-2",
+                        "host": "gb10-2",
+                        "environment": "development",
+                        "api_url": "https://yylx.world/dev/api",
+                        "image_tag": "dev-2222222",
+                        "source_git_commit": "2222222222222222222222222222222222222222",
+                        "max_concurrent": 1,
+                        "running_trials": 0,
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    expired = _run_capacity(
+        "status",
+        "--manifest",
+        leased_manifest,
+        "--observed-json",
+        observed,
+        "--now",
+        "2026-07-06T12:00:02Z",
+    )
+
+    assert expired.returncode == 0, expired.stderr
+    report = json.loads(expired.stdout)
+    assert report["lease"]["state"] == "expired"
+    assert report["new_beta_claims_allowed"] is False
+    assert report["drain"]["running_beta_trials"] == 1
+    assert report["drain"]["idle_leased_slots"] == 1
+    hosts = {item["host"]: item for item in report["desired_hosts"]}
+    assert hosts["gb10-1"]["state"] == "beta_draining"
+    assert hosts["gb10-1"]["beta_slots"] == 1
+    assert hosts["gb10-2"]["state"] == "eligible"
+    assert hosts["gb10-2"]["beta_slots"] == 0
+
+    expired_manifest = tmp_path / "expired.toml"
+    applied_expiry = _run_capacity(
+        "status",
+        "--manifest",
+        leased_manifest,
+        "--observed-json",
+        observed,
+        "--now",
+        "2026-07-06T12:00:02Z",
+        "--apply",
+        "--output-manifest",
+        expired_manifest,
+    )
+    assert applied_expiry.returncode == 0, applied_expiry.stderr
+    assert expired_manifest.is_file()
+    applied_report = json.loads(applied_expiry.stdout)
+    assert applied_report["applied"] is True
+    assert applied_report["lease"]["state"] == "expired"
+
+
+def test_release_beta_is_idempotent_and_returns_beta_slots_to_zero(tmp_path: Path) -> None:
+    manifest = tmp_path / "capacity.toml"
+    _write_manifest(
+        manifest,
+        """
+[[hosts]]
+name = "gb10-1"
+pool = "gb10-arm64"
+total_slots = 10
+state = "eligible"
+
+[[hosts]]
+name = "gb10-2"
+pool = "gb10-arm64"
+total_slots = 10
+state = "eligible"
+""",
+    )
+    leased_manifest = tmp_path / "leased.toml"
+    release_one_manifest = tmp_path / "released-once.toml"
+    release_two_manifest = tmp_path / "released-twice.toml"
+    lease = _run_capacity(
+        "lease-beta",
+        "--manifest",
+        manifest,
+        "--reason",
+        "validation",
+        "--ttl",
+        "30m",
+        "--slots-per-host",
+        "1",
+        "--max-total-slots",
+        "2",
+        "--preemptible",
+        "--now",
+        "2026-07-06T12:00:00Z",
+        "--apply",
+        "--output-manifest",
+        leased_manifest,
+    )
+    assert lease.returncode == 0, lease.stderr
+
+    release_one = _run_capacity(
+        "release-beta",
+        "--manifest",
+        leased_manifest,
+        "--reason",
+        "validation complete",
+        "--now",
+        "2026-07-06T12:10:00Z",
+        "--apply",
+        "--output-manifest",
+        release_one_manifest,
+    )
+    assert release_one.returncode == 0, release_one.stderr
+    first_report = json.loads(release_one.stdout)
+    assert first_report["summary"]["beta_slots"] == 0
+    assert first_report["summary"]["prod_slots"] == 20
+    assert first_report["lease"]["state"] == "released"
+    assert first_report["new_beta_claims_allowed"] is False
+
+    release_two = _run_capacity(
+        "release-beta",
+        "--manifest",
+        release_one_manifest,
+        "--reason",
+        "validation complete",
+        "--now",
+        "2026-07-06T12:11:00Z",
+        "--apply",
+        "--output-manifest",
+        release_two_manifest,
+    )
+    assert release_two.returncode == 0, release_two.stderr
+    second_report = json.loads(release_two.stdout)
+    assert second_report["summary"]["beta_slots"] == 0
+    assert second_report["changes"]["changed_host_count"] == 0
+    assert release_two_manifest.read_text(encoding="utf-8") == release_one_manifest.read_text(
+        encoding="utf-8",
+    )
+
+
+def test_drain_beta_redacts_command_and_evidence_output(tmp_path: Path) -> None:
+    manifest = tmp_path / "capacity.toml"
+    _write_manifest(
+        manifest,
+        """
+[[hosts]]
+name = "gb10-1"
+pool = "gb10-arm64"
+total_slots = 10
+state = "eligible"
+beta_slots = 1
+""",
+    )
+    observed = tmp_path / "observed.json"
+    observed.write_text(
+        json.dumps(
+            {
+                "workers": [
+                    {
+                        "worker_id": "beta-worker-1",
+                        "host": "gb10-1",
+                        "environment": "development",
+                        "api_url": "https://yylx.world/dev/api?token=loom_api_livevalue",
+                        "image_tag": "dev-2222222",
+                        "source_git_commit": "2222222222222222222222222222222222222222",
+                        "max_concurrent": 1,
+                        "running_trials": 1,
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    evidence = tmp_path / "evidence" / "drain.json"
+    secret_reason = "incident Bearer sk-live-secret-value"
+
+    drain = _run_capacity(
+        "drain-beta",
+        "--manifest",
+        manifest,
+        "--observed-json",
+        observed,
+        "--reason",
+        secret_reason,
+        "--now",
+        "2026-07-06T12:00:00Z",
+        "--evidence-out",
+        evidence,
+    )
+
+    assert drain.returncode == 0, drain.stderr
+    evidence_text = evidence.read_text(encoding="utf-8")
+    combined = drain.stdout + drain.stderr + evidence_text
+    assert "sk-live-secret-value" not in combined
+    assert "loom_api_livevalue" not in combined
+    assert "<redacted>" in combined
+    report = json.loads(drain.stdout)
+    assert report["applied"] is False
+    assert report["drain"]["running_beta_trials"] == 1
+    assert report["command"]["argv"][0] == "drain-beta"
