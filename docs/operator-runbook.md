@@ -698,17 +698,41 @@ knob you need.
      --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-lease.json"
    ```
 
-   Check or drain the beta lease with the latest secret-free worker
-   registration/status artifact. TTL-expired status stops new beta claims in
-   the desired state and reports running beta trials separately from idle
-   leased slots:
+   Check the beta lease with the latest secret-free worker
+   registration/status artifact and the current prod-pressure summary. Any
+   nonzero `--prod-pending-count`, `--prod-active-count`, or
+   `--prod-capacity-shortfall` makes `status` stop new beta claims in the
+   desired state, immediately return idle beta slots to prod, and report
+   running beta slots as draining. TTL expiry still stops new beta claims even
+   when prod pressure is absent. Preemptible running beta tasks are reported as
+   retryable only after the configured grace period; this helper only writes
+   desired state and evidence, not live cancellations:
 
    ```bash
    uv run python scripts/ops/worker_capacity_manifest.py status \
      --manifest "$LEASE_MANIFEST" \
      --observed-json "$ROLLOUT_DIR/worker-registrations.json" \
+     --prod-pending-count "${PROD_PENDING_COUNT:-0}" \
+     --prod-active-count "${PROD_ACTIVE_COUNT:-0}" \
+     --prod-capacity-shortfall "${PROD_CAPACITY_SHORTFALL:-0}" \
+     --prod-pressure-source "control-plane prod queue summary" \
+     --preemptible-grace-period 10m \
+     --apply \
+     --output-manifest "$ROLLOUT_DIR/worker-capacity-beta-status.toml" \
      --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-status.json"
+   ```
 
+   The status evidence includes `prod_pressure.cause=prod_capacity_pressure`
+   when the pause is prod-driven, which is distinct from drift/errors that
+   indicate beta rollout failure. If pressure clears before the lease TTL
+   expires, rerunning `status` with zero prod-pressure counts recovers the
+   bounded beta desired slots from the lease metadata and sets
+   `prod_pressure.recovered=true`.
+
+   Use an explicit manual drain only for operator-initiated pause scenarios
+   that are not represented by the prod-pressure counts:
+
+   ```bash
    uv run python scripts/ops/worker_capacity_manifest.py drain-beta \
      --manifest "$LEASE_MANIFEST" \
      --observed-json "$ROLLOUT_DIR/worker-registrations.json" \
