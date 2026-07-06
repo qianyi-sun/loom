@@ -55,6 +55,9 @@ hosts = []
 [k8s_worker]
 enabled = false
 
+[llm_gateway_sandbox]
+enabled = false
+
 [replicas]
 service = 2
 control_plane = 2

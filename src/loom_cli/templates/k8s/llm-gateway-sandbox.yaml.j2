@@ -1,0 +1,132 @@
+{% if llm_gateway_sandbox.enabled %}
+# loom-llm-gateway-sandbox — per-node TLS-terminating HTTP CONNECT
+# proxy (#547 item #3, closes #78 Phase B).
+#
+# Sits IN FRONT of the socat-based `loom-gateway-router` for
+# sandbox-originated LLM traffic. Two responsibilities socat can't:
+#
+#   1. TLS termination on hostPort 8443 (sandbox reaches
+#      `loom-sandbox-gateway.local:8443` via HTTPS)
+#   2. HS256 step-JWT verification against the shared signing key
+#      minted by control-plane
+#
+# Only rejected/authorized bytes reach the in-cluster gateway.
+# Rendered only when `llm_gateway_sandbox.enabled = true` — off by
+# default because it requires operator to provision a TLS Secret
+# containing a cert for `loom-sandbox-gateway.local` (see
+# `docs/architecture/sandbox-isolation.md` for cert-issuance guide).
+#
+# Why an exception in `loom cluster audit`: hostPort 8443 is
+# legitimately needed (sandbox Docker containers reach this by IP,
+# not by k8s Service DNS). The auditor allowlist exempts
+# `loom-llm-gateway-sandbox` alongside `loom-gateway-router`.
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: loom-llm-gateway-sandbox
+spec:
+  selector:
+    matchLabels: { app: loom-llm-gateway-sandbox }
+  template:
+    metadata:
+      labels: { app: loom-llm-gateway-sandbox }
+    spec:
+      # Same tolerations as gateway-router: single-node kind clusters
+      # still place the pod; multi-node prod puts one per node.
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: sandbox-gateway
+          image: loom-llm-gateway-sandbox:{{ image_tag }}
+          args:
+            - "--listen-addr=:8443"
+            # The Go proxy resolves cluster DNS directly — no need
+            # to hop through the socat router. Skip that layer for
+            # sandbox-authenticated traffic.
+            - "--upstream-url=http://loom-llm-gateway.{{ namespace }}.svc.cluster.local:9100"
+            - "--jwt-signing-key-file=/run/loom/jwt-signing-key"
+            - "--tls-cert-file=/run/loom/loom-sandbox-gateway.crt"
+            - "--tls-key-file=/run/loom/loom-sandbox-gateway.key"
+          ports:
+            - name: sandbox
+              containerPort: 8443
+              hostPort: 8443
+              protocol: TCP
+          volumeMounts:
+            # Step-JWT signing key: same secret as control-plane +
+            # llm-gateway. HS256 verification is stateless; a fresh
+            # signing key rotation on control-plane needs a paired
+            # restart here (kubelet picks up the changed Secret on
+            # the next pod start).
+            - name: step-jwt-signing-key
+              mountPath: /run/loom
+              readOnly: true
+            # TLS server cert + key. Operator-provisioned;
+            # `loom-sandbox-gateway-tls` Secret is NOT bootstrapped
+            # by `loom cluster bootstrap-secrets` because it needs a
+            # real cert (self-signed OR cert-manager-issued OR
+            # loom-CA-signed) that the sandbox trusts.
+            - name: sandbox-tls
+              mountPath: /run/loom
+              readOnly: true
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { cpu: 500m, memory: 128Mi }
+          # Distroless-static image has no shell or curl — the Go
+          # binary itself must expose a probe endpoint if we want
+          # readiness. For v1 we let kubelet infer readiness from
+          # process liveness (crash → restart within seconds), same
+          # as gateway-router.
+      volumes:
+        - name: step-jwt-signing-key
+          secret:
+            secretName: loom-secrets
+            items:
+              - key: step-jwt-signing-key
+                path: jwt-signing-key
+                mode: 0400
+        - name: sandbox-tls
+          secret:
+            secretName: loom-sandbox-gateway-tls
+            items:
+              - key: tls.crt
+                path: loom-sandbox-gateway.crt
+                mode: 0400
+              - key: tls.key
+                path: loom-sandbox-gateway.key
+                mode: 0400
+
+---
+# NetworkPolicy: hostPort ingress from anywhere on the node (same
+# rationale as gateway-router — k8s NetworkPolicy can't inspect
+# node-local traffic further). Egress to the in-cluster gateway
+# plus kube-dns for the Service resolution.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loom-llm-gateway-sandbox
+spec:
+  podSelector:
+    matchLabels: { app: loom-llm-gateway-sandbox }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - { port: 8443, protocol: TCP }
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app: loom-llm-gateway } }
+      ports:
+        - { port: 9100, protocol: TCP }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+{% endif %}
