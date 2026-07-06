@@ -1044,9 +1044,9 @@ observability and mutation contract:
 | 07 | render | candidate-source `loom cluster render` → `rendered.yaml` |
 | 08 | preflight | candidate-source `loom cluster preflight` |
 | 09 | migrate | candidate-source `loom cluster render-migration` + `kubectl wait` (#332) |
-| 10 | env-state | candidate-source apply + check (#331 fix for stop-on-disable) |
+| 10 | env-state | candidate-source apply + check (#331 fix for stop-on-disable). Pure GB10 node-status convergence drift is retried for up to 15 minutes so node-agent image builds can finish; mixed drift still fails immediately. |
 | 11 | cluster-up | candidate-source `loom cluster up` (#203 fix for updated replicas) |
-| 12 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment`, then `loom cluster release-gate --manifest <that file>` (#339 fix for stale kind-import). GB10 convergence mismatches are retried briefly so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. |
+| 12 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment`, then `loom cluster release-gate --manifest <that file>` (#339 fix for stale kind-import). GB10 convergence mismatches are retried for up to 15 minutes so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. |
 | 13 | smoke | HTTP health + user-owned smoke token whoami + benchmarks + smoke task lookup + trial submit + poll + trajectory HEAD |
 | 99 | summary | write `summary.md` from every prior step's result.json |
 

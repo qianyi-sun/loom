@@ -25,8 +25,8 @@ from loom_cli.rollout.steps.s10_env_state import _profile_path_for
 from loom_cli.rollout.steps.subcommand_step import SubcommandStep
 from loom_cli.rollout.steps.subprocess_util import SubprocessResult, run_captured
 
-_GB10_STATUS_MAX_ATTEMPTS = 30
-_GB10_STATUS_RETRY_DELAY_SEC = 2.0
+_GB10_STATUS_MAX_ATTEMPTS = 180
+_GB10_STATUS_RETRY_DELAY_SEC = 5.0
 
 
 def _is_transient_cp_unreachable(stderr: str) -> bool:
