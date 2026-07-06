@@ -644,6 +644,9 @@ def test_preflight_resolves_loom_cli_with_rollout_cluster_config(
     config_path = Path(seen["argv"][seen["argv"].index("--config") + 1])
     assert config_path != ctx.cluster_config_path
     assert tomllib.loads(config_path.read_text())["image_tag"] == ctx.image_tag
+    assert seen["argv"][seen["argv"].index("--backup-manifest") + 1] == (
+        str(ctx.backup_manifest_path)
+    )
 
 
 def test_cluster_up_runs_loom_cli_from_candidate_worktree(
