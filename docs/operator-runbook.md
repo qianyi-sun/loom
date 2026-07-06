@@ -1399,7 +1399,7 @@ observability and mutation contract:
 | 08 | preflight | candidate-source `loom cluster preflight --backup-manifest <path>` using the same manifest verified by step 05 |
 | 09 | migrate | candidate-source `loom cluster render-migration` + `kubectl wait` (#332) |
 | 10 | env-state | candidate-source `loom admin environment-state apply/check --admin-token <source> --expect-admin-token-fingerprint <fingerprint>` (#331 fix for stop-on-disable, #533 guard for scoped admin token drift). Pure GB10 node-status convergence drift is retried for up to 15 minutes so node-agent image builds can finish; mixed drift still fails immediately. |
-| 11 | cluster-up | candidate-source `loom cluster up --recover-sandbox-deadlines --sandbox-deadline-max-pods 4` (#203 fix for updated replicas, #206 bounded kind/containerd sandbox-deadline retry) |
+| 11 | cluster-up | candidate-source `loom cluster up --backup-manifest <path> --recover-sandbox-deadlines --sandbox-deadline-max-pods 4` using the same manifest verified by step 05 and preflighted by step 08 (#203 fix for updated replicas, #206 bounded kind/containerd sandbox-deadline retry) |
 | 12 | production-defaults | candidate-source `loom admin rate-cards sync-yibuapi --format json`, then `loom providers update/show` for hosted provider pricing defaults declared in the environment-state profile. This keeps DB-backed cost-attribution defaults from disappearing after a fresh rollout. |
 | 13 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, run `loom cluster minio-storage-preflight --output minio-storage-preflight-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment` with the same `--admin-token <source> --expect-admin-token-fingerprint <fingerprint>` contract as step 10, then `loom cluster release-gate --manifest <that file> --minio-storage-preflight <that storage artifact>` (#339 fix for stale kind-import, #536 guard for GB10 status token drift). GB10 convergence mismatches are retried for up to 15 minutes so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. |
 | 14 | smoke | HTTP health + smoke identity + benchmarks + smoke task lookup. Default `user-token` mode submits a user-owned trial and checks trajectory/usage; `admin-on-behalf` mode submits an audited represented-user batch through the admin API, uses a batch-compatible current-GB10 default task, and polls batch success. |
@@ -1482,12 +1482,15 @@ uses the same classifier and keeps the release red even if a target-generation
 pod is Ready but an old pod is still stuck in sandbox teardown.
 
 The one-command rollout driver runs step 11 with
-`--recover-sandbox-deadlines --sandbox-deadline-max-pods 4`. That path only
-runs after the normal protected preflight, backup/storage guards, render, and
-apply path. If readiness times out and the classifier finds sandbox-deadline
-pods, it deletes at most four classified pods and retries readiness once. It
-does not delete PVCs, namespaces, kind clusters, Docker volumes, or arbitrary
-unready pods.
+`--backup-manifest "$BACKUP_MANIFEST" --recover-sandbox-deadlines
+--sandbox-deadline-max-pods 4`. `cluster up` runs its own protected preflight,
+so the rollout carries the same manifest that step 05 verified and step 08
+preflighted instead of bypassing the backup freshness guard. That path only runs
+after the normal protected preflight, backup/storage guards, render, and apply
+path. If readiness times out and the classifier finds sandbox-deadline pods, it
+deletes at most four classified pods and retries readiness once. It does not
+delete PVCs, namespaces, kind clusters, Docker volumes, or arbitrary unready
+pods.
 
 For a manual retry, rerun the same protected command shape instead of deleting
 pods ad hoc:

@@ -57,3 +57,19 @@ class TestClusterUpStepArgv:
 
         assert "--recover-sandbox-deadlines" in argv
         assert argv[argv.index("--sandbox-deadline-max-pods") + 1] == "4"
+
+    def test_passes_backup_manifest_to_internal_preflight(self, tmp_path: Path) -> None:
+        backup_manifest = tmp_path / "staging-backup-manifest.json"
+        backup_manifest.write_text("{}", encoding="utf-8")
+        ctx = make_ctx(
+            tmp_path,
+            namespace="loom-staging",
+            backup_manifest_path=backup_manifest,
+        )
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        ev.ensure()
+        step_dir = ev.step_dir(11, "cluster-up")
+
+        argv = list(ClusterUpStep().argv(ctx, step_dir))
+
+        assert argv[argv.index("--backup-manifest") + 1] == str(backup_manifest)
