@@ -1196,6 +1196,7 @@ resumes from the interrupted step.
 ```bash
 export ADMIN_TOKEN_SOURCE="${ADMIN_TOKEN_SOURCE:-file:/secure/path/admin-token}"
 export ADMIN_TOKEN_FINGERPRINT="${ADMIN_TOKEN_FINGERPRINT:-sha256:<12-hex> len=<N>}"
+export WORKER_TOKEN_SOURCE="${WORKER_TOKEN_SOURCE:-file:/secure/path/worker-token}"
 export LOOM_SMOKE_API_TOKEN="$(cat /secure/path/user-owned-smoke-token)"
 
 loom cluster rollout \
@@ -1210,6 +1211,7 @@ loom cluster rollout \
   --rollout-root /data/loom-staging \
   --admin-token "$ADMIN_TOKEN_SOURCE" \
   --expect-admin-token-fingerprint "$ADMIN_TOKEN_FINGERPRINT" \
+  --worker-token "$WORKER_TOKEN_SOURCE" \
   --scope current-gb10
 ```
 
@@ -1237,6 +1239,18 @@ control-plane mutation if the local token source drifted. The token must carry
 the protected admin scopes used by environment-state reconciliation, including
 worker-pool administration, because step 10 configures autoscaler policy and
 GB10 desired state before the cluster is brought up.
+
+`WORKER_TOKEN_SOURCE` is also a source reference, not a raw token. Use
+`env:VAR` or `file:PATH`; the rollout driver rejects stdin `-` because the
+environment-state check is replayed during resume. Step 10 passes this source
+only to `loom admin environment-state check --worker-token` so external Slurm
+runner `env_file` fingerprints can be compared against the active protected
+worker token without writing token values to logs or evidence. It does not
+create the external runner env file or shared checkout. When the environment
+profile declares `external_slurm_runner_prerequisites`, materialize the
+declared `env_file` and `repo_dir` for the rollout image tag before rerunning
+step 10; the check should then prove existence, git HEAD, clean status, and
+worker-token fingerprint parity.
 
 Step 14 defaults to `LOOM_SMOKE_SUBMIT_MODE=user-token`. In that mode, the live
 trial submit uses `LOOM_SMOKE_API_TOKEN`, and that credential must be a

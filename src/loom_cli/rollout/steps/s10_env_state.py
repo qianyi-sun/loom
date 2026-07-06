@@ -107,6 +107,12 @@ class EnvStateStep(BaseStep):
                 "--expect-admin-token-fingerprint",
                 ctx.expect_admin_token_fingerprint,
             ])
+        worker_check_args: list[str] = []
+        if ctx.worker_token_source:
+            worker_check_args.extend([
+                "--worker-token",
+                ctx.worker_token_source,
+            ])
         apply_ = run_captured(
             candidate_loom_argv(
                 "admin", "environment-state", "apply",
@@ -126,6 +132,7 @@ class EnvStateStep(BaseStep):
             "--file", str(profile_path),
             "--environment", ctx.environment,
             *release_vars,
+            *worker_check_args,
             "--format", "json",
         )
         check_attempt_logs: list[str] = []
