@@ -26,6 +26,89 @@ class _StubResponse:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# loom admin env-diagnostics
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_env_diagnostics_text_redacts_sensitive_values(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    token = "loom_api_batch_runner_synthetic_token_value_123"
+    monkeypatch.setenv("LOOM_TEST_SVC_BATCH_RUNNER_CP_TOKEN", token)
+    monkeypatch.setenv("LOOM_TEST_PUBLIC_BASE_URL", "https://loom.example.test")
+
+    rc = main(
+        [
+            "admin",
+            "env-diagnostics",
+            "--prefix",
+            "LOOM_TEST_",
+        ],
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "LOOM_TEST_SVC_BATCH_RUNNER_CP_TOKEN=[REDACTED" in out
+    assert "sha256:" in out
+    assert f"len={len(token)}" in out
+    assert "LOOM_TEST_PUBLIC_BASE_URL=https://loom.example.test" in out
+    assert token not in out
+    assert token[:12] not in out
+
+
+def test_env_diagnostics_json_and_markdown_do_not_leak_sensitive_values(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    token = "loom_api_json_markdown_synthetic_token_value_123"
+    api_key = "sk-synthetic-api-key-value"
+    monkeypatch.setenv("LOOM_TEST_BATCH_RUNNER_CP_TOKEN", token)
+    monkeypatch.setenv("LOOM_TEST_PROVIDER_API_KEY", api_key)
+    monkeypatch.setenv("LOOM_TEST_MODE", "public-beta")
+
+    json_rc = main(
+        [
+            "admin",
+            "env-diagnostics",
+            "--prefix",
+            "LOOM_TEST_",
+            "--format",
+            "json",
+        ],
+    )
+    assert json_rc == 0
+    json_out = capsys.readouterr().out
+    parsed = json.loads(json_out)
+    entries = {entry["name"]: entry for entry in parsed["entries"]}
+    assert entries["LOOM_TEST_BATCH_RUNNER_CP_TOKEN"]["value"] == "[REDACTED]"
+    assert entries["LOOM_TEST_BATCH_RUNNER_CP_TOKEN"]["fingerprint"].startswith("sha256:")
+    assert entries["LOOM_TEST_PROVIDER_API_KEY"]["value"] == "[REDACTED]"
+    assert entries["LOOM_TEST_MODE"]["value"] == "public-beta"
+
+    markdown_rc = main(
+        [
+            "admin",
+            "env-diagnostics",
+            "--prefix",
+            "LOOM_TEST_",
+            "--format",
+            "markdown",
+        ],
+    )
+    assert markdown_rc == 0
+    markdown_out = capsys.readouterr().out
+    assert "| LOOM_TEST_BATCH_RUNNER_CP_TOKEN | sensitive |" in markdown_out
+    assert "| LOOM_TEST_MODE | value | public-beta |" in markdown_out
+
+    combined = json_out + markdown_out
+    assert token not in combined
+    assert token[:12] not in combined
+    assert api_key not in combined
+    assert api_key[:12] not in combined
+
+
+# ──────────────────────────────────────────────────────────────────────
 # loom admin tokens worker mint
 # ──────────────────────────────────────────────────────────────────────
 

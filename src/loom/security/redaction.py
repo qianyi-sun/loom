@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -14,6 +15,26 @@ ShareStatus = Literal["shared", "blocked"]
 class RedactionDecision:
     status: ShareStatus
     reason: str | None = None
+
+
+@dataclass(frozen=True)
+class RedactedEnvironmentEntry:
+    name: str
+    value: str
+    sensitive: bool
+    fingerprint: str | None = None
+    length: int | None = None
+    reason: str | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "sensitive": self.sensitive,
+            "value": self.value,
+            "fingerprint": self.fingerprint,
+            "length": self.length,
+            "reason": self.reason,
+        }
 
 
 _TOKEN_RE = re.compile(
@@ -63,6 +84,15 @@ _SENSITIVE_KEYS = {
     "password",
 }
 
+_SENSITIVE_ENV_KEY_RE = re.compile(
+    r"(?i)(^|_)(?:"
+    r"TOKEN|SECRET|KEY|APIKEY|ACCESSKEY|SECRETKEY|PRIVATEKEY|"
+    r"PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|AUTH|"
+    r"BEARER|COOKIE|PRIVATE|CERT|KUBECONFIG|DATABASE_URL|DB_URL|DSN|"
+    r"CONNECTION_STRING|CONN_STR|CLUSTER_CONFIG_B64"
+    r")($|_)",
+)
+
 
 def redact_text(value: str, *, limit: int | None = None) -> str:
     """Redact secret-like material from text while preserving diagnostics."""
@@ -102,6 +132,63 @@ def redact_mapping(value: Any) -> Any:
     if isinstance(value, str):
         return redact_text(value)
     return value
+
+
+def is_sensitive_environment_key(name: str) -> bool:
+    """Return whether an environment variable name should hide its value."""
+
+    return bool(_SENSITIVE_ENV_KEY_RE.search(name))
+
+
+def _secret_fingerprint(value: str) -> str:
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    return f"sha256:{digest}"
+
+
+def redact_environment_mapping(
+    env: Mapping[str, str],
+    *,
+    prefixes: tuple[str, ...] = (),
+) -> list[RedactedEnvironmentEntry]:
+    """Return sorted, redacted environment entries for diagnostics.
+
+    Sensitive values are never retained in the returned objects. Operators get
+    a SHA-256 digest prefix and length so rotation/convergence can be checked
+    without exposing raw token prefixes.
+    """
+
+    entries: list[RedactedEnvironmentEntry] = []
+    for name, raw_value in sorted(env.items()):
+        if prefixes and not any(name.startswith(prefix) for prefix in prefixes):
+            continue
+        value = str(raw_value)
+        key_sensitive = is_sensitive_environment_key(name)
+        value_redacted = redact_text(value)
+        value_sensitive = value_redacted != value
+        if key_sensitive or value_sensitive:
+            reason = "sensitive environment key" if key_sensitive else "secret-like value"
+            entries.append(
+                RedactedEnvironmentEntry(
+                    name=name,
+                    value="[REDACTED]",
+                    sensitive=True,
+                    fingerprint=_secret_fingerprint(value),
+                    length=len(value),
+                    reason=reason,
+                )
+            )
+        else:
+            entries.append(
+                RedactedEnvironmentEntry(
+                    name=name,
+                    value=value,
+                    sensitive=False,
+                    fingerprint=None,
+                    length=len(value),
+                    reason=None,
+                )
+            )
+    return entries
 
 
 def contains_secret_like_content(content: bytes | str) -> RedactionDecision:
