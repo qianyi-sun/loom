@@ -964,7 +964,7 @@ default     = "loom.example.com"
 [render_config.ingress_redirect_hosts]
 python_type = "str_list"
 default     = []
-description = "Additional HTTPS hostnames that bind the public ingress TLS secret and permanently redirect to ingress_host. They must not serve separate frontend/API routes."
+description = "Optional www/non-www HTTPS counterpart hostnames that bind the public ingress TLS secret and redirect to ingress_host. They must not serve separate frontend/API routes."
 
 [render_config.ingress_class_name]
 python_type = "str"

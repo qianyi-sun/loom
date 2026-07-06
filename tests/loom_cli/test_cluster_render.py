@@ -636,30 +636,17 @@ def test_render_ingress_redirect_hosts_bind_tls_and_redirect_to_canonical() -> N
     )
     docs = _load_docs(render_manifests(cfg))
     ingresses = [d for d in docs if d["kind"] == "Ingress"]
+    assert [d["metadata"]["name"] for d in ingresses] == ["loom-ingress"]
     main = next(d for d in ingresses if d["metadata"]["name"] == "loom-ingress")
-    redirect = next(
-        d for d in ingresses if d["metadata"]["name"] == "loom-ingress-redirect"
-    )
 
+    assert main["metadata"]["annotations"][
+        "nginx.ingress.kubernetes.io/from-to-www-redirect"
+    ] == "true"
     assert [r["host"] for r in main["spec"]["rules"]] == ["yylx.world"]
     assert main["spec"]["tls"] == [{
         "hosts": ["yylx.world", "www.yylx.world"],
         "secretName": "loom-staging-tls",
     }]
-
-    assert redirect["metadata"]["annotations"][
-        "nginx.ingress.kubernetes.io/permanent-redirect"
-    ] == "https://yylx.world$request_uri"
-    assert redirect["metadata"]["annotations"][
-        "nginx.ingress.kubernetes.io/permanent-redirect-code"
-    ] == "308"
-    assert redirect["spec"]["tls"] == [{
-        "hosts": ["www.yylx.world"],
-        "secretName": "loom-staging-tls",
-    }]
-    assert [r["host"] for r in redirect["spec"]["rules"]] == ["www.yylx.world"]
-    assert redirect["spec"]["rules"][0]["http"]["paths"][0]["path"] == "/"
-    assert redirect["spec"]["rules"][0]["http"]["paths"][0]["pathType"] == "Prefix"
 
 
 def test_render_rejects_redirect_host_matching_canonical_host() -> None:
@@ -668,6 +655,15 @@ def test_render_rejects_redirect_host_matching_canonical_host() -> None:
         ingress_redirect_hosts=("yylx.world",),
     )
     with pytest.raises(ValueError, match="must not include ingress_host"):
+        render_manifests(cfg)
+
+
+def test_render_rejects_redirect_host_outside_www_counterpart() -> None:
+    cfg = ClusterConfig(
+        ingress_host="yylx.world",
+        ingress_redirect_hosts=("staging.yylx.world",),
+    )
+    with pytest.raises(ValueError, match="www/non-www counterpart"):
         render_manifests(cfg)
 
 

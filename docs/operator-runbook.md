@@ -328,8 +328,8 @@ cat > cluster-config.toml <<EOF
 namespace = "loom"
 image_tag = "0.7"
 ingress_host = "loom.example.com"
-# Optional: bind extra SNI names to the same certificate and 308 redirect them
-# to ingress_host. Do not use these as separate frontend/API routes.
+# Optional: bind the www/non-www counterpart to the same certificate and
+# redirect it to ingress_host. Do not use it as a separate frontend/API route.
 # ingress_redirect_hosts = ["www.loom.example.com"]
 ingress_class_name = "nginx"
 ingress_tls_secret_name = "loom-tls"
@@ -449,9 +449,9 @@ knob you need.
      or browser-cached config cannot silently keep pointing at the wrong API.
      `www.yylx.world` is redirect-only: profiles list it in
      `ingress_redirect_hosts` so TLS/SNI uses the same public certificate, then
-     ingress-nginx issues a 308 redirect back to the bare `yylx.world` host
-     with the original path. Do not configure a second frontend/API base under
-     `www`.
+     ingress-nginx's `from-to-www-redirect` handling redirects back to the bare
+     `yylx.world` host with the original path. Do not configure a second
+     frontend/API base under `www`.
    - For a lab or invite-only staging host reached directly by IP address, set
      `ingress_host` to that IP and pre-create the TLS Secret with a certificate
      whose Subject Alternative Name includes the IP address. Kubernetes rejects
