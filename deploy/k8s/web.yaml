@@ -23,6 +23,17 @@ spec:
       containers:
         - name: loom-web
           image: loom-web:0.7
+          env:
+            - name: LOOM_FRONTEND_ENVIRONMENT
+              value: "local"
+            - name: LOOM_FRONTEND_ENVIRONMENT_LABEL
+              value: "Local development"
+            - name: LOOM_FRONTEND_ROUTE_PATH
+              value: ""
+            - name: LOOM_FRONTEND_API_BASE
+              value: ""
+            - name: LOOM_FRONTEND_PUBLIC_ORIGIN
+              value: "https://loom.example.com"
           ports:
             - containerPort: 8080
           readinessProbe:

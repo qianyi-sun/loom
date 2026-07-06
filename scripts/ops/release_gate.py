@@ -56,6 +56,12 @@ REQUIRED_CHECKS: dict[str, tuple[str, ...]] = {
     ),
     "release_owner_approval": ("owner", "url"),
 }
+CANONICAL_FRONTEND_ROUTES = {
+    "production_route": "https://yylx.world/prod",
+    "development_route": "https://yylx.world/dev",
+    "production_api_base": "https://yylx.world/prod/api",
+    "development_api_base": "https://yylx.world/dev/api",
+}
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"(^|@)sha256:[0-9a-f]{64}$")
@@ -176,7 +182,24 @@ def _validate_checks(manifest: dict[str, Any]) -> list[str]:
             errors.extend(_validate_worker_capacity_smoke(check))
         if check_name == "score_positive_canary":
             errors.extend(_validate_score_positive_canary(check))
+        if check_name == "frontend_route_evidence":
+            errors.extend(_validate_frontend_route_evidence(check))
 
+    return errors
+
+
+def _validate_frontend_route_evidence(check: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    for field, expected in CANONICAL_FRONTEND_ROUTES.items():
+        if check.get(field) != expected:
+            errors.append(f"frontend_route_evidence.{field} must be {expected}")
+    if check.get("production_route") == check.get("development_route"):
+        errors.append("frontend_route_evidence production and development routes must differ")
+    if check.get("production_api_base") == check.get("development_api_base"):
+        errors.append("frontend_route_evidence production and development API bases must differ")
+    prod_label = check.get("production_environment_label")
+    if isinstance(prod_label, str) and "beta" in prod_label.lower():
+        errors.append("frontend_route_evidence.production_environment_label must not contain beta")
     return errors
 
 

@@ -20,7 +20,9 @@ import yaml
 EXPECTED_ENVIRONMENTS = {
     "development": {
         "namespace": "loom-dev",
-        "ingress_host": "dev.yylx.world",
+        "ingress_host": "yylx.world",
+        "frontend_route": "https://yylx.world/dev",
+        "frontend_api_base": "https://yylx.world/dev/api",
         "github_environment": "development",
         "allowed_refs": ("refs/heads/dev",),
         "allowed_tag_prefixes": (),
@@ -28,6 +30,8 @@ EXPECTED_ENVIRONMENTS = {
     "staging": {
         "namespace": "loom-staging",
         "ingress_host": "staging.yylx.world",
+        "frontend_route": "https://staging.yylx.world",
+        "frontend_api_base": "https://staging.yylx.world/api",
         "github_environment": "staging",
         "allowed_refs": ("refs/heads/dev",),
         "allowed_tag_prefixes": (),
@@ -35,6 +39,8 @@ EXPECTED_ENVIRONMENTS = {
     "production": {
         "namespace": "loom-prod",
         "ingress_host": "yylx.world",
+        "frontend_route": "https://yylx.world/prod",
+        "frontend_api_base": "https://yylx.world/prod/api",
         "github_environment": "production",
         "allowed_refs": ("refs/heads/main",),
         "allowed_tag_prefixes": ("refs/tags/v",),
@@ -43,7 +49,8 @@ EXPECTED_ENVIRONMENTS = {
 
 REQUIRED_DISTINCT_FIELDS = (
     "namespace",
-    "ingress_host",
+    "frontend_route",
+    "frontend_api_base",
     "database_name",
     "task_bucket",
     "trajectories_bucket",
@@ -66,6 +73,8 @@ class EnvironmentProfile:
     github_environment: str
     namespace: str
     ingress_host: str
+    frontend_route: str
+    frontend_api_base: str
     cluster_config: str
     allowed_refs: tuple[str, ...]
     allowed_tag_prefixes: tuple[str, ...]
@@ -89,6 +98,8 @@ class EnvironmentProfile:
             "github_environment",
             "namespace",
             "ingress_host",
+            "frontend_route",
+            "frontend_api_base",
             "cluster_config",
             "allowed_refs",
             "allowed_tag_prefixes",
@@ -112,6 +123,8 @@ class EnvironmentProfile:
             github_environment=_expect_str(raw, path, "github_environment"),
             namespace=_expect_str(raw, path, "namespace"),
             ingress_host=_expect_str(raw, path, "ingress_host"),
+            frontend_route=_expect_str(raw, path, "frontend_route"),
+            frontend_api_base=_expect_str(raw, path, "frontend_api_base"),
             cluster_config=_expect_str(raw, path, "cluster_config"),
             allowed_refs=_expect_str_tuple(raw, path, "allowed_refs"),
             allowed_tag_prefixes=_expect_str_tuple(raw, path, "allowed_tag_prefixes"),
@@ -194,6 +207,33 @@ def validate_profiles(profiles: list[EnvironmentProfile], repo_root: Path) -> li
                     f"{env_name}: {profile.cluster_config} {key}={raw_cluster.get(key)!r} "
                     f"does not match profile {getattr(profile, key)!r}",
                 )
+        expected_route_path = _url_path(profile.frontend_route)
+        try:
+            expected_api_base_path = _api_base_path(profile.frontend_api_base)
+        except ValueError as exc:
+            errors.append(f"{env_name}: {exc}")
+            expected_api_base_path = None
+        for key, expected_value in (
+            ("frontend_route_path", expected_route_path),
+            ("frontend_api_base_path", expected_api_base_path),
+        ):
+            if expected_value is None:
+                continue
+            actual = raw_cluster.get(key, "")
+            if actual != expected_value:
+                errors.append(
+                    f"{env_name}: {profile.cluster_config} {key}={actual!r} "
+                    f"does not match profile {expected_value!r}",
+                )
+        expected_frontend_environment = (
+            "production" if env_name == "production" else env_name
+        )
+        if raw_cluster.get("frontend_environment") != expected_frontend_environment:
+            errors.append(
+                f"{env_name}: {profile.cluster_config} frontend_environment="
+                f"{raw_cluster.get('frontend_environment')!r} does not match "
+                f"{expected_frontend_environment!r}",
+            )
 
     for field in REQUIRED_DISTINCT_FIELDS:
         values = [getattr(profile, field) for profile in profiles]
@@ -232,6 +272,8 @@ def validate_profiles(profiles: list[EnvironmentProfile], repo_root: Path) -> li
                     f"{profile.environment}: {field} must use a safe secret ref "
                     f"prefix from {SAFE_SECRET_REF_PREFIXES!r}",
                 )
+        if profile.environment == "production" and "beta" in profile.frontend_route.lower():
+            errors.append("production: frontend_route must not contain beta wording")
 
     return errors
 
@@ -265,6 +307,20 @@ def build_dry_run_artifact(profiles: list[EnvironmentProfile]) -> dict[str, Any]
             for profile in profiles
         ],
     }
+
+
+def _url_path(url: str) -> str:
+    from urllib.parse import urlparse
+
+    path = urlparse(url).path.rstrip("/")
+    return "" if path == "/" else path
+
+
+def _api_base_path(url: str) -> str:
+    path = _url_path(url)
+    if path.endswith("/api"):
+        return path[:-4]
+    raise ValueError(f"frontend_api_base must end in /api: {url}")
 
 
 def validate_workflow(workflow_path: Path) -> list[str]:

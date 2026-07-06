@@ -606,11 +606,16 @@ bearer tokens remain supported for CLI/API automation, but the production SPA
 no longer stores normal bearer-token login state in `localStorage`.
 
 **Deployment:** `deploy/Dockerfile.web` is a multi-stage build —
-node-slim builds the Vite bundle, nginx-alpine serves it.
+node-slim builds the Vite bundle, nginx-alpine serves it, and a startup
+script writes public `loom-frontend-config.json` route/API metadata from pod
+environment variables.
 `deploy/k8s/web.yaml` is a 2-replica Deployment + Service on port
 80. The TLS `loom-ingress` routes `<ingress_host>/api/v1/*` to
 `loom-service:8090` and everything else to `loom-web:80`; nginx inside
-`loom-web` falls back to `index.html` for client-side React Router paths.
+`loom-web` falls back to `index.html` for client-side React Router paths. The
+first production profiles use `https://yylx.world/prod` and
+`https://yylx.world/dev`, with API calls routed under `/prod/api/v1` and
+`/dev/api/v1` and rewritten to the service's `/api/v1` surface.
 
 For local dev: `cd web && npm run dev` runs Vite's dev server on
 :5173 with HMR. Vite's `server.proxy` config sends `/api/*` to

@@ -39,11 +39,15 @@ def test_environment_profiles_pin_approved_names_and_isolated_state() -> None:
     assert set(profiles) == {"development", "staging", "production"}
 
     assert profiles["development"]["namespace"] == "loom-dev"
-    assert profiles["development"]["ingress_host"] == "dev.yylx.world"
+    assert profiles["development"]["ingress_host"] == "yylx.world"
+    assert profiles["development"]["frontend_route"] == "https://yylx.world/dev"
+    assert profiles["development"]["frontend_api_base"] == "https://yylx.world/dev/api"
     assert profiles["staging"]["namespace"] == "loom-staging"
     assert profiles["staging"]["ingress_host"] == "staging.yylx.world"
     assert profiles["production"]["namespace"] == "loom-prod"
     assert profiles["production"]["ingress_host"] == "yylx.world"
+    assert profiles["production"]["frontend_route"] == "https://yylx.world/prod"
+    assert profiles["production"]["frontend_api_base"] == "https://yylx.world/prod/api"
 
     assert len({profile["namespace"] for profile in profiles.values()}) == 3
     assert len({profile["database_name"] for profile in profiles.values()}) == 3

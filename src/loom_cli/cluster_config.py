@@ -117,6 +117,10 @@ if TYPE_CHECKING:
         ingress_class_name: str = "nginx"
         ingress_host: str = "loom.example.com"
         ingress_tls_secret_name: str = "loom-tls"
+        frontend_environment: str = "local"
+        frontend_environment_label: str = "Local development"
+        frontend_route_path: str = ""
+        frontend_api_base_path: str = ""
         artifacts_bucket: str = "artifacts"
         k8s_worker: _K8sWorkerConfig = field(default_factory=_K8sWorkerConfig)
         minio_image: str = "minio/minio"

@@ -11,6 +11,7 @@
 import { NavLink } from "react-router-dom";
 
 import { cn } from "../lib/cn";
+import { getFrontendConfig } from "../lib/frontendConfig";
 
 const NAV_ITEMS = [
   { to: "/", label: "Home" },
@@ -51,6 +52,7 @@ export default function NavBar({
 }: NavBarProps): JSX.Element {
   const canManageTeam = isAdmin || currentTeamRole === "owner";
   const displayRole = formatRole(currentTeamRole);
+  const frontendConfig = getFrontendConfig();
   const identityLabel = [
     currentUsername?.trim() || null,
     currentTeamName?.trim() || null,
@@ -65,6 +67,17 @@ export default function NavBar({
         <p className="text-xs uppercase tracking-wider text-slate-400">
           benchmark platform
         </p>
+        <div
+          aria-label="Frontend environment"
+          className="mt-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5"
+        >
+          <p className="truncate text-xs font-semibold text-slate-700">
+            {frontendConfig.environmentLabel}
+          </p>
+          <p className="mt-0.5 truncate font-mono text-[10px] text-slate-500">
+            {frontendConfig.apiRouteBase}
+          </p>
+        </div>
       </div>
 
       <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto pb-1 lg:flex-col lg:overflow-x-visible lg:pb-0">

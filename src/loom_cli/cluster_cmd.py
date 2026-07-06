@@ -958,6 +958,12 @@ _PERSISTENT_STORAGE_BACKENDS = frozenset({
     _PERSISTENT_STORAGE_DYNAMIC,
     _PERSISTENT_STORAGE_STATIC_HOST_PATH,
 })
+_FRONTEND_ENVIRONMENTS = frozenset({
+    "local",
+    "development",
+    "staging",
+    "production",
+})
 
 
 def _normalise_static_host_path_root(config: ClusterConfig) -> str | None:
@@ -1028,6 +1034,62 @@ def _persistent_storage_context(config: ClusterConfig) -> dict[str, Any]:
                 "host_path": _join_host_path(root, "trajectories"),
             },
         ],
+    }
+
+
+def _normalise_frontend_path(raw: str, field_name: str) -> str:
+    value = raw.strip().rstrip("/")
+    if value in {"", "/"}:
+        return ""
+    if not value.startswith("/"):
+        raise ValueError(f"{field_name} must be empty, /, /prod, or /dev")
+    if value not in {"/prod", "/dev"}:
+        raise ValueError(f"{field_name} must be empty, /, /prod, or /dev")
+    return value
+
+
+def _frontend_route_context(config: ClusterConfig) -> dict[str, Any]:
+    environment = config.frontend_environment.strip()
+    if environment not in _FRONTEND_ENVIRONMENTS:
+        raise ValueError(
+            "frontend_environment must be one of "
+            f"{sorted(_FRONTEND_ENVIRONMENTS)!r}; got {environment!r}",
+        )
+    label = config.frontend_environment_label.strip()
+    if not label:
+        raise ValueError("frontend_environment_label must not be empty")
+
+    route_path = _normalise_frontend_path(
+        config.frontend_route_path,
+        "frontend_route_path",
+    )
+    api_base_path = _normalise_frontend_path(
+        config.frontend_api_base_path or route_path,
+        "frontend_api_base_path",
+    )
+    if api_base_path != route_path:
+        raise ValueError(
+            "frontend_api_base_path must match frontend_route_path for "
+            "prod/dev route isolation",
+        )
+    if environment == "production" and route_path != "/prod":
+        raise ValueError("production frontend_environment must use frontend_route_path=/prod")
+    if environment != "production" and route_path == "/prod":
+        raise ValueError("non-production frontend_environment must not use /prod")
+    if environment == "production" and "beta" in label.lower():
+        raise ValueError("production frontend_environment_label must not contain beta")
+    if route_path in {"/prod", "/dev"} and config.ingress_host != "yylx.world":
+        raise ValueError(
+            f"frontend_route_path={route_path!r} must use ingress_host='yylx.world'",
+        )
+
+    return {
+        "frontend_environment": environment,
+        "frontend_environment_label": label,
+        "frontend_route_path": route_path,
+        "frontend_api_base_path": api_base_path,
+        "frontend_public_origin": f"https://{config.ingress_host}",
+        "frontend_prefixed_route": bool(route_path),
     }
 
 
@@ -1176,6 +1238,7 @@ def render_manifests(config: ClusterConfig) -> str:
     )
     ctx = config.to_render_context()
     ctx.update(_persistent_storage_context(config))
+    ctx.update(_frontend_route_context(config))
     ctx["provider_egress_rules"] = _provider_egress_rules(config)
     try:
         ipaddress.ip_address(config.ingress_host)

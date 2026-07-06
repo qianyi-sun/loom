@@ -1,8 +1,9 @@
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import NavBar from "../../components/NavBar";
+import { setFrontendConfigForTests } from "../../lib/frontendConfig";
 
 function renderNav(
   isAdmin: boolean,
@@ -23,6 +24,8 @@ function renderNav(
 }
 
 describe("NavBar", () => {
+  afterEach(() => setFrontendConfigForTests(null));
+
   it("renders the team nav items", () => {
     renderNav(false);
     expect(screen.getByRole("link", { name: "Home" })).toBeInTheDocument();
@@ -48,6 +51,39 @@ describe("NavBar", () => {
     expect(identityContext).toHaveTextContent("Qianyi / EAI");
     expect(identityContext).toHaveTextContent("owner");
   });
+
+  it("shows a clear non-production environment identity in the global navigation", () => {
+    setFrontendConfigForTests({
+      environment: "development",
+      environmentLabel: "Development / public beta",
+      routePath: "/dev",
+      apiBase: "/dev",
+      apiRouteBase: "https://yylx.world/dev/api",
+    });
+
+    renderNav(false, "member", "EAI", "Dev User");
+
+    const environment = screen.getByLabelText("Frontend environment");
+    expect(environment).toHaveTextContent("Development / public beta");
+    expect(environment).toHaveTextContent("https://yylx.world/dev/api");
+  });
+
+  it("shows production identity without beta wording", () => {
+    setFrontendConfigForTests({
+      environment: "production",
+      environmentLabel: "Production",
+      routePath: "/prod",
+      apiBase: "/prod",
+      apiRouteBase: "https://yylx.world/prod/api",
+    });
+
+    renderNav(false, "member", "EAI", "Prod User");
+
+    const environment = screen.getByLabelText("Frontend environment");
+    expect(environment).toHaveTextContent("Production");
+    expect(environment).not.toHaveTextContent(/beta/i);
+  });
+
 
   it("hides admin-only links from a team user", () => {
     renderNav(false, "member");

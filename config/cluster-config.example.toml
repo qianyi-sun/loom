@@ -6,6 +6,14 @@
 artifacts_bucket = "artifacts"
 # Optional environment-state TOML profile used by protected rollout steps. Relative paths resolve from the cluster-config file directory.
 env_state_profile = ""
+# Public path prefix prepended by the SPA API client before /api/v1. Must match frontend_route_path for protected prod/dev routes.
+frontend_api_base_path = ""
+# Public SPA environment identity written to the runtime frontend config.
+frontend_environment = "local"
+# Human-readable public SPA environment label shown in the UI chrome.
+frontend_environment_label = "Local development"
+# Public SPA path prefix on ingress_host. Empty means host root; production uses /prod and development/public-beta uses /dev.
+frontend_route_path = ""
 # Image tag applied to every loom-* image.
 image_tag = "0.7"
 # Optional cert-manager ClusterIssuer name for automatic TLS.

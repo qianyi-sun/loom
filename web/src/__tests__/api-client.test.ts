@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api, apiFetch, setCsrfToken, setUnauthorizedHandler } from "../api/client";
+import { setFrontendConfigForTests } from "../lib/frontendConfig";
 
 describe("apiFetch", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    setFrontendConfigForTests(null);
     setCsrfToken(null);
     vi.restoreAllMocks();
   });
@@ -70,6 +72,29 @@ describe("apiFetch", () => {
     );
     const result = await apiFetch("/api/v1/tokens/abc12345");
     expect(result).toBeUndefined();
+  });
+
+  it("prefixes API calls with the runtime frontend API base", async () => {
+    setFrontendConfigForTests({
+      environment: "production",
+      environmentLabel: "Production",
+      routePath: "/prod",
+      apiBase: "/prod",
+      apiRouteBase: "https://yylx.world/prod/api",
+    });
+    const spy = vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await apiFetch("/api/v1/health");
+
+    expect(spy).toHaveBeenCalledWith(
+      "/prod/api/v1/health",
+      expect.objectContaining({ credentials: "include" }),
+    );
   });
 
   it("sends admin actor header when approving a team registration", async () => {
