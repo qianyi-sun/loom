@@ -37,7 +37,7 @@ EXPECTED_ENVIRONMENTS = {
         "ingress_host": "yylx.world",
         "github_environment": "production",
         "allowed_refs": ("refs/heads/main",),
-        "allowed_tag_prefixes": ("refs/tags/release-",),
+        "allowed_tag_prefixes": ("refs/tags/v",),
     },
 }
 

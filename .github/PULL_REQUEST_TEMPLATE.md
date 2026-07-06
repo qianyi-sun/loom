@@ -51,15 +51,21 @@
 Complete this section only for PRs targeting `main`.
 
 - Candidate SHA:
+- Immutable prod tag (`vX.Y.Z`; never move after publication):
 - Staging URL:
 - Image digests:
 - Release gate workflow run:
 - Gate evidence artifact:
+- Frontend route evidence:
+- Worker isolation evidence:
+- Raw-delivery/export requirement status:
 - Rollback notes:
 - Previous production image digest:
 - Rendered production manifest:
 - DB recovery point:
 - Production deploy approver:
+- I confirm this PR targets `main` only for release promotion from validated `dev`.
+- I confirm the prod tag is new, immutable, and will not be force-moved.
 
 ## Deployment Notes
 
