@@ -51,6 +51,27 @@ Three execution legs, joined per `task_id` across all 100 SkillLearnBench tasks:
 - **Production-equivalent x86.** This x86 leg ran on the local dev cluster, not on public-beta. #49's release gate explicitly requires fresh x86 capacity on the production fabric; #129 currently blocks that. Re-run this same comparison on production x86 once #129 lands.
 - **Per-task identity of the 11 loom-agrees-official-dissents tasks.** Need #110-style replay to confirm whether each one is the "missing expected output artifact" pattern or a different cause. Out of scope for this report.
 
+## Repo-only dissent replay plan
+
+Use the checked-in CSV as the source of truth for deterministic triage before
+any future live replay. This command performs no provider, Docker, database,
+artifact-store, or infrastructure calls:
+
+```bash
+uv run python scripts/alignment/skilllearnbench_three_way_replay_plan.py \
+    --three-way-csv docs/evidence/2026-06-30-slb-three-way-codex-qwen36.csv \
+    --out-json /tmp/slb-three-way-replay-plan.json \
+    --out-md /tmp/slb-three-way-replay-plan.md
+```
+
+The current checked-in CSV yields 26 planned rows: 8
+`likely_verifier_artifact_replay_needed`, 3
+`official_semantics_drift_candidate`, and 15
+`architecture_specific_rerun_needed`. These are replay-plan labels, not
+root-cause conclusions; later live validation still needs task-level verifier
+inputs, artifacts, stdout/stderr, required-files manifests, reward JSON, and
+safe provider/model metadata.
+
 ## Per-task table
 
 See `2026-06-30-slb-three-way-codex-qwen36.csv` (sibling file). Mismatches summary table for quick triage:
