@@ -29,12 +29,26 @@ REQUIRED_CHECKS: dict[str, tuple[str, ...]] = {
     "cluster_render_audit": ("url", "staging_config", "production_config"),
     "migration_dry_run": ("url", "db_recovery_point"),
     "public_api_spa_smoke": ("url", "batch_id", "trial_id", "artifact_url"),
+    "frontend_route_evidence": (
+        "url",
+        "production_route",
+        "development_route",
+        "production_api_base",
+        "development_api_base",
+    ),
     "secret_redaction": ("url",),
     "provider_smoke": ("url", "provider_path"),
     "benchmark_reward_gate": ("url", "batch_id", "benchmarks"),
     "score_positive_canary": ("url", "batch_id"),
     "benchmark_score_alignment": ("url", "manifest", "benchmarks"),
     "worker_capacity_smoke": ("url", "batch_id", "k8s_workers", "oldlab_workers"),
+    "prod_beta_isolation": (
+        "url",
+        "state_profile_evidence",
+        "worker_identity_evidence",
+        "frontend_api_base_evidence",
+    ),
+    "raw_delivery_export_status": ("url", "requirement_status"),
     "rollback_plan": (
         "previous_production_image_digest",
         "rendered_manifest",
@@ -46,6 +60,7 @@ REQUIRED_CHECKS: dict[str, tuple[str, ...]] = {
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"(^|@)sha256:[0-9a-f]{64}$")
 URL_RE = re.compile(r"^https://[^\s]+$")
+PROD_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 FORBIDDEN_PATTERNS = (
     re.compile(r"authorization:\s*bearer", re.IGNORECASE),
     re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE),
@@ -109,6 +124,10 @@ def _validate_top_level(
         errors.append("image_tag must be a non-empty string")
     if image_tag and manifest_image_tag != image_tag:
         errors.append(f"image_tag mismatch: manifest={manifest_image_tag!r} expected={image_tag!r}")
+
+    prod_tag = manifest.get("prod_tag")
+    if not isinstance(prod_tag, str) or not PROD_TAG_RE.fullmatch(prod_tag):
+        errors.append("prod_tag must be an immutable SemVer tag like v1.0.0")
 
     staging_url = manifest.get("staging_url")
     if not isinstance(staging_url, str) or not URL_RE.fullmatch(staging_url):
@@ -249,6 +268,7 @@ def _evidence_report(manifest: dict[str, Any]) -> dict[str, Any]:
         "status": "pass",
         "candidate_sha": manifest["candidate_sha"],
         "image_tag": manifest["image_tag"],
+        "prod_tag": manifest["prod_tag"],
         "staging_url": manifest["staging_url"],
         "image_digests": manifest["image_digests"],
         "checks": manifest["checks"],
@@ -261,6 +281,7 @@ def _render_markdown(report: dict[str, Any]) -> str:
         "",
         f"- Candidate SHA: `{report['candidate_sha']}`",
         f"- Image tag: `{report['image_tag']}`",
+        f"- Prod tag: `{report['prod_tag']}`",
         f"- Staging URL: {report['staging_url']}",
         "",
         "## Image Digests",

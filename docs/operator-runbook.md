@@ -19,7 +19,7 @@ across rows.
 |---|---|---|---|---|---|---|
 | `development` | `dev` only | `development` | `loom-dev` | `dev.yylx.world` | `loom_dev` | `loom-dev-trajectories`, `loom-dev-artifacts` |
 | `staging` | pinned `dev` SHA | `staging` | `loom-staging` | `staging.yylx.world` | `loom_staging` | `loom-staging-trajectories`, `loom-staging-artifacts` |
-| `production` | `main` or `release-*` tag only | `production` | `loom-prod` | `yylx.world` | `loom_prod` | `loom-prod-trajectories`, `loom-prod-artifacts` |
+| `production` | `main` plus immutable `vX.Y.Z` release tags | `production` | `loom-prod` | `yylx.world` | `loom_prod` | `loom-prod-trajectories`, `loom-prod-artifacts` |
 
 Committed environment profiles live in `deploy/environments/`. Each profile
 has a matching `*.cluster.toml` render input. The production profile follows
@@ -65,26 +65,39 @@ the heavy staging evidence, encode it as a release gate manifest, and run
 `.github/workflows/release-promotion-gate.yml` before opening or merging the
 release PR.
 
+Production tags are immutable SemVer Git tags on `main`, for example
+`v1.0.0`. Pick the exact `prod_tag` in the release issue before opening the
+release PR, record it in the release gate manifest and PR template, and never
+move it after publication. If the same code must be re-released, create a new
+SemVer tag; rollback deploys the previous recorded prod tag or image digest
+instead of force-moving a tag.
+
 Normal flow:
 
 1. Pick a 40-character candidate SHA from `dev`.
-2. Build or identify the image tag/digests for that candidate.
-3. Deploy that exact image tag to `staging` using the staging GitHub
+2. Pick the immutable SemVer production tag, for example `v1.0.0`, and record
+   it in the release issue. Do not reuse an existing tag.
+3. Build or identify the image tag/digests for that candidate.
+4. Deploy that exact image tag to `staging` using the staging GitHub
    Environment.
-4. Run the staging smoke checklist below, including migration dry-run,
+5. Run the staging smoke checklist below, including migration dry-run,
    public API/SPA smoke, provider smoke, benchmark reward gate,
    score-positive canary gate before any full production benchmark batch,
    benchmark score-alignment gate, redaction scan, worker-capacity smoke, and
-   rollback evidence.
-5. Write a JSON manifest with `schema_version=1`, `candidate_sha`,
-   `image_tag`, `staging_url`, image digests for every Loom image, and pass
-   records for every required check:
+   rollback evidence. For first prod, also include prod/dev frontend route
+   evidence, prod/beta state and worker isolation evidence, and the
+   raw-delivery/export requirement status from the operator-free user E2E gate.
+6. Write a JSON manifest with `schema_version=1`, `candidate_sha`,
+   `image_tag`, `prod_tag`, `staging_url`, image digests for every Loom image,
+   and pass records for every required check:
    `repository_ci`, `image_build`, `cluster_render_audit`,
-   `migration_dry_run`, `public_api_spa_smoke`, `secret_redaction`,
+   `migration_dry_run`, `public_api_spa_smoke`, `frontend_route_evidence`,
+   `secret_redaction`,
    `provider_smoke`, `benchmark_reward_gate`, `score_positive_canary`,
-   `benchmark_score_alignment`, `worker_capacity_smoke`, `rollback_plan`, and
+   `benchmark_score_alignment`, `worker_capacity_smoke`,
+   `prod_beta_isolation`, `raw_delivery_export_status`, `rollback_plan`, and
    `release_owner_approval`.
-6. Run the release gate workflow:
+7. Run the release gate workflow:
    ```bash
    base64_manifest="$(base64 < release-gate-input.json | tr -d '\n')"
    gh workflow run release-promotion-gate.yml \
@@ -93,11 +106,13 @@ Normal flow:
      -f image_tag="$IMAGE_TAG" \
      -f evidence_manifest_b64="$base64_manifest"
    ```
-7. Attach the workflow run, `release-gate-evidence` artifact, staging URL,
-   candidate SHA, image digests, and rollback notes to the release PR from
-   `dev` to `main`.
-8. Merge the release PR only after the release owner accepts the evidence.
-9. Deploy production from `main` with the same candidate SHA, image tag, and
+8. Attach the workflow run, `release-gate-evidence` artifact, staging URL,
+   candidate SHA, prod tag, image digests, frontend route evidence,
+   worker-isolation evidence, raw-delivery/export requirement status, and
+   rollback notes to the release PR from `dev` to `main`.
+9. Merge the release PR only after the release owner accepts the evidence.
+10. Tag the merged `main` commit with the recorded immutable `prod_tag`.
+11. Deploy production from `main` with the same candidate SHA, image tag, and
    release gate workflow run id. The production deploy preflight downloads the
    `release-gate-evidence` artifact, verifies the candidate/image match, scans
    for leaked bearer/provider keys, signed URLs, internal service URLs, and
@@ -115,8 +130,9 @@ artifact after fixing an operator error, or execute the rollback plan recorded
 in the manifest.
 
 Hotfix path: branch from `main`, apply the minimal fix, run repository CI plus
-the same release gate against staging for the hotfix SHA, open a hotfix PR to
-`main`, and deploy production with that hotfix candidate SHA and gate run id.
+the same release gate against staging for the hotfix SHA, choose a new SemVer
+prod tag, open a hotfix PR to `main`, and deploy production with that hotfix
+candidate SHA and gate run id.
 Back-merge or cherry-pick the hotfix to `dev` after production is stable.
 
 ### Deploy, inspect, and rollback by environment
@@ -149,7 +165,7 @@ Use `dry_run=true` to render and audit with the environment secret config
 without applying. Every deploy job writes `rollout-evidence/rendered.yaml` and
 `rollout-evidence/release-manifest-<image-tag>.json` before apply, then uploads
 that directory as a workflow artifact for the operator review trail. Production
-deploys from any ref other than `main` or a `release-*` tag are skipped by the
+deploys from any ref other than `main` or an immutable `vX.Y.Z` tag are skipped by the
 workflow condition and still require the protected `production` environment
 approval when they do run. Production deploys also refuse to run without a
 successful release gate artifact for the
