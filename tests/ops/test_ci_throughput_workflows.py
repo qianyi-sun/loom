@@ -66,3 +66,63 @@ def test_ci_supports_merge_queue_merge_group_event() -> None:
 
     assert "merge_group" in on_config
     assert "checks_requested" in on_config["merge_group"]["types"]
+
+
+def test_opt_in_pr_smokes_cancel_superseded_pr_runs() -> None:
+    for workflow_path in (
+        ".github/workflows/cluster-smoke.yml",
+        ".github/workflows/cluster-deploy-spikes.yml",
+        ".github/workflows/staging-smoke.yml",
+    ):
+        workflow = _workflow(workflow_path)
+
+        assert workflow["concurrency"]["cancel-in-progress"] == (
+            "${{ github.event_name == 'pull_request' }}"
+        )
+        assert "github.event.pull_request.number || github.ref" in workflow[
+            "concurrency"
+        ]["group"]
+
+
+def test_repository_checks_writes_default_fast_coverage_summary() -> None:
+    workflow = _workflow(".github/workflows/ci.yml")
+    jobs = workflow["jobs"]
+    coverage_step = next(
+        step
+        for step in jobs["repository-checks"]["steps"]
+        if step.get("name") == "Coverage gate + summary (fast tier)"
+    )
+
+    assert "GITHUB_STEP_SUMMARY" in coverage_step["run"]
+    assert "coverage report --fail-under=70" in coverage_step["run"]
+
+
+def test_combined_coverage_summary_is_opt_in() -> None:
+    workflow = _workflow(".github/workflows/ci.yml")
+    coverage_summary_if = workflow["jobs"]["coverage-summary"]["if"]
+
+    assert "ci:coverage-summary" in coverage_summary_if
+    assert "ci:integration" in coverage_summary_if
+
+
+def test_repository_checks_uses_lightweight_coverage_tooling() -> None:
+    workflow = _workflow(".github/workflows/ci.yml")
+    repository_steps = workflow["jobs"]["repository-checks"]["steps"]
+    step_names = {step.get("name") for step in repository_steps}
+    run_blocks = "\n".join(step.get("run", "") for step in repository_steps)
+
+    assert "Install uv" not in step_names
+    assert "Set up Python 3.11" not in step_names
+    assert "python3 -m coverage combine" in run_blocks
+    assert "python3 -m coverage xml" in run_blocks
+
+
+def test_lint_and_static_caches_mypy() -> None:
+    workflow = _workflow(".github/workflows/ci.yml")
+    steps = workflow["jobs"]["lint-and-static"]["steps"]
+    step_names = [step.get("name") for step in steps]
+    cache_step = steps[step_names.index("Cache mypy")]
+
+    assert step_names.index("Cache mypy") < step_names.index("Mypy (strict)")
+    assert cache_step["uses"] == "actions/cache@v4"
+    assert cache_step["with"]["path"] == ".mypy_cache"

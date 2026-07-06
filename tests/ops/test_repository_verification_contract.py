@@ -42,7 +42,9 @@ def test_contributor_quickstart_documents_full_fast_coverage_gate() -> None:
         step for step in package_steps if step.get("name") == "Pytest — sibling packages"
     )
     coverage_gate_step = next(
-        step for step in repository_steps if step.get("name") == "Coverage gate (fast tier)"
+        step
+        for step in repository_steps
+        if step.get("name") == "Coverage gate + summary (fast tier)"
     )
 
     text = (REPO_ROOT / "docs/contributor-quickstart.md").read_text(encoding="utf-8")
@@ -54,5 +56,6 @@ def test_contributor_quickstart_documents_full_fast_coverage_gate() -> None:
 
     assert _normalize_command(root_pytest_step["run"]) in normalized_text
     assert _normalize_command(local_sibling_run) in normalized_text
-    assert _normalize_command(coverage_gate_step["run"]) in normalized_text
+    assert "coverage report --fail-under=70" in coverage_gate_step["run"]
+    assert "uv run coverage report --fail-under=70" in text
     assert "first pytest command alone is not the fast coverage gate" in text
