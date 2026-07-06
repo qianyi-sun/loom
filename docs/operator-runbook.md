@@ -842,10 +842,13 @@ knob you need.
    Control Plane admin API. The profile also lists the operator-only env keys
    required by that gate: `HF_TOKEN`, `LOOM_SVC_DB_URL`, and
    `LOOM_SVC_MINIO_*`. Those credentials belong in the operator context, not
-   the runtime worker pods. For SkillLearnBench, the release manifest records
-   the profile's catalog gate and `loom cluster release-gate` requires the
-   matching `--hf-mirror-boundary-evidence` artifact before staging or
-   production promotion can pass.
+   the runtime worker pods. The same catalog gate publishes the checked-in
+   `deploy/catalog/gb10-smoke` benchmark with `loom datasets publish-local` so
+   current-GB10 rollout smoke has a real `s3://` task bundle instead of a
+   manual DB row or `fixture://` source. For SkillLearnBench, the release
+   manifest records the profile's catalog gate and `loom cluster release-gate`
+   requires the matching `--hf-mirror-boundary-evidence` artifact before
+   staging or production promotion can pass.
 
 9. **Verify service-proxied downloads.** `loom_service` should use the
    cluster-internal MinIO endpoint for object reads, then stream ATIF,
@@ -1254,12 +1257,15 @@ rollout-smoke batch on resume, otherwise submits one audited batch through
 `GET /api/v1/batches/{batch_id}` until `state=finished`,
 `result_status=succeeded`, and `trial_summary.succeeded` covers the expected
 trial count. For `--scope=current-gb10`, this mode defaults to
-`terminal-bench-2/hello-world` with `required_worker_pool=gb10-arm64` because
-the batch API runs agent-by-task compatibility preflight and the user-token
-trial default is not batch-compatible for `oracle`. Evidence must contain only
-the admin source reference, fingerprint, represented username/team id, batch id,
-and redacted response JSON. Do not record raw bearer values in shell history,
-argv evidence, issue comments, PR bodies, Markdown, or logs.
+`loom-smoke/gb10-oracle-hello-world` with
+`required_worker_pool=gb10-arm64`. That task is a checked-in release-smoke
+fixture published by the catalog provisioning gate through
+`loom datasets publish-local deploy/catalog/gb10-smoke`; it is
+oracle-compatible and explicitly `cpu_arch=any`, so the batch API preflight and
+GB10 claimability gate agree. Evidence must contain only the admin source
+reference, fingerprint, represented username/team id, batch id, and redacted
+response JSON. Do not record raw bearer values in shell history, argv evidence,
+issue comments, PR bodies, Markdown, or logs.
 
 Optional flags:
 
@@ -3404,6 +3410,18 @@ loom datasets register skilllearnbench \
 If the HF repo is private/gated and the pod lacks `HF_TOKEN`, the 401/403 is a
 real rollout blocker. Fix it by updating the Secret/profile and restarting the
 operator context; do not replace it with hand-written DB rows.
+
+For protected current-GB10 rollout smoke, also publish the checked-in release
+smoke fixture through the same official local-benchmark path before step 14.
+This creates a real DB task row and internal `s3://` bundle source for
+`loom-smoke/gb10-oracle-hello-world`; it is idempotent and uses the same target
+DB/MinIO environment variables as the catalog commands above.
+
+```bash
+loom datasets publish-local deploy/catalog/gb10-smoke \
+  --bucket loom-benchmarks \
+  --imported-by "release:${IMAGE_TAG:-manual}"
+```
 
 For adapter-backed benchmark publishing, use the protected `Publish benchmarks
 to HF Hub` workflow when possible. The workflow fails hard when the selected
