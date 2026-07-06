@@ -3,6 +3,7 @@ ingress_host = "staging.yylx.world"
 ingress_tls_secret_name = "loom-staging-tls"
 trajectories_bucket = "loom-staging-trajectories"
 artifacts_bucket = "loom-staging-artifacts"
+env_state_profile = "../environment-state/staging.toml"
 
 # Trial execution capacity comes from Slurm-managed pools (`oldlab`,
 # `gb10-arm64`); the in-cluster loom-worker Deployment is omitted to

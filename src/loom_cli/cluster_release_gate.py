@@ -762,6 +762,25 @@ def _gb10_worker_check(
             evidence=evidence,
             remediation=remediation,
         )
+    if not desired_states:
+        artifact_desired_states = artifact.get("desired_states")
+        return ReleaseGateCheck(
+            name="gb10-worker-convergence",
+            outcome="fail",
+            detail="release manifest declares no GB10 desired state",
+            evidence={
+                **evidence,
+                "artifact_desired_state_count": (
+                    len(artifact_desired_states)
+                    if isinstance(artifact_desired_states, list)
+                    else None
+                ),
+            },
+            remediation=(
+                "declare gb10_worker_pool_desired_states through the release "
+                "environment-state profile before accepting GB10 worker evidence"
+            ),
+        )
     if not isinstance(artifact.get("desired_states"), list) or not isinstance(
         artifact.get("nodes"),
         list,

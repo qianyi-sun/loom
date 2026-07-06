@@ -23,9 +23,23 @@ def _make_table_dataclass(entry: RenderConfigEntry) -> type:
     """For `python_type = "table"` entries (e.g. replicas), build a
     frozen dataclass whose fields are `entry.fields.keys()`."""
     assert entry.fields is not None
+
+    def _field_for(default: Any) -> Any:
+        if isinstance(default, list):
+            def _list_factory(default: list[Any] = default) -> list[Any]:
+                return list(default)
+
+            return field(default_factory=_list_factory)
+        if isinstance(default, dict):
+            def _dict_factory(default: dict[str, Any] = default) -> dict[str, Any]:
+                return dict(default)
+
+            return field(default_factory=_dict_factory)
+        return field(default=default)
+
     cls = make_dataclass(
         f"_{entry.name.capitalize()}Config",
-        [(k, type(v), field(default=v)) for k, v in entry.fields.items()],
+        [(k, type(v), _field_for(v)) for k, v in entry.fields.items()],
         frozen=True,
     )
     return cls
@@ -91,8 +105,14 @@ if TYPE_CHECKING:
         enabled: bool = False
 
     @dataclass(frozen=True)
+    class _Gb10PoolConfig:
+        hosts: list[dict[str, Any]] = field(default_factory=list)
+
+    @dataclass(frozen=True)
     class ClusterConfig:
         image_tag: str = "0.7"
+        env_state_profile: str = ""
+        gb10_pool: _Gb10PoolConfig = field(default_factory=_Gb10PoolConfig)
         ingress_cert_manager_cluster_issuer: str = ""
         ingress_class_name: str = "nginx"
         ingress_host: str = "loom.example.com"
@@ -163,7 +183,19 @@ def load_cluster_config(path: Path | None) -> ClusterConfig:
                 )
             # Coerce values to the right type via the sub-dataclass default's type
             default_instance = sub_cls()
-            coerced = {k: type(getattr(default_instance, k))(v) for k, v in val.items()}
+            coerced: dict[str, Any] = {}
+            for k, v in val.items():
+                default_value = getattr(default_instance, k)
+                if isinstance(default_value, list):
+                    if not isinstance(v, list):
+                        raise ValueError(f"{name}.{k} must be a TOML array")
+                    coerced[k] = list(v)
+                elif isinstance(default_value, dict):
+                    if not isinstance(v, dict):
+                        raise ValueError(f"{name}.{k} must be a TOML table")
+                    coerced[k] = dict(v)
+                else:
+                    coerced[k] = type(default_value)(v)
             kwargs[name] = sub_cls(**coerced)
         else:
             if entry_field.type == tuple[str, ...]:

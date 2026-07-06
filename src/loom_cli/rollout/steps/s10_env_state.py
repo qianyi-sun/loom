@@ -32,14 +32,18 @@ def _profile_path_for(ctx: RolloutContext, config_path: Path | None = None) -> s
     """
     from loom_cli.cluster_config import load_cluster_config
 
+    source_config_path = config_path or ctx.cluster_config_path
     try:
-        cfg = load_cluster_config(config_path or ctx.cluster_config_path)
+        cfg = load_cluster_config(source_config_path)
     except Exception:
         return None
     profile = getattr(cfg, "env_state_profile", None)
     if not profile:
         return None
-    return str(profile)
+    profile_path = Path(str(profile)).expanduser()
+    if not profile_path.is_absolute():
+        profile_path = source_config_path.parent / profile_path
+    return str(profile_path.resolve(strict=False))
 
 
 class EnvStateStep(BaseStep):
@@ -75,6 +79,7 @@ class EnvStateStep(BaseStep):
                 "admin", "environment-state", "apply",
                 "--cp-url", ctx.cp_url,
                 "--file", str(profile_path),
+                "--environment", ctx.environment,
                 *release_vars,
             ),
             cwd=cwd,
@@ -85,6 +90,7 @@ class EnvStateStep(BaseStep):
                 "admin", "environment-state", "check",
                 "--cp-url", ctx.cp_url,
                 "--file", str(profile_path),
+                "--environment", ctx.environment,
                 *release_vars,
                 "--format", "json",
             ),

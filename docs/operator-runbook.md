@@ -546,6 +546,14 @@ knob you need.
    The gate fails if any declared active GB10 host is missing, unreachable or
    otherwise not `applied`, stale on image/env/source, dirty, or reporting a
    max-concurrency value that differs from desired state.
+   For `loom cluster rollout --scope current-gb10`, the cluster config must
+   declare `env_state_profile`, and the resolved release manifest must contain
+   at least one `gb10_worker_pool_desired_states` entry. An empty GB10 desired
+   state is a release-contract error, even if a `gb10-workers status` artifact
+   exists, because it proves no external worker target was declared. The
+   optional `[gb10_pool] hosts = [...]` cluster-config section feeds the legacy
+   SSH prep step only; it does not replace the environment-state/node-agent
+   desired-state contract used by the release gate.
    Protected `environment-state apply/check` uses the same per-environment
    rollout lease as `loom cluster up`, defaulting to
    `$LOOM_ROLLOUT_LOCK_DIR` or `~/.loom/rollout-locks`. Set a shared
@@ -1033,7 +1041,7 @@ observability and mutation contract:
 | 09 | migrate | candidate-source `loom cluster render-migration` + `kubectl wait` (#332) |
 | 10 | env-state | candidate-source apply + check (#331 fix for stop-on-disable) |
 | 11 | cluster-up | candidate-source `loom cluster up` (#203 fix for updated replicas) |
-| 12 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, collect GB10 status when the manifest records GB10 desired state, then `loom cluster release-gate --manifest <that file>` (#339 fix for stale kind-import). GB10 convergence mismatches are retried briefly so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. |
+| 12 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment`, then `loom cluster release-gate --manifest <that file>` (#339 fix for stale kind-import). GB10 convergence mismatches are retried briefly so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. |
 | 13 | smoke | HTTP health + user-owned smoke token whoami + benchmarks + smoke task lookup + trial submit + poll + trajectory HEAD |
 | 99 | summary | write `summary.md` from every prior step's result.json |
 

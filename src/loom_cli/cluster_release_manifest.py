@@ -96,6 +96,7 @@ def _external_worker_summary(
     if environment_state_path is None:
         return {
             "environment_state_file": None,
+            "control_plane_environment": None,
             "slurm_pools": [],
             "gb10_desired_states": [],
         }
@@ -107,6 +108,10 @@ def _external_worker_summary(
         image_tag=image_tag,
         env_config_version=env_config_version,
         git_sha=git_sha,
+    )
+    control_plane_environment = resolved.get(
+        "control_plane_environment",
+        resolved.get("environment"),
     )
 
     slurm_pools: list[dict[str, Any]] = []
@@ -144,6 +149,7 @@ def _external_worker_summary(
             "path": str(environment_state_path),
             "sha256": _sha256_bytes(raw_bytes),
         },
+        "control_plane_environment": control_plane_environment,
         "slurm_pools": slurm_pools,
         "gb10_desired_states": gb10_desired_states,
     }

@@ -158,7 +158,7 @@ class ReleaseGateStep(SubcommandStep):
             "--output",
             str(self.release_manifest_path(ctx, step_dir)),
         )
-        profile = _profile_path_for(ctx, rollout_cluster_config(ctx, step_dir))
+        profile = _profile_path_for(ctx)
         if profile is not None:
             argv.extend([
                 "--environment-state-file",
@@ -167,6 +167,41 @@ class ReleaseGateStep(SubcommandStep):
                 ctx.image_tag,
             ])
         return argv
+
+    def _manifest_external_workers(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+    ) -> dict[str, Any]:
+        path = self.release_manifest_path(ctx, step_dir)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        external_workers = raw.get("external_workers")
+        return external_workers if isinstance(external_workers, dict) else {}
+
+    def _gb10_status_environment(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+    ) -> str:
+        external_workers = self._manifest_external_workers(ctx, step_dir)
+        control_plane_environment = external_workers.get("control_plane_environment")
+        if isinstance(control_plane_environment, str) and control_plane_environment:
+            return control_plane_environment
+        return ctx.environment
+
+    def _gb10_desired_state_count(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+    ) -> int | None:
+        external_workers = self._manifest_external_workers(ctx, step_dir)
+        if "gb10_desired_states" not in external_workers:
+            return None
+        desired = external_workers.get("gb10_desired_states")
+        return len(desired) if isinstance(desired, list) else 0
 
     def gb10_status_argv(
         self,
@@ -180,7 +215,7 @@ class ReleaseGateStep(SubcommandStep):
             "--cp-url",
             ctx.cp_url,
             "--environment",
-            ctx.environment,
+            self._gb10_status_environment(ctx, step_dir),
             "--release-image-tag",
             ctx.image_tag,
             "--release-env-config-version",
@@ -316,6 +351,17 @@ class ReleaseGateStep(SubcommandStep):
                     manifest.stderr.strip().splitlines()[-1]
                     if manifest.stderr.strip()
                     else f"release-manifest exited {manifest.returncode}"
+                ),
+                artifacts=artifacts,
+            )
+        gb10_desired_count = self._gb10_desired_state_count(ctx, step_dir)
+        if ctx.scope == "current-gb10" and gb10_desired_count == 0:
+            return RunResult(
+                exit_code=2,
+                summary="release manifest lacks GB10 desired state",
+                error=(
+                    "current-gb10 rollout requires env_state_profile with at "
+                    "least one gb10_worker_pool_desired_states entry"
                 ),
                 artifacts=artifacts,
             )

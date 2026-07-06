@@ -66,6 +66,7 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
     environment_state_path = tmp_path / "staging.toml"
     environment_state_path.write_text(
         'environment = "staging"\n'
+        'control_plane_environment = "production"\n'
         'secret_example = "super-secret-token"\n'
         "[[worker_pool_autoscaler_policies]]\n"
         'pool_name = "oldlab"\n'
@@ -156,6 +157,7 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
     assert manifest["external_workers"]["environment_state_file"]["sha256"] == (
         hashlib.sha256(environment_state_path.read_bytes()).hexdigest()
     )
+    assert manifest["external_workers"]["control_plane_environment"] == "production"
     assert manifest["external_workers"]["slurm_pools"] == [
         {
             "pool_name": "oldlab",

@@ -160,6 +160,44 @@ def test_load_config_from_toml_accepts_worker_subprocess_gateway_url(
     )
 
 
+def test_load_config_accepts_rollout_environment_state_and_gb10_pool(
+    tmp_path: Path,
+) -> None:
+    cfg_path = tmp_path / "cluster.toml"
+    cfg_path.write_text(
+        'env_state_profile = "../environment-state/staging.toml"\n'
+        "[gb10_pool]\n"
+        "hosts = [\n"
+        "  { ssh_target = \"trt-gb10-1\", repo_path = \"/srv/loom\", "
+        "env_file_path = \"/srv/loom/.env\" },\n"
+        "]\n",
+        encoding="utf-8",
+    )
+
+    cfg = load_cluster_config(cfg_path)
+
+    assert cfg.env_state_profile == "../environment-state/staging.toml"
+    assert cfg.gb10_pool.hosts == [
+        {
+            "ssh_target": "trt-gb10-1",
+            "repo_path": "/srv/loom",
+            "env_file_path": "/srv/loom/.env",
+        }
+    ]
+
+
+def test_load_config_rejects_non_array_gb10_hosts(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "cluster.toml"
+    cfg_path.write_text(
+        "[gb10_pool]\n"
+        'hosts = "trt-gb10-1"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"gb10_pool\.hosts must be a TOML array"):
+        load_cluster_config(cfg_path)
+
+
 def test_load_config_rejects_deprecated_gateway_public_host(
     tmp_path: Path,
 ) -> None:
