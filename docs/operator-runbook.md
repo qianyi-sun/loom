@@ -311,6 +311,7 @@ Each verb:
 | Command | What it does | Exit codes |
 |---|---|---|
 | `loom cluster preflight` | API-side checks: namespace exists, required Secrets present, IngressClass installed, default StorageClass available, PSS labels OK, and schema-doctor reconciliation for rendered env/Secret drift. With `--config`, preflight validates live `loom-secrets` but checks env vars against the target rendered Deployments so rollouts that add schema-backed env vars are not blocked by old live pods. Protected environments also check the live critical PVC/PV storage boundary and a recent backup manifest; pass `--config cluster-config.toml` so first deploys can prove static host-path Retain PVs before the PVCs exist. Optional runtime-derived worker env such as hostname, idle-exit, fixtures root, benchmark cache, and blocking-I/O executor override may stay unset. | 0 pass / 1 fail / 2 cluster unreachable |
+| `loom admin env-diagnostics` | Print scoped runtime environment diagnostics without raw secret values. By default it includes `LOOM_` variables and redacts key names containing `TOKEN`, `SECRET`, `KEY`, password, credential, auth, kubeconfig, or database/DSN markers. Sensitive entries show only `[REDACTED sha256:<12-hex> len=<N>]`, so JSON/Markdown output is safe to attach as release evidence. | 0 written / 2 bad input |
 | `loom cluster backup manifest/check` | Write or verify metadata-only backup manifests for staging/staging destructive-operation guards | 0 verified / 1 invalid manifest / 2 bad input |
 | `loom cluster render` | Print the rendered YAML to stdout (no cluster contact) | 0 / 2 on bad config |
 | `loom cluster release-manifest` | Write a safe pre-apply rollout artifact with the candidate git SHA/image tag, CLI version, cluster-config and rendered-manifest hashes, intended Deployment images, optional expected image digests/IDs from `--expected-image-identities-json`, Alembic heads, and environment-state worker desired-state fingerprints | 0 written / 2 bad input |
@@ -518,6 +519,58 @@ knob you need.
      | kubectl apply -f -
    kubectl rollout restart deploy/loom-service
    ```
+
+   To inspect the running service environment during deploy/debug checks, use
+   the redacted diagnostic path rather than raw shell env dumps:
+   ```bash
+   kubectl exec deploy/loom-service -- \
+     loom admin env-diagnostics --prefix LOOM_SVC_ --format markdown
+   ```
+   The root cause of the #97 exposure was not a failed token rotation path; it
+   was the missing operator-approved boundary for environment inspection, which
+   pushed debugging toward raw `printenv` output. Treat
+   `loom admin env-diagnostics` as the only evidence-producing environment
+   inspection command for public-beta and production service pods.
+   Do not run `printenv | grep TOKEN`, `env | grep SECRET`,
+   `kubectl exec ... -- printenv`, or similar raw commands in public-beta or
+   production. They can copy service tokens, SecretStore keys, database URLs,
+   provider keys, and password-bearing credentials into terminal scrollback,
+   CI logs, issue comments, or rollout evidence.
+
+   After a suspected `batch-runner-cp-token` exposure, rotate it and validate
+   only hash-derived evidence. The mint response contains the raw token, so do
+   not redirect it to logs or evidence files:
+   ```bash
+   kubectl port-forward deploy/loom-control-plane 8080:8080 &
+   curl -sS -X POST http://localhost:8080/admin/batch-runner-tokens \
+     -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -d '{"expires_in_days": 365}' \
+     | python -c 'import json, sys; body = json.load(sys.stdin); print("new batch-runner token hash prefix:", body["token_hash_prefix"], file=sys.stderr); print(body["token"])' \
+     | kubectl create secret generic loom-secrets \
+         --from-file=batch-runner-cp-token=/dev/stdin \
+         --dry-run=client -o yaml \
+     | kubectl apply -f -
+   kubectl rollout restart deploy/loom-service
+   kubectl rollout status deploy/loom-service --timeout=120s
+
+   kubectl exec deploy/loom-service -- \
+     loom admin env-diagnostics --prefix LOOM_SVC_ --format json \
+     > "$ROLLOUT_DIR/loom-service-env-diagnostics.json"
+   jq -e '.entries[] | select(.name=="LOOM_SVC_BATCH_RUNNER_CP_TOKEN")
+          | select(.value=="[REDACTED]")
+          | select(.fingerprint | startswith("sha256:"))
+          | select(.length > 0)' \
+     "$ROLLOUT_DIR/loom-service-env-diagnostics.json"
+
+   # If the suspected old token hash prefix is known, revoke it after the new
+   # service pod is live.
+   curl -sS -X DELETE "http://localhost:8080/admin/worker-tokens/$OLD_PREFIX" \
+     -H "Authorization: Bearer $ADMIN_TOKEN"
+   ```
+   Compare the first 8 hex characters after `sha256:` in the env diagnostic
+   with the new `token_hash_prefix` printed by the mint step. Record only the
+   prefix/fingerprint and rollout status in issues or PRs; never record the
+   raw `LOOM_SVC_BATCH_RUNNER_CP_TOKEN` value.
 
 8. **Apply versioned environment state.** Kubernetes manifests do not own
    every rollout-critical runtime row. After the images and secrets are live,

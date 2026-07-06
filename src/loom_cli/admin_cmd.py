@@ -6,6 +6,8 @@ Subcommands:
   rotation via the Control Plane's admin surface.
 - ``loom admin tokens team {mint,revoke,rotate}`` — legacy team-token
   rotation via loom_service's /api/v1/tokens route.
+- ``loom admin env-diagnostics`` — redacted runtime environment inspection
+  for deploy/debug evidence without raw secret values.
 - ``loom admin rate-cards sync-yibuapi`` — sync the official YibuAPI
   pricing catalog into the service rate-card store.
 - ``loom admin secret-store rewrap`` — master-key rotation walker;
@@ -29,6 +31,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
+from loom.security.redaction import RedactedEnvironmentEntry, redact_environment_mapping
 from loom_cli.cluster_backup_guard import is_protected_environment
 from loom_cli.gb10_release_gate import gb10_release_target_mismatches
 from loom_cli.rollout_lock import (
@@ -62,6 +65,42 @@ _HEX_PREFIX_RE = re.compile(r"^[0-9a-f]{4,64}$")
 _DEFAULT_CP_URL = "http://localhost:8080"
 _DEFAULT_EXPIRES_DAYS = 365
 _DEFAULT_ADMIN_TOKEN_SOURCE = "env:LOOM_ADMIN_TOKEN"
+_DEFAULT_ENV_DIAGNOSTIC_PREFIX = "LOOM_"
+
+
+def _env_diagnostic_value(entry: RedactedEnvironmentEntry) -> str:
+    if not entry.sensitive:
+        return entry.value
+    if entry.fingerprint is None:
+        return "[REDACTED]"
+    length = entry.length if entry.length is not None else 0
+    return f"[REDACTED {entry.fingerprint} len={length}]"
+
+
+def _env_diagnostics(args: argparse.Namespace) -> int:
+    prefixes = tuple(args.prefix or (_DEFAULT_ENV_DIAGNOSTIC_PREFIX,))
+    entries = redact_environment_mapping(os.environ, prefixes=prefixes)
+    if args.format == "json":
+        json.dump(
+            {
+                "prefixes": list(prefixes),
+                "entries": [entry.to_json() for entry in entries],
+            },
+            sys.stdout,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+        return 0
+    if args.format == "markdown":
+        sys.stdout.write("| name | kind | value |\n")
+        sys.stdout.write("| --- | --- | --- |\n")
+        for entry in entries:
+            kind = "sensitive" if entry.sensitive else "value"
+            sys.stdout.write(f"| {entry.name} | {kind} | {_env_diagnostic_value(entry)} |\n")
+        return 0
+    for entry in entries:
+        sys.stdout.write(f"{entry.name}={_env_diagnostic_value(entry)}\n")
+    return 0
 
 
 def _add_rollout_lock_args(parser: argparse.ArgumentParser) -> None:
@@ -1355,11 +1394,33 @@ def dispatch(argv: list[str]) -> int:
         description=(
             "Operator-only admin operations. Subcommands: "
             "`tokens` (worker/team token rotation), "
+            "`env-diagnostics` (redacted runtime environment inspection), "
             "`rate-cards` (pricing catalog sync), and "
             "`secret-store` (master-key rotation walker)."
         ),
     )
     sub = parser.add_subparsers(dest="admin_cmd", required=True)
+
+    p_env_diagnostics = sub.add_parser(
+        "env-diagnostics",
+        help="Print redacted runtime environment diagnostics.",
+    )
+    p_env_diagnostics.add_argument(
+        "--prefix",
+        action="append",
+        default=None,
+        help=(
+            "Environment variable prefix to include. Repeat to inspect "
+            "multiple scoped prefixes. Defaults to LOOM_."
+        ),
+    )
+    p_env_diagnostics.add_argument(
+        "--format",
+        choices=["text", "json", "markdown"],
+        default="text",
+        help="Output format for terminal use or evidence artifacts.",
+    )
+    p_env_diagnostics.set_defaults(handler=_env_diagnostics)
 
     p_tokens = sub.add_parser(
         "tokens",
