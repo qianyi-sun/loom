@@ -49,6 +49,16 @@ from loom_cli.cluster_rollout_evidence import (
     normalize_cluster_status_format,
     render_rollout_evidence_json,
 )
+from loom_cli.minio_storage_preflight import (
+    DEFAULT_BUCKETS,
+    DEFAULT_STOP_FREE_PERCENT,
+    DEFAULT_WARN_FREE_PERCENT,
+    DEFAULT_WARN_GROWTH_BYTES_PER_HOUR,
+    MinioStorageThresholds,
+    build_minio_storage_preflight,
+    render_minio_storage_preflight_json,
+    render_minio_storage_preflight_table,
+)
 from loom_cli.rollout_lock import (
     DEFAULT_ROLLOUT_LOCK_TTL_SECONDS,
     RolloutLease,
@@ -406,7 +416,7 @@ def _load_clients(
     default StorageClass; `status` ignores it. Kept in the same
     helper so every cluster subcommand uses one auth path."""
     try:
-        from kubernetes import client, config  # type: ignore[import-not-found]
+        from kubernetes import client, config  # type: ignore
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "the 'kubernetes' package is required for `loom cluster` "
@@ -1409,6 +1419,55 @@ def _rollout_evidence_docker_images(args: argparse.Namespace) -> int:
     return 0 if evidence["ok"] else 1
 
 
+def _minio_storage_preflight(args: argparse.Namespace) -> int:
+    previous_report: dict[str, Any] | None = None
+    if args.previous_evidence:
+        try:
+            loaded = json.loads(Path(args.previous_evidence).resolve().read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                raise ValueError("previous storage preflight JSON root must be an object")
+            previous_report = loaded
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            sys.stderr.write(f"error: previous storage preflight invalid: {exc}\n")
+            return 2
+    try:
+        report = build_minio_storage_preflight(
+            namespace=args.namespace,
+            pod=args.pod,
+            data_path=args.data_path,
+            bucket_names=args.bucket or list(DEFAULT_BUCKETS),
+            thresholds=MinioStorageThresholds(
+                warn_free_percent=args.warn_free_percent,
+                stop_free_percent=args.stop_free_percent,
+                warn_growth_bytes_per_hour=args.warn_growth_bytes_per_hour,
+            ),
+            estimated_batch_bytes=args.estimated_batch_bytes,
+            previous_report=previous_report,
+        )
+    except (RuntimeError, ValueError) as exc:
+        sys.stderr.write(f"error: minio storage preflight failed: {exc}\n")
+        return 2
+
+    rendered = (
+        render_minio_storage_preflight_json(report)
+        if args.format == "json"
+        else render_minio_storage_preflight_table(report)
+    )
+    if args.output:
+        try:
+            Path(args.output).resolve().write_text(
+                render_minio_storage_preflight_json(report),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            sys.stderr.write(f"error: cannot write storage preflight evidence: {exc}\n")
+            return 2
+    sys.stdout.write(rendered)
+    if report.get("outcome") == "stop" and not args.allow_storage_stop_override:
+        return 1
+    return 0
+
+
 def _release_gate(args: argparse.Namespace) -> int:
     try:
         manifest_path = Path(args.manifest).resolve()
@@ -1475,6 +1534,20 @@ def _release_gate(args: argparse.Namespace) -> int:
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             gb10_workers_status_error = str(exc)
 
+    minio_storage_preflight_artifact: dict[str, Any] | None = None
+    minio_storage_preflight_path: str | None = None
+    minio_storage_preflight_error: str | None = None
+    if args.minio_storage_preflight:
+        minio_path = Path(args.minio_storage_preflight).resolve()
+        minio_storage_preflight_path = str(minio_path)
+        try:
+            loaded_minio_storage = json.loads(minio_path.read_text(encoding="utf-8"))
+            if not isinstance(loaded_minio_storage, dict):
+                raise ValueError("MinIO storage preflight JSON root must be an object")
+            minio_storage_preflight_artifact = loaded_minio_storage
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            minio_storage_preflight_error = str(exc)
+
     if args.dry_run:
         live_alembic = None
         live_alembic_heads = list(manifest.get("alembic", {}).get("expected_heads", []) or [])
@@ -1512,6 +1585,9 @@ def _release_gate(args: argparse.Namespace) -> int:
         gb10_workers_status_artifact=gb10_workers_status_artifact,
         gb10_workers_status_path=gb10_workers_status_path,
         gb10_workers_status_error=gb10_workers_status_error,
+        minio_storage_preflight_artifact=minio_storage_preflight_artifact,
+        minio_storage_preflight_path=minio_storage_preflight_path,
+        minio_storage_preflight_error=minio_storage_preflight_error,
     )
 
     if args.environment:
@@ -4042,6 +4118,90 @@ def dispatch(argv: list[str]) -> int:
     )
     p_release_manifest.set_defaults(handler=_release_manifest)
 
+    p_minio_storage = sub.add_parser(
+        "minio-storage-preflight",
+        help=(
+            "Record MinIO /data filesystem, bucket usage, thresholds, and "
+            "headroom before a large public-beta run."
+        ),
+    )
+    p_minio_storage.add_argument(
+        "--namespace",
+        default="loom",
+        help="Kubernetes namespace containing the MinIO pod (default: loom).",
+    )
+    p_minio_storage.add_argument(
+        "--pod",
+        default="loom-minio-0",
+        help="MinIO pod name to exec into (default: loom-minio-0).",
+    )
+    p_minio_storage.add_argument(
+        "--data-path",
+        default="/data",
+        help="MinIO data mount path inside the pod (default: /data).",
+    )
+    p_minio_storage.add_argument(
+        "--bucket",
+        action="append",
+        default=None,
+        help=(
+            "Bucket directory under --data-path to measure. Repeatable. "
+            "Defaults to artifacts, trajectories, loom-benchmarks, and loom-tasks."
+        ),
+    )
+    p_minio_storage.add_argument(
+        "--warn-free-percent",
+        type=float,
+        default=DEFAULT_WARN_FREE_PERCENT,
+        help=f"Warn when effective free space falls below this percent (default: {DEFAULT_WARN_FREE_PERCENT}).",
+    )
+    p_minio_storage.add_argument(
+        "--stop-free-percent",
+        type=float,
+        default=DEFAULT_STOP_FREE_PERCENT,
+        help=f"Stop when effective free space falls below this percent (default: {DEFAULT_STOP_FREE_PERCENT}).",
+    )
+    p_minio_storage.add_argument(
+        "--warn-growth-bytes-per-hour",
+        type=int,
+        default=DEFAULT_WARN_GROWTH_BYTES_PER_HOUR,
+        help=(
+            "Warn when artifacts+trajectories growth exceeds this rate and "
+            f"--previous-evidence is supplied (default: {DEFAULT_WARN_GROWTH_BYTES_PER_HOUR})."
+        ),
+    )
+    p_minio_storage.add_argument(
+        "--estimated-batch-bytes",
+        type=int,
+        default=None,
+        help="Optional expected additional bytes for the requested batch.",
+    )
+    p_minio_storage.add_argument(
+        "--previous-evidence",
+        default=None,
+        help="Optional prior minio-storage-preflight JSON for growth-rate alerting.",
+    )
+    p_minio_storage.add_argument(
+        "--output",
+        default=None,
+        help="Write machine-readable JSON evidence to this path.",
+    )
+    p_minio_storage.add_argument(
+        "--format",
+        choices=["table", "json"],
+        default="table",
+        help="Output format (default: table).",
+    )
+    p_minio_storage.add_argument(
+        "--allow-storage-stop-override",
+        action="store_true",
+        help=(
+            "Exit 0 even when the preflight outcome is stop. Use only when "
+            "the operator explicitly accepts the storage risk."
+        ),
+    )
+    p_minio_storage.set_defaults(handler=_minio_storage_preflight)
+
     p_release_gate = sub.add_parser(
         "release-gate",
         help=(
@@ -4094,6 +4254,14 @@ def dispatch(argv: list[str]) -> int:
         help=(
             "JSON artifact from `loom admin gb10-workers status --format json`. "
             "Required when the release manifest records GB10 worker desired state."
+        ),
+    )
+    p_release_gate.add_argument(
+        "--minio-storage-preflight",
+        default=None,
+        help=(
+            "JSON artifact from `loom cluster minio-storage-preflight --output`. "
+            "When supplied, release-gate fails if the artifact outcome is stop."
         ),
     )
     p_release_gate.add_argument(

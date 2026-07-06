@@ -497,6 +497,95 @@ def test_batch_create_with_benchmark_shortcut(
     assert body["provider_model_id"] == "gpt-4o"
 
 
+def test_batch_create_refuses_stopped_storage_preflight_without_override(
+    tmp_path: Path,
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    storage = tmp_path / "minio-storage-preflight.json"
+    storage.write_text(
+        json.dumps({
+            "outcome": "stop",
+            "filesystem": {"free_percent": 8.0, "free_bytes": 8 * 1024**3},
+            "thresholds": {"stop_free_percent": 15.0},
+            "checks": [
+                {
+                    "name": "minio-data-free-space",
+                    "outcome": "stop",
+                    "detail": "free space 8.0% is below stop threshold 15.0%",
+                }
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    rc = main([
+        "eval",
+        "batch",
+        "create",
+        "--agent",
+        "oracle",
+        "--benchmark",
+        "source-useful-frontier",
+        "--name",
+        "big-batch",
+        "--storage-preflight-evidence",
+        str(storage),
+    ])
+
+    assert rc == 1
+    assert "explicit storage override" in capsys.readouterr().err
+    assert mock_server.requests == []
+
+
+def test_batch_create_allows_explicit_storage_preflight_override(
+    tmp_path: Path,
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    storage = tmp_path / "minio-storage-preflight.json"
+    storage.write_text(
+        json.dumps({
+            "outcome": "stop",
+            "filesystem": {"free_percent": 8.0, "free_bytes": 8 * 1024**3},
+            "thresholds": {"stop_free_percent": 15.0},
+            "checks": [],
+        }),
+        encoding="utf-8",
+    )
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 1,
+            "n_per_task": 1,
+            "backend": "docker",
+            "combinations": [],
+            "state": "submitted",
+            "created_at": "2026-06-16T00:00:00Z",
+        },
+    )
+
+    rc = main([
+        "eval",
+        "batch",
+        "create",
+        "--agent",
+        "oracle",
+        "--benchmark",
+        "source-useful-frontier",
+        "--name",
+        "big-batch",
+        "--storage-preflight-evidence",
+        str(storage),
+        "--override-storage-preflight-stop",
+    ])
+
+    assert rc == 0
+    assert "Created batch" in capsys.readouterr().out
+    assert len(mock_server.requests) == 1
+
+
 def test_batch_create_oracle_does_not_require_provider_or_model(
     mock_server: MockServer,
     capsys: pytest.CaptureFixture[str],

@@ -59,6 +59,9 @@ def test_deploy_script_runs_release_gate_after_cluster_up() -> None:
     assert "release-gate-${LOOM_IMAGE_TAG}.md" in script
     assert "gb10-workers-status-${LOOM_IMAGE_TAG}.json" in script
     assert "--gb10-workers-status" in script
+    assert "minio-storage-preflight-${LOOM_IMAGE_TAG}.json" in script
+    assert "minio-storage-preflight" in script
+    assert "--minio-storage-preflight" in script
 
 
 def test_deploy_workflow_uploads_rollout_evidence_artifact() -> None:

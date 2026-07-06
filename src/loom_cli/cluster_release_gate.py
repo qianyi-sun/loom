@@ -822,6 +822,68 @@ def _gb10_worker_check(
     )
 
 
+def _minio_storage_preflight_check(
+    *,
+    artifact: dict[str, Any] | None,
+    artifact_path: str | None,
+    artifact_error: str | None,
+) -> ReleaseGateCheck | None:
+    if artifact is None and artifact_error is None:
+        return None
+    evidence: dict[str, Any] = {"artifact": artifact_path}
+    if artifact_error is not None:
+        return ReleaseGateCheck(
+            name="minio-storage-pressure",
+            outcome="fail",
+            detail="MinIO storage preflight artifact is unreadable",
+            evidence={**evidence, "error": artifact_error},
+            remediation=(
+                "rerun `loom cluster minio-storage-preflight --output ...` "
+                "and pass the JSON artifact to release-gate"
+            ),
+        )
+    assert artifact is not None
+    filesystem = artifact.get("filesystem") if isinstance(artifact, dict) else {}
+    thresholds = artifact.get("thresholds") if isinstance(artifact, dict) else {}
+    checks = artifact.get("checks") if isinstance(artifact, dict) else []
+    if not isinstance(filesystem, dict):
+        filesystem = {}
+    if not isinstance(thresholds, dict):
+        thresholds = {}
+    outcome = str(artifact.get("outcome") or "unknown")
+    evidence.update({
+        "outcome": outcome,
+        "free_bytes": filesystem.get("free_bytes"),
+        "free_percent": filesystem.get("free_percent"),
+        "used_percent": filesystem.get("used_percent"),
+        "warn_free_percent": thresholds.get("warn_free_percent"),
+        "stop_free_percent": thresholds.get("stop_free_percent"),
+        "checks": checks if isinstance(checks, list) else [],
+    })
+    if outcome == "stop":
+        return ReleaseGateCheck(
+            name="minio-storage-pressure",
+            outcome="fail",
+            detail="MinIO storage preflight reports stop",
+            evidence=evidence,
+            remediation=(
+                "reclaim MinIO artifacts/trajectories, provision storage, "
+                "or record an explicit operator override before large runs"
+            ),
+        )
+    detail = (
+        "MinIO storage preflight warns"
+        if outcome == "warn"
+        else "MinIO storage preflight passed"
+    )
+    return ReleaseGateCheck(
+        name="minio-storage-pressure",
+        outcome="pass",
+        detail=detail,
+        evidence=evidence,
+    )
+
+
 def collect_release_gate_report(
     *,
     manifest: dict[str, Any],
@@ -840,6 +902,9 @@ def collect_release_gate_report(
     gb10_workers_status_artifact: dict[str, Any] | None = None,
     gb10_workers_status_path: str | None = None,
     gb10_workers_status_error: str | None = None,
+    minio_storage_preflight_artifact: dict[str, Any] | None = None,
+    minio_storage_preflight_path: str | None = None,
+    minio_storage_preflight_error: str | None = None,
 ) -> ReleaseGateReport:
     environment = str(manifest.get("release", {}).get("environment") or "")
     expected_rendered = manifest.get("rendered_manifest", {}).get("sha256")
@@ -893,6 +958,13 @@ def collect_release_gate_report(
     )
     if gb10_worker_check is not None:
         checks.append(gb10_worker_check)
+    minio_storage_check = _minio_storage_preflight_check(
+        artifact=minio_storage_preflight_artifact,
+        artifact_path=minio_storage_preflight_path,
+        artifact_error=minio_storage_preflight_error,
+    )
+    if minio_storage_check is not None:
+        checks.append(minio_storage_check)
     return ReleaseGateReport(
         environment=environment,
         namespace=namespace,
@@ -1194,6 +1266,36 @@ def _environment_state_component_rows(check: ReleaseGateCheck) -> list[dict[str,
     return rows
 
 
+def _minio_storage_component_row(check: ReleaseGateCheck) -> dict[str, Any] | None:
+    if check.name != "minio-storage-pressure":
+        return None
+    evidence = check.evidence
+    row_evidence = []
+    if evidence.get("artifact"):
+        row_evidence.append(str(evidence["artifact"]))
+    free_percent = evidence.get("free_percent")
+    stop_free_percent = evidence.get("stop_free_percent")
+    readiness = (
+        f"free={free_percent}% stop={stop_free_percent}%"
+        if free_percent is not None and stop_free_percent is not None
+        else str(evidence.get("outcome") or "")
+    )
+    return {
+        "surface": "object-store",
+        "component": "minio-storage",
+        "expected_release": f"stop_free_percent={stop_free_percent}",
+        "expected_digest": "",
+        "live_release": _first_text(evidence.get("outcome")),
+        "live_digest": "",
+        "generation": "",
+        "readiness": readiness,
+        "restart_crash_reason": "" if check.outcome == "pass" else check.detail,
+        "evidence": row_evidence,
+        "outcome": check.outcome,
+        "detail": check.detail,
+    }
+
+
 def build_component_evidence_rows(report: ReleaseGateReport) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for check in report.checks:
@@ -1201,6 +1303,9 @@ def build_component_evidence_rows(report: ReleaseGateReport) -> list[dict[str, A
         if kubernetes_row is not None:
             rows.append(kubernetes_row)
         rows.extend(_environment_state_component_rows(check))
+        minio_storage_row = _minio_storage_component_row(check)
+        if minio_storage_row is not None:
+            rows.append(minio_storage_row)
     return rows
 
 

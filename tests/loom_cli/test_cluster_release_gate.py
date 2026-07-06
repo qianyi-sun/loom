@@ -858,6 +858,59 @@ def test_release_gate_passes_when_environment_state_check_is_clean() -> None:
     assert check.evidence["artifact"] == "environment-state-check-live-secrets.json"
 
 
+def test_release_gate_fails_when_minio_storage_preflight_stops() -> None:
+    report = collect_release_gate_report(
+        manifest=_manifest(),
+        apps_v1=_FakeAppsV1({
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+            ),
+        }),
+        core_v1=_FakeCoreV1([
+            _ready_pod(
+                name="loom-service-new",
+                app="loom-service",
+                image="loom-service:staging-abc123",
+                image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+            ),
+        ]),
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+        minio_storage_preflight_artifact={
+            "outcome": "stop",
+            "filesystem": {
+                "free_percent": 8.0,
+                "free_bytes": 8 * 1024**3,
+            },
+            "thresholds": {
+                "warn_free_percent": 25.0,
+                "stop_free_percent": 15.0,
+            },
+            "checks": [
+                {
+                    "name": "minio-data-free-space",
+                    "outcome": "stop",
+                    "detail": "free space 8.0% is below stop threshold 15.0%",
+                },
+            ],
+        },
+        minio_storage_preflight_path="minio-storage-preflight.json",
+    )
+
+    assert not report.all_pass
+    check = next(
+        check for check in report.checks
+        if check.name == "minio-storage-pressure"
+    )
+    assert check.outcome == "fail"
+    assert check.detail == "MinIO storage preflight reports stop"
+    assert check.evidence["artifact"] == "minio-storage-preflight.json"
+    assert check.evidence["free_percent"] == 8.0
+
+
 def test_release_gate_evidence_includes_autoscaler_blockers() -> None:
     blockers = [
         {
@@ -1397,3 +1450,67 @@ def test_cluster_release_gate_cli_passes_gb10_status_artifact(
         "nodes": [],
     }
     assert captured["gb10_workers_status_path"] == str(gb10_status_path.resolve())
+
+
+def test_cluster_release_gate_cli_passes_minio_storage_preflight_artifact(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    manifest_path = tmp_path / "release-manifest.json"
+    manifest_path.write_text(json.dumps(_manifest()), encoding="utf-8")
+    storage_path = tmp_path / "minio-storage-preflight.json"
+    storage_path.write_text(
+        json.dumps({
+            "outcome": "pass",
+            "filesystem": {"free_percent": 42.0, "free_bytes": 42 * 1024**3},
+            "thresholds": {"warn_free_percent": 25.0, "stop_free_percent": 15.0},
+            "checks": [],
+        }),
+        encoding="utf-8",
+    )
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._load_clients",
+        lambda _context: (object(), object(), object(), object()),
+    )
+
+    def _fake_collect_release_gate_report(**kwargs: Any) -> ReleaseGateReport:
+        captured.update(kwargs)
+        return ReleaseGateReport(
+            environment="staging",
+            namespace="loom",
+            checks=[
+                ReleaseGateCheck(
+                    name="minio-storage-pressure",
+                    outcome="pass",
+                    detail="MinIO storage preflight passed",
+                    evidence={},
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd.collect_release_gate_report",
+        _fake_collect_release_gate_report,
+    )
+
+    rc = main([
+        "cluster",
+        "release-gate",
+        "--manifest",
+        str(manifest_path),
+        "--namespace",
+        "loom",
+        "--environment",
+        "staging",
+        "--minio-storage-preflight",
+        str(storage_path),
+        "--dry-run",
+        "--format",
+        "json",
+    ])
+
+    assert rc == 0
+    assert captured["minio_storage_preflight_artifact"]["outcome"] == "pass"
+    assert captured["minio_storage_preflight_path"] == str(storage_path.resolve())
