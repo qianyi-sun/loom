@@ -113,6 +113,13 @@ Normal flow:
    `benchmark_score_alignment`, `worker_capacity_smoke`,
    `prod_beta_isolation`, `raw_delivery_export_status`, `rollback_plan`, and
    `release_owner_approval`.
+   The `prod_beta_isolation` record is not a link-only checkbox. It must embed
+   the dry-run identities the gate compares: production and development state
+   profiles, frontend routes/API bases, worker API URL, worker image and source
+   commit, and beta capacity lease status. Safe secret references such as
+   `github-environment:production/LOOM_SERVICE_API_TOKEN` are expected in
+   `secret_refs`; raw token, provider key, database password, MinIO credential,
+   signed URL, or bearer values are forbidden.
 7. Run the release gate workflow:
    ```bash
    base64_manifest="$(base64 < release-gate-input.json | tr -d '\n')"
@@ -131,8 +138,8 @@ Normal flow:
 11. Deploy production from `main` with the same candidate SHA, image tag, and
    release gate workflow run id. The production deploy preflight downloads the
    `release-gate-evidence` artifact, verifies the candidate/image match, scans
-   for leaked bearer/provider keys, signed URLs, internal service URLs, and
-   secret refs, and confirms the candidate SHA is an ancestor of the
+   for leaked bearer/provider keys, signed URLs, raw secret values, and
+   internal service URLs, and confirms the candidate SHA is an ancestor of the
    production ref before it can reach `loom cluster up`.
 
 Failed gate path: keep the release on `dev`, record the failing check and
@@ -656,7 +663,10 @@ knob you need.
 
    The report is safe to attach to release issues and PRs: secret-bearing input
    fields are omitted or redacted, and the output must not contain service
-   tokens, provider keys, signed URLs, MinIO credentials, or secret refs.
+   tokens, provider keys, signed URLs, MinIO credentials, or raw secret values.
+   Secret references are intentionally preserved so the production promotion
+   gate can prove prod uses production refs and public-beta/dev uses
+   development refs.
 
    If a public-beta rollout smoke needs temporary shared capacity, create a
    bounded beta lease in a separate desired-state file. First preview the
@@ -754,6 +764,12 @@ knob you need.
      --output-manifest "$ROLLOUT_DIR/worker-capacity-beta-released.toml" \
      --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-release.json"
    ```
+
+   A production promotion manifest must record the latest beta lease status in
+   `checks.prod_beta_isolation.beta_capacity`. The release gate requires
+   `beta_slots=0`, no active lease, and `new_beta_claims_allowed=false` unless
+   the same object includes an explicit override with `approved=true`, a
+   non-empty reason, and an HTTPS evidence URL.
 
    The `loom admin environment-state apply/check` commands above are
    idempotent and use the existing Control Plane admin APIs for worker-pool

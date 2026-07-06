@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -23,6 +24,108 @@ def _image_digests() -> dict[str, str]:
         "loom-service": "ghcr.io/qianyi-sun/loom-service@sha256:" + "3" * 64,
         "loom-worker": "ghcr.io/qianyi-sun/loom-worker@sha256:" + "4" * 64,
         "loom-web": "ghcr.io/qianyi-sun/loom-web@sha256:" + "5" * 64,
+    }
+
+
+def _prod_beta_isolation_evidence() -> dict[str, Any]:
+    return {
+        "status": "pass",
+        "url": "https://github.com/qianyi-sun/loom/issues/490#issuecomment-isolation-gate",
+        "state_profile_evidence": "release-evidence/prod-beta-state-profile.json",
+        "worker_identity_evidence": "release-evidence/prod-beta-worker-identity.json",
+        "frontend_api_base_evidence": "release-evidence/prod-beta-api-base.json",
+        "state_profiles": {
+            "production": {
+                "environment": "production",
+                "github_environment": "production",
+                "namespace": "loom-prod",
+                "database_name": "loom_prod",
+                "object_storage": {
+                    "task_bucket": "loom-prod-tasks",
+                    "trajectories_bucket": "loom-prod-trajectories",
+                    "artifacts_bucket": "loom-prod-artifacts",
+                },
+                "secret_refs": {
+                    "secret_store_key_ref": (
+                        "github-environment:production/LOOM_SECRET_STORE_MASTER_KEY"
+                    ),
+                    "service_api_token_ref": (
+                        "github-environment:production/LOOM_SERVICE_API_TOKEN"
+                    ),
+                    "worker_token_ref": "github-environment:production/LOOM_WORKER_TOKEN",
+                    "provider_secret_ref": (
+                        "github-environment:production/LOOM_PROVIDER_SECRET_REF"
+                    ),
+                    "yibuapi_secret_ref": "github-environment:production/YIBUAPI_API_KEY",
+                },
+                "provider_connection_namespace": "production",
+            },
+            "development": {
+                "environment": "development",
+                "github_environment": "development",
+                "namespace": "loom-dev",
+                "database_name": "loom_dev",
+                "object_storage": {
+                    "task_bucket": "loom-dev-tasks",
+                    "trajectories_bucket": "loom-dev-trajectories",
+                    "artifacts_bucket": "loom-dev-artifacts",
+                },
+                "secret_refs": {
+                    "secret_store_key_ref": (
+                        "github-environment:development/LOOM_SECRET_STORE_MASTER_KEY"
+                    ),
+                    "service_api_token_ref": (
+                        "github-environment:development/LOOM_SERVICE_API_TOKEN"
+                    ),
+                    "worker_token_ref": "github-environment:development/LOOM_WORKER_TOKEN",
+                    "provider_secret_ref": (
+                        "github-environment:development/LOOM_PROVIDER_SECRET_REF"
+                    ),
+                    "yibuapi_secret_ref": "github-environment:development/YIBUAPI_API_KEY",
+                },
+                "provider_connection_namespace": "development",
+            },
+        },
+        "frontend": {
+            "production": {
+                "route": "https://yylx.world/prod",
+                "api_base": "https://yylx.world/prod/api",
+                "environment_label": "Production",
+            },
+            "development": {
+                "route": "https://yylx.world/dev",
+                "api_base": "https://yylx.world/dev/api",
+                "environment_label": "Development / public beta",
+            },
+        },
+        "workers": {
+            "production": {
+                "environment": "production",
+                "api_url": "https://yylx.world/prod/api",
+                "image": "ghcr.io/qianyi-sun/loom-worker:release-0123456789ab",
+                "image_digest": "ghcr.io/qianyi-sun/loom-worker@sha256:" + "4" * 64,
+                "source_commit": _candidate_sha(),
+                "k8s_namespace": "loom-prod",
+                "k8s_deployment": "loom-prod-worker",
+            },
+            "development": {
+                "environment": "development",
+                "api_url": "https://yylx.world/dev/api",
+                "image": "ghcr.io/qianyi-sun/loom-worker:public-beta-abc1234",
+                "image_digest": "ghcr.io/qianyi-sun/loom-worker@sha256:" + "6" * 64,
+                "source_commit": "abcdef0123456789abcdef0123456789abcdef01",
+                "k8s_namespace": "loom-dev",
+                "k8s_deployment": "loom-dev-worker",
+            },
+        },
+        "beta_capacity": {
+            "lease_state": "none",
+            "beta_slots": 0,
+            "new_beta_claims_allowed": False,
+            "override": {
+                "approved": False,
+            },
+        },
     }
 
 
@@ -123,11 +226,7 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
             ],
         },
         "prod_beta_isolation": {
-            "status": "pass",
-            "url": "https://github.com/qianyi-sun/loom/issues/490#issuecomment-isolation-gate",
-            "state_profile_evidence": "release-evidence/prod-beta-state-profile.json",
-            "worker_identity_evidence": "release-evidence/prod-beta-worker-identity.json",
-            "frontend_api_base_evidence": "release-evidence/prod-beta-api-base.json",
+            **_prod_beta_isolation_evidence(),
         },
         "raw_delivery_export_status": {
             "status": "pass",
@@ -206,6 +305,12 @@ def test_release_gate_accepts_complete_manifest_and_writes_artifacts(tmp_path: P
     evidence = json.loads(json_out.read_text(encoding="utf-8"))
     assert evidence["status"] == "pass"
     assert evidence["candidate_sha"] == _candidate_sha()
+    isolation = evidence["checks"]["prod_beta_isolation"]
+    assert (
+        isolation["state_profiles"]["production"]["secret_refs"]["worker_token_ref"]
+        == "github-environment:production/LOOM_WORKER_TOKEN"
+    )
+    assert isolation["workers"]["production"]["source_commit"] == _candidate_sha()
     markdown = markdown_out.read_text(encoding="utf-8")
     assert "Release Gate Evidence" in markdown
     assert "v1.0.0" in markdown
@@ -216,6 +321,177 @@ def test_release_gate_accepts_complete_manifest_and_writes_artifacts(tmp_path: P
     assert "frontend_route_evidence" in markdown
     assert "prod_beta_isolation" in markdown
     assert "raw_delivery_export_status" in markdown
+
+
+@pytest.mark.parametrize(
+    ("seed_name", "mutate", "expected_error"),
+    [
+        (
+            "frontend_api_base",
+            lambda check: check["frontend"]["production"].update(
+                {"api_base": "https://yylx.world/dev/api"},
+            ),
+            "prod_beta_isolation.frontend.production.api_base",
+        ),
+        (
+            "worker_api_url",
+            lambda check: check["workers"]["development"].update(
+                {"api_url": "https://yylx.world/prod/api"},
+            ),
+            "prod_beta_isolation.workers.development.api_url",
+        ),
+        (
+            "worker_source",
+            lambda check: check["workers"]["production"].update(
+                {
+                    "source_commit": "abcdef0123456789abcdef0123456789abcdef01",
+                    "image": "ghcr.io/qianyi-sun/loom-worker:public-beta-abc1234",
+                },
+            ),
+            "prod_beta_isolation.workers.production.source_commit",
+        ),
+        (
+            "db_target",
+            lambda check: check["state_profiles"]["production"].update(
+                {"database_name": "loom_dev"},
+            ),
+            "prod_beta_isolation.state_profiles.production.database_name",
+        ),
+        (
+            "object_storage_target",
+            lambda check: check["state_profiles"]["production"]["object_storage"].update(
+                {"task_bucket": "loom-dev-tasks"},
+            ),
+            "prod_beta_isolation.state_profiles.production.object_storage.task_bucket",
+        ),
+        (
+            "token_refs",
+            lambda check: check["state_profiles"]["production"]["secret_refs"].update(
+                {
+                    "service_api_token_ref": (
+                        "github-environment:development/LOOM_SERVICE_API_TOKEN"
+                    ),
+                },
+            ),
+            "prod_beta_isolation.state_profiles.production.secret_refs.service_api_token_ref",
+        ),
+        (
+            "active_beta_lease",
+            lambda check: check["beta_capacity"].update(
+                {
+                    "lease_state": "active",
+                    "beta_slots": 2,
+                    "new_beta_claims_allowed": True,
+                },
+            ),
+            "prod_beta_isolation.beta_capacity requires beta_slots=0",
+        ),
+    ],
+)
+def test_release_gate_rejects_seeded_prod_beta_crossings(
+    tmp_path: Path,
+    seed_name: str,
+    mutate: Any,
+    expected_error: str,
+) -> None:
+    manifest = _passing_evidence()
+    check = manifest["checks"]["prod_beta_isolation"]
+    mutate(check)
+
+    result = _run_release_gate(
+        tmp_path,
+        manifest,
+        "validate",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "release-0123456789ab",
+    )
+
+    assert result.returncode == 1, seed_name
+    assert expected_error in result.stderr
+
+
+def test_release_gate_allows_documented_beta_lease_override(tmp_path: Path) -> None:
+    manifest = _passing_evidence()
+    manifest["checks"]["prod_beta_isolation"]["beta_capacity"].update(
+        {
+            "lease_state": "active",
+            "beta_slots": 1,
+            "new_beta_claims_allowed": True,
+            "override": {
+                "approved": True,
+                "reason": "Qianyi approved one running beta drain slot before prod promote",
+                "url": "https://github.com/qianyi-sun/loom/issues/490#issuecomment-override",
+            },
+        },
+    )
+
+    result = _run_release_gate(
+        tmp_path,
+        manifest,
+        "validate",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "release-0123456789ab",
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_release_gate_allows_shared_object_bucket_with_documented_prefix_policy(
+    tmp_path: Path,
+) -> None:
+    manifest = _passing_evidence()
+    check = manifest["checks"]["prod_beta_isolation"]
+    for profile in check["state_profiles"].values():
+        profile["object_storage"] = {
+            "task_bucket": "loom-shared-tasks",
+            "trajectories_bucket": "loom-shared-trajectories",
+            "artifacts_bucket": "loom-shared-artifacts",
+        }
+    check["state_profiles"]["production"]["object_storage"]["prefix_policy"] = {
+        "approved": True,
+        "production_prefix": "prod/",
+        "development_prefix": "dev/",
+        "url": "https://github.com/qianyi-sun/loom/issues/490#issuecomment-prefix-policy",
+    }
+
+    result = _run_release_gate(
+        tmp_path,
+        manifest,
+        "validate",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "release-0123456789ab",
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_release_gate_rejects_raw_secret_values_without_echoing_them(tmp_path: Path) -> None:
+    manifest = _passing_evidence()
+    raw_token = "sk-thisrawsecretmustnotappear1234567890"
+    manifest["checks"]["prod_beta_isolation"]["state_profiles"]["production"][
+        "operator_note"
+    ] = raw_token
+
+    result = _run_release_gate(
+        tmp_path,
+        manifest,
+        "validate",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "release-0123456789ab",
+    )
+
+    assert result.returncode == 1
+    assert "forbidden evidence value" in result.stderr
+    assert raw_token not in result.stderr
+    assert raw_token not in result.stdout
 
 
 def test_release_gate_rejects_missing_required_checks_and_secret_leaks(tmp_path: Path) -> None:

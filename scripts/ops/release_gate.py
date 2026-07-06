@@ -62,20 +62,64 @@ CANONICAL_FRONTEND_ROUTES = {
     "production_api_base": "https://yylx.world/prod/api",
     "development_api_base": "https://yylx.world/dev/api",
 }
+CANONICAL_STATE_IDENTITIES: dict[str, dict[str, Any]] = {
+    "production": {
+        "environment": "production",
+        "github_environment": "production",
+        "namespace": "loom-prod",
+        "database_name": "loom_prod",
+        "provider_connection_namespace": "production",
+        "object_storage": {
+            "task_bucket": "loom-prod-tasks",
+            "trajectories_bucket": "loom-prod-trajectories",
+            "artifacts_bucket": "loom-prod-artifacts",
+        },
+        "secret_ref_prefix": "github-environment:production/",
+    },
+    "development": {
+        "environment": "development",
+        "github_environment": "development",
+        "namespace": "loom-dev",
+        "database_name": "loom_dev",
+        "provider_connection_namespace": "development",
+        "object_storage": {
+            "task_bucket": "loom-dev-tasks",
+            "trajectories_bucket": "loom-dev-trajectories",
+            "artifacts_bucket": "loom-dev-artifacts",
+        },
+        "secret_ref_prefix": "github-environment:development/",
+    },
+}
+PROD_BETA_STORAGE_FIELDS = ("task_bucket", "trajectories_bucket", "artifacts_bucket")
+PROD_BETA_SECRET_REF_FIELDS = (
+    "secret_store_key_ref",
+    "service_api_token_ref",
+    "worker_token_ref",
+    "provider_secret_ref",
+    "yibuapi_secret_ref",
+)
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"(^|@)sha256:[0-9a-f]{64}$")
 URL_RE = re.compile(r"^https://[^\s]+$")
 PROD_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
-FORBIDDEN_PATTERNS = (
+URL_CREDENTIAL_RE = re.compile(r"://([^:/@\s]+):([^@\s]+)@")
+SECRET_VALUE_PATTERNS = (
     re.compile(r"authorization:\s*bearer", re.IGNORECASE),
     re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE),
     re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{10,}"),
     re.compile(r"\bghp_[A-Za-z0-9_]{10,}"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{10,}"),
+    re.compile(r"\bloom_(?:api|w)_[A-Za-z0-9._-]{8,}", re.IGNORECASE),
     re.compile(r"[?&](X-Amz-Signature|AWSAccessKeyId|Signature)=", re.IGNORECASE),
+    re.compile(
+        r"(?i)(token|api_key|access_key|secret|password|signature)=[^&\s]+",
+    ),
+    URL_CREDENTIAL_RE,
+)
+FORBIDDEN_PATTERNS = (
+    *SECRET_VALUE_PATTERNS,
     re.compile(r"\bloom://", re.IGNORECASE),
-    re.compile(r"\bgithub-environment:", re.IGNORECASE),
     re.compile(r"https?://loom-(minio|postgres|llm-gateway|control-plane)([:/.]|$)", re.IGNORECASE),
     re.compile(r"\.svc\.cluster\.local\b", re.IGNORECASE),
     re.compile(r"\bhost\.docker\.internal\b", re.IGNORECASE),
@@ -107,6 +151,38 @@ def _iter_strings(value: Any, path: str) -> list[tuple[str, str]]:
 
 def _is_non_empty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _as_dict(value: Any, path: str, errors: list[str]) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    errors.append(f"{path} must be an object")
+    return None
+
+
+def _string_value(value: Any, path: str, errors: list[str]) -> str | None:
+    if _is_non_empty_string(value):
+        return str(value)
+    errors.append(f"{path} must be a non-empty string")
+    return None
+
+
+def _bool_value(value: Any, path: str, errors: list[str], *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    errors.append(f"{path} must be a boolean")
+    return default
+
+
+def _int_value(value: Any, path: str, errors: list[str], *, default: int = 0) -> int:
+    if value is None:
+        return default
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    errors.append(f"{path} must be an integer")
+    return default
 
 
 def _validate_top_level(
@@ -184,6 +260,8 @@ def _validate_checks(manifest: dict[str, Any]) -> list[str]:
             errors.extend(_validate_score_positive_canary(check))
         if check_name == "frontend_route_evidence":
             errors.extend(_validate_frontend_route_evidence(check))
+        if check_name == "prod_beta_isolation":
+            errors.extend(_validate_prod_beta_isolation(check, manifest=manifest))
 
     return errors
 
@@ -264,6 +342,389 @@ def _validate_worker_capacity_smoke(check: dict[str, Any]) -> list[str]:
     return errors
 
 
+def _profiles_by_environment(check: dict[str, Any], errors: list[str]) -> dict[str, dict[str, Any]]:
+    raw_profiles = check.get("state_profiles")
+    if raw_profiles is None and isinstance(check.get("environment_isolation"), dict):
+        raw_profiles = check["environment_isolation"].get("profiles")
+
+    profiles: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_profiles, list):
+        for index, item in enumerate(raw_profiles):
+            if not isinstance(item, dict):
+                errors.append(f"prod_beta_isolation.state_profiles[{index}] must be an object")
+                continue
+            environment = item.get("environment")
+            if not _is_non_empty_string(environment):
+                errors.append(
+                    f"prod_beta_isolation.state_profiles[{index}].environment "
+                    "must be a non-empty string",
+                )
+                continue
+            profiles[str(environment)] = item
+    elif isinstance(raw_profiles, dict):
+        for key, item in raw_profiles.items():
+            if not isinstance(item, dict):
+                errors.append(f"prod_beta_isolation.state_profiles.{key} must be an object")
+                continue
+            profiles[str(key)] = item
+            environment = item.get("environment")
+            if _is_non_empty_string(environment):
+                profiles.setdefault(str(environment), item)
+    else:
+        errors.append("prod_beta_isolation.state_profiles must be an object or profile list")
+    return profiles
+
+
+def _environment_item(
+    items: dict[str, Any],
+    *,
+    environment: str,
+    aliases: tuple[str, ...],
+    path: str,
+    errors: list[str],
+) -> dict[str, Any] | None:
+    for key in (environment, *aliases):
+        value = items.get(key)
+        if isinstance(value, dict):
+            return value
+    for value in items.values():
+        if isinstance(value, dict) and value.get("environment") in (environment, *aliases):
+            return value
+    errors.append(f"{path}.{environment} must be present")
+    return None
+
+
+def _validate_prod_beta_isolation(
+    check: dict[str, Any],
+    *,
+    manifest: dict[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+    profiles = _profiles_by_environment(check, errors)
+    prod_profile = _environment_item(
+        profiles,
+        environment="production",
+        aliases=("prod",),
+        path="prod_beta_isolation.state_profiles",
+        errors=errors,
+    )
+    dev_profile = _environment_item(
+        profiles,
+        environment="development",
+        aliases=("dev", "public-beta", "public_beta", "beta"),
+        path="prod_beta_isolation.state_profiles",
+        errors=errors,
+    )
+    if prod_profile is not None and dev_profile is not None:
+        errors.extend(_validate_state_profiles(prod_profile, dev_profile))
+
+    frontend = _as_dict(check.get("frontend"), "prod_beta_isolation.frontend", errors)
+    if frontend is not None:
+        prod_frontend = _environment_item(
+            frontend,
+            environment="production",
+            aliases=("prod",),
+            path="prod_beta_isolation.frontend",
+            errors=errors,
+        )
+        dev_frontend = _environment_item(
+            frontend,
+            environment="development",
+            aliases=("dev", "public-beta", "public_beta", "beta"),
+            path="prod_beta_isolation.frontend",
+            errors=errors,
+        )
+        if prod_frontend is not None and dev_frontend is not None:
+            errors.extend(_validate_prod_beta_frontend(prod_frontend, dev_frontend))
+
+    workers = _as_dict(check.get("workers"), "prod_beta_isolation.workers", errors)
+    if workers is not None:
+        prod_worker = _environment_item(
+            workers,
+            environment="production",
+            aliases=("prod",),
+            path="prod_beta_isolation.workers",
+            errors=errors,
+        )
+        dev_worker = _environment_item(
+            workers,
+            environment="development",
+            aliases=("dev", "public-beta", "public_beta", "beta"),
+            path="prod_beta_isolation.workers",
+            errors=errors,
+        )
+        if prod_worker is not None and dev_worker is not None:
+            errors.extend(_validate_prod_beta_workers(prod_worker, dev_worker, manifest=manifest))
+
+    beta_capacity = _as_dict(
+        check.get("beta_capacity"),
+        "prod_beta_isolation.beta_capacity",
+        errors,
+    )
+    if beta_capacity is not None:
+        errors.extend(_validate_beta_capacity(beta_capacity))
+
+    return errors
+
+
+def _validate_state_profiles(
+    prod_profile: dict[str, Any],
+    dev_profile: dict[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+    for environment, profile in (("production", prod_profile), ("development", dev_profile)):
+        expected = CANONICAL_STATE_IDENTITIES[environment]
+        for field in (
+            "environment",
+            "github_environment",
+            "namespace",
+            "database_name",
+            "provider_connection_namespace",
+        ):
+            if profile.get(field) != expected[field]:
+                errors.append(
+                    f"prod_beta_isolation.state_profiles.{environment}.{field} "
+                    f"must be {expected[field]!r}",
+                )
+        _as_dict(
+            profile.get("object_storage"),
+            f"prod_beta_isolation.state_profiles.{environment}.object_storage",
+            errors,
+        )
+        secret_refs = _as_dict(
+            profile.get("secret_refs"),
+            f"prod_beta_isolation.state_profiles.{environment}.secret_refs",
+            errors,
+        )
+        if secret_refs is not None:
+            prefix = str(expected["secret_ref_prefix"])
+            for field in PROD_BETA_SECRET_REF_FIELDS:
+                ref = _string_value(
+                    secret_refs.get(field),
+                    f"prod_beta_isolation.state_profiles.{environment}.secret_refs.{field}",
+                    errors,
+                )
+                if ref is not None and not ref.startswith(prefix):
+                    errors.append(
+                        "prod_beta_isolation.state_profiles."
+                        f"{environment}.secret_refs.{field} must start with {prefix!r}",
+                    )
+
+    for field in ("database_name", "provider_connection_namespace", "namespace"):
+        if prod_profile.get(field) == dev_profile.get(field):
+            errors.append(
+                f"prod_beta_isolation.state_profiles.production.{field} "
+                "must differ from development",
+            )
+    prod_storage = prod_profile.get("object_storage")
+    dev_storage = dev_profile.get("object_storage")
+    if isinstance(prod_storage, dict) and isinstance(dev_storage, dict):
+        shared_with_prefix_policy = _has_explicit_prod_prefix_policy(prod_storage)
+        for environment, storage, peer_storage in (
+            ("production", prod_storage, dev_storage),
+            ("development", dev_storage, prod_storage),
+        ):
+            expected_storage = CANONICAL_STATE_IDENTITIES[environment]["object_storage"]
+            for field in PROD_BETA_STORAGE_FIELDS:
+                actual = storage.get(field)
+                expected = expected_storage[field]
+                shared_with_peer = actual == peer_storage.get(field)
+                if actual == expected:
+                    continue
+                if shared_with_peer and shared_with_prefix_policy:
+                    continue
+                errors.append(
+                    "prod_beta_isolation.state_profiles."
+                    f"{environment}.object_storage.{field} must be {expected!r} "
+                    "or shared with an approved prod prefix policy",
+                )
+                if environment == "production" and shared_with_peer:
+                    errors.append(
+                        "prod_beta_isolation.state_profiles.production.object_storage."
+                        f"{field} must differ from development or declare an approved "
+                        "prod prefix policy",
+                    )
+    prod_refs = prod_profile.get("secret_refs")
+    dev_refs = dev_profile.get("secret_refs")
+    if isinstance(prod_refs, dict) and isinstance(dev_refs, dict):
+        for field in PROD_BETA_SECRET_REF_FIELDS:
+            if prod_refs.get(field) == dev_refs.get(field):
+                errors.append(
+                    f"prod_beta_isolation.state_profiles.production.secret_refs.{field} "
+                    "must differ from development",
+                )
+    return errors
+
+
+def _has_explicit_prod_prefix_policy(storage: dict[str, Any]) -> bool:
+    policy = storage.get("prefix_policy")
+    if not isinstance(policy, dict):
+        return False
+    prod_prefix = policy.get("production_prefix")
+    dev_prefix = policy.get("development_prefix")
+    return (
+        policy.get("approved") is True
+        and _is_non_empty_string(prod_prefix)
+        and _is_non_empty_string(dev_prefix)
+        and prod_prefix != dev_prefix
+        and "prod" in str(prod_prefix).lower()
+    )
+
+
+def _validate_prod_beta_frontend(
+    prod_frontend: dict[str, Any],
+    dev_frontend: dict[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+    checks = (
+        ("route", "production_route"),
+        ("api_base", "production_api_base"),
+    )
+    for field, canonical_key in checks:
+        expected = CANONICAL_FRONTEND_ROUTES[canonical_key]
+        if prod_frontend.get(field) != expected:
+            errors.append(
+                f"prod_beta_isolation.frontend.production.{field} must be {expected}",
+            )
+    dev_expected = {
+        "route": CANONICAL_FRONTEND_ROUTES["development_route"],
+        "api_base": CANONICAL_FRONTEND_ROUTES["development_api_base"],
+    }
+    for field, expected in dev_expected.items():
+        if dev_frontend.get(field) != expected:
+            errors.append(
+                f"prod_beta_isolation.frontend.development.{field} must be {expected}",
+            )
+    if prod_frontend.get("route") == dev_frontend.get("route"):
+        errors.append("prod_beta_isolation.frontend production and development routes must differ")
+    if prod_frontend.get("api_base") == dev_frontend.get("api_base"):
+        errors.append(
+            "prod_beta_isolation.frontend production and development API bases must differ",
+        )
+    prod_label = prod_frontend.get("environment_label")
+    if isinstance(prod_label, str) and "beta" in prod_label.lower():
+        errors.append("prod_beta_isolation.frontend.production.environment_label must not contain beta")
+    return errors
+
+
+def _validate_prod_beta_workers(
+    prod_worker: dict[str, Any],
+    dev_worker: dict[str, Any],
+    *,
+    manifest: dict[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+    if prod_worker.get("environment") != "production":
+        errors.append("prod_beta_isolation.workers.production.environment must be 'production'")
+    dev_environment = dev_worker.get("environment")
+    if dev_environment not in {"development", "dev", "public-beta", "public_beta", "beta"}:
+        errors.append("prod_beta_isolation.workers.development.environment must identify dev/beta")
+
+    prod_api = prod_worker.get("api_url")
+    dev_api = dev_worker.get("api_url")
+    if prod_api != CANONICAL_FRONTEND_ROUTES["production_api_base"]:
+        errors.append(
+            "prod_beta_isolation.workers.production.api_url must be "
+            f"{CANONICAL_FRONTEND_ROUTES['production_api_base']}",
+        )
+    if dev_api != CANONICAL_FRONTEND_ROUTES["development_api_base"]:
+        errors.append(
+            "prod_beta_isolation.workers.development.api_url must be "
+            f"{CANONICAL_FRONTEND_ROUTES['development_api_base']}",
+        )
+    if prod_api == dev_api:
+        errors.append("prod_beta_isolation.workers production and development api_url must differ")
+
+    candidate_sha = manifest.get("candidate_sha")
+    source_commit = prod_worker.get("source_commit")
+    if source_commit != candidate_sha:
+        errors.append(
+            "prod_beta_isolation.workers.production.source_commit must match "
+            "candidate_sha",
+        )
+    elif not isinstance(source_commit, str) or not SHA_RE.fullmatch(source_commit):
+        errors.append("prod_beta_isolation.workers.production.source_commit must be a git SHA")
+
+    image_tag = manifest.get("image_tag")
+    worker_digest = None
+    image_digests = manifest.get("image_digests")
+    if isinstance(image_digests, dict):
+        worker_digest = image_digests.get("loom-worker")
+    image = prod_worker.get("image")
+    image_digest = prod_worker.get("image_digest")
+    if worker_digest is not None and image_digest != worker_digest:
+        errors.append(
+            "prod_beta_isolation.workers.production.image_digest must match "
+            "image_digests.loom-worker",
+        )
+    if isinstance(image, str) and isinstance(image_tag, str) and image_tag not in image:
+        errors.append(
+            "prod_beta_isolation.workers.production.image must reference image_tag",
+        )
+    if isinstance(image, str) and re.search(r"(public-beta|:dev\b|/dev\b)", image, re.IGNORECASE):
+        errors.append("prod_beta_isolation.workers.production.image must not be a dev/beta image")
+    if prod_worker.get("k8s_namespace") != "loom-prod":
+        errors.append("prod_beta_isolation.workers.production.k8s_namespace must be 'loom-prod'")
+    if dev_worker.get("k8s_namespace") == "loom-prod":
+        errors.append("prod_beta_isolation.workers.development.k8s_namespace must not be loom-prod")
+    return errors
+
+
+def _validate_beta_capacity(beta_capacity: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    lease_state = beta_capacity.get("lease_state")
+    lease = beta_capacity.get("lease")
+    if lease_state is None and isinstance(lease, dict):
+        lease_state = lease.get("state")
+    if lease_state is None:
+        lease_state = "none"
+    if not isinstance(lease_state, str) or not lease_state:
+        errors.append("prod_beta_isolation.beta_capacity.lease_state must be a non-empty string")
+        lease_state = "invalid"
+    lease_state_normalized = str(lease_state).lower()
+    beta_slots = _int_value(
+        beta_capacity.get("beta_slots")
+        if beta_capacity.get("beta_slots") is not None
+        else (
+            beta_capacity.get("summary", {}).get("beta_slots")
+            if isinstance(beta_capacity.get("summary"), dict)
+            else None
+        ),
+        "prod_beta_isolation.beta_capacity.beta_slots",
+        errors,
+        default=0,
+    )
+    new_claims_allowed = _bool_value(
+        beta_capacity.get("new_beta_claims_allowed"),
+        "prod_beta_isolation.beta_capacity.new_beta_claims_allowed",
+        errors,
+        default=False,
+    )
+    blocking_lease = (
+        lease_state_normalized in {"active", "leased", "draining"}
+        or beta_slots != 0
+        or new_claims_allowed
+    )
+    if blocking_lease and not _has_documented_beta_override(beta_capacity):
+        errors.append(
+            "prod_beta_isolation.beta_capacity requires beta_slots=0 and no active "
+            "beta lease unless override.approved includes reason and url",
+        )
+    return errors
+
+
+def _has_documented_beta_override(beta_capacity: dict[str, Any]) -> bool:
+    override = beta_capacity.get("override")
+    if not isinstance(override, dict):
+        return False
+    return (
+        override.get("approved") is True
+        and _is_non_empty_string(override.get("reason"))
+        and isinstance(override.get("url"), str)
+        and URL_RE.fullmatch(str(override["url"])) is not None
+    )
+
+
 def _validate_no_leaks(manifest: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     for path, value in _iter_strings(manifest, ""):
@@ -272,6 +733,24 @@ def _validate_no_leaks(manifest: dict[str, Any]) -> list[str]:
                 errors.append(f"forbidden evidence value at {path}")
                 break
     return errors
+
+
+def _redact_string(value: str) -> str:
+    redacted = value
+    for pattern in SECRET_VALUE_PATTERNS:
+        replacement = "://<redacted>@" if pattern is URL_CREDENTIAL_RE else "<redacted>"
+        redacted = pattern.sub(replacement, redacted)
+    return redacted
+
+
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact_string(value)
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _redact_value(child) for key, child in value.items()}
+    return value
 
 
 def validate_manifest(
@@ -294,7 +773,7 @@ def _evidence_report(manifest: dict[str, Any]) -> dict[str, Any]:
         "prod_tag": manifest["prod_tag"],
         "staging_url": manifest["staging_url"],
         "image_digests": manifest["image_digests"],
-        "checks": manifest["checks"],
+        "checks": _redact_value(manifest["checks"]),
     }
 
 

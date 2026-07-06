@@ -613,6 +613,15 @@ uv run python scripts/ops/worker_capacity_manifest.py release-beta \
   --evidence-out "$ROLLOUT_DIR/worker-capacity-beta-release.json"
 ```
 
+Before production promotion, copy the latest `status`, `drain-beta`, or
+`release-beta` summary into the release-promotion manifest under
+`checks.prod_beta_isolation.beta_capacity`. The production gate accepts
+`lease_state=none`, `released`, or an expired/drained state only when
+`beta_slots=0` and `new_beta_claims_allowed=false`. Any active beta lease,
+remaining beta slot, or open beta claims fail promotion unless the same object
+contains a documented override with `approved=true`, a reason, and an HTTPS
+approval/evidence URL.
+
 ## GB10 Node-Agent Compatibility Lifecycle
 
 Normal GB10 capacity should be managed through the Slurm autoscaler policy
