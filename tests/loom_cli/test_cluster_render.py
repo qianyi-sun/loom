@@ -766,6 +766,31 @@ def test_render_static_host_path_storage_binds_critical_state_to_retain_pvs() ->
     )
 
 
+def test_render_static_host_path_keeps_worker_trajectories_pvc_when_worker_disabled() -> None:
+    cfg = ClusterConfig(
+        namespace="loom-staging",
+        persistent_storage_backend="static-host-path",
+        persistent_storage_host_path_root="/data/loom-staging",
+    )
+
+    docs = _load_docs(render_manifests(cfg))
+    kinds_names = {(d["kind"], d["metadata"]["name"]) for d in docs}
+
+    assert ("Deployment", "loom-worker") not in kinds_names
+    assert ("NetworkPolicy", "loom-worker") not in kinds_names
+    assert ("PersistentVolumeClaim", "loom-worker-trajectories") in kinds_names
+
+    worker_pvc = next(
+        d for d in docs
+        if d["kind"] == "PersistentVolumeClaim"
+        and d["metadata"]["name"] == "loom-worker-trajectories"
+    )
+    assert worker_pvc["spec"]["storageClassName"] == ""
+    assert worker_pvc["spec"]["volumeName"] == (
+        "loom-staging-worker-trajectories-data"
+    )
+
+
 def test_render_rejects_unknown_persistent_storage_backend() -> None:
     cfg = ClusterConfig(persistent_storage_backend="local-path")
     with pytest.raises(ValueError, match="persistent_storage_backend"):
@@ -928,10 +953,10 @@ def test_default_config_disables_k8s_worker() -> None:
 
 
 def test_render_omits_worker_deployment_when_disabled() -> None:
-    """Rendering with k8s_worker.enabled=false must omit the whole
-    loom-worker Deployment + trajectories PVC + worker NetworkPolicy,
-    not merely scale it to zero replicas — belt-and-suspenders against
-    `kubectl scale` drift."""
+    """Default dynamic rendering with k8s_worker.enabled=false must omit
+    the whole loom-worker Deployment + trajectories PVC + worker
+    NetworkPolicy, not merely scale it to zero replicas — belt-and-
+    suspenders against `kubectl scale` drift."""
     docs = _load_docs(render_manifests(ClusterConfig()))
     kinds_names = {(d["kind"], d["metadata"]["name"]) for d in docs}
     assert ("Deployment", "loom-worker") not in kinds_names

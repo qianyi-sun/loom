@@ -302,6 +302,10 @@ artifact-retention or teardown decision, using the protected-environment backup
 and acknowledgement flow required for destructive PVC operations. If a disabled
 profile still has live/Ready `app=loom-worker` pods after `cluster up`, the
 release gate must fail until the stale Deployment and NetworkPolicy are gone.
+For protected `static-host-path` profiles, the renderer still emits the
+`loom-worker-trajectories` PVC even when `k8s_worker.enabled=false`, so
+preflight can verify that the Retain PV/PVC boundary exists before any apply
+continues.
 
 ## At-a-glance: deploy a fresh cluster
 

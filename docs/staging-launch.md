@@ -262,6 +262,12 @@ set of classified pods before one readiness retry. If that retry fails, keep
 the evidence and inspect kind/containerd/kubelet instead of deleting unrelated
 pods or skipping the storage/backup guards.
 
+When staging uses `static-host-path` storage with `k8s_worker.enabled=false`,
+the render still includes `persistentvolumeclaim/loom-worker-trajectories`.
+The disabled-worker profile removes only in-cluster worker compute/network
+resources; the retained trajectory PVC remains part of the protected storage
+boundary checked before rollout mutation.
+
 After `loom cluster up` reaches readiness, run the hard convergence gate against
 the same saved inputs:
 
