@@ -202,6 +202,16 @@ class Trial:
                             ),
                             dns=tuple(self.ctx.task_config.environment.dns),
                             tmpfs=tuple(self.ctx.task_config.environment.tmpfs),
+                            labels=tuple(
+                                sorted(
+                                    {
+                                        "loom.trial-container": "true",
+                                        "loom.trial_id": str(self.ctx.trial_id),
+                                        "loom.team_id": str(self.ctx.team_id),
+                                        "loom.task_id": self.ctx.task_id,
+                                    }.items()
+                                )
+                            ),
                         )
                     )
                     driver_started = True

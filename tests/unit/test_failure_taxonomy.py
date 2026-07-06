@@ -111,6 +111,13 @@ def test_reward_zero_is_score_failure_not_platform_failure() -> None:
             False,
         ),
         (
+            "node_setup_health",
+            "platform_failure",
+            "platform_setup",
+            "operator_approval",
+            False,
+        ),
+        (
             "task_image_build_failed",
             "task_failure",
             "task_image_build",

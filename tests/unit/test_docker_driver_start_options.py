@@ -160,3 +160,53 @@ async def test_docker_driver_passes_api_timeout_to_docker_client(
 
     assert from_env_timeouts == [900.0]
     assert container.started is True
+
+
+async def test_docker_driver_passes_labels_to_container_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    create_kwargs: dict[str, Any] = {}
+    container = _FakeContainer()
+
+    class _Containers:
+        def create(self, image: str, **kwargs: Any) -> object:
+            create_kwargs["image"] = image
+            create_kwargs.update(kwargs)
+            return container
+
+    class _Client:
+        containers = _Containers()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(docker_module.docker, "from_env", lambda: _Client())
+    monkeypatch.setattr(DockerDriver, "_ensure_image", lambda self, opts: None)
+
+    async def _noop_wait(self: DockerDriver) -> None:
+        return None
+
+    async def _noop_policy(self: DockerDriver, policy: object) -> None:
+        return None
+
+    monkeypatch.setattr(DockerDriver, "_wait_until_running", _noop_wait)
+    monkeypatch.setattr(DockerDriver, "set_network_policy", _noop_policy)
+
+    driver = DockerDriver(
+        image="loom-agent-sandbox:dev",
+        workspace=PurePosixPath("/workspace"),
+    )
+    await driver.start(
+        options=StartOptions(
+            labels=(
+                ("loom.trial-container", "true"),
+                ("loom.trial_id", "00000000-0000-0000-0000-000000000001"),
+            ),
+        )
+    )
+
+    assert create_kwargs["labels"] == {
+        "loom.trial-container": "true",
+        "loom.trial_id": "00000000-0000-0000-0000-000000000001",
+    }
+    assert container.started is True

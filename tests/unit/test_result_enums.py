@@ -25,6 +25,10 @@ def test_failure_reason_includes_task_image_build_timeout():
     assert FailureReason.TASK_IMAGE_BUILD_TIMEOUT.value == "task_image_build_timeout"
 
 
+def test_failure_reason_includes_node_setup_health():
+    assert FailureReason.NODE_SETUP_HEALTH.value == "node_setup_health"
+
+
 def test_failure_reason_includes_provider_transport_disconnect():
     assert (
         FailureReason.PROVIDER_TRANSPORT_DISCONNECT.value

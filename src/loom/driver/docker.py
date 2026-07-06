@@ -137,6 +137,8 @@ class DockerDriver:
                 run_kwargs["dns"] = list(opts.dns)
             if opts.tmpfs:
                 run_kwargs["tmpfs"] = _tmpfs_specs_to_docker_map(opts.tmpfs)
+            if opts.labels:
+                run_kwargs["labels"] = dict(opts.labels)
             # docker-py's high-level containers.run() creates before it starts,
             # but it does not return the Container if start() raises. Split the
             # steps so the failure cleanup path can remove Created containers.

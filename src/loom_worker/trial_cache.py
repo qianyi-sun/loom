@@ -45,8 +45,8 @@ from docker.errors import APIError, BuildError, ImageNotFound, NotFound
 if TYPE_CHECKING:
     from loom_launcher.adapter import AgentAdapter
 
-    from loom_worker.config import WorkerSettings
-    from loom_worker.control_plane_client import HttpControlPlaneClient
+from loom_worker.config import WorkerSettings
+from loom_worker.control_plane_client import HttpControlPlaneClient
 
 logger = logging.getLogger(__name__)
 
@@ -350,6 +350,7 @@ async def _daemon_build_slot(
     worker_id: UUID,
     *,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    read_setup_health: Callable[[], Any] | None = None,
 ) -> AsyncIterator[str]:
     """Limit concurrent docker builds against a shared host daemon.
 
@@ -358,6 +359,20 @@ async def _daemon_build_slot(
     prevents different cold cache keys from hammering the same Docker
     daemon with concurrent apt/build setup containers.
     """
+    from loom_worker.setup_admission import (
+        policy_from_settings,
+        read_node_health_snapshot,
+        wait_for_setup_health,
+    )
+
+    policy = policy_from_settings(settings)
+    read_snapshot = read_setup_health or read_node_health_snapshot
+    await wait_for_setup_health(
+        policy=policy,
+        operation="setup-build",
+        read_snapshot=read_snapshot,
+        sleep=sleep,
+    )
     slot_keys = _daemon_build_slot_keys(settings)
     ttl_sec = settings.trial_cache_build_lock_timeout_sec
     slot_key = await _claim_any_trial_cache_slot(
@@ -379,6 +394,17 @@ async def _daemon_build_slot(
                 slot_key = candidate
                 break
 
+    try:
+        await wait_for_setup_health(
+            policy=policy,
+            operation="setup-build",
+            read_snapshot=read_snapshot,
+            sleep=sleep,
+        )
+    except Exception:
+        with contextlib.suppress(Exception):
+            await cp_client.release_trial_cache_slot(slot_key, worker_id)
+        raise
     logger.info(
         "trial_cache daemon build slot acquired slot=%s max_concurrent=%d",
         slot_key,

@@ -56,6 +56,15 @@ def test_setup_failure_classifier_recognizes_preflight_task_compatibility() -> N
     assert ml._classify_setup_failure(detail) == FailureReason.TASK_COMPATIBILITY
 
 
+def test_setup_failure_classifier_recognizes_node_health_guard() -> None:
+    detail = (
+        "SETUP_ADMISSION_BLOCKED reason=node_io_pressure "
+        "operation=trial-cache-build io.full.avg10=76.15 max=50.0"
+    )
+
+    assert ml._classify_setup_failure(detail) == FailureReason.NODE_SETUP_HEALTH
+
+
 async def test_setup_failure_patch_uses_task_image_build_timeout_reason() -> None:
     cp = _FakeCPClient()
     trial_id = uuid4()

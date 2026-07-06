@@ -78,6 +78,18 @@ spec:
           value: '600'
         - name: LOOM_WORKER_SANDBOX_WORKER_INDEX
           value: '0'
+        - name: LOOM_WORKER_SETUP_HEALTH_DSTATE_MAX
+          value: '32'
+        - name: LOOM_WORKER_SETUP_HEALTH_GUARD_ENABLED
+          value: 'True'
+        - name: LOOM_WORKER_SETUP_HEALTH_IO_FULL_AVG10_MAX
+          value: '50.0'
+        - name: LOOM_WORKER_SETUP_HEALTH_MIN_SWAP_FREE_MB
+          value: '1024'
+        - name: LOOM_WORKER_SETUP_HEALTH_POLL_INTERVAL_SEC
+          value: '5.0'
+        - name: LOOM_WORKER_SETUP_HEALTH_WAIT_TIMEOUT_SEC
+          value: '300.0'
         - name: LOOM_WORKER_STORAGE_AUTH_KIND
           value: 'static_keys'
         - name: LOOM_WORKER_STORAGE_BACKEND
