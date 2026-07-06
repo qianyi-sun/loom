@@ -187,3 +187,69 @@ class TestQuotaCheckLogic:
                 session, team_id=uuid4(), default_max_count=50,
             )
         assert exc_info.value.status_code == 429
+
+
+class TestTeamStorageBytes:
+    """Tests for team storage accounting helpers."""
+
+    def test_prefix_storage_bytes_sums_object_sizes(self) -> None:
+        from loom.taskset.storage_bytes import prefix_storage_bytes
+
+        client = MagicMock()
+        client.get_paginator.return_value.paginate.return_value = [
+            {"Contents": [{"Size": 100}, {"Size": 250}]},
+            {"Contents": [{"Size": 50}]},
+        ]
+        total = prefix_storage_bytes(
+            client,
+            bucket="artifacts",
+            prefix="tasksets/user/abc/slug/",
+        )
+        assert total == 400
+
+    def test_team_storage_baseline_excludes_current_task_set(self) -> None:
+        from loom.taskset.storage_bytes import team_storage_baseline_excluding_task_set
+
+        client = MagicMock()
+        client.get_paginator.return_value.paginate.side_effect = [
+            [{"Contents": [{"Size": 1000}, {"Size": 500}]}],
+            [{"Contents": [{"Size": 500}]}],
+        ]
+        baseline = team_storage_baseline_excluding_task_set(
+            client,
+            bucket="artifacts",
+            team_id="team-1",
+            slug="my-set",
+        )
+        assert baseline == 1000
+
+
+class TestStorageQuotaCheckLogic:
+    """Tests for team storage quota enforcement at submit."""
+
+    @pytest.mark.asyncio
+    async def test_storage_quota_rejects_when_at_limit(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from fastapi import HTTPException
+
+        from loom_service.taskset_intake import check_taskset_storage_quota
+
+        session = AsyncMock()
+        session.execute = AsyncMock(
+            return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
+        )
+        with patch(
+            "loom_service.taskset_intake.team_taskset_storage_bytes",
+            return_value=21_474_836_480,
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await check_taskset_storage_quota(
+                    session,
+                    team_id=uuid4(),
+                    minio_client=MagicMock(),
+                    artifacts_bucket="artifacts",
+                    default_max_storage_bytes=21_474_836_480,
+                )
+        assert exc_info.value.status_code == 429
+        assert exc_info.value.detail == "taskset_storage_quota_exceeded"

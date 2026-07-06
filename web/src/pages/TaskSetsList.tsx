@@ -25,7 +25,7 @@ function taskSetStatusVariant(status: string): StatusVariant {
 }
 
 function capabilityLabel(item: TaskSetListItem): string {
-  if (item.evaluation_ready && item.intents.includes("data_production")) {
+  if (item.evaluation_ready && item.intents.includes("trajectory_generation")) {
     return "both";
   }
   if (item.evaluation_ready) return "evaluation-ready";

@@ -6,6 +6,7 @@ Jobs remain ``queued`` after successful POST until that worker ships.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import tempfile
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ from loom.models.taskset import (
     task_set_id_for,
 )
 from loom.taskset.intents import IntentWarning, normalize_intents
+from loom.taskset.storage_bytes import team_taskset_storage_bytes
 
 _ACTIVE_JOB_STATES = frozenset({"queued", "claimed", "running"})
 _PATH_TRAVERSAL = re.compile(r"(^|[/\\])\.\.([/\\]|$)|(^|[/\\])\.\.?$")
@@ -166,6 +168,37 @@ async def _upload_file_object_with_size_cap(
         )
 
 
+async def check_taskset_storage_quota(
+    session: AsyncSession,
+    *,
+    team_id: UUID,
+    minio_client: Any,
+    artifacts_bucket: str,
+    default_max_storage_bytes: int,
+) -> None:
+    """Reject if team TaskSet blob storage is already at the configured cap."""
+    quota_row = (await session.execute(
+        select(TeamQuota).where(TeamQuota.team_id == team_id),
+    )).scalar_one_or_none()
+    max_storage = (
+        quota_row.taskset_max_storage_bytes
+        if quota_row is not None and quota_row.taskset_max_storage_bytes is not None
+        else default_max_storage_bytes
+    )
+
+    team_bytes = await asyncio.to_thread(
+        team_taskset_storage_bytes,
+        minio_client,
+        bucket=artifacts_bucket,
+        team_id=team_id,
+    )
+    if team_bytes >= max_storage:
+        raise HTTPException(
+            status_code=429,
+            detail="taskset_storage_quota_exceeded",
+        )
+
+
 async def check_taskset_count_quota(
     session: AsyncSession,
     *,
@@ -207,11 +240,19 @@ async def submit_task_set(
     transform_upload: UploadFile | None,
     bundle_upload: UploadFile | None = None,
     taskset_quota_max_count: int = 50,
+    taskset_quota_max_storage_bytes: int = 21_474_836_480,
     manifest_max_bytes: int = 1_048_576,
     bundle_max_bytes: int = 5_368_709_120,
 ) -> TaskSetIntakeResult:
     await check_taskset_count_quota(
         session, team_id=team_id, default_max_count=taskset_quota_max_count,
+    )
+    await check_taskset_storage_quota(
+        session,
+        team_id=team_id,
+        minio_client=minio_client,
+        artifacts_bucket=artifacts_bucket,
+        default_max_storage_bytes=taskset_quota_max_storage_bytes,
     )
     manifest_model, raw_manifest = await parse_manifest_upload(
         manifest_upload,

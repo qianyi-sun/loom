@@ -18,7 +18,7 @@ from tests.integration.taskset_fixtures import _manifest_bytes
 )
 @pytest.mark.asyncio
 async def test_cross_team_endpoint_returns_404(
-    tasksets_setup,
+    tasksets_setup,  # noqa: F811
     method: str,
     path_suffix: str,
 ) -> None:

@@ -533,6 +533,8 @@ def materialize_task_set(
     artifacts_bucket: str,
     upstream_cache_root: Path,
     max_bundle_bytes: int | None = None,
+    team_storage_baseline: int = 0,
+    max_team_storage_bytes: int | None = None,
 ) -> MaterializeOutput:
     """Materialize one TaskSet synchronously. Caller owns DB writes."""
     slug = manifest.slug
@@ -683,6 +685,14 @@ def materialize_task_set(
                         cumulative_bytes=cumulative_bytes,
                         max_bundle_bytes=max_bundle_bytes,
                     )
+                    if (
+                        max_team_storage_bytes is not None
+                        and team_storage_baseline + cumulative_bytes > max_team_storage_bytes
+                    ):
+                        raise _BundleSizeExceededError(
+                            team_storage_baseline + cumulative_bytes,
+                            max_team_storage_bytes,
+                        )
                 source = f"s3://{artifacts_bucket}/{bundle_prefix}/"
                 drafts.append(
                     TaskRowDraft(
