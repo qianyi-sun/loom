@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Public invite-only beta smoke gate.
+"""Staging invite-only smoke gate.
 
 This script verifies the public API and Run Library release boundary against a
 staging deployment. Browser-only invite acceptance and SPA submission still
