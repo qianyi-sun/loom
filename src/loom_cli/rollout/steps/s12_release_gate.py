@@ -105,7 +105,7 @@ def _image_identities_from_inspect(
 
 
 class ReleaseGateStep(SubcommandStep):
-    number = 12
+    number = 13
     name = "release-gate"
 
     def _inputs_fingerprint(self, ctx: RolloutContext) -> dict[str, object]:

@@ -58,6 +58,7 @@ class TestDefaultStepSequence:
             "migrate",
             "env-state",
             "cluster-up",
+            "production-defaults",
             "release-gate",
             "smoke",
             "summary",
@@ -78,7 +79,7 @@ class TestDefaultStepSequence:
         env_state_dir = ev.step_dir(10, "env-state")
         env_state_dir.path.mkdir(parents=True, exist_ok=True)
         env_state_dir.artifact_path("environment-state-check.json").write_text("{}")
-        gb10_dir = ev.step_dir(12, "release-gate")
+        gb10_dir = ev.step_dir(13, "release-gate")
         gb10_dir.path.mkdir(parents=True, exist_ok=True)
 
         argv = list(ReleaseGateStep().argv(ctx, gb10_dir))

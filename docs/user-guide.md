@@ -1106,9 +1106,10 @@ loom admin rate-cards sync-yibuapi
 
 Self-deployed provider connections should usually remain `tokens-only`,
 which records tokens but leaves dollar cost as not applicable. Hosted YibuAPI
-connections that use the synced rate card return per-trial, per-batch, and
-admin usage costs; self-deployed/private APIs return token totals and usage
-confidence without inventing a dollar amount.
+connections that use the synced rate card and `pricing_source=rate-card` with
+`rate_card_provider=yibuapi` return per-trial, per-batch, and admin usage
+costs; self-deployed/private APIs return token totals and usage confidence
+without inventing a dollar amount.
 When inspecting a main production batch plus linked supplemental reruns, pass
 `batch_id=<main-batch-id>&include_batch_family=true` to `/api/v1/usage` or use
 `loom eval usage --batch-id <main-batch-id> --include-batch-family`. Add

@@ -77,6 +77,19 @@ def _validate_pricing_both_or_neither(
             "interdependent (both or neither).\n",
         )
         return 2
+    pricing_source = getattr(args, "pricing_source", None)
+    if pricing_source in {"rate-card", "tokens-only"} and (has_in or has_out):
+        sys.stderr.write(
+            "error: --input-usd-per-1m/--output-usd-per-1m can only be "
+            "used with pricing_source='operator-supplied'.\n",
+        )
+        return 2
+    if pricing_source == "operator-supplied" and not (has_in and has_out):
+        sys.stderr.write(
+            "error: --pricing-source operator-supplied requires "
+            "--input-usd-per-1m and --output-usd-per-1m.\n",
+        )
+        return 2
     return None
 
 
@@ -191,11 +204,13 @@ def _create(args: argparse.Namespace) -> int:
             payload["allowed_models"] = args.allowed_models
         if args.rate_card_provider is not None:
             payload["rate_card_provider"] = args.rate_card_provider
+        if args.pricing_source is not None:
+            payload["pricing_source"] = args.pricing_source
         pricing_data = _pricing_dict_or_none(
             args.input_usd_per_1m, args.output_usd_per_1m,
         )
         if pricing_data is not None:
-            payload["pricing_source"] = "operator-supplied"
+            payload["pricing_source"] = args.pricing_source or "operator-supplied"
             payload["pricing_data"] = pricing_data
 
         with authed_client(cfg) as c:
@@ -273,18 +288,20 @@ def _update(args: argparse.Namespace) -> int:
             patch["allowed_models"] = args.allowed_models
         if args.rate_card_provider is not None:
             patch["rate_card_provider"] = args.rate_card_provider
+        if args.pricing_source is not None:
+            patch["pricing_source"] = args.pricing_source
         pricing_data = _pricing_dict_or_none(
             args.input_usd_per_1m, args.output_usd_per_1m,
         )
         if pricing_data is not None:
-            patch["pricing_source"] = "operator-supplied"
+            patch["pricing_source"] = args.pricing_source or "operator-supplied"
             patch["pricing_data"] = pricing_data
 
         if not patch:
             sys.stderr.write(
                 "error: `update` requires at least one of --base-url / "
                 "--api-key / --allowed-models / --rate-card-provider / "
-                "--input-usd-per-1m + --output-usd-per-1m.\n",
+                "--pricing-source / --input-usd-per-1m + --output-usd-per-1m.\n",
             )
             return 2
 
@@ -578,6 +595,17 @@ def _test(args: argparse.Namespace) -> int:
 def _add_pricing_args(parser: argparse.ArgumentParser) -> None:
     """Shared by `create` and `update`. Both-or-neither validated in
     the handler (argparse can't natively express the constraint)."""
+    parser.add_argument(
+        "--pricing-source",
+        choices=["rate-card", "tokens-only", "operator-supplied"],
+        default=None,
+        help=(
+            "Cost attribution mode. Use rate-card only when the service "
+            "rate-card table has matching provider/model rows; "
+            "operator-supplied requires --input-usd-per-1m and "
+            "--output-usd-per-1m."
+        ),
+    )
     parser.add_argument(
         "--input-usd-per-1m", dest="input_usd_per_1m",
         type=float, default=None,

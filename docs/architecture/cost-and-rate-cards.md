@@ -160,6 +160,13 @@ the rate-card id, source URL, pricing version, check time, currency,
 group, and group ratio; unresolved non-facade hashes remain visible with
 `resolved=false`.
 
+Protected rollout profiles can keep this from drifting by declaring
+`[rate_card_sync.yibuapi]` and hosted provider pricing defaults. The
+one-command rollout driver applies those declarations after cluster-up
+and before release-gate/smoke, so a fresh DB-backed rollout does not lose
+the official YibuAPI rate card or revert the hosted provider to
+`tokens-only`.
+
 ## Usage API and CLI
 
 `GET /api/v1/usage` is the admin/user API for totals. It supports:
@@ -218,8 +225,9 @@ loom providers create \
 ```
 
 The connection still defaults to `pricing_source='tokens-only'` for
-OpenAI-compatible endpoints; switch it to `rate-card` only when the
-service rate-card table has rows for that provider/model pair. For
+OpenAI-compatible endpoints; switch it with
+`loom providers update NAME --pricing-source rate-card --rate-card-provider PROVIDER`
+only when the service rate-card table has rows for that provider/model pair. For
 user-managed or self-deployed APIs, keep `tokens-only`: Loom records
 token totals and returns `estimated_cost_usd=null` with
 `cost_status='not_applicable'` rather than inventing a dollar amount.

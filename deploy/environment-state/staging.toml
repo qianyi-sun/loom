@@ -138,6 +138,16 @@ required_env = [
   "LOOM_SVC_MINIO_SECRET_KEY",
 ]
 
+[rate_card_sync.yibuapi]
+enabled = true
+group = "default"
+
+[[hosted_provider_pricing_defaults]]
+name = "mz_tn_canada_qianyi"
+pricing_source = "rate-card"
+rate_card_provider = "yibuapi"
+required = true
+
 [external_slurm_runner_prerequisites]
 pools = ["oldlab", "gb10-arm64"]
 expected_repo_ref = "${IMAGE_TAG}"

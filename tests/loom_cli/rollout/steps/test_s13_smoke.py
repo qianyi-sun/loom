@@ -19,7 +19,7 @@ def test_smoke_posts_current_trial_config_contract_with_user_owned_token(
     ctx = make_ctx(tmp_path)
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(13, "smoke")
+    step_dir = ev.step_dir(14, "smoke")
     captured_payloads: list[dict[str, Any]] = []
 
     monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-token")
@@ -93,7 +93,7 @@ def test_smoke_uses_token_when_heading_platform_trajectory_download_url(
     ctx = make_ctx(tmp_path)
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(13, "smoke")
+    step_dir = ev.step_dir(14, "smoke")
 
     monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "smoke-user-token")
     monkeypatch.setenv("LOOM_SMOKE_TASK_ID", "terminal-bench-2/hello-world")
@@ -203,7 +203,7 @@ def test_smoke_get_probes_platform_trajectory_when_head_not_allowed(
     ctx = make_ctx(tmp_path)
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(13, "smoke")
+    step_dir = ev.step_dir(14, "smoke")
 
     monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "smoke-user-token")
     monkeypatch.setenv("LOOM_SMOKE_TASK_ID", "terminal-bench-2/hello-world")
@@ -326,7 +326,7 @@ def test_current_gb10_smoke_defaults_to_gb10_compatible_task_and_pool(
     ctx = make_ctx(tmp_path, scope="current-gb10", exclude_oldlab=True)
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(13, "smoke")
+    step_dir = ev.step_dir(14, "smoke")
     captured_payloads: list[dict[str, Any]] = []
 
     monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "smoke-user-token")
@@ -404,7 +404,7 @@ def test_full_cluster_smoke_keeps_terminal_bench_default_without_pool(
     ctx = make_ctx(tmp_path, scope="full-cluster")
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(13, "smoke")
+    step_dir = ev.step_dir(14, "smoke")
     captured_payloads: list[dict[str, Any]] = []
 
     monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "smoke-user-token")
@@ -474,7 +474,7 @@ def test_smoke_rejects_non_user_owned_smoke_token_before_submit(
     ctx = make_ctx(tmp_path)
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(13, "smoke")
+    step_dir = ev.step_dir(14, "smoke")
 
     monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-token")
     monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "legacy-token")
@@ -515,7 +515,7 @@ def test_smoke_rejects_missing_smoke_task_before_submit(
     ctx = make_ctx(tmp_path)
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(13, "smoke")
+    step_dir = ev.step_dir(14, "smoke")
 
     monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "smoke-user-token")
     monkeypatch.setenv("LOOM_SMOKE_TASK_ID", "missing/task")

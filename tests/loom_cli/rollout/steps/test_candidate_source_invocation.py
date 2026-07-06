@@ -22,6 +22,7 @@ from loom_cli.rollout.steps.s08_preflight import PreflightStep
 from loom_cli.rollout.steps.s09_migrate import MigrateStep
 from loom_cli.rollout.steps.s10_env_state import EnvStateStep, _profile_path_for
 from loom_cli.rollout.steps.s11_cluster_up import ClusterUpStep
+from loom_cli.rollout.steps.s12_production_defaults import ProductionDefaultsStep
 from loom_cli.rollout.steps.s12_release_gate import ReleaseGateStep
 from loom_cli.rollout.steps.subprocess_util import SubprocessResult
 
@@ -384,6 +385,104 @@ def test_env_state_profile_path_resolves_from_cluster_config_dir(
     assert _profile_path_for(ctx, config_path) == str(profile)
 
 
+def test_production_defaults_syncs_rate_card_and_verifies_hosted_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    worktree = _prepare_candidate_worktree(ev)
+    step_dir = ev.step_dir(12, "production-defaults")
+    profile = tmp_path / "staging.toml"
+    profile.write_text(
+        """
+environment = "staging"
+
+[rate_card_sync.yibuapi]
+enabled = true
+group = "default"
+
+[[hosted_provider_pricing_defaults]]
+name = "mz_tn_canada_qianyi"
+pricing_source = "rate-card"
+rate_card_provider = "yibuapi"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    calls: list[dict[str, Any]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(
+            {
+                "argv": list(argv),
+                "cwd": kwargs.get("cwd"),
+                "env": kwargs.get("env"),
+            }
+        )
+        if list(argv)[3:6] == ["admin", "rate-cards", "sync-yibuapi"]:
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout='{"id":"yibuapi-pricing-v1","entry_count":128}\n',
+                stderr="",
+            )
+        if list(argv)[3:5] == ["providers", "update"]:
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout="updated\n",
+                stderr="",
+            )
+        if list(argv)[3:5] == ["providers", "show"]:
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout=json.dumps({
+                    "name": "mz_tn_canada_qianyi",
+                    "pricing_source": "rate-card",
+                    "rate_card_provider": "yibuapi",
+                }),
+                stderr="",
+            )
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s12_production_defaults._profile_path_for",
+        lambda ctx: str(profile),
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s12_production_defaults.run_captured",
+        fake_run,
+    )
+
+    result = ProductionDefaultsStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    assert len(calls) == 3
+    for call in calls:
+        _assert_candidate_invocation(call, worktree=worktree)
+    assert calls[0]["argv"][3:] == [
+        "admin", "rate-cards", "sync-yibuapi",
+        "--group", "default",
+        "--format", "json",
+    ]
+    assert calls[1]["argv"][3:] == [
+        "providers", "update", "mz_tn_canada_qianyi",
+        "--pricing-source", "rate-card",
+        "--rate-card-provider", "yibuapi",
+    ]
+    assert calls[2]["argv"][3:] == [
+        "providers", "show", "mz_tn_canada_qianyi",
+        "--format", "json",
+    ]
+    assert step_dir.artifact_path("rate-card-sync-yibuapi.json").is_file()
+    assert step_dir.artifact_path(
+        "provider-mz_tn_canada_qianyi.json",
+    ).is_file()
+
+
 def test_subcommand_step_resolves_loom_cli_without_global_executable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -526,7 +625,7 @@ def test_release_gate_argv_passes_generated_release_manifest(tmp_path: Path) -> 
     ctx = make_ctx(tmp_path, image_tag="public-beta-abc123")
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(12, "release-gate")
+    step_dir = ev.step_dir(13, "release-gate")
 
     argv = list(ReleaseGateStep().argv(ctx, step_dir))
 
@@ -569,10 +668,10 @@ def test_rollout_cluster_commands_use_config_with_context_image_tag(
     cluster_up_argv = list(ClusterUpStep().argv(ctx, ev.step_dir(11, "cluster-up")))
     cluster_up_config = Path(cluster_up_argv[cluster_up_argv.index("--config") + 1])
     manifest_argv = list(
-        ReleaseGateStep().release_manifest_argv(ctx, ev.step_dir(12, "release-gate")),
+        ReleaseGateStep().release_manifest_argv(ctx, ev.step_dir(13, "release-gate")),
     )
     release_manifest_config = Path(manifest_argv[manifest_argv.index("--config") + 1])
-    gate_argv = list(ReleaseGateStep().argv(ctx, ev.step_dir(12, "release-gate")))
+    gate_argv = list(ReleaseGateStep().argv(ctx, ev.step_dir(13, "release-gate")))
     release_gate_config = Path(gate_argv[gate_argv.index("--config") + 1])
 
     assert rendered_config != ctx.cluster_config_path
@@ -660,7 +759,7 @@ def test_release_gate_run_generates_manifest_then_gates(
     ev.ensure()
     worktree = _prepare_candidate_worktree(ev)
     _write_rendered_service(ev)
-    step_dir = ev.step_dir(12, "release-gate")
+    step_dir = ev.step_dir(13, "release-gate")
     calls: list[dict[str, Any]] = []
 
     def fake_run(argv, **kwargs):
@@ -741,7 +840,7 @@ spec:
 """,
         encoding="utf-8",
     )
-    step_dir = ev.step_dir(12, "release-gate")
+    step_dir = ev.step_dir(13, "release-gate")
 
     def fake_run(argv, **kwargs):
         if list(argv[:3]) == ["docker", "image", "inspect"]:
@@ -814,7 +913,7 @@ def test_release_gate_run_fails_fast_when_gb10_status_fails(
     ev.ensure()
     _prepare_candidate_worktree(ev)
     _write_rendered_service(ev)
-    step_dir = ev.step_dir(12, "release-gate")
+    step_dir = ev.step_dir(13, "release-gate")
     calls: list[list[str]] = []
 
     def fake_run(argv, **kwargs):
@@ -866,7 +965,7 @@ def test_release_gate_current_gb10_requires_manifest_desired_state(
     ev.ensure()
     _prepare_candidate_worktree(ev)
     _write_rendered_service(ev)
-    step_dir = ev.step_dir(12, "release-gate")
+    step_dir = ev.step_dir(13, "release-gate")
     calls: list[list[str]] = []
 
     def fake_run(argv, **kwargs):
@@ -922,7 +1021,7 @@ def test_release_gate_retries_transient_gb10_status_cp_unreachable(
     ev.ensure()
     _prepare_candidate_worktree(ev)
     _write_rendered_service(ev)
-    step_dir = ev.step_dir(12, "release-gate")
+    step_dir = ev.step_dir(13, "release-gate")
     calls: list[list[str]] = []
     gb10_attempts = 0
 
@@ -1005,7 +1104,7 @@ def test_release_gate_retries_gb10_convergence_until_node_agent_reports_current(
     ev.ensure()
     _prepare_candidate_worktree(ev)
     _write_rendered_service(ev, image_tag="public-beta-53897aa")
-    step_dir = ev.step_dir(12, "release-gate")
+    step_dir = ev.step_dir(13, "release-gate")
     status_attempts = 0
     gate_attempts = 0
 

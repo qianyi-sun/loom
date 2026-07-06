@@ -387,6 +387,36 @@ def test_update_rate_card_provider_patches_by_resolved_id(
     assert patch_body == {"rate_card_provider": "fireworks"}
 
 
+def test_update_pricing_source_rate_card_patches_by_resolved_id(
+    mock_server: MockServer,
+) -> None:
+    conn = _make_connection(name="yibuapi-prod")
+    updated = _make_connection(
+        name="yibuapi-prod",
+        pricing_source="rate-card",
+        rate_card_provider="yibuapi",
+    )
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[
+        ("PATCH", f"/api/v1/provider-connections/{conn['id']}")
+    ] = httpx.Response(200, json=updated)
+
+    rc = main([
+        "providers", "update", "yibuapi-prod",
+        "--pricing-source", "rate-card",
+        "--rate-card-provider", "yibuapi",
+    ])
+
+    assert rc == 0
+    patch_body = json.loads(mock_server[1].content)
+    assert patch_body == {
+        "pricing_source": "rate-card",
+        "rate_card_provider": "yibuapi",
+    }
+
+
 def test_update_with_no_changes_errors(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
