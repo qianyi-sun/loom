@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import PurePosixPath
 
 import pytest
@@ -64,6 +64,24 @@ class _FakeSandbox:
     ) -> tuple[int, bytes]:
         key = " ".join(argv)
         return self.exec_table.get(key, (1, b""))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_adapter_registry() -> Iterator[None]:
+    """Restore the process-global adapter registry after each test.
+
+    ``test_registry.py`` registers throwaway adapters (e.g.
+    ``test-register-returns-input``) to exercise ``register_adapter``.
+    Without teardown those entries leak into later pytest modules in the
+    same process (e.g. ``test_agent_benchmark_matrix.py``).
+    """
+    from loom_launcher.registry import _clear_for_tests, all_adapters, register_adapter
+
+    snapshot = {a.name: a for a in all_adapters()}
+    yield
+    _clear_for_tests()
+    for adapter in snapshot.values():
+        register_adapter(adapter)
 
 
 @pytest.fixture
