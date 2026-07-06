@@ -1253,10 +1253,13 @@ rollout-smoke batch on resume, otherwise submits one audited batch through
 `POST /api/v1/admin/batches/on-behalf`, then polls
 `GET /api/v1/batches/{batch_id}` until `state=finished`,
 `result_status=succeeded`, and `trial_summary.succeeded` covers the expected
-trial count. Evidence must contain only the admin source reference,
-fingerprint, represented username/team id, batch id, and redacted response
-JSON. Do not record raw bearer values in shell history, argv evidence, issue
-comments, PR bodies, Markdown, or logs.
+trial count. For `--scope=current-gb10`, this mode defaults to
+`terminal-bench-2/hello-world` with `required_worker_pool=gb10-arm64` because
+the batch API runs agent-by-task compatibility preflight and the user-token
+trial default is not batch-compatible for `oracle`. Evidence must contain only
+the admin source reference, fingerprint, represented username/team id, batch id,
+and redacted response JSON. Do not record raw bearer values in shell history,
+argv evidence, issue comments, PR bodies, Markdown, or logs.
 
 Optional flags:
 
@@ -1362,7 +1365,7 @@ observability and mutation contract:
 | 11 | cluster-up | candidate-source `loom cluster up --recover-sandbox-deadlines --sandbox-deadline-max-pods 4` (#203 fix for updated replicas, #206 bounded kind/containerd sandbox-deadline retry) |
 | 12 | production-defaults | candidate-source `loom admin rate-cards sync-yibuapi --format json`, then `loom providers update/show` for hosted provider pricing defaults declared in the environment-state profile. This keeps DB-backed cost-attribution defaults from disappearing after a fresh rollout. |
 | 13 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, run `loom cluster minio-storage-preflight --output minio-storage-preflight-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment` with the same `--admin-token <source> --expect-admin-token-fingerprint <fingerprint>` contract as step 10, then `loom cluster release-gate --manifest <that file> --minio-storage-preflight <that storage artifact>` (#339 fix for stale kind-import, #536 guard for GB10 status token drift). GB10 convergence mismatches are retried for up to 15 minutes so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. |
-| 14 | smoke | HTTP health + smoke identity + benchmarks + smoke task lookup. Default `user-token` mode submits a user-owned trial and checks trajectory/usage; `admin-on-behalf` mode submits an audited represented-user batch through the admin API and polls batch success. |
+| 14 | smoke | HTTP health + smoke identity + benchmarks + smoke task lookup. Default `user-token` mode submits a user-owned trial and checks trajectory/usage; `admin-on-behalf` mode submits an audited represented-user batch through the admin API, uses a batch-compatible current-GB10 default task, and polls batch success. |
 | 99 | summary | write `summary.md` from every prior step's result.json |
 
 Step 13 deliberately writes a narrow image-identity artifact instead of full
