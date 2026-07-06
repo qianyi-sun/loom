@@ -1382,7 +1382,7 @@ observability and mutation contract:
 | 05 | backup | candidate-source `loom cluster backup check --manifest <path>` (#363) |
 | 06 | audit | candidate-source `loom cluster audit` |
 | 07 | render | candidate-source `loom cluster render` → `rendered.yaml` |
-| 08 | preflight | candidate-source `loom cluster preflight` |
+| 08 | preflight | candidate-source `loom cluster preflight --backup-manifest <path>` using the same manifest verified by step 05 |
 | 09 | migrate | candidate-source `loom cluster render-migration` + `kubectl wait` (#332) |
 | 10 | env-state | candidate-source `loom admin environment-state apply/check --admin-token <source> --expect-admin-token-fingerprint <fingerprint>` (#331 fix for stop-on-disable, #533 guard for scoped admin token drift). Pure GB10 node-status convergence drift is retried for up to 15 minutes so node-agent image builds can finish; mixed drift still fails immediately. |
 | 11 | cluster-up | candidate-source `loom cluster up --recover-sandbox-deadlines --sandbox-deadline-max-pods 4` (#203 fix for updated replicas, #206 bounded kind/containerd sandbox-deadline retry) |
