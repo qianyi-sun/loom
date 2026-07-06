@@ -3052,8 +3052,11 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    fixed teams such as Team A and Team B exist, then submit username requests
    for each team. Approve each request in Admin access -> Accounts, open the
    setup link in a fresh browser profile, set a password, and confirm the user
-   lands in the selected team without seeing raw API credentials. Capture only
-   safe prefixes and redacted links in shared evidence.
+   lands in the selected team without seeing raw API credentials. Generated
+   setup/reset links must already use the public HTTPS origin from
+   `LOOM_SVC_PUBLIC_BASE_URL` or ingress forwarded headers; fix that
+   configuration before sharing any one-time link. Capture only safe prefixes
+   and redacted links in shared evidence.
 6. **CLI login.** In a fresh shell, sign in with the approved account:
    ```bash
    export LOOM_PASSWORD=...

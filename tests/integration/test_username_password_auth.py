@@ -88,6 +88,16 @@ def _extract_token(link: str) -> str:
     return values[0]
 
 
+def _action_link_origin(link: str) -> tuple[str, str, str, bool]:
+    parsed = urlparse(link)
+    return (
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        bool(parse_qs(parsed.query).get("token")),
+    )
+
+
 @pytest.fixture
 async def username_auth_app(
     monkeypatch: pytest.MonkeyPatch,
@@ -285,6 +295,100 @@ async def test_user_registers_sets_password_and_logs_in(
         assert me["user"]["email"] is None
         assert me["current_team"]["name"] == team_name
         assert me["current_team"]["role"] == "member"
+
+
+async def test_setup_link_uses_public_base_url_when_configured(
+    username_auth_app: tuple[FastAPI, UUID, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LOOM_PUBLIC_BASE_URL", raising=False)
+    app, team_id, _team_name = username_auth_app
+    app.state.settings.public_base_url = "https://loom.example.com"
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as client:
+        admin_me = await _login(client, username="Qianyi", password=ADMIN_PASSWORD)
+        csrf = str(admin_me["csrf_token"])
+        created = await client.post(
+            "/api/v1/auth/registration-requests",
+            json={"username": "Ada", "team_id": str(team_id)},
+        )
+        assert created.status_code == 202, created.text
+        approved = await client.post(
+            f"/api/v1/admin/registration-requests/{created.json()['id']}/approve",
+            headers={"X-Loom-CSRF": csrf},
+            json={"role": "member"},
+        )
+
+    assert approved.status_code == 200, approved.text
+    assert _action_link_origin(approved.json()["setup_link"]) == (
+        "https",
+        "loom.example.com",
+        "/auth/setup",
+        True,
+    )
+
+
+async def test_setup_and_reset_links_use_forwarded_https_origin(
+    username_auth_app: tuple[FastAPI, UUID, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LOOM_PUBLIC_BASE_URL", raising=False)
+    app, team_id, _team_name = username_auth_app
+    forwarded = {
+        "X-Forwarded-Proto": "https",
+        "X-Forwarded-Host": "public.example.com",
+    }
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as client:
+        admin_me = await _login(client, username="Qianyi", password=ADMIN_PASSWORD)
+        csrf = str(admin_me["csrf_token"])
+        created = await client.post(
+            "/api/v1/auth/registration-requests",
+            json={"username": "Ada", "team_id": str(team_id)},
+        )
+        assert created.status_code == 202, created.text
+        approved = await client.post(
+            f"/api/v1/admin/registration-requests/{created.json()['id']}/approve",
+            headers={"X-Loom-CSRF": csrf, **forwarded},
+            json={"role": "member"},
+        )
+        assert approved.status_code == 200, approved.text
+        setup_token = _extract_token(approved.json()["setup_link"])
+        completed = await client.post(
+            "/api/v1/auth/setup/complete",
+            headers={"X-Loom-CSRF": csrf},
+            json={
+                "token": setup_token,
+                "password": ADA_PASSWORD,
+                "confirm_password": ADA_PASSWORD,
+            },
+        )
+        assert completed.status_code == 200, completed.text
+        reset_requested = await client.post(
+            "/api/v1/auth/password-reset-requests",
+            json={"username": "Ada"},
+        )
+        assert reset_requested.status_code == 202, reset_requested.text
+        listed = await client.get("/api/v1/admin/password-reset-requests")
+        assert listed.status_code == 200, listed.text
+        reset_approved = await client.post(
+            f"/api/v1/admin/password-reset-requests/{listed.json()['items'][0]['id']}/approve",
+            headers={"X-Loom-CSRF": csrf, **forwarded},
+        )
+
+    assert reset_approved.status_code == 200, reset_approved.text
+    assert _action_link_origin(approved.json()["setup_link"]) == (
+        "https",
+        "public.example.com",
+        "/auth/setup",
+        True,
+    )
+    assert _action_link_origin(reset_approved.json()["reset_link"]) == (
+        "https",
+        "public.example.com",
+        "/auth/reset",
+        True,
+    )
 
 
 async def test_password_reset_requires_admin_link_and_revokes_sessions_and_tokens(

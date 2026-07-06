@@ -144,6 +144,11 @@
     "default": "PydanticUndefined",
     "required": true
   },
+  "public_base_url": {
+    "annotation": "pydantic.networks.HttpUrl | None",
+    "default": "None",
+    "required": false
+  },
   "signed_url_expiry_sec": {
     "annotation": "<class 'int'>",
     "default": "3600",

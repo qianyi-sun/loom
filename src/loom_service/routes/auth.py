@@ -37,6 +37,7 @@ from loom_service.password_auth import (
     validate_password_pair,
     verify_password,
 )
+from loom_service.public_links import public_base_url
 from loom_service.session_auth import (
     consume_login_challenge,
     create_login_challenge,
@@ -141,8 +142,7 @@ def _raw_action_token(purpose: str) -> str:
 
 
 def _action_link(request: Request, route: str, raw_token: str) -> str:
-    base = str(request.base_url).rstrip("/")
-    return f"{base}/auth/{route}?token={raw_token}"
+    return f"{public_base_url(request)}/auth/{route}?token={raw_token}"
 
 
 def _token_prefix(raw_token: str) -> str:
