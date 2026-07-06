@@ -361,3 +361,63 @@ compare it to the canonical row. The runtime difference fully explains the delta
 - **Same symmetric-agent-runtime follow-up as the GPQA entry** — running Loom with
   `claude-code` against AIME would isolate verifier parity from agent-runtime
   contribution.
+
+## terminal-bench-2 — preliminary claude-code × claude-haiku-4-5
+
+This entry preserves the checked-in qianyi-sun/loom#222 public-beta evidence for
+Claude Haiku 4.5 on Terminal-Bench 2, but it is **preliminary** and **not canonical
+acceptance**. Canonical #222 acceptance still requires a Terminus-2 rerun/live
+validation against the same 86-task slate.
+
+Status: preliminary and not canonical acceptance.
+
+- **Upstream pin:** `terminal-bench-core` v0.1.1, commit `91e10457`.
+- **Imported task slate:** full Terminal-Bench 2 task set, 86 tasks.
+- **Batch:** `81d3f790-a426-4c64-97aa-2ddf5a08a563`, captured from public-beta
+  `https://yylx.world` on 2026-06-30.
+- **Agent / model:** Loom `claude-code` adapter with `claude-haiku-4-5` through
+  `yibuapi-anthropic-pb`.
+- **Per-task evidence:** `docs/evidence/issue-222/per-task-results.json`.
+
+### Preliminary result
+
+| Metric | Value |
+|---|---:|
+| Full denominator | 86 tasks |
+| Reward-positive rows | 35/86 = 40.70% |
+| Clean `state=succeeded, reward=1.0` rows | 33/86 = 38.37% |
+| Reward-positive rows that ended `trajectory_flush_failed` | 2 |
+| `state=failed` system failures | 12 system failures |
+| Upstream Haiku reference | ~40.2% |
+| Historical reward-positive delta vs upstream | +0.50 pp |
+
+The historical 35/86 reward-positive headline is close to Anthropic's published
+Claude Haiku 4.5 Terminal-Bench reference of ~40.2% (non-thinking mode,
+Terminus-2 scaffold, 11-run average). The checked-in JSON also shows that only
+33/86 rows are clean platform-successful `state=succeeded, reward=1.0` outcomes:
+two reward-positive rows ended as `trajectory_flush_failed`, and the batch has
+12 system failures overall. Those platform-failure rows are part of the evidence,
+not something to smooth over in the acceptance status.
+
+### What this preliminary entry validates
+
+1. **The full 86-task slate ran through Loom public beta with a real model.** This
+   is stronger than replay-only Layer 2 evidence and should remain linked from
+   the manifest so future readers do not lose it.
+2. **The reward-positive headline is in the expected upstream range.** Counting
+   all reward-positive rows gives 40.70%, a +0.50 pp delta vs the upstream ~40.2%
+   Haiku reference.
+3. **The result is not final acceptance.** The run uses Loom `claude-code` while
+   the upstream reference uses Terminus-2, it is a single run vs an 11-run
+   reference average, and the 12 system failures include two
+   `trajectory_flush_failed` reward-positive rows.
+
+### Open follow-ups (not in this preliminary entry)
+
+- **Terminus-2 rerun for canonical #222 acceptance.** Re-run the full 86-task
+  Terminal-Bench 2 slate with `--agent terminus-2 --model claude-haiku-4-5` and
+  record clean live acceptance evidence before changing the issue to final
+  Layer 3 accepted status.
+- **Failure taxonomy review.** The 12 system failures should remain visible in
+  the evidence; a future run should either eliminate them or account for them as
+  platform failures outside model-quality scoring.

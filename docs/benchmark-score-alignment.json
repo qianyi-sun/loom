@@ -843,6 +843,42 @@
             "asserts": "the verifier shim's TEST_DIR defaults to `/app/environment/tb2-tests` (the upstream TB2 test location) so the shim runs the upstream test suite verbatim, not a Loom-built proxy"
           }
         ]
+      },
+      "layer3_evidence": {
+        "status": "preliminary_pending_terminus_2_rerun",
+        "canonical_acceptance_status": "pending_terminus_2_rerun",
+        "acceptance_caveat": "Preliminary checked-in evidence only: not canonical acceptance for #222. The historical 35/86 headline counts reward-positive rows, but only 33/86 are clean state=succeeded,reward=1.0 rows because two reward-positive trials ended as trajectory_flush_failed. Canonical acceptance still requires a Terminus-2 rerun/live validation.",
+        "runs": [
+          {
+            "case_id": "tb2-claude-code-haiku-4-5-preliminary-86",
+            "agent": "claude-code",
+            "method": "public_beta_full_slate_single_run",
+            "model": "claude-haiku-4-5",
+            "provider": "yibuapi-anthropic-pb via https://yibuapi.com (anthropic dialect)",
+            "upstream_revision": "terminal-bench-core v0.1.1 / 91e10457",
+            "batch_id": "81d3f790-a426-4c64-97aa-2ddf5a08a563",
+            "trial_count": 86,
+            "reward_positive_count": 35,
+            "reward_positive_rate": 0.4069767441860465,
+            "reward_positive_rate_display": "40.70%",
+            "clean_succeeded_reward_positive_count": 33,
+            "clean_succeeded_reward_positive_rate": 0.38372093023255816,
+            "clean_succeeded_reward_positive_rate_display": "38.37%",
+            "succeeded_reward_zero_count": 41,
+            "system_failures": 12,
+            "trajectory_flush_failed_reward_positive_count": 2,
+            "llm_calls": 1924,
+            "upstream_reference": "Anthropic-published Claude Haiku 4.5 Terminal-Bench 2 non-thinking Terminus-2 reference, 11-run average",
+            "upstream_reference_rate_display": "~40.2%",
+            "delta_pp": 0.50,
+            "per_task_table": "docs/evidence/issue-222/per-task-results.json",
+            "verdict": "Preliminary, caveated evidence only; not canonical acceptance. The 35/86 reward-positive rate is close to the upstream ~40.2% reference, but the clean platform-successful succeeded+reward=1.0 count is 33/86 because two reward-positive trials ended as trajectory_flush_failed, and 12 total trials are state=failed system failures. Canonical #222 acceptance still requires a Terminus-2 rerun/live validation.",
+            "follow_ups": [
+              "#222",
+              "#32"
+            ]
+          }
+        ]
       }
     }
   ]
