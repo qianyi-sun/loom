@@ -1216,13 +1216,15 @@ Step 10 forwards that same source plus `ADMIN_TOKEN_FINGERPRINT` into
 control-plane mutation if the local token source drifted. The token must carry
 the protected admin scopes used by environment-state reconciliation, including
 worker-pool administration, because step 10 configures autoscaler policy and
-GB10 desired state before the cluster is brought up. Step 14's live trial
-submit uses `LOOM_SMOKE_API_TOKEN`, and that credential must be a user-owned API
-token whose `/api/v1/auth/whoami` reports `credential_type=user_owned_api_token`
-and includes `submit` scope. Admin secrets, internal service credentials, and
-legacy team tokens are refused before trial submission because they cannot
-create user-facing work under the account-auth model. `LOOM_SMOKE_TASK_ID`
-defaults to
+GB10 desired state before the cluster is brought up.
+
+Step 14 defaults to `LOOM_SMOKE_SUBMIT_MODE=user-token`. In that mode, the live
+trial submit uses `LOOM_SMOKE_API_TOKEN`, and that credential must be a
+user-owned API token whose `/api/v1/auth/whoami` reports
+`credential_type=user_owned_api_token` and includes `submit` scope. Admin
+secrets, internal service credentials, and legacy team tokens are refused before
+trial submission because they cannot create user-facing work under the
+account-auth model. `LOOM_SMOKE_TASK_ID` defaults to
 `skilllearnbench/anthropic-poster-design/anthropic-poster-design-1` with
 `required_worker_pool=gb10-arm64` for `--scope=current-gb10`, because that
 scope excludes the x86/OLDLAB path. For `--scope=full-cluster`, the default is
@@ -1232,6 +1234,29 @@ scope excludes the x86/OLDLAB path. For `--scope=full-cluster`, the default is
 override must target a specific pool, set `LOOM_SMOKE_REQUIRED_WORKER_POOL`
 explicitly; the driver only injects the GB10 pool for its built-in
 current-gb10 default.
+
+For a release canary where an operator must represent an active user/team and a
+user-owned smoke token is unavailable, set
+`LOOM_SMOKE_SUBMIT_MODE=admin-on-behalf` and provide:
+
+```bash
+export LOOM_SMOKE_SUBMIT_MODE=admin-on-behalf
+export LOOM_SMOKE_ON_BEHALF_USERNAME=devansh
+export LOOM_SMOKE_ON_BEHALF_TEAM_ID=<agentic-rl-team-uuid>
+export LOOM_SMOKE_ADMIN_ACTOR=<operator-name>
+```
+
+The rollout driver resolves the admin credential only from `--admin-token`'s
+secret-source reference, validates `--expect-admin-token-fingerprint` before
+any service call when that guard is provided, reuses an existing deterministic
+rollout-smoke batch on resume, otherwise submits one audited batch through
+`POST /api/v1/admin/batches/on-behalf`, then polls
+`GET /api/v1/batches/{batch_id}` until `state=finished`,
+`result_status=succeeded`, and `trial_summary.succeeded` covers the expected
+trial count. Evidence must contain only the admin source reference,
+fingerprint, represented username/team id, batch id, and redacted response
+JSON. Do not record raw bearer values in shell history, argv evidence, issue
+comments, PR bodies, Markdown, or logs.
 
 Optional flags:
 
@@ -1337,7 +1362,7 @@ observability and mutation contract:
 | 11 | cluster-up | candidate-source `loom cluster up --recover-sandbox-deadlines --sandbox-deadline-max-pods 4` (#203 fix for updated replicas, #206 bounded kind/containerd sandbox-deadline retry) |
 | 12 | production-defaults | candidate-source `loom admin rate-cards sync-yibuapi --format json`, then `loom providers update/show` for hosted provider pricing defaults declared in the environment-state profile. This keeps DB-backed cost-attribution defaults from disappearing after a fresh rollout. |
 | 13 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, run `loom cluster minio-storage-preflight --output minio-storage-preflight-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment` with the same `--admin-token <source> --expect-admin-token-fingerprint <fingerprint>` contract as step 10, then `loom cluster release-gate --manifest <that file> --minio-storage-preflight <that storage artifact>` (#339 fix for stale kind-import, #536 guard for GB10 status token drift). GB10 convergence mismatches are retried for up to 15 minutes so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. |
-| 14 | smoke | HTTP health + user-owned smoke token whoami + benchmarks + smoke task lookup + trial submit + poll + trajectory HEAD |
+| 14 | smoke | HTTP health + smoke identity + benchmarks + smoke task lookup. Default `user-token` mode submits a user-owned trial and checks trajectory/usage; `admin-on-behalf` mode submits an audited represented-user batch through the admin API and polls batch success. |
 | 99 | summary | write `summary.md` from every prior step's result.json |
 
 Step 13 deliberately writes a narrow image-identity artifact instead of full

@@ -1,6 +1,6 @@
 """Step 13 — end-to-end live smoke (#340).
 
-Concrete smoke:
+Concrete smoke, default ``user-token`` mode:
 
 1. ``GET /api/v1/health`` on Loom Service → expect 200.
 2. ``GET /api/v1/auth/whoami`` with a user-owned smoke API token → submitter
@@ -17,6 +17,13 @@ Concrete smoke:
 
 Every step above writes its response JSON as a separate artifact so an
 operator can inspect the smoke evidence without re-running.
+
+``admin-on-behalf`` mode is an explicit release-canary alternative for cases
+where an operator must represent an active user/team and no user-owned smoke
+token is available. It uses the rollout admin token source reference, validates
+the expected fingerprint before service calls, submits through the audited
+``/api/v1/admin/batches/on-behalf`` API, and records only redacted/source-ref
+evidence.
 """
 
 from __future__ import annotations
@@ -29,10 +36,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
 from loom_cli.rollout.steps.base import BaseStep, RunResult
+from loom_cli.secret_source import SecretSourceError, resolve_secret_source
 
 DEFAULT_TERMINAL_TIMEOUT_SEC = 300.0
 DEFAULT_POLL_INTERVAL_SEC = 5.0
@@ -41,6 +50,14 @@ DEFAULT_CURRENT_GB10_SMOKE_TASK_ID = (
     "skilllearnbench/anthropic-poster-design/anthropic-poster-design-1"
 )
 DEFAULT_CURRENT_GB10_REQUIRED_WORKER_POOL = "gb10-arm64"
+DEFAULT_SMOKE_AGENT = "oracle"
+
+
+@dataclass(frozen=True, slots=True)
+class _AdminOnBehalfConfig:
+    represented_username: str
+    team_id: str
+    admin_actor: str
 
 
 def _ingress_base(ctx: RolloutContext) -> str:
@@ -55,6 +72,17 @@ def _smoke_api_token(ctx: RolloutContext) -> str | None:
     return os.environ.get("LOOM_SMOKE_API_TOKEN") or ctx.metadata.get(
         "smoke_api_token",
     )
+
+
+def _config_value(ctx: RolloutContext, env_name: str, metadata_key: str) -> str | None:
+    value = os.environ.get(env_name) or ctx.metadata.get(metadata_key)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _smoke_submit_mode(ctx: RolloutContext) -> str:
+    return _config_value(ctx, "LOOM_SMOKE_SUBMIT_MODE", "smoke_submit_mode") or "user-token"
 
 
 def _smoke_task_id(ctx: RolloutContext) -> str:
@@ -87,6 +115,10 @@ def _smoke_required_worker_pool(
     return None
 
 
+def _smoke_agent(ctx: RolloutContext) -> str:
+    return _config_value(ctx, "LOOM_SMOKE_AGENT", "smoke_agent") or DEFAULT_SMOKE_AGENT
+
+
 def _http_get(url: str, *, token: str | None = None) -> tuple[int, bytes]:
     req = urllib.request.Request(url)
     if token:
@@ -99,15 +131,23 @@ def _http_get(url: str, *, token: str | None = None) -> tuple[int, bytes]:
 
 
 def _http_post(
-    url: str, payload: Mapping[str, object], *, token: str | None = None,
+    url: str,
+    payload: Mapping[str, object],
+    *,
+    token: str | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> tuple[int, bytes]:
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
-        url, data=body, method="POST",
+        url,
+        data=body,
+        method="POST",
     )
     req.add_header("Content-Type", "application/json")
     if token:
         req.add_header("Authorization", f"Bearer {token}")
+    for key, value in (headers or {}).items():
+        req.add_header(key, value)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return resp.status, resp.read()
@@ -184,8 +224,7 @@ def _probe_trajectory_download(
     try:
         with urllib.request.urlopen(head_req, timeout=15) as resp:
             step_dir.artifact_path("07-trajectory-head.txt").write_text(
-                f"status={resp.status}\n"
-                f"content-length={resp.headers.get('Content-Length')}\n"
+                f"status={resp.status}\ncontent-length={resp.headers.get('Content-Length')}\n"
             )
             return
     except urllib.error.HTTPError as exc:
@@ -208,9 +247,16 @@ def _probe_trajectory_download(
 
 
 def _idempotency_key(ctx: RolloutContext) -> str:
-    return "smoke-" + hashlib.sha256(
-        f"{ctx.image_tag}|{ctx.resolved_sha}".encode(),
-    ).hexdigest()[:16]
+    return (
+        "smoke-"
+        + hashlib.sha256(
+            f"{ctx.image_tag}|{ctx.resolved_sha}".encode(),
+        ).hexdigest()[:16]
+    )
+
+
+def _admin_smoke_batch_name(ctx: RolloutContext) -> str:
+    return f"rollout-{_idempotency_key(ctx)}"
 
 
 def _validate_submitter_identity(
@@ -236,11 +282,422 @@ def _validate_submitter_identity(
     return True, "ok"
 
 
+def _validate_admin_identity(body: bytes) -> tuple[bool, str]:
+    try:
+        whoami = json.loads(body)
+    except json.JSONDecodeError:
+        return False, "admin smoke whoami response is not JSON"
+    scopes = whoami.get("scopes")
+    is_admin_scoped = isinstance(scopes, list) and any(
+        isinstance(scope, str) and scope.startswith("admin:") for scope in scopes
+    )
+    credential_type = whoami.get("credential_type")
+    principal_type = whoami.get("principal_type")
+    if credential_type == "admin_bearer_token" or principal_type == "admin":
+        return True, "ok"
+    if is_admin_scoped:
+        return True, "ok"
+    return (
+        False,
+        "admin-on-behalf smoke requires an admin-capable token; "
+        f"whoami credential_type={credential_type!r} "
+        f"principal_type={principal_type!r}",
+    )
+
+
+def _admin_token_fingerprint(value: str) -> str:
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    return f"sha256:{digest} len={len(value)}"
+
+
+def _resolve_smoke_admin_token(ctx: RolloutContext) -> tuple[str | None, str | None]:
+    try:
+        token = resolve_secret_source(ctx.admin_token_source, flag_name="--admin-token")
+    except SecretSourceError as exc:
+        return None, str(exc)
+    if ctx.expect_admin_token_fingerprint is not None:
+        live = _admin_token_fingerprint(token)
+        if live != ctx.expect_admin_token_fingerprint:
+            return (
+                None,
+                "admin_token_fingerprint drift: "
+                f"desired={ctx.expect_admin_token_fingerprint!r} live={live!r}. "
+                "Resolve the protected-environment admin token source before "
+                "running rollout smoke.",
+            )
+    return token, None
+
+
+def _admin_on_behalf_config(
+    ctx: RolloutContext,
+) -> tuple[_AdminOnBehalfConfig | None, str | None]:
+    represented_username = _config_value(
+        ctx,
+        "LOOM_SMOKE_ON_BEHALF_USERNAME",
+        "smoke_on_behalf_username",
+    )
+    team_id = _config_value(
+        ctx,
+        "LOOM_SMOKE_ON_BEHALF_TEAM_ID",
+        "smoke_on_behalf_team_id",
+    )
+    admin_actor = _config_value(
+        ctx,
+        "LOOM_SMOKE_ADMIN_ACTOR",
+        "smoke_admin_actor",
+    )
+    missing = []
+    if represented_username is None:
+        missing.append("LOOM_SMOKE_ON_BEHALF_USERNAME/smoke_on_behalf_username")
+    if team_id is None:
+        missing.append("LOOM_SMOKE_ON_BEHALF_TEAM_ID/smoke_on_behalf_team_id")
+    if admin_actor is None:
+        missing.append("LOOM_SMOKE_ADMIN_ACTOR/smoke_admin_actor")
+    if missing:
+        return (
+            None,
+            "admin-on-behalf smoke requires " + ", ".join(missing) + " before any service call",
+        )
+    assert represented_username is not None
+    assert team_id is not None
+    assert admin_actor is not None
+    return _AdminOnBehalfConfig(
+        represented_username=represented_username,
+        team_id=team_id,
+        admin_actor=admin_actor,
+    ), None
+
+
+def _validate_benchmark_catalog(body: bytes) -> str | None:
+    try:
+        catalog = json.loads(body)
+    except json.JSONDecodeError:
+        return "benchmarks response not JSON"
+    items = catalog.get("items") or catalog.get("data") or []
+    if not items:
+        return "benchmarks catalog is empty"
+    return None
+
+
+def _task_payload_inputs(ctx: RolloutContext) -> tuple[str, str | None]:
+    explicit_task_id = bool(_explicit_smoke_task_id(ctx))
+    task_id = _smoke_task_id(ctx)
+    required_worker_pool = _smoke_required_worker_pool(
+        ctx,
+        explicit_task_id=explicit_task_id,
+    )
+    return task_id, required_worker_pool
+
+
+def _admin_on_behalf_payload(
+    ctx: RolloutContext,
+    cfg: _AdminOnBehalfConfig,
+) -> dict[str, object]:
+    task_id, required_worker_pool = _task_payload_inputs(ctx)
+    payload: dict[str, object] = {
+        "name": _admin_smoke_batch_name(ctx),
+        "represented_username": cfg.represented_username,
+        "team_id": cfg.team_id,
+        "task_filter": {"task_ids": [task_id]},
+        "trial_config": {
+            "agent_name": _smoke_agent(ctx),
+            "agent_model": None,
+        },
+        "n_per_task": 1,
+    }
+    if required_worker_pool is not None:
+        payload["required_worker_pools"] = [required_worker_pool]
+    return payload
+
+
+def _existing_admin_smoke_batch_id(
+    body: bytes,
+    *,
+    cfg: _AdminOnBehalfConfig,
+    batch_name: str,
+    task_id: str,
+) -> str | None:
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        if item.get("name") != batch_name or item.get("team_id") != cfg.team_id:
+            continue
+        submitted_by_user = item.get("submitted_by_user")
+        if not isinstance(submitted_by_user, Mapping):
+            continue
+        if (
+            submitted_by_user.get("username") != cfg.represented_username
+            or submitted_by_user.get("team_id") != cfg.team_id
+        ):
+            continue
+        task_filter = item.get("task_filter")
+        if not isinstance(task_filter, Mapping):
+            continue
+        task_ids = task_filter.get("task_ids")
+        if not isinstance(task_ids, list) or task_ids != [task_id]:
+            continue
+        batch_id = item.get("id")
+        if isinstance(batch_id, str) and batch_id:
+            return batch_id
+    return None
+
+
+def _json_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _admin_batch_succeeded(
+    batch: Mapping[str, object],
+    *,
+    cfg: _AdminOnBehalfConfig,
+) -> tuple[bool, str]:
+    state = batch.get("state")
+    if state != "finished":
+        return False, f"batch terminal state {state!r} — expected finished"
+    result_status = batch.get("result_status")
+    if result_status != "succeeded":
+        return False, f"batch result_status {result_status!r} — expected succeeded"
+    expected = batch.get("expected_trial_count")
+    expected_count = _json_int(expected)
+    if expected_count is None:
+        return False, "batch response has no numeric expected_trial_count"
+    trial_summary = batch.get("trial_summary")
+    if not isinstance(trial_summary, Mapping):
+        return False, "batch response has no trial_summary"
+    succeeded = _json_int(trial_summary.get("succeeded", 0))
+    if succeeded is None:
+        return False, "batch trial_summary.succeeded is not numeric"
+    if succeeded < expected_count:
+        return (
+            False,
+            f"batch succeeded trials {succeeded} < expected {expected_count}",
+        )
+    submitted_by_user = batch.get("submitted_by_user")
+    if not isinstance(submitted_by_user, Mapping):
+        return False, "batch response has no submitted_by_user"
+    username = submitted_by_user.get("username")
+    team_id = submitted_by_user.get("team_id")
+    if username != cfg.represented_username or team_id != cfg.team_id:
+        return (
+            False,
+            "batch submitted_by_user does not match represented "
+            f"user/team: username={username!r} team_id={team_id!r}",
+        )
+    return True, "ok"
+
+
+def _run_admin_on_behalf_smoke(
+    ctx: RolloutContext,
+    step_dir: StepDir,
+) -> RunResult:
+    cfg, cfg_error = _admin_on_behalf_config(ctx)
+    if cfg_error is not None:
+        return RunResult(exit_code=2, error=cfg_error)
+    assert cfg is not None
+    token, token_error = _resolve_smoke_admin_token(ctx)
+    if token_error is not None:
+        exit_code = 1 if "fingerprint drift" in token_error else 2
+        return RunResult(exit_code=exit_code, error=token_error)
+    assert token is not None
+    base = _ingress_base(ctx)
+
+    status, body = _http_get(f"{base}/api/v1/health", token=token)
+    step_dir.artifact_path("01-health.json").write_bytes(body)
+    if status != 200:
+        return RunResult(exit_code=1, error=f"/api/v1/health returned {status}")
+
+    status, body = _http_get(f"{base}/api/v1/auth/whoami", token=token)
+    step_dir.artifact_path("02-whoami.json").write_bytes(body)
+    if status != 200:
+        return RunResult(exit_code=1, error=f"/api/v1/auth/whoami returned {status}")
+    ok, reason = _validate_admin_identity(body)
+    if not ok:
+        return RunResult(exit_code=1, error=reason)
+
+    status, body = _http_get(f"{base}/api/v1/benchmarks", token=token)
+    step_dir.artifact_path("03-benchmarks.json").write_bytes(body)
+    if status != 200:
+        return RunResult(exit_code=1, error=f"/api/v1/benchmarks returned {status}")
+    catalog_error = _validate_benchmark_catalog(body)
+    if catalog_error is not None:
+        return RunResult(exit_code=1, error=catalog_error)
+
+    task_id, _required_worker_pool = _task_payload_inputs(ctx)
+    quoted_task_id = urllib.parse.quote(task_id, safe="/")
+    status, body = _http_get(f"{base}/api/v1/tasks/{quoted_task_id}", token=token)
+    step_dir.artifact_path("04-task.json").write_bytes(body)
+    if status == 404:
+        return RunResult(
+            exit_code=1,
+            error=f"smoke task {task_id!r} not found in live catalog",
+        )
+    if status != 200:
+        return RunResult(
+            exit_code=1,
+            error=f"/api/v1/tasks/{task_id} returned {status}",
+        )
+
+    batch_name = _admin_smoke_batch_name(ctx)
+    existing_params = urllib.parse.urlencode(
+        {"team_id": cfg.team_id, "q": batch_name, "limit": "20"},
+    )
+    status, body = _http_get(
+        f"{base}/api/v1/batches?{existing_params}",
+        token=token,
+    )
+    step_dir.artifact_path("05-existing-batches.json").write_bytes(body)
+    if status != 200:
+        return RunResult(
+            exit_code=1,
+            error=f"GET /batches recovery lookup returned {status}",
+        )
+    batch_id = _existing_admin_smoke_batch_id(
+        body,
+        cfg=cfg,
+        batch_name=batch_name,
+        task_id=task_id,
+    )
+    if batch_id is not None:
+        step_dir.artifact_path("05-submit.json").write_text(
+            json.dumps(
+                {"batch_id": batch_id, "recovered": True},
+                sort_keys=True,
+            )
+            + "\n",
+        )
+    else:
+        status, body = _http_post(
+            f"{base}/api/v1/admin/batches/on-behalf",
+            _admin_on_behalf_payload(ctx, cfg),
+            token=token,
+            headers={"X-Loom-Admin-Actor": cfg.admin_actor},
+        )
+        step_dir.artifact_path("05-submit.json").write_bytes(body)
+        if status not in (200, 201):
+            return RunResult(
+                exit_code=1,
+                error=f"POST /admin/batches/on-behalf returned {status}",
+            )
+        try:
+            submit = json.loads(body)
+        except json.JSONDecodeError:
+            return RunResult(exit_code=1, error="submit response not JSON")
+        batch_id_raw = submit.get("id") or submit.get("batch_id")
+        if not isinstance(batch_id_raw, str) or not batch_id_raw:
+            return RunResult(exit_code=1, error="submit response has no batch id")
+        batch_id = batch_id_raw
+
+    deadline = time.time() + DEFAULT_TERMINAL_TIMEOUT_SEC
+    terminal_batch: dict[str, object] | None = None
+    while time.time() < deadline:
+        status, body = _http_get(
+            f"{base}/api/v1/batches/{batch_id}",
+            token=token,
+        )
+        step_dir.artifact_path("06-poll.json").write_bytes(body)
+        if status == 200:
+            try:
+                batch = json.loads(body)
+            except json.JSONDecodeError:
+                return RunResult(exit_code=1, error="batch poll response not JSON")
+            state = batch.get("state")
+            if state in ("finished", "failed", "cancelled"):
+                terminal_batch = batch
+                break
+        elif status in (401, 403, 404):
+            return RunResult(
+                exit_code=1,
+                error=f"/api/v1/batches/{batch_id} returned {status}",
+            )
+        time.sleep(DEFAULT_POLL_INTERVAL_SEC)
+    if terminal_batch is None:
+        return RunResult(
+            exit_code=1,
+            error=f"batch {batch_id} did not reach terminal state in "
+            f"{DEFAULT_TERMINAL_TIMEOUT_SEC}s",
+        )
+    ok, reason = _admin_batch_succeeded(terminal_batch, cfg=cfg)
+    if not ok:
+        return RunResult(exit_code=1, error=reason)
+
+    step_dir.stdout_path().write_text(
+        f"admin-on-behalf smoke ok: batch {batch_id} finished for "
+        f"{cfg.represented_username}/{cfg.team_id}\n",
+    )
+    return RunResult(
+        exit_code=0,
+        summary=f"admin-on-behalf smoke batch {batch_id} succeeded",
+        artifacts={"batch_id": batch_id},
+    )
+
+
 class SmokeStep(BaseStep):
     number = 14
     name = "smoke"
 
+    def _inputs_fingerprint(self, ctx: RolloutContext) -> dict[str, object]:
+        submit_mode = _smoke_submit_mode(ctx)
+        task_id, required_worker_pool = _task_payload_inputs(ctx)
+        fingerprint: dict[str, object] = {
+            **ctx.to_inputs_dict(),
+            "smoke_submit_mode": submit_mode,
+            "smoke_task_id": task_id,
+            "smoke_required_worker_pool": required_worker_pool,
+        }
+        if submit_mode == "admin-on-behalf":
+            fingerprint.update(
+                {
+                    "smoke_agent": _smoke_agent(ctx),
+                    "smoke_batch_name": _admin_smoke_batch_name(ctx),
+                    "smoke_on_behalf_username": _config_value(
+                        ctx,
+                        "LOOM_SMOKE_ON_BEHALF_USERNAME",
+                        "smoke_on_behalf_username",
+                    ),
+                    "smoke_on_behalf_team_id": _config_value(
+                        ctx,
+                        "LOOM_SMOKE_ON_BEHALF_TEAM_ID",
+                        "smoke_on_behalf_team_id",
+                    ),
+                    "smoke_admin_actor": _config_value(
+                        ctx,
+                        "LOOM_SMOKE_ADMIN_ACTOR",
+                        "smoke_admin_actor",
+                    ),
+                },
+            )
+        else:
+            fingerprint["smoke_api_token_present"] = bool(_smoke_api_token(ctx))
+        return fingerprint
+
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:
+        submit_mode = _smoke_submit_mode(ctx)
+        if submit_mode == "admin-on-behalf":
+            return _run_admin_on_behalf_smoke(ctx, step_dir)
+        if submit_mode != "user-token":
+            return RunResult(
+                exit_code=2,
+                error=(
+                    "LOOM_SMOKE_SUBMIT_MODE/smoke_submit_mode must be "
+                    "'user-token' or 'admin-on-behalf'"
+                ),
+            )
         token = _smoke_api_token(ctx)
         if not token:
             return RunResult(
@@ -280,18 +737,21 @@ class SmokeStep(BaseStep):
         step_dir.artifact_path("03-benchmarks.json").write_bytes(body)
         if status != 200:
             return RunResult(
-                exit_code=1, error=f"/api/v1/benchmarks returned {status}",
+                exit_code=1,
+                error=f"/api/v1/benchmarks returned {status}",
             )
         try:
             catalog = json.loads(body)
         except json.JSONDecodeError:
             return RunResult(
-                exit_code=1, error="benchmarks response not JSON",
+                exit_code=1,
+                error="benchmarks response not JSON",
             )
         items = catalog.get("items") or catalog.get("data") or []
         if not items:
             return RunResult(
-                exit_code=1, error="benchmarks catalog is empty",
+                exit_code=1,
+                error="benchmarks catalog is empty",
             )
 
         # 4. smoke task exists in the live catalog.
@@ -303,7 +763,8 @@ class SmokeStep(BaseStep):
         )
         quoted_task_id = urllib.parse.quote(task_id, safe="/")
         status, body = _http_get(
-            f"{base}/api/v1/tasks/{quoted_task_id}", token=token,
+            f"{base}/api/v1/tasks/{quoted_task_id}",
+            token=token,
         )
         step_dir.artifact_path("04-task.json").write_bytes(body)
         if status == 404:
@@ -329,7 +790,9 @@ class SmokeStep(BaseStep):
         if required_worker_pool is not None:
             payload["required_worker_pool"] = required_worker_pool
         status, body = _http_post(
-            f"{base}/api/v1/trials", payload, token=token,
+            f"{base}/api/v1/trials",
+            payload,
+            token=token,
         )
         step_dir.artifact_path("05-submit.json").write_bytes(body)
         if status not in (200, 201, 409):  # 409: idempotency replay
@@ -341,12 +804,14 @@ class SmokeStep(BaseStep):
             submit = json.loads(body)
         except json.JSONDecodeError:
             return RunResult(
-                exit_code=1, error="submit response not JSON",
+                exit_code=1,
+                error="submit response not JSON",
             )
         trial_id = submit.get("id") or submit.get("trial_id")
         if not trial_id:
             return RunResult(
-                exit_code=1, error="submit response has no trial id",
+                exit_code=1,
+                error="submit response has no trial id",
             )
 
         # 6. poll
@@ -354,7 +819,8 @@ class SmokeStep(BaseStep):
         terminal_trial: dict[str, object] | None = None
         while time.time() < deadline:
             status, body = _http_get(
-                f"{base}/api/v1/trials/{trial_id}", token=token,
+                f"{base}/api/v1/trials/{trial_id}",
+                token=token,
             )
             step_dir.artifact_path("06-poll.json").write_bytes(body)
             if status == 200:
@@ -402,7 +868,8 @@ class SmokeStep(BaseStep):
 
         # 8. usage rollup — verify the smoke trial showed up
         status, body = _http_get(
-            f"{base}/api/v1/usage", token=token,
+            f"{base}/api/v1/usage",
+            token=token,
         )
         step_dir.artifact_path("08-usage.json").write_bytes(body)
         # Non-fatal: usage rollups may lag; log but don't fail on empty.
