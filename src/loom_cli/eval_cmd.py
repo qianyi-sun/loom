@@ -1375,12 +1375,13 @@ def dispatch(argv: list[str]) -> int:
     )
     p_bdel.add_argument(
         "--mode",
-        choices=["lightweight", "raw-harbor"],
+        choices=["lightweight", "raw-harbor", "raw-harbor-tb2-v1"],
         default="lightweight",
         help=(
             "Export mode. lightweight preserves the #390 delivery bundle; "
             "raw-harbor adds raw provider logs, task bundles, agent-run "
-            "artifacts, and derived SFT JSONL."
+            "artifacts, and derived SFT JSONL; raw-harbor-tb2-v1 adds the "
+            "versioned TB2-facing delivery profile."
         ),
     )
     p_bdel.add_argument(

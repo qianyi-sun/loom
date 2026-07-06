@@ -292,12 +292,21 @@ loom eval batch delivery-bundle <batch-id> \
 ```
 
 Use `--mode raw-harbor` when the handoff needs raw provider and Harbor-style
-execution artifacts for training or audit:
+execution artifacts for training or audit without changing Loom-native schemas:
 
 ```bash
 loom eval batch delivery-bundle <batch-id> \
   --mode raw-harbor \
   --output raw-harbor-delivery.tar.gz
+```
+
+Use `--mode raw-harbor-tb2-v1` when the downstream consumer expects the
+versioned TB2/Phase 1 delivery profile:
+
+```bash
+loom eval batch delivery-bundle <batch-id> \
+  --mode raw-harbor-tb2-v1 \
+  --output raw-harbor-tb2-v1-delivery.tar.gz
 ```
 
 `delivery-bundle` asks the service to choose the final trial for each
@@ -327,7 +336,7 @@ Each archive contains:
 - `trajectories/<task>/<trial-id>.events.jsonl` and
   `atif/<task>/<trial-id>.atif.json` for the selected final trials.
 
-Raw Harbor mode keeps those lightweight files and adds:
+Raw Harbor modes keep those lightweight files and add:
 
 - `provider_logs/manifest.json` plus redacted raw provider request/response
   logs captured on the Loom Gateway path.
@@ -335,14 +344,24 @@ Raw Harbor mode keeps those lightweight files and adds:
   selected task source is available as an `s3://` bundle.
 - `agent_runs/<task_id>/<trial_id>/execution_result.json`, `metrics.json`,
   `artifact_manifest.json`, `verifier_output.json`,
-  `provider_logs_manifest.json`, `trajectory.jsonl`, and `atif.json`.
+  `provider_logs_manifest.json`, and `atif.json`.
 - `derived/sft_messages.jsonl`, derived from the redacted provider logs for
   downstream SFT-style pipelines.
+
+The base `raw-harbor` mode preserves the Loom-native event stream as
+`agent_runs/<task_id>/<trial_id>/trajectory.jsonl` and leaves assistant payload
+schemas unchanged. The `raw-harbor-tb2-v1` profile instead writes
+`trajectory.json` reconstructed from provider logs plus
+`loom_trajectory.jsonl` as the raw timing/audit spine, and normalizes
+Loom/Terminus assistant action keys such as `state_analysis`, `explanation`,
+`timeout_sec`, and `is_task_complete` into the TB2-facing `analysis`, `plan`,
+`duration`, and `task_complete` schema.
 
 The same flow is available in the SPA Batch Detail page through the **Delivery
 bundle** card. API clients can call
 `POST /api/v1/batches/{id}/delivery-export` with optional
-`mode` (`lightweight` or `raw-harbor`) and `supplemental_batch_ids`, poll
+`mode` (`lightweight`, `raw-harbor`, or `raw-harbor-tb2-v1`) and
+`supplemental_batch_ids`, poll
 `GET /api/v1/batches/{id}/delivery-export`, and download through the returned
 `/api/v1/batches/.../delivery-export/.../download` URL. Creating a bundle
 requires submit/admin scope; reading or downloading an existing bundle only

@@ -152,6 +152,10 @@ Provider-facade raw handoff logs are a separate export contract from
 surfaces can continue to show only safe generation controls, while
 `loom eval batch delivery-bundle --mode raw-harbor` can package the
 redacted full request/response bodies into `provider_logs/`.
+Versioned training handoff profiles such as
+`--mode raw-harbor-tb2-v1` reconstruct SFT rows from those provider logs
+plus reward/metrics joins; the Loom event stream remains an audit spine rather
+than the SFT source of truth.
 
 Codex subprocess alignment runs use a separate adapter-specific path
 because Codex constructs its own Responses request. The worker converts

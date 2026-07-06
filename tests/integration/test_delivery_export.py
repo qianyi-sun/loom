@@ -476,7 +476,7 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
         sync_engine.dispose()
 
 
-async def test_raw_harbor_delivery_export_streams_derek_style_bundle(
+async def test_raw_harbor_tb2_delivery_export_streams_sample_compatible_bundle(
     delivery_setup: dict[str, object],
     postgres_url: str,
 ) -> None:
@@ -500,8 +500,27 @@ async def test_raw_harbor_delivery_export_streams_derek_style_bundle(
     sync_engine = create_engine(postgres_url)
     try:
         with sync_engine.begin() as conn:
+            captured_at_base = datetime.now(UTC)
+            first_assistant_content = ""
             for index, task_id in enumerate(task_ids, start=1):
                 trial_id = selected_trials[task_id]
+                assistant_content = f"answer {index}"
+                if index == 1:
+                    assistant_content = json.dumps(
+                        {
+                            "state_analysis": "fresh shell",
+                            "explanation": "inspect files",
+                            "commands": [
+                                {
+                                    "keystrokes": "ls -la\n",
+                                    "is_blocking": True,
+                                    "timeout_sec": 5,
+                                }
+                            ],
+                            "is_task_complete": False,
+                        }
+                    )
+                    first_assistant_content = assistant_content
                 conn.execute(
                     insert(LlmCall).values(
                         team_id=delivery_setup["team_id"],
@@ -534,7 +553,255 @@ async def test_raw_harbor_delivery_export_streams_derek_style_bundle(
                                             {
                                                 "message": {
                                                     "role": "assistant",
-                                                    "content": f"answer {index}",
+                                                    "content": assistant_content,
+                                                }
+                                            }
+                                        ]
+                                    }
+                                },
+                            }
+                        },
+                        request_params={"status": "available", "parameters": {}},
+                        cost_usd=0,
+                        rate_card_hash="facade:operator-supplied",
+                        captured_at=captured_at_base + timedelta(seconds=index),
+                    )
+                )
+            conn.execute(
+                insert(LlmCall).values(
+                    team_id=delivery_setup["team_id"],
+                    trial_id=selected_trials[task_ids[0]],
+                    step_id="step-1-followup",
+                    dialect="openai_facade",
+                    model="gpt-4o",
+                    input_tokens=12,
+                    output_tokens=6,
+                    provider_extras={
+                        "_loom_raw_provider_log": {
+                            "schema_version": "1",
+                            "ref": (
+                                "llm_calls/raw-1b/provider_extras/"
+                                "_loom_raw_provider_log"
+                            ),
+                            "request": {
+                                "body": {
+                                    "messages": [
+                                        {"role": "user", "content": "prompt 1"},
+                                        {
+                                            "role": "assistant",
+                                            "content": first_assistant_content,
+                                        },
+                                        {"role": "user", "content": "total 1\n"},
+                                    ]
+                                }
+                            },
+                            "response": {
+                                "body": {
+                                    "choices": [
+                                        {
+                                            "message": {
+                                                "role": "assistant",
+                                                "content": "answer after ls",
+                                            }
+                                        }
+                                    ]
+                                }
+                            },
+                        }
+                    },
+                    request_params={"status": "available", "parameters": {}},
+                    cost_usd=0,
+                    rate_card_hash="facade:operator-supplied",
+                    captured_at=captured_at_base + timedelta(seconds=100),
+                )
+            )
+    finally:
+        sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            f"/api/v1/batches/{main_batch_id}/delivery-export",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "mode": "raw-harbor-tb2-v1",
+                "supplemental_batch_ids": [
+                    str(supplemental_batch_id),
+                    str(targeted_batch_id),
+                ],
+            },
+        )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["manifest"]["mode"] == "raw-harbor-tb2-v1"
+    assert body["manifest"]["export_profile"] == {
+        "name": "raw-harbor-tb2",
+        "version": "1",
+        "source_of_truth": "provider_logs",
+        "audit_spine": "loom_trajectory.jsonl",
+    }
+    assert body["manifest"]["object_counts"]["provider_logs"] == 5
+    assert body["manifest"]["object_counts"]["task_bundle_files"] == 2
+    assert body["archive_filename"].endswith("-raw-harbor-tb2-v1.tar.gz")
+
+    archive_key = body["storage"]["key"]
+    archive_bytes = fake_s3.objects[(body["storage"]["bucket"], archive_key)]  # type: ignore[attr-defined]
+    assert hashlib.sha256(archive_bytes).hexdigest() == body["sha256"]
+    # The archive body must be uploaded from a file-like spool, not held as one
+    # fully materialized bytes object before put_object.
+    assert fake_s3.put_body_types_by_key[(body["storage"]["bucket"], archive_key)] is not bytes  # type: ignore[attr-defined]
+
+    first_task = task_ids[0]
+    first_trial = selected_trials[first_task]
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        names = set(tar.getnames())
+        assert "manifest.json" in names
+        assert "summary.json" in names
+        assert "provider_logs/manifest.json" in names
+        assert "derived/sft_messages.jsonl" in names
+        assert f"task_bundles/{first_task}/task.toml" in names
+        assert f"task_bundles/{first_task}/instruction.md" in names
+        assert f"agent_runs/{first_task}/{first_trial}/execution_result.json" in names
+        assert f"agent_runs/{first_task}/{first_trial}/metrics.json" in names
+        assert f"agent_runs/{first_task}/{first_trial}/artifact_manifest.json" in names
+        assert f"agent_runs/{first_task}/{first_trial}/verifier_output.json" in names
+        assert f"agent_runs/{first_task}/{first_trial}/provider_logs_manifest.json" in names
+        assert f"agent_runs/{first_task}/{first_trial}/trajectory.json" in names
+        assert f"agent_runs/{first_task}/{first_trial}/loom_trajectory.jsonl" in names
+        manifest = json.load(tar.extractfile("manifest.json"))  # type: ignore[arg-type]
+        assert manifest["mode"] == "raw-harbor-tb2-v1"
+        assert manifest["layout"] == {
+            "top_level_manifests": ["manifest.json", "summary.json"],
+            "task_bundles": "task_bundles/<task_id>/...",
+            "agent_runs": "agent_runs/<task_id>/<trial_id>/...",
+            "derived": "derived/sft_messages.jsonl",
+        }
+        provider_manifest = json.load(
+            tar.extractfile("provider_logs/manifest.json")  # type: ignore[arg-type]
+        )
+        assert len(provider_manifest["logs"]) == 5
+        first_provider_log = json.load(
+            tar.extractfile(provider_manifest["logs"][0]["archive_path"])  # type: ignore[arg-type]
+        )
+        rendered_provider_log = json.dumps(first_provider_log)
+        assert "prompt " in rendered_provider_log
+        assert "state_analysis" in rendered_provider_log
+        assert "sk-" not in rendered_provider_log
+        sft_lines = (
+            tar.extractfile("derived/sft_messages.jsonl")  # type: ignore[union-attr]
+            .read()
+            .decode()
+            .splitlines()
+        )
+        assert len(sft_lines) == 5
+        first_sft_row = json.loads(sft_lines[0])
+        assert first_sft_row["reward"] == 1.0
+        assert first_sft_row["reward_positive"] is True
+        assert first_sft_row["source"] == "provider_logs"
+        assert first_sft_row["messages"] == [
+            {"role": "user", "content": "prompt 1"},
+            {
+                "role": "assistant",
+                "content": json.dumps(
+                    {
+                        "analysis": "fresh shell",
+                        "plan": "inspect files",
+                        "commands": [{"keystrokes": "ls -la\n", "duration": 5}],
+                        "task_complete": False,
+                    }
+                ),
+            },
+        ]
+        artifact_manifest = json.load(
+            tar.extractfile(  # type: ignore[arg-type]
+                f"agent_runs/{first_task}/{first_trial}/artifact_manifest.json"
+            )
+        )
+        assert {
+            artifact["kind"]: artifact["path"]
+            for artifact in artifact_manifest["artifacts"]
+        }["trajectory"] == "trajectory.json"
+        assert {
+            artifact["kind"]: artifact["path"]
+            for artifact in artifact_manifest["artifacts"]
+        }["agent_native_trajectory"] == "loom_trajectory.jsonl"
+        trajectory = json.load(
+            tar.extractfile(  # type: ignore[arg-type]
+                f"agent_runs/{first_task}/{first_trial}/trajectory.json"
+            )
+        )
+        assert trajectory["schema_version"] == "ATIF-v1.7"
+        assert trajectory["agent"]["name"] == "opencode"
+        assert trajectory["agent"]["model_name"] == "gpt-4o"
+        assert trajectory["steps"][0]["source"] == "user"
+        assert trajectory["steps"][1]["source"] == "agent"
+        assert trajectory["steps"][1]["message"] == "Analysis: fresh shell\nPlan: inspect files"
+        assert trajectory["steps"][1]["observation"] == {
+            "results": [{"content": "total 1\n"}]
+        }
+        assert trajectory["steps"][1]["tool_calls"] == [
+            {
+                "tool_call_id": "call-1-1",
+                "function_name": "bash_command",
+                "arguments": {"keystrokes": "ls -la\n", "duration": 5},
+            }
+        ]
+
+
+async def test_raw_harbor_delivery_export_preserves_loom_native_trajectory(
+    delivery_setup: dict[str, object],
+    postgres_url: str,
+) -> None:
+    app = delivery_setup["app"]
+    raw = str(delivery_setup["raw"])
+    main_batch_id = delivery_setup["main_batch_id"]
+    supplemental_batch_id = delivery_setup["supplemental_batch_id"]
+    targeted_batch_id = delivery_setup["targeted_batch_id"]
+    selected_trials: dict[str, UUID] = delivery_setup["selected_trials"]  # type: ignore[assignment]
+    task_ids: list[str] = delivery_setup["task_ids"]  # type: ignore[assignment]
+    fake_s3 = delivery_setup["fake_s3"]
+    assistant_content = json.dumps(
+        {
+            "state_analysis": "fresh shell",
+            "explanation": "inspect files",
+            "commands": [{"keystrokes": "ls -la\n", "timeout_sec": 5}],
+            "is_task_complete": False,
+        }
+    )
+
+    sync_engine = create_engine(postgres_url)
+    try:
+        with sync_engine.begin() as conn:
+            for index, task_id in enumerate(task_ids, start=1):
+                conn.execute(
+                    insert(LlmCall).values(
+                        team_id=delivery_setup["team_id"],
+                        trial_id=selected_trials[task_id],
+                        step_id=f"raw-step-{index}",
+                        dialect="openai_facade",
+                        model="gpt-4o",
+                        input_tokens=10,
+                        output_tokens=5,
+                        provider_extras={
+                            "_loom_raw_provider_log": {
+                                "schema_version": "1",
+                                "request": {
+                                    "body": {
+                                        "messages": [
+                                            {
+                                                "role": "user",
+                                                "content": f"prompt {index}",
+                                            }
+                                        ]
+                                    }
+                                },
+                                "response": {
+                                    "body": {
+                                        "choices": [
+                                            {
+                                                "message": {
+                                                    "role": "assistant",
+                                                    "content": assistant_content,
                                                 }
                                             }
                                         ]
@@ -566,63 +833,27 @@ async def test_raw_harbor_delivery_export_streams_derek_style_bundle(
     assert response.status_code == 201, response.text
     body = response.json()
     assert body["manifest"]["mode"] == "raw-harbor"
-    assert body["manifest"]["object_counts"]["provider_logs"] == 4
-    assert body["manifest"]["object_counts"]["task_bundle_files"] == 2
+    assert "export_profile" not in body["manifest"]
     assert body["archive_filename"].endswith("-raw-harbor.tar.gz")
 
     archive_key = body["storage"]["key"]
     archive_bytes = fake_s3.objects[(body["storage"]["bucket"], archive_key)]  # type: ignore[attr-defined]
-    assert hashlib.sha256(archive_bytes).hexdigest() == body["sha256"]
-    # The archive body must be uploaded from a file-like spool, not held as one
-    # fully materialized bytes object before put_object.
-    assert fake_s3.put_body_types_by_key[(body["storage"]["bucket"], archive_key)] is not bytes  # type: ignore[attr-defined]
-
     first_task = task_ids[0]
     first_trial = selected_trials[first_task]
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
         names = set(tar.getnames())
-        assert "manifest.json" in names
-        assert "summary.json" in names
-        assert "provider_logs/manifest.json" in names
-        assert "derived/sft_messages.jsonl" in names
-        assert f"task_bundles/{first_task}/task.toml" in names
-        assert f"task_bundles/{first_task}/instruction.md" in names
-        assert f"agent_runs/{first_task}/{first_trial}/execution_result.json" in names
-        assert f"agent_runs/{first_task}/{first_trial}/metrics.json" in names
-        assert f"agent_runs/{first_task}/{first_trial}/artifact_manifest.json" in names
-        assert f"agent_runs/{first_task}/{first_trial}/verifier_output.json" in names
-        assert f"agent_runs/{first_task}/{first_trial}/provider_logs_manifest.json" in names
         assert f"agent_runs/{first_task}/{first_trial}/trajectory.jsonl" in names
-        manifest = json.load(tar.extractfile("manifest.json"))  # type: ignore[arg-type]
-        assert manifest["mode"] == "raw-harbor"
-        assert manifest["layout"] == {
-            "top_level_manifests": ["manifest.json", "summary.json"],
-            "task_bundles": "task_bundles/<task_id>/...",
-            "agent_runs": "agent_runs/<task_id>/<trial_id>/...",
-            "derived": "derived/sft_messages.jsonl",
-        }
-        provider_manifest = json.load(
-            tar.extractfile("provider_logs/manifest.json")  # type: ignore[arg-type]
-        )
-        assert len(provider_manifest["logs"]) == 4
-        first_provider_log = json.load(
-            tar.extractfile(provider_manifest["logs"][0]["archive_path"])  # type: ignore[arg-type]
-        )
-        rendered_provider_log = json.dumps(first_provider_log)
-        assert "prompt " in rendered_provider_log
-        assert "answer " in rendered_provider_log
-        assert "sk-" not in rendered_provider_log
+        assert f"agent_runs/{first_task}/{first_trial}/trajectory.json" not in names
+        assert f"agent_runs/{first_task}/{first_trial}/loom_trajectory.jsonl" not in names
         sft_lines = (
             tar.extractfile("derived/sft_messages.jsonl")  # type: ignore[union-attr]
             .read()
             .decode()
             .splitlines()
         )
-        assert len(sft_lines) == 4
-        assert json.loads(sft_lines[0])["messages"] == [
-            {"role": "user", "content": "prompt 1"},
-            {"role": "assistant", "content": "answer 1"},
-        ]
+        first_sft_row = json.loads(sft_lines[0])
+        assert first_sft_row["messages"][1]["content"] == assistant_content
+        assert "state_analysis" in first_sft_row["messages"][1]["content"]
 
 
 async def test_delivery_export_create_requires_submit_scope(
