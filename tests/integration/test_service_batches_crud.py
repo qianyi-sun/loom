@@ -19,7 +19,9 @@ from sqlalchemy import create_engine, delete, insert, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
+from loom.admin_secret import AdminSecretVerifier
 from loom.db.schema import (
+    AdminAuditEvent,
     Batch,
     Benchmark,
     LlmCall,
@@ -27,6 +29,7 @@ from loom.db.schema import (
     RateCard,
     Task,
     Team,
+    TeamMembership,
     TeamQuota,
     Token,
     Trial,
@@ -37,6 +40,8 @@ from loom_llm_gateway.rate_card import RateCardTable, hash_table
 from loom_service import agent_catalog
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+
+RAW_ADMIN_TOKEN = "loom_admin_" + "A" * 43
 
 
 def _valid_task_config(task_id: str) -> dict[str, object]:
@@ -108,6 +113,9 @@ async def camp_setup(
         engine,
         expire_on_commit=False,
     )
+    app.state.admin_secret_verifier = AdminSecretVerifier.from_token(
+        RAW_ADMIN_TOKEN,
+    )
     app.state.minio_client = boto3.client(
         "s3",
         endpoint_url=settings.minio_endpoint,
@@ -144,6 +152,13 @@ async def camp_setup(
                 team_id=team_id,
                 created_by_user_id=user_id,
                 issued_at=datetime.now(UTC),
+            )
+        )
+        s.execute(
+            insert(TeamMembership).values(
+                team_id=team_id,
+                user_id=user_id,
+                role="owner",
             )
         )
         # 3 MIT tasks + 2 Apache to test license-filter materialization.
@@ -201,11 +216,13 @@ async def camp_setup(
             s.execute(delete(RateCard))
             s.execute(delete(Token))
             s.execute(delete(Batch))
+            s.execute(delete(AdminAuditEvent))
             s.execute(delete(ProviderConnection))
             s.execute(delete(Task))
             s.execute(delete(Benchmark))
             s.execute(delete(Worker))
             s.execute(delete(TeamQuota))
+            s.execute(delete(TeamMembership))
             s.execute(delete(User).where(User.username_normalized == username.casefold()))
             s.execute(delete(Team))
             s.commit()
@@ -248,6 +265,252 @@ async def test_post_batch_materializes_count(
     }
     assert detail_body["submitted_by_user"]["username"].startswith("BatchOwner-")
     assert detail_body["submitted_by_user"]["team_id"] == str(team_id)
+
+
+async def test_admin_submit_on_behalf_records_represented_user_and_audit(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, _raw, team_id = camp_setup
+    sync_engine = create_engine(postgres_url)
+    represented_username = ""
+    with sync_engine.begin() as conn:
+        represented_username = conn.execute(
+            select(User.username).where(User.username.like("BatchOwner-%")),
+        ).scalar_one()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        created = await ac.post(
+            "/api/v1/admin/batches/on-behalf",
+            headers={
+                "Authorization": f"Bearer {RAW_ADMIN_TOKEN}",
+                "X-Loom-Admin-Actor": "release-operator",
+                "User-Agent": "loom-test-admin-on-behalf",
+            },
+            json={
+                "represented_username": represented_username,
+                "team_id": str(team_id),
+                "name": "admin canary",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {"agent": {"name": "oracle"}},
+            },
+        )
+        detail = await ac.get(
+            f"/api/v1/batches/{created.json().get('batch_id')}",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+        )
+        audit = await ac.get(
+            "/api/v1/admin/audit-events?limit=20",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+        )
+
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["team_id"] == str(team_id)
+    assert body["expected_trial_count"] == 3
+
+    assert detail.status_code == 200, detail.text
+    submitted = detail.json()["submitted_by_user"]
+    assert submitted["username"] == represented_username
+    assert submitted["team_id"] == str(team_id)
+
+    with sync_engine.begin() as conn:
+        batch_row = conn.execute(
+            select(Batch.submitted_by_user_id).where(
+                Batch.id == UUID(body["batch_id"]),
+            ),
+        ).one()
+        represented_user_id = conn.execute(
+            select(User.id).where(User.username == represented_username),
+        ).scalar_one()
+    sync_engine.dispose()
+    assert batch_row.submitted_by_user_id == represented_user_id
+
+    assert audit.status_code == 200, audit.text
+    event = next(
+        item
+        for item in audit.json()["items"]
+        if item["action"] == "batch.submit_on_behalf"
+    )
+    assert event["actor"] == "release-operator"
+    assert event["target_type"] == "batch"
+    assert event["target_id"] == body["batch_id"]
+    assert event["metadata"] == {
+        "represented_user_id": str(represented_user_id),
+        "represented_username": represented_username,
+        "represented_team_id": str(team_id),
+        "expected_trial_count": 3,
+        "backend": "docker",
+    }
+
+
+async def test_admin_submit_on_behalf_requires_admin_actor(
+    camp_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    app, _raw, team_id = camp_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/admin/batches/on-behalf",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            json={
+                "represented_username": "BatchOwner-missing",
+                "team_id": str(team_id),
+                "name": "missing actor",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {"agent": {"name": "oracle"}},
+            },
+        )
+
+    assert r.status_code == 400
+    assert "X-Loom-Admin-Actor" in r.json()["detail"]
+
+
+async def test_admin_submit_on_behalf_rejects_inactive_represented_user(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, _raw, team_id = camp_setup
+    inactive_user_id = uuid4()
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(User).values(
+                id=inactive_user_id,
+                username="InactiveBatchOwner",
+                username_normalized="inactivebatchowner",
+                status="pending_setup",
+                is_platform_admin=False,
+            )
+        )
+        conn.execute(
+            insert(TeamMembership).values(
+                team_id=team_id,
+                user_id=inactive_user_id,
+                role="member",
+            )
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/admin/batches/on-behalf",
+            headers={
+                "Authorization": f"Bearer {RAW_ADMIN_TOKEN}",
+                "X-Loom-Admin-Actor": "release-operator",
+            },
+            json={
+                "represented_username": "InactiveBatchOwner",
+                "team_id": str(team_id),
+                "name": "inactive user",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {"agent": {"name": "oracle"}},
+            },
+        )
+
+    assert r.status_code == 403
+    assert "represented user is not active" in r.json()["detail"]
+
+
+async def test_admin_submit_on_behalf_rejects_non_member_user(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, _raw, team_id = camp_setup
+    other_user_id = uuid4()
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(User).values(
+                id=other_user_id,
+                username="ActiveNonMember",
+                username_normalized="activenonmember",
+                status="active",
+                is_platform_admin=False,
+            )
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/admin/batches/on-behalf",
+            headers={
+                "Authorization": f"Bearer {RAW_ADMIN_TOKEN}",
+                "X-Loom-Admin-Actor": "release-operator",
+            },
+            json={
+                "represented_username": "ActiveNonMember",
+                "team_id": str(team_id),
+                "name": "non member",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {"agent": {"name": "oracle"}},
+            },
+        )
+
+    assert r.status_code == 403
+    assert "not a member" in r.json()["detail"]
+
+
+async def test_legacy_team_token_cannot_submit_on_behalf(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, _raw, team_id = camp_setup
+    legacy_raw = f"loom_team_{uuid4().hex}"
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        represented_username = conn.execute(
+            select(User.username).where(User.username.like("BatchOwner-%")),
+        ).scalar_one()
+        conn.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(legacy_raw.encode()).digest(),
+                type="team",
+                scopes=["read:own", "submit"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
+            )
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/admin/batches/on-behalf",
+            headers={
+                "Authorization": f"Bearer {legacy_raw}",
+                "X-Loom-Admin-Actor": "release-operator",
+            },
+            json={
+                "represented_username": represented_username,
+                "team_id": str(team_id),
+                "name": "legacy token on-behalf",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {"agent": {"name": "oracle"}},
+            },
+        )
+
+    assert r.status_code == 403
+    assert "admin scope required" in r.json()["detail"]
 
 
 def _insert_budget_provider(

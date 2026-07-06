@@ -1172,6 +1172,136 @@ def _sync_yibuapi_rate_cards(args: argparse.Namespace) -> int:
     return 0
 
 
+def _admin_submit_batch_on_behalf(args: argparse.Namespace) -> int:
+    from loom_cli.eval_cmd import (
+        _agent_needs_model,
+        _build_agent_model,
+        _print_batch_summary,
+    )
+    from loom_cli.providers_cmd import _resolve_by_name
+
+    admin_actor = args.admin_actor.strip() if args.admin_actor else ""
+    if not admin_actor:
+        sys.stderr.write("error: --admin-actor is required for admin on-behalf submission\n")
+        return 2
+    if args.task_filter is not None and args.benchmark is not None:
+        sys.stderr.write(
+            "error: --benchmark and --task-filter are mutually exclusive "
+            "(--benchmark B is sugar for --task-filter "
+            '\'{"benchmark_id":"B"}\').\n',
+        )
+        return 2
+    if args.task_filter is None and args.benchmark is None:
+        sys.stderr.write("error: one of --benchmark or --task-filter is required.\n")
+        return 2
+
+    try:
+        cfg = require_logged_in()
+    except NotLoggedInError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 2
+
+    try:
+        with authed_client(cfg) as c:
+            needs_model, agent_err = _agent_needs_model(c, args.agent)
+            if agent_err is not None:
+                sys.stderr.write(agent_err)
+                return 2
+            assert needs_model is not None
+            if needs_model:
+                missing = [
+                    flag
+                    for flag, value in (
+                        ("--provider", args.provider),
+                        ("--model", args.model),
+                    )
+                    if not value
+                ]
+                if missing:
+                    sys.stderr.write(
+                        f"error: agent {args.agent!r} requires --provider "
+                        "and --model for admin on-behalf batch submission; "
+                        "missing " + ", ".join(missing) + ".\n",
+                    )
+                    return 2
+            elif args.provider or args.model or args.agent_provider:
+                sys.stderr.write(
+                    f"error: agent {args.agent!r} does not take a model; "
+                    "omit --provider, --model, and --agent-provider.\n",
+                )
+                return 2
+
+            task_filter = (
+                args.task_filter
+                if args.task_filter is not None
+                else {"benchmark_id": args.benchmark}
+            )
+            trial_config: dict[str, Any] = {
+                "agent_name": args.agent,
+                "agent_model": None,
+            }
+            payload: dict[str, Any] = {
+                "represented_username": args.represented_username,
+                "team_id": args.team_id,
+                "task_filter": task_filter,
+                "trial_config": trial_config,
+            }
+            if args.name is not None:
+                payload["name"] = args.name
+            if args.name_suffix is not None:
+                payload["name_suffix"] = args.name_suffix
+            if args.description is not None:
+                payload["description"] = args.description
+            if args.n_per_task is not None:
+                payload["n_per_task"] = args.n_per_task
+            if args.backend is not None:
+                payload["backend"] = args.backend
+            if args.required_worker_pool:
+                payload["required_worker_pools"] = args.required_worker_pool
+            if needs_model:
+                conn = _resolve_by_name(
+                    c,
+                    args.provider,
+                    team_id=args.team_id,
+                )
+                trial_config["agent_model"] = _build_agent_model(
+                    conn["type"],
+                    args.model,
+                    agent_provider_override=args.agent_provider,
+                )
+                payload["provider_connection_id"] = conn["id"]
+                payload["provider_model_id"] = args.model
+
+            resp = c.post(
+                "/api/v1/admin/batches/on-behalf",
+                json=payload,
+                headers={"X-Loom-Admin-Actor": admin_actor},
+            )
+            body = assert_2xx(resp, action="submit admin on-behalf batch")
+    except HttpStatusError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 1
+    except httpx.RequestError as e:
+        sys.stderr.write(
+            f"error: could not reach {cfg.server_url}: {e}\n",
+        )
+        return 2
+
+    if body.get("name") is None:
+        body = {**body, "name": args.name or "(server-generated)"}
+    sys.stdout.write(
+        f"Submitted on-behalf batch for {args.represented_username!r}:\n",
+    )
+    _print_batch_summary(body)
+    return 0
+
+
+def _load_task_filter_json(raw: str) -> dict[str, Any]:
+    from loom_cli.eval_cmd import _load_task_filter_json as load
+
+    return load(raw)
+
+
 def _scopes_argparse_type(value: str) -> list[str]:
     """Accept a comma-separated list of scopes. Rejects unknown
     scopes client-side to surface typos before the round-trip."""
@@ -1718,6 +1848,103 @@ def dispatch(argv: list[str]) -> int:
     )
     _add_team_mint_args(p_team_rotate)
     p_team_rotate.set_defaults(handler=_rotate_team_token)
+
+    p_batches = sub.add_parser(
+        "batches",
+        help="Admin batch operations through the public service API.",
+    )
+    batches_sub = p_batches.add_subparsers(dest="batches_op", required=True)
+    p_submit_on_behalf = batches_sub.add_parser(
+        "submit-on-behalf",
+        help="Submit an audited batch on behalf of an active user/team.",
+    )
+    p_submit_on_behalf.add_argument(
+        "--represented-username",
+        required=True,
+        help="Active username to record as the represented submitter.",
+    )
+    p_submit_on_behalf.add_argument(
+        "--team-id",
+        required=True,
+        help="Represented team UUID. The user must be a member of this team.",
+    )
+    p_submit_on_behalf.add_argument("--agent", required=True)
+    p_submit_on_behalf.add_argument(
+        "--provider",
+        default=None,
+        help=(
+            "Provider connection name. Required for agents that call a "
+            "model; omit for no-model agents such as oracle."
+        ),
+    )
+    p_submit_on_behalf.add_argument(
+        "--model",
+        default=None,
+        help=(
+            "Upstream model id. Required for agents that call a model; "
+            "omit for no-model agents such as oracle."
+        ),
+    )
+    p_submit_on_behalf.add_argument(
+        "--agent-provider",
+        dest="agent_provider",
+        default=None,
+        help="Override the agent model provider field for pricing/adapter compatibility.",
+    )
+    p_submit_on_behalf.add_argument(
+        "--benchmark",
+        default=None,
+        help=('Benchmark slug — shortcut for --task-filter \'{"benchmark_id":"..."}\'.'),
+    )
+    p_submit_on_behalf.add_argument(
+        "--task-filter",
+        dest="task_filter",
+        type=_load_task_filter_json,
+        default=None,
+        help=(
+            "Task filter as JSON (object). Pass a literal JSON string "
+            "or `@path/to/file.json` to read from disk."
+        ),
+    )
+    p_submit_on_behalf.add_argument(
+        "--name",
+        default=None,
+        help="Optional batch display name. When omitted, the server generates one.",
+    )
+    p_submit_on_behalf.add_argument(
+        "--name-suffix",
+        default=None,
+        help="Optional suffix appended to the server-generated display name.",
+    )
+    p_submit_on_behalf.add_argument("--description", default=None)
+    p_submit_on_behalf.add_argument(
+        "--n-per-task",
+        dest="n_per_task",
+        type=int,
+        default=None,
+        help="Number of trials per task (1-100).",
+    )
+    p_submit_on_behalf.add_argument(
+        "--backend",
+        default=None,
+        help="Worker backend (default: server default).",
+    )
+    p_submit_on_behalf.add_argument(
+        "--required-worker-pool",
+        dest="required_worker_pool",
+        action="append",
+        default=[],
+        help=(
+            "Require one extra coverage trial to run on this worker pool. "
+            "Repeat for mixed-pool release canaries."
+        ),
+    )
+    p_submit_on_behalf.add_argument(
+        "--admin-actor",
+        default=None,
+        help="Required audit actor for the real operator/admin submitting.",
+    )
+    p_submit_on_behalf.set_defaults(handler=_admin_submit_batch_on_behalf)
 
     # ── rate-cards subgroup ───────────────────────────────────────────
     p_rate_cards = sub.add_parser(
