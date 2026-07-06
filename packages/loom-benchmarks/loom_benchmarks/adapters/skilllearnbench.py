@@ -38,7 +38,7 @@ _UPSTREAM_BAD_ORACLE_INSTANCE_IDS = frozenset({
     "earthquake-plate-calculation/earthquake-plate-calculation-3",
     "earthquake-plate-calculation/earthquake-plate-calculation-4",
     "earthquake-plate-calculation/earthquake-plate-calculation-5",
-    # Public-beta replay showed every upstream organize oracle returns reward
+    # Historical pre-prod replay showed every upstream organize oracle returns reward
     # 0.0; variants 1 and 6 also raise FileNotFoundError for a paper absent
     # from their Dockerfile paper list.
     "organize-messy-files/organize-messy-files-1",
