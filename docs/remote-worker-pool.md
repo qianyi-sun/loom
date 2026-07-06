@@ -479,6 +479,41 @@ stale record temporarily blocks replacement on the same nodelist so the
 controller does not double-submit during a noisy Slurm or heartbeat transition;
 the next reconcile can replace missing capacity on another allowed node.
 
+## Prod-First Shared Capacity Contract
+
+First production runs on a separate prod control plane and state profile, but
+GB10/OLDLAB machines remain shared physical capacity. The release contract is
+`deploy/worker-capacity/prod-first.toml`: by default every eligible host slot
+belongs to production, beta/dev has `beta_slots = 0`, and any beta borrow must
+be explicit, bounded to at most one slot per host, and drained back before the
+borrow window ends. The manifest can also represent `beta_draining`,
+`host_draining`, and `unreachable` hosts such as the current `trt-gb10-14`
+SSH-unreachable node.
+
+Generate the secret-safe desired-vs-observed evidence before a production
+promotion:
+
+```bash
+uv run python scripts/ops/worker_capacity_manifest.py \
+  --manifest deploy/worker-capacity/prod-first.toml \
+  --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
+  --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
+  --var BETA_IMAGE_TAG="$BETA_IMAGE_TAG" \
+  --var BETA_SOURCE_COMMIT="$BETA_RELEASE_SHA" \
+  --observed-json "$ROLLOUT_DIR/worker-registrations.json" \
+  --evidence-out "$ROLLOUT_DIR/worker-capacity-prod-first.json"
+```
+
+The observed artifact may come from Control Plane worker registration/status,
+GB10 node-agent status, or a composed release evidence collector, but it must
+not include raw service tokens, provider keys, MinIO credentials, or signed
+URLs. The validator redacts secret-bearing fields before writing JSON or
+Markdown and fails on prod/dev crosses in worker identity, API URL, image tag,
+source commit, compose service, Kubernetes deployment, host state, or observed
+slot counts. This check complements `environment-state apply/check`; it does
+not allocate, drain, or reclaim beta capacity. Lease creation and automatic
+prod-pressure drain remain separate actuator work.
+
 ## GB10 Node-Agent Compatibility Lifecycle
 
 Normal GB10 capacity should be managed through the Slurm autoscaler policy
