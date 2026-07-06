@@ -1,6 +1,11 @@
 """Unit tests for `loom qa matrix` helpers."""
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+import pytest
+
 from loom_cli import qa_cmd
 
 # ─── _provider_compatible ──────────────────────────────────────────
@@ -414,3 +419,250 @@ def test_render_markdown_includes_summary_and_cells() -> None:
     fail_idx = md.index("FAIL_PLATFORM")
     pass_idx = md.index("PASS_PLATFORM", fail_idx)  # after fail block
     assert fail_idx < pass_idx
+
+
+# ─── provider compatibility plan ───────────────────────────────────
+
+
+def test_provider_compatibility_matrix_records_status_dimensions() -> None:
+    matrix = qa_cmd._build_provider_compatibility_matrix()
+    payload = qa_cmd._provider_compatibility_matrix_to_json_payload(matrix)
+
+    assert payload["schema_version"] == "provider-harness-compatibility-v1"
+    assert payload["issue"] == "https://github.com/qianyi-sun/loom/issues/114"
+    assert payload["live_provider_calls"] == "not_run"
+
+    cells = {
+        (cell["agent"], cell["provider_endpoint_type"]): cell
+        for cell in payload["cells"]
+    }
+    codex_yibu = cells[("codex", "yibuapi-openai-compatible")]
+    assert codex_yibu["status"] == "supported"
+    assert codex_yibu["protocol_surface"] == "responses"
+    assert codex_yibu["streaming"] == "supported"
+    assert codex_yibu["tool_use"] == "supported"
+    assert codex_yibu["request_params"] == "supported"
+    assert codex_yibu["max_tokens"] == "supported"
+    assert codex_yibu["usage"] == "pending_live_smoke"
+    assert codex_yibu["diagnostics"] == "pending_live_smoke"
+    assert codex_yibu["redaction"] == "supported"
+    assert codex_yibu["live_smoke"] is None
+
+    gemini_yibu = cells[("gemini-cli", "yibuapi-gemini-native")]
+    assert gemini_yibu["status"] == "supported"
+    assert gemini_yibu["protocol_surface"] == "gemini"
+    assert gemini_yibu["usage"] == "pending_live_smoke"
+    assert "supported_providers" in gemini_yibu["support_reason"]
+
+    oracle_openai = cells[("oracle", "user-hosted-openai-compatible")]
+    assert oracle_openai["status"] == "skipped"
+    assert "no-model" in oracle_openai["skip_reason"]
+
+    assert payload["summary"]["supported"] > 0
+    assert payload["summary"]["blocked"] > 0
+    assert payload["summary"]["skipped"] == len(payload["provider_endpoint_types"])
+    assert sum(payload["summary"].values()) == len(payload["cells"])
+
+
+def test_provider_compatibility_matrix_covers_default_ready_agent_catalog() -> None:
+    from loom_service import agent_catalog
+
+    matrix = qa_cmd._build_provider_compatibility_matrix()
+    payload = qa_cmd._provider_compatibility_matrix_to_json_payload(matrix)
+
+    repo_known_ready_agents = {
+        "oracle",
+        "litellm",
+        *(
+            name for name, ready in agent_catalog._ADAPTER_RUNTIME_READY.items()
+            if ready
+        ),
+    }
+    live_catalog_ready_agents = {
+        agent.name for agent in agent_catalog.list_agents()
+        if agent.service_mode_ready
+    }
+    expected_agents = repo_known_ready_agents | live_catalog_ready_agents
+    endpoint_types = {
+        endpoint["id"] for endpoint in payload["provider_endpoint_types"]
+    }
+    emitted_by_agent: dict[str, set[str]] = {}
+    for cell in payload["cells"]:
+        emitted_by_agent.setdefault(cell["agent"], set()).add(
+            cell["provider_endpoint_type"],
+        )
+
+    assert expected_agents.issubset(emitted_by_agent)
+    for agent_name in expected_agents:
+        assert emitted_by_agent[agent_name] == endpoint_types
+
+
+def test_provider_compatibility_matrix_includes_generic_agents_per_agent() -> None:
+    matrix = qa_cmd._build_provider_compatibility_matrix()
+    payload = qa_cmd._provider_compatibility_matrix_to_json_payload(matrix)
+    cells = {
+        (cell["agent"], cell["provider_endpoint_type"]): cell
+        for cell in payload["cells"]
+    }
+
+    for agent_name in ("litellm", "opencode"):
+        openai = cells[(agent_name, "user-hosted-openai-compatible")]
+        anthropic = cells[(agent_name, "yibuapi-anthropic-messages")]
+        assert openai["status"] == "supported"
+        assert anthropic["status"] == "supported"
+        assert openai["usage"] == "pending_live_smoke"
+        assert "supported_providers=['*']" in openai["support_reason"]
+        assert openai["agent_group"] == "generic-provider"
+
+
+def test_provider_compatibility_matrix_blocks_provider_locked_mismatch() -> None:
+    matrix = qa_cmd._build_provider_compatibility_matrix()
+    payload = qa_cmd._provider_compatibility_matrix_to_json_payload(matrix)
+    cells = {
+        (cell["agent"], cell["provider_endpoint_type"]): cell
+        for cell in payload["cells"]
+    }
+
+    kimi_openai = cells[("kimi-cli", "user-hosted-openai-compatible")]
+    assert kimi_openai["status"] == "blocked"
+    assert "supported_providers=['moonshot']" in kimi_openai["blocked_reason"]
+    assert kimi_openai["follow_up_url"] == "https://github.com/qianyi-sun/loom/issues/114"
+
+
+def test_provider_compatibility_evidence_override_is_serialized() -> None:
+    matrix = qa_cmd._build_provider_compatibility_matrix(
+        evidence_overrides=[
+            {
+                "agent": "codex",
+                "provider_endpoint_type": "yibuapi-openai-compatible",
+                "live_smoke": {
+                    "status": "passed",
+                    "checked_at": "2026-07-06T12:00:00+00:00",
+                    "llm_calls_count": 1,
+                    "usage": "priced",
+                    "diagnostics": "sanitized",
+                    "redaction": "passed",
+                    "notes": "smoke used env:YIBUAPI_API_KEY and sanitized debug evidence",
+                    "evidence_url": "https://github.com/qianyi-sun/loom/issues/114#issuecomment-1",
+                },
+            },
+        ],
+    )
+    payload = qa_cmd._provider_compatibility_matrix_to_json_payload(matrix)
+
+    cell = next(
+        c for c in payload["cells"]
+        if c["agent"] == "codex"
+        and c["provider_endpoint_type"] == "yibuapi-openai-compatible"
+    )
+    assert cell["usage"] == "priced"
+    assert cell["diagnostics"] == "sanitized"
+    assert cell["redaction"] == "passed"
+    assert cell["live_smoke"] == {
+        "status": "passed",
+        "checked_at": "2026-07-06T12:00:00+00:00",
+        "llm_calls_count": 1,
+        "usage": "priced",
+        "diagnostics": "sanitized",
+        "redaction": "passed",
+        "notes": "smoke used env:YIBUAPI_API_KEY and sanitized debug evidence",
+        "evidence_url": "https://github.com/qianyi-sun/loom/issues/114#issuecomment-1",
+    }
+
+
+def test_provider_compatibility_evidence_rejects_secret_like_values() -> None:
+    raw_token = "loom_api_abcdefghijklmnopqrstuvwxyz012345"
+    signed_url = "https://storage.example.test/evidence?X-Amz-Signature=abc123"
+    with pytest.raises(ValueError) as exc_info:
+        qa_cmd._build_provider_compatibility_matrix(
+            evidence_overrides=[
+                {
+                    "agent": "codex",
+                    "provider_endpoint_type": "yibuapi-openai-compatible",
+                    "live_smoke": {
+                        "status": "failed",
+                        "notes": f"failed with Authorization: Bearer {raw_token}",
+                        "evidence_url": signed_url,
+                    },
+                },
+            ],
+        )
+
+    message = str(exc_info.value)
+    assert "secret-like content" in message
+    assert raw_token not in message
+    assert "X-Amz-Signature=abc123" not in message
+
+
+def test_provider_compatibility_plan_cli_does_not_require_login(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fail_login() -> None:
+        raise AssertionError("plan-only compatibility matrix must not log in")
+
+    monkeypatch.setattr(qa_cmd, "require_logged_in", fail_login)
+    json_output = tmp_path / "compat.json"
+    md_output = tmp_path / "compat.md"
+
+    rc = qa_cmd.dispatch([
+        "matrix",
+        "--compatibility-plan",
+        "--json-output",
+        str(json_output),
+        "--output",
+        str(md_output),
+    ])
+
+    assert rc == 0
+    stdout = capsys.readouterr().out
+    assert "# Agent harness x provider compatibility matrix" in stdout
+    assert "yibuapi-openai-compatible" in stdout
+    payload = json.loads(json_output.read_text())
+    assert payload["schema_version"] == "provider-harness-compatibility-v1"
+    assert payload["summary"]["supported"] > 0
+    assert md_output.read_text() == stdout
+
+
+def test_provider_compatibility_plan_cli_loads_safe_evidence_file(
+    tmp_path: Path,
+) -> None:
+    evidence_file = tmp_path / "evidence.json"
+    evidence_file.write_text(json.dumps({
+        "cells": [
+            {
+                "agent": "codex",
+                "provider_endpoint_type": "user-hosted-openai-compatible",
+                "live_smoke": {
+                    "status": "passed",
+                    "checked_at": "2026-07-06T12:30:00+00:00",
+                    "llm_calls_count": 1,
+                    "usage": "tokens-only",
+                    "diagnostics": "sanitized",
+                    "redaction": "passed",
+                    "notes": "vLLM chat fallback evidence, provider key kept as env:VLLM_API_KEY",
+                },
+            },
+        ],
+    }))
+    json_output = tmp_path / "compat.json"
+
+    rc = qa_cmd.dispatch([
+        "matrix",
+        "--compatibility-plan",
+        "--compatibility-evidence",
+        str(evidence_file),
+        "--json-output",
+        str(json_output),
+    ])
+
+    assert rc == 0
+    payload = json.loads(json_output.read_text())
+    cell = next(
+        c for c in payload["cells"]
+        if c["agent"] == "codex"
+        and c["provider_endpoint_type"] == "user-hosted-openai-compatible"
+    )
+    assert cell["usage"] == "tokens-only"
+    assert cell["live_smoke"]["llm_calls_count"] == 1

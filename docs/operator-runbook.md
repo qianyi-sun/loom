@@ -2686,6 +2686,26 @@ agent-capable models only. Raw provider entries are still available with
 `hidden_reason` values such as `classifier-non-llm` so operators can
 debug noisy OpenAI-compatible catalogs.
 
+Before submitting an agent/provider smoke matrix, generate the repo-side
+compatibility plan:
+
+```bash
+loom qa matrix \
+  --compatibility-plan \
+  --output provider-harness-compatibility.md \
+  --json-output provider-harness-compatibility.json
+```
+
+This is a no-login, no-provider-call planning command. It emits per-agent cells
+for every default displayed service-mode-ready harness and every tracked
+provider endpoint type, including generic `supported_providers=["*"]` agents
+such as `litellm` and `opencode`. `blocked` and `skipped` cells include the
+pre-submit reason; `supported` cells keep live-smoke fields as
+`pending_live_smoke` until authorized low-cost provider validation is merged
+from a sanitized `--compatibility-evidence` JSON file. Evidence files must use
+safe references such as `env:PROVIDER_API_KEY`; the CLI rejects raw-looking
+bearer tokens, provider keys, and signed URLs before writing Markdown or JSON.
+
 For self-hosted endpoints that do not implement useful discovery, add
 the model id manually through the provider model API:
 

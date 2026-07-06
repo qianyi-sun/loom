@@ -95,6 +95,44 @@ Common failures:
   or another model is selected.
 - Noisy model list: hide non-agent models in the Models tab.
 
+### Harness Compatibility Plan
+
+Before submitting an agent/provider smoke matrix, generate the repo-known
+harness/provider plan:
+
+```bash
+loom qa matrix \
+  --compatibility-plan \
+  --output provider-harness-compatibility.md \
+  --json-output provider-harness-compatibility.json
+```
+
+This command does not log in, contact a provider, or submit batches. It covers
+every repo-known default displayed `service_mode_ready=true` agent, including
+builtins and launcher adapters such as `litellm`, `opencode`, `aider`, Codex,
+Claude Code, and Gemini CLI. The JSON schema records each agent harness x
+provider endpoint cell as `supported`, `skipped`, or `blocked`, with protocol
+surface (`chat`, `responses`, `messages`, or `gemini`), streaming, tool-use,
+request-param, max-token, usage, diagnostic, and redaction status. Generic
+`supported_providers=["*"]` agents are still emitted as per-agent rows so #35
+can consume the matrix directly. Use it as pre-submit input for the live
+low-cost smokes tracked by #114 and for the agent x benchmark planning in #35.
+
+If live-smoke evidence is available, merge it from a local JSON file:
+
+```bash
+loom qa matrix \
+  --compatibility-plan \
+  --compatibility-evidence provider-harness-evidence.json \
+  --json-output provider-harness-compatibility.json
+```
+
+Evidence files may include sanitized `live_smoke` fields such as status,
+checked time, `llm_calls_count`, usage, diagnostics, redaction status, and an
+issue-comment URL. The CLI rejects raw-looking bearer tokens, provider API keys,
+or signed URLs in evidence, notes, URLs, and serialized output; keep credentials
+as safe references such as `env:PROVIDER_API_KEY`.
+
 ## GPU Cluster Checkpoint
 
 Use this path when the user owns a checkpoint or Hugging Face model and a

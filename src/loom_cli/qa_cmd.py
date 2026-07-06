@@ -26,15 +26,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 import httpx
 
+from loom.security.redaction import contains_secret_like_content
 from loom_cli.server_client import (
     HttpStatusError,
     NotLoggedInError,
@@ -48,6 +50,49 @@ CellState = Literal[
     "PASS_PLATFORM", "FAIL_PLATFORM", "SUSPECT_PASS",
     "SKIPPED", "STUCK", "PENDING",
 ]
+
+CompatibilityCellStatus = Literal["supported", "skipped", "blocked"]
+
+_COMPATIBILITY_SCHEMA_VERSION = "provider-harness-compatibility-v1"
+_COMPATIBILITY_ISSUE_URL = "https://github.com/qianyi-sun/loom/issues/114"
+_PROVIDER_ENDPOINT_TYPES: list[dict[str, str]] = [
+    {
+        "id": "yibuapi-openai-compatible",
+        "provider_family": "openai",
+        "protocol_surface": "openai-compatible",
+        "description": "YibuAPI OpenAI-compatible endpoint through the Loom gateway facade.",
+    },
+    {
+        "id": "yibuapi-anthropic-messages",
+        "provider_family": "anthropic",
+        "protocol_surface": "messages",
+        "description": "YibuAPI Anthropic-native Messages endpoint.",
+    },
+    {
+        "id": "yibuapi-gemini-native",
+        "provider_family": "google",
+        "protocol_surface": "gemini",
+        "description": "YibuAPI Gemini-native endpoint when enabled.",
+    },
+    {
+        "id": "user-hosted-openai-compatible",
+        "provider_family": "openai",
+        "protocol_surface": "chat",
+        "description": "User-hosted OpenAI-compatible endpoint such as vLLM.",
+    },
+    {
+        "id": "user-hosted-anthropic-compatible",
+        "provider_family": "anthropic",
+        "protocol_surface": "messages",
+        "description": "User-hosted Anthropic-compatible endpoint when enabled.",
+    },
+]
+_SECRET_QUERY_PARAM_RE = re.compile(
+    r"(?i)(?:[?&;]|^)"
+    r"(?:api[-_]?key|access[-_]?token|auth[-_]?token|token|"
+    r"signature|x-amz-signature|x-amz-credential|"
+    r"x-amz-security-token|awsaccesskeyid)=",
+)
 
 
 @dataclass
@@ -77,6 +122,443 @@ class MatrixResult:
         for cell in self.cells:
             counts[cell.state] = counts.get(cell.state, 0) + 1
         return counts
+
+
+@dataclass
+class LiveSmokeEvidence:
+    status: str
+    checked_at: str | None = None
+    llm_calls_count: int | None = None
+    usage: str | None = None
+    diagnostics: str | None = None
+    redaction: str | None = None
+    notes: str | None = None
+    evidence_url: str | None = None
+    batch_id: str | None = None
+    trial_id: str | None = None
+
+
+@dataclass
+class ProviderCompatibilityCell:
+    agent: str
+    provider_endpoint_type: str
+    agent_group: str
+    status: CompatibilityCellStatus
+    protocol_surface: str
+    streaming: str
+    tool_use: str
+    request_params: str
+    max_tokens: str
+    usage: str
+    diagnostics: str
+    redaction: str
+    support_reason: str | None = None
+    blocked_reason: str | None = None
+    skip_reason: str | None = None
+    follow_up_url: str | None = None
+    live_smoke: LiveSmokeEvidence | None = None
+
+
+@dataclass
+class ProviderCompatibilityMatrix:
+    schema_version: str
+    issue: str
+    live_provider_calls: str
+    provider_endpoint_types: list[dict[str, str]]
+    cells: list[ProviderCompatibilityCell]
+    notes: list[str] = field(default_factory=list)
+
+    def by_status(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for cell in self.cells:
+            counts[cell.status] = counts.get(cell.status, 0) + 1
+        return counts
+
+
+@dataclass(frozen=True)
+class CompatibilityAgentMetadata:
+    name: str
+    needs_model: bool
+    supported_providers: tuple[str, ...]
+    supported_model_sources: tuple[str, ...]
+    endpoint_dialect: str | None
+
+
+def _compat_cell(
+    *,
+    agent: str,
+    provider_endpoint_type: str,
+    agent_group: str,
+    status: CompatibilityCellStatus,
+    protocol_surface: str,
+    streaming: str = "pending_live_smoke",
+    tool_use: str = "pending_live_smoke",
+    request_params: str = "pending_live_smoke",
+    max_tokens: str = "pending_live_smoke",
+    usage: str = "pending_live_smoke",
+    diagnostics: str = "pending_live_smoke",
+    redaction: str = "supported",
+    support_reason: str | None = None,
+    blocked_reason: str | None = None,
+    skip_reason: str | None = None,
+    follow_up_url: str | None = None,
+) -> ProviderCompatibilityCell:
+    return ProviderCompatibilityCell(
+        agent=agent,
+        provider_endpoint_type=provider_endpoint_type,
+        agent_group=agent_group,
+        status=status,
+        protocol_surface=protocol_surface,
+        streaming=streaming,
+        tool_use=tool_use,
+        request_params=request_params,
+        max_tokens=max_tokens,
+        usage=usage,
+        diagnostics=diagnostics,
+        redaction=redaction,
+        support_reason=support_reason,
+        blocked_reason=blocked_reason,
+        skip_reason=skip_reason,
+        follow_up_url=follow_up_url,
+    )
+
+
+_FALLBACK_ADAPTER_ENDPOINT_DIALECTS: dict[str, str] = {
+    "aider": "openai_chat",
+    "claude-code": "anthropic_messages",
+    "codex": "openai_responses",
+    "gemini-cli": "gemini",
+    "hello": "openai_chat",
+    "kimi-cli": "openai_chat",
+    "mini-swe-agent": "openai_chat",
+    "opencode": "openai_chat",
+    "openhands": "openai_chat",
+    "openhands-sdk": "openai_chat",
+    "qwen-cli": "openai_chat",
+    "swe-agent": "openai_chat",
+    "terminus-2": "openai_chat",
+}
+
+
+def _repo_known_service_mode_ready_agents() -> list[CompatibilityAgentMetadata]:
+    from loom_service import agent_catalog
+
+    entries: dict[str, CompatibilityAgentMetadata] = {}
+    for agent in agent_catalog.list_agents():
+        if not agent.service_mode_ready:
+            continue
+        entries[agent.name] = CompatibilityAgentMetadata(
+            name=agent.name,
+            needs_model=agent.needs_model,
+            supported_providers=tuple(agent.supported_providers),
+            supported_model_sources=tuple(agent.supported_model_sources),
+            endpoint_dialect=agent.runtime_contract.endpoint_dialect,
+        )
+
+    adapter_ready = getattr(agent_catalog, "_ADAPTER_RUNTIME_READY", {})
+    adapter_overrides = getattr(agent_catalog, "_ADAPTER_OVERRIDES", {})
+    default_adapter_support = getattr(
+        agent_catalog,
+        "_DEFAULT_ADAPTER_SUPPORT",
+        (("*",), ("api", "local-server", "hf")),
+    )
+    for name, ready in adapter_ready.items():
+        if not ready or name in entries:
+            continue
+        providers, sources = adapter_overrides.get(name, default_adapter_support)
+        entries[name] = CompatibilityAgentMetadata(
+            name=str(name),
+            needs_model=True,
+            supported_providers=tuple(providers),
+            supported_model_sources=tuple(sources),
+            endpoint_dialect=_FALLBACK_ADAPTER_ENDPOINT_DIALECTS.get(str(name)),
+        )
+
+    return sorted(entries.values(), key=lambda agent: agent.name)
+
+
+def _agent_group(agent: CompatibilityAgentMetadata) -> str:
+    if not agent.needs_model:
+        return "no-model"
+    if "*" in agent.supported_providers:
+        return "generic-provider"
+    return "provider-locked"
+
+
+def _cell_protocol_surface(
+    agent: CompatibilityAgentMetadata,
+    endpoint: Mapping[str, str],
+) -> str:
+    provider_family = endpoint["provider_family"]
+    if provider_family == "openai":
+        dialect = agent.endpoint_dialect or ""
+        if agent.name == "codex" or "responses" in dialect:
+            return "responses"
+        return "chat"
+    return endpoint["protocol_surface"]
+
+
+def _supported_dimension_statuses(
+    agent: CompatibilityAgentMetadata,
+    endpoint: Mapping[str, str],
+) -> dict[str, str]:
+    if agent.name == "codex" and endpoint["provider_family"] == "openai":
+        return {
+            "streaming": "supported",
+            "tool_use": "supported",
+            "request_params": "supported",
+            "max_tokens": "supported",
+        }
+    return {
+        "streaming": "pending_live_smoke",
+        "tool_use": "pending_live_smoke",
+        "request_params": "pending_live_smoke",
+        "max_tokens": "pending_live_smoke",
+    }
+
+
+def _supported_providers_text(providers: tuple[str, ...]) -> str:
+    return f"supported_providers={list(providers)!r}"
+
+
+def _provider_compatibility_cell_for_agent_endpoint(
+    agent: CompatibilityAgentMetadata,
+    endpoint: Mapping[str, str],
+) -> ProviderCompatibilityCell:
+    endpoint_provider = endpoint["provider_family"]
+    endpoint_id = endpoint["id"]
+    protocol_surface = _cell_protocol_surface(agent, endpoint)
+    group = _agent_group(agent)
+    if not agent.needs_model:
+        return _compat_cell(
+            agent=agent.name,
+            provider_endpoint_type=endpoint_id,
+            agent_group=group,
+            status="skipped",
+            protocol_surface=protocol_surface,
+            streaming="not_applicable",
+            tool_use="not_applicable",
+            request_params="not_applicable",
+            max_tokens="not_applicable",
+            usage="not_applicable",
+            diagnostics="supported",
+            redaction="supported",
+            skip_reason=(
+                f"{agent.name} is a no-model harness; provider selection is "
+                "not applicable and should be omitted before submit"
+            ),
+        )
+
+    providers = agent.supported_providers
+    provider_matches = "*" in providers or endpoint_provider in providers
+    if not provider_matches:
+        return _compat_cell(
+            agent=agent.name,
+            provider_endpoint_type=endpoint_id,
+            agent_group=group,
+            status="blocked",
+            protocol_surface=protocol_surface,
+            streaming="not_applicable",
+            tool_use="not_applicable",
+            request_params="not_applicable",
+            max_tokens="not_applicable",
+            usage="not_applicable",
+            diagnostics="supported",
+            redaction="supported",
+            blocked_reason=(
+                f"agent metadata {_supported_providers_text(providers)} does "
+                f"not include endpoint provider family {endpoint_provider!r}"
+            ),
+            follow_up_url=_COMPATIBILITY_ISSUE_URL,
+        )
+
+    dimensions = _supported_dimension_statuses(agent, endpoint)
+    if "*" in providers:
+        support_reason = (
+            f"agent metadata {_supported_providers_text(providers)} accepts "
+            f"endpoint provider family {endpoint_provider!r}; pending #114 "
+            "live smoke evidence"
+        )
+    else:
+        support_reason = (
+            f"agent metadata {_supported_providers_text(providers)} includes "
+            f"endpoint provider family {endpoint_provider!r}; pending #114 "
+            "live smoke evidence"
+        )
+    return _compat_cell(
+        agent=agent.name,
+        provider_endpoint_type=endpoint_id,
+        agent_group=group,
+        status="supported",
+        protocol_surface=protocol_surface,
+        streaming=dimensions["streaming"],
+        tool_use=dimensions["tool_use"],
+        request_params=dimensions["request_params"],
+        max_tokens=dimensions["max_tokens"],
+        usage="pending_live_smoke",
+        diagnostics="pending_live_smoke",
+        redaction="supported",
+        support_reason=support_reason,
+    )
+
+
+def _default_provider_compatibility_cells() -> list[ProviderCompatibilityCell]:
+    return [
+        _provider_compatibility_cell_for_agent_endpoint(agent, endpoint)
+        for agent in _repo_known_service_mode_ready_agents()
+        for endpoint in _PROVIDER_ENDPOINT_TYPES
+    ]
+
+
+def _assert_compatibility_secret_safe(value: Any, *, field_path: str) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            _assert_compatibility_secret_safe(
+                item, field_path=f"{field_path}.{key}",
+            )
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _assert_compatibility_secret_safe(
+                item, field_path=f"{field_path}[{index}]",
+            )
+        return
+    if not isinstance(value, str) or not value:
+        return
+    decision = contains_secret_like_content(value)
+    if decision.status == "blocked" or _SECRET_QUERY_PARAM_RE.search(value):
+        raise ValueError(f"{field_path}: secret-like content rejected")
+
+
+def _coerce_live_smoke_evidence(value: Mapping[str, Any]) -> LiveSmokeEvidence:
+    _assert_compatibility_secret_safe(value, field_path="live_smoke")
+    llm_calls = value.get("llm_calls_count")
+    if llm_calls is not None and not isinstance(llm_calls, int):
+        raise ValueError("live_smoke.llm_calls_count must be an integer")
+    status = value.get("status")
+    if not isinstance(status, str) or not status:
+        raise ValueError("live_smoke.status is required")
+    return LiveSmokeEvidence(
+        status=status,
+        checked_at=_optional_str(value, "checked_at"),
+        llm_calls_count=llm_calls,
+        usage=_optional_str(value, "usage"),
+        diagnostics=_optional_str(value, "diagnostics"),
+        redaction=_optional_str(value, "redaction"),
+        notes=_optional_str(value, "notes"),
+        evidence_url=_optional_str(value, "evidence_url"),
+        batch_id=_optional_str(value, "batch_id"),
+        trial_id=_optional_str(value, "trial_id"),
+    )
+
+
+def _optional_str(value: Mapping[str, Any], key: str) -> str | None:
+    item = value.get(key)
+    if item is None:
+        return None
+    if not isinstance(item, str):
+        raise ValueError(f"{key} must be a string")
+    return item
+
+
+def _apply_compatibility_evidence_overrides(
+    cells: list[ProviderCompatibilityCell],
+    evidence_overrides: Iterable[Mapping[str, Any]],
+) -> None:
+    by_key = {
+        (cell.agent, cell.provider_endpoint_type): cell
+        for cell in cells
+    }
+    for override in evidence_overrides:
+        _assert_compatibility_secret_safe(override, field_path="evidence")
+        agent = override.get("agent")
+        endpoint = override.get("provider_endpoint_type")
+        if not isinstance(agent, str) or not isinstance(endpoint, str):
+            raise ValueError("evidence cells require agent and provider_endpoint_type")
+        cell = by_key.get((agent, endpoint))
+        if cell is None:
+            raise ValueError(
+                "evidence cell does not match a repo-known compatibility cell",
+            )
+
+        live_smoke_value = override.get("live_smoke")
+        if live_smoke_value is not None:
+            if not isinstance(live_smoke_value, Mapping):
+                raise ValueError("live_smoke must be an object")
+            live_smoke = _coerce_live_smoke_evidence(live_smoke_value)
+            cell.live_smoke = live_smoke
+            if live_smoke.usage:
+                cell.usage = live_smoke.usage
+            if live_smoke.diagnostics:
+                cell.diagnostics = live_smoke.diagnostics
+            if live_smoke.redaction:
+                cell.redaction = live_smoke.redaction
+
+
+def _build_provider_compatibility_matrix(
+    *,
+    evidence_overrides: Iterable[Mapping[str, Any]] | None = None,
+) -> ProviderCompatibilityMatrix:
+    cells = _default_provider_compatibility_cells()
+    if evidence_overrides:
+        _apply_compatibility_evidence_overrides(cells, evidence_overrides)
+    matrix = ProviderCompatibilityMatrix(
+        schema_version=_COMPATIBILITY_SCHEMA_VERSION,
+        issue=_COMPATIBILITY_ISSUE_URL,
+        live_provider_calls="not_run",
+        provider_endpoint_types=[dict(item) for item in _PROVIDER_ENDPOINT_TYPES],
+        cells=cells,
+        notes=[
+            "Repo-known compatibility plan only; this command does not run live provider calls.",
+            "Cells with pending_live_smoke remain open for #114 low-cost provider validation.",
+            "Use this matrix as pre-submit input for #35 agent x benchmark planning.",
+        ],
+    )
+    _validate_provider_compatibility_matrix(matrix)
+    return matrix
+
+
+def _validate_provider_compatibility_matrix(
+    matrix: ProviderCompatibilityMatrix,
+) -> None:
+    _assert_compatibility_secret_safe(
+        _provider_compatibility_matrix_to_json_payload(matrix, validate=False),
+        field_path="provider_compatibility_matrix",
+    )
+
+
+def _provider_compatibility_matrix_to_json_payload(
+    matrix: ProviderCompatibilityMatrix,
+    *,
+    validate: bool = True,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": matrix.schema_version,
+        "issue": matrix.issue,
+        "live_provider_calls": matrix.live_provider_calls,
+        "provider_endpoint_types": matrix.provider_endpoint_types,
+        "summary": matrix.by_status(),
+        "notes": list(matrix.notes),
+        "cells": [_provider_compatibility_cell_to_json(cell) for cell in matrix.cells],
+    }
+    if validate:
+        _assert_compatibility_secret_safe(
+            payload, field_path="provider_compatibility_matrix",
+        )
+    return payload
+
+
+def _provider_compatibility_cell_to_json(
+    cell: ProviderCompatibilityCell,
+) -> dict[str, Any]:
+    payload = asdict(cell)
+    if cell.live_smoke is not None:
+        payload["live_smoke"] = {
+            key: value
+            for key, value in asdict(cell.live_smoke).items()
+            if value is not None
+        }
+    return payload
 
 
 def _fetch_catalogs(
@@ -494,7 +976,134 @@ def _render_markdown(result: MatrixResult) -> str:
     return "\n".join(lines)
 
 
+def _render_provider_compatibility_markdown(
+    matrix: ProviderCompatibilityMatrix,
+) -> str:
+    payload = _provider_compatibility_matrix_to_json_payload(matrix)
+    lines: list[str] = []
+    lines.append("# Agent harness x provider compatibility matrix\n")
+    lines.append(f"- Schema: `{payload['schema_version']}`")
+    lines.append(f"- Issue: {payload['issue']}")
+    lines.append(f"- Live provider calls: `{payload['live_provider_calls']}`")
+    lines.append("")
+    lines.append("## Summary")
+    for status, n in sorted(payload["summary"].items()):
+        lines.append(f"- {status}: {n}")
+    lines.append("")
+    lines.append("## Provider Endpoint Types")
+    for endpoint in payload["provider_endpoint_types"]:
+        lines.append(
+            f"- `{endpoint['id']}`: provider `{endpoint['provider_family']}`, "
+            f"surface `{endpoint['protocol_surface']}` - {endpoint['description']}",
+        )
+    lines.append("")
+    lines.append("## Cells")
+    lines.append(
+        "| Agent | Agent group | Provider endpoint | Status | Protocol | Streaming | "
+        "Tool use | Request params | Max tokens | Usage | Diagnostics | "
+        "Redaction | Reason | Support reason | Follow-up | Live smoke |",
+    )
+    lines.append(
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+    )
+    sort_key = {"blocked": 0, "skipped": 1, "supported": 2}
+    for cell in sorted(
+        matrix.cells,
+        key=lambda c: (
+            sort_key.get(c.status, 9),
+            c.agent,
+            c.provider_endpoint_type,
+        ),
+    ):
+        reason = _md_escape(cell.blocked_reason or cell.skip_reason or "")
+        support_reason = _md_escape(cell.support_reason or "")
+        follow_up = cell.follow_up_url or ""
+        live_smoke = ""
+        if cell.live_smoke is not None:
+            smoke = cell.live_smoke
+            parts = [smoke.status]
+            if smoke.llm_calls_count is not None:
+                parts.append(f"llm_calls={smoke.llm_calls_count}")
+            if smoke.checked_at:
+                parts.append(smoke.checked_at)
+            live_smoke = "; ".join(parts)
+        lines.append(
+            f"| {cell.agent} | {cell.agent_group} | {cell.provider_endpoint_type} | "
+            f"{cell.status} | {cell.protocol_surface} | {cell.streaming} | "
+            f"{cell.tool_use} | {cell.request_params} | {cell.max_tokens} | "
+            f"{cell.usage} | {cell.diagnostics} | {cell.redaction} | "
+            f"{reason} | {support_reason} | {follow_up} | {live_smoke} |",
+        )
+    lines.append("")
+    lines.append("## Notes")
+    for note in matrix.notes:
+        lines.append(f"- {_md_escape(note)}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _md_escape(value: str) -> str:
+    return value.replace("|", "\\|")
+
+
+def _load_compatibility_evidence_file(path: str) -> list[Mapping[str, Any]]:
+    with open(path, encoding="utf-8") as f:
+        payload = json.load(f)
+    if isinstance(payload, list):
+        cells = payload
+    elif isinstance(payload, dict) and isinstance(payload.get("cells"), list):
+        cells = payload["cells"]
+    else:
+        raise ValueError("compatibility evidence must be a list or an object with cells")
+    if not all(isinstance(cell, Mapping) for cell in cells):
+        raise ValueError("compatibility evidence cells must be objects")
+    return cells
+
+
+def _compatibility_plan(args: argparse.Namespace) -> int:
+    evidence_overrides: list[Mapping[str, Any]] = []
+    try:
+        for path in args.compatibility_evidence or []:
+            evidence_overrides.extend(_load_compatibility_evidence_file(path))
+        matrix = _build_provider_compatibility_matrix(
+            evidence_overrides=evidence_overrides,
+        )
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        sys.stderr.write(f"compatibility plan failed: {exc}\n")
+        return 2
+
+    md = _render_provider_compatibility_markdown(matrix)
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(md)
+    print(md, end="")
+
+    if args.json_output:
+        with open(args.json_output, "w", encoding="utf-8") as f:
+            json.dump(
+                _provider_compatibility_matrix_to_json_payload(matrix),
+                f,
+                indent=2,
+            )
+            f.write("\n")
+    return 0
+
+
 def _matrix(args: argparse.Namespace) -> int:
+    if args.compatibility_plan:
+        return _compatibility_plan(args)
+    if not args.provider_connection:
+        sys.stderr.write(
+            "error: --provider-connection is required unless "
+            "--compatibility-plan is set.\n",
+        )
+        return 2
+    if not args.model:
+        sys.stderr.write(
+            "error: --model is required unless --compatibility-plan is set.\n",
+        )
+        return 2
+
     agent_filter = set(args.agent) if args.agent else None
     bench_filter = set(args.benchmark) if args.benchmark else None
     try:
@@ -637,11 +1246,11 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_matrix.add_argument(
-        "--provider-connection", required=True,
+        "--provider-connection", default=None,
         help="Name of the registered provider connection (loom providers create ...).",
     )
     p_matrix.add_argument(
-        "--model", required=True,
+        "--model", default=None,
         help="Model id known to the relay (e.g. gpt-4o-mini).",
     )
     p_matrix.add_argument(
@@ -667,6 +1276,20 @@ def dispatch(argv: list[str]) -> int:
     p_matrix.add_argument(
         "--json-output", default=None,
         help="Path to write the matrix as JSON for programmatic consumption.",
+    )
+    p_matrix.add_argument(
+        "--compatibility-plan", action="store_true",
+        help=(
+            "Emit the repo-known agent harness x provider endpoint "
+            "compatibility matrix without login, provider calls, or batch submit."
+        ),
+    )
+    p_matrix.add_argument(
+        "--compatibility-evidence", action="append", default=None,
+        help=(
+            "Optional JSON evidence file with cells[] live_smoke entries to merge "
+            "into --compatibility-plan output. Repeatable."
+        ),
     )
     p_matrix.set_defaults(handler=_matrix)
 
