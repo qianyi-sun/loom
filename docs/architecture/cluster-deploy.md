@@ -696,7 +696,15 @@ status tag as display evidence rather than the target-generation source of
 truth. Managed Deployments with `replicas=0` record zero-replica
 template-image evidence instead of requiring a Ready pod. The gate also rejects
 old-pod sandbox teardown stalls instead of passing solely because a
-target-generation pod is Ready. On success, `up` has also rejected managed
+target-generation pod is Ready.
+
+Protected `static-host-path` renders keep
+`persistentvolumeclaim/loom-worker-trajectories` in the manifest even when
+`k8s_worker.enabled=false`; only the in-cluster worker Deployment and
+NetworkPolicy are omitted. That keeps retained trajectory storage auditable by
+protected preflight while execution capacity comes from external pools.
+
+On success, `up` has also rejected managed
 Deployment pods stuck in blocking CrashLoop/image/config/start/OOM/failed
 states, then prints the rendered and live image for each managed
 Deployment/container so the rollout log captures image-convergence evidence.
