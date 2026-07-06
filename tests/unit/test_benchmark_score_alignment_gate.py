@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "benchmark_score_alignment_gate.py"
 MANIFEST = ROOT / "docs" / "benchmark-score-alignment.json"
+LAYER3_DOC = ROOT / "docs" / "benchmark-score-alignment-layer3.md"
 
 
 def _load_module():
@@ -19,6 +20,10 @@ def _load_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _benchmark(manifest: dict, benchmark_id: str) -> dict:
+    return next(row for row in manifest["benchmarks"] if row["benchmark_id"] == benchmark_id)
 
 
 def test_layer1_manifest_covers_every_v1_supported_benchmark() -> None:
@@ -142,3 +147,56 @@ def test_manifest_gate_rejects_wrong_harbor_repo(tmp_path: Path) -> None:
         "expected a fail naming the correct repo, got: "
         f"{[(r.status, r.detail) for r in results]}"
     )
+
+
+def test_terminal_bench_2_layer3_manifest_records_preliminary_nonfinal_evidence() -> None:
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    tb2 = _benchmark(manifest, "terminal-bench-2")
+
+    layer3 = tb2["layer3_evidence"]
+    assert layer3["status"] == "preliminary_pending_terminus_2_rerun"
+    assert layer3["canonical_acceptance_status"] == "pending_terminus_2_rerun"
+    assert "not canonical acceptance" in layer3["acceptance_caveat"].lower()
+    assert "terminus-2" in layer3["acceptance_caveat"].lower()
+    assert "trajectory_flush_failed" in layer3["acceptance_caveat"]
+
+    runs = layer3["runs"]
+    assert len(runs) == 1
+    run = runs[0]
+    assert run["agent"] == "claude-code"
+    assert run["model"] == "claude-haiku-4-5"
+    assert run["trial_count"] == 86
+    assert run["reward_positive_count"] == 35
+    assert run["reward_positive_rate"] == 35 / 86
+    assert run["reward_positive_rate_display"] == "40.70%"
+    assert run["clean_succeeded_reward_positive_count"] == 33
+    assert run["clean_succeeded_reward_positive_rate"] == 33 / 86
+    assert run["clean_succeeded_reward_positive_rate_display"] == "38.37%"
+    assert run["trajectory_flush_failed_reward_positive_count"] == 2
+    assert run["system_failures"] == 12
+    assert run["upstream_reference_rate_display"] == "~40.2%"
+    assert run["delta_pp"] == 0.50
+    assert run["per_task_table"] == "docs/evidence/issue-222/per-task-results.json"
+    assert "preliminary" in run["verdict"].lower()
+    assert "not canonical acceptance" in run["verdict"].lower()
+    assert "trajectory_flush_failed" in run["verdict"]
+
+
+def test_terminal_bench_2_layer3_doc_matches_manifest_and_keeps_rerun_caveat() -> None:
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    run = _benchmark(manifest, "terminal-bench-2")["layer3_evidence"]["runs"][0]
+    doc = LAYER3_DOC.read_text(encoding="utf-8")
+
+    assert "## terminal-bench-2" in doc
+    assert "preliminary" in doc.lower()
+    assert "not canonical acceptance" in doc.lower()
+    assert "Terminus-2 rerun" in doc
+    assert f"{run['reward_positive_count']}/{run['trial_count']}" in doc
+    assert run["reward_positive_rate_display"] in doc
+    assert f"{run['clean_succeeded_reward_positive_count']}/{run['trial_count']}" in doc
+    assert run["clean_succeeded_reward_positive_rate_display"] in doc
+    assert "trajectory_flush_failed" in doc
+    assert f"{run['system_failures']} system failures" in doc
+    assert run["upstream_reference_rate_display"] in doc
+    assert f"{run['delta_pp']:.2f} pp" in doc
+    assert run["per_task_table"] in doc
