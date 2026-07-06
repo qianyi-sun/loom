@@ -3,6 +3,12 @@
 For operators of a production Loom deployment. Local dev → see the
 top-level README + `deploy/docker-compose.dev.yml`.
 
+For the first `main`-based production release, use the focused
+[`first-prod-release-runbook.md`](first-prod-release-runbook.md) first. It is
+the executable operator path for first-prod bootstrap, temporary beta leases,
+frontend route checks, the production release gate, rollback preparation, and
+emergency beta drain. The sections below remain the detailed reference.
+
 > **Cross-repo issue/PR refs:** bare `#N` in this document may point to
 > the pre-2026-06-26 `carinrc/loom` archive tracker (numbering was reset
 > on the new canonical repo `qianyi-sun/loom`). See
