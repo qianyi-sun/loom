@@ -388,7 +388,94 @@ Stop condition: any production route resolving `/dev`, any development route
 resolving `/prod`, missing `no-store`, missing environment identity, or a
 cached stale config blocks production promotion.
 
-### 7. Production Release Gate
+### 7. Operator-Free User E2E Evidence Gate
+
+The live normal-user journey for #493 is `LIVE PROD AUTHORITY REQUIRED` and is
+not part of a no-secret dry run. It must be run later by a normal scoped user
+or user-agent through exposed CLI/API and frontend surfaces only. The
+repo-side check below is `DRY-RUN SAFE`: it validates the redacted evidence
+package after that journey exists and rejects operator shortcuts or leaks.
+
+The evidence package must use token sources such as
+`env:LOOM_PROD_USER_E2E_TOKEN` or `file:/secure/path/token`, never raw bearer
+values, signed URLs, database credentials, MinIO credentials, shell traces, or
+argv token flags. It must include:
+
+- production environment, route, API base, user role, and token source;
+- prod/dev route and API-base separation for `https://yylx.world/prod` and
+  `https://yylx.world/dev`;
+- `cli_api` pass records for `submit`, `monitor`, `batch_detail`,
+  `batch_debug`, `trial_detail`, `trial_debug`, `download_atif`,
+  `download_trajectory`, `download_artifact`, `delivery_bundle`, and
+  `integrity`;
+- frontend pass records for route/API-base loading, navigation, submit/status/
+  debug/download buttons, and service-proxied download routes;
+- `forbidden_shortcuts: []`.
+
+The required public CLI examples include exact exposed commands, for example
+`loom eval batch delivery-bundle <batch-id> --mode raw-harbor-tb2-v1 --output
+delivery.tar.gz`; do not substitute operator-only helpers, direct DB reads,
+MinIO tools, Kubernetes commands, worker SSH, or hidden admin commands.
+
+`DRY-RUN SAFE`
+
+```bash
+uv run python scripts/ops/operator_free_user_e2e_gate.py validate \
+  --evidence "$ROLLOUT_DIR/operator-free-user-e2e.json" \
+  --output-json "$ROLLOUT_DIR/operator-free-user-e2e-report.json"
+```
+
+Expected success output:
+
+```text
+Operator-free user E2E gate: PASS
+```
+
+Expected JSON evidence snippet:
+
+```json
+{
+  "status": "pass",
+  "issue": 493,
+  "environment": {
+    "name": "production",
+    "route": "https://yylx.world/prod",
+    "api_base": "https://yylx.world/prod/api",
+    "user_role": "normal_user",
+    "token_source": "env:LOOM_PROD_USER_E2E_TOKEN"
+  },
+  "validated_cli_api_steps": [
+    "submit",
+    "monitor",
+    "batch_detail",
+    "batch_debug",
+    "trial_detail",
+    "trial_debug",
+    "download_atif",
+    "download_trajectory",
+    "download_artifact",
+    "delivery_bundle",
+    "integrity"
+  ]
+}
+```
+
+Expected failure output:
+
+```text
+Operator-free user E2E gate: FAIL
+- missing required cli_api step 'trial_debug'
+- forbidden shortcut declared at forbidden_shortcuts[0]
+- forbidden evidence value at cli_api.submit.evidence
+```
+
+Stop condition: do not treat #493 as complete when this repo-side validator
+passes against synthetic evidence. Keep #493 open until the authorized live
+normal-user prod/dev route validation is run and the same validator accepts the
+redacted evidence package without raw secrets, signed URLs, operator-only
+surfaces, or prod/dev route confusion.
+
+### 8. Production Release Gate
 
 Create a synthetic no-secret manifest for the dry run. Live releases must use
 real staging evidence, real image digests, real backup pointers, real frontend
@@ -666,7 +753,7 @@ failing `hf_mirror_token_boundary` evidence for SkillLearnBench mirrored
 `s3://` runtime sources and worker HF token absence, or any forbidden evidence
 value blocks promotion.
 
-### 8. Production Release Workflow
+### 9. Production Release Workflow
 
 The workflow commands below are not part of the no-secret dry run. They are
 listed here so the release owner can run the same command shape with real

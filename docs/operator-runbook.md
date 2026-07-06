@@ -108,7 +108,12 @@ Normal flow:
    evidence, prod/beta state and worker isolation evidence, and the
    raw-delivery/export requirement status from the operator-free user E2E gate.
    The worker-isolation evidence must include the prod-first shared-capacity
-   report generated from `deploy/worker-capacity/prod-first.toml`.
+   report generated from `deploy/worker-capacity/prod-first.toml`. Validate the
+   redacted normal-user evidence package with
+   `uv run python scripts/ops/operator_free_user_e2e_gate.py validate --evidence
+   <operator-free-user-e2e.json> --output-json <operator-free-user-e2e-report.json>`.
+   The validator is offline-only; the live #493 journey still requires explicit
+   production authority and #493 remains open until that live evidence exists.
 6. Write a JSON manifest with `schema_version=1`, `candidate_sha`,
    `image_tag`, `prod_tag`, `staging_url`, image digests for every Loom image,
    and pass records for every required check:
