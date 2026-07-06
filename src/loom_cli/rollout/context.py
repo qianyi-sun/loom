@@ -39,6 +39,12 @@ class RolloutContext:
             that call ``loom admin ...`` must use this instead of the admin
             CLI's localhost default because protected rollouts often run
             against a private tunnel or node-local port.
+        admin_token_source: Secret-source reference for protected CP admin
+            calls. This is persisted as a source reference only, never the raw
+            token value.
+        expect_admin_token_fingerprint: Optional redacted fingerprint expected
+            for admin_token_source. Steps pass this through to admin commands
+            so token drift fails before CP mutation.
         cluster_config_path: Path to the operator's cluster-config.toml.
         cluster_config_sha256: sha256 of cluster_config_path contents at launch.
         rollout_root: Root of the evidence directory tree (#174 model).
@@ -70,6 +76,8 @@ class RolloutContext:
     cluster_config_sha256: str
     rollout_root: Path
     backup_manifest_path: Path
+    admin_token_source: str = "env:LOOM_CP_ADMIN_TOKEN"
+    expect_admin_token_fingerprint: str | None = None
     scope: str = "current-gb10"
     exclude_oldlab: bool = False
     resume: bool = False
@@ -90,6 +98,8 @@ class RolloutContext:
             "namespace": self.namespace,
             "environment": self.environment,
             "cp_url": self.cp_url,
+            "admin_token_source": self.admin_token_source,
+            "expect_admin_token_fingerprint": self.expect_admin_token_fingerprint,
             "cluster_config_path": str(self.cluster_config_path),
             "cluster_config_sha256": self.cluster_config_sha256,
             "rollout_root": str(self.rollout_root),

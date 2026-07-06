@@ -23,6 +23,36 @@ from loom_cli.rollout.steps import default_step_sequence
 from loom_cli.rollout.steps.s00_resolve_target import resolve_ref_to_sha
 
 
+def _replayable_admin_token_source(source: str) -> str:
+    """Validate a secret source that rollout steps can safely reuse.
+
+    Direct admin commands may accept stdin for one-shot operations. The rollout
+    driver calls env-state apply and check separately, persists inputs for
+    resume evidence, and therefore requires a replayable reference.
+    """
+    if source.startswith("env:"):
+        if source == "env:":
+            raise argparse.ArgumentTypeError(
+                "--admin-token: env: source requires a variable name",
+            )
+        return source
+    if source.startswith("file:"):
+        if source == "file:":
+            raise argparse.ArgumentTypeError(
+                "--admin-token: file: source requires a path",
+            )
+        return source
+    if source == "-":
+        raise argparse.ArgumentTypeError(
+            "--admin-token: stdin source '-' is not replayable for rollout; "
+            "use env:VAR or file:PATH",
+        )
+    raise argparse.ArgumentTypeError(
+        "--admin-token: literal values are rejected; use one of "
+        "{env:VAR | file:PATH}",
+    )
+
+
 def build_parser(p: argparse.ArgumentParser) -> None:
     """Populate ``p`` with the rollout subcommand's arguments."""
     p.add_argument(
@@ -65,6 +95,27 @@ def build_parser(p: argparse.ArgumentParser) -> None:
             "Operator-reachable Control Plane admin base URL used by rollout "
             "steps that call `loom admin ...`, for example "
             "http://control-node.lan:18081 or http://127.0.0.1:18081."
+        ),
+    )
+    p.add_argument(
+        "--admin-token",
+        default="env:LOOM_CP_ADMIN_TOKEN",
+        type=_replayable_admin_token_source,
+        help=(
+            "Admin token source for protected Control Plane admin calls. "
+            "Use a replayable env:VAR or file:PATH reference so raw tokens "
+            "never enter argv or rollout evidence. Default: "
+            "'env:LOOM_CP_ADMIN_TOKEN'."
+        ),
+    )
+    p.add_argument(
+        "--expect-admin-token-fingerprint",
+        default=None,
+        help=(
+            "Expected redacted admin-token fingerprint, formatted as "
+            "'sha256:<12-hex> len=<N>'. When set, env-state apply/check "
+            "fail before contacting CP if --admin-token resolves to a "
+            "different token."
         ),
     )
     p.add_argument(
@@ -182,6 +233,8 @@ def handle(args: argparse.Namespace) -> int:
         namespace=args.namespace,
         environment=args.environment,
         cp_url=args.cp_url,
+        admin_token_source=args.admin_token,
+        expect_admin_token_fingerprint=args.expect_admin_token_fingerprint,
         cluster_config_path=cluster_config_path,
         cluster_config_sha256=cfg_sha,
         rollout_root=rollout_root,

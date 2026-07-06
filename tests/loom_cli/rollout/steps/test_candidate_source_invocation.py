@@ -264,8 +264,57 @@ def test_env_state_resolves_loom_cli_without_global_executable(
     assert calls[1]["argv"][3:6] == ["admin", "environment-state", "check"]
     for call in calls:
         assert call["argv"][call["argv"].index("--environment") + 1] == ctx.environment
+        assert call["argv"][call["argv"].index("--admin-token") + 1] == (
+            "env:LOOM_CP_ADMIN_TOKEN"
+        )
         assert "--var" in call["argv"]
         assert f"GIT_SHA={ctx.resolved_sha}" in call["argv"]
+
+
+def test_env_state_passes_pinned_admin_token_source_and_fingerprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(
+        tmp_path,
+        admin_token_source="file:/secure/path/public-beta-admin-token",
+        expect_admin_token_fingerprint="sha256:abc123def456 len=64",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    step_dir = ev.step_dir(10, "env-state")
+    profile = tmp_path / "staging.toml"
+    profile.write_text("[worker_service]\n")
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return SubprocessResult(
+            argv=list(argv),
+            returncode=0,
+            stdout="ok\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._profile_path_for",
+        lambda ctx: str(profile),
+    )
+    monkeypatch.setattr("loom_cli.rollout.steps.s10_env_state.run_captured", fake_run)
+
+    result = EnvStateStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    assert len(calls) == 2
+    for argv in calls:
+        assert argv[argv.index("--admin-token") + 1] == (
+            "file:/secure/path/public-beta-admin-token"
+        )
+        assert argv[argv.index("--expect-admin-token-fingerprint") + 1] == (
+            "sha256:abc123def456 len=64"
+        )
+        assert "raw-secret-token" not in argv
 
 
 def test_env_state_retries_gb10_source_convergence_drift(
