@@ -344,18 +344,12 @@ with raw legacy rows but no valid stored `TaskConfig` appears as
 For first-party adapter-backed benchmarks, prefer the manifest path:
 
 ```bash
+# Export LOOM_DB_URL and LOOM_MINIO_* in the shell or process environment.
+# These commands read them from env so credentials stay out of argv.
 loom datasets publish my-benchmark --hf-org "$LOOM_HF_ORG"
 loom datasets register my-benchmark --hf-org "$LOOM_HF_ORG" \
-    --db-url "$LOOM_DB_URL" \
-    --mirror-to-object-store \
-    --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
-    --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
-    --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
-loom datasets audit my-benchmark --db-url "$LOOM_DB_URL" \
-    --verify-bundles \
-    --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
-    --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
-    --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
+    --mirror-to-object-store
+loom datasets audit my-benchmark --verify-bundles
 ```
 
 For first-party adapter publishes, the `Publish benchmarks to HF Hub` GitHub
@@ -394,9 +388,8 @@ team-evals/
 loom datasets validate-local "$LOOM_WORKER_FIXTURES_ROOT/team-evals"
 loom datasets sync-config \
   --config ./config/benchmarks.toml \
-  --fixtures-root "$LOOM_WORKER_FIXTURES_ROOT" \
-  --db-url "$LOOM_DB_URL"
-loom datasets audit team-evals --db-url "$LOOM_DB_URL"
+  --fixtures-root "$LOOM_WORKER_FIXTURES_ROOT"
+loom datasets audit team-evals
 ```
 
 `benchmark.toml` carries benchmark-level metadata. The default
@@ -407,17 +400,18 @@ For production, publish the same validated folder to object storage instead of
 depending on a worker fixture mount:
 
 ```bash
-loom datasets publish-local ./team-evals \
-  --db-url "$LOOM_DB_URL" \
-  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
-  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
-  --minio-secret-key "$LOOM_MINIO_SECRET_KEY" \
-  --bucket loom-benchmarks
+# Export LOOM_DB_URL and LOOM_MINIO_* in the shell or process environment.
+# Do not pass credential values through argv; publish-local reads these env vars.
+loom datasets publish-local ./team-evals --bucket loom-benchmarks
 ```
 
 That path registers task sources such as
 `s3://loom-benchmarks/team-evals/alpha/`, which the worker already materializes
 through the object-store backend.
+If a wrapper must pass sources explicitly, use safe references such as
+`--db-url env:LOOM_DB_URL`, `--minio-access-key env:LOOM_MINIO_ACCESS_KEY`,
+and `--minio-secret-key env:LOOM_MINIO_SECRET_KEY`; literal credential values
+are rejected because argv is visible in process listings.
 
 Once registered, submit a trial:
 

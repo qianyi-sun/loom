@@ -184,11 +184,7 @@ published manifest into catalog rows:
 
 ```bash
 loom datasets publish humaneval --hf-org PRHW
-loom datasets register humaneval --hf-org PRHW --db-url "$LOOM_DB_URL" \
-  --mirror-to-object-store \
-  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
-  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
-  --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
+loom datasets register humaneval --hf-org PRHW --mirror-to-object-store
 ```
 
 The publish command validates every generated `task.toml` against

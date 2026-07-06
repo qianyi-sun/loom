@@ -3732,8 +3732,10 @@ RUN chmod +x /app/setup_repo.sh && /app/setup_repo.sh
 DOCKER
 ```
 
-Then run `publish-local` without overrides. It must exit non-zero before upload
-or task-row registration and print `TASK_COMPAT_APP_PATH_MISSING`:
+Then run `publish-local` without overrides. The command assumes `LOOM_DB_URL`
+and `LOOM_MINIO_*` are already exported; do not add credential flags because
+those values can appear in process argv. It must exit non-zero before upload or
+task-row registration and print `TASK_COMPAT_APP_PATH_MISSING`:
 
 ```bash
 set +e
@@ -4016,16 +4018,8 @@ export LOOM_MINIO_SECRET_KEY=...
 
 loom datasets publish terminal-bench-2 --hf-org "$LOOM_HF_ORG"
 loom datasets register terminal-bench-2 --hf-org "$LOOM_HF_ORG" \
-  --db-url "$LOOM_DB_URL" \
-  --mirror-to-object-store \
-  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
-  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
-  --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
-loom datasets audit terminal-bench-2 --db-url "$LOOM_DB_URL" \
-  --verify-bundles \
-  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
-  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
-  --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
+  --mirror-to-object-store
+loom datasets audit terminal-bench-2 --verify-bundles
 ```
 
 Acceptance:

@@ -29,18 +29,12 @@ lands at the `--tb2-report` path.
 For platform onboarding, publish and register the full pinned task set:
 
 ```bash
+# Export LOOM_DB_URL and LOOM_MINIO_* in the shell or process environment.
+# The register/audit commands read them from env so credentials stay out of argv.
 loom datasets publish terminal-bench-2 --hf-org "$LOOM_HF_ORG"
 loom datasets register terminal-bench-2 --hf-org "$LOOM_HF_ORG" \
-  --db-url "$LOOM_DB_URL" \
-  --mirror-to-object-store \
-  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
-  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
-  --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
-loom datasets audit terminal-bench-2 --db-url "$LOOM_DB_URL" \
-  --verify-bundles \
-  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
-  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
-  --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
+  --mirror-to-object-store
+loom datasets audit terminal-bench-2 --verify-bundles
 ```
 
 Converted TB-2 tasks set `[environment].workdir = "/app"` because upstream

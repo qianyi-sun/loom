@@ -195,18 +195,15 @@ The first audit/readiness command is operator-facing and direct-DB. It can be
 used before and after registration:
 
 ```bash
-loom datasets audit --all --db-url "$LOOM_DB_URL"
-loom datasets audit humaneval --db-url "$LOOM_DB_URL"
-loom datasets audit --all --db-url "$LOOM_DB_URL" --json
+# Export LOOM_DB_URL and LOOM_MINIO_* in the shell or process environment.
+# These commands read them from env so credentials stay out of argv.
+loom datasets audit --all
+loom datasets audit humaneval
+loom datasets audit --all --json
 loom datasets publish humaneval --hf-org "$LOOM_HF_ORG"
-loom datasets register humaneval --hf-org "$LOOM_HF_ORG" --db-url "$LOOM_DB_URL" \
-  --mirror-to-object-store --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
-  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
-  --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
-loom datasets audit --all --db-url "$LOOM_DB_URL" --verify-bundles \
-  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
-  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
-  --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
+loom datasets register humaneval --hf-org "$LOOM_HF_ORG" \
+  --mirror-to-object-store
+loom datasets audit --all --verify-bundles
 loom datasets verify humaneval --limit 3
 ```
 
@@ -306,30 +303,31 @@ loom datasets validate-local ./my-benchmark
 # against the worker fixtures root that contains ./my-benchmark as <id>/.
 loom datasets sync-config \
   --config ./config/benchmarks.toml \
-  --fixtures-root "$LOOM_WORKER_FIXTURES_ROOT" \
-  --db-url "$LOOM_DB_URL"
+  --fixtures-root "$LOOM_WORKER_FIXTURES_ROOT"
 
-loom datasets audit my-benchmark --db-url "$LOOM_DB_URL"
+loom datasets audit my-benchmark
 ```
 
 Production object-store operator flow:
 
 ```bash
+# Export LOOM_DB_URL and LOOM_MINIO_* in the shell or process environment.
+# Do not pass credential values through argv; publish-local reads these env vars.
 loom datasets validate-local ./my-benchmark
-loom datasets publish-local ./my-benchmark \
-  --db-url "$LOOM_DB_URL" \
-  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
-  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
-  --minio-secret-key "$LOOM_MINIO_SECRET_KEY" \
-  --bucket loom-benchmarks
+loom datasets publish-local ./my-benchmark --bucket loom-benchmarks
 
-loom datasets audit my-benchmark --db-url "$LOOM_DB_URL"
+loom datasets audit my-benchmark
 ```
 
 `publish-local` stores each task bundle under
 `s3://<bucket>/<benchmark-id>/<task-id>/` and writes that prefix into
 `tasks.source`. Workers materialize those rows through the existing `s3://`
 materializer, so production does not require mounting the user's source folder.
+The secret-bearing `publish-local` flags (`--db-url`, `--minio-access-key`,
+and `--minio-secret-key`) accept only safe sources such as
+`env:LOOM_DB_URL`, `env:LOOM_MINIO_ACCESS_KEY`, or `file:/path/to/secret`;
+literal values are rejected before upload because they can be exposed by
+process listings.
 If a task declares `environment.dockerfile`, the Dockerfile and build context
 are uploaded with the same bundle. The worker builds the image from the
 materialized bundle before the first trial that needs it and caches the result
