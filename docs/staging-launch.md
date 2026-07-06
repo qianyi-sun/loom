@@ -140,7 +140,11 @@ Attach these to the release issue or release PR:
   the default owner of all eligible GB10/OLDLAB slots, beta/dev at zero slots
   unless an explicit bounded borrow is active, and no worker identity, API URL,
   image tag, source commit, compose service, or Kubernetes deployment crossing
-  the prod/dev boundary.
+  the prod/dev boundary. If a bounded beta lease is active, the evidence must
+  include the prod-pressure counts used by `status`; nonzero prod pressure must
+  produce `prod_pressure.cause=prod_capacity_pressure`,
+  `new_beta_claims_allowed=false`, idle beta slots returned to prod, and running
+  beta slots reported as draining rather than as beta rollout failure.
 - `scripts/staging_smoke_gate.py` Markdown evidence with `--fail-on-skip`
   and `--allow-mutating-checks` against disposable staging data. The report
   must include the service restart/OOM row by passing `--k8s-namespace`, and
