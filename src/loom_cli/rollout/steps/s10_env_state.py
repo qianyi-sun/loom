@@ -98,10 +98,20 @@ class EnvStateStep(BaseStep):
             "--var", f"ENV_CONFIG_VERSION={ctx.image_tag}",
             "--var", f"GIT_SHA={ctx.resolved_sha}",
         ]
+        admin_args = [
+            "--admin-token",
+            ctx.admin_token_source,
+        ]
+        if ctx.expect_admin_token_fingerprint:
+            admin_args.extend([
+                "--expect-admin-token-fingerprint",
+                ctx.expect_admin_token_fingerprint,
+            ])
         apply_ = run_captured(
             candidate_loom_argv(
                 "admin", "environment-state", "apply",
                 "--cp-url", ctx.cp_url,
+                *admin_args,
                 "--file", str(profile_path),
                 "--environment", ctx.environment,
                 *release_vars,
@@ -112,6 +122,7 @@ class EnvStateStep(BaseStep):
         check_argv = candidate_loom_argv(
             "admin", "environment-state", "check",
             "--cp-url", ctx.cp_url,
+            *admin_args,
             "--file", str(profile_path),
             "--environment", ctx.environment,
             *release_vars,
