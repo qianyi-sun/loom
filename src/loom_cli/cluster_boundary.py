@@ -64,13 +64,17 @@ _REQUIRES_NETWORK_POLICY: frozenset[str] = frozenset({
 })
 
 # Workloads that legitimately need a hostPort. The cluster-deploy
-# design explicitly calls out one such use: the gateway-router
-# DaemonSet binds hostPort 30443 because the sandbox Docker
-# containers spawned by the worker can't reach in-cluster Service
-# DNS — they need a stable per-node TCP endpoint. The auditor
-# exempts named workloads here; any other hostPort is still flagged.
+# design explicitly calls out these uses:
+# - `loom-gateway-router` binds hostPort 30443 (socat TCP forwarder)
+# - `loom-llm-gateway-sandbox` binds hostPort 8443 (TLS-terminating
+#   HTTP CONNECT proxy, #547 item #3, closes #78 Phase B)
+# Sandbox Docker containers spawned by the worker can't reach
+# in-cluster Service DNS — they need stable per-node TCP endpoints.
+# The auditor exempts named workloads here; any other hostPort is
+# still flagged.
 _HOSTPORT_ALLOWLIST: frozenset[str] = frozenset({
     "loom-gateway-router",
+    "loom-llm-gateway-sandbox",
 })
 
 

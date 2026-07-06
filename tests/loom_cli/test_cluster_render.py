@@ -1039,3 +1039,96 @@ def test_render_includes_hpa_when_enabled_with_custom_thresholds() -> None:
     assert spec["minReplicas"] == 3
     assert spec["maxReplicas"] == 10
     assert spec["metrics"][0]["resource"]["target"]["averageUtilization"] == 70
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #547 item #3: loom-llm-gateway-sandbox
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_default_config_disables_llm_gateway_sandbox() -> None:
+    """Off by default because the DaemonSet needs an operator-
+    provisioned TLS Secret (loom-sandbox-gateway-tls)."""
+    assert ClusterConfig().llm_gateway_sandbox.enabled is False
+
+
+def test_render_omits_llm_gateway_sandbox_when_disabled() -> None:
+    docs = _load_docs(render_manifests(_DEFAULT_CFG))
+    kinds_names = {(d["kind"], d["metadata"]["name"]) for d in docs}
+    assert ("DaemonSet", "loom-llm-gateway-sandbox") not in kinds_names
+    assert (
+        "NetworkPolicy",
+        "loom-llm-gateway-sandbox",
+    ) not in kinds_names
+
+
+def test_render_includes_sandbox_daemonset_when_enabled() -> None:
+    sandbox_cls = type(ClusterConfig().llm_gateway_sandbox)
+    cfg = _default_cfg(llm_gateway_sandbox=sandbox_cls(enabled=True))
+    docs = _load_docs(render_manifests(cfg))
+
+    ds = next(
+        d for d in docs
+        if d["kind"] == "DaemonSet"
+        and d["metadata"]["name"] == "loom-llm-gateway-sandbox"
+    )
+    pod_spec = ds["spec"]["template"]["spec"]
+    container = pod_spec["containers"][0]
+
+    # Binary points at the intended k8s Service (skipping the socat
+    # router — the Go proxy resolves cluster DNS directly).
+    args = container["args"]
+    upstream = next(a for a in args if a.startswith("--upstream-url="))
+    assert "loom-llm-gateway." in upstream
+    assert ".svc.cluster.local:9100" in upstream
+
+    # hostPort 8443 is exposed for sandbox Docker containers to dial.
+    port = container["ports"][0]
+    assert port["containerPort"] == 8443
+    assert port["hostPort"] == 8443
+
+    # Both secrets are mounted read-only into /run/loom.
+    vol_secret_names = {
+        v["secret"]["secretName"]
+        for v in pod_spec["volumes"] if "secret" in v
+    }
+    assert vol_secret_names == {
+        "loom-secrets",
+        "loom-sandbox-gateway-tls",
+    }
+
+
+def test_render_includes_sandbox_network_policy_when_enabled() -> None:
+    """The NetworkPolicy must permit hostPort ingress on 8443 (node-
+    local traffic can't be further restricted by k8s NetworkPolicy)
+    and egress to the in-cluster llm-gateway + kube-dns only."""
+    sandbox_cls = type(ClusterConfig().llm_gateway_sandbox)
+    cfg = _default_cfg(llm_gateway_sandbox=sandbox_cls(enabled=True))
+    docs = _load_docs(render_manifests(cfg))
+
+    policy = next(
+        d for d in docs
+        if d["kind"] == "NetworkPolicy"
+        and d["metadata"]["name"] == "loom-llm-gateway-sandbox"
+    )
+    spec = policy["spec"]
+    assert spec["podSelector"] == {
+        "matchLabels": {"app": "loom-llm-gateway-sandbox"},
+    }
+    ingress_ports = {p["port"] for p in spec["ingress"][0]["ports"]}
+    assert ingress_ports == {8443}
+    egress_pods = {
+        target["podSelector"]["matchLabels"].get("app")
+        for rule in spec["egress"]
+        for target in rule.get("to", [])
+        if "podSelector" in target
+    }
+    assert "loom-llm-gateway" in egress_pods
+
+
+def test_cluster_audit_exempts_sandbox_hostport() -> None:
+    """The auditor's `_HOSTPORT_ALLOWLIST` must include
+    loom-llm-gateway-sandbox; otherwise every enabled render would
+    flag its hostPort as a boundary violation."""
+    from loom_cli.cluster_boundary import _HOSTPORT_ALLOWLIST
+    assert "loom-llm-gateway-sandbox" in _HOSTPORT_ALLOWLIST

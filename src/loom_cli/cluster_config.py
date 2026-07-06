@@ -116,6 +116,10 @@ if TYPE_CHECKING:
         cpu_target_pct: int = 60
 
     @dataclass(frozen=True)
+    class _LlmGatewaySandboxConfig:
+        enabled: bool = False
+
+    @dataclass(frozen=True)
     class ClusterConfig:
         image_tag: str = "0.7"
         env_state_profile: str = ""
@@ -131,6 +135,7 @@ if TYPE_CHECKING:
         artifacts_bucket: str = "artifacts"
         gateway_hpa: _GatewayHpaConfig = field(default_factory=_GatewayHpaConfig)
         k8s_worker: _K8sWorkerConfig = field(default_factory=_K8sWorkerConfig)
+        llm_gateway_sandbox: _LlmGatewaySandboxConfig = field(default_factory=_LlmGatewaySandboxConfig)
         minio_image: str = "minio/minio"
         minio_storage_gi: int = 500
         namespace: str = "loom"

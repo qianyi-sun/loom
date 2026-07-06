@@ -989,6 +989,14 @@ _TEMPLATE_ORDER: tuple[str, ...] = (
     # Docker containers a stable hostPort:30443 endpoint to dial the
     # in-cluster gateway through. Carries its own NetworkPolicy.
     "gateway-router.yaml.j2",
+    # llm-gateway-sandbox DaemonSet (#547 item #3) — TLS-terminating
+    # HTTP CONNECT proxy on hostPort 8443 that verifies the step-JWT
+    # before tunneling to the in-cluster gateway. Renders only when
+    # llm_gateway_sandbox.enabled=true in the profile. Sits in front
+    # of gateway-router for authenticated sandbox traffic. Off by
+    # default; requires operator-provisioned loom-sandbox-gateway-tls
+    # Secret.
+    "llm-gateway-sandbox.yaml.j2",
     # Egress xDS control plane + Envoy proxy (#190 Phase C). The
     # xds-server reads provider_connections from Postgres + serves
     # CDS+RDS; Envoy fetches the dynamic config + acts as a forward

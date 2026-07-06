@@ -1093,3 +1093,18 @@ python_type = "table"
 # provider in the cluster; kind + development don't have one by
 # default, so leave this off for local dev.
 fields      = { enabled = false, min_replicas = 2, max_replicas = 8, cpu_target_pct = 60 }
+
+[render_config.llm_gateway_sandbox]
+python_type = "table"
+# Off by default because the DaemonSet requires operator to pre-
+# provision `loom-sandbox-gateway-tls` Secret (a `tls`-shaped
+# k8s Secret with cert + key for `loom-sandbox-gateway.local`).
+# The `loom cluster bootstrap-secrets` command intentionally does
+# NOT generate this — operators pick a cert issuance path
+# (self-signed for dev, cert-manager or loom-CA-signed for prod).
+# When enabled, the DaemonSet places one loom-llm-gateway-sandbox
+# pod per node (hostPort 8443) that terminates TLS + verifies the
+# HS256 step-JWT before tunneling bytes to loom-llm-gateway.
+# Closes #78 Phase B — per-node edge auth instead of destination-
+# only.
+fields      = { enabled = false }
