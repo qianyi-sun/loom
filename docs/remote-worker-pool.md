@@ -1340,8 +1340,10 @@ pulls desired state and applies its host intent:
 - `stopped`: keep compose stopped.
 
 The active path is liveness-aware as well as metadata-aware. If image/env/source
-already match desired state but the worker compose service is missing or exited,
-`apply` starts it again instead of reporting only `already current`.
+already match desired state, `apply` still prepares the image and runs
+`docker compose up -d worker`. Compose no-ops when the service is truly current,
+and recreates or starts it when rollout prep pre-wrote `.env`, the image/env
+changed outside compose, or the previous worker exited.
 
 Rollback or disable:
 

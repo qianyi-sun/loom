@@ -696,9 +696,12 @@ def _apply(args: argparse.Namespace) -> int:
         if desired_intent not in {"draining", "stopped"}:
             compose_base = _compose_base(args, args.env_file)
             try:
-                if not _compose_service_is_running(compose_base, args.service):
-                    _pull_or_build(compose_base, args.service, dry_run=args.dry_run)
-                    _run([*compose_base, "up", "-d", args.service], dry_run=args.dry_run)
+                was_running = _compose_service_is_running(compose_base, args.service)
+                _pull_or_build(compose_base, args.service, dry_run=args.dry_run)
+                _run([*compose_base, "up", "-d", args.service], dry_run=args.dry_run)
+                if was_running:
+                    last_apply_result = "docker compose worker reconciled"
+                else:
                     last_apply_result = "docker compose worker started"
             except (RuntimeError, subprocess.CalledProcessError) as exc:
                 _report_node(
