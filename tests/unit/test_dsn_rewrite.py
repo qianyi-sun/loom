@@ -45,6 +45,12 @@ def test_raises_on_missing_userinfo() -> None:
         _rewrite_dsn_host_port(src, host="loom-pgbouncer", port=6432)
 
 
+def test_raises_on_missing_password() -> None:
+    src = "postgresql://user@loom-postgres:5432/loom"
+    with pytest.raises(ValueError, match="userinfo"):
+        _rewrite_dsn_host_port(src, host="loom-pgbouncer", port=6432)
+
+
 def test_raises_on_missing_host() -> None:
     src = "postgresql+psycopg://loom:pw@:5432/loom"
     with pytest.raises(ValueError, match="host"):
