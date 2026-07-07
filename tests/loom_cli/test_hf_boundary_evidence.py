@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -311,3 +313,31 @@ def test_hf_boundary_db_audit_branch_uses_readiness_audit_contract(
         "missing": 0,
         "missing_sources": [],
     }
+
+
+def test_hf_boundary_module_import_does_not_require_cluster_config() -> None:
+    script = """
+import builtins
+
+original_import = builtins.__import__
+
+def guarded_import(name, *args, **kwargs):
+    if name == "loom_cli.cluster_config":
+        raise RuntimeError("cluster config unavailable in service pod")
+    return original_import(name, *args, **kwargs)
+
+builtins.__import__ = guarded_import
+
+import loom_cli.hf_boundary_evidence as evidence
+
+assert evidence.collect_source_summary_from_db
+"""
+
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
