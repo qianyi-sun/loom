@@ -39,6 +39,11 @@
     "default": "PydanticUndefined",
     "required": true
   },
+  "db_url_pool": {
+    "annotation": "<class 'pydantic.networks.PostgresDsn'>",
+    "default": "''",
+    "required": false
+  },
   "dev_reload": {
     "annotation": "<class 'bool'>",
     "default": "False",
