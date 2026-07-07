@@ -3347,6 +3347,7 @@ def _normalise_volume_claim_templates(value: Any) -> Any:
         claim = dict(item)
         claim.pop("apiVersion", None)
         claim.pop("kind", None)
+        claim.pop("status", None)
         spec = claim.get("spec")
         if isinstance(spec, dict):
             spec = dict(spec)
