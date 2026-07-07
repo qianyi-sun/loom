@@ -488,6 +488,12 @@ Retry a failed rollout by fixing the local cause and restarting the service:
 systemctl --user start loom-gb10-node-agent.service
 ```
 
+`loom-gb10-node-agent.service` is a `Type=oneshot` unit. A successful apply
+normally finishes as `ActiveState=inactive` / `SubState=dead`; check
+`systemctl --user show loom-gb10-node-agent.service -p Result -p ExecMainStatus`
+and expect `Result=success` with `ExecMainStatus=0`. Do not treat `is-active`
+returning inactive as a failed prep by itself.
+
 Rollback publishes the previous desired image/concurrency/env version back to
 the Control Plane first, then applies it locally. This keeps the periodic
 node-agent timer from reapplying the bad desired state after a manual rollback:
