@@ -78,7 +78,7 @@ async def test_listen_through_pgbouncer_does_not_receive_notify_from_external_co
 
     try:
         await asyncio.wait_for(_wait(), timeout=1.5)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
 
     await listen_conn.close()

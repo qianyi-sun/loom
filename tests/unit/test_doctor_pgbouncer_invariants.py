@@ -1,8 +1,6 @@
 """Tests for _check_pgbouncer_invariants (#609)."""
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import MagicMock
 

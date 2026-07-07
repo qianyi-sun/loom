@@ -8,7 +8,6 @@ from loom_control_plane.config import ControlPlaneSettings
 from loom_llm_gateway.config import GatewaySettings
 from loom_service.config import LoomServiceSettings
 
-
 DIRECT = "postgresql+psycopg://loom:pw@loom-postgres:5432/loom"
 POOL = "postgresql+psycopg://loom:pw@loom-pgbouncer:6432/loom"
 

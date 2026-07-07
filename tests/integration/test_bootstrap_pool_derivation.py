@@ -11,7 +11,6 @@ from pathlib import Path
 from loom_config.bootstrap import render_bootstrap_command
 from loom_config.loader import load_schema
 
-
 _SCHEMA_PATH = Path("config/loom-schema.toml")
 
 
