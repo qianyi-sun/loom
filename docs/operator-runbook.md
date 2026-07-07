@@ -3593,11 +3593,36 @@ token; do not switch release evidence to a personal namespace.
 The mirror path is idempotent. It downloads the exact HF revision with the
 operator token, writes bundle objects under deterministic internal keys, stores
 `s3://...` runtime sources in `tasks.source`, and preserves HF repo/revision/
-path/checksum provenance in task tags without storing tokens.
+path/checksum provenance in task tags without storing tokens. Keep the two
+provenance layers separate: `benchmarks.upstream_*` records the adapter/source
+origin and may legitimately be `git` for SkillLearnBench, while the runtime HF
+mirror provenance used by the release gate comes from task tags such as
+`hf_repo_id`, `hf_revision`, `hf_path`, and `hf_checksum` plus the internal
+`s3://` source prefix.
 
-For staging or production promotion, turn the audit/canary result into a
-secret-safe HF mirror/token-boundary artifact and keep it with the rollout
-evidence:
+For staging or production promotion, generate a secret-safe HF
+mirror/token-boundary artifact with the first-class CLI and keep it with the
+rollout evidence. Protected rollout step 14 runs this before
+`loom cluster release-gate`; manual release investigations can run the same
+command shape:
+
+```bash
+loom datasets hf-boundary-evidence skilllearnbench \
+  --environment "${ENVIRONMENT:-staging}" \
+  --namespace "$K8S_NAMESPACE" \
+  --cluster-config "$CLUSTER_CONFIG" \
+  --gb10-workers-status "$ROLLOUT_DIR/gb10-workers-status-$IMAGE_TAG.json" \
+  --output "$ROLLOUT_DIR/hf-mirror-boundary-evidence-$IMAGE_TAG.json"
+```
+
+The command collects catalog audit data through the `loom-service` pod, reads
+task-level runtime mirror provenance from the target DB, finds a succeeded
+SkillLearnBench GB10 canary unless `--canary-batch-id` is supplied, and checks
+GB10 worker `.env` files plus worker container env keys for `HF_TOKEN`
+presence. It records only counts, paths, prefixes, batch ids, booleans, and
+redacted/secret-safe references.
+
+The generated artifact has this shape:
 
 ```json
 {
@@ -3616,7 +3641,7 @@ evidence:
   },
   "hf_provenance": {
     "upstream_kind": "huggingface",
-    "upstream_locator": "PRHW/SkillLearnBench",
+    "upstream_locator": "PRHW/loom-benchmark-skilllearnbench",
     "upstream_revision": "$PUBLISHED_SHA"
   },
   "worker_boundary": {
