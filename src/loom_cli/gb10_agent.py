@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -614,6 +615,24 @@ def _compose_service_is_running(compose_base: list[str], service: str) -> bool:
     return False
 
 
+def _wait_for_compose_service_running(
+    compose_base: list[str],
+    service: str,
+    *,
+    attempts: int = 10,
+    sleep_sec: float = 3.0,
+) -> None:
+    for attempt in range(1, attempts + 1):
+        if _compose_service_is_running(compose_base, service):
+            return
+        if attempt < attempts:
+            time.sleep(sleep_sec)
+    raise RuntimeError(
+        f"docker compose service {service!r} did not reach running state "
+        f"after {attempts} check(s)",
+    )
+
+
 def _write_temp_env_file(env_file: Path, rendered: str) -> Path:
     runtime_dir = _runtime_temp_env_dir()
     with tempfile.NamedTemporaryFile(
@@ -699,6 +718,8 @@ def _apply(args: argparse.Namespace) -> int:
                 was_running = _compose_service_is_running(compose_base, args.service)
                 _pull_or_build(compose_base, args.service, dry_run=args.dry_run)
                 _run([*compose_base, "up", "-d", args.service], dry_run=args.dry_run)
+                if not args.dry_run:
+                    _wait_for_compose_service_running(compose_base, args.service)
                 if was_running:
                     last_apply_result = "docker compose worker reconciled"
                 else:
@@ -756,6 +777,8 @@ def _apply(args: argparse.Namespace) -> int:
         )
         if desired_intent not in {"draining", "stopped"}:
             _run([*compose_base, "up", "-d", args.service], dry_run=args.dry_run)
+            if not args.dry_run:
+                _wait_for_compose_service_running(compose_base, args.service)
         if not args.dry_run:
             args.env_file.write_text(rendered, encoding="utf-8")
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:

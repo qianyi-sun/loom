@@ -4976,9 +4976,10 @@ link it from #217; do not merge incomplete evidence.
   `worker_backend_names` containing `docker`. A node-agent `already current`
   result without that linked worker evidence is not sufficient for release.
   For the GB10 compatibility node-agent path, active/no-drift apply still runs
-  `docker compose up -d worker`; if release-gate reports stale worker
-  heartbeats, inspect the host compose service rather than accepting
-  node-agent metadata alone.
+  `docker compose up -d worker` and waits for the compose service to become
+  `running`; if release-gate reports stale worker heartbeats after step 11
+  passed, inspect whether the worker exited after registration rather than
+  accepting node-agent metadata alone.
 
   ```bash
   loom admin slurm-workers status \
