@@ -15,8 +15,9 @@ break-glass operation.
   cluster.
 - Worker hosts: `trt-gb10-1` through `trt-gb10-15`.
 - Slurm partition: `gb10`.
-- Jump path: operator Mac SSH aliases for `trt-gb10-N`; `trt-gb10-14`
-  specifically must use `ProxyJump trt-gb10-1`.
+- Jump path: `deploy/worker-pools/gb10/ssh_config` is the release-managed SSH
+  topology for `trt-gb10-N`; `trt-gb10-14` specifically must use
+  `ProxyJump trt-gb10-1`.
 - Worker process path on every GB10 host:
   `/home/qianyi/loom-worker-build-staging`.
 - Loom checkout path on every GB10 host:
@@ -50,16 +51,21 @@ starts.
 
 ## SSH Trust And Tunnel Recovery
 
-The operator Mac must have non-interactive SSH aliases for every
-`trt-gb10-N`. Keep `trt-gb10-14` routed through `ProxyJump trt-gb10-1`;
-the older `trt-gb10-8` jump path does not reach `10.42.0.12:22`.
+The operator Mac must have a loaded SSH agent that can authenticate to every
+`trt-gb10-N`. Protected rollouts are launched on `platform-dev` through
+`ssh -A platform-dev`, and rollout step 11 uses the repo-owned
+`deploy/worker-pools/gb10/ssh_config` with `ssh -F`; do not rely on
+`platform-dev` having local `trt-gb10-*` aliases or copied private keys. Keep
+`trt-gb10-14` routed through `ProxyJump trt-gb10-1`; the older
+`trt-gb10-8` jump path does not reach `10.42.0.12:22`.
 
 Verify non-interactive SSH before starting or restarting workers:
 
 ```bash
 for i in $(seq 1 15); do
   h=trt-gb10-$i
-  ssh -o BatchMode=yes -o ConnectTimeout=8 "$h" 'hostname >/dev/null'
+  ssh -F deploy/worker-pools/gb10/ssh_config \
+    -o BatchMode=yes -o ConnectTimeout=8 "$h" 'hostname >/dev/null'
 done
 ```
 

@@ -37,11 +37,12 @@ from loom_cli.rollout.steps.subprocess_util import (
 class GB10Host:
     """One release-managed GB10 host."""
 
-    ssh_target: str        # user@hostname or SSH alias
-    repo_path: str         # e.g. /srv/loom/staging
-    env_file_path: str     # e.g. /srv/loom/staging/.env
+    ssh_target: str  # user@hostname or SSH alias
+    repo_path: str  # e.g. /srv/loom/staging
+    env_file_path: str  # e.g. /srv/loom/staging/.env
     repo_url: str = "https://github.com/qianyi-sun/loom.git"
     node_agent_service: str | None = None
+    ssh_config_path: str | None = None
 
 
 def gb10_hosts_for(ctx: RolloutContext) -> list[GB10Host]:
@@ -63,16 +64,26 @@ def gb10_hosts_for(ctx: RolloutContext) -> list[GB10Host]:
     pool = getattr(cfg, "gb10_pool", None)
     if pool is None:
         return []
+    ssh_config = getattr(pool, "ssh_config", "") or ""
+    ssh_config_path: str | None = None
+    if ssh_config:
+        path = Path(str(ssh_config)).expanduser()
+        if not path.is_absolute():
+            path = ctx.cluster_config_path.parent / path
+        ssh_config_path = str(path.resolve(strict=False))
     hosts_raw = getattr(pool, "hosts", None) or ()
     result: list[GB10Host] = []
     for h in hosts_raw:
-        result.append(GB10Host(
-            ssh_target=h.get("ssh_target"),
-            repo_path=h.get("repo_path"),
-            env_file_path=h.get("env_file_path"),
-            repo_url=h.get("repo_url") or "https://github.com/qianyi-sun/loom.git",
-            node_agent_service=h.get("node_agent_service"),
-        ))
+        result.append(
+            GB10Host(
+                ssh_target=h.get("ssh_target"),
+                repo_path=h.get("repo_path"),
+                env_file_path=h.get("env_file_path"),
+                repo_url=h.get("repo_url") or "https://github.com/qianyi-sun/loom.git",
+                node_agent_service=h.get("node_agent_service"),
+                ssh_config_path=ssh_config_path,
+            )
+        )
     return [h for h in result if h.ssh_target and h.repo_path and h.env_file_path]
 
 
@@ -132,14 +143,22 @@ def _ssh(host: GB10Host, remote_cmd: str) -> SubprocessResult:
     ``BatchMode=yes`` disables password prompts (fails fast if key
     auth isn't set up). ``ConnectTimeout=10`` bounds hang-on-connect.
     """
-    return run_captured([
-        "ssh",
-        "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=10",
-        "-o", "StrictHostKeyChecking=accept-new",
-        host.ssh_target,
-        remote_cmd,
-    ])
+    argv = ["ssh"]
+    if host.ssh_config_path:
+        argv.extend(["-F", host.ssh_config_path])
+    argv.extend(
+        [
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            host.ssh_target,
+            remote_cmd,
+        ]
+    )
+    return run_captured(argv)
 
 
 def _env_file_update_command(ctx: RolloutContext, host: GB10Host) -> str:
@@ -177,7 +196,9 @@ PY"""
 
 
 def _prep_one_host(
-    ctx: RolloutContext, host: GB10Host, host_dir: Path,
+    ctx: RolloutContext,
+    host: GB10Host,
+    host_dir: Path,
 ) -> tuple[bool, str]:
     """Run the prep sequence on one host. Returns (ok, summary)."""
     repo_path = shlex.quote(host.repo_path)
@@ -209,16 +230,11 @@ def _prep_one_host(
         ),
         (
             "verify-head",
-            (
-                f"test \"$(cd {repo_path} && git rev-parse HEAD)\" = "
-                f"{resolved_sha}"
-            ),
+            (f'test "$(cd {repo_path} && git rev-parse HEAD)" = {resolved_sha}'),
         ),
         (
             "verify-env-file",
-            (
-                f"grep -q '^LOOM_IMAGE_TAG={image_tag}$' {env_file_path}"
-            ),
+            (f"grep -q '^LOOM_IMAGE_TAG={image_tag}$' {env_file_path}"),
         ),
     ]
     if host.node_agent_service:
@@ -257,7 +273,9 @@ class GB10PrepStep(BaseStep):
         }
 
     def _verify_impl(
-        self, ctx: RolloutContext, step_dir: StepDir,
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
     ) -> VerifyOutcome:
         hosts = gb10_hosts_for(ctx)
         if not hosts:

@@ -6,6 +6,7 @@ now come from `config/loom-schema.toml` (`render_config` section).
 The dataclass shape is materialized at import time so call sites
 keep dot-access (`cfg.image_tag`, `cfg.replicas.service`).
 """
+
 from __future__ import annotations
 
 import tomllib
@@ -26,11 +27,13 @@ def _make_table_dataclass(entry: RenderConfigEntry) -> type:
 
     def _field_for(default: Any) -> Any:
         if isinstance(default, list):
+
             def _list_factory(default: list[Any] = default) -> list[Any]:
                 return list(default)
 
             return field(default_factory=_list_factory)
         if isinstance(default, dict):
+
             def _dict_factory(default: dict[str, Any] = default) -> dict[str, Any]:
                 return dict(default)
 
@@ -106,6 +109,7 @@ if TYPE_CHECKING:
 
     @dataclass(frozen=True)
     class _Gb10PoolConfig:
+        ssh_config: str = ""
         hosts: list[dict[str, Any]] = field(default_factory=list)
 
     @dataclass(frozen=True)
@@ -137,7 +141,9 @@ if TYPE_CHECKING:
         artifacts_bucket: str = "artifacts"
         gateway_hpa: _GatewayHpaConfig = field(default_factory=_GatewayHpaConfig)
         k8s_worker: _K8sWorkerConfig = field(default_factory=_K8sWorkerConfig)
-        llm_gateway_sandbox: _LlmGatewaySandboxConfig = field(default_factory=_LlmGatewaySandboxConfig)
+        llm_gateway_sandbox: _LlmGatewaySandboxConfig = field(
+            default_factory=_LlmGatewaySandboxConfig
+        )
         minio_image: str = "minio/minio"
         minio_storage_gi: int = 500
         namespace: str = "loom"
@@ -183,8 +189,7 @@ def load_cluster_config(path: Path | None) -> ClusterConfig:
     unknown = set(raw.keys()) - field_names
     if unknown:
         raise ValueError(
-            f"unknown keys in cluster config: {sorted(unknown)} "
-            f"(known: {sorted(field_names)})"
+            f"unknown keys in cluster config: {sorted(unknown)} (known: {sorted(field_names)})"
         )
     kwargs: dict[str, Any] = {}
     for name, val in raw.items():

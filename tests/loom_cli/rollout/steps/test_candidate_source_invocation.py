@@ -14,7 +14,12 @@ import pytest
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.evidence import EvidenceDirectory
 from loom_cli.rollout.steps.s03_kind_load_images import KindLoadImagesStep
-from loom_cli.rollout.steps.s04_gb10_prep import GB10PrepStep, gb10_hosts_for
+from loom_cli.rollout.steps.s04_gb10_prep import (
+    GB10Host,
+    GB10PrepStep,
+    _ssh,
+    gb10_hosts_for,
+)
 from loom_cli.rollout.steps.s05_backup import BackupStep
 from loom_cli.rollout.steps.s06_audit import AuditStep
 from loom_cli.rollout.steps.s07_render import RenderStep
@@ -986,8 +991,12 @@ def test_rollout_cluster_config_is_stable_after_first_synthesis(
 
 def test_gb10_prep_reads_hosts_from_cluster_config(tmp_path: Path) -> None:
     ctx = make_ctx(tmp_path)
+    ssh_config = tmp_path / "deploy" / "worker-pools" / "gb10" / "ssh_config"
+    ssh_config.parent.mkdir(parents=True)
+    ssh_config.write_text("Host trt-gb10-1\n  HostName 203.0.113.1\n")
     ctx.cluster_config_path.write_text(
         "[gb10_pool]\n"
+        f'ssh_config = "{ssh_config}"\n'
         "hosts = [\n"
         '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom", '
         'env_file_path = "/srv/loom/.env", '
@@ -1005,6 +1014,41 @@ def test_gb10_prep_reads_hosts_from_cluster_config(tmp_path: Path) -> None:
     assert hosts[0].env_file_path == "/srv/loom/.env"
     assert hosts[0].repo_url == "https://github.com/qianyi-sun/loom.git"
     assert hosts[0].node_agent_service == "loom-gb10-node-agent.service"
+    assert hosts[0].ssh_config_path == str(ssh_config)
+
+
+def test_gb10_prep_ssh_uses_declared_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ssh_config = tmp_path / "gb10_ssh_config"
+    ssh_config.write_text("Host trt-gb10-1\n  HostName 203.0.113.1\n")
+    host = GB10Host(
+        ssh_target="trt-gb10-1",
+        repo_path="/srv/loom",
+        env_file_path="/srv/loom/.env",
+        ssh_config_path=str(ssh_config),
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_run(argv):
+        captured["argv"] = list(argv)
+        return SubprocessResult(
+            argv=list(argv),
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep.run_captured", fake_run)
+
+    _ssh(host, "hostname >/dev/null")
+
+    argv = captured["argv"]
+    assert argv[:3] == ["ssh", "-F", str(ssh_config)]
+    assert "-o" in argv
+    assert "BatchMode=yes" in argv
+    assert argv[-2:] == ["trt-gb10-1", "hostname >/dev/null"]
 
 
 def test_gb10_prep_fails_when_current_gb10_profile_has_no_hosts(
@@ -1084,8 +1128,7 @@ def test_gb10_prep_clones_preserves_env_and_starts_node_agent(
 
     assert result.exit_code == 0
     assert any(
-        "git clone --quiet https://github.com/qianyi-sun/loom.git /srv/loom-staging"
-        in call
+        "git clone --quiet https://github.com/qianyi-sun/loom.git /srv/loom-staging" in call
         for call in calls
     )
     env_update = next(call for call in calls if "LOOM_IMAGE_TAG" in call)
