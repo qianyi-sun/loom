@@ -40,6 +40,7 @@ def _live_minio_statefulset(*, storage: str = "500Gi") -> dict[str, Any]:
                         "volumeMode": "Filesystem",
                         "volumeName": "loom-staging-minio-data",
                     },
+                    "status": {"phase": "Pending"},
                 },
             ],
         },
