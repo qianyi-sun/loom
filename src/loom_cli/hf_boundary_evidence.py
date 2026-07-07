@@ -16,7 +16,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from loom_benchmark_tool.db_url import normalize_db_url
-from loom_cli.cluster_config import load_cluster_config
 
 _RAW_SECRET_RE = re.compile(r"(?:hf_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})")
 
@@ -553,6 +552,8 @@ def collect_worker_boundary_from_gb10(
     cluster_config_path: Path,
     timeout_sec: float,
 ) -> dict[str, Any]:
+    from loom_cli.cluster_config import load_cluster_config
+
     cfg = load_cluster_config(cluster_config_path)
     pool = getattr(cfg, "gb10_pool", None)
     hosts = list(getattr(pool, "hosts", []) or [])
