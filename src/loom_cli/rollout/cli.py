@@ -230,6 +230,17 @@ def build_parser(p: argparse.ArgumentParser) -> None:
         ),
     )
     p.add_argument(
+        "--backup-manifest-min-remaining-hours",
+        type=int,
+        default=2,
+        help=(
+            "Minimum freshness window that must remain on --backup-manifest "
+            "when rollout step 05 runs. This fails long protected rollouts "
+            "early instead of letting the manifest expire before cluster-up. "
+            "Default: 2."
+        ),
+    )
+    p.add_argument(
         "--rollout-root",
         required=True,
         help=(
@@ -282,6 +293,11 @@ def handle(args: argparse.Namespace) -> int:
     if not cluster_config_path.is_file():
         sys.stderr.write(
             f"error: cluster-config not found: {cluster_config_path}\n"
+        )
+        return 2
+    if args.backup_manifest_min_remaining_hours < 0:
+        sys.stderr.write(
+            "error: --backup-manifest-min-remaining-hours must be >= 0\n"
         )
         return 2
     cfg_sha = sha256_of_file(cluster_config_path)
@@ -351,6 +367,9 @@ def handle(args: argparse.Namespace) -> int:
         cluster_config_sha256=cfg_sha,
         rollout_root=rollout_root,
         backup_manifest_path=Path(args.backup_manifest),
+        backup_manifest_min_remaining_hours=(
+            args.backup_manifest_min_remaining_hours
+        ),
         scope=args.scope,
         exclude_oldlab=args.exclude_oldlab,
         resume=args.resume,

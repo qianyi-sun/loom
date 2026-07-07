@@ -106,6 +106,40 @@ def test_validate_backup_manifest_rejects_stale_snapshot(tmp_path):
     assert any("stale" in problem for problem in problems)
 
 
+def test_validate_backup_manifest_rejects_near_expiry_snapshot(tmp_path):
+    postgres = tmp_path / "postgres.dump"
+    postgres.write_text("pg", encoding="utf-8")
+    minio = tmp_path / "minio"
+    minio.mkdir()
+    (minio / "object").write_text("obj", encoding="utf-8")
+    secrets = tmp_path / "secrets.yaml"
+    secrets.write_text("redacted", encoding="utf-8")
+    manifest_path = tmp_path / "backup-manifest.json"
+    write_backup_manifest(
+        environment="staging",
+        namespace="loom-staging",
+        output_path=manifest_path,
+        components={
+            "postgres": postgres,
+            "minio": minio,
+            "k8s_secrets": secrets,
+        },
+        now=datetime(2026, 6, 29, 12, 0, tzinfo=UTC),
+    )
+
+    problems = validate_backup_manifest(
+        manifest_path,
+        environment="staging",
+        namespace="loom-staging",
+        max_age_hours=24,
+        min_remaining_hours=2,
+        now=datetime(2026, 6, 30, 11, 1, tzinfo=UTC),
+    )
+
+    assert any("expires too soon" in problem for problem in problems)
+    assert any("requires at least 2h remaining" in problem for problem in problems)
+
+
 def test_cli_backup_manifest_and_check_round_trip(tmp_path, capsys):
     postgres = tmp_path / "postgres.dump"
     postgres.write_text("pg", encoding="utf-8")

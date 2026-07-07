@@ -161,6 +161,7 @@ def validate_backup_manifest(
     environment: str,
     namespace: str,
     max_age_hours: int = DEFAULT_BACKUP_MAX_AGE_HOURS,
+    min_remaining_hours: int = 0,
     now: datetime | None = None,
 ) -> list[str]:
     if manifest_path is None:
@@ -196,6 +197,13 @@ def validate_backup_manifest(
             problems.append(
                 f"backup manifest is stale: age exceeds {max_age_hours}h",
             )
+        elif min_remaining_hours > 0:
+            remaining = timedelta(hours=max_age_hours) - age
+            if remaining < timedelta(hours=min_remaining_hours):
+                problems.append(
+                    "backup manifest expires too soon: "
+                    f"requires at least {min_remaining_hours}h remaining",
+                )
     verification = manifest.get("verification")
     if not isinstance(verification, dict) or verification.get("status") != "verified":
         problems.append("backup manifest verification.status must be 'verified'")
