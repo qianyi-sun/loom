@@ -84,10 +84,8 @@ Attach these to the release issue or release PR:
   `loom eval batch show`, `loom eval trial show`, and
   `loom eval trial download`.
 - Benchmark catalog provisioning evidence from `loom cluster rollout` step 10
-  (`catalog-provisioning.json`, redacted stdout/stderr logs) showing either
-  `loom datasets provision-catalog` with non-zero
-  `ready_agents`, non-zero `ready_benchmarks`, non-zero `ready_tasks`, and
-  `missing=0`, or
+  (`catalog-provisioning.json`, redacted stdout/stderr logs) showing the
+  committed staging profile's HF registration path,
   `loom datasets register <benchmark>` against the published HF manifest with
   `--mirror-to-object-store`, non-zero `registered`, non-zero `mirrored`, zero
   unexpected `legacy_placeholders`, and `loom datasets audit --verify-bundles`
@@ -100,6 +98,8 @@ Attach these to the release issue or release PR:
   gated HF manifests, confirm the operator context uses protected
   `staging-catalog-provisioning.env` or `catalog_provisioning.env_sources` for
   `PUBLISHED_SHA`, `HF_TOKEN`, and target `LOOM_SVC_MINIO_*` credentials.
+  Use the source-copy `loom datasets provision-catalog` path only when a
+  profile also declares protected source catalog/object-store inputs.
   Workers may still receive optional `loom-secrets/huggingface-api-key` as
   legacy `hf://` compatibility, but mirrored release evidence should not
   depend on worker direct HF fetches.

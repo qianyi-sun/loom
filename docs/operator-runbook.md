@@ -878,8 +878,11 @@ knob you need.
    operator-only env keys required by that gate: `PUBLISHED_SHA`, `HF_TOKEN`,
    `LOOM_SVC_DB_URL`, and `LOOM_SVC_MINIO_*`; secret-bearing values must come
    from the protected `staging-catalog-provisioning.env` file or equivalent
-   `env_sources`, not argv or worker pods. The same catalog gate publishes the
-   checked-in `deploy/catalog/gb10-smoke` benchmark with
+   `env_sources`, not argv or worker pods. The committed staging profile uses
+   the HF registration/mirror path for SkillLearnBench; do not add the
+   source-copy `loom datasets provision-catalog` step unless the profile also
+   declares protected `LOOM_CATALOG_SOURCE_*` inputs. The same catalog gate
+   publishes the checked-in `deploy/catalog/gb10-smoke` benchmark with
    `loom datasets publish-local` so current-GB10 rollout smoke has a real
    `s3://` task bundle instead of a manual DB row or `fixture://` source. For
    SkillLearnBench, the release
