@@ -14,10 +14,9 @@ import pytest
 from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from tests.integration.gateway_db import delete_teams_by_name_async
-
 from loom.db.schema import Team, Token, User
 from loom_llm_gateway.auth import verify_bearer_token
+from tests.integration.gateway_db import delete_teams_by_name_async
 
 
 async def _insert_token(

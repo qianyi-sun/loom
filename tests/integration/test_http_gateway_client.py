@@ -17,14 +17,13 @@ from sqlalchemy.orm import sessionmaker
 
 from loom.agent.gateway_client import GatewayCallRequest
 from loom.agent.http_gateway_client import HttpLLMGatewayClient
-from tests.integration.gateway_db import delete_all_teams_and_quotas
-
 from loom.db.schema import RateCard, Team, Token
 from loom.models.trajectory import ChatMessage
 from loom.models.types import ModelSpec
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.rate_card import RateCardCache
+from tests.integration.gateway_db import delete_all_teams_and_quotas
 
 
 @pytest.fixture

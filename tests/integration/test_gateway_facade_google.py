@@ -22,11 +22,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from loom.auth import mint_step_jwt
-from tests.integration.gateway_db import (
-    delete_all_teams_and_quotas,
-    delete_team_and_quota,
-)
-
 from loom.db.schema import (
     LlmCall,
     ProviderConnection,
@@ -41,6 +36,10 @@ from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.rate_card import RateCardCache
+from tests.integration.gateway_db import (
+    delete_all_teams_and_quotas,
+    delete_team_and_quota,
+)
 
 _TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
 

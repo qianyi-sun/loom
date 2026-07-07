@@ -13,11 +13,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, insert, text
 from sqlalchemy.orm import sessionmaker
 
-from tests.integration.gateway_db import delete_all_teams_and_quotas, delete_team_and_quota
-
 from loom.db.schema import LlmCall, ProviderConnection, RateCard, Secret, Team, Token
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
+from tests.integration.gateway_db import delete_all_teams_and_quotas, delete_team_and_quota
 
 
 @pytest.fixture
