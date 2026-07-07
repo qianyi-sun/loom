@@ -208,6 +208,11 @@ scripts/ops/worker_service_tunnels.py check \
   --env-file "$REMOTE_WORKER_ENV_FILE"
 ```
 
+The checker treats an empty 2xx response from `minio` as healthy because
+MinIO's `/minio/health/*` endpoints return no response body. Empty 2xx
+responses from Control Plane, Gateway, or subprocess Gateway still fail the
+probe because they indicate the stale `kubectl port-forward` pattern.
+
 For immediate local self-heal testing without waiting for the timer, run:
 
 ```bash
