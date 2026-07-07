@@ -48,6 +48,9 @@ def candidate_loom_env(step_dir: StepDir) -> dict[str, str]:
     env = os.environ.copy()
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = candidate_src if not existing else f"{candidate_src}{os.pathsep}{existing}"
+    tool_bin = str(Path(sys.executable).parent)
+    existing_path = env.get("PATH")
+    env["PATH"] = tool_bin if not existing_path else f"{tool_bin}{os.pathsep}{existing_path}"
     env["LOOM_ROLLOUT_CANDIDATE_WORKTREE"] = str(worktree)
     return env
 
