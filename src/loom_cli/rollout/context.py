@@ -61,6 +61,10 @@ class RolloutContext:
             ``loom cluster backup check``. Not part of ``inputs_hash`` — the
             manifest changes between rollouts and stale-checks are handled
             by ``backup check`` itself.
+        backup_manifest_min_remaining_hours: Minimum remaining freshness
+            window required by the rollout backup step before the manifest
+            reaches the protected backup max age. This keeps long GB10 prep
+            runs from discovering backup expiry only at the mutation step.
         scope: Rollout scope classification.
             One of ``"current-gb10"``, ``"full-cluster"``. Full-cluster asks
             for release-critical acceptance evidence across every managed
@@ -82,6 +86,7 @@ class RolloutContext:
     cluster_config_sha256: str
     rollout_root: Path
     backup_manifest_path: Path
+    backup_manifest_min_remaining_hours: int = 2
     admin_token_source: str = "env:LOOM_CP_ADMIN_TOKEN"
     expect_admin_token_fingerprint: str | None = None
     worker_token_source: str | None = None
@@ -113,6 +118,9 @@ class RolloutContext:
             "cluster_config_path": str(self.cluster_config_path),
             "cluster_config_sha256": self.cluster_config_sha256,
             "rollout_root": str(self.rollout_root),
+            "backup_manifest_min_remaining_hours": (
+                self.backup_manifest_min_remaining_hours
+            ),
             "scope": self.scope,
             "exclude_oldlab": self.exclude_oldlab,
         }

@@ -656,6 +656,12 @@ loom cluster backup manifest \
   --k8s-secrets /data/loom-staging/backups/20260629T120000Z/secrets \
   --output /data/loom-staging/backups/20260629T120000Z/backup-manifest.json
 
+loom cluster backup check \
+  --environment staging \
+  --namespace loom-staging \
+  --manifest /data/loom-staging/backups/20260629T120000Z/backup-manifest.json \
+  --min-remaining-hours 2
+
 loom cluster preflight \
   --environment staging \
   --namespace loom-staging \
@@ -671,6 +677,8 @@ release-manifest` against that exact config and image tag, storing the artifact
 beside the rendered YAML. For protected release acceptance, pass
 `--expected-image-identities-json` so the artifact records immutable image
 digests or image IDs, not just mutable tags. The one-command rollout driver
+uses `--backup-manifest-min-remaining-hours 2` by default so a near-expiry
+manifest fails before long host prep instead of at protected mutation time. It
 generates that identity JSON from the rendered Deployment images and local
 Docker image IDs for rollout-managed images only; external images are left out.
 The artifact records the expected

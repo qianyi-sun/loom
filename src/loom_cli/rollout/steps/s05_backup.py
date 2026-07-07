@@ -41,6 +41,8 @@ class BackupStep(SubcommandStep):
             ctx.namespace,
             "--manifest",
             str(ctx.backup_manifest_path),
+            "--min-remaining-hours",
+            str(ctx.backup_manifest_min_remaining_hours),
         )
 
     def cwd(self, ctx: RolloutContext, step_dir: StepDir) -> Path:

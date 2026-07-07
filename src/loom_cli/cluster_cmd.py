@@ -2878,6 +2878,7 @@ def _backup_check(args: argparse.Namespace) -> int:
         environment=args.environment,
         namespace=args.namespace,
         max_age_hours=args.max_age_hours,
+        min_remaining_hours=args.min_remaining_hours,
     )
     if problems:
         for problem in problems:
@@ -4458,6 +4459,16 @@ def dispatch(argv: list[str]) -> int:
         "--max-age-hours",
         type=int,
         default=DEFAULT_BACKUP_MAX_AGE_HOURS,
+    )
+    p_backup_check.add_argument(
+        "--min-remaining-hours",
+        type=int,
+        default=0,
+        help=(
+            "Minimum remaining freshness window required before the "
+            "manifest reaches --max-age-hours. Useful for long protected "
+            "rollouts that must not discover expiry at mutation time."
+        ),
     )
     p_backup_check.set_defaults(handler=_backup_check)
 

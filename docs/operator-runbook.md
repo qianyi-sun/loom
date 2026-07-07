@@ -1251,6 +1251,7 @@ systemd-run --user --unit "$unit" --collect \
       --cp-url http://127.0.0.1:18081 \
       --cluster-config deploy/environments/staging.cluster.toml \
       --backup-manifest /data/loom-staging/backups/latest/backup-manifest.json \
+      --backup-manifest-min-remaining-hours 2 \
       --rollout-root /data/loom-staging \
       --admin-token file:/shared_work/qianyi/loom-worker-capacity/staging-admin-token \
       --expect-admin-token-fingerprint "sha256:<12-hex> len=<N>" \
@@ -1319,7 +1320,12 @@ itself — the operator produces the Postgres dump, MinIO snapshot, and
 secrets export per the runbook procedure (§ *Protected-environment
 backups*) and hands the resulting `backup-manifest.json` to the driver.
 Step 05 invokes `loom cluster backup check` and refuses to advance
-without a fresh, verified manifest.
+without a fresh, verified manifest. Protected rollouts also require the
+manifest to retain the `--backup-manifest-min-remaining-hours` freshness
+window at step 05. The default is 2 hours, which prevents a long GB10 prep
+from discovering backup expiry only when step 12 is ready to mutate the
+cluster. If the check fails, create a fresh backup bundle and manifest before
+rerunning or resuming; do not bypass protected preflight.
 
 `ADMIN_TOKEN_SOURCE` is a secret source reference, not a raw token; use
 `env:VAR` or `file:PATH` so shell history, process listings, logs, JSON, and
@@ -1520,7 +1526,7 @@ desired state.
 | 01 | worktree | `git worktree add` at target sha |
 | 02 | build-images | `docker build` × every rollout-critical image (#365) |
 | 03 | kind-load-images | candidate-source `loom cluster load-images` (#96) |
-| 05 | backup | candidate-source `loom cluster backup check --manifest <path>` (#363) |
+| 05 | backup | candidate-source `loom cluster backup check --manifest <path> --min-remaining-hours <N>` (#363, #619 freshness buffer) |
 | 06 | audit | candidate-source `loom cluster audit` |
 | 07 | render | candidate-source `loom cluster render` → `rendered.yaml` |
 | 08 | preflight | candidate-source `loom cluster preflight --backup-manifest <path>` using the same manifest verified by step 05 |
@@ -3378,11 +3384,16 @@ loom cluster backup manifest \
 loom cluster backup check \
   --environment "$ENVIRONMENT" \
   --namespace "$NAMESPACE" \
-  --manifest "$BACKUP_ROOT/backup-manifest.json"
+  --manifest "$BACKUP_ROOT/backup-manifest.json" \
+  --min-remaining-hours 2
 ```
 
 The manifest records paths, sizes, and hashes only; it must not contain raw
-secret values. Use it for protected preflight:
+secret values. For long protected rollouts, require a remaining freshness
+window when checking the manifest. A manifest that is merely under the 24-hour
+max age at launch can still expire before GB10 prep reaches `cluster up`; the
+2-hour rollout default catches that case before any rollout mutation work.
+Use the manifest for protected preflight:
 
 ```bash
 loom cluster preflight \

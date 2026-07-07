@@ -39,7 +39,25 @@ class TestBackupStepArgv:
             "loom-staging",
             "--manifest",
             str(manifest),
+            "--min-remaining-hours",
+            "2",
         ]
+
+    def test_uses_context_min_remaining_hours(self, tmp_path: Path) -> None:
+        manifest = tmp_path / "backup-manifest.json"
+        manifest.write_text("{}")
+        ctx = make_ctx(
+            tmp_path,
+            backup_manifest_path=manifest,
+            backup_manifest_min_remaining_hours=4,
+        )
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        ev.ensure()
+        step_dir = ev.step_dir(5, "backup")
+
+        argv = list(BackupStep().argv(ctx, step_dir))
+
+        assert argv[argv.index("--min-remaining-hours") + 1] == "4"
 
     def test_rejects_obsolete_flags(self, tmp_path: Path) -> None:
         """Regression guard for #363: the pre-fix invocation used
