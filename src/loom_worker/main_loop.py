@@ -18,6 +18,7 @@ integration ships.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -70,6 +71,7 @@ from loom_worker.materializers import (
     dispatch_materialize,
 )
 from loom_worker.orphan_cleanup import cleanup_orphan_trajectories
+from loom_worker.orphan_containers import cleanup_orphan_sandbox_containers
 from loom_worker.runner_pool import RunnerPool
 from loom_worker.sandbox_network import SandboxNetworkAllocator
 from loom_worker.sandbox_singleton import (
@@ -476,6 +478,34 @@ def _run_orphan_cleanup(
         config=retry_config,
         sleep=sleep,
     )
+    _run_orphan_sandbox_cleanup(_lookup)
+
+
+def _run_orphan_sandbox_cleanup(
+    lookup: Callable[[UUID], tuple[str, UUID | None]],
+) -> None:
+    """Best-effort sweep of Docker containers left by dead workers (#605).
+
+    Errors are logged and swallowed — sandbox cleanup must not fail
+    worker boot. The reclaim sweep will eventually re-queue any trial
+    whose worker went away, and the next startup will retry the sweep.
+    """
+    import docker as _docker
+    try:
+        client = _docker.from_env()
+    except Exception:
+        logger.exception("orphan_sandbox_docker_client_failed")
+        return
+    try:
+        cleanup_orphan_sandbox_containers(
+            docker_client=client,
+            state_lookup=lambda tid: lookup(tid)[0],
+        )
+    except Exception:
+        logger.exception("orphan_sandbox_cleanup_failed")
+    finally:
+        with contextlib.suppress(Exception):
+            client.close()
 
 
 def _run_trial_cache_eviction(settings: WorkerSettings) -> None:
