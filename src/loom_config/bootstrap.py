@@ -10,8 +10,35 @@ from __future__ import annotations
 import shlex
 import subprocess
 from collections.abc import Mapping
+from urllib.parse import urlsplit, urlunsplit
 
 from loom_config.loader import Schema
+
+
+def _rewrite_dsn_host_port(dsn: str, *, host: str, port: int) -> str:
+    """Rewrite the netloc's host+port in a psycopg/SQLAlchemy DSN,
+    preserving scheme, credentials, database name, and query parameters.
+
+    Raises ValueError on malformed inputs (missing userinfo, missing
+    host, non-URL input).
+    """
+    try:
+        parsed = urlsplit(dsn)
+    except ValueError as exc:
+        raise ValueError(f"malformed DSN: {dsn!r}") from exc
+
+    if not parsed.scheme or not parsed.scheme.startswith(("postgres", "postgresql")):
+        raise ValueError(f"unsupported scheme in DSN: {dsn!r}")
+    if parsed.username is None or parsed.password is None:
+        raise ValueError(f"DSN missing userinfo (user:password@): {dsn!r}")
+    if not parsed.hostname:
+        raise ValueError(f"DSN missing host: {dsn!r}")
+
+    netloc = f"{parsed.username}:{parsed.password}@{host}:{port}"
+    return urlunsplit((
+        parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment,
+    ))
+
 
 _SMOKE_DEFAULTS: Mapping[str, str] = {
     "step-jwt-signing-key":   "smoke-jwt-key-do-not-use-in-prod",
