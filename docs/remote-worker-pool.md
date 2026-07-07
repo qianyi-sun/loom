@@ -1343,7 +1343,9 @@ The active path is liveness-aware as well as metadata-aware. If image/env/source
 already match desired state, `apply` still prepares the image and runs
 `docker compose up -d worker`. Compose no-ops when the service is truly current,
 and recreates or starts it when rollout prep pre-wrote `.env`, the image/env
-changed outside compose, or the previous worker exited.
+changed outside compose, or the previous worker exited. The active apply path
+then waits for the compose worker service to become `running`; a created/stopped
+container is a failed apply, not a successful node-agent report.
 
 Rollback or disable:
 

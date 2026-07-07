@@ -490,7 +490,9 @@ When no metadata drift remains and host intent is active, the node-agent skips
 the drain/stop phase but still prepares the image and runs
 `docker compose up -d worker`. Compose no-ops when the service is already
 current, and recreates or starts it when the env/image changed outside compose
-or the previous worker exited.
+or the previous worker exited. After every active `up -d`, node-agent waits for
+the compose service to report `running`; if it remains only created/stopped, the
+apply fails so rollout step 11 can retry or stop before release-gate.
 
 Retry a failed rollout by fixing the local cause and restarting the service:
 

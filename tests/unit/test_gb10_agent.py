@@ -434,10 +434,15 @@ def test_apply_restarts_missing_active_worker_when_release_metadata_is_current(
         "_report_node",
         lambda _args, **kwargs: reports.append(kwargs),
     )
+    running_checks = iter([False, True])
+
+    def _service_running(_compose_base, _service):  # type: ignore[no-untyped-def]
+        return next(running_checks)
+
     monkeypatch.setattr(
         gb10_agent,
         "_compose_service_is_running",
-        lambda _compose_base, _service: False,
+        _service_running,
         raising=False,
     )
     monkeypatch.setattr(
@@ -472,6 +477,80 @@ def test_apply_restarts_missing_active_worker_when_release_metadata_is_current(
     ]
     assert reports[-1]["apply_state"] == "applied"
     assert reports[-1]["last_apply_result"] == "docker compose worker started"
+
+
+def test_apply_fails_when_active_worker_never_reaches_running_after_up(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    env_file = tmp_path / ".env.remote-worker"
+    env_file.write_text(
+        "LOOM_IMAGE_TAG=current-image\n"
+        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_MAX_CONCURRENT=10\n"
+        "LOOM_WORKER_ENV_CONFIG_VERSION=current-env\n"
+        "LOOM_GB10_CAPACITY_INTENT=active\n",
+        encoding="utf-8",
+    )
+    compose_file = tmp_path / "docker-compose.remote-worker.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    desired = DesiredState(
+        environment="production",
+        pool_name="gb10-arm64",
+        image_tag="current-image",
+        max_concurrent=10,
+        env_config_version="current-env",
+        rollout_policy={"mode": "all"},
+        env={},
+    )
+    commands: list[list[str]] = []
+    reports: list[dict[str, object]] = []
+
+    monkeypatch.setattr(gb10_agent, "_fetch_desired_state", lambda _args: desired)
+    monkeypatch.setattr(
+        gb10_agent,
+        "_report_node",
+        lambda _args, **kwargs: reports.append(kwargs),
+    )
+    monkeypatch.setattr(
+        gb10_agent,
+        "_compose_service_is_running",
+        lambda _compose_base, _service: False,
+        raising=False,
+    )
+    monkeypatch.setattr(gb10_agent.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        gb10_agent,
+        "_run",
+        lambda argv, *, dry_run: commands.append(list(argv)),
+    )
+
+    rc = gb10_agent._apply(
+        SimpleNamespace(
+            cp_url="http://cp:8080",
+            admin_token="env:LOOM_ADMIN_TOKEN",
+            worker_token=None,
+            environment="production",
+            pool_name="gb10-arm64",
+            hostname="trt-gb10-1",
+            env_file=env_file,
+            compose_file=[compose_file],
+            service="worker",
+            drain_timeout_sec=600,
+            dry_run=False,
+            rollback=False,
+            force=False,
+            format="text",
+        )
+    )
+
+    assert rc == 1
+    assert [command[-2:] for command in commands] == [
+        ["pull", "worker"],
+        ["-d", "worker"],
+    ]
+    assert reports[-1]["apply_state"] == "failed"
+    assert "did not reach running state" in str(reports[-1]["error_message"])
 
 
 def test_apply_reconciles_running_active_worker_when_release_metadata_is_current(
@@ -517,6 +596,11 @@ def test_apply_reconciles_running_active_worker_when_release_metadata_is_current
         gb10_agent,
         "_run",
         lambda argv, *, dry_run: commands.append(list(argv)),
+    )
+    monkeypatch.setattr(
+        gb10_agent,
+        "_wait_for_compose_service_running",
+        lambda _compose_base, _service: None,
     )
 
     rc = gb10_agent._apply(
@@ -604,6 +688,11 @@ def test_apply_updates_source_checkout_before_compose(
     monkeypatch.setattr(gb10_agent, "_report_node", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         gb10_agent,
+        "_wait_for_compose_service_running",
+        lambda _compose_base, _service: None,
+    )
+    monkeypatch.setattr(
+        gb10_agent,
         "_source_git_provenance",
         lambda _source_dir: ("7b61049ffffffffff00000000000000000000000", False),
     )
@@ -688,6 +777,11 @@ def test_apply_cleans_legacy_repo_temp_env_files(
         gb10_agent,
         "_run",
         lambda argv, *, dry_run: commands.append(list(argv)),
+    )
+    monkeypatch.setattr(
+        gb10_agent,
+        "_wait_for_compose_service_running",
+        lambda _compose_base, _service: None,
     )
 
     rc = gb10_agent._apply(
@@ -884,6 +978,11 @@ def test_apply_builds_local_worker_image_when_registry_pull_fails(
             raise subprocess.CalledProcessError(1, argv)
 
     monkeypatch.setattr(gb10_agent, "_run", _run)
+    monkeypatch.setattr(
+        gb10_agent,
+        "_wait_for_compose_service_running",
+        lambda _compose_base, _service: None,
+    )
 
     rc = gb10_agent._apply(
         SimpleNamespace(
@@ -962,6 +1061,11 @@ def test_rollback_apply_publishes_previous_state_to_control_plane(
     monkeypatch.setattr(gb10_agent.httpx, "put", _fake_put)
     monkeypatch.setattr(gb10_agent, "_report_node", lambda *args, **kwargs: None)
     monkeypatch.setattr(gb10_agent, "_run", lambda argv, *, dry_run: None)
+    monkeypatch.setattr(
+        gb10_agent,
+        "_wait_for_compose_service_running",
+        lambda _compose_base, _service: None,
+    )
 
     rc = gb10_agent._apply(
         SimpleNamespace(
