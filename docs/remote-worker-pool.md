@@ -725,7 +725,11 @@ checkout's git commit, and whether the tree is dirty. When desired state
 contains `source_git_commit`, active node source commits must match it exactly
 and the checkout must be clean. Missing provenance is a release-gate failure
 because it means the operator cannot prove that a local build fallback used the
-desired source tree.
+desired source tree. The status artifact also links node reports to the worker
+registry by hostname/pool; active release nodes must show `worker_id`,
+`worker_status=active`, `worker_fresh=true`, and `worker_backend_names`
+containing `docker`. This is the evidence that `/api/v1/backends` will expose a
+usable docker backend for smoke and user submissions.
 
 ```bash
 loom admin gb10-workers status \
@@ -1334,6 +1338,10 @@ pulls desired state and applies its host intent:
 - `draining`: write drain intent, stop compose with the drain timeout, and
   let the worker finish in-flight trials before exit.
 - `stopped`: keep compose stopped.
+
+The active path is liveness-aware as well as metadata-aware. If image/env/source
+already match desired state but the worker compose service is missing or exited,
+`apply` starts it again instead of reporting only `already current`.
 
 Rollback or disable:
 

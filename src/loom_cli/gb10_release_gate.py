@@ -113,6 +113,23 @@ def gb10_release_target_mismatches(
         )
         max_bad = desired_max is not None and current_max != desired_max
         apply_bad = apply_state != "applied"
+        worker_id = node.get("worker_id")
+        worker_status = node.get("worker_status")
+        worker_fresh = node.get("worker_fresh")
+        worker_backend_names = node.get("worker_backend_names")
+        if not isinstance(worker_backend_names, list):
+            worker_backend_names = []
+        worker_backend_set = {
+            item for item in worker_backend_names
+            if isinstance(item, str) and item
+        }
+        worker_bad = (
+            not isinstance(worker_id, str)
+            or not worker_id.strip()
+            or worker_status != "active"
+            or worker_fresh is not True
+            or "docker" not in worker_backend_set
+        )
         expected_source = desired.get("source_git_commit")
         if not isinstance(expected_source, str) or not expected_source.strip():
             expected_source = release_source_prefix(release_image_tag)
@@ -128,6 +145,22 @@ def gb10_release_target_mismatches(
                 or source_dirty is not False
             )
         )
+        if worker_bad:
+            mismatches.append(
+                "node "
+                f"{node.get('hostname', '-')} "
+                "missing active/fresh docker worker registration "
+                f"image={image or '-'}/{release_image_tag or '-'} "
+                f"env={env or '-'}/{release_env_config_version or '-'} "
+                f"max={current_max if current_max is not None else '-'}/"
+                f"{desired_max if desired_max is not None else '-'} "
+                f"worker_id={worker_id or '-'} "
+                f"worker_status={worker_status or '-'} "
+                f"worker_fresh={worker_fresh if worker_fresh is not None else '-'} "
+                f"worker_backends={','.join(sorted(worker_backend_set)) or '-'} "
+                f"compose_project_dir={node.get('compose_project_dir') or '-'} "
+                f"apply_state={apply_state or '-'}"
+            )
         if image_bad or env_bad or max_bad or apply_bad or source_bad:
             mismatches.append(
                 "node "
