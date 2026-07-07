@@ -43,6 +43,8 @@ class GB10Host:
     repo_url: str = "https://github.com/qianyi-sun/loom.git"
     node_agent_service: str | None = None
     ssh_config_path: str | None = None
+    ssh_identity_file: str | None = None
+    ssh_certificate_file: str | None = None
 
 
 def gb10_hosts_for(ctx: RolloutContext) -> list[GB10Host]:
@@ -71,6 +73,14 @@ def gb10_hosts_for(ctx: RolloutContext) -> list[GB10Host]:
         if not path.is_absolute():
             path = ctx.cluster_config_path.parent / path
         ssh_config_path = str(path.resolve(strict=False))
+    ssh_identity_file = _resolve_optional_pool_path(
+        ctx,
+        getattr(pool, "ssh_identity_file", "") or "",
+    )
+    ssh_certificate_file = _resolve_optional_pool_path(
+        ctx,
+        getattr(pool, "ssh_certificate_file", "") or "",
+    )
     hosts_raw = getattr(pool, "hosts", None) or ()
     result: list[GB10Host] = []
     for h in hosts_raw:
@@ -82,9 +92,46 @@ def gb10_hosts_for(ctx: RolloutContext) -> list[GB10Host]:
                 repo_url=h.get("repo_url") or "https://github.com/qianyi-sun/loom.git",
                 node_agent_service=h.get("node_agent_service"),
                 ssh_config_path=ssh_config_path,
+                ssh_identity_file=ssh_identity_file,
+                ssh_certificate_file=ssh_certificate_file,
             )
         )
     return [h for h in result if h.ssh_target and h.repo_path and h.env_file_path]
+
+
+def _resolve_optional_pool_path(ctx: RolloutContext, value: str) -> str | None:
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = ctx.cluster_config_path.parent / path
+    return str(path.resolve(strict=False))
+
+
+def _gb10_ssh_auth_preflight(hosts: list[GB10Host]) -> str | None:
+    """Return a non-secret auth-material error, or None when ready."""
+    if not hosts:
+        return None
+    identity = hosts[0].ssh_identity_file
+    if not identity:
+        return (
+            "gb10-prep requires [gb10_pool].ssh_identity_file so the "
+            "platform-dev rollout runner does not depend on Mac ssh-agent "
+            "forwarding"
+        )
+    identity_path = Path(identity)
+    if not identity_path.is_file():
+        return f"gb10-prep ssh_identity_file does not exist: {identity_path}"
+    mode = identity_path.stat().st_mode & 0o777
+    if mode & 0o077:
+        return (
+            f"gb10-prep ssh_identity_file must not be group/world accessible: "
+            f"{identity_path} mode={mode:03o}"
+        )
+    cert = hosts[0].ssh_certificate_file
+    if cert and not Path(cert).is_file():
+        return f"gb10-prep ssh_certificate_file does not exist: {cert}"
+    return None
 
 
 def _env_state_profile_path_for(ctx: RolloutContext) -> Path | None:
@@ -146,6 +193,10 @@ def _ssh(host: GB10Host, remote_cmd: str) -> SubprocessResult:
     argv = ["ssh"]
     if host.ssh_config_path:
         argv.extend(["-F", host.ssh_config_path])
+    if host.ssh_identity_file:
+        argv.extend(["-i", host.ssh_identity_file, "-o", "IdentitiesOnly=yes"])
+    if host.ssh_certificate_file:
+        argv.extend(["-o", f"CertificateFile={host.ssh_certificate_file}"])
     argv.extend(
         [
             "-o",
@@ -282,15 +333,47 @@ class GB10PrepStep(BaseStep):
             if _no_gb10_hosts_error(ctx):
                 return VerifyOutcome.MISMATCH
             return VerifyOutcome.MATCH
-        # For each host, cheap check: env file has correct IMAGE_TAG.
+        auth_error = _gb10_ssh_auth_preflight(hosts)
+        if auth_error:
+            step_dir.stderr_path().write_text(auth_error + "\n")
+            return VerifyOutcome.UNKNOWN
         for host in hosts:
-            image_tag = shlex.quote(ctx.image_tag)
+            repo_path = shlex.quote(host.repo_path)
             env_file_path = shlex.quote(host.env_file_path)
-            r = _ssh(host, f"grep -q '^LOOM_IMAGE_TAG={image_tag}$' {env_file_path}")
-            if r.returncode != 0:
-                # Could be transient; treat as UNKNOWN so we retry rather
-                # than falsely declaring MATCH or MISMATCH.
-                return VerifyOutcome.UNKNOWN
+            image_tag = shlex.quote(ctx.image_tag)
+            resolved_sha = shlex.quote(ctx.resolved_sha)
+            checks = [
+                (
+                    "checkout-head",
+                    f'test "$(cd {repo_path} && git rev-parse HEAD)" = {resolved_sha}',
+                ),
+                (
+                    "image-tag",
+                    f"grep -q '^LOOM_IMAGE_TAG={image_tag}$' {env_file_path}",
+                ),
+                (
+                    "env-config-version",
+                    f"grep -q '^LOOM_WORKER_ENV_CONFIG_VERSION={image_tag}$' {env_file_path}",
+                ),
+            ]
+            if host.node_agent_service:
+                service = shlex.quote(host.node_agent_service)
+                checks.append(
+                    (
+                        "node-agent-active",
+                        f"systemctl --user is-active --quiet {service}",
+                    )
+                )
+            for _label, cmd in checks:
+                r = _ssh(host, cmd)
+                if r.returncode != 0:
+                    if r.returncode == 255:
+                        # SSH/auth/connect failures are ambiguous; do not
+                        # classify them as target drift.
+                        return VerifyOutcome.UNKNOWN
+                    # SSH succeeded but the release predicate did not match:
+                    # the previous prep did not finish and resume should rerun.
+                    return VerifyOutcome.MISMATCH
         return VerifyOutcome.MATCH
 
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:
@@ -307,6 +390,10 @@ class GB10PrepStep(BaseStep):
                 exit_code=0,
                 summary="no GB10 hosts declared; step is a no-op",
             )
+        auth_error = _gb10_ssh_auth_preflight(hosts)
+        if auth_error:
+            step_dir.stderr_path().write_text(auth_error + "\n")
+            return RunResult(exit_code=1, error=auth_error)
         # Per-host subdir for logs.
         summaries: list[str] = []
         failures: list[str] = []

@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from loom_cli.rollout.state import (
+    DriverRecord,
     RolloutState,
     StepRecord,
     StepState,
@@ -32,8 +33,10 @@ class TestStepState:
     def test_is_success_only_for_done(self) -> None:
         assert StepState.DONE.is_success()
         for state in (
-            StepState.NOT_STARTED, StepState.RUNNING,
-            StepState.VERIFYING, StepState.FAILED,
+            StepState.NOT_STARTED,
+            StepState.RUNNING,
+            StepState.VERIFYING,
+            StepState.FAILED,
         ):
             assert not state.is_success()
 
@@ -59,7 +62,8 @@ class TestStepRecord:
 
     def test_to_dict_roundtrip(self) -> None:
         rec = StepRecord(
-            number=4, name="kind-load",
+            number=4,
+            name="kind-load",
             state=StepState.DONE,
             inputs_hash="abc123",
             started_at="2026-07-02T22:00:00Z",
@@ -79,11 +83,17 @@ class TestStepRecord:
 
     def test_from_dict_rejects_unknown_state(self) -> None:
         with pytest.raises(ValueError, match="unknown step state"):
-            StepRecord.from_dict({
-                "number": 4, "name": "x", "state": "chugging",
-                "inputs_hash": None, "started_at": None,
-                "finished_at": None, "error": None,
-            })
+            StepRecord.from_dict(
+                {
+                    "number": 4,
+                    "name": "x",
+                    "state": "chugging",
+                    "inputs_hash": None,
+                    "started_at": None,
+                    "finished_at": None,
+                    "error": None,
+                }
+            )
 
 
 class TestRolloutState:
@@ -102,7 +112,8 @@ class TestRolloutState:
 
     def test_mark_step_running_sets_current(self) -> None:
         state = RolloutState.new(
-            rollout_id="rid", steps=[(0, "a"), (1, "b")],
+            rollout_id="rid",
+            steps=[(0, "a"), (1, "b")],
         )
         state.mark_step_running(0, started_at="2026-07-02T22:00:00Z")
         assert state.current_step == 0
@@ -111,7 +122,8 @@ class TestRolloutState:
 
     def test_mark_step_done_bumps_current_step_on_next_running(self) -> None:
         state = RolloutState.new(
-            rollout_id="rid", steps=[(0, "a"), (1, "b")],
+            rollout_id="rid",
+            steps=[(0, "a"), (1, "b")],
         )
         state.mark_step_running(0, started_at="2026-07-02T22:00:00Z")
         state.mark_step_done(
@@ -125,7 +137,8 @@ class TestRolloutState:
 
     def test_mark_step_failed_sets_status_failed(self) -> None:
         state = RolloutState.new(
-            rollout_id="rid", steps=[(0, "a"), (1, "b")],
+            rollout_id="rid",
+            steps=[(0, "a"), (1, "b")],
         )
         state.mark_step_running(0, started_at="t0")
         state.mark_step_failed(0, finished_at="t1", error="docker daemon unreachable")
@@ -135,7 +148,8 @@ class TestRolloutState:
 
     def test_all_done_marks_rollout_done(self) -> None:
         state = RolloutState.new(
-            rollout_id="rid", steps=[(0, "a"), (1, "b")],
+            rollout_id="rid",
+            steps=[(0, "a"), (1, "b")],
         )
         state.mark_step_running(0, started_at="t0")
         state.mark_step_done(0, finished_at="t1", inputs_hash="h0")
@@ -156,21 +170,55 @@ class TestRolloutState:
         loaded = RolloutState.load(path)
         assert loaded == state
 
+    def test_driver_record_persists_with_state(self, tmp_path: Path) -> None:
+        state = RolloutState.new(
+            rollout_id="20260702t235959z-x",
+            steps=[(0, "a")],
+        )
+        state.mark_driver_active(
+            DriverRecord(
+                pid=1234,
+                hostname="platform-dev",
+                boot_id="boot-1",
+                started_at="2026-07-07T00:00:00Z",
+                updated_at="2026-07-07T00:00:05Z",
+            )
+        )
+
+        path = tmp_path / "state.json"
+        state.save(path)
+        raw = json.loads(path.read_text())
+        loaded = RolloutState.load(path)
+
+        assert raw["driver"] == {
+            "pid": 1234,
+            "hostname": "platform-dev",
+            "boot_id": "boot-1",
+            "started_at": "2026-07-07T00:00:00Z",
+            "updated_at": "2026-07-07T00:00:05Z",
+        }
+        assert loaded.driver == state.driver
+
     def test_load_rejects_wrong_schema_version(self, tmp_path: Path) -> None:
         path = tmp_path / "state.json"
-        path.write_text(json.dumps({
-            "version": 999,
-            "rollout_id": "rid",
-            "status": "running",
-            "current_step": None,
-            "steps": [],
-        }))
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 999,
+                    "rollout_id": "rid",
+                    "status": "running",
+                    "current_step": None,
+                    "steps": [],
+                }
+            )
+        )
         with pytest.raises(ValueError, match=r"unsupported state\.json version"):
             RolloutState.load(path)
 
     def test_current_running_step(self) -> None:
         state = RolloutState.new(
-            rollout_id="rid", steps=[(0, "a"), (1, "b"), (2, "c")],
+            rollout_id="rid",
+            steps=[(0, "a"), (1, "b"), (2, "c")],
         )
         state.mark_step_running(0, started_at="t0")
         state.mark_step_done(0, finished_at="t0d", inputs_hash="h0")
@@ -183,7 +231,8 @@ class TestRolloutState:
     def test_needs_verify_for_running_step(self) -> None:
         """Resume: a step in `running` needs verify() before we decide."""
         state = RolloutState.new(
-            rollout_id="rid", steps=[(0, "a"), (1, "b")],
+            rollout_id="rid",
+            steps=[(0, "a"), (1, "b")],
         )
         state.mark_step_running(0, started_at="t0")
         state.mark_step_verifying(0)
@@ -192,10 +241,22 @@ class TestRolloutState:
     def test_reset_step_to_running_for_retry(self) -> None:
         """After verify says MISMATCH, we retry the run."""
         state = RolloutState.new(
-            rollout_id="rid", steps=[(0, "a")],
+            rollout_id="rid",
+            steps=[(0, "a")],
         )
         state.mark_step_running(0, started_at="t0")
         state.mark_step_verifying(0)
         state.reset_step_for_retry(0, started_at="t1")
         assert state.steps[0].state is StepState.RUNNING
         assert state.steps[0].started_at == "t1"
+
+    def test_reset_step_for_retry_restores_top_level_running_status(self) -> None:
+        state = RolloutState.new(
+            rollout_id="rid",
+            steps=[(0, "a"), (1, "b")],
+        )
+        state.mark_step_failed(0, finished_at="t1", error="planned failure")
+
+        state.reset_step_for_retry(0, started_at="t2")
+
+        assert state.status == "running"

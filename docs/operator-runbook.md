@@ -678,7 +678,7 @@ knob you need.
    pools, mint tokens, or read live credentials. The default manifest assigns
    every eligible GB10/OLDLAB slot to production and leaves staging/dev at zero
    borrowed slots. The v1.0 GB10 baseline is all 15 GB10 hosts at 10 slots
-   each; `trt-gb10-14` is reachable from the operator Mac through
+   each; the repo-owned GB10 SSH topology reaches `trt-gb10-14` through
    `ProxyJump trt-gb10-1`. When an observed worker registration/status artifact is
    available, pass it with `--observed-json` so the report fails on prod/dev
    environment, API URL, image tag, source commit, compose service, Kubernetes
@@ -849,14 +849,14 @@ knob you need.
    state without `[gb10_pool]` hosts is also a release-contract error because
    rollout step 11 would have no actual hosts to prepare. For the v1.0 staging
    gate, `deploy/environments/staging.cluster.toml` enumerates all 15 GB10
-   hosts and points `[gb10_pool].ssh_config` at the repo-owned GB10 SSH config,
-   so step 11 does not depend on `platform-dev` having operator-local
-   `trt-gb10-*` aliases. The operator still launches the protected rollout
-   from the Mac with SSH agent forwarding to `platform-dev`; do not copy GB10
-   private keys onto `platform-dev`. Step 11 writes only non-secret release
-   marker keys to each host-local env file and starts the host-local GB10
-   node-agent service; release-gate then requires every active host to report
-   10 slots, the target image/env, and the target source commit.
+   hosts and points `[gb10_pool].ssh_config` at the repo-owned GB10 SSH config
+   plus `[gb10_pool].ssh_identity_file` at a platform-dev-local deploy
+   identity. Step 11 therefore does not depend on `platform-dev` having
+   operator-local `trt-gb10-*` aliases or a Mac forwarded-agent session. Step
+   11 writes only non-secret release marker keys to each host-local env file
+   and starts the host-local GB10 node-agent service; release-gate then
+   requires every active host to report 10 slots, the target image/env, and
+   the target source commit.
    Protected `environment-state apply/check` uses the same per-environment
    rollout lease as `loom cluster up`, defaulting to
    `$LOOM_ROLLOUT_LOCK_DIR` or `~/.loom/rollout-locks`. Set a shared
@@ -1213,40 +1213,88 @@ target ref → worktree → build → kind-load → backup → audit → render 
 preflight → migrate → env-state → GB10 prep → cluster up → production
 defaults → release-gate → smoke → summary. Every step writes evidence
 into a per-rollout directory tree; a re-run of the same command safely
-resumes from the interrupted step.
+resumes from the interrupted step. The driver also records its process owner in
+`state.json`; a second invocation refuses while the previous driver is still
+alive, and takes over a stale `running` state after the previous driver process
+has exited.
 
 ### Invocation
 
 ```bash
-ssh -A platform-dev '
-cd /home/qianyi/dev/loom
-.venv/bin/loom cluster rollout \
-  --ref origin/dev \
-  --image-tag staging-abc1234 \
-  --cluster-name loom-staging \
-  --namespace loom-staging \
-  --environment staging \
-  --cp-url http://127.0.0.1:18081 \
-  --cluster-config deploy/environments/staging.cluster.toml \
-  --backup-manifest /data/loom-staging/backups/latest/backup-manifest.json \
-  --rollout-root /data/loom-staging \
-  --admin-token file:/shared_work/qianyi/loom-worker-capacity/staging-admin-token \
-  --expect-admin-token-fingerprint "sha256:<12-hex> len=<N>" \
-  --worker-token file:/shared_work/qianyi/loom-worker-capacity/staging-worker-token \
-  --service-token file:/shared_work/qianyi/loom-worker-capacity/staging-service-token \
-  --scope current-gb10
+ssh platform-dev '
+unit=loom-rollout-staging-abc1234
+systemd-run --user --unit "$unit" --collect \
+  /bin/bash -lc '"'"'
+    set -euo pipefail
+    cd /home/qianyi/dev/loom
+    export LOOM_SMOKE_SUBMIT_MODE=admin-on-behalf
+    export LOOM_SMOKE_ON_BEHALF_USERNAME=devansh
+    export LOOM_SMOKE_ON_BEHALF_TEAM_ID=<agentic-rl-team-uuid>
+    export LOOM_SMOKE_ADMIN_ACTOR=codex-v1-release-gate
+    exec .venv/bin/loom cluster rollout \
+      --ref origin/dev \
+      --image-tag staging-abc1234 \
+      --cluster-name loom-staging \
+      --namespace loom-staging \
+      --environment staging \
+      --cp-url http://127.0.0.1:18081 \
+      --cluster-config deploy/environments/staging.cluster.toml \
+      --backup-manifest /data/loom-staging/backups/latest/backup-manifest.json \
+      --rollout-root /data/loom-staging \
+      --admin-token file:/shared_work/qianyi/loom-worker-capacity/staging-admin-token \
+      --expect-admin-token-fingerprint "sha256:<12-hex> len=<N>" \
+      --worker-token file:/shared_work/qianyi/loom-worker-capacity/staging-worker-token \
+      --service-token file:/shared_work/qianyi/loom-worker-capacity/staging-service-token \
+      --scope current-gb10
+  '"'"'
 '
 ```
 
-The `-A` is part of the release invocation, not an optional convenience: step
-11 runs on `platform-dev` and uses `deploy/worker-pools/gb10/ssh_config` to
-reach `trt-gb10-*`, while authentication comes from the operator's forwarded
-agent. Before the rollout, verify the agent boundary without printing key
-material:
+The release invocation intentionally does not use `ssh -A`. `platform-dev` is
+the fixed rollout runner, and step 11 authenticates to GB10 through the
+platform-dev-local deploy identity declared by
+`[gb10_pool].ssh_identity_file`. That file is operator-managed secret material:
+it must exist on `platform-dev`, must not be group/world accessible, and must
+not be committed or printed. A public SSH certificate may be declared through
+`[gb10_pool].ssh_certificate_file` when the site uses short-lived certs.
+
+Before rollout, verify the durable GB10 auth boundary from `platform-dev`
+without Mac agent forwarding:
 
 ```bash
-ssh-add -l || ssh-add ~/.ssh/id_ed25519_remote
-ssh -A platform-dev 'ssh-add -l >/dev/null'
+ssh platform-dev '
+cd /home/qianyi/dev/loom
+test "$(stat -c %a /shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519)" = 600
+for i in $(seq 1 15); do
+  h=trt-gb10-$i
+  ssh -F deploy/worker-pools/gb10/ssh_config \
+    -i /shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519 \
+    -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 \
+    "$h" hostname >/dev/null
+done
+'
+```
+
+If the deploy identity has not been provisioned yet, use the operator Mac's
+existing admin SSH access only as a one-time bootstrap channel to install the
+deploy identity's public key or SSH certificate trust on the GB10 hosts; do not
+run the release rollout itself through forwarded-agent authentication.
+
+To resume the same fixed version after a failed or disconnected run, start a
+new detached unit with the same command and append `--resume`. Do not edit
+`state.json` or manually repair host evidence.
+
+Inspect the systemd unit plus rollout evidence instead of relying on terminal
+history:
+
+```bash
+ssh platform-dev '
+systemctl --user status loom-rollout-staging-abc1234 --no-pager || true
+journalctl --user-unit loom-rollout-staging-abc1234 -n 100 --no-pager || true
+rid=$(ls -td /data/loom-staging/rollouts/*-staging-abc1234 | head -1)
+jq "{rollout_id,status,current_step,driver}" "$rid/state.json"
+tail -n 100 "$rid/logs/driver.log"
+'
 ```
 
 For `--environment staging`, the driver intentionally refuses legacy physical
@@ -1408,11 +1456,14 @@ Each invocation gets a directory under `<rollout-root>/rollouts/`:
 
 Every step transitions through the tiny FSM
 `not_started → running → verifying → done | failed` and the driver
-persists after every transition, so `Ctrl-C` at any point followed by
-a re-run picks up where it left off. `state.json` version is `1`.
-`inputs.json` pins the rollout to the SHA resolved at launch. On `--resume`,
-the driver keeps that pinned SHA when the operator supplies the same target ref
-and image tag, even if the branch now points at a newer commit.
+persists after every transition, so `Ctrl-C`, terminal timeout, or SSH
+disconnect followed by `--resume` picks up where it left off. `state.json`
+version is `1`; it includes a best-effort driver owner record with pid,
+hostname, boot id, and last update timestamp so stale `running` state is
+distinguishable from an active writer. `inputs.json` pins the rollout to the
+SHA resolved at launch. On `--resume`, the driver keeps that pinned SHA when
+the operator supplies the same target ref and image tag, even if the branch now
+points at a newer commit.
 
 ### Resume semantics
 
@@ -1422,6 +1473,10 @@ and image tag, even if the branch now points at a newer commit.
   the step's `verify()` (read-only). MATCH → mark done and continue.
   MISMATCH → drop back to `running` and retry. UNKNOWN → refuse to
   advance and print a diagnostic (operator inspects and re-runs).
+- If `state.json` names a previous driver that is still alive on the same
+  host/boot, a second invocation refuses rather than double-writing evidence.
+  If the previous driver process is gone, the new invocation records itself as
+  the owner and resumes from the persisted step.
 - After a successful `run()`, the driver calls `verify()` again and
   requires MATCH or UNKNOWN before marking done. A MISMATCH here means
   the world doesn't match what `run()` reported — a real problem, not

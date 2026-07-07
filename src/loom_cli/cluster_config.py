@@ -110,6 +110,8 @@ if TYPE_CHECKING:
     @dataclass(frozen=True)
     class _Gb10PoolConfig:
         ssh_config: str = ""
+        ssh_identity_file: str = ""
+        ssh_certificate_file: str = ""
         hosts: list[dict[str, Any]] = field(default_factory=list)
 
     @dataclass(frozen=True)

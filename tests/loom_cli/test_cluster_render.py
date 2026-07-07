@@ -184,6 +184,8 @@ def test_load_config_accepts_rollout_environment_state_and_gb10_pool(
         'env_state_profile = "../environment-state/staging.toml"\n'
         "[gb10_pool]\n"
         'ssh_config = "../worker-pools/gb10/ssh_config"\n'
+        'ssh_identity_file = "/shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519"\n'
+        'ssh_certificate_file = "/shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519-cert.pub"\n'
         "hosts = [\n"
         '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom", '
         'env_file_path = "/srv/loom/.env", '
@@ -197,6 +199,14 @@ def test_load_config_accepts_rollout_environment_state_and_gb10_pool(
 
     assert cfg.env_state_profile == "../environment-state/staging.toml"
     assert cfg.gb10_pool.ssh_config == "../worker-pools/gb10/ssh_config"
+    assert (
+        cfg.gb10_pool.ssh_identity_file
+        == "/shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519"
+    )
+    assert (
+        cfg.gb10_pool.ssh_certificate_file
+        == "/shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519-cert.pub"
+    )
     assert cfg.gb10_pool.hosts == [
         {
             "ssh_target": "trt-gb10-1",
@@ -747,10 +757,21 @@ def test_render_profiles_set_backend_runtime_environment(
 
 def test_staging_profile_declares_repo_owned_gb10_ssh_config() -> None:
     cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / "staging.cluster.toml")
+    ssh_config = (_REPO_ROOT / "deploy" / "worker-pools" / "gb10" / "ssh_config").read_text(
+        encoding="utf-8"
+    )
 
     assert cfg.gb10_pool.ssh_config == "../worker-pools/gb10/ssh_config"
+    assert (
+        cfg.gb10_pool.ssh_identity_file
+        == "/shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519"
+    )
     assert len(cfg.gb10_pool.hosts) == 15
-    assert (_REPO_ROOT / "deploy" / "worker-pools" / "gb10" / "ssh_config").is_file()
+    assert (
+        "IdentityFile /shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519"
+        in ssh_config
+    )
+    assert "IdentitiesOnly yes" in ssh_config
 
 
 def test_render_custom_storage_sizes() -> None:

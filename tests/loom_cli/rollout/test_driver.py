@@ -14,7 +14,7 @@ from loom_cli.rollout.driver import (
     run_rollout,
 )
 from loom_cli.rollout.evidence import EvidenceDirectory
-from loom_cli.rollout.state import RolloutState, StepState
+from loom_cli.rollout.state import DriverRecord, RolloutState, StepState
 from loom_cli.rollout.steps.base import (
     BaseStep,
     RunResult,
@@ -22,6 +22,7 @@ from loom_cli.rollout.steps.base import (
 )
 
 # ---- Test doubles ----
+
 
 class _AlwaysOKStep(BaseStep):
     def __init__(self, number: int, name: str) -> None:
@@ -55,6 +56,7 @@ class _RaisingStep(BaseStep):
 
 class _MatchOnVerify(BaseStep):
     """Simulates a step that was interrupted mid-run but succeeded."""
+
     def __init__(self, number: int, name: str) -> None:
         self.number = number
         self.name = name
@@ -94,7 +96,28 @@ class _UnknownOnVerify(BaseStep):
         return VerifyOutcome.UNKNOWN
 
 
+class _MismatchThenAccept(BaseStep):
+    """Simulates a stale running step whose observable state needs a retry."""
+
+    def __init__(self, number: int, name: str) -> None:
+        self.number = number
+        self.name = name
+        self.run_calls = 0
+        self.verify_calls = 0
+
+    def _run_impl(self, ctx, step_dir):
+        self.run_calls += 1
+        return RunResult(exit_code=0, summary=f"{self.name} retried")
+
+    def _verify_impl(self, ctx, step_dir):
+        self.verify_calls += 1
+        if self.verify_calls == 1:
+            return VerifyOutcome.MISMATCH
+        return VerifyOutcome.UNKNOWN
+
+
 # ---- Preflight ----
+
 
 class TestPreflight:
     def test_refuses_full_cluster_plus_exclude_oldlab(self, tmp_path: Path) -> None:
@@ -112,6 +135,7 @@ class TestPreflight:
 
 
 # ---- Happy path ----
+
 
 class TestRunRollout:
     def test_all_steps_succeed(self, tmp_path: Path) -> None:
@@ -147,6 +171,21 @@ class TestRunRollout:
         assert ev.inputs_path().is_file()
         assert ev.read_inputs()["image_tag"] == "staging-abc123"
 
+    def test_writes_driver_log_for_disconnect_diagnostics(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        steps = [_AlwaysOKStep(0, "resolve")]
+
+        rc = run_rollout(ctx, steps, ev, io.StringIO())
+
+        assert rc == 0
+        log = ev.driver_log_path().read_text(encoding="utf-8")
+        assert "[run  ] 00-resolve" in log
+        assert "[done ] 00-resolve" in log
+
     def test_refuses_when_inputs_json_conflicts(self, tmp_path: Path) -> None:
         ctx = make_ctx(tmp_path)
         ev = EvidenceDirectory(tmp_path, "test-rid")
@@ -159,9 +198,7 @@ class TestRunRollout:
 
 
 class TestFailure:
-    def test_step_failure_marks_state_failed_and_returns_nonzero(
-        self, tmp_path: Path
-    ) -> None:
+    def test_step_failure_marks_state_failed_and_returns_nonzero(self, tmp_path: Path) -> None:
         ctx = make_ctx(tmp_path)
         ev = EvidenceDirectory(tmp_path, "test-rid")
         steps = [
@@ -213,7 +250,8 @@ class TestResume:
         ev.write_inputs(ctx.to_inputs_dict())
         # Manually persist state showing step 0 running.
         state = RolloutState.new(
-            rollout_id="test-rid", steps=[(0, "a"), (1, "b")],
+            rollout_id="test-rid",
+            steps=[(0, "a"), (1, "b")],
         )
         state.mark_step_running(0, started_at="2026-07-02T22:00:00Z")
         state.save(ev.state_path())
@@ -231,7 +269,8 @@ class TestResume:
         ev.ensure()
         ev.write_inputs(ctx.to_inputs_dict())
         state = RolloutState.new(
-            rollout_id="test-rid", steps=[(0, "a")],
+            rollout_id="test-rid",
+            steps=[(0, "a")],
         )
         state.mark_step_running(0, started_at="t0")
         state.save(ev.state_path())
@@ -244,15 +283,14 @@ class TestResume:
         assert rc == 2
         assert step_a.run_calls == 1
 
-    def test_refuses_on_unknown_verify_during_resume(
-        self, tmp_path: Path
-    ) -> None:
+    def test_refuses_on_unknown_verify_during_resume(self, tmp_path: Path) -> None:
         ctx = make_ctx(tmp_path)
         ev = EvidenceDirectory(tmp_path, "test-rid")
         ev.ensure()
         ev.write_inputs(ctx.to_inputs_dict())
         state = RolloutState.new(
-            rollout_id="test-rid", steps=[(0, "a")],
+            rollout_id="test-rid",
+            steps=[(0, "a")],
         )
         state.mark_step_running(0, started_at="t0")
         state.save(ev.state_path())
@@ -260,6 +298,92 @@ class TestResume:
         step_a = _UnknownOnVerify(0, "a")
         rc = run_rollout(ctx, [step_a], ev, io.StringIO())
         assert rc == 2
+
+    def test_refuses_resume_when_another_driver_is_still_active(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        ev.ensure()
+        ev.write_inputs(ctx.to_inputs_dict())
+        state = RolloutState.new(
+            rollout_id="test-rid",
+            steps=[(0, "a")],
+        )
+        state.mark_step_running(0, started_at="t0")
+        state.driver = DriverRecord(
+            pid=123,
+            hostname="platform-dev",
+            boot_id="boot-a",
+            started_at="t0",
+            updated_at="t0",
+        )
+        state.save(ev.state_path())
+        monkeypatch.setattr(
+            "loom_cli.rollout.driver._current_driver_identity",
+            lambda: DriverRecord(
+                pid=456,
+                hostname="platform-dev",
+                boot_id="boot-a",
+                started_at="t1",
+                updated_at="t1",
+            ),
+        )
+        monkeypatch.setattr(
+            "loom_cli.rollout.driver._driver_record_is_alive",
+            lambda _record, _current: True,
+        )
+
+        with pytest.raises(DriverError, match="already active"):
+            run_rollout(ctx, [_AlwaysOKStep(0, "a")], ev, io.StringIO())
+
+    def test_stale_dead_driver_owner_can_resume_and_retry(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        ev.ensure()
+        ev.write_inputs(ctx.to_inputs_dict())
+        state = RolloutState.new(
+            rollout_id="test-rid",
+            steps=[(0, "a")],
+        )
+        state.mark_step_running(0, started_at="t0")
+        state.driver = DriverRecord(
+            pid=123,
+            hostname="platform-dev",
+            boot_id="boot-a",
+            started_at="t0",
+            updated_at="t0",
+        )
+        state.save(ev.state_path())
+        monkeypatch.setattr(
+            "loom_cli.rollout.driver._current_driver_identity",
+            lambda: DriverRecord(
+                pid=456,
+                hostname="platform-dev",
+                boot_id="boot-a",
+                started_at="t1",
+                updated_at="t1",
+            ),
+        )
+        monkeypatch.setattr(
+            "loom_cli.rollout.driver._driver_record_is_alive",
+            lambda _record, _current: False,
+        )
+
+        step = _MismatchThenAccept(0, "a")
+        rc = run_rollout(ctx, [step], ev, io.StringIO())
+
+        assert rc == 0
+        assert step.run_calls == 1
+        loaded = RolloutState.load(ev.state_path())
+        assert loaded.status == "done"
+        assert loaded.driver is None
 
     def test_reruns_when_inputs_hash_changes(self, tmp_path: Path) -> None:
         """Different inputs → is_done returns False even if state says done."""
@@ -276,3 +400,16 @@ class TestResume:
         step_a2 = _AlwaysOKStep(0, "a")
         run_rollout(ctx, [step_a2], ev, io.StringIO())
         assert step_a2.run_calls == 0
+
+    def test_successful_skip_only_rerun_clears_driver_owner(self, tmp_path: Path) -> None:
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        step = _AlwaysOKStep(0, "a")
+        assert run_rollout(ctx, [step], ev, io.StringIO()) == 0
+
+        skipped_step = _AlwaysOKStep(0, "a")
+        assert run_rollout(ctx, [skipped_step], ev, io.StringIO()) == 0
+
+        loaded = RolloutState.load(ev.state_path())
+        assert loaded.status == "done"
+        assert loaded.driver is None

@@ -13,6 +13,7 @@ import pytest
 
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.evidence import EvidenceDirectory
+from loom_cli.rollout.steps.base import VerifyOutcome
 from loom_cli.rollout.steps.s03_kind_load_images import KindLoadImagesStep
 from loom_cli.rollout.steps.s04_gb10_prep import (
     GB10Host,
@@ -116,6 +117,12 @@ def _release_manifest_with_gb10_contract() -> str:
         )
         + "\n"
     )
+
+
+def _write_dummy_identity(path: Path) -> Path:
+    path.write_text("not-a-real-key\n", encoding="utf-8")
+    path.chmod(0o600)
+    return path
 
 
 def test_render_runs_loom_cli_from_candidate_worktree(
@@ -994,9 +1001,14 @@ def test_gb10_prep_reads_hosts_from_cluster_config(tmp_path: Path) -> None:
     ssh_config = tmp_path / "deploy" / "worker-pools" / "gb10" / "ssh_config"
     ssh_config.parent.mkdir(parents=True)
     ssh_config.write_text("Host trt-gb10-1\n  HostName 203.0.113.1\n")
+    identity = _write_dummy_identity(tmp_path / "gb10-rollout-ed25519")
+    cert = tmp_path / "gb10-rollout-ed25519-cert.pub"
+    cert.write_text("ssh-ed25519-cert-v01@openssh.com dummy\n", encoding="utf-8")
     ctx.cluster_config_path.write_text(
         "[gb10_pool]\n"
         f'ssh_config = "{ssh_config}"\n'
+        f'ssh_identity_file = "{identity}"\n'
+        f'ssh_certificate_file = "{cert}"\n'
         "hosts = [\n"
         '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom", '
         'env_file_path = "/srv/loom/.env", '
@@ -1015,6 +1027,8 @@ def test_gb10_prep_reads_hosts_from_cluster_config(tmp_path: Path) -> None:
     assert hosts[0].repo_url == "https://github.com/qianyi-sun/loom.git"
     assert hosts[0].node_agent_service == "loom-gb10-node-agent.service"
     assert hosts[0].ssh_config_path == str(ssh_config)
+    assert hosts[0].ssh_identity_file == str(identity)
+    assert hosts[0].ssh_certificate_file == str(cert)
 
 
 def test_gb10_prep_ssh_uses_declared_config(
@@ -1023,11 +1037,16 @@ def test_gb10_prep_ssh_uses_declared_config(
 ) -> None:
     ssh_config = tmp_path / "gb10_ssh_config"
     ssh_config.write_text("Host trt-gb10-1\n  HostName 203.0.113.1\n")
+    identity = _write_dummy_identity(tmp_path / "gb10-rollout-ed25519")
+    cert = tmp_path / "gb10-rollout-ed25519-cert.pub"
+    cert.write_text("ssh-ed25519-cert-v01@openssh.com dummy\n", encoding="utf-8")
     host = GB10Host(
         ssh_target="trt-gb10-1",
         repo_path="/srv/loom",
         env_file_path="/srv/loom/.env",
         ssh_config_path=str(ssh_config),
+        ssh_identity_file=str(identity),
+        ssh_certificate_file=str(cert),
     )
     captured: dict[str, Any] = {}
 
@@ -1046,6 +1065,10 @@ def test_gb10_prep_ssh_uses_declared_config(
 
     argv = captured["argv"]
     assert argv[:3] == ["ssh", "-F", str(ssh_config)]
+    assert "-i" in argv
+    assert str(identity) in argv
+    assert "IdentitiesOnly=yes" in argv
+    assert f"CertificateFile={cert}" in argv
     assert "-o" in argv
     assert "BatchMode=yes" in argv
     assert argv[-2:] == ["trt-gb10-1", "hostname >/dev/null"]
@@ -1090,6 +1113,169 @@ trt-gb10-1 = "active"
     assert "no [gb10_pool] hosts" in result.error
 
 
+def test_gb10_prep_requires_platform_dev_identity_file(
+    tmp_path: Path,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
+    ctx.cluster_config_path.write_text(
+        "[gb10_pool]\n"
+        "hosts = [\n"
+        '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom-staging", '
+        'env_file_path = "/srv/loom-staging/.env" },\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(11, "gb10-prep")
+
+    result = GB10PrepStep().run(ctx, step_dir)
+
+    assert result.exit_code == 1
+    assert result.error is not None
+    assert "[gb10_pool].ssh_identity_file" in result.error
+    assert "ssh-agent forwarding" in step_dir.stderr_path().read_text()
+
+
+def test_gb10_prep_rejects_group_readable_identity_file(
+    tmp_path: Path,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
+    identity = tmp_path / "gb10-rollout-ed25519"
+    identity.write_text("not-a-real-key\n", encoding="utf-8")
+    identity.chmod(0o640)
+    ctx.cluster_config_path.write_text(
+        "[gb10_pool]\n"
+        f'ssh_identity_file = "{identity}"\n'
+        "hosts = [\n"
+        '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom-staging", '
+        'env_file_path = "/srv/loom-staging/.env" },\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+
+    result = GB10PrepStep().run(ctx, ev.step_dir(11, "gb10-prep"))
+
+    assert result.exit_code == 1
+    assert result.error is not None
+    assert "must not be group/world accessible" in result.error
+    assert "mode=640" in result.error
+
+
+def test_gb10_prep_verify_treats_missing_target_env_as_retryable_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
+    identity = _write_dummy_identity(tmp_path / "gb10-rollout-ed25519")
+    ctx.cluster_config_path.write_text(
+        "[gb10_pool]\n"
+        f'ssh_identity_file = "{identity}"\n'
+        "hosts = [\n"
+        '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom-staging", '
+        'env_file_path = "/srv/loom-staging/.env" },\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+
+    def fake_ssh(host, remote_cmd):
+        return SubprocessResult(
+            argv=["ssh", host.ssh_target, remote_cmd],
+            returncode=1,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
+
+    outcome = GB10PrepStep().verify(ctx, ev.step_dir(11, "gb10-prep"))
+
+    assert outcome is VerifyOutcome.MISMATCH
+
+
+def test_gb10_prep_verify_keeps_ssh_auth_failure_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
+    identity = _write_dummy_identity(tmp_path / "gb10-rollout-ed25519")
+    ctx.cluster_config_path.write_text(
+        "[gb10_pool]\n"
+        f'ssh_identity_file = "{identity}"\n'
+        "hosts = [\n"
+        '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom-staging", '
+        'env_file_path = "/srv/loom-staging/.env" },\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+
+    def fake_ssh(host, remote_cmd):
+        return SubprocessResult(
+            argv=["ssh", host.ssh_target, remote_cmd],
+            returncode=255,
+            stdout="",
+            stderr="Permission denied (publickey).",
+        )
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
+
+    outcome = GB10PrepStep().verify(ctx, ev.step_dir(11, "gb10-prep"))
+
+    assert outcome is VerifyOutcome.UNKNOWN
+
+
+def test_gb10_prep_verify_checks_checkout_env_version_and_node_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(
+        tmp_path,
+        image_tag="staging-abc123",
+        resolved_sha="d" * 40,
+    )
+    identity = _write_dummy_identity(tmp_path / "gb10-rollout-ed25519")
+    ctx.cluster_config_path.write_text(
+        "[gb10_pool]\n"
+        f'ssh_identity_file = "{identity}"\n'
+        "hosts = [\n"
+        '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom-staging", '
+        'env_file_path = "/srv/loom-staging/.env", '
+        'node_agent_service = "loom-gb10-node-agent.service" },\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    calls: list[str] = []
+
+    def fake_ssh(host, remote_cmd):
+        calls.append(remote_cmd)
+        return SubprocessResult(
+            argv=["ssh", host.ssh_target, remote_cmd],
+            returncode=1 if "systemctl --user is-active" in remote_cmd else 0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
+
+    outcome = GB10PrepStep().verify(ctx, ev.step_dir(11, "gb10-prep"))
+
+    assert outcome is VerifyOutcome.MISMATCH
+    assert calls == [
+        'test "$(cd /srv/loom-staging && git rev-parse HEAD)" = dddddddddddddddddddddddddddddddddddddddd',
+        "grep -q '^LOOM_IMAGE_TAG=staging-abc123$' /srv/loom-staging/.env",
+        "grep -q '^LOOM_WORKER_ENV_CONFIG_VERSION=staging-abc123$' /srv/loom-staging/.env",
+        "systemctl --user is-active --quiet loom-gb10-node-agent.service",
+    ]
+
+
 def test_gb10_prep_clones_preserves_env_and_starts_node_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1099,8 +1285,10 @@ def test_gb10_prep_clones_preserves_env_and_starts_node_agent(
         image_tag="staging-abc123",
         resolved_sha="c" * 40,
     )
+    identity = _write_dummy_identity(tmp_path / "gb10-rollout-ed25519")
     ctx.cluster_config_path.write_text(
         "[gb10_pool]\n"
+        f'ssh_identity_file = "{identity}"\n'
         "hosts = [\n"
         '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom-staging", '
         'env_file_path = "/srv/loom-staging/.env", '
