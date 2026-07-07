@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from fastapi.testclient import TestClient
 
 from loom_llm_gateway.drain import DrainState, drain_and_report
@@ -96,6 +97,26 @@ async def test_drain_and_report_returns_timeout_with_diagnostic() -> None:
     assert report["status"] == "timeout"
     assert report["remaining_in_flight"] == 1
     assert report["timeout_sec"] == 0.2
+
+
+# ──────────────────────────────────────────────────────────────────────
+# create_app wiring
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_create_app_attaches_drain_before_lifespan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Integration fixtures wire app.state without entering lifespan."""
+    from loom_llm_gateway.app import create_app
+    from loom_llm_gateway.config import GatewaySettings
+
+    monkeypatch.setenv(
+        "LOOM_GW_DB_URL",
+        "postgresql+asyncpg://loom:loom@localhost:5432/loom",
+    )
+    app = create_app(GatewaySettings(_env_file=None))
+    assert isinstance(app.state.drain, DrainState)
 
 
 # ──────────────────────────────────────────────────────────────────────
