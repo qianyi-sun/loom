@@ -1544,11 +1544,12 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert gb10_state["rollout_policy"] == {"mode": "all"}
     assert profile.catalog_provisioning["required"] is True
     command = profile.catalog_provisioning["command"]
-    assert "loom datasets provision-catalog" in command
+    assert "loom datasets provision-catalog" not in command
     assert "loom datasets register skilllearnbench" in command
     assert "--mirror-to-object-store" in command
     assert "loom datasets publish-local deploy/catalog/gb10-smoke" in command
     assert "loom datasets audit --all --verify-bundles" in command
+    assert "LOOM_CATALOG_SOURCE_" not in command
     assert (
         profile.catalog_provisioning["env_file"]
         == "/shared_work/qianyi/loom-worker-capacity/staging-catalog-provisioning.env"
@@ -1564,6 +1565,12 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
         "LOOM_SVC_MINIO_ACCESS_KEY",
         "LOOM_SVC_MINIO_SECRET_KEY",
     ]
+    assert not {
+        "LOOM_CATALOG_SOURCE_DB_URL",
+        "LOOM_CATALOG_SOURCE_MINIO_ENDPOINT",
+        "LOOM_CATALOG_SOURCE_MINIO_ACCESS_KEY",
+        "LOOM_CATALOG_SOURCE_MINIO_SECRET_KEY",
+    } & set(profile.catalog_provisioning["required_env"])
     assert set(profile.external_slurm_runner_prerequisites["pools"]) == {"gb10-arm64"}
     assert profile.external_slurm_runner_prerequisites["require_worker_token_parity"] is True
     assert profile.external_slurm_runner_prerequisites["materialize"] is True
