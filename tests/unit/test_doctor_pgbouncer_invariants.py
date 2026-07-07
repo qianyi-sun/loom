@@ -99,6 +99,48 @@ def test_flags_all_three_services_direct_wrong() -> None:
         assert any(key in s for s in flagged), f"{key} not flagged"
 
 
+def test_reconcile_calls_pgbouncer_invariants(monkeypatch: pytest.MonkeyPatch) -> None:
+    """reconcile() must surface pgbouncer violations read from the live secret."""
+    import base64
+    from unittest.mock import MagicMock
+
+    from loom_config.doctor import reconcile
+
+    # Build a schema with pgbouncer enabled and no service_config entries
+    # (so _secret_violations and _orphan_secret_violations produce nothing).
+    pgb_entry = MagicMock()
+    pgb_entry.fields = {"enabled": True}
+
+    schema = MagicMock()
+    schema.render_config = {"pgbouncer": pgb_entry}
+    schema.service_prefix = {}
+    schema.service_config = {}
+    schema.infra_secrets = set()
+
+    # cp-db-url points at pgbouncer — direct URLs must point at loom-postgres.
+    wrong_direct = "postgresql+psycopg://loom:pw@loom-pgbouncer:6432/loom"
+
+    def _make_secret_data(dsn: str) -> bytes:
+        return base64.b64encode(dsn.encode())
+
+    mock_secret = MagicMock()
+    mock_secret.data = {
+        "cp-db-url": _make_secret_data(wrong_direct),
+    }
+
+    core_v1_api = MagicMock()
+    # read_namespaced_secret is called twice: once by _read_secret_keys and
+    # once by the pgbouncer block.  Both calls return the same mock secret.
+    core_v1_api.read_namespaced_secret.return_value = mock_secret
+    core_v1_api.list_namespaced_pod.return_value.items = []
+
+    report = reconcile(schema, core_v1_api, namespace="loom")
+
+    pgbouncer_violations = [v for v in report.violations if v.kind == "pgbouncer_invariant"]
+    assert pgbouncer_violations, "Expected at least one pgbouncer_invariant violation"
+    assert any("cp-db-url" in v.entry for v in pgbouncer_violations)
+
+
 def test_skips_missing_secret_keys() -> None:
     """If a secret key is absent, no finding is raised (secret missing is a
     separate check handled by _secret_violations)."""

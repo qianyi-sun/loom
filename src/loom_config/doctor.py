@@ -65,6 +65,26 @@ def reconcile(schema: Schema, core_v1_api: Any, namespace: str) -> DoctorReport:
     # 3) orphan secrets (key in loom-secrets but no schema entry refs it)
     violations.extend(_orphan_secret_violations(schema, secret_keys))
 
+    # 4) pgbouncer URL ↔ enabled invariants
+    pgbouncer_cfg = schema.render_config.get("pgbouncer", None)
+    if pgbouncer_cfg is not None and (pgbouncer_cfg.fields or {}).get("enabled"):
+        import base64
+        secret_values: dict[str, str] = {}
+        try:
+            secret = core_v1_api.read_namespaced_secret("loom-secrets", namespace)
+            for key in (
+                "cp-db-url", "gw-db-url", "svc-db-url",
+                "cp-db-url-pool", "gw-db-url-pool", "svc-db-url-pool",
+            ):
+                raw = (secret.data or {}).get(key)
+                if raw is not None:
+                    secret_values[key] = base64.b64decode(raw).decode("utf-8")
+        except Exception:
+            # Silently swallow: _secret_violations already surfaces
+            # missing-secret conditions.
+            pass
+        violations.extend(_check_pgbouncer_invariants(schema, secret_values))
+
     return DoctorReport(violations=violations)
 
 
@@ -104,6 +124,27 @@ def reconcile_rendered(
                     ))
 
     violations.extend(_orphan_secret_violations(schema, secret_keys))
+
+    # pgbouncer URL ↔ enabled invariants
+    pgbouncer_cfg = schema.render_config.get("pgbouncer", None)
+    if pgbouncer_cfg is not None and (pgbouncer_cfg.fields or {}).get("enabled"):
+        import base64
+        secret_values_r: dict[str, str] = {}
+        try:
+            secret = core_v1_api.read_namespaced_secret("loom-secrets", namespace)
+            for key in (
+                "cp-db-url", "gw-db-url", "svc-db-url",
+                "cp-db-url-pool", "gw-db-url-pool", "svc-db-url-pool",
+            ):
+                raw = (secret.data or {}).get(key)
+                if raw is not None:
+                    secret_values_r[key] = base64.b64decode(raw).decode("utf-8")
+        except Exception:
+            # Silently swallow: _secret_violations already surfaces
+            # missing-secret conditions.
+            pass
+        violations.extend(_check_pgbouncer_invariants(schema, secret_values_r))
+
     return DoctorReport(violations=violations)
 
 
