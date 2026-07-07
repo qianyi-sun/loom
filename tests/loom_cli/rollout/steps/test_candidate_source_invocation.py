@@ -23,7 +23,10 @@ from loom_cli.rollout.steps.s09_migrate import MigrateStep
 from loom_cli.rollout.steps.s10_env_state import EnvStateStep, _profile_path_for
 from loom_cli.rollout.steps.s11_cluster_up import ClusterUpStep
 from loom_cli.rollout.steps.s12_production_defaults import ProductionDefaultsStep
-from loom_cli.rollout.steps.s12_release_gate import ReleaseGateStep
+from loom_cli.rollout.steps.s12_release_gate import (
+    ReleaseGateStep,
+    _is_gb10_convergence_failure,
+)
 from loom_cli.rollout.steps.subprocess_util import SubprocessResult
 
 
@@ -1302,6 +1305,38 @@ def test_release_gate_current_gb10_requires_manifest_desired_state(
     assert [call[3:6] for call in non_docker_calls] == [
         ["cluster", "release-manifest", "--config"],
     ]
+
+
+def test_release_gate_retry_classifier_ignores_passing_gb10_check() -> None:
+    result = SubprocessResult(
+        argv=["loom", "cluster", "release-gate"],
+        returncode=1,
+        stdout=(
+            "CHECK                                      OUTCOME  DETAIL\n"
+            "gb10-worker-convergence                    pass     "
+            "GB10 worker status matches release target\n"
+            "hf-mirror-token-boundary                   fail     "
+            "HF mirror/token boundary evidence artifact is unreadable\n"
+        ),
+        stderr="",
+    )
+
+    assert not _is_gb10_convergence_failure(result)
+
+
+def test_release_gate_retry_classifier_accepts_failing_gb10_check() -> None:
+    result = SubprocessResult(
+        argv=["loom", "cluster", "release-gate"],
+        returncode=1,
+        stdout=(
+            "CHECK                                      OUTCOME  DETAIL\n"
+            "gb10-worker-convergence                    fail     "
+            "GB10 worker status reports release-target drift\n"
+        ),
+        stderr="",
+    )
+
+    assert _is_gb10_convergence_failure(result)
 
 
 def test_release_gate_retries_transient_gb10_status_cp_unreachable(

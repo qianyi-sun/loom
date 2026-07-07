@@ -35,11 +35,24 @@ def _is_transient_cp_unreachable(stderr: str) -> bool:
 
 def _is_gb10_convergence_failure(result: SubprocessResult) -> bool:
     text = f"{result.stdout}\n{result.stderr}"
-    return (
-        "gb10-worker-convergence" in text
-        or "GB10 worker" in text
-        or "GB10 rollout target mismatch" in text
-    )
+    if "GB10 rollout target mismatch" in text:
+        return True
+    for line in text.splitlines():
+        normalised = line.replace("|", " ").strip()
+        tokens = normalised.split()
+        if not tokens:
+            continue
+        lowered = [token.lower() for token in tokens]
+        try:
+            check_index = lowered.index("gb10-worker-convergence")
+        except ValueError:
+            continue
+        if any(
+            outcome in {"fail", "failed", "error"}
+            for outcome in lowered[check_index + 1:check_index + 3]
+        ):
+            return True
+    return False
 
 
 def _string_list(value: Any) -> list[str]:
