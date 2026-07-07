@@ -13,6 +13,7 @@ from typing import Any
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
+from loom.security.redaction import is_sensitive_environment_key, redact_text
 from loom_cli import __version__ as _loom_cli_version
 from loom_cli.cluster_cmd import _rendered_deployment_images
 from loom_cli.cluster_config import ClusterConfig
@@ -179,6 +180,23 @@ def _catalog_provisioning_summary(
     command = catalog.get("command")
     if isinstance(command, str) and command:
         summary["command"] = command
+    env_file = catalog.get("env_file")
+    if isinstance(env_file, str) and env_file:
+        summary["env_file"] = env_file
+    env = catalog.get("env")
+    if isinstance(env, dict):
+        summary["env"] = {
+            key: "[REDACTED]" if is_sensitive_environment_key(key) else redact_text(value)
+            for key, value in env.items()
+            if isinstance(key, str) and key and isinstance(value, str) and value
+        }
+    env_sources = catalog.get("env_sources")
+    if isinstance(env_sources, dict):
+        summary["env_sources"] = {
+            key: redact_text(value)
+            for key, value in env_sources.items()
+            if isinstance(key, str) and key and isinstance(value, str) and value
+        }
     required_env = catalog.get("required_env")
     if isinstance(required_env, list):
         summary["required_env"] = [

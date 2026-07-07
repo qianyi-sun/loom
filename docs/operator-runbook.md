@@ -871,16 +871,18 @@ knob you need.
    same shared path; the deploy helper fails closed for protected environments
    when it is unset.
    Staging uses the same flow with `--environment staging` and
-   `deploy/environment-state/staging.toml`. Keep the catalog provisioning
-   command printed by the profile in the rollout evidence; that gate remains
-   separate because catalog data lives in the service DB/object store, not the
-   Control Plane admin API. The profile also lists the operator-only env keys
-   required by that gate: `HF_TOKEN`, `LOOM_SVC_DB_URL`, and
-   `LOOM_SVC_MINIO_*`. Those credentials belong in the operator context, not
-   the runtime worker pods. The same catalog gate publishes the checked-in
-   `deploy/catalog/gb10-smoke` benchmark with `loom datasets publish-local` so
-   current-GB10 rollout smoke has a real `s3://` task bundle instead of a
-   manual DB row or `fixture://` source. For SkillLearnBench, the release
+   `deploy/environment-state/staging.toml`. `loom cluster rollout` step 10 now
+   executes the profile's required catalog provisioning command after
+   environment-state apply and before environment-state check, writing
+   redacted `catalog-provisioning.*` evidence. The profile lists the
+   operator-only env keys required by that gate: `PUBLISHED_SHA`, `HF_TOKEN`,
+   `LOOM_SVC_DB_URL`, and `LOOM_SVC_MINIO_*`; secret-bearing values must come
+   from the protected `staging-catalog-provisioning.env` file or equivalent
+   `env_sources`, not argv or worker pods. The same catalog gate publishes the
+   checked-in `deploy/catalog/gb10-smoke` benchmark with
+   `loom datasets publish-local` so current-GB10 rollout smoke has a real
+   `s3://` task bundle instead of a manual DB row or `fixture://` source. For
+   SkillLearnBench, the release
    manifest records the profile's catalog gate and `loom cluster release-gate`
    requires the matching `--hf-mirror-boundary-evidence` artifact before
    staging or production promotion can pass.
@@ -1514,7 +1516,7 @@ desired state.
 | 07 | render | candidate-source `loom cluster render` → `rendered.yaml` |
 | 08 | preflight | candidate-source `loom cluster preflight --backup-manifest <path>` using the same manifest verified by step 05 |
 | 09 | migrate | candidate-source `loom cluster render-migration` + `kubectl wait` (#332) |
-| 10 | env-state | candidate-source `loom admin environment-state apply/check --admin-token <source> --expect-admin-token-fingerprint <fingerprint>` (#331 fix for stop-on-disable, #533 guard for scoped admin token drift). Pure GB10 node-status convergence drift is recorded and deferred because step 11 has not started node-agent apply yet; mixed drift still fails immediately. |
+| 10 | env-state | candidate-source `loom admin environment-state apply`, then required profile `catalog_provisioning.command` via protected env/env-source inputs, then `loom admin environment-state check --admin-token <source> --expect-admin-token-fingerprint <fingerprint>` (#331 fix for stop-on-disable, #533 guard for scoped admin token drift, #543 catalog-owned GB10 smoke task provisioning). Pure GB10 node-status convergence drift is recorded and deferred because step 11 has not started node-agent apply yet; mixed drift still fails immediately. |
 | 11 | gb10-prep | SSH ×N hosts after desired-state apply: fetch, checkout, write env file, install/start node-agent, verify. The GB10 node-agent unit is `Type=oneshot`; successful prep is verified from `systemctl show` `Result=success` and `ExecMainStatus=0`, even though the unit is normally `inactive/dead` after completion. This step intentionally runs after step 10 so a host-local node-agent cannot apply a stale Control Plane desired-state row (#593). |
 | 12 | cluster-up | candidate-source `loom cluster up --backup-manifest <path> --recover-sandbox-deadlines --sandbox-deadline-max-pods 4` using the same manifest verified by step 05 and preflighted by step 08 (#203 fix for updated replicas, #206 bounded kind/containerd sandbox-deadline retry) |
 | 13 | production-defaults | candidate-source `loom admin rate-cards sync-yibuapi --format json`, then `loom providers update/show` for hosted provider pricing defaults declared in the environment-state profile, using `--service-token <source>` in an isolated CLI config derived from the rollout route. This keeps DB-backed cost-attribution defaults from disappearing after a fresh rollout without depending on ambient operator login state. |
@@ -3568,11 +3570,13 @@ If the HF repo is private/gated and the pod lacks `HF_TOKEN`, the 401/403 is a
 real rollout blocker. Fix it by updating the Secret/profile and restarting the
 operator context; do not replace it with hand-written DB rows.
 
-For protected current-GB10 rollout smoke, also publish the checked-in release
-smoke fixture through the same official local-benchmark path before step 15.
-This creates a real DB task row and internal `s3://` bundle source for
+For protected current-GB10 rollout smoke, step 10 publishes the checked-in
+release smoke fixture through the same official local-benchmark path before
+step 15. This creates a real DB task row and internal `s3://` bundle source for
 `loom-smoke/gb10-oracle-hello-world`; it is idempotent and uses the same target
-DB/MinIO environment variables as the catalog commands above.
+DB/MinIO environment variables as the catalog commands above. Run the command
+manually only for diagnosis or repair outside `loom cluster rollout`; the
+normal rollout path should converge it automatically.
 
 ```bash
 loom datasets publish-local deploy/catalog/gb10-smoke \
