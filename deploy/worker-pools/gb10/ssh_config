@@ -50,6 +50,8 @@ Host trt-gb10-15
 
 Host trt-gb10-*
   User qianyi
+  IdentityFile /shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519
+  IdentitiesOnly yes
   PubkeyAuthentication yes
   PasswordAuthentication no
   StrictHostKeyChecking accept-new

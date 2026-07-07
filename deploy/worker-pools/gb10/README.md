@@ -51,13 +51,20 @@ starts.
 
 ## SSH Trust And Tunnel Recovery
 
-The operator Mac must have a loaded SSH agent that can authenticate to every
-`trt-gb10-N`. Protected rollouts are launched on `platform-dev` through
-`ssh -A platform-dev`, and rollout step 11 uses the repo-owned
-`deploy/worker-pools/gb10/ssh_config` with `ssh -F`; do not rely on
-`platform-dev` having local `trt-gb10-*` aliases or copied private keys. Keep
-`trt-gb10-14` routed through `ProxyJump trt-gb10-1`; the older
-`trt-gb10-8` jump path does not reach `10.42.0.12:22`.
+Protected rollouts run from `platform-dev` as the fixed rollout runner. Step 11
+uses the repo-owned `deploy/worker-pools/gb10/ssh_config` with `ssh -F` plus
+the platform-dev-local deploy identity declared by
+`[gb10_pool].ssh_identity_file`; do not rely on `platform-dev` having local
+`trt-gb10-*` aliases or a Mac forwarded-agent session. Keep `trt-gb10-14`
+routed through `ProxyJump trt-gb10-1`; the older `trt-gb10-8` jump path does
+not reach `10.42.0.12:22`.
+
+Do not background the protected rollout on `platform-dev` while depending on
+the operator Mac's forwarded SSH agent. The formal rollout path is a detached
+`systemd-run --user` unit on `platform-dev` using the local deploy identity.
+If rollout state remains `running` after the process exits, rerun the same
+fixed image tag with `--resume` instead of hand-editing rollout evidence or
+host state.
 
 Verify non-interactive SSH before starting or restarting workers:
 
@@ -65,6 +72,8 @@ Verify non-interactive SSH before starting or restarting workers:
 for i in $(seq 1 15); do
   h=trt-gb10-$i
   ssh -F deploy/worker-pools/gb10/ssh_config \
+    -i /shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519 \
+    -o IdentitiesOnly=yes \
     -o BatchMode=yes -o ConnectTimeout=8 "$h" 'hostname >/dev/null'
 done
 ```
@@ -173,11 +182,10 @@ artifact/trajectory object-store path.
 
 ## Setup And Restart
 
-Run the following from `cudo-sudo-trt` after loading the GB10 ssh-agent:
-
-```bash
-source ~/.ssh/gb10_agent.env
-```
+The protected rollout owns normal checkout/env/service convergence. The
+commands below are break-glass/manual equivalents and must be run from
+`platform-dev` with the repo-owned SSH config plus the local deploy identity,
+not from a Mac forwarded-agent session.
 
 Prepare or refresh the checkout on every host:
 
@@ -185,7 +193,7 @@ Prepare or refresh the checkout on every host:
 COMMIT=cbbe6ff213da492fcef4348121b941944547c188
 for i in $(seq 1 15); do
   h=trt-gb10-$i
-  ssh "$h" "
+  ssh -F deploy/worker-pools/gb10/ssh_config "$h" "
     set -euo pipefail
     if [ ! -d ~/loom-worker-build-staging/.git ]; then
       git clone https://github.com/qianyi-sun/loom.git ~/loom-worker-build-staging
@@ -265,7 +273,7 @@ Start or restart workers:
 ```bash
 for i in $(seq 1 15); do
   h=trt-gb10-$i
-  ssh "$h" "
+  ssh -F deploy/worker-pools/gb10/ssh_config "$h" "
     set -euo pipefail
     cd ~/loom-worker-build-staging
     docker compose \
@@ -285,7 +293,7 @@ existing `/home/qianyi/loom-worker-build-staging/.env` file.
 ```bash
 for i in $(seq 1 15); do
   h=trt-gb10-$i
-  ssh "$h" "
+  ssh -F deploy/worker-pools/gb10/ssh_config "$h" "
     set -euo pipefail
     mkdir -p ~/.config/systemd/user
     cp ~/loom-worker-build-staging/deploy/worker-pools/gb10/loom-gb10-worker.service \
@@ -338,7 +346,7 @@ Manual install after env-state is current:
 ```bash
 for i in $(seq 1 15); do
   h=trt-gb10-$i
-  ssh "$h" "
+  ssh -F deploy/worker-pools/gb10/ssh_config "$h" "
     set -euo pipefail
     mkdir -p ~/.config/systemd/user
     cp ~/loom-worker-build-staging/deploy/worker-pools/gb10/loom-gb10-node-agent.service \
@@ -500,7 +508,7 @@ operator logs in:
 ```bash
 for i in $(seq 1 15); do
   h=trt-gb10-$i
-  ssh "$h" 'sudo loginctl enable-linger qianyi' &
+  ssh -F deploy/worker-pools/gb10/ssh_config "$h" 'sudo loginctl enable-linger qianyi' &
 done
 wait
 ```
@@ -510,7 +518,7 @@ Stop without deleting cached Docker volumes:
 ```bash
 for i in $(seq 1 15); do
   h=trt-gb10-$i
-  ssh "$h" "
+  ssh -F deploy/worker-pools/gb10/ssh_config "$h" "
     cd ~/loom-worker-build-staging &&
     docker compose \
       --env-file .env \
@@ -539,7 +547,7 @@ Check running worker containers:
 ```bash
 for i in $(seq 1 15); do
   h=trt-gb10-$i
-  ssh "$h" "
+  ssh -F deploy/worker-pools/gb10/ssh_config "$h" "
     cd ~/loom-worker-build-staging &&
     docker compose \
       --env-file .env \

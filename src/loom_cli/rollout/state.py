@@ -63,6 +63,41 @@ class StepState(enum.StrEnum):
 
 
 @dataclass
+class DriverRecord:
+    """Best-effort owner/heartbeat for the rollout driver process.
+
+    The rollout evidence tree is a single-writer state machine. This record
+    lets a later invocation distinguish "the previous driver is still alive"
+    from "state.json was left running by a dead SSH/session process".
+    """
+
+    pid: int
+    hostname: str
+    boot_id: str | None
+    started_at: str
+    updated_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "pid": self.pid,
+            "hostname": self.hostname,
+            "boot_id": self.boot_id,
+            "started_at": self.started_at,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> DriverRecord:
+        return cls(
+            pid=int(data["pid"]),
+            hostname=str(data["hostname"]),
+            boot_id=data.get("boot_id"),
+            started_at=str(data["started_at"]),
+            updated_at=str(data["updated_at"]),
+        )
+
+
+@dataclass
 class StepRecord:
     """Persisted state for one step."""
 
@@ -117,8 +152,9 @@ class RolloutState:
 
     rollout_id: str
     steps: list[StepRecord] = field(default_factory=list)
-    status: str = "running"          # "running" | "done" | "failed"
+    status: str = "running"  # "running" | "done" | "failed"
     current_step: int | None = None  # number of the last step marked running
+    driver: DriverRecord | None = None
 
     @classmethod
     def new(cls, *, rollout_id: str, steps: list[tuple[int, str]]) -> RolloutState:
@@ -139,6 +175,7 @@ class RolloutState:
         record.started_at = started_at
         record.finished_at = None
         record.error = None
+        self.status = "running"
         self.current_step = number
 
     def mark_step_verifying(self, number: int) -> None:
@@ -152,11 +189,15 @@ class RolloutState:
         record.started_at = started_at
         record.finished_at = None
         record.error = None
+        self.status = "running"
         self.current_step = number
 
     def mark_step_done(
-        self, number: int, *,
-        finished_at: str, inputs_hash: str,
+        self,
+        number: int,
+        *,
+        finished_at: str,
+        inputs_hash: str,
     ) -> None:
         record = self._find(number)
         record.state = StepState.DONE
@@ -169,14 +210,23 @@ class RolloutState:
             self.current_step = None
 
     def mark_step_failed(
-        self, number: int, *,
-        finished_at: str, error: str,
+        self,
+        number: int,
+        *,
+        finished_at: str,
+        error: str,
     ) -> None:
         record = self._find(number)
         record.state = StepState.FAILED
         record.finished_at = finished_at
         record.error = error
         self.status = "failed"
+
+    def mark_driver_active(self, record: DriverRecord) -> None:
+        self.driver = record
+
+    def clear_driver(self) -> None:
+        self.driver = None
 
     def current_running_step(self) -> int | None:
         """Return the number of the step currently in RUNNING/VERIFYING,
@@ -192,6 +242,7 @@ class RolloutState:
             "rollout_id": self.rollout_id,
             "status": self.status,
             "current_step": self.current_step,
+            "driver": self.driver.to_dict() if self.driver else None,
             "steps": [r.to_dict() for r in self.steps],
         }
 
@@ -200,14 +251,18 @@ class RolloutState:
         version = int(data.get("version", 0))
         if version != STATE_VERSION:
             raise ValueError(
-                f"unsupported state.json version {version}; "
-                f"driver expects {STATE_VERSION}"
+                f"unsupported state.json version {version}; driver expects {STATE_VERSION}"
             )
         return cls(
             rollout_id=str(data["rollout_id"]),
             steps=[StepRecord.from_dict(s) for s in data.get("steps", [])],
             status=str(data.get("status", "running")),
             current_step=data.get("current_step"),
+            driver=(
+                DriverRecord.from_dict(data["driver"])
+                if isinstance(data.get("driver"), dict)
+                else None
+            ),
         )
 
     def save(self, path: Path) -> None:
@@ -217,8 +272,11 @@ class RolloutState:
         # writes. Crash between write and rename leaves the previous
         # state.json intact, which is the desired failure mode.
         with tempfile.NamedTemporaryFile(
-            "w", dir=str(path.parent), suffix=".tmp",
-            delete=False, encoding="utf-8",
+            "w",
+            dir=str(path.parent),
+            suffix=".tmp",
+            delete=False,
+            encoding="utf-8",
         ) as f:
             json.dump(self.to_dict(), f, indent=2)
             f.write("\n")
