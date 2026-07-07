@@ -7,6 +7,7 @@ import os
 import sys
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -507,6 +508,156 @@ PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"
         "LOOM_SVC_MINIO_ACCESS_KEY",
         "LOOM_SVC_MINIO_SECRET_KEY",
     ]
+
+
+def test_env_state_catalog_provisioning_forwards_cluster_local_db_and_minio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = tmp_path / "catalog.env"
+    env_file.write_text(
+        "HF_TOKEN=hf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "LOOM_SVC_DB_URL=postgresql+psycopg://loom:secret@loom-postgres:5432/loom\n"
+        "LOOM_SVC_MINIO_ENDPOINT=http://loom-minio:9000\n"
+        "LOOM_SVC_MINIO_ACCESS_KEY=minio-access-secret\n"
+        "LOOM_SVC_MINIO_SECRET_KEY=minio-secret-secret\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    worktree = _prepare_candidate_worktree(ev)
+    step_dir = ev.step_dir(10, "env-state")
+    profile = tmp_path / "staging.toml"
+    profile.write_text(
+        f"""
+environment = "staging"
+
+[catalog_provisioning]
+required = true
+command = "loom datasets register skilllearnbench && loom datasets publish-local deploy/catalog/gb10-smoke"
+env_file = "{env_file}"
+required_env = [
+  "PUBLISHED_SHA",
+  "HF_TOKEN",
+  "LOOM_SVC_DB_URL",
+  "LOOM_SVC_MINIO_ENDPOINT",
+  "LOOM_SVC_MINIO_ACCESS_KEY",
+  "LOOM_SVC_MINIO_SECRET_KEY",
+]
+
+[catalog_provisioning.env]
+PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"
+
+[catalog_provisioning.kubernetes_port_forward]
+enabled = true
+postgres_service = "service/loom-postgres"
+postgres_remote_port = 5432
+minio_service = "service/loom-minio"
+minio_remote_port = 9000
+""".lstrip(),
+        encoding="utf-8",
+    )
+    calls: list[dict[str, Any]] = []
+    forwarded: list[dict[str, Any]] = []
+    ports = iter([15432, 19000])
+
+    def fake_reserve_port() -> int:
+        return next(ports)
+
+    def fake_start_forward(**kwargs: Any) -> SimpleNamespace:
+        forwarded.append(kwargs)
+        return SimpleNamespace(
+            **kwargs,
+            stdout_log=step_dir.artifact_path(
+                f"fake-port-forward-{kwargs['name']}.stdout",
+            ),
+            stderr_log=step_dir.artifact_path(
+                f"fake-port-forward-{kwargs['name']}.stderr",
+            ),
+            stdout_handle=None,
+            stderr_handle=None,
+            process=None,
+        )
+
+    def fake_stop_forward(_handle: object) -> None:
+        return None
+
+    def fake_run(argv, **kwargs):
+        calls.append(
+            {
+                "argv": list(argv),
+                "cwd": kwargs.get("cwd"),
+                "env": kwargs.get("env"),
+            }
+        )
+        if list(argv)[3:6] == ["admin", "environment-state", "apply"]:
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout="applied\n",
+                stderr="",
+            )
+        if list(argv)[:2] == ["bash", "-euo"]:
+            assert kwargs["cwd"] == worktree
+            assert kwargs["env"]["LOOM_SVC_DB_URL"] == (
+                "postgresql+psycopg://loom:secret@127.0.0.1:15432/loom"
+            )
+            assert kwargs["env"]["LOOM_SVC_MINIO_ENDPOINT"] == "http://127.0.0.1:19000"
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout="catalog ok\n",
+                stderr="",
+            )
+        if list(argv)[3:6] == ["admin", "environment-state", "check"]:
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout='{"ok": true, "drift": [], "autoscaler_blockers": []}\n',
+                stderr="",
+            )
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._profile_path_for",
+        lambda ctx: str(profile),
+    )
+    monkeypatch.setattr("loom_cli.rollout.steps.s10_env_state.run_captured", fake_run)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._reserve_local_port",
+        fake_reserve_port,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._start_catalog_port_forward",
+        fake_start_forward,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._stop_catalog_port_forward",
+        fake_stop_forward,
+        raising=False,
+    )
+
+    result = EnvStateStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    assert [item["local_port"] for item in forwarded] == [15432, 19000]
+    assert [item["remote_port"] for item in forwarded] == [5432, 9000]
+    assert [item["resource"] for item in forwarded] == [
+        "service/loom-postgres",
+        "service/loom-minio",
+    ]
+    assert {item["namespace"] for item in forwarded} == {ctx.namespace}
+    artifact = json.loads(
+        step_dir.artifact_path("catalog-provisioning.json").read_text(
+            encoding="utf-8",
+        )
+    )
+    assert artifact["kubernetes_port_forward"]["enabled"] is True
+    assert "secret" not in json.dumps(artifact)
 
 
 def test_env_state_fails_before_mutation_when_catalog_required_env_missing(

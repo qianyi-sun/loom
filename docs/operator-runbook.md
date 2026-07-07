@@ -881,8 +881,14 @@ knob you need.
    `env_sources`, not argv or worker pods. The committed staging profile uses
    the HF registration/mirror path for SkillLearnBench; do not add the
    source-copy `loom datasets provision-catalog` step unless the profile also
-   declares protected `LOOM_CATALOG_SOURCE_*` inputs. The same catalog gate
-   publishes the checked-in `deploy/catalog/gb10-smoke` benchmark with
+   declares protected `LOOM_CATALOG_SOURCE_*` inputs. Because the target DB and
+   MinIO Secret values use Kubernetes service names such as `loom-postgres` and
+   `loom-minio`, step 10 opens short-lived, rollout-owned `kubectl port-forward`
+   processes for those services and rewrites only the catalog command's
+   effective env to `127.0.0.1:<port>` endpoints. Those forwards are recorded
+   in `catalog-provisioning.json` and are stopped when the command exits; they
+   are not operator terminal state. The same catalog gate publishes the
+   checked-in `deploy/catalog/gb10-smoke` benchmark with
    `loom datasets publish-local` so current-GB10 rollout smoke has a real
    `s3://` task bundle instead of a manual DB row or `fixture://` source. For
    SkillLearnBench, the release

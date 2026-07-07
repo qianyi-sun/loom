@@ -98,6 +98,10 @@ Attach these to the release issue or release PR:
   gated HF manifests, confirm the operator context uses protected
   `staging-catalog-provisioning.env` or `catalog_provisioning.env_sources` for
   `PUBLISHED_SHA`, `HF_TOKEN`, and target `LOOM_SVC_MINIO_*` credentials.
+  The committed staging profile also records step-owned Kubernetes
+  port-forward evidence for `loom-postgres` and `loom-minio`, so the candidate
+  CLI can run from the rollout host without relying on host DNS for cluster
+  service names or on hand-started tunnels.
   Use the source-copy `loom datasets provision-catalog` path only when a
   profile also declares protected source catalog/object-store inputs.
   Workers may still receive optional `loom-secrets/huggingface-api-key` as
