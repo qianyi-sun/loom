@@ -27,6 +27,7 @@ _DEPLOY_DIR = _REPO_ROOT / "deploy" / "k8s"
 # worker → web → ingress.
 _GOLDEN_FILES = (
     "postgres.yaml",
+    "pgbouncer.yaml",
     "minio.yaml",
     "control-plane.yaml",
     "loom-service.yaml",
@@ -288,23 +289,25 @@ def test_load_config_path_none_returns_defaults() -> None:
 
 
 def test_render_produces_valid_yaml_with_expected_kinds() -> None:
-    """Smoke: every document parses, the set covers the 7 Deployments
-    + 1 DaemonSet + 8 Services + 2 StatefulSets + 1 PVC + 1 Ingress
-    + 8 NetworkPolicies + 2 ConfigMaps (Grafana dashboards + egress-
-    proxy bootstrap) expected by cluster-deploy.md §Component map +
-    sandbox-isolation.md."""
+    """Smoke: every document parses, the set covers the 8 Deployments
+    + 1 DaemonSet + 9 Services + 2 StatefulSets + 1 PVC + 1 Ingress
+    + 1 PodDisruptionBudget + 10 NetworkPolicies + 2 ConfigMaps
+    (Grafana dashboards + egress-proxy bootstrap) expected by
+    cluster-deploy.md §Component map + sandbox-isolation.md."""
     text = render_manifests(_DEFAULT_CFG)
     assert text.startswith("apiVersion: apps/v1\nkind: StatefulSet\n")
     docs = _load_docs(text)
     kinds = [d["kind"] for d in docs]
     assert kinds.count("StatefulSet") == 2  # postgres, minio
-    # cp, service, gateway, worker, web + egress-xds + egress-proxy
-    assert kinds.count("Deployment") == 7
+    # cp, service, gateway, worker, web + egress-xds + egress-proxy + pgbouncer
+    assert kinds.count("Deployment") == 8
     assert kinds.count("DaemonSet") == 1  # gateway-router
-    # 6 service-Deployments + egress-xds + egress-proxy.
-    assert kinds.count("Service") == 8
+    # postgres + pgbouncer + minio + cp + gateway + service + web + ingress + egress = 9
+    assert kinds.count("Service") == 9
     assert kinds.count("Ingress") == 1
     assert kinds.count("PersistentVolumeClaim") == 1
+    # pgbouncer PodDisruptionBudget.
+    assert kinds.count("PodDisruptionBudget") == 1
     # NetworkPolicies: postgres + minio + cp + gateway + worker + svc
     # + web + gateway-router + egress-xds + egress-proxy = 10.
     assert kinds.count("NetworkPolicy") == 10

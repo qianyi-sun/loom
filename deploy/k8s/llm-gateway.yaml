@@ -36,6 +36,12 @@ spec:
                 secretKeyRef:
                   name: loom-secrets
                   key: gw-db-url
+            - name: LOOM_GW_DB_URL_POOL
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: gw-db-url-pool
+                  optional: true
             - name: LOOM_GW_DEV_RELOAD
               value: "False"
             - name: LOOM_GW_EGRESS_PROXY_URL

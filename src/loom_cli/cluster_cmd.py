@@ -975,6 +975,7 @@ def _pod_unready_reason(pod: Any) -> str:
 _TEMPLATE_ORDER: tuple[str, ...] = (
     "persistent-storage.yaml.j2",
     "postgres.yaml.j2",
+    "pgbouncer.yaml.j2",
     "minio.yaml.j2",
     "control-plane.yaml.j2",
     "loom-service.yaml.j2",
