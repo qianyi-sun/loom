@@ -1558,6 +1558,11 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     ]
     assert set(profile.external_slurm_runner_prerequisites["pools"]) == {"gb10-arm64"}
     assert profile.external_slurm_runner_prerequisites["require_worker_token_parity"] is True
+    assert profile.external_slurm_runner_prerequisites["materialize"] is True
+    assert (
+        profile.external_slurm_runner_prerequisites["env_template_glob"]
+        == "/shared_work/qianyi/loom-worker-capacity/staging-gb10-worker-staging-*.env"
+    )
 
 
 def test_staging_profile_is_gb10_only_for_first_prod_validation() -> None:
