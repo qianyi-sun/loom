@@ -849,10 +849,14 @@ knob you need.
    state without `[gb10_pool]` hosts is also a release-contract error because
    rollout step 11 would have no actual hosts to prepare. For the v1.0 staging
    gate, `deploy/environments/staging.cluster.toml` enumerates all 15 GB10
-   hosts, writes only non-secret release marker keys to each host-local env
-   file, and starts the host-local GB10 node-agent service; release-gate then
-   requires every active host to report 10 slots, the target image/env, and the
-   target source commit.
+   hosts and points `[gb10_pool].ssh_config` at the repo-owned GB10 SSH config,
+   so step 11 does not depend on `platform-dev` having operator-local
+   `trt-gb10-*` aliases. The operator still launches the protected rollout
+   from the Mac with SSH agent forwarding to `platform-dev`; do not copy GB10
+   private keys onto `platform-dev`. Step 11 writes only non-secret release
+   marker keys to each host-local env file and starts the host-local GB10
+   node-agent service; release-gate then requires every active host to report
+   10 slots, the target image/env, and the target source commit.
    Protected `environment-state apply/check` uses the same per-environment
    rollout lease as `loom cluster up`, defaulting to
    `$LOOM_ROLLOUT_LOCK_DIR` or `~/.loom/rollout-locks`. Set a shared
@@ -1214,27 +1218,35 @@ resumes from the interrupted step.
 ### Invocation
 
 ```bash
-export ADMIN_TOKEN_SOURCE="${ADMIN_TOKEN_SOURCE:-file:/secure/path/admin-token}"
-export ADMIN_TOKEN_FINGERPRINT="${ADMIN_TOKEN_FINGERPRINT:-sha256:<12-hex> len=<N>}"
-export WORKER_TOKEN_SOURCE="${WORKER_TOKEN_SOURCE:-file:/secure/path/worker-token}"
-export SERVICE_TOKEN_SOURCE="${SERVICE_TOKEN_SOURCE:-file:/secure/path/service-api-token}"
-export LOOM_SMOKE_API_TOKEN="$(cat /secure/path/user-owned-smoke-token)"
-
-loom cluster rollout \
+ssh -A platform-dev '
+cd /home/qianyi/dev/loom
+.venv/bin/loom cluster rollout \
   --ref origin/dev \
   --image-tag staging-abc1234 \
   --cluster-name loom-staging \
   --namespace loom-staging \
   --environment staging \
-  --cp-url http://control-node.lan:18081 \
-  --cluster-config /operator/cluster-config.toml \
+  --cp-url http://127.0.0.1:18081 \
+  --cluster-config deploy/environments/staging.cluster.toml \
   --backup-manifest /data/loom-staging/backups/latest/backup-manifest.json \
   --rollout-root /data/loom-staging \
-  --admin-token "$ADMIN_TOKEN_SOURCE" \
-  --expect-admin-token-fingerprint "$ADMIN_TOKEN_FINGERPRINT" \
-  --worker-token "$WORKER_TOKEN_SOURCE" \
-  --service-token "$SERVICE_TOKEN_SOURCE" \
+  --admin-token file:/shared_work/qianyi/loom-worker-capacity/staging-admin-token \
+  --expect-admin-token-fingerprint "sha256:<12-hex> len=<N>" \
+  --worker-token file:/shared_work/qianyi/loom-worker-capacity/staging-worker-token \
+  --service-token file:/shared_work/qianyi/loom-worker-capacity/staging-service-token \
   --scope current-gb10
+'
+```
+
+The `-A` is part of the release invocation, not an optional convenience: step
+11 runs on `platform-dev` and uses `deploy/worker-pools/gb10/ssh_config` to
+reach `trt-gb10-*`, while authentication comes from the operator's forwarded
+agent. Before the rollout, verify the agent boundary without printing key
+material:
+
+```bash
+ssh-add -l || ssh-add ~/.ssh/id_ed25519_remote
+ssh -A platform-dev 'ssh-add -l >/dev/null'
 ```
 
 For `--environment staging`, the driver intentionally refuses legacy physical

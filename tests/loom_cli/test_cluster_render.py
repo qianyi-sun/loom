@@ -26,14 +26,22 @@ _DEPLOY_DIR = _REPO_ROOT / "deploy" / "k8s"
 # lines up: postgres → minio → control-plane → service → gateway →
 # worker → web → ingress.
 _GOLDEN_FILES = (
-    "postgres.yaml", "minio.yaml", "control-plane.yaml",
-    "loom-service.yaml", "llm-gateway.yaml", "worker.yaml",
-    "web.yaml", "ingress.yaml", "gateway-router.yaml",
+    "postgres.yaml",
+    "minio.yaml",
+    "control-plane.yaml",
+    "loom-service.yaml",
+    "llm-gateway.yaml",
+    "worker.yaml",
+    "web.yaml",
+    "ingress.yaml",
+    "gateway-router.yaml",
     # Phase C (#190) — egress proxy chain. Default replicas=0 so
     # the resources exist in the manifest but no pods until
     # operators scale up.
-    "egress-xds.yaml", "egress-proxy.yaml",
-    "network-policies.yaml", "grafana-dashboards.yaml",
+    "egress-xds.yaml",
+    "egress-proxy.yaml",
+    "network-policies.yaml",
+    "grafana-dashboards.yaml",
 )
 
 
@@ -45,8 +53,7 @@ def _load_docs(yaml_text: str) -> list[dict]:
 
 def _deployment_env_value(docs: list[dict], deployment: str, env_name: str) -> str | None:
     doc = next(
-        d for d in docs
-        if d.get("kind") == "Deployment" and d["metadata"]["name"] == deployment
+        d for d in docs if d.get("kind") == "Deployment" and d["metadata"]["name"] == deployment
     )
     env = doc["spec"]["template"]["spec"]["containers"][0]["env"]
     item = next((entry for entry in env if entry["name"] == env_name), None)
@@ -117,9 +124,9 @@ def test_load_config_from_toml(tmp_path: Path) -> None:
         'persistent_storage_backend = "static-host-path"\n'
         'persistent_storage_host_path_root = "/data/loom-staging"\n'
         'provider_egress_allowlist = ["202.78.161.51:18001"]\n'
-        '[replicas]\n'
-        'service = 5\n'
-        'worker = 10\n',
+        "[replicas]\n"
+        "service = 5\n"
+        "worker = 10\n",
         encoding="utf-8",
     )
     cfg = load_cluster_config(cfg_path)
@@ -141,8 +148,8 @@ def test_load_config_from_toml(tmp_path: Path) -> None:
 def test_load_config_from_toml_accepts_worker_capacity(tmp_path: Path) -> None:
     cfg_path = tmp_path / "cluster.toml"
     cfg_path.write_text(
-        '[worker_capacity]\n'
-        'max_concurrent = 24\n'
+        "[worker_capacity]\n"
+        "max_concurrent = 24\n"
         'cpu_request = "2"\n'
         'cpu_limit = "32"\n'
         'memory_request = "8Gi"\n'
@@ -166,10 +173,7 @@ def test_load_config_from_toml_accepts_worker_subprocess_gateway_url(
         encoding="utf-8",
     )
     cfg = load_cluster_config(cfg_path)
-    assert (
-        cfg.worker_subprocess_gateway_url
-        == "http://host.docker.internal:30444/openai/v1"
-    )
+    assert cfg.worker_subprocess_gateway_url == "http://host.docker.internal:30444/openai/v1"
 
 
 def test_load_config_accepts_rollout_environment_state_and_gb10_pool(
@@ -179,11 +183,12 @@ def test_load_config_accepts_rollout_environment_state_and_gb10_pool(
     cfg_path.write_text(
         'env_state_profile = "../environment-state/staging.toml"\n'
         "[gb10_pool]\n"
+        'ssh_config = "../worker-pools/gb10/ssh_config"\n'
         "hosts = [\n"
-        "  { ssh_target = \"trt-gb10-1\", repo_path = \"/srv/loom\", "
-        "env_file_path = \"/srv/loom/.env\", "
-        "repo_url = \"https://github.com/qianyi-sun/loom.git\", "
-        "node_agent_service = \"loom-gb10-node-agent.service\" },\n"
+        '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom", '
+        'env_file_path = "/srv/loom/.env", '
+        'repo_url = "https://github.com/qianyi-sun/loom.git", '
+        'node_agent_service = "loom-gb10-node-agent.service" },\n'
         "]\n",
         encoding="utf-8",
     )
@@ -191,6 +196,7 @@ def test_load_config_accepts_rollout_environment_state_and_gb10_pool(
     cfg = load_cluster_config(cfg_path)
 
     assert cfg.env_state_profile == "../environment-state/staging.toml"
+    assert cfg.gb10_pool.ssh_config == "../worker-pools/gb10/ssh_config"
     assert cfg.gb10_pool.hosts == [
         {
             "ssh_target": "trt-gb10-1",
@@ -205,8 +211,7 @@ def test_load_config_accepts_rollout_environment_state_and_gb10_pool(
 def test_load_config_rejects_non_array_gb10_hosts(tmp_path: Path) -> None:
     cfg_path = tmp_path / "cluster.toml"
     cfg_path.write_text(
-        "[gb10_pool]\n"
-        'hosts = "trt-gb10-1"\n',
+        '[gb10_pool]\nhosts = "trt-gb10-1"\n',
         encoding="utf-8",
     )
 
@@ -238,8 +243,7 @@ def test_load_config_rejects_unknown_top_level_key(tmp_path: Path) -> None:
 def test_load_config_rejects_unknown_replicas_key(tmp_path: Path) -> None:
     cfg_path = tmp_path / "cluster.toml"
     cfg_path.write_text(
-        '[replicas]\n'
-        'servvice = 4\n',
+        "[replicas]\nservvice = 4\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match=r"unknown keys under \[replicas\]"):
@@ -283,10 +287,10 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     assert text.startswith("apiVersion: apps/v1\nkind: StatefulSet\n")
     docs = _load_docs(text)
     kinds = [d["kind"] for d in docs]
-    assert kinds.count("StatefulSet") == 2   # postgres, minio
+    assert kinds.count("StatefulSet") == 2  # postgres, minio
     # cp, service, gateway, worker, web + egress-xds + egress-proxy
     assert kinds.count("Deployment") == 7
-    assert kinds.count("DaemonSet") == 1     # gateway-router
+    assert kinds.count("DaemonSet") == 1  # gateway-router
     # 6 service-Deployments + egress-xds + egress-proxy.
     assert kinds.count("Service") == 8
     assert kinds.count("Ingress") == 1
@@ -304,9 +308,7 @@ def test_worker_manifest_sets_subprocess_gateway_url_for_sandboxes() -> None:
     )
     docs = _load_docs(render_manifests(cfg))
     worker = next(
-        d
-        for d in docs
-        if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
+        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
     )
     env = worker["spec"]["template"]["spec"]["containers"][0]["env"]
     by_name = {entry["name"]: entry for entry in env}
@@ -322,9 +324,7 @@ def test_worker_manifest_injects_optional_hf_token_secret() -> None:
     """
     docs = _load_docs(render_manifests(_DEFAULT_CFG))
     worker = next(
-        d
-        for d in docs
-        if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
+        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
     )
     env = worker["spec"]["template"]["spec"]["containers"][0]["env"]
     by_name = {entry["name"]: entry for entry in env}
@@ -343,9 +343,7 @@ def test_worker_manifest_injects_optional_hf_token_secret() -> None:
 def test_worker_manifest_mounts_docker_registry_auth_config() -> None:
     docs = _load_docs(render_manifests(_DEFAULT_CFG))
     worker = next(
-        d
-        for d in docs
-        if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
+        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
     )
     pod_spec = worker["spec"]["template"]["spec"]
     container = pod_spec["containers"][0]
@@ -383,9 +381,7 @@ def test_worker_manifest_renders_configured_capacity_and_resources() -> None:
     )
     docs = _load_docs(render_manifests(cfg))
     worker = next(
-        d
-        for d in docs
-        if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
+        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
     )
     container = worker["spec"]["template"]["spec"]["containers"][0]
     env = [entry for entry in container["env"] if entry["name"] == "LOOM_WORKER_MAX_CONCURRENT"]
@@ -450,9 +446,7 @@ def test_render_with_custom_image_tag_applies_to_every_loom_image() -> None:
                 loom_images.append(c["image"])
     assert loom_images, "no loom-* images found in render output"
     for img in loom_images:
-        assert img.endswith(":2.0.0-rc1"), (
-            f"expected :2.0.0-rc1 suffix, got {img}"
-        )
+        assert img.endswith(":2.0.0-rc1"), f"expected :2.0.0-rc1 suffix, got {img}"
 
 
 def test_render_injects_secret_store_master_key_for_provider_paths() -> None:
@@ -461,11 +455,7 @@ def test_render_injects_secret_store_master_key_for_provider_paths() -> None:
     the shared master key into both pods from loom-secrets.
     """
     docs = _load_docs(render_manifests(_DEFAULT_CFG))
-    deployments = {
-        d["metadata"]["name"]: d
-        for d in docs
-        if d["kind"] == "Deployment"
-    }
+    deployments = {d["metadata"]["name"]: d for d in docs if d["kind"] == "Deployment"}
 
     expected = {
         "loom-service": "LOOM_SECRET_STORE_MASTER_KEY",
@@ -485,20 +475,13 @@ def test_render_injects_secret_store_master_key_for_provider_paths() -> None:
 
 
 def _network_policy_named(docs: list[dict], name: str) -> dict:
-    return next(
-        d for d in docs
-        if d["kind"] == "NetworkPolicy" and d["metadata"]["name"] == name
-    )
+    return next(d for d in docs if d["kind"] == "NetworkPolicy" and d["metadata"]["name"] == name)
 
 
 def _ipblock_ports(policy: dict) -> set[tuple[str, int]]:
     out: set[tuple[str, int]] = set()
     for rule in policy["spec"].get("egress", []):
-        ports = [
-            p["port"]
-            for p in rule.get("ports", [])
-            if p.get("protocol", "TCP") == "TCP"
-        ]
+        ports = [p["port"] for p in rule.get("ports", []) if p.get("protocol", "TCP") == "TCP"]
         for target in rule.get("to", []):
             ip_block = target.get("ipBlock")
             if ip_block is None:
@@ -597,10 +580,12 @@ def test_render_default_ingress_uses_tls_secret_and_class() -> None:
     docs = _load_docs(render_manifests(cfg))
     ingress = next(d for d in docs if d["kind"] == "Ingress")
     assert ingress["spec"]["ingressClassName"] == "nginx"
-    assert ingress["spec"]["tls"] == [{
-        "hosts": ["loom.example.com"],
-        "secretName": "loom-tls",
-    }]
+    assert ingress["spec"]["tls"] == [
+        {
+            "hosts": ["loom.example.com"],
+            "secretName": "loom-tls",
+        }
+    ]
     assert "cert-manager.io/cluster-issuer" not in ingress["metadata"]["annotations"]
 
 
@@ -632,10 +617,12 @@ def test_render_with_cert_manager_cluster_issuer_annotation() -> None:
     assert ingress["metadata"]["annotations"]["cert-manager.io/cluster-issuer"] == (
         "letsencrypt-prod"
     )
-    assert ingress["spec"]["tls"] == [{
-        "hosts": ["loom.acme.example"],
-        "secretName": "loom-acme-tls",
-    }]
+    assert ingress["spec"]["tls"] == [
+        {
+            "hosts": ["loom.acme.example"],
+            "secretName": "loom-acme-tls",
+        }
+    ]
 
 
 def test_render_ingress_redirect_hosts_bind_tls_and_redirect_to_canonical() -> None:
@@ -653,14 +640,17 @@ def test_render_ingress_redirect_hosts_bind_tls_and_redirect_to_canonical() -> N
     assert [d["metadata"]["name"] for d in ingresses] == ["loom-ingress"]
     main = next(d for d in ingresses if d["metadata"]["name"] == "loom-ingress")
 
-    assert main["metadata"]["annotations"][
-        "nginx.ingress.kubernetes.io/from-to-www-redirect"
-    ] == "true"
+    assert (
+        main["metadata"]["annotations"]["nginx.ingress.kubernetes.io/from-to-www-redirect"]
+        == "true"
+    )
     assert [r["host"] for r in main["spec"]["rules"]] == ["yylx.world"]
-    assert main["spec"]["tls"] == [{
-        "hosts": ["yylx.world", "www.yylx.world"],
-        "secretName": "loom-staging-tls",
-    }]
+    assert main["spec"]["tls"] == [
+        {
+            "hosts": ["yylx.world", "www.yylx.world"],
+            "secretName": "loom-staging-tls",
+        }
+    ]
 
 
 def test_render_rejects_redirect_host_matching_canonical_host() -> None:
@@ -755,6 +745,14 @@ def test_render_profiles_set_backend_runtime_environment(
         assert _deployment_env_value(docs, deployment, "LOOM_ENV") == runtime_environment
 
 
+def test_staging_profile_declares_repo_owned_gb10_ssh_config() -> None:
+    cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / "staging.cluster.toml")
+
+    assert cfg.gb10_pool.ssh_config == "../worker-pools/gb10/ssh_config"
+    assert len(cfg.gb10_pool.hosts) == 15
+    assert (_REPO_ROOT / "deploy" / "worker-pools" / "gb10" / "ssh_config").is_file()
+
+
 def test_render_custom_storage_sizes() -> None:
     cfg = _default_cfg(
         postgres_storage_gi=200,
@@ -763,19 +761,20 @@ def test_render_custom_storage_sizes() -> None:
     )
     docs = _load_docs(render_manifests(cfg))
     pg = next(
-        d for d in docs
-        if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-postgres"
+        d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-postgres"
     )
     pg_storage = pg["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]["storage"]
     assert pg_storage == "200Gi"
     minio = next(
-        d for d in docs
-        if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-minio"
+        d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-minio"
     )
-    minio_storage = minio["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]["storage"]
+    minio_storage = minio["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"][
+        "storage"
+    ]
     assert minio_storage == "2000Gi"
     worker_pvc = next(
-        d for d in docs
+        d
+        for d in docs
         if d["kind"] == "PersistentVolumeClaim"
         and d["metadata"]["name"] == "loom-worker-trajectories"
     )
@@ -790,11 +789,7 @@ def test_render_static_host_path_storage_binds_critical_state_to_retain_pvs() ->
     )
 
     docs = _load_docs(render_manifests(cfg))
-    pvs = {
-        d["metadata"]["name"]: d
-        for d in docs
-        if d["kind"] == "PersistentVolume"
-    }
+    pvs = {d["metadata"]["name"]: d for d in docs if d["kind"] == "PersistentVolume"}
 
     assert pvs["loom-staging-postgres-data"]["spec"] == {
         "capacity": {"storage": "50Gi"},
@@ -818,30 +813,27 @@ def test_render_static_host_path_storage_binds_critical_state_to_retain_pvs() ->
     )
 
     postgres = next(
-        d for d in docs
-        if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-postgres"
+        d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-postgres"
     )
     postgres_claim = postgres["spec"]["volumeClaimTemplates"][0]["spec"]
     assert postgres_claim["storageClassName"] == ""
     assert postgres_claim["volumeName"] == "loom-staging-postgres-data"
 
     minio = next(
-        d for d in docs
-        if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-minio"
+        d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-minio"
     )
     minio_claim = minio["spec"]["volumeClaimTemplates"][0]["spec"]
     assert minio_claim["storageClassName"] == ""
     assert minio_claim["volumeName"] == "loom-staging-minio-data"
 
     worker_pvc = next(
-        d for d in docs
+        d
+        for d in docs
         if d["kind"] == "PersistentVolumeClaim"
         and d["metadata"]["name"] == "loom-worker-trajectories"
     )
     assert worker_pvc["spec"]["storageClassName"] == ""
-    assert worker_pvc["spec"]["volumeName"] == (
-        "loom-staging-worker-trajectories-data"
-    )
+    assert worker_pvc["spec"]["volumeName"] == ("loom-staging-worker-trajectories-data")
 
 
 def test_render_static_host_path_keeps_worker_trajectories_pvc_when_worker_disabled() -> None:
@@ -859,14 +851,13 @@ def test_render_static_host_path_keeps_worker_trajectories_pvc_when_worker_disab
     assert ("PersistentVolumeClaim", "loom-worker-trajectories") in kinds_names
 
     worker_pvc = next(
-        d for d in docs
+        d
+        for d in docs
         if d["kind"] == "PersistentVolumeClaim"
         and d["metadata"]["name"] == "loom-worker-trajectories"
     )
     assert worker_pvc["spec"]["storageClassName"] == ""
-    assert worker_pvc["spec"]["volumeName"] == (
-        "loom-staging-worker-trajectories-data"
-    )
+    assert worker_pvc["spec"]["volumeName"] == ("loom-staging-worker-trajectories-data")
 
 
 def test_render_rejects_unknown_persistent_storage_backend() -> None:
@@ -890,8 +881,7 @@ def test_render_worker_max_concurrent_schema_default() -> None:
     duplicate env-var ordering."""
     docs = _load_docs(render_manifests(_DEFAULT_CFG))
     worker = next(
-        d for d in docs
-        if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
+        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
     )
     env_list = worker["spec"]["template"]["spec"]["containers"][0]["env"]
     concurrent_entries = [e for e in env_list if e["name"] == "LOOM_WORKER_MAX_CONCURRENT"]
@@ -905,8 +895,7 @@ def test_render_worker_pool_name_schema_default() -> None:
     """Fixed Kubernetes workers should register under an explicit pool."""
     docs = _load_docs(render_manifests(_DEFAULT_CFG))
     worker = next(
-        d for d in docs
-        if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
+        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
     )
     env_list = worker["spec"]["template"]["spec"]["containers"][0]["env"]
     pool_entries = [e for e in env_list if e["name"] == "LOOM_WORKER_POOL_NAME"]
@@ -925,9 +914,7 @@ def test_render_can_override_service_object_buckets() -> None:
     )
     docs = _load_docs(render_manifests(cfg))
     service = next(
-        d
-        for d in docs
-        if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-service"
+        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-service"
     )
     env = service["spec"]["template"]["spec"]["containers"][0]["env"]
     by_name = {entry["name"]: entry["value"] for entry in env if "value" in entry}
@@ -1054,8 +1041,7 @@ def test_render_includes_worker_when_enabled_via_profile() -> None:
     assert ("NetworkPolicy", "loom-worker") in kinds_names
 
 
-def test_load_shipped_profile_files_have_explicit_k8s_worker_setting(
-) -> None:
+def test_load_shipped_profile_files_have_explicit_k8s_worker_setting() -> None:
     """Every profile that ships in `deploy/environments/` must
     declare k8s_worker.enabled explicitly — no silent inheritance
     of the schema default. See #383 rationale."""
@@ -1068,8 +1054,7 @@ def test_load_shipped_profile_files_have_explicit_k8s_worker_setting(
     for filename, want_enabled in expected.items():
         cfg = load_cluster_config(envs_dir / filename)
         assert cfg.k8s_worker.enabled is want_enabled, (
-            f"{filename}: expected k8s_worker.enabled={want_enabled}, "
-            f"got {cfg.k8s_worker.enabled}"
+            f"{filename}: expected k8s_worker.enabled={want_enabled}, got {cfg.k8s_worker.enabled}"
         )
 
 
@@ -1083,9 +1068,7 @@ def test_loom_service_env_carries_k8s_worker_enabled_from_profile() -> None:
         cfg = ClusterConfig(k8s_worker=k8s_worker_cls(enabled=enabled))
         docs = _load_docs(render_manifests(cfg))
         svc = next(
-            d
-            for d in docs
-            if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-service"
+            d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-service"
         )
         env = svc["spec"]["template"]["spec"]["containers"][0]["env"]
         by_name = {entry["name"]: entry for entry in env}
@@ -1100,9 +1083,7 @@ def test_loom_service_env_carries_k8s_worker_enabled_from_profile() -> None:
 def test_llm_gateway_deployment_includes_drain_prestop_and_grace() -> None:
     docs = _load_docs(render_manifests(_DEFAULT_CFG))
     gateway = next(
-        d for d in docs
-        if d["kind"] == "Deployment"
-        and d["metadata"]["name"] == "loom-llm-gateway"
+        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-llm-gateway"
     )
     pod_spec = gateway["spec"]["template"]["spec"]
     assert pod_spec["terminationGracePeriodSeconds"] == 300
@@ -1134,9 +1115,9 @@ def test_render_includes_hpa_when_enabled_with_custom_thresholds() -> None:
     )
     docs = _load_docs(render_manifests(cfg))
     hpa = next(
-        d for d in docs
-        if d["kind"] == "HorizontalPodAutoscaler"
-        and d["metadata"]["name"] == "loom-llm-gateway"
+        d
+        for d in docs
+        if d["kind"] == "HorizontalPodAutoscaler" and d["metadata"]["name"] == "loom-llm-gateway"
     )
     spec = hpa["spec"]
     assert spec["minReplicas"] == 3
@@ -1171,9 +1152,9 @@ def test_render_includes_sandbox_daemonset_when_enabled() -> None:
     docs = _load_docs(render_manifests(cfg))
 
     ds = next(
-        d for d in docs
-        if d["kind"] == "DaemonSet"
-        and d["metadata"]["name"] == "loom-llm-gateway-sandbox"
+        d
+        for d in docs
+        if d["kind"] == "DaemonSet" and d["metadata"]["name"] == "loom-llm-gateway-sandbox"
     )
     pod_spec = ds["spec"]["template"]["spec"]
     container = pod_spec["containers"][0]
@@ -1191,10 +1172,7 @@ def test_render_includes_sandbox_daemonset_when_enabled() -> None:
     assert port["hostPort"] == 8443
 
     # Both secrets are mounted read-only into /run/loom.
-    vol_secret_names = {
-        v["secret"]["secretName"]
-        for v in pod_spec["volumes"] if "secret" in v
-    }
+    vol_secret_names = {v["secret"]["secretName"] for v in pod_spec["volumes"] if "secret" in v}
     assert vol_secret_names == {
         "loom-secrets",
         "loom-sandbox-gateway-tls",
@@ -1210,9 +1188,9 @@ def test_render_includes_sandbox_network_policy_when_enabled() -> None:
     docs = _load_docs(render_manifests(cfg))
 
     policy = next(
-        d for d in docs
-        if d["kind"] == "NetworkPolicy"
-        and d["metadata"]["name"] == "loom-llm-gateway-sandbox"
+        d
+        for d in docs
+        if d["kind"] == "NetworkPolicy" and d["metadata"]["name"] == "loom-llm-gateway-sandbox"
     )
     spec = policy["spec"]
     assert spec["podSelector"] == {
@@ -1234,4 +1212,5 @@ def test_cluster_audit_exempts_sandbox_hostport() -> None:
     loom-llm-gateway-sandbox; otherwise every enabled render would
     flag its hostPort as a boundary violation."""
     from loom_cli.cluster_boundary import _HOSTPORT_ALLOWLIST
+
     assert "loom-llm-gateway-sandbox" in _HOSTPORT_ALLOWLIST

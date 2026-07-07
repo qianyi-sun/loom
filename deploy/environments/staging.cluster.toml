@@ -30,6 +30,7 @@ web = 1
 enabled = false
 
 [gb10_pool]
+ssh_config = "../worker-pools/gb10/ssh_config"
 hosts = [
   { ssh_target = "trt-gb10-1", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
   { ssh_target = "trt-gb10-2", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },

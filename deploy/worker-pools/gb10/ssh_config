@@ -1,0 +1,57 @@
+Host trt-gb10-1
+  HostName 207.35.188.227
+
+Host trt-gb10-2
+  HostName 207.35.188.228
+
+Host trt-gb10-3
+  HostName 207.35.188.229
+
+Host trt-gb10-4
+  HostName 207.35.188.230
+
+Host trt-gb10-5
+  HostName 207.35.188.231
+
+Host trt-gb10-6
+  HostName 207.35.188.232
+
+Host trt-gb10-7
+  HostName 207.35.188.233
+
+Host trt-gb10-8
+  HostName 207.35.188.234
+
+Host trt-gb10-9
+  HostName 207.35.188.235
+
+Host trt-gb10-10
+  HostName 207.35.188.236
+
+Host trt-gb10-11
+  HostName 10.42.0.10
+  ProxyJump trt-gb10-1
+
+Host trt-gb10-12
+  HostName 10.42.0.86
+  ProxyJump trt-gb10-1
+
+Host trt-gb10-13
+  HostName 10.42.0.88
+  ProxyJump trt-gb10-1
+
+Host trt-gb10-14
+  HostName 10.42.0.12
+  ProxyJump trt-gb10-1
+
+Host trt-gb10-15
+  HostName 10.42.0.71
+  ProxyJump trt-gb10-1
+
+Host trt-gb10-*
+  User qianyi
+  PubkeyAuthentication yes
+  PasswordAuthentication no
+  StrictHostKeyChecking accept-new
+  ServerAliveInterval 30
+  ServerAliveCountMax 3
