@@ -15,11 +15,15 @@ import json
 import os
 import re
 import shutil
+import socket
+import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import dotenv_values
 
@@ -53,12 +57,36 @@ class CatalogProvisioningError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class CatalogKubernetesPortForward:
+    namespace: str
+    postgres_service: str
+    postgres_remote_port: int
+    minio_service: str
+    minio_remote_port: int
+
+
+@dataclass(frozen=True)
+class CatalogPortForwardHandle:
+    name: str
+    namespace: str
+    resource: str
+    remote_port: int
+    local_port: int
+    stdout_log: Path
+    stderr_log: Path
+    process: subprocess.Popen[str] | None = None
+    stdout_handle: Any = None
+    stderr_handle: Any = None
+
+
+@dataclass(frozen=True)
 class CatalogProvisioningPlan:
     command: str
     env: dict[str, str]
     required_env: list[str]
     env_file: dict[str, Any] | None
     env_sources: dict[str, str]
+    kubernetes_port_forward: CatalogKubernetesPortForward | None
 
 
 def _is_gb10_node_status_drift_only(stdout: str) -> bool:
@@ -263,6 +291,74 @@ def _catalog_literal_env(catalog: dict[str, Any]) -> dict[str, str]:
     return out
 
 
+def _catalog_port_forward_int(
+    raw: object,
+    *,
+    field: str,
+    default: int,
+) -> int:
+    value = default if raw is None else raw
+    if not isinstance(value, int) or value <= 0 or value > 65535:
+        raise CatalogProvisioningError(
+            f"catalog_provisioning.kubernetes_port_forward.{field} "
+            "must be a TCP port number",
+        )
+    return value
+
+
+def _catalog_port_forward_resource(
+    raw: object,
+    *,
+    field: str,
+    default: str,
+) -> str:
+    value = default if raw is None else raw
+    if not isinstance(value, str) or not value.strip():
+        raise CatalogProvisioningError(
+            f"catalog_provisioning.kubernetes_port_forward.{field} "
+            "must be a non-empty string",
+        )
+    return value.strip()
+
+
+def _catalog_kubernetes_port_forward(
+    ctx: RolloutContext,
+    catalog: dict[str, Any],
+) -> CatalogKubernetesPortForward | None:
+    raw = catalog.get("kubernetes_port_forward")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise CatalogProvisioningError(
+            "catalog_provisioning.kubernetes_port_forward must be a table",
+        )
+    if raw.get("enabled") is not True:
+        return None
+    return CatalogKubernetesPortForward(
+        namespace=str(raw.get("namespace") or ctx.namespace),
+        postgres_service=_catalog_port_forward_resource(
+            raw.get("postgres_service"),
+            field="postgres_service",
+            default="service/loom-postgres",
+        ),
+        postgres_remote_port=_catalog_port_forward_int(
+            raw.get("postgres_remote_port"),
+            field="postgres_remote_port",
+            default=5432,
+        ),
+        minio_service=_catalog_port_forward_resource(
+            raw.get("minio_service"),
+            field="minio_service",
+            default="service/loom-minio",
+        ),
+        minio_remote_port=_catalog_port_forward_int(
+            raw.get("minio_remote_port"),
+            field="minio_remote_port",
+            default=9000,
+        ),
+    )
+
+
 def _catalog_provisioning_plan(
     ctx: RolloutContext,
     profile_path: Path | str,
@@ -307,6 +403,7 @@ def _catalog_provisioning_plan(
         required_env=required_env,
         env_file=env_file_evidence,
         env_sources=env_source_evidence,
+        kubernetes_port_forward=_catalog_kubernetes_port_forward(ctx, catalog),
     )
 
 
@@ -326,25 +423,261 @@ def _redact_catalog_output(
     return redact_text(redacted)
 
 
+def _reserve_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _wait_for_local_tcp(
+    *,
+    process: subprocess.Popen[str],
+    local_port: int,
+    stderr_log: Path,
+    timeout_seconds: float = 10.0,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_error = ""
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            stderr_tail = ""
+            if stderr_log.is_file():
+                stderr_tail = stderr_log.read_text(
+                    encoding="utf-8",
+                    errors="replace",
+                )[-500:]
+            raise CatalogProvisioningError(
+                "kubectl port-forward exited before becoming ready: "
+                + redact_text(stderr_tail.strip() or f"exit={process.returncode}"),
+            )
+        try:
+            with socket.create_connection(("127.0.0.1", local_port), timeout=0.2):
+                return
+        except OSError as exc:
+            last_error = str(exc)
+            time.sleep(0.1)
+    raise CatalogProvisioningError(
+        f"kubectl port-forward did not open 127.0.0.1:{local_port}: {last_error}",
+    )
+
+
+def _start_catalog_port_forward(
+    *,
+    namespace: str,
+    resource: str,
+    remote_port: int,
+    local_port: int,
+    step_dir: StepDir,
+    name: str,
+) -> CatalogPortForwardHandle:
+    stdout_log = step_dir.artifact_path(f"catalog-port-forward-{name}.stdout")
+    stderr_log = step_dir.artifact_path(f"catalog-port-forward-{name}.stderr")
+    stdout_handle = stdout_log.open("w", encoding="utf-8")
+    stderr_handle = stderr_log.open("w", encoding="utf-8")
+    process: subprocess.Popen[str] | None = None
+    try:
+        process = subprocess.Popen(
+            [
+                "kubectl",
+                "-n",
+                namespace,
+                "port-forward",
+                resource,
+                f"{local_port}:{remote_port}",
+            ],
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            text=True,
+        )
+        handle = CatalogPortForwardHandle(
+            name=name,
+            namespace=namespace,
+            resource=resource,
+            remote_port=remote_port,
+            local_port=local_port,
+            stdout_log=stdout_log,
+            stderr_log=stderr_log,
+            process=process,
+            stdout_handle=stdout_handle,
+            stderr_handle=stderr_handle,
+        )
+        _wait_for_local_tcp(
+            process=process,
+            local_port=local_port,
+            stderr_log=stderr_log,
+        )
+        return handle
+    except Exception:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        stdout_handle.close()
+        stderr_handle.close()
+        raise
+
+
+def _stop_catalog_port_forward(handle: CatalogPortForwardHandle) -> None:
+    if handle.process is not None and handle.process.poll() is None:
+        handle.process.terminate()
+        try:
+            handle.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            handle.process.kill()
+            handle.process.wait(timeout=5)
+    for stream in (handle.stdout_handle, handle.stderr_handle):
+        if stream is not None:
+            stream.close()
+
+
+def _replace_url_host_port(value: str, *, host: str, port: int) -> str:
+    has_scheme = "://" in value
+    candidate = value if has_scheme else "http://" + value
+    parsed = urlsplit(candidate)
+    userinfo = ""
+    if "@" in parsed.netloc:
+        userinfo = parsed.netloc.rsplit("@", 1)[0] + "@"
+    replaced = urlunsplit(
+        (
+            parsed.scheme,
+            f"{userinfo}{host}:{port}",
+            parsed.path,
+            parsed.query,
+            parsed.fragment,
+        )
+    )
+    return replaced if has_scheme else replaced.removeprefix("http://")
+
+
+def _catalog_port_forward_evidence(
+    handle: CatalogPortForwardHandle,
+) -> dict[str, Any]:
+    return {
+        "name": handle.name,
+        "namespace": handle.namespace,
+        "resource": handle.resource,
+        "remote_port": handle.remote_port,
+        "local_host": "127.0.0.1",
+        "local_port": handle.local_port,
+        "stdout_log": str(handle.stdout_log),
+        "stderr_log": str(handle.stderr_log),
+    }
+
+
+@contextmanager
+def _catalog_effective_env(
+    plan: CatalogProvisioningPlan,
+    *,
+    step_dir: StepDir,
+) -> Iterator[tuple[dict[str, str], dict[str, Any]]]:
+    env = dict(plan.env)
+    config = plan.kubernetes_port_forward
+    if config is None:
+        yield env, {"enabled": False}
+        return
+
+    handles: list[CatalogPortForwardHandle] = []
+    try:
+        postgres = _start_catalog_port_forward(
+            namespace=config.namespace,
+            resource=config.postgres_service,
+            remote_port=config.postgres_remote_port,
+            local_port=_reserve_local_port(),
+            step_dir=step_dir,
+            name="postgres",
+        )
+        handles.append(postgres)
+        minio = _start_catalog_port_forward(
+            namespace=config.namespace,
+            resource=config.minio_service,
+            remote_port=config.minio_remote_port,
+            local_port=_reserve_local_port(),
+            step_dir=step_dir,
+            name="minio",
+        )
+        handles.append(minio)
+        for name in ("LOOM_DB_URL", "LOOM_SVC_DB_URL"):
+            if env.get(name):
+                env[name] = _replace_url_host_port(
+                    env[name],
+                    host="127.0.0.1",
+                    port=postgres.local_port,
+                )
+        for name in ("LOOM_MINIO_ENDPOINT", "LOOM_SVC_MINIO_ENDPOINT"):
+            if env.get(name):
+                env[name] = _replace_url_host_port(
+                    env[name],
+                    host="127.0.0.1",
+                    port=minio.local_port,
+                )
+        yield env, {
+            "enabled": True,
+            "namespace": config.namespace,
+            "forwards": [_catalog_port_forward_evidence(handle) for handle in handles],
+        }
+    finally:
+        for handle in reversed(handles):
+            _stop_catalog_port_forward(handle)
+
+
 def _run_catalog_provisioning(
     plan: CatalogProvisioningPlan,
     *,
     cwd: Path,
     step_dir: StepDir,
 ) -> RunResult | None:
-    result = run_captured(
-        ["bash", "-euo", "pipefail", "-c", plan.command],
-        cwd=cwd,
-        env=plan.env,
-    )
+    try:
+        with _catalog_effective_env(plan, step_dir=step_dir) as (
+            effective_env,
+            port_forward_evidence,
+        ):
+            result = run_captured(
+                ["bash", "-euo", "pipefail", "-c", plan.command],
+                cwd=cwd,
+                env=effective_env,
+            )
+    except CatalogProvisioningError as exc:
+        message = redact_text(str(exc))
+        stdout_log = step_dir.artifact_path("catalog-provisioning.stdout")
+        stderr_log = step_dir.artifact_path("catalog-provisioning.stderr")
+        stdout_log.write_text("", encoding="utf-8")
+        stderr_log.write_text(message + "\n", encoding="utf-8")
+        evidence_path = step_dir.artifact_path("catalog-provisioning.json")
+        evidence_path.write_text(
+            json.dumps(
+                {
+                    "required": True,
+                    "command": plan.command,
+                    "returncode": 1,
+                    "required_env": plan.required_env,
+                    "env_file": plan.env_file,
+                    "env_sources": plan.env_sources,
+                    "kubernetes_port_forward": {"enabled": True, "error": message},
+                    "stdout_log": str(stdout_log),
+                    "stderr_log": str(stderr_log),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return RunResult(
+            exit_code=1,
+            error=f"catalog provisioning failed: {message[:200]}",
+            artifacts={"catalog_provisioning": str(evidence_path)},
+        )
     redacted_stdout = _redact_catalog_output(
         result.stdout,
-        env=plan.env,
+        env=effective_env,
         required_env=plan.required_env,
     )
     redacted_stderr = _redact_catalog_output(
         result.stderr,
-        env=plan.env,
+        env=effective_env,
         required_env=plan.required_env,
     )
     stdout_log = step_dir.artifact_path("catalog-provisioning.stdout")
@@ -352,9 +685,9 @@ def _run_catalog_provisioning(
     stdout_log.write_text(redacted_stdout, encoding="utf-8")
     stderr_log.write_text(redacted_stderr, encoding="utf-8")
     env_evidence = {
-        name: plan.env[name]
+        name: effective_env[name]
         for name in plan.required_env
-        if name in plan.env
+        if name in effective_env
     }
     evidence = {
         "required": True,
@@ -363,6 +696,7 @@ def _run_catalog_provisioning(
         "required_env": plan.required_env,
         "env_file": plan.env_file,
         "env_sources": plan.env_sources,
+        "kubernetes_port_forward": port_forward_evidence,
         "environment": [
             entry.to_json()
             for entry in redact_environment_mapping(env_evidence)

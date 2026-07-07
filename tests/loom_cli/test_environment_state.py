@@ -1557,6 +1557,13 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert profile.catalog_provisioning["env"] == {
         "PUBLISHED_SHA": "79087002d62bb22169a704bc941c8d614082d880",
     }
+    assert profile.catalog_provisioning["kubernetes_port_forward"] == {
+        "enabled": True,
+        "postgres_service": "service/loom-postgres",
+        "postgres_remote_port": 5432,
+        "minio_service": "service/loom-minio",
+        "minio_remote_port": 9000,
+    }
     assert profile.catalog_provisioning["required_env"] == [
         "PUBLISHED_SHA",
         "HF_TOKEN",
