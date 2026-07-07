@@ -51,7 +51,7 @@ enabled = false
 min_replicas = 2
 max_replicas = 8
 cpu_target_pct = 60
-# GB10 hosts managed by protected rollout step 04. Each host entry is an inline TOML table with ssh_target, repo_path, and env_file_path.
+# GB10 hosts managed by protected rollout step 04. Each host entry is an inline TOML table with ssh_target, repo_path, env_file_path, optional repo_url, and optional node_agent_service.
 
 [gb10_pool]
 hosts = []

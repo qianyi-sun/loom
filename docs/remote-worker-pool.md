@@ -491,9 +491,10 @@ GB10/OLDLAB machines remain shared physical capacity. The release contract is
 `deploy/worker-capacity/prod-first.toml`: by default every eligible host slot
 belongs to production, staging/dev has `staging_slots = 0`, and any staging borrow must
 be explicit, bounded to at most one slot per host, and drained back before the
-borrow window ends. The manifest can also represent `staging_draining`,
-`host_draining`, and `unreachable` hosts such as the current `trt-gb10-14`
-SSH-unreachable node.
+borrow window ends. The v1.0 GB10 baseline is all 15 GB10 hosts at 10 slots
+each; the operator Mac reaches `trt-gb10-14` through `ProxyJump trt-gb10-1`.
+The manifest can still represent future `staging_draining`, `host_draining`,
+and `unreachable` host states when live evidence proves a host is unavailable.
 
 Generate the secret-safe desired-vs-observed evidence before a production
 promotion:
@@ -735,8 +736,8 @@ loom admin gb10-workers status \
   --release-env-config-version "$ENV_CONFIG_VERSION"
 ```
 
-On each GB10 host, the node-agent reads the host-local
-`.env.remote-worker` file, compares it with Control Plane desired state, writes
+On each GB10 host, the node-agent reads the host-local staging env file
+`/home/qianyi/loom-worker-build-staging/.env`, compares it with Control Plane desired state, writes
 only non-secret env updates, then runs Docker Compose locally. If desired state
 contains `source_git_commit`, the apply path fetches `origin` and checks out
 that commit before pull/build/restart, so local-build fallback cannot silently
@@ -750,22 +751,24 @@ loom worker gb10-agent plan \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
   --pool-name gb10-arm64 \
-  --env-file /home/trt/loom-remote-worker/.env.remote-worker
+  --env-file /home/qianyi/loom-worker-build-staging/.env \
+  --source-dir /home/qianyi/loom-worker-build-staging
 
 loom worker gb10-agent apply \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
   --pool-name gb10-arm64 \
-  --env-file /home/trt/loom-remote-worker/.env.remote-worker \
+  --env-file /home/qianyi/loom-worker-build-staging/.env \
   --compose-file deploy/docker-compose.remote-worker.yml \
-  --compose-file /home/trt/loom-remote-worker/docker-compose.gb10-hostnet.yml
+  --compose-file deploy/worker-pools/gb10/docker-compose.gb10-hostnet.yml \
+  --source-dir /home/qianyi/loom-worker-build-staging
 ```
 
 For worker-token rotation, run the same host-local plan/apply with the active
 environment token supplied through `env:`, `file:`, or stdin. The token is not
 published to the Control Plane; it is compared against and, on apply, written
-only to the host-local `.env.remote-worker` file before restarting the worker.
+only to the host-local `.env` file before restarting the worker.
 Output shows only changed key names and redacted values.
 
 ```bash
@@ -774,7 +777,8 @@ loom worker gb10-agent plan \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
   --pool-name gb10-arm64 \
-  --env-file /home/trt/loom-remote-worker/.env.remote-worker \
+  --env-file /home/qianyi/loom-worker-build-staging/.env \
+  --source-dir /home/qianyi/loom-worker-build-staging \
   --worker-token file:/secure/path/current-worker-token
 
 loom worker gb10-agent apply \
@@ -782,9 +786,10 @@ loom worker gb10-agent apply \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
   --pool-name gb10-arm64 \
-  --env-file /home/trt/loom-remote-worker/.env.remote-worker \
+  --env-file /home/qianyi/loom-worker-build-staging/.env \
   --compose-file deploy/docker-compose.remote-worker.yml \
-  --compose-file /home/trt/loom-remote-worker/docker-compose.gb10-hostnet.yml \
+  --compose-file deploy/worker-pools/gb10/docker-compose.gb10-hostnet.yml \
+  --source-dir /home/qianyi/loom-worker-build-staging \
   --worker-token file:/secure/path/current-worker-token
 ```
 

@@ -1091,7 +1091,7 @@ fields      = { enabled = false }
 
 [render_config.gb10_pool]
 python_type = "table"
-description = "GB10 hosts managed by protected rollout step 04. Each host entry is an inline TOML table with ssh_target, repo_path, and env_file_path."
+description = "GB10 hosts managed by protected rollout step 04. Each host entry is an inline TOML table with ssh_target, repo_path, env_file_path, optional repo_url, and optional node_agent_service."
 fields      = { hosts = [] }
 
 [render_config.trial_cache_registry_repo]

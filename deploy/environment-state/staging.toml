@@ -60,7 +60,7 @@ image_tag = "${IMAGE_TAG}"
 max_concurrent = 10
 env_config_version = "${ENV_CONFIG_VERSION}"
 source_git_commit = "${GIT_SHA}"
-target_slots = 140
+target_slots = 150
 
 [gb10_worker_pool_desired_states.host_intents]
 trt-gb10-1 = "active"
@@ -76,7 +76,7 @@ trt-gb10-10 = "active"
 trt-gb10-11 = "active"
 trt-gb10-12 = "active"
 trt-gb10-13 = "active"
-trt-gb10-14 = "draining"
+trt-gb10-14 = "active"
 trt-gb10-15 = "active"
 
 [gb10_worker_pool_desired_states.rollout_policy]
