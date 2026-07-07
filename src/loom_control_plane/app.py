@@ -62,7 +62,8 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_async_engine(
-            str(settings.db_url),
+            settings.db_engine_url,
+            connect_args=settings.db_engine_connect_args,
             pool_pre_ping=True,
             pool_size=settings.db_pool_size,
             max_overflow=settings.db_max_overflow,
