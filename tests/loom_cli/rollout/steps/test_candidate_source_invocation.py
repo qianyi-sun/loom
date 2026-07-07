@@ -248,7 +248,7 @@ def test_env_state_resolves_loom_cli_without_global_executable(
     worktree = _prepare_candidate_worktree(ev)
     step_dir = ev.step_dir(10, "env-state")
     profile = tmp_path / "staging.toml"
-    profile.write_text("[worker_service]\n")
+    profile.write_text('environment = "staging"\n')
     calls: list[dict[str, Any]] = []
 
     def fake_run(argv, **kwargs):
@@ -301,7 +301,7 @@ def test_env_state_passes_pinned_admin_token_source_and_fingerprint(
     _prepare_candidate_worktree(ev)
     step_dir = ev.step_dir(10, "env-state")
     profile = tmp_path / "staging.toml"
-    profile.write_text("[worker_service]\n")
+    profile.write_text('environment = "staging"\n')
     calls: list[list[str]] = []
 
     def fake_run(argv, **kwargs):
@@ -345,7 +345,7 @@ def test_env_state_passes_worker_token_source_to_check_only(
     _prepare_candidate_worktree(ev)
     step_dir = ev.step_dir(10, "env-state")
     profile = tmp_path / "staging.toml"
-    profile.write_text("[worker_service]\n")
+    profile.write_text('environment = "staging"\n')
     calls: list[list[str]] = []
 
     def fake_run(argv, **kwargs):
@@ -377,6 +377,174 @@ def test_env_state_passes_worker_token_source_to_check_only(
     assert "staging-worker-token-value" not in str(check_argv)
 
 
+def test_env_state_runs_catalog_provisioning_between_apply_and_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = tmp_path / "catalog.env"
+    hf_token = "hf_" + "a" * 32
+    db_url = "postgresql://loom:catalog-secret@postgres/loom"
+    env_file.write_text(
+        f"HF_TOKEN={hf_token}\n"
+        f"LOOM_SVC_DB_URL={db_url}\n"
+        "LOOM_SVC_MINIO_ENDPOINT=http://minio:9000\n"
+        "LOOM_SVC_MINIO_ACCESS_KEY=minio-access-secret\n"
+        "LOOM_SVC_MINIO_SECRET_KEY=minio-secret-secret\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    worktree = _prepare_candidate_worktree(ev)
+    step_dir = ev.step_dir(10, "env-state")
+    profile = tmp_path / "staging.toml"
+    profile.write_text(
+        f"""
+environment = "staging"
+
+[catalog_provisioning]
+required = true
+command = "loom datasets provision-catalog && loom datasets publish-local deploy/catalog/gb10-smoke"
+env_file = "{env_file}"
+required_env = [
+  "PUBLISHED_SHA",
+  "HF_TOKEN",
+  "LOOM_SVC_DB_URL",
+  "LOOM_SVC_MINIO_ENDPOINT",
+  "LOOM_SVC_MINIO_ACCESS_KEY",
+  "LOOM_SVC_MINIO_SECRET_KEY",
+]
+
+[catalog_provisioning.env]
+PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    calls: list[dict[str, Any]] = []
+
+    def fake_run(argv, **kwargs):
+        call = {
+            "argv": list(argv),
+            "cwd": kwargs.get("cwd"),
+            "env": kwargs.get("env"),
+        }
+        calls.append(call)
+        if list(argv)[3:6] == ["admin", "environment-state", "apply"]:
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout="applied\n",
+                stderr="",
+            )
+        if list(argv)[:2] == ["bash", "-euo"]:
+            assert kwargs["cwd"] == worktree
+            assert kwargs["env"]["HF_TOKEN"] == hf_token
+            assert kwargs["env"]["LOOM_SVC_DB_URL"] == db_url
+            assert kwargs["env"]["PUBLISHED_SHA"] == (
+                "79087002d62bb22169a704bc941c8d614082d880"
+            )
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout=f"catalog ok {hf_token} {db_url}\n",
+                stderr=f"warning access {kwargs['env']['LOOM_SVC_MINIO_ACCESS_KEY']}\n",
+            )
+        if list(argv)[3:6] == ["admin", "environment-state", "check"]:
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout='{"ok": true, "drift": [], "autoscaler_blockers": []}\n',
+                stderr="",
+            )
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._profile_path_for",
+        lambda ctx: str(profile),
+    )
+    monkeypatch.setattr("loom_cli.rollout.steps.s10_env_state.run_captured", fake_run)
+
+    result = EnvStateStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    assert [call["argv"][3:6] for call in calls if call["argv"][:3] == [sys.executable, "-m", "loom_cli"]] == [
+        ["admin", "environment-state", "apply"],
+        ["admin", "environment-state", "check"],
+    ]
+    assert calls[1]["argv"] == [
+        "bash",
+        "-euo",
+        "pipefail",
+        "-c",
+        "loom datasets provision-catalog && loom datasets publish-local deploy/catalog/gb10-smoke",
+    ]
+    for call in (calls[0], calls[2]):
+        _assert_candidate_invocation(call, worktree=worktree)
+    stdout = step_dir.stdout_path().read_text(encoding="utf-8")
+    stderr = step_dir.stderr_path().read_text(encoding="utf-8")
+    artifact = step_dir.artifact_path("catalog-provisioning.json").read_text(
+        encoding="utf-8",
+    )
+    combined = stdout + stderr + artifact + json.dumps(result.artifacts)
+    assert hf_token not in combined
+    assert db_url not in combined
+    assert "minio-access-secret" not in combined
+    assert "[REDACTED:HF_TOKEN]" in combined
+    assert "[REDACTED:LOOM_SVC_DB_URL]" in combined
+    evidence = json.loads(artifact)
+    assert evidence["returncode"] == 0
+    assert evidence["env_file"]["path"] == str(env_file)
+    assert evidence["required_env"] == [
+        "PUBLISHED_SHA",
+        "HF_TOKEN",
+        "LOOM_SVC_DB_URL",
+        "LOOM_SVC_MINIO_ENDPOINT",
+        "LOOM_SVC_MINIO_ACCESS_KEY",
+        "LOOM_SVC_MINIO_SECRET_KEY",
+    ]
+
+
+def test_env_state_fails_before_mutation_when_catalog_required_env_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    step_dir = ev.step_dir(10, "env-state")
+    profile = tmp_path / "staging.toml"
+    profile.write_text(
+        """
+environment = "staging"
+
+[catalog_provisioning]
+required = true
+command = "loom datasets publish-local deploy/catalog/gb10-smoke"
+required_env = ["HF_TOKEN"]
+""".lstrip(),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._profile_path_for",
+        lambda ctx: str(profile),
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state.run_captured",
+        lambda argv, **kwargs: calls.append(list(argv)),
+    )
+
+    result = EnvStateStep().run(ctx, step_dir)
+
+    assert result.exit_code == 2
+    assert "catalog provisioning missing required env: HF_TOKEN" in (result.error or "")
+    assert calls == []
+
+
 def test_env_state_defers_gb10_node_status_drift_to_release_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -387,7 +555,7 @@ def test_env_state_defers_gb10_node_status_drift_to_release_gate(
     _prepare_candidate_worktree(ev)
     step_dir = ev.step_dir(10, "env-state")
     profile = tmp_path / "staging.toml"
-    profile.write_text("[worker_service]\n")
+    profile.write_text('environment = "staging"\n')
     calls: list[list[str]] = []
     check_attempts = 0
 

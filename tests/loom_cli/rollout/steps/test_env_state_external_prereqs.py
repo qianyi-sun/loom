@@ -155,7 +155,7 @@ def test_env_state_materializes_external_prereqs_before_apply_check(
     (package_dir / "__main__.py").write_text("raise SystemExit(0)\n")
     step_dir = ev.step_dir(10, "env-state")
     profile = tmp_path / "staging.toml"
-    profile.write_text("[worker_service]\n", encoding="utf-8")
+    profile.write_text('environment = "staging"\n', encoding="utf-8")
     order: list[str] = []
 
     def fake_materialize(*_args, **_kwargs):

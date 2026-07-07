@@ -17,10 +17,17 @@ import re
 import shutil
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from loom.security.redaction import redact_text
+from dotenv import dotenv_values
+
+from loom.security.redaction import (
+    is_sensitive_environment_key,
+    redact_environment_mapping,
+    redact_text,
+)
 from loom.worker_token import DEFAULT_WORKER_TOKEN_ENV_KEY, worker_token_fingerprint
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
@@ -39,6 +46,19 @@ from loom_cli.secret_source import SecretSourceError, resolve_secret_source
 
 class ExternalSlurmPrereqMaterializationError(RuntimeError):
     """Raised when rollout cannot converge external Slurm runner prerequisites."""
+
+
+class CatalogProvisioningError(RuntimeError):
+    """Raised when rollout cannot safely run required catalog provisioning."""
+
+
+@dataclass(frozen=True)
+class CatalogProvisioningPlan:
+    command: str
+    env: dict[str, str]
+    required_env: list[str]
+    env_file: dict[str, Any] | None
+    env_sources: dict[str, str]
 
 
 def _is_gb10_node_status_drift_only(stdout: str) -> bool:
@@ -145,6 +165,226 @@ def _release_vars(ctx: RolloutContext) -> dict[str, str]:
         "ENV_CONFIG_VERSION": ctx.image_tag,
         "GIT_SHA": ctx.resolved_sha,
     }
+
+
+def _string_list(value: object, field: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise CatalogProvisioningError(f"{field} must be an array")
+    out: list[str] = []
+    for idx, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            raise CatalogProvisioningError(f"{field}[{idx}] must be a non-empty string")
+        out.append(item.strip())
+    return out
+
+
+def _catalog_env_file(catalog: dict[str, Any]) -> tuple[dict[str, str], dict[str, Any] | None]:
+    raw_path = catalog.get("env_file")
+    if raw_path is None:
+        return {}, None
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise CatalogProvisioningError("catalog_provisioning.env_file must be a non-empty string")
+    path = Path(raw_path).expanduser()
+    if not path.is_file():
+        raise CatalogProvisioningError(
+            f"catalog provisioning env_file does not exist: {path}",
+        )
+    values = {
+        key: str(value)
+        for key, value in dotenv_values(path).items()
+        if key and value is not None
+    }
+    evidence = {
+        "path": str(path),
+        "mode": oct(path.stat().st_mode & 0o777),
+        "key_count": len(values),
+        "keys": sorted(values),
+    }
+    return values, evidence
+
+
+def _catalog_env_sources(catalog: dict[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
+    raw_sources = catalog.get("env_sources", {})
+    if raw_sources is None:
+        return {}, {}
+    if not isinstance(raw_sources, dict):
+        raise CatalogProvisioningError("catalog_provisioning.env_sources must be a table")
+    resolved: dict[str, str] = {}
+    evidence: dict[str, str] = {}
+    for raw_key, raw_source in raw_sources.items():
+        key = str(raw_key).strip()
+        if not key:
+            raise CatalogProvisioningError(
+                "catalog_provisioning.env_sources keys must be non-empty",
+            )
+        if not isinstance(raw_source, str) or not raw_source.strip():
+            raise CatalogProvisioningError(
+                f"catalog_provisioning.env_sources.{key} must be a non-empty string",
+            )
+        source = raw_source.strip()
+        if source == "-":
+            raise CatalogProvisioningError(
+                f"catalog_provisioning.env_sources.{key} cannot use stdin '-' "
+                "during unattended rollout; use env:VAR or file:PATH",
+            )
+        try:
+            resolved[key] = resolve_secret_source(
+                source,
+                flag_name=f"catalog_provisioning.env_sources.{key}",
+            )
+        except SecretSourceError as exc:
+            raise CatalogProvisioningError(str(exc)) from exc
+        evidence[key] = redact_text(source)
+    return resolved, evidence
+
+
+def _catalog_literal_env(catalog: dict[str, Any]) -> dict[str, str]:
+    raw_env = catalog.get("env", {})
+    if raw_env is None:
+        return {}
+    if not isinstance(raw_env, dict):
+        raise CatalogProvisioningError("catalog_provisioning.env must be a table")
+    out: dict[str, str] = {}
+    for raw_key, raw_value in raw_env.items():
+        key = str(raw_key).strip()
+        if not key:
+            raise CatalogProvisioningError("catalog_provisioning.env keys must be non-empty")
+        if is_sensitive_environment_key(key):
+            raise CatalogProvisioningError(
+                f"catalog_provisioning.env.{key} is sensitive; use env_file or env_sources",
+            )
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            raise CatalogProvisioningError(
+                f"catalog_provisioning.env.{key} must be a non-empty string",
+            )
+        out[key] = raw_value.strip()
+    return out
+
+
+def _catalog_provisioning_plan(
+    ctx: RolloutContext,
+    profile_path: Path | str,
+    base_env: dict[str, str],
+) -> CatalogProvisioningPlan | None:
+    from loom_cli.environment_state import load_environment_state_profile
+
+    try:
+        profile = load_environment_state_profile(
+            profile_path,
+            variables=_release_vars(ctx),
+            expected_environment=ctx.environment,
+        )
+    except Exception as exc:
+        raise CatalogProvisioningError(str(exc)) from exc
+
+    catalog = profile.catalog_provisioning
+    if catalog.get("required") is not True:
+        return None
+    command = catalog.get("command")
+    if not isinstance(command, str) or not command.strip():
+        raise CatalogProvisioningError(
+            "catalog_provisioning.required=true requires a non-empty command",
+        )
+
+    env = dict(base_env)
+    env_file_values, env_file_evidence = _catalog_env_file(catalog)
+    env.update(env_file_values)
+    env_sources, env_source_evidence = _catalog_env_sources(catalog)
+    env.update(env_sources)
+    env.update(_catalog_literal_env(catalog))
+
+    required_env = _string_list(catalog.get("required_env"), "catalog_provisioning.required_env")
+    missing = [name for name in required_env if not env.get(name)]
+    if missing:
+        raise CatalogProvisioningError(
+            "catalog provisioning missing required env: " + ", ".join(missing),
+        )
+    return CatalogProvisioningPlan(
+        command=command.strip(),
+        env=env,
+        required_env=required_env,
+        env_file=env_file_evidence,
+        env_sources=env_source_evidence,
+    )
+
+
+def _redact_catalog_output(
+    text: str,
+    *,
+    env: dict[str, str],
+    required_env: Sequence[str],
+) -> str:
+    redacted = text
+    for name in required_env:
+        value = env.get(name)
+        if not value:
+            continue
+        if is_sensitive_environment_key(name) or redact_text(value) != value:
+            redacted = redacted.replace(value, f"[REDACTED:{name}]")
+    return redact_text(redacted)
+
+
+def _run_catalog_provisioning(
+    plan: CatalogProvisioningPlan,
+    *,
+    cwd: Path,
+    step_dir: StepDir,
+) -> RunResult | None:
+    result = run_captured(
+        ["bash", "-euo", "pipefail", "-c", plan.command],
+        cwd=cwd,
+        env=plan.env,
+    )
+    redacted_stdout = _redact_catalog_output(
+        result.stdout,
+        env=plan.env,
+        required_env=plan.required_env,
+    )
+    redacted_stderr = _redact_catalog_output(
+        result.stderr,
+        env=plan.env,
+        required_env=plan.required_env,
+    )
+    stdout_log = step_dir.artifact_path("catalog-provisioning.stdout")
+    stderr_log = step_dir.artifact_path("catalog-provisioning.stderr")
+    stdout_log.write_text(redacted_stdout, encoding="utf-8")
+    stderr_log.write_text(redacted_stderr, encoding="utf-8")
+    env_evidence = {
+        name: plan.env[name]
+        for name in plan.required_env
+        if name in plan.env
+    }
+    evidence = {
+        "required": True,
+        "command": plan.command,
+        "returncode": result.returncode,
+        "required_env": plan.required_env,
+        "env_file": plan.env_file,
+        "env_sources": plan.env_sources,
+        "environment": [
+            entry.to_json()
+            for entry in redact_environment_mapping(env_evidence)
+        ],
+        "stdout_log": str(stdout_log),
+        "stderr_log": str(stderr_log),
+    }
+    evidence_path = step_dir.artifact_path("catalog-provisioning.json")
+    evidence_path.write_text(
+        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    if result.returncode == 0:
+        return None
+    message = (redacted_stderr or redacted_stdout).strip() or (
+        f"catalog provisioning exited {result.returncode}"
+    )
+    return RunResult(
+        exit_code=result.returncode,
+        error=f"catalog provisioning failed: {message[:200]}",
+        artifacts={"catalog_provisioning": str(evidence_path)},
+    )
 
 
 def _secret_safe_value(value: str) -> str:
@@ -519,6 +759,13 @@ class EnvStateStep(BaseStep):
             return RunResult(exit_code=2, error=str(exc))
 
         profile_path = candidate_relative_path(Path(profile), step_dir)
+        try:
+            catalog_plan = _catalog_provisioning_plan(ctx, profile_path, env)
+        except CatalogProvisioningError as exc:
+            message = redact_text(str(exc))
+            step_dir.stderr_path().write_text(message + "\n", encoding="utf-8")
+            return RunResult(exit_code=2, error=message)
+
         release_vars = [
             "--var",
             f"IMAGE_TAG={ctx.image_tag}",
@@ -564,6 +811,55 @@ class EnvStateStep(BaseStep):
             cwd=cwd,
             env=env,
         )
+        if apply_.returncode != 0:
+            step_dir.stdout_path().write_text(
+                "# external-slurm-runner-prerequisites\n"
+                f"materialized {len(materialized)} external runner prerequisite set(s)\n"
+                f"# apply\n{apply_.stdout}\n",
+                encoding="utf-8",
+            )
+            step_dir.stderr_path().write_text(
+                f"# apply\n{apply_.stderr}\n",
+                encoding="utf-8",
+            )
+            return RunResult(
+                exit_code=apply_.returncode,
+                error=f"env-state apply failed: {redact_text(apply_.stderr, limit=200).strip()}",
+            )
+
+        catalog_summary = "catalog provisioning not required"
+        catalog_stdout = ""
+        catalog_stderr = ""
+        catalog_artifact: str | None = None
+        if catalog_plan is not None:
+            catalog_result = _run_catalog_provisioning(
+                catalog_plan,
+                cwd=cwd,
+                step_dir=step_dir,
+            )
+            catalog_stdout = step_dir.artifact_path(
+                "catalog-provisioning.stdout",
+            ).read_text(encoding="utf-8")
+            catalog_stderr = step_dir.artifact_path(
+                "catalog-provisioning.stderr",
+            ).read_text(encoding="utf-8")
+            catalog_artifact = str(step_dir.artifact_path("catalog-provisioning.json"))
+            if catalog_result is not None:
+                step_dir.stdout_path().write_text(
+                    "# external-slurm-runner-prerequisites\n"
+                    f"materialized {len(materialized)} external runner prerequisite set(s)\n"
+                    f"# apply\n{apply_.stdout}\n"
+                    f"# catalog-provisioning\n{catalog_stdout}\n",
+                    encoding="utf-8",
+                )
+                step_dir.stderr_path().write_text(
+                    f"# apply\n{apply_.stderr}\n"
+                    f"# catalog-provisioning\n{catalog_stderr}\n",
+                    encoding="utf-8",
+                )
+                return catalog_result
+            catalog_summary = "catalog provisioning exited 0"
+
         check_argv = environment_state_check_argv(ctx, step_dir)
         assert check_argv is not None
         check = run_captured(check_argv, cwd=cwd, env=env)
@@ -590,29 +886,32 @@ class EnvStateStep(BaseStep):
             "# external-slurm-runner-prerequisites\n"
             f"materialized {len(materialized)} external runner prerequisite set(s)\n"
             f"# apply\n{apply_.stdout}\n"
+            f"# catalog-provisioning\n{catalog_stdout}\n"
             f"# check\n{check.stdout}\n",
+            encoding="utf-8",
         )
         step_dir.stderr_path().write_text(
-            f"# apply\n{apply_.stderr}\n# check\n{check.stderr}\n",
+            f"# apply\n{apply_.stderr}\n"
+            f"# catalog-provisioning\n{catalog_stderr}\n"
+            f"# check\n{check.stderr}\n",
+            encoding="utf-8",
         )
-        if apply_.returncode != 0:
-            return RunResult(
-                exit_code=apply_.returncode,
-                error=f"env-state apply failed: {apply_.stderr.strip()[:200]}",
-            )
+        artifacts = {
+            "environment_state_check": str(
+                step_dir.artifact_path("environment-state-check.json")
+            ),
+        }
+        if catalog_artifact is not None:
+            artifacts["catalog_provisioning"] = catalog_artifact
         if check.returncode != 0:
             if deferred_gb10_status:
                 return RunResult(
                     exit_code=0,
                     summary=(
-                        "env-state apply clean; GB10 node-status convergence "
-                        "deferred to release-gate"
+                        f"env-state apply clean; {catalog_summary}; "
+                        "GB10 node-status convergence deferred to release-gate"
                     ),
-                    artifacts={
-                        "environment_state_check": str(
-                            step_dir.artifact_path("environment-state-check.json")
-                        ),
-                    },
+                    artifacts=artifacts,
                 )
             return RunResult(
                 exit_code=check.returncode,
@@ -620,10 +919,6 @@ class EnvStateStep(BaseStep):
             )
         return RunResult(
             exit_code=0,
-            summary="env-state apply + check clean",
-            artifacts={
-                "environment_state_check": str(
-                    step_dir.artifact_path("environment-state-check.json")
-                ),
-            },
+            summary=f"env-state apply + check clean; {catalog_summary}",
+            artifacts=artifacts,
         )

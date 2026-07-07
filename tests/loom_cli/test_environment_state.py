@@ -1549,7 +1549,15 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert "--mirror-to-object-store" in command
     assert "loom datasets publish-local deploy/catalog/gb10-smoke" in command
     assert "loom datasets audit --all --verify-bundles" in command
+    assert (
+        profile.catalog_provisioning["env_file"]
+        == "/shared_work/qianyi/loom-worker-capacity/staging-catalog-provisioning.env"
+    )
+    assert profile.catalog_provisioning["env"] == {
+        "PUBLISHED_SHA": "79087002d62bb22169a704bc941c8d614082d880",
+    }
     assert profile.catalog_provisioning["required_env"] == [
+        "PUBLISHED_SHA",
         "HF_TOKEN",
         "LOOM_SVC_DB_URL",
         "LOOM_SVC_MINIO_ENDPOINT",

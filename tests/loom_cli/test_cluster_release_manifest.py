@@ -86,9 +86,12 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
         '--revision \\"$PUBLISHED_SHA\\" --mirror-to-object-store '
         '--bucket loom-benchmarks && '
         'loom datasets audit --all --verify-bundles"\n'
-        'required_env = ["HF_TOKEN", "LOOM_SVC_DB_URL", '
+        'env_file = "/secure/staging-catalog.env"\n'
+        'required_env = ["PUBLISHED_SHA", "HF_TOKEN", "LOOM_SVC_DB_URL", '
         '"LOOM_SVC_MINIO_ENDPOINT", "LOOM_SVC_MINIO_ACCESS_KEY", '
-        '"LOOM_SVC_MINIO_SECRET_KEY"]\n',
+        '"LOOM_SVC_MINIO_SECRET_KEY"]\n'
+        "[catalog_provisioning.env]\n"
+        'PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"\n',
         encoding="utf-8",
     )
     config = load_cluster_config(config_path)
@@ -192,7 +195,12 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
             "--bucket loom-benchmarks && "
             "loom datasets audit --all --verify-bundles"
         ),
+        "env_file": "/secure/staging-catalog.env",
+        "env": {
+            "PUBLISHED_SHA": "79087002d62bb22169a704bc941c8d614082d880",
+        },
         "required_env": [
+            "PUBLISHED_SHA",
             "HF_TOKEN",
             "LOOM_SVC_DB_URL",
             "LOOM_SVC_MINIO_ENDPOINT",
