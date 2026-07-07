@@ -694,6 +694,28 @@ def test_probe_health_urls_treats_empty_body_as_failed_probe(
     assert "empty_response" in results[0].detail
 
 
+def test_probe_health_urls_accepts_minio_empty_health_body(
+    monkeypatch,
+) -> None:
+    """MinIO's health endpoints return HTTP 200 with an empty body, so the
+    stale-port-forward empty-body guard must not reject MinIO probes."""
+    module = _load_module()
+    monkeypatch.setattr(
+        module,
+        "urlopen",
+        lambda _url, timeout: _FakeResponse(status=200, body=b""),
+    )
+
+    results = module.probe_health_urls(
+        [("minio", "http://oldlab-1:19000/minio/health/live")],
+        timeout_sec=5.0,
+    )
+
+    assert len(results) == 1
+    assert results[0].ok is True
+    assert results[0].detail == "http_status=200"
+
+
 def test_probe_health_urls_accepts_nonempty_body_as_healthy(
     monkeypatch,
 ) -> None:

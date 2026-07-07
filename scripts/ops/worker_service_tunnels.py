@@ -475,7 +475,7 @@ def probe_health_urls(
                     if not status_ok:
                         ok = False
                         detail = f"http_status={status}"
-                    elif not body:
+                    elif not body and name != "minio":
                         ok = False
                         detail = f"http_status={status} empty_response"
                     else:
