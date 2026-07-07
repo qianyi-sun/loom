@@ -45,6 +45,9 @@ import psycopg
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+
+from loom_listen.metrics import PUSH_MODE_GAUGE as _PUSH_MODE_GAUGE
+from loom_listen.self_test import notify_round_trip
 from sqlalchemy import select
 
 from loom.db.schema import Trial, TrialEvent
@@ -373,6 +376,7 @@ class _ListenSubscription:
         self._target_prefix = f"{trial_id}:"
         self._conn: psycopg.AsyncConnection[Any] | None = None
         self._drain_task: asyncio.Task[None] | None = None
+        self._push_mode: bool = False
         self.wake = asyncio.Event()
 
     async def __aenter__(self) -> _ListenSubscription:
@@ -382,6 +386,18 @@ class _ListenSubscription:
             self._dsn, autocommit=True,
         )
         await self._conn.execute(f"LISTEN {_LISTEN_CHANNEL}")
+        push_ok = await notify_round_trip(self._conn, timeout_sec=1.0)
+        if push_ok:
+            _PUSH_MODE_GAUGE.labels(watcher="trajectory").set(1)
+        else:
+            logger.error(
+                "trajectory_listen_selftest_failed — NOTIFY round-trip timed out; "
+                "SSE stream will fall back to poll-only mode. "
+                "Check that the LISTEN connection is not routed through "
+                "pgbouncer transaction mode.",
+            )
+            _PUSH_MODE_GAUGE.labels(watcher="trajectory").set(0)
+        self._push_mode = push_ok
         self._drain_task = asyncio.create_task(self._drain())
         return self
 
@@ -548,7 +564,7 @@ async def stream_events(
                 # lands while we were emitting events above isn't
                 # lost — drain may have set wake during the yield
                 # iterator's pause.
-                if subscription is not None:
+                if subscription is not None and subscription._push_mode:
                     try:
                         await asyncio.wait_for(
                             subscription.wake.wait(),
