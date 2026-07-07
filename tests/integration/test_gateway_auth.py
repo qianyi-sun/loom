@@ -14,6 +14,8 @@ import pytest
 from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from tests.integration.gateway_db import delete_teams_by_name_async
+
 from loom.db.schema import Team, Token, User
 from loom_llm_gateway.auth import verify_bearer_token
 
@@ -50,7 +52,7 @@ async def db_session(postgres_url: str) -> AsyncGenerator[AsyncSession, None]:
             await session.execute(
                 delete(User).where(User.username_normalized.like("gateway-auth-%")),
             )
-            await session.execute(delete(Team).where(Team.name.like("t-%")))
+            await delete_teams_by_name_async(session, "t-%")
             await session.commit()
     await engine.dispose()
 

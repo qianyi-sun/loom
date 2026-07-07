@@ -17,6 +17,8 @@ from sqlalchemy.orm import sessionmaker
 
 from loom.agent.http_gateway_client import HttpLLMGatewayClient
 from loom.agent.litellm import LiteLLMAgent
+from tests.integration.gateway_db import delete_all_teams_and_quotas
+
 from loom.db.schema import RateCard, Team, Token
 from loom.driver.base import StartOptions
 from loom.driver.fake import FakeDriver
@@ -128,7 +130,7 @@ async def test_e2e_litellm_agent_via_gateway(
     finally:
         with sync_factory() as s:
             s.execute(delete(Token))
-            s.execute(delete(Team))
+            delete_all_teams_and_quotas(s)
             s.execute(delete(RateCard))
             s.commit()
         sync_engine.dispose()
