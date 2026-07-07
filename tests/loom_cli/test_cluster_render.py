@@ -309,8 +309,8 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     # pgbouncer PodDisruptionBudget.
     assert kinds.count("PodDisruptionBudget") == 1
     # NetworkPolicies: postgres + minio + cp + gateway + worker + svc
-    # + web + gateway-router + egress-xds + egress-proxy = 10.
-    assert kinds.count("NetworkPolicy") == 10
+    # + web + gateway-router + egress-xds + egress-proxy + pgbouncer = 11.
+    assert kinds.count("NetworkPolicy") == 11
     # Grafana dashboards ConfigMap + egress-proxy bootstrap ConfigMap.
     assert kinds.count("ConfigMap") == 2
 
