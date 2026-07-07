@@ -305,10 +305,21 @@ def _update(args: argparse.Namespace) -> int:
             )
             return 2
 
+        admin_actor = args.admin_actor.strip() if args.admin_actor else None
+        if args.admin_actor is not None and not admin_actor:
+            sys.stderr.write("error: --admin-actor must not be empty\n")
+            return 2
+        headers = (
+            {"X-Loom-Admin-Actor": admin_actor}
+            if admin_actor is not None
+            else None
+        )
         with authed_client(cfg) as c:
             row = _resolve_by_name(c, args.name)
             resp = c.patch(
-                f"/api/v1/provider-connections/{row['id']}", json=patch,
+                f"/api/v1/provider-connections/{row['id']}",
+                json=patch,
+                headers=headers,
             )
         body = assert_2xx(
             resp, action=f"update provider connection {args.name!r}",
@@ -702,6 +713,15 @@ def dispatch(argv: list[str]) -> int:
         help="Replace the allowed-model list (NOT append).",
     )
     _add_pricing_args(p_update)
+    p_update.add_argument(
+        "--admin-actor",
+        default=None,
+        help=(
+            "Sets X-Loom-Admin-Actor for admin-token provider mutations. "
+            "Required by the service when an admin credential updates a "
+            "provider on behalf of a team or rollout."
+        ),
+    )
     p_update.add_argument(
         "--rate-card-provider", default=None,
         help=(

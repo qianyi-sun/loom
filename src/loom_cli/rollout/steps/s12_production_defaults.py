@@ -39,6 +39,7 @@ from loom_cli.rollout.steps.subprocess_util import SubprocessResult, run_capture
 from loom_cli.secret_source import SecretSourceError, resolve_secret_source
 
 _SAFE_ARTIFACT_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+_PRODUCTION_DEFAULTS_ADMIN_ACTOR = "rollout-production-defaults"
 
 
 def _release_vars(ctx: RolloutContext) -> dict[str, str]:
@@ -298,6 +299,10 @@ class ProductionDefaultsStep(BaseStep):
                 rate_card_provider = desired.get("rate_card_provider")
                 if rate_card_provider is not None:
                     update_argv.extend(["--rate-card-provider", str(rate_card_provider)])
+                update_argv.extend([
+                    "--admin-actor",
+                    _PRODUCTION_DEFAULTS_ADMIN_ACTOR,
+                ])
                 update = self._run_cmd(
                     argv=update_argv,
                     cwd=cwd,

@@ -387,6 +387,28 @@ def test_update_rate_card_provider_patches_by_resolved_id(
     assert patch_body == {"rate_card_provider": "fireworks"}
 
 
+def test_update_with_admin_actor_sends_audit_header(
+    mock_server: MockServer,
+) -> None:
+    conn = _make_connection(name="openai-prod")
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[
+        ("PATCH", f"/api/v1/provider-connections/{conn['id']}")
+    ] = httpx.Response(200, json=conn)
+
+    rc = main([
+        "providers", "update", "openai-prod",
+        "--pricing-source", "rate-card",
+        "--rate-card-provider", "openai",
+        "--admin-actor", "release-operator",
+    ])
+
+    assert rc == 0
+    assert mock_server[1].headers["X-Loom-Admin-Actor"] == "release-operator"
+
+
 def test_update_pricing_source_rate_card_patches_by_resolved_id(
     mock_server: MockServer,
 ) -> None:
