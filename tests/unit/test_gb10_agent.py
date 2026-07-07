@@ -474,6 +474,79 @@ def test_apply_restarts_missing_active_worker_when_release_metadata_is_current(
     assert reports[-1]["last_apply_result"] == "docker compose worker started"
 
 
+def test_apply_reconciles_running_active_worker_when_release_metadata_is_current(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    env_file = tmp_path / ".env.remote-worker"
+    env_file.write_text(
+        "LOOM_IMAGE_TAG=current-image\n"
+        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_MAX_CONCURRENT=10\n"
+        "LOOM_WORKER_ENV_CONFIG_VERSION=current-env\n"
+        "LOOM_GB10_CAPACITY_INTENT=active\n",
+        encoding="utf-8",
+    )
+    compose_file = tmp_path / "docker-compose.remote-worker.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    desired = DesiredState(
+        environment="production",
+        pool_name="gb10-arm64",
+        image_tag="current-image",
+        max_concurrent=10,
+        env_config_version="current-env",
+        rollout_policy={"mode": "all"},
+        env={},
+    )
+    commands: list[list[str]] = []
+    reports: list[dict[str, object]] = []
+
+    monkeypatch.setattr(gb10_agent, "_fetch_desired_state", lambda _args: desired)
+    monkeypatch.setattr(
+        gb10_agent,
+        "_report_node",
+        lambda _args, **kwargs: reports.append(kwargs),
+    )
+    monkeypatch.setattr(
+        gb10_agent,
+        "_compose_service_is_running",
+        lambda _compose_base, _service: True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        gb10_agent,
+        "_run",
+        lambda argv, *, dry_run: commands.append(list(argv)),
+    )
+
+    rc = gb10_agent._apply(
+        SimpleNamespace(
+            cp_url="http://cp:8080",
+            admin_token="env:LOOM_ADMIN_TOKEN",
+            worker_token=None,
+            environment="production",
+            pool_name="gb10-arm64",
+            hostname="trt-gb10-1",
+            env_file=env_file,
+            compose_file=[compose_file],
+            service="worker",
+            drain_timeout_sec=600,
+            dry_run=False,
+            rollback=False,
+            force=False,
+            format="text",
+        )
+    )
+
+    assert rc == 0
+    assert [command[-2:] for command in commands] == [
+        ["pull", "worker"],
+        ["-d", "worker"],
+    ]
+    assert reports[-1]["apply_state"] == "applied"
+    assert reports[-1]["last_apply_result"] == "docker compose worker reconciled"
+
+
 def test_compose_service_running_accepts_project_scoped_container_name(
     monkeypatch,
 ) -> None:

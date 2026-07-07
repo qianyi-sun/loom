@@ -313,9 +313,10 @@ write desired state to the Control Plane, and each GB10 host periodically runs
 trial concurrency, and env/config version with its local env file. The Control
 Plane does not SSH into GB10 hosts and does not store worker tokens or MinIO
 credentials. Apply is restartable: when the local release metadata already
-matches the Control Plane but the active-intent Docker Compose worker is not
-running, the agent still runs `docker compose up -d worker` so a rerun repairs a
-missing worker container instead of reporting only `already current`.
+matches the Control Plane and host intent is active, the agent still reconciles
+Docker Compose with `docker compose up -d worker`. This covers both missing or
+exited worker containers and rollout prep that pre-wrote `.env` before the
+actual compose container was recreated for the target image/env.
 
 Create `/home/qianyi/loom-worker-build-staging/gb10-node-agent.env` on every
 host with mode `600`:
@@ -484,6 +485,12 @@ before running `docker compose stop --timeout <drain-timeout> worker` and
 `docker compose up -d worker`. The stop path sends SIGTERM to the worker, which
 uses the existing worker drain logic before the container exits. Use `--force`
 only for an explicit emergency override.
+
+When no metadata drift remains and host intent is active, the node-agent skips
+the drain/stop phase but still prepares the image and runs
+`docker compose up -d worker`. Compose no-ops when the service is already
+current, and recreates or starts it when the env/image changed outside compose
+or the previous worker exited.
 
 Retry a failed rollout by fixing the local cause and restarting the service:
 
