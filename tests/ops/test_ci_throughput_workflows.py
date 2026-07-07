@@ -84,6 +84,36 @@ def test_opt_in_pr_smokes_cancel_superseded_pr_runs() -> None:
         ]["group"]
 
 
+def test_real_aws_s3_storage_smoke_skips_without_environment_secrets() -> None:
+    workflow = _workflow(".github/workflows/staging-smoke.yml")
+    job = workflow["jobs"]["smoke-storage-aws-s3"]
+    steps = job["steps"]
+
+    guard = steps[0]
+    assert guard["name"] == "Check AWS S3 smoke inputs"
+    assert guard["id"] == "aws_s3_inputs"
+
+    guard_script = guard["run"]
+    for required_env in (
+        "LOOM_SVC_MINIO_ACCESS_KEY",
+        "LOOM_SVC_MINIO_SECRET_KEY",
+        "LOOM_SVC_MINIO_REGION",
+        "LOOM_CI_S3_BUCKET",
+    ):
+        assert required_env in guard_script
+    assert "Real AWS S3 storage smoke skipped; missing required env vars:" in guard_script
+    assert 'echo "enabled=false" >> "$GITHUB_OUTPUT"' in guard_script
+    assert 'echo "enabled=true" >> "$GITHUB_OUTPUT"' in guard_script
+
+    for step in steps[1:]:
+        assert "steps.aws_s3_inputs.outputs.enabled == 'true'" in step["if"]
+
+    cleanup = next(
+        step for step in steps if step.get("name") == "Reset bucket lifecycle on exit (always)"
+    )
+    assert cleanup["if"] == "always() && steps.aws_s3_inputs.outputs.enabled == 'true'"
+
+
 def test_repository_checks_writes_default_fast_coverage_summary() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
     jobs = workflow["jobs"]
