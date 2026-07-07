@@ -28,3 +28,22 @@ web = 1
 
 [k8s_worker]
 enabled = false
+
+[gb10_pool]
+hosts = [
+  { ssh_target = "trt-gb10-1", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-2", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-3", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-4", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-5", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-6", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-7", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-8", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-9", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-10", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-11", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-12", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-13", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-14", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-15", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+]

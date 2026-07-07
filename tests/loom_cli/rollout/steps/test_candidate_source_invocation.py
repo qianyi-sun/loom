@@ -14,7 +14,7 @@ import pytest
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.evidence import EvidenceDirectory
 from loom_cli.rollout.steps.s03_kind_load_images import KindLoadImagesStep
-from loom_cli.rollout.steps.s04_gb10_prep import gb10_hosts_for
+from loom_cli.rollout.steps.s04_gb10_prep import GB10PrepStep, gb10_hosts_for
 from loom_cli.rollout.steps.s05_backup import BackupStep
 from loom_cli.rollout.steps.s06_audit import AuditStep
 from loom_cli.rollout.steps.s07_render import RenderStep
@@ -1009,7 +1009,9 @@ def test_gb10_prep_reads_hosts_from_cluster_config(tmp_path: Path) -> None:
         "[gb10_pool]\n"
         "hosts = [\n"
         '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom", '
-        'env_file_path = "/srv/loom/.env" },\n'
+        'env_file_path = "/srv/loom/.env", '
+        'repo_url = "https://github.com/qianyi-sun/loom.git", '
+        'node_agent_service = "loom-gb10-node-agent.service" },\n'
         "]\n",
         encoding="utf-8",
     )
@@ -1020,6 +1022,97 @@ def test_gb10_prep_reads_hosts_from_cluster_config(tmp_path: Path) -> None:
     assert hosts[0].ssh_target == "trt-gb10-1"
     assert hosts[0].repo_path == "/srv/loom"
     assert hosts[0].env_file_path == "/srv/loom/.env"
+    assert hosts[0].repo_url == "https://github.com/qianyi-sun/loom.git"
+    assert hosts[0].node_agent_service == "loom-gb10-node-agent.service"
+
+
+def test_gb10_prep_fails_when_current_gb10_profile_has_no_hosts(
+    tmp_path: Path,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
+    state_dir = tmp_path / "environment-state"
+    state_dir.mkdir()
+    (state_dir / "staging.toml").write_text(
+        """
+environment = "staging"
+
+[[gb10_worker_pool_desired_states]]
+pool_name = "gb10-arm64"
+image_tag = "${IMAGE_TAG}"
+max_concurrent = 1
+env_config_version = "${ENV_CONFIG_VERSION}"
+source_git_commit = "${GIT_SHA}"
+target_slots = 1
+
+[gb10_worker_pool_desired_states.host_intents]
+trt-gb10-1 = "active"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    ctx.cluster_config_path.write_text(
+        'env_state_profile = "environment-state/staging.toml"\n',
+        encoding="utf-8",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+
+    result = GB10PrepStep().run(ctx, ev.step_dir(4, "gb10-prep"))
+
+    assert result.exit_code == 1
+    assert result.error is not None
+    assert "declares GB10 desired state" in result.error
+    assert "no [gb10_pool] hosts" in result.error
+
+
+def test_gb10_prep_clones_preserves_env_and_starts_node_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(
+        tmp_path,
+        image_tag="staging-abc123",
+        resolved_sha="c" * 40,
+    )
+    ctx.cluster_config_path.write_text(
+        "[gb10_pool]\n"
+        "hosts = [\n"
+        '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom-staging", '
+        'env_file_path = "/srv/loom-staging/.env", '
+        'repo_url = "https://github.com/qianyi-sun/loom.git", '
+        'node_agent_service = "loom-gb10-node-agent.service" },\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    calls: list[str] = []
+
+    def fake_ssh(host, remote_cmd):
+        calls.append(remote_cmd)
+        return SubprocessResult(
+            argv=["ssh", host.ssh_target, remote_cmd],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
+
+    result = GB10PrepStep().run(ctx, ev.step_dir(4, "gb10-prep"))
+
+    assert result.exit_code == 0
+    assert any(
+        "git clone --quiet https://github.com/qianyi-sun/loom.git /srv/loom-staging"
+        in call
+        for call in calls
+    )
+    env_update = next(call for call in calls if "LOOM_IMAGE_TAG" in call)
+    assert "LOOM_IMAGE_TAG" in env_update
+    assert "LOOM_WORKER_ENV_CONFIG_VERSION" in env_update
+    assert "LOOM_WORKER_TOKEN" not in env_update
+    assert "> /srv/loom-staging/.env" not in env_update
+    assert calls[-1] == "systemctl --user start loom-gb10-node-agent.service"
 
 
 def test_release_gate_run_generates_manifest_then_gates(

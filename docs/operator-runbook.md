@@ -676,9 +676,10 @@ knob you need.
    For first prod, also generate the shared physical worker-capacity contract.
    This is a repo-only desired-state/evidence check: it does not mutate worker
    pools, mint tokens, or read live credentials. The default manifest assigns
-   every eligible GB10/OLDLAB slot to production, leaves staging/dev at zero
-   borrowed slots, and records `trt-gb10-14` as unreachable until the SSH path
-   is repaired. When an observed worker registration/status artifact is
+   every eligible GB10/OLDLAB slot to production and leaves staging/dev at zero
+   borrowed slots. The v1.0 GB10 baseline is all 15 GB10 hosts at 10 slots
+   each; `trt-gb10-14` is reachable from the operator Mac through
+   `ProxyJump trt-gb10-1`. When an observed worker registration/status artifact is
    available, pass it with `--observed-json` so the report fails on prod/dev
    environment, API URL, image tag, source commit, compose service, Kubernetes
    deployment, slot-count, or worker-identity drift:
@@ -837,13 +838,18 @@ knob you need.
    otherwise not `applied`, stale on image/env/source, dirty, or reporting a
    max-concurrency value that differs from desired state.
    For `loom cluster rollout --scope current-gb10`, the cluster config must
-   declare `env_state_profile`, and the resolved release manifest must contain
-   at least one `gb10_worker_pool_desired_states` entry. An empty GB10 desired
-   state is a release-contract error, even if a `gb10-workers status` artifact
-   exists, because it proves no external worker target was declared. The
-   optional `[gb10_pool] hosts = [...]` cluster-config section feeds the legacy
-   SSH prep step only; it does not replace the environment-state/node-agent
-   desired-state contract used by the release gate.
+   declare `env_state_profile`, `[gb10_pool] hosts = [...]`, and the resolved
+   release manifest must contain at least one
+   `gb10_worker_pool_desired_states` entry. An empty GB10 desired state is a
+   release-contract error, even if a `gb10-workers status` artifact exists,
+   because it proves no external worker target was declared. A GB10 desired
+   state without `[gb10_pool]` hosts is also a release-contract error because
+   rollout step 04 would have no actual hosts to prepare. For the v1.0 staging
+   gate, `deploy/environments/staging.cluster.toml` enumerates all 15 GB10
+   hosts, writes only non-secret release marker keys to each host-local env
+   file, and starts the host-local GB10 node-agent service; release-gate then
+   requires every active host to report 10 slots, the target image/env, and the
+   target source commit.
    Protected `environment-state apply/check` uses the same per-environment
    rollout lease as `loom cluster up`, defaulting to
    `$LOOM_ROLLOUT_LOCK_DIR` or `~/.loom/rollout-locks`. Set a shared
@@ -4852,9 +4858,10 @@ link it from #217; do not merge incomplete evidence.
     --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
     --environment staging \
     --pool-name gb10-arm64 \
-    --env-file /home/trt/loom-remote-worker/.env.remote-worker \
+    --env-file /home/qianyi/loom-worker-build-staging/.env \
     --compose-file deploy/docker-compose.remote-worker.yml \
-    --compose-file /home/trt/loom-remote-worker/docker-compose.gb10-hostnet.yml \
+    --compose-file deploy/worker-pools/gb10/docker-compose.gb10-hostnet.yml \
+    --source-dir /home/qianyi/loom-worker-build-staging \
     --worker-token file:/secure/path/worker-token
   loom resources status --json
   ```

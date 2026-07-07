@@ -15,12 +15,14 @@ break-glass operation.
   cluster.
 - Worker hosts: `trt-gb10-1` through `trt-gb10-15`.
 - Slurm partition: `gb10`.
-- Jump path: operator Mac -> `cudo-sudo-trt` -> `trt-gb10-N`.
-- Worker process path on every GB10 host: `/home/trt/loom-remote-worker`.
+- Jump path: operator Mac SSH aliases for `trt-gb10-N`; `trt-gb10-14`
+  specifically must use `ProxyJump trt-gb10-1`.
+- Worker process path on every GB10 host:
+  `/home/qianyi/loom-worker-build-staging`.
 - Loom checkout path on every GB10 host:
-  `/home/trt/loom-remote-worker/loom`.
+  `/home/qianyi/loom-worker-build-staging`.
 - Remote-worker env file on every GB10 host:
-  `/home/trt/loom-remote-worker/.env.remote-worker`, mode `600`.
+  `/home/qianyi/loom-worker-build-staging/.env`, mode `600`.
 
 The worker-facing OLDLAB-1 services stay private. Public internet traffic must
 continue to reach only Web/API over TLS. Remote workers use loopback endpoints
@@ -48,13 +50,9 @@ starts.
 
 ## SSH Trust And Tunnel Recovery
 
-The operator path has two SSH hops: the Mac reaches `cudo-sudo-trt`, then
-`cudo-sudo-trt` reaches `trt-gb10-N`. Load the GB10 ssh-agent on
-`cudo-sudo-trt` before running fleet commands:
-
-```bash
-source ~/.ssh/gb10_agent.env
-```
+The operator Mac must have non-interactive SSH aliases for every
+`trt-gb10-N`. Keep `trt-gb10-14` routed through `ProxyJump trt-gb10-1`;
+the older `trt-gb10-8` jump path does not reach `10.42.0.12:22`.
 
 Verify non-interactive SSH before starting or restarting workers:
 
@@ -183,19 +181,18 @@ for i in $(seq 1 15); do
   h=trt-gb10-$i
   ssh "$h" "
     set -euo pipefail
-    mkdir -p ~/loom-remote-worker
-    if [ ! -d ~/loom-remote-worker/loom/.git ]; then
-      git clone https://github.com/qianyi-sun/loom.git ~/loom-remote-worker/loom
+    if [ ! -d ~/loom-worker-build-staging/.git ]; then
+      git clone https://github.com/qianyi-sun/loom.git ~/loom-worker-build-staging
     fi
-    cd ~/loom-remote-worker/loom
+    cd ~/loom-worker-build-staging
     git fetch origin dev
     git checkout --detach $COMMIT
   "
 done
 ```
 
-Create `/home/trt/loom-remote-worker/docker-compose.gb10-hostnet.yml` on every
-host:
+The host-network override lives in the checked-out repo at
+`deploy/worker-pools/gb10/docker-compose.gb10-hostnet.yml`:
 
 ```yaml
 services:
@@ -203,7 +200,7 @@ services:
     network_mode: host
 ```
 
-Keep `.env.remote-worker` untracked and mode `600`. Required non-secret shape:
+Keep `.env` untracked and mode `600`. Required non-secret shape:
 
 ```bash
 LOOM_IMAGE_TAG=staging-cbbe6ff
@@ -248,7 +245,7 @@ loom admin environment-state check \
 For the host-local node-agent path, `LOOM_WORKER_ENV_CONFIG_VERSION` must change
 with the token rollout so `loom admin gb10-workers status
 --release-env-config-version "$ENV_CONFIG_VERSION"` proves the updated
-`.env.remote-worker` was applied on each GB10 host without storing the raw token
+`.env` was applied on each GB10 host without storing the raw token
 in the Control Plane.
 
 `LOOM_WORKER_ENV_CONFIG_VERSION` is a host-local lifecycle marker for the
@@ -264,11 +261,11 @@ for i in $(seq 1 15); do
   h=trt-gb10-$i
   ssh "$h" "
     set -euo pipefail
-    cd ~/loom-remote-worker/loom
+    cd ~/loom-worker-build-staging
     docker compose \
-      --env-file ../.env.remote-worker \
+      --env-file .env \
       -f deploy/docker-compose.remote-worker.yml \
-      -f ../docker-compose.gb10-hostnet.yml \
+      -f deploy/worker-pools/gb10/docker-compose.gb10-hostnet.yml \
       up -d --build
   " &
 done
@@ -277,7 +274,7 @@ wait
 
 Install the worker-side user service so each GB10 host re-runs the same Compose
 startup after host reboot. This service does not store secrets; it reads the
-existing `/home/trt/loom-remote-worker/.env.remote-worker` file.
+existing `/home/qianyi/loom-worker-build-staging/.env` file.
 
 ```bash
 for i in $(seq 1 15); do
@@ -285,7 +282,7 @@ for i in $(seq 1 15); do
   ssh "$h" "
     set -euo pipefail
     mkdir -p ~/.config/systemd/user
-    cp ~/loom-remote-worker/loom/deploy/worker-pools/gb10/loom-gb10-worker.service \
+    cp ~/loom-worker-build-staging/deploy/worker-pools/gb10/loom-gb10-worker.service \
       ~/.config/systemd/user/loom-gb10-worker.service
     systemctl --user daemon-reload
     systemctl --user enable --now loom-gb10-worker.service
@@ -303,12 +300,12 @@ trial concurrency, and env/config version with its local env file. The Control
 Plane does not SSH into GB10 hosts and does not store worker tokens or MinIO
 credentials.
 
-Create `/home/trt/loom-remote-worker/gb10-node-agent.env` on every host with
-mode `600`:
+Create `/home/qianyi/loom-worker-build-staging/gb10-node-agent.env` on every
+host with mode `600`:
 
 ```bash
 LOOM_GB10_CP_URL=http://127.0.0.1:18081
-LOOM_GB10_ENVIRONMENT=production
+LOOM_GB10_ENVIRONMENT=staging
 LOOM_GB10_POOL_NAME=gb10-arm64
 LOOM_GB10_DRAIN_TIMEOUT_SEC=600
 LOOM_GB10_NODE_AGENT_TOKEN=loom_admin_...
@@ -318,7 +315,7 @@ The node-agent token currently uses the CP admin surface and must include the
 `admin:gb10_workers` scope. Keep it host-local and rotate it with the same
 care as other admin credentials.
 
-GB10 hosts install `uv` under `/home/trt/.local/bin`; the node-agent systemd
+GB10 hosts install `uv` under `/home/qianyi/.local/bin`; the node-agent systemd
 unit sets PATH explicitly so the timer works from a non-interactive user
 service environment.
 
@@ -330,9 +327,9 @@ for i in $(seq 1 15); do
   ssh "$h" "
     set -euo pipefail
     mkdir -p ~/.config/systemd/user
-    cp ~/loom-remote-worker/loom/deploy/worker-pools/gb10/loom-gb10-node-agent.service \
+    cp ~/loom-worker-build-staging/deploy/worker-pools/gb10/loom-gb10-node-agent.service \
       ~/.config/systemd/user/loom-gb10-node-agent.service
-    cp ~/loom-remote-worker/loom/deploy/worker-pools/gb10/loom-gb10-node-agent.timer \
+    cp ~/loom-worker-build-staging/deploy/worker-pools/gb10/loom-gb10-node-agent.timer \
       ~/.config/systemd/user/loom-gb10-node-agent.timer
     systemctl --user daemon-reload
     systemctl --user enable --now loom-gb10-node-agent.timer
@@ -344,19 +341,19 @@ wait
 Before enabling fleet-wide apply, inspect one host:
 
 ```bash
-cd /home/trt/loom-remote-worker/loom
+cd /home/qianyi/loom-worker-build-staging
 uv run loom worker gb10-agent plan \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
   --pool-name gb10-arm64 \
   --hostname trt-gb10-1 \
-  --env-file /home/trt/loom-remote-worker/.env.remote-worker
+  --env-file /home/qianyi/loom-worker-build-staging/.env
 ```
 
 Use `apply --dry-run` to preview the non-secret env keys and Docker Compose
 commands that would run. Dry-run output does not print the full
-`.env.remote-worker` file because that file also contains worker and MinIO
+host-local `.env` file because that file also contains worker and MinIO
 credentials.
 
 For normal staging and staging rollouts, apply the repository
@@ -448,7 +445,7 @@ loom admin gb10-workers status \
 The node-agent applies updates by first fetching `origin` and checking out the
 desired `source_git_commit` in the host-local checkout when desired state
 requires a source change or the tree is dirty. It then writes non-secret keys in
-`.env.remote-worker` and runs `docker compose pull`. If the worker image tag is
+the host-local `.env` file and runs `docker compose pull`. If the worker image tag is
 not available from a registry, it falls back to `docker compose build` from the
 checked-out source before running `docker compose stop --timeout
 <drain-timeout> worker` and `docker compose up -d worker`. The stop path sends
@@ -471,9 +468,10 @@ uv run loom worker gb10-agent apply \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
   --pool-name gb10-arm64 \
-  --env-file /home/trt/loom-remote-worker/.env.remote-worker \
+  --env-file /home/qianyi/loom-worker-build-staging/.env \
   --compose-file deploy/docker-compose.remote-worker.yml \
-  --compose-file /home/trt/loom-remote-worker/docker-compose.gb10-hostnet.yml \
+  --compose-file deploy/worker-pools/gb10/docker-compose.gb10-hostnet.yml \
+  --source-dir /home/qianyi/loom-worker-build-staging \
   --rollback \
   --force
 ```
@@ -481,14 +479,14 @@ uv run loom worker gb10-agent apply \
 The manual Docker Compose commands remain the break-glass fallback when the
 node-agent token, timer, or CP desired-state API is unavailable.
 
-Enable lingering for the `trt` user on every GB10 host through the site's
+Enable lingering for the `qianyi` user on every GB10 host through the site's
 privileged admin path so the user service starts after reboot even before an
 operator logs in:
 
 ```bash
 for i in $(seq 1 15); do
   h=trt-gb10-$i
-  ssh "$h" 'sudo loginctl enable-linger trt' &
+  ssh "$h" 'sudo loginctl enable-linger qianyi' &
 done
 wait
 ```
@@ -499,11 +497,11 @@ Stop without deleting cached Docker volumes:
 for i in $(seq 1 15); do
   h=trt-gb10-$i
   ssh "$h" "
-    cd ~/loom-remote-worker/loom &&
+    cd ~/loom-worker-build-staging &&
     docker compose \
-      --env-file ../.env.remote-worker \
+      --env-file .env \
       -f deploy/docker-compose.remote-worker.yml \
-      -f ../docker-compose.gb10-hostnet.yml \
+      -f deploy/worker-pools/gb10/docker-compose.gb10-hostnet.yml \
       down
   " &
 done
@@ -528,11 +526,11 @@ Check running worker containers:
 for i in $(seq 1 15); do
   h=trt-gb10-$i
   ssh "$h" "
-    cd ~/loom-remote-worker/loom &&
+    cd ~/loom-worker-build-staging &&
     docker compose \
-      --env-file ../.env.remote-worker \
+      --env-file .env \
       -f deploy/docker-compose.remote-worker.yml \
-      -f ../docker-compose.gb10-hostnet.yml \
+      -f deploy/worker-pools/gb10/docker-compose.gb10-hostnet.yml \
       ps --status running
   "
 done

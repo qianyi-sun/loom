@@ -181,7 +181,9 @@ def test_load_config_accepts_rollout_environment_state_and_gb10_pool(
         "[gb10_pool]\n"
         "hosts = [\n"
         "  { ssh_target = \"trt-gb10-1\", repo_path = \"/srv/loom\", "
-        "env_file_path = \"/srv/loom/.env\" },\n"
+        "env_file_path = \"/srv/loom/.env\", "
+        "repo_url = \"https://github.com/qianyi-sun/loom.git\", "
+        "node_agent_service = \"loom-gb10-node-agent.service\" },\n"
         "]\n",
         encoding="utf-8",
     )
@@ -194,6 +196,8 @@ def test_load_config_accepts_rollout_environment_state_and_gb10_pool(
             "ssh_target": "trt-gb10-1",
             "repo_path": "/srv/loom",
             "env_file_path": "/srv/loom/.env",
+            "repo_url": "https://github.com/qianyi-sun/loom.git",
+            "node_agent_service": "loom-gb10-node-agent.service",
         }
     ]
 

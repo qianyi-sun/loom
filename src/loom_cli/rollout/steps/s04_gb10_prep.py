@@ -19,6 +19,7 @@ reasons; step imports the Python wrapper).
 
 from __future__ import annotations
 
+import shlex
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +40,8 @@ class GB10Host:
     ssh_target: str        # user@hostname or SSH alias
     repo_path: str         # e.g. /srv/loom/staging
     env_file_path: str     # e.g. /srv/loom/staging/.env
+    repo_url: str = "https://github.com/qianyi-sun/loom.git"
+    node_agent_service: str | None = None
 
 
 def gb10_hosts_for(ctx: RolloutContext) -> list[GB10Host]:
@@ -67,8 +70,60 @@ def gb10_hosts_for(ctx: RolloutContext) -> list[GB10Host]:
             ssh_target=h.get("ssh_target"),
             repo_path=h.get("repo_path"),
             env_file_path=h.get("env_file_path"),
+            repo_url=h.get("repo_url") or "https://github.com/qianyi-sun/loom.git",
+            node_agent_service=h.get("node_agent_service"),
         ))
-    return [h for h in result if h.ssh_target and h.repo_path]
+    return [h for h in result if h.ssh_target and h.repo_path and h.env_file_path]
+
+
+def _env_state_profile_path_for(ctx: RolloutContext) -> Path | None:
+    from loom_cli.cluster_config import load_cluster_config
+
+    try:
+        cfg = load_cluster_config(ctx.cluster_config_path)
+    except Exception:
+        return None
+    profile = getattr(cfg, "env_state_profile", None)
+    if not profile:
+        return None
+    path = Path(str(profile))
+    if path.is_absolute():
+        return path
+    return ctx.cluster_config_path.parent / path
+
+
+def _gb10_desired_state_declared(ctx: RolloutContext) -> bool:
+    from loom_cli.environment_state import load_environment_state_profile
+
+    profile_path = _env_state_profile_path_for(ctx)
+    if profile_path is None:
+        return False
+    try:
+        profile = load_environment_state_profile(
+            profile_path,
+            variables={
+                "IMAGE_TAG": ctx.image_tag,
+                "ENV_CONFIG_VERSION": ctx.image_tag,
+                "GIT_SHA": ctx.resolved_sha,
+            },
+            expected_environment=ctx.environment,
+        )
+    except Exception:
+        return False
+    return bool(profile.gb10_desired_states)
+
+
+def _no_gb10_hosts_error(ctx: RolloutContext) -> str | None:
+    if ctx.scope != "current-gb10":
+        return None
+    if not _gb10_desired_state_declared(ctx):
+        return None
+    return (
+        "current-gb10 rollout declares GB10 desired state, but the cluster "
+        "config has no [gb10_pool] hosts; add the actual release-managed "
+        "GB10 hosts so rollout step 04 can deliver runner state before "
+        "release-gate"
+    )
 
 
 def _ssh(host: GB10Host, remote_cmd: str) -> SubprocessResult:
@@ -87,40 +142,88 @@ def _ssh(host: GB10Host, remote_cmd: str) -> SubprocessResult:
     ])
 
 
+def _env_file_update_command(ctx: RolloutContext, host: GB10Host) -> str:
+    updates = {
+        "IMAGE_TAG": ctx.image_tag,
+        "ENV_CONFIG_VERSION": ctx.image_tag,
+        "LOOM_IMAGE_TAG": ctx.image_tag,
+        "LOOM_WORKER_ENV_CONFIG_VERSION": ctx.image_tag,
+    }
+    return f"""python3 - <<'PY'
+from pathlib import Path
+
+path = Path({host.env_file_path!r})
+updates = {updates!r}
+path.parent.mkdir(parents=True, exist_ok=True)
+existing = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+out = []
+seen = set()
+for line in existing:
+    if "=" not in line or line.lstrip().startswith("#"):
+        out.append(line)
+        continue
+    key = line.split("=", 1)[0].strip()
+    if key in updates:
+        if key not in seen:
+            out.append(f"{{key}}={{updates[key]}}")
+            seen.add(key)
+        continue
+    out.append(line)
+for key, value in updates.items():
+    if key not in seen:
+        out.append(f"{{key}}={{value}}")
+path.write_text("\\n".join(out) + "\\n", encoding="utf-8")
+PY"""
+
+
 def _prep_one_host(
     ctx: RolloutContext, host: GB10Host, host_dir: Path,
 ) -> tuple[bool, str]:
     """Run the prep sequence on one host. Returns (ok, summary)."""
+    repo_path = shlex.quote(host.repo_path)
+    env_file_path = shlex.quote(host.env_file_path)
+    repo_url = shlex.quote(host.repo_url)
+    image_tag = shlex.quote(ctx.image_tag)
+    resolved_sha = shlex.quote(ctx.resolved_sha)
     steps: list[tuple[str, str]] = [
         (
+            "checkout-present",
+            (
+                f"if [ -d {repo_path}/.git ]; then :; "
+                f"elif [ -e {repo_path} ]; then "
+                f"echo 'repo_path exists but is not a git checkout' >&2; exit 1; "
+                f"else git clone --quiet {repo_url} {repo_path}; fi"
+            ),
+        ),
+        (
             "fetch",
-            f"cd {host.repo_path} && git fetch --quiet origin",
+            f"cd {repo_path} && git fetch --quiet origin",
         ),
         (
             "checkout",
-            f"cd {host.repo_path} && git checkout --detach {ctx.resolved_sha}",
+            f"cd {repo_path} && git checkout --detach {resolved_sha}",
         ),
         (
             "env-file",
-            (
-                f"printf 'IMAGE_TAG=%s\\nENV_CONFIG_VERSION=%s\\n' "
-                f"{ctx.image_tag} {ctx.image_tag} > {host.env_file_path}"
-            ),
+            _env_file_update_command(ctx, host),
         ),
         (
             "verify-head",
             (
-                f"test \"$(cd {host.repo_path} && git rev-parse HEAD)\" = "
-                f"{ctx.resolved_sha}"
+                f"test \"$(cd {repo_path} && git rev-parse HEAD)\" = "
+                f"{resolved_sha}"
             ),
         ),
         (
             "verify-env-file",
             (
-                f"grep -q 'IMAGE_TAG={ctx.image_tag}' {host.env_file_path}"
+                f"grep -q '^LOOM_IMAGE_TAG={image_tag}$' {env_file_path}"
             ),
         ),
     ]
+    if host.node_agent_service:
+        service = shlex.quote(host.node_agent_service)
+        steps.append(("node-agent", f"systemctl --user start {service}"))
     log_lines: list[str] = []
     for label, cmd in steps:
         result = _ssh(host, cmd)
@@ -158,10 +261,14 @@ class GB10PrepStep(BaseStep):
     ) -> VerifyOutcome:
         hosts = gb10_hosts_for(ctx)
         if not hosts:
+            if _no_gb10_hosts_error(ctx):
+                return VerifyOutcome.MISMATCH
             return VerifyOutcome.MATCH
         # For each host, cheap check: env file has correct IMAGE_TAG.
         for host in hosts:
-            r = _ssh(host, f"grep -q 'IMAGE_TAG={ctx.image_tag}' {host.env_file_path}")
+            image_tag = shlex.quote(ctx.image_tag)
+            env_file_path = shlex.quote(host.env_file_path)
+            r = _ssh(host, f"grep -q '^LOOM_IMAGE_TAG={image_tag}$' {env_file_path}")
             if r.returncode != 0:
                 # Could be transient; treat as UNKNOWN so we retry rather
                 # than falsely declaring MATCH or MISMATCH.
@@ -171,6 +278,10 @@ class GB10PrepStep(BaseStep):
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:
         hosts = gb10_hosts_for(ctx)
         if not hosts:
+            error = _no_gb10_hosts_error(ctx)
+            if error:
+                step_dir.stderr_path().write_text(error + "\n")
+                return RunResult(exit_code=1, error=error)
             step_dir.stdout_path().write_text(
                 "no GB10 hosts declared in cluster-config; skipping.\n",
             )
