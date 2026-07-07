@@ -329,6 +329,11 @@ The node-agent token currently uses the CP admin surface and must include the
 `admin:gb10_workers` scope. Keep it host-local and rotate it with the same
 care as other admin credentials.
 
+`gb10-node-agent.env` is host-local runtime configuration, not release source.
+The repository ignores this file, along with legacy `..env.*.tmp` compose env
+files from older node-agent versions, so they do not make the release-managed
+checkout report `source_git_dirty=true`.
+
 GB10 hosts install `uv` under `/home/qianyi/.local/bin`; the node-agent systemd
 unit sets PATH explicitly so the timer works from a non-interactive user
 service environment.
@@ -467,12 +472,15 @@ loom admin gb10-workers status \
 The node-agent applies updates by first fetching `origin` and checking out the
 desired `source_git_commit` in the host-local checkout when desired state
 requires a source change or the tree is dirty. It then writes non-secret keys in
-the host-local `.env` file and runs `docker compose pull`. If the worker image tag is
-not available from a registry, it falls back to `docker compose build` from the
-checked-out source before running `docker compose stop --timeout
-<drain-timeout> worker` and `docker compose up -d worker`. The stop path sends
-SIGTERM to the worker, which uses the existing worker drain logic before the
-container exits. Use `--force` only for an explicit emergency override.
+the host-local `.env` file and runs `docker compose pull`. During apply it uses a
+temporary compose env file under the user runtime/tmp directory with mode `600`,
+not inside `/home/qianyi/loom-worker-build-staging`; reruns also remove legacy
+repo-root `..env.*.tmp` files. If the worker image tag is not available from a
+registry, it falls back to `docker compose build` from the checked-out source
+before running `docker compose stop --timeout <drain-timeout> worker` and
+`docker compose up -d worker`. The stop path sends SIGTERM to the worker, which
+uses the existing worker drain logic before the container exits. Use `--force`
+only for an explicit emergency override.
 
 Retry a failed rollout by fixing the local cause and restarting the service:
 

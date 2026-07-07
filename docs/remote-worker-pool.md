@@ -745,6 +745,10 @@ that commit before pull/build/restart, so local-build fallback cannot silently
 reuse a stale source tree. The apply path uses
 `docker compose stop --timeout <seconds> worker`, so the worker receives
 SIGTERM and uses the existing drain path before restart.
+The host-local node-agent env file and legacy `..env.*.tmp` files are ignored by
+the repo, and new transient compose env files are written under the user
+runtime/tmp directory instead of the source checkout. They must not make GB10
+release-gate source convergence fail as `source_git_dirty=true`.
 
 ```bash
 loom worker gb10-agent plan \

@@ -4947,6 +4947,14 @@ link it from #217; do not merge incomplete evidence.
     --worker-token file:/secure/path/worker-token
   loom resources status --json
   ```
+
+  Treat `/home/qianyi/loom-worker-build-staging/gb10-node-agent.env` and
+  node-agent transient compose env files as host-local runtime material, not
+  release source. Current node-agent apply writes transient env files under the
+  user runtime/tmp directory and removes legacy repo-root `..env.*.tmp` files on
+  rerun; these files must not be the reason a GB10 node reports
+  `source_git_dirty=true`.
+
 - For elastic Slurm pools, the Control Plane records submitted worker jobs in
   `slurm_worker_jobs` and exposes safe capacity status with:
 
