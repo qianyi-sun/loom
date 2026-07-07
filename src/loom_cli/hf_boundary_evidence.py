@@ -404,7 +404,7 @@ async def collect_canary_summary_from_db(
                     .all()
                 )
 
-            selected: Mapping[str, Any] | None = None
+            selected: dict[str, Any] | None = None
             for row in rows:
                 task_filter = _mapping(row.get("task_filter"))
                 required_pools = row.get("required_worker_pools")
@@ -413,7 +413,7 @@ async def collect_canary_summary_from_db(
                     and isinstance(required_pools, list)
                     and worker_pool in required_pools
                 ):
-                    selected = row
+                    selected = dict(row)
                     break
             if selected is None:
                 raise HfBoundaryEvidenceError(
@@ -665,11 +665,17 @@ def _load_or_collect_audit(
                         access_key=args.minio_access_key,
                         secret_key=args.minio_secret_key,
                     ),
-                    bucket=args.bucket,
                 )
-            data = json.loads(render_readiness_json(items, bundle_report=bundle))
+            data = json.loads(render_readiness_json(items))
             if not isinstance(data, dict):
                 raise HfBoundaryEvidenceError("audit renderer returned non-object JSON")
+            if bundle is not None:
+                data["bundle_presence"] = {
+                    "s3_tasks": bundle.s3_tasks,
+                    "verified": bundle.verified,
+                    "missing": bundle.missing,
+                    "missing_sources": bundle.missing_sources,
+                }
             return data
 
         return asyncio.run(_run())

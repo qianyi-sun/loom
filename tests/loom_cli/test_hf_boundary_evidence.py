@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from loom_cli import datasets_cmd
+from loom_cli import datasets_cmd, hf_boundary_evidence
 from loom_cli.hf_boundary_evidence import (
     HfBoundaryEvidenceError,
     collect_worker_boundary_from_gb10,
@@ -246,3 +247,67 @@ hosts = [
 
     assert evidence["summary"]["checked_hosts"] == 1
     assert calls[0][-1] == "/srv/loom-prod-worker"
+
+
+def test_hf_boundary_db_audit_branch_uses_readiness_audit_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_run_readiness_audit(**kwargs: object) -> list[str]:
+        assert kwargs == {
+            "db_url": "postgresql://loom/test",
+            "benchmark": "skilllearnbench",
+        }
+        return ["readiness-item"]
+
+    async def fake_run_bundle_presence_audit(**kwargs: object) -> SimpleNamespace:
+        assert set(kwargs) == {"db_url", "benchmark", "object_store"}
+        assert kwargs["db_url"] == "postgresql://loom/test"
+        assert kwargs["benchmark"] == "skilllearnbench"
+        return SimpleNamespace(
+            s3_tasks=2,
+            verified=2,
+            missing=0,
+            missing_sources=[],
+        )
+
+    def fake_render_readiness_json(items: list[str]) -> str:
+        assert items == ["readiness-item"]
+        return json.dumps({"count": 1, "items": [{"id": "skilllearnbench"}]})
+
+    class FakeObjectStore:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "loom_cli.benchmark_readiness.run_readiness_audit",
+        fake_run_readiness_audit,
+    )
+    monkeypatch.setattr(
+        "loom_cli.benchmark_readiness.run_bundle_presence_audit",
+        fake_run_bundle_presence_audit,
+    )
+    monkeypatch.setattr(
+        "loom_cli.benchmark_readiness.render_readiness_json",
+        fake_render_readiness_json,
+    )
+    monkeypatch.setattr("loom.trajectory.storage.MinioObjectStore", FakeObjectStore)
+
+    audit = hf_boundary_evidence._load_or_collect_audit(
+        SimpleNamespace(
+            audit_json=None,
+            namespace=None,
+            db_url="postgresql://loom/test",
+            benchmark="skilllearnbench",
+            minio_endpoint="http://minio:9000",
+            minio_access_key="minio-access",
+            minio_secret_key="minio-secret",
+        ),
+        target=None,
+    )
+
+    assert audit["bundle_presence"] == {
+        "s3_tasks": 2,
+        "verified": 2,
+        "missing": 0,
+        "missing_sources": [],
+    }

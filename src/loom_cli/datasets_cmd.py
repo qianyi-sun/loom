@@ -277,10 +277,6 @@ def _add_hf_boundary_evidence_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--minio-endpoint", default=_target_minio_env("ENDPOINT"))
     p.add_argument("--minio-access-key", default=_target_minio_env("ACCESS_KEY"))
     p.add_argument("--minio-secret-key", default=_target_minio_env("SECRET_KEY"))
-    p.add_argument(
-        "--bucket",
-        default=os.environ.get("LOOM_BENCHMARK_BUCKET", "loom-benchmarks"),
-    )
 
 
 def _source_env(name: str) -> str | None:
