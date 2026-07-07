@@ -4,8 +4,10 @@ What you're looking for, where it lives:
 
 ## I want to use Loom
 
-- **[user-guide.md](user-guide.md)** — `loom` CLI: install, `run`,
-  `datasets`, `config`, troubleshooting
+- **[user-guide.md](user-guide.md)** — install, quickstarts (laptop-only,
+  local service, CLI-to-server, web app), backends, model sources (hosted +
+  local LLMs), web platform workflows, benchmarks and datasets, CLI
+  reference, troubleshooting
 - **[provider-onboarding.md](provider-onboarding.md)** — hosted
   third-party API setup, user-operated Slurm/vLLM checkpoint deployment,
   provider testing, model refresh, and safe registration

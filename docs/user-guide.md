@@ -1,10 +1,14 @@
-# User Guide — `loom` CLI
+# User Guide
 
-Everything a researcher needs to run LLMs against customizable tasks
-from a laptop. Pluggable agents (use one of the 12 shipped harnesses
-or write your own); pluggable task adapters (23 catalog entries ship in the
-core package, plus optional Terminal-Bench-2). One
-`uv sync`, then `loom run`.
+Everything a researcher needs to run agents against benchmarks with Loom, from
+the CLI or the web app. This guide covers install, quickstarts for the four
+common workflows, sandbox backends, model sources (hosted APIs + local LLMs),
+web platform workflows, benchmark and dataset management, CLI reference, and
+troubleshooting.
+
+Loom's product boundary and architecture are in the
+[repo README](../README.md). Provider setup for hosted APIs and self-hosted
+GPU-cluster vLLM lives in [`provider-onboarding.md`](provider-onboarding.md).
 
 > **Cross-repo issue/PR refs:** bare `#N` in this guide may point to the
 > pre-2026-06-26 `carinrc/loom` archive tracker (numbering was reset on
@@ -32,7 +36,26 @@ The last package is optional (TB-2 adapter). All others ship the core
 > .venv/bin/activate` first, then `pip install -e . -e
 > packages/loom-launcher -e packages/loom-benchmarks`.
 
-## First run (smoke)
+## Choose your quickstart
+
+Pick the path that matches what you have:
+
+| You have… | Follow |
+|---|---|
+| No stack at all, just a task + a model key, throwaway run | [Laptop-only `loom run`](#quickstart-laptop-only-loom-run) |
+| No account; you want to run the full stack on your own machine | [Run Loom locally](#quickstart-run-loom-locally) |
+| An account on a running Loom and prefer a terminal | [Submit from the CLI to a Loom server](#quickstart-submit-from-the-cli-to-a-loom-server) |
+| The same account and want clicks | [Submit from the web app](#quickstart-submit-from-the-web-app) |
+
+The web and CLI paths submit into a running service and persist
+trajectories/ATIF/usage server-side. `loom service up` runs that same service
+stack against local Docker + Postgres + MinIO. `loom run` is a one-shot
+in-process trial that writes `events.jsonl` + `atif.json` to a local directory
+and exits — no DB, no team, no provider registration.
+
+## Quickstart: Laptop-only `loom run`
+
+For a local one-off experiment without the service stack.
 
 ```bash
 loom datasets list                # see what's available
@@ -60,7 +83,7 @@ ls /tmp/loom-smoke/<trial-id>/
   atif.json          # ATIF v1.7 projection
 ```
 
-## Real evaluation runs
+Real evaluation runs:
 
 ```bash
 # Anthropic / OpenAI / Google API key
@@ -86,161 +109,101 @@ Per-trial outputs land at `./runs/<trial-id>/{events.jsonl,atif.json}`.
 With `--json`, each trial's result also prints as a JSON line on stdout
 for piping (e.g. `loom run ... --json | jq '.state'`).
 
-In service mode, team-scoped provider connections are the normal path
-for user-hosted OpenAI-compatible endpoints. Register the connection,
-refresh or manually add its model ids, then launch from the SPA. The
-v1.0 hosted/public platform does not run model servers for users; it only
-stores the team-scoped provider connection and routes calls to the endpoint
-the team provides.
-SPA hides obvious tool/API entries by default and submits
-`provider_connection_id` + `provider_model_id` with the trial or batch;
-operators can use the raw model view for debugging noisy catalogs.
-When New Batch links you to a provider's Models tab to refresh,
-preflight, or manually add a model, use the "Back to New Batch" link on
-that page to return to the batch form after the model catalog is ready.
-For complete setup recipes, including hosted third-party APIs and
-Slurm/vLLM checkpoint deployment on a GPU cluster, see
-[`provider-onboarding.md`](provider-onboarding.md).
+Model-backed local run against an already-running OpenAI-compatible server:
+
+```bash
+loom run --task humaneval/HumanEval/0 \
+  --agent claude-code \
+  --local-server http://localhost:8000/v1 \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --backend docker
+```
+
+Full local LLM workflows (auto-starting vLLM, comparing multiple models) live
+in [Model sources → Local LLMs](#local-llms-vllm-ollama-llamacpp-lm-studio).
+
+## Quickstart: Run Loom Locally
+
+Local service mode is the fastest way to run the full stack for development or
+demo preparation.
+
+Prerequisites:
+
+- Python 3.12;
+- [`uv`](https://docs.astral.sh/uv/getting-started/installation/);
+- Docker CLI with the Compose plugin;
+- Docker Desktop running on macOS.
+
+Install (see [Install](#install) above), then start the service stack:
+
+```bash
+cp .env.example .env
+# Edit .env if you want default provider keys for local testing.
+loom service up
+```
+
+`loom service up` starts Postgres, MinIO, LLM Gateway, Control Plane,
+`loom_service`, Worker, and the React SPA. It runs migrations, seeds local
+tokens, and prints endpoint URLs.
+
+Default local URLs:
+
+| What | URL |
+|---|---|
+| Web app | http://localhost:5173/ |
+| API root | http://localhost:8090/ |
+| Swagger UI | http://localhost:8090/docs |
+| Health | http://localhost:8090/api/v1/health |
+| MinIO console | http://localhost:9001/ |
+
+Tear down:
+
+```bash
+loom service down      # preserve volumes
+loom service down -v   # remove Postgres + MinIO volumes
+```
+
+Local compose is for development, not public hosting. Production or shared
+deployments use `loom cluster` with Kubernetes, TLS Ingress, protected
+environment secrets, and release-promotion evidence. See
+[`operator-runbook.md`](operator-runbook.md).
+
 Running the local service stack requires Docker CLI with the Compose
 plugin; on macOS, install and start Docker Desktop, then verify
 `docker compose version` before `loom service up`.
 
-## Web sessions and teams
+## Quickstart: Submit from the CLI to a Loom Server
 
-When Loom is served as a web platform, the SPA uses browser user sessions.
-Users sign in with username and password. First-time users request an account
-from Settings by entering a username and selecting an existing team. If the
-team is missing, contact an admin to create it first. Staging does not
-collect email and does not send automatic mail: an admin reviews the request,
-approves a team role, and manually shares the one-time password setup link.
-Forgot-password follows the same pattern: the user submits a reset request,
-the admin approves it, and the user receives a one-time reset link. On deployed
-web environments, setup and reset links are generated with the public HTTPS
-origin. The service sets an HttpOnly session cookie. Auth responses return a
-CSRF token that the SPA keeps in memory; the browser sends cookies
-automatically, and mutating requests include the CSRF header. You should not
-paste a raw bearer token into the production SPA. The CLI stores the same
-session cookie plus CSRF token in the owner-only config file; `loom auth
-whoami` persists rotated session/CSRF values returned by the server, and
-mutating CLI requests refresh the session
-CSRF before retrying a CSRF-specific rejection.
+Use this path from any machine that can reach the Loom public API.
+The CLI machine does not need GPUs, model weights, or direct access to the
+benchmark workers; it only needs network access to the Loom service and a team
+account.
 
-Your current team controls execution, cost attribution, provider credentials,
-members, and user-owned API tokens. Roles are enforced by the API:
-
-- `viewer` can read the current team's batches, trials, provider summaries, and
-  usage.
-- `member` can also submit work for the current team.
-- `owner` can manage user-owned API tokens and provider connections.
-- `platform_admin` is an operator role with cross-team inspection/admin access.
-
-The app shell always shows the current team and role beside the primary
-navigation, so users can confirm which team will own new batches, provider
-connections, reset/setup approvals, and API-token actions before they act. After sign-in,
-Home is the default landing page. It summarizes team readiness, provider
-health, benchmark readiness, active workers, recent batch/trial activity, and
-separates user-owned next actions from operator-owned prerequisites. Team
-Settings shows the signed-in username, current team, role, team switcher, joined
-browser users, and role-aware setup links. Team owners get Team access for
-legacy invites and API tokens; platform admins also manage fixed internal
-teams, approve pending username account requests, and approve password reset
-requests. Members and viewers see only the actions their role allows.
-
-Team access is split into task-focused sections. Platform admins can review
-legacy team requests, approve account setup and password reset requests, switch
-to fixed-team maintenance, create/list legacy invites, manage API tokens, or
-inspect the audit log. Team owners see only invite and API-token sections.
-Account setup/reset links are revealed only once and must be shared manually.
-
-Most web workflows now include contextual quickstarts directly on the page. Use
-the copyable snippets in Settings, Team access, Providers, New Batch, Monitor,
-Batch Detail, Trial Detail, Run Library, Usage, Rate cards, Tasks, and
-Benchmarks when you want the CLI/API equivalent for the page you are viewing.
-Home intentionally avoids telling users to run operator import or worker
-commands from the browser; those items appear as operator actions when the
-service reports that platform prerequisites are missing. The examples use safe
-placeholders and `env:`/`file:` secret references so users do not need to switch
-back to this guide for the common path.
-
-The CLI uses the same username/password account by default. Use
-`loom auth login --server URL --username USER --password env:LOOM_PASSWORD`,
-then `loom auth whoami` to verify the active server, user, current team, role,
-and scopes. Team owners can still create, rotate, or revoke named API tokens
-from Team access for automation; those tokens are user-owned, scoped, and
-shown only once on create/rotate. Legacy unowned team tokens are read/compat
-credentials only and cannot create batches, direct trials, reruns, clones, or
-artifact reuse jobs. Completed run metadata and safe artifacts are shared
-across teams through the Run Library; ordinary batch, trial, trajectory, ATIF,
-artifact, cancellation, rerun, and provider routes remain current-team scoped.
-
-Monitor lists show `username / team` for each batch and trial when the submitter
-is known, with legacy team fallback for old rows. Ordinary users see their
-current team's work; platform admins can use the team filter to inspect
-cross-team queues without losing context. The Monitor health card summarizes
-the current URL scope with batch/trial state counters, queued/claimed/running
-trial pressure, concurrent task slots, active worker count, worker backends, and
-per-resource-pool slot usage before the row table. In the batch view, the `q`
-search filter scopes both the table and health card to matching batch identity
-text or batch ids, so shared Monitor links keep their counters aligned with the
-visible rows. For autoscaled worker pools,
-the resource summary also includes desired slots, pending slots, draining
-slots, idle-window age, and the last autoscaler decision. The same slot summary
-is available from the CLI with `loom resources status` and
-`loom resources status --json`. The table's State dropdown is still reflected
-in the URL, but the health card keeps all lifecycle counters visible so queue
-pressure does not disappear when you filter the rows to failures. Monitor
-filters are reflected in the URL so support links can preserve `view`, `state`,
-`q`, `batch_id`, `team_id`, `benchmark_id`, `agent`, and `model` while
-switching between batch and trial views. Failed trial lists include a Failure
-diagnostics summary grouped by platform `failure_reason`, with representative
-messages and links to the first affected trial so provider, sandbox, verifier,
-and artifact failures can be triaged before opening individual logs.
-User-facing web timestamps render in the viewer's local timezone with a short
-timezone label, and CLI text summaries use the executing shell's local
-timezone. API and `--format json` responses keep canonical timezone-aware ISO
-timestamps. Token usage labels use `Input` and `Output` instead of abbreviated
-`P`/`C` wording.
-
-New Batch includes a Release review card before submit. Check that it shows the
-intended task scope, planned trial count, selected backend worker availability,
-provider connection status, and model preflight state before launching a
-release-blocking batch. When tag filters are selected, the generated description
-preview and stored batch description include the selected tag keys and values.
-
-Usage follows the same team-context model. Ordinary users see usage scoped to
-their current team and do not enter raw team ids. Platform admins can leave the
-team filter blank for platform-wide usage or choose an internal team by name;
-the copyable CLI command still includes the stable `--team-id` value when a
-team is selected. Admin usage views can request per-batch drilldown; token-only
-or self-deployed calls show token totals with `cost_status=not_applicable`
-instead of a fabricated dollar amount. Failed upstream provider attempts show
-as `pricing_mode=failed-upstream` and `cost_status=failed_upstream`, so they
-remain inspectable without being counted as priced provider usage. Usage views
-also show `usage_estimate_confidence`: `high` means the provider returned a
-complete usage block, while `partial` or `missing` means token and cost totals
-are lower confidence because some provider usage fields were absent.
-
-### Public server CLI flow
-
-From a fresh shell, authenticate with your approved username/password account:
+Install the CLI (see [Install](#install)), then authenticate with your
+approved username/password account. The CLI uses the same account as the web
+app; if you don't have one yet, follow the request-access flow in
+[Web sessions and teams](#web-sessions-and-teams) first.
 
 ```bash
 export LOOM_PASSWORD=...
-loom auth login --server https://loom.example.com --username USER --password env:LOOM_PASSWORD
+loom auth login --server https://yylx.world/dev --username USER --password env:LOOM_PASSWORD
 loom auth whoami
 ```
 
-Provider keys also use indirection so secrets do not appear in shell history:
+Register a hosted OpenAI-compatible provider:
 
 ```bash
-export OPENAI_API_KEY=sk-...
+export PROVIDER_API_KEY=sk-...
+
 loom providers create \
   --name smoke-openai \
   --type openai-compatible \
   --base-url https://api.openai.com/v1 \
-  --api-key env:OPENAI_API_KEY
+  --api-key env:PROVIDER_API_KEY
+
 loom providers test smoke-openai
 loom providers models smoke-openai --refresh
+loom providers models smoke-openai --preflight gpt-4o-mini
 ```
 
 Submit, monitor, inspect usage, and download through public `/api/v1` routes:
@@ -281,6 +244,29 @@ loom eval trial download <trial-id> --kind artifact \
   --artifact-key <artifact-key-from-trial-show> \
   --output artifact.bin
 ```
+
+For a self-hosted inference service, register the final reachable `/v1` URL the
+same way:
+
+```bash
+export SELF_HOSTED_API_KEY=...
+
+loom providers create \
+  --name lab-vllm \
+  --type openai-compatible \
+  --base-url https://inference.example.com/v1 \
+  --api-key env:SELF_HOSTED_API_KEY
+
+loom providers test lab-vllm
+loom providers models lab-vllm --refresh
+loom providers models lab-vllm --preflight qwen2.5-coder-7b-instruct
+```
+
+If the model server does not expose a useful `/models` catalog, add the model id
+manually from the provider page or provider model API, then preflight it before
+launching large batches.
+
+### Delivery bundles for release handoff
 
 For release handoff or customer delivery, create one deterministic bundle for a
 finished batch family instead of downloading trial objects one by one:
@@ -368,6 +354,8 @@ requires submit/admin scope; reading or downloading an existing bundle only
 requires normal read access. These routes are team-scoped and never expose raw
 MinIO/S3 URLs.
 
+### Cross-team submission (platform admins)
+
 `loom eval batch create` can omit `--name`; the service derives a concise
 name and description from the benchmark/subset, combinations, provider/model,
 and backend. Use `--name-suffix` only when you need an extra human label after
@@ -393,6 +381,8 @@ Auth and permission errors use the same remediation hint across CLI subcommands.
 Text and JSON output redact raw bearer tokens, provider keys, internal service
 hosts, and signed object-store URLs. `loom eval trial show` prints copyable
 download commands instead of MinIO/S3 signed URLs.
+
+### Diagnosis and debug evidence
 
 Use `loom eval diagnose batch <batch-id>` or
 `loom eval diagnose trial <trial-id>` first when a run failed and a human or
@@ -447,119 +437,58 @@ copy/paste task-list launches; `supplemental_coordinates` preserves every
 `task_id`/`sample_idx`/`combination_idx` row when multiple samples or
 combinations for the same task need rerun.
 
-## Run Library
+## Quickstart: Submit from the Web App
 
-Run Library is the org-wide place to inspect completed shared work. Team still
-controls execution, cost, provider credentials, members, and API tokens. The
-Library only exposes completed metadata and artifacts that passed sharing
-checks.
+Use this path when working through the public UI.
 
-Use the SPA top-level **Run Library** page:
+> **Need an account?** Staging uses admin-approved username/password
+> accounts (no email, no automatic mail). On the sign-in page, use the
+> **Request account** card: enter a username, pick an existing team, and
+> wait for an admin to approve and share the one-time password setup link.
+> If the team you need doesn't exist, ask an admin to create it first.
+> Full flow: [Web sessions and teams](#web-sessions-and-teams).
 
-- **My team** shows your team's library rows.
-- **All teams** shows your team plus completed org-shared rows from other
-  teams.
-- Owner-team labels show who ran the original work.
-- State, team, artifact-type, search, benchmark, agent, model provider/name,
-  provider connection, and provider model filters narrow the table without
-  parsing display names or showing raw JSON payloads.
-- Artifact badges on the list are bounded previews; a `+` means the run has
-  more typed artifacts than the list page counted. Open the row or export
-  artifact metadata for the complete set.
-- Platform admins can use the team filter with internal team names across the
-  whole platform; ordinary users see only their joined teams.
+1. Open [https://yylx.world/dev](https://yylx.world/dev) or your local Loom URL. First production uses [https://yylx.world/prod](https://yylx.world/prod).
+2. Sign in and select the team that owns the run.
+3. Open **Providers**.
+   - Add a third-party provider connection, or register a self-hosted
+     OpenAI-compatible endpoint.
+   - Test the connection.
+   - Refresh models.
+   - Preflight the exact model you plan to use.
+4. Open **New batch**.
+   - Select one or more benchmarks.
+   - Choose the task subset: all, first N, last N, random N, or explicit task
+     ids.
+   - Pick agent/model combinations.
+   - Optionally add a short suffix; Loom generates the batch name and
+     description from the selected tasks and combinations.
+   - Review the planned trial count and submit.
+5. Open **Monitor** to watch batch/trial progress.
+6. Open the batch or trial detail page for evaluator reward, platform outcome,
+   trajectory, ATIF, and artifacts.
+7. Open **Run Library** to find completed shared work and reuse safe artifacts
+   or clone run configuration into the current team.
 
-Open a Library row to inspect task selection, agent/model config, trial rollup,
-debug evidence, provenance, and artifact group previews. Safe shared artifacts
-expose Download, Copy URL, and Reuse actions. Blocked artifacts show only a safe
-reason and cannot be downloaded or reused by another team. Typed artifact rows
-also show the artifact type, owner team, source trial/batch, safety/redaction
-state, and content-hash prefix. Large-run detail views use a capped typed
-artifact preview instead of loading full legacy trial trajectory indexes or the
-complete typed artifact inventory. Use **Export artifact metadata** on the
-detail page to download safe typed artifact metadata for that run as JSONL.
+The public web app intentionally hides raw infrastructure details in the common
+path. Diagnostic panels and copyable CLI snippets are available on the same
+pages when you need to reproduce or debug from a terminal.
 
-Clone config and reuse artifact both create new records in your current team and
-record `source_provenance`. They do not copy the source team's provider
-connection or credentials; choose a provider connection owned by your team when
-the source config requires one. The Run Library detail page shows that selector
-before cloning provider-backed work.
+For the deep dive on how web sessions, teams, roles, monitor filters, and
+diagnostic panels work, see [Web platform workflows](#web-platform-workflows).
 
-From the CLI, export safe Run Library artifact metadata with:
+## Backends
 
-```bash
-loom eval artifact export \
-  --scope all \
-  --artifact-type metric_table \
-  --safety-state safe \
-  --format jsonl \
-  --output run-library-artifacts.jsonl
-```
+`loom run --backend` picks the sandbox that hosts the trial:
 
-The export contains redacted metadata and storage pointers only; it does not
-copy object bodies or source-team provider credentials.
+- **`docker`** — the default for real runs. Uses the local Docker daemon (or
+  Docker Desktop on macOS) and per-trial containers.
+- **`fake`** — no-op sandbox. `exec` returns success without running anything.
+  Verifies the trial pipeline end-to-end without a container.
+- **`daytona`** — cloud sandbox for elastic capacity or when Docker isn't
+  available on the submit host.
 
-## Default views and diagnostics
-
-The SPA defaults to readable summaries instead of raw API payloads.
-New Batch explains task selection, agent/model combinations, backend,
-and advanced trial settings in product terms. Batch Detail shows a
-Run plan, Monitor shows planned trials and evaluator score, Run Library shows
-org-wide completed shared work, and Trial Detail separates platform outcome
-from evaluator reward. Batch Detail and Trial Detail also show owner team,
-visibility/share status, provenance when a run was cloned or reused, and a
-Debug evidence card when the API has structured outcome evidence. That card
-shows reason code, category, attribution, lifecycle state, model/provider
-summary, and suggested next actions in human-readable form; the exact redacted
-JSON remains in a collapsed disclosure for API reproduction.
-For normal model-backed runs, New Batch starts from the provider connection and
-model choice and uses Loom's default model runner internally. Users only open
-`Use a specific agent` when they want a non-default runtime such as `oracle` or
-another service-mode agent; choosing an agent that does not need a model hides
-the provider/model controls.
-
-When a finished batch has transient gateway failures, Batch Detail shows
-`Rerun failed cases` and a supplemental rerun recommendation. The
-recommendation distinguishes auto-safe platform failures from failures that
-need operator approval and from failures that are not rerunnable. Reward `0`
-with verifier output is a platform success and a score failure, so Monitor and
-Run Library show it separately from platform failure and it is not selected for
-automatic supplemental reruns. The action creates a linked rerun batch
-containing only selected task/sample/combination coordinates. The original
-batch keeps its original trial counts, and Batch Detail also shows the
-effective result after successful linked reruns replace those transient
-failures. `GET /api/v1/batches/{id}` includes the same `rerun_plan` summary
-and `final_trial_selection` map so API agents can preserve main/supplemental
-lineage without scraping the UI.
-Use `loom eval batch delivery-bundle <original-batch-id>` after the reruns
-finish to export that effective result with the original and supplemental
-batch lineage recorded in the manifest, ledger, artifact metadata, and Batch
-Detail download status.
-
-Raw data is still available when you need to debug or reproduce an API
-request. Look for `Diagnostics`, `Raw event data`, or explicit
-advanced disclosures. Those panels contain internal field names such
-as `task_filter`, `trial_config`, trajectory event payloads,
-fan-out errors, and rate-card payloads. They are intentionally closed
-by default so the normal workflow stays focused on what was launched,
-what is running, and what needs attention.
-
-Provider pages use the same model. A connection marked `Ready` means
-the last provider test passed. `Needs attention` means the last test
-failed and batches using that connection may fail. `Untested` means
-the connection has been saved but should be tested before real runs.
-Allowed-model summaries distinguish unrestricted discovered models
-from explicit allow-lists. Provider tabs are URL-addressable with
-`?tab=overview`, `?tab=models`, and `?tab=settings`, so operators can link
-directly to the relevant setup or debugging view.
-
-Contextual snippets are not a substitute for diagnostics. If a quickstart
-command fails, open the same page's diagnostic panel or detail view, then copy
-the relevant `loom eval batch show`, `loom eval trial show`, `loom eval trial
-download`, `loom providers test`, or `loom eval usage` command from the page
-to reproduce the issue from a shell.
-
-## Cloud sandboxes (Daytona)
+### Cloud sandboxes (Daytona)
 
 ```bash
 export DAYTONA_API_KEY=...
@@ -599,11 +528,55 @@ run is connected to a Loom service (`--server-url`). Standalone
 laptop runs skip persistence — the trajectories + ATIF still drop on
 local disk.
 
-## Local LLMs (vLLM, ollama, llama.cpp, lm-studio)
+## Model sources
 
-Three paths, ordered by what most users reach for first.
+### Hosted providers
 
-### Path A: inline — your server is already running
+The full hosted-provider registration workflow, including OpenAI-compatible
+endpoints and provider-native APIs, lives in
+[`provider-onboarding.md`](provider-onboarding.md).
+
+Quick recap for `loom run`:
+
+```bash
+loom config set token.anthropic sk-ant-...
+# Or export ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY.
+# Or add ANTHROPIC_API_KEY=... to a project .env at or above the CWD.
+loom run --model anthropic/claude-opus-4-7 ...
+```
+
+For service-mode `litellm` trials and Codex subprocess trials, API
+clients can include `trial_config.request_params` to pin non-sensitive
+generation controls such as `temperature`, `top_p`, `seed`, max output
+limits, reasoning effort, tool-choice mode, and provider decoding extras.
+Loom strips prompt/message payloads, headers, API keys, credentials, and unknown
+extras before forwarding the request, then exposes the effective
+controls in provider debug evidence. Codex needs an adapter-specific
+bridge because its CLI constructs provider requests itself: the worker
+passes sanitized per-trial controls to the Codex launcher as
+`LOOM_CODEX_SETTINGS_JSON`, and the launcher/Gateway sanitize those
+values again before forwarding and auditing them. Other subprocess
+agents need their own adapter-specific support.
+
+In service mode, team-scoped provider connections are the normal path
+for user-hosted OpenAI-compatible endpoints. Register the connection,
+refresh or manually add its model ids, then launch from the SPA. The
+v1.0 hosted/public platform does not run model servers for users; it only
+stores the team-scoped provider connection and routes calls to the endpoint
+the team provides.
+SPA hides obvious tool/API entries by default and submits
+`provider_connection_id` + `provider_model_id` with the trial or batch;
+operators can use the raw model view for debugging noisy catalogs.
+When New Batch links you to a provider's Models tab to refresh,
+preflight, or manually add a model, use the "Back to New Batch" link on
+that page to return to the batch form after the model catalog is ready.
+
+### Local LLMs (vLLM, ollama, llama.cpp, lm-studio)
+
+Three paths for driving `loom run` against a local OpenAI-compatible server,
+ordered by what most users reach for first.
+
+#### Path A: inline — your server is already running
 
 Pass the server URL on the command line. No config, no state.
 
@@ -632,7 +605,7 @@ CLI flag > env var > none. Cost defaults to `$0` (no rate-card row
 for `local:_inline` by default; add one keyed
 `provider="local:_inline"` if you want GPU attribution).
 
-### Path B: local CLI helper — start vLLM for this process
+#### Path B: local CLI helper — start vLLM for this process
 
 If you have weights on disk or a HuggingFace model id, install the
 optional vLLM extra and pass the spec directly:
@@ -681,7 +654,7 @@ vLLM tuning (passed through to `vllm serve`):
 | `--enforce-eager` | off | Disable CUDA graphs (debug only) |
 | `--keep-alive` | off | Leave vLLM running after the trial (handy when iterating against the same model). Only meaningful for single-`--model` runs; multi-model loops always tear down each iteration's server. |
 
-### Path C: persisted — same server, many runs
+#### Path C: persisted — same server, many runs
 
 If you target the same server every day, persist it once and skip
 typing the URL:
@@ -742,29 +715,7 @@ Service-mode operators register local providers via env vars:
 `model=local/...` is the natural follow-up; today, service-mode
 clients reach local servers via `loom run` on the agent's host.
 
-## Comparing multiple models
-
-`loom run --model A --model B` runs the same tasks against each
-model. Default behavior:
-
-- **Sequential** — load A, run all tasks, unload A, then load B.
-  One vLLM in GPU memory at a time. Peak memory = max(A, B).
-- **Output bucketing** — trials land under
-  `<output-dir>/<model-slug>/<trial-id>/`. The slug is derived from
-  the model spec (HF basename, path basename, or registered name).
-- **Exit code** — `max` of all per-model exit codes, so any failure
-  surfaces.
-
-Opt into multi-GPU parallel:
-
-```bash
-loom run ... --model hf:A --model hf:B --parallel-models
-```
-
-You're responsible for ensuring enough GPU memory for both. Loom
-does not auto-partition `--gpu-memory-utilization` between models.
-
-## `loom serve` reference
+### `loom serve` reference
 
 Foreground command that launches vLLM and registers it as
 `local/<name>`. No daemon, no PID files; closing the terminal
@@ -791,7 +742,304 @@ served_model_name = "<canonical>"
 to `~/.config/loom/config.toml`. On shutdown (Ctrl-C, SIGTERM, or
 vLLM crash), the entry is removed.
 
-## `loom datasets` reference
+### Comparing multiple models
+
+`loom run --model A --model B` runs the same tasks against each
+model. Default behavior:
+
+- **Sequential** — load A, run all tasks, unload A, then load B.
+  One vLLM in GPU memory at a time. Peak memory = max(A, B).
+- **Output bucketing** — trials land under
+  `<output-dir>/<model-slug>/<trial-id>/`. The slug is derived from
+  the model spec (HF basename, path basename, or registered name).
+- **Exit code** — `max` of all per-model exit codes, so any failure
+  surfaces.
+
+Opt into multi-GPU parallel:
+
+```bash
+loom run ... --model hf:A --model hf:B --parallel-models
+```
+
+You're responsible for ensuring enough GPU memory for both. Loom
+does not auto-partition `--gpu-memory-utilization` between models.
+
+## Web platform workflows
+
+The rest of this section documents behavior of the deployed web platform (SPA
++ public API). It applies to a running Loom service; laptop-only `loom run`
+skips all of it.
+
+### Web sessions and teams
+
+When Loom is served as a web platform, the SPA uses browser user sessions.
+Users sign in with username and password. First-time users request an account
+from Settings by entering a username and selecting an existing team. If the
+team is missing, contact an admin to create it first. Staging does not
+collect email and does not send automatic mail: an admin reviews the request,
+approves a team role, and manually shares the one-time password setup link.
+Forgot-password follows the same pattern: the user submits a reset request,
+the admin approves it, and the user receives a one-time reset link. On deployed
+web environments, setup and reset links are generated with the public HTTPS
+origin. The service sets an HttpOnly session cookie. Auth responses return a
+CSRF token that the SPA keeps in memory; the browser sends cookies
+automatically, and mutating requests include the CSRF header. You should not
+paste a raw bearer token into the production SPA. The CLI stores the same
+session cookie plus CSRF token in the owner-only config file; `loom auth
+whoami` persists rotated session/CSRF values returned by the server, and
+mutating CLI requests refresh the session
+CSRF before retrying a CSRF-specific rejection.
+
+Your current team controls execution, cost attribution, provider credentials,
+members, and user-owned API tokens. Roles are enforced by the API:
+
+- `viewer` can read the current team's batches, trials, provider summaries, and
+  usage.
+- `member` can also submit work for the current team.
+- `owner` can manage user-owned API tokens and provider connections.
+- `platform_admin` is an operator role with cross-team inspection/admin access.
+
+The app shell always shows the current team and role beside the primary
+navigation, so users can confirm which team will own new batches, provider
+connections, reset/setup approvals, and API-token actions before they act. After sign-in,
+Home is the default landing page. It summarizes team readiness, provider
+health, benchmark readiness, active workers, recent batch/trial activity, and
+separates user-owned next actions from operator-owned prerequisites. Team
+Settings shows the signed-in username, current team, role, team switcher, joined
+browser users, and role-aware setup links. Team owners get Team access for
+legacy invites and API tokens; platform admins also manage fixed internal
+teams, approve pending username account requests, and approve password reset
+requests. Members and viewers see only the actions their role allows.
+
+Team access is split into task-focused sections. Platform admins can review
+legacy team requests, approve account setup and password reset requests, switch
+to fixed-team maintenance, create/list legacy invites, manage API tokens, or
+inspect the audit log. Team owners see only invite and API-token sections.
+Account setup/reset links are revealed only once and must be shared manually.
+
+Most web workflows now include contextual quickstarts directly on the page. Use
+the copyable snippets in Settings, Team access, Providers, New Batch, Monitor,
+Batch Detail, Trial Detail, Run Library, Usage, Rate cards, Tasks, and
+Benchmarks when you want the CLI/API equivalent for the page you are viewing.
+Home intentionally avoids telling users to run operator import or worker
+commands from the browser; those items appear as operator actions when the
+service reports that platform prerequisites are missing. The examples use safe
+placeholders and `env:`/`file:` secret references so users do not need to switch
+back to this guide for the common path.
+
+The CLI uses the same username/password account by default. Use
+`loom auth login --server URL --username USER --password env:LOOM_PASSWORD`,
+then `loom auth whoami` to verify the active server, user, current team, role,
+and scopes. Team owners can still create, rotate, or revoke named API tokens
+from Team access for automation; those tokens are user-owned, scoped, and
+shown only once on create/rotate. Legacy unowned team tokens are read/compat
+credentials only and cannot create batches, direct trials, reruns, clones, or
+artifact reuse jobs. Completed run metadata and safe artifacts are shared
+across teams through the Run Library; ordinary batch, trial, trajectory, ATIF,
+artifact, cancellation, rerun, and provider routes remain current-team scoped.
+
+### Default views and diagnostics
+
+Monitor lists show `username / team` for each batch and trial when the submitter
+is known, with legacy team fallback for old rows. Ordinary users see their
+current team's work; platform admins can use the team filter to inspect
+cross-team queues without losing context. The Monitor health card summarizes
+the current URL scope with batch/trial state counters, queued/claimed/running
+trial pressure, concurrent task slots, active worker count, worker backends, and
+per-resource-pool slot usage before the row table. In the batch view, the `q`
+search filter scopes both the table and health card to matching batch identity
+text or batch ids, so shared Monitor links keep their counters aligned with the
+visible rows. For autoscaled worker pools,
+the resource summary also includes desired slots, pending slots, draining
+slots, idle-window age, and the last autoscaler decision. The same slot summary
+is available from the CLI with `loom resources status` and
+`loom resources status --json`. The table's State dropdown is still reflected
+in the URL, but the health card keeps all lifecycle counters visible so queue
+pressure does not disappear when you filter the rows to failures. Monitor
+filters are reflected in the URL so support links can preserve `view`, `state`,
+`q`, `batch_id`, `team_id`, `benchmark_id`, `agent`, and `model` while
+switching between batch and trial views. Failed trial lists include a Failure
+diagnostics summary grouped by platform `failure_reason`, with representative
+messages and links to the first affected trial so provider, sandbox, verifier,
+and artifact failures can be triaged before opening individual logs.
+User-facing web timestamps render in the viewer's local timezone with a short
+timezone label, and CLI text summaries use the executing shell's local
+timezone. API and `--format json` responses keep canonical timezone-aware ISO
+timestamps. Token usage labels use `Input` and `Output` instead of abbreviated
+`P`/`C` wording.
+
+New Batch includes a Release review card before submit. Check that it shows the
+intended task scope, planned trial count, selected backend worker availability,
+provider connection status, and model preflight state before launching a
+release-blocking batch. When tag filters are selected, the generated description
+preview and stored batch description include the selected tag keys and values.
+
+Usage follows the same team-context model. Ordinary users see usage scoped to
+their current team and do not enter raw team ids. Platform admins can leave the
+team filter blank for platform-wide usage or choose an internal team by name;
+the copyable CLI command still includes the stable `--team-id` value when a
+team is selected. Admin usage views can request per-batch drilldown; token-only
+or self-deployed calls show token totals with `cost_status=not_applicable`
+instead of a fabricated dollar amount. Failed upstream provider attempts show
+as `pricing_mode=failed-upstream` and `cost_status=failed_upstream`, so they
+remain inspectable without being counted as priced provider usage. Usage views
+also show `usage_estimate_confidence`: `high` means the provider returned a
+complete usage block, while `partial` or `missing` means token and cost totals
+are lower confidence because some provider usage fields were absent.
+
+The SPA defaults to readable summaries instead of raw API payloads.
+New Batch explains task selection, agent/model combinations, backend,
+and advanced trial settings in product terms. Batch Detail shows a
+Run plan, Monitor shows planned trials and evaluator score, Run Library shows
+org-wide completed shared work, and Trial Detail separates platform outcome
+from evaluator reward. Batch Detail and Trial Detail also show owner team,
+visibility/share status, provenance when a run was cloned or reused, and a
+Debug evidence card when the API has structured outcome evidence. That card
+shows reason code, category, attribution, lifecycle state, model/provider
+summary, and suggested next actions in human-readable form; the exact redacted
+JSON remains in a collapsed disclosure for API reproduction.
+For normal model-backed runs, New Batch starts from the provider connection and
+model choice and uses Loom's default model runner internally. Users only open
+`Use a specific agent` when they want a non-default runtime such as `oracle` or
+another service-mode agent; choosing an agent that does not need a model hides
+the provider/model controls.
+
+When a finished batch has transient gateway failures, Batch Detail shows
+`Rerun failed cases` and a supplemental rerun recommendation. The
+recommendation distinguishes auto-safe platform failures from failures that
+need operator approval and from failures that are not rerunnable. Reward `0`
+with verifier output is a platform success and a score failure, so Monitor and
+Run Library show it separately from platform failure and it is not selected for
+automatic supplemental reruns. The action creates a linked rerun batch
+containing only selected task/sample/combination coordinates. The original
+batch keeps its original trial counts, and Batch Detail also shows the
+effective result after successful linked reruns replace those transient
+failures. `GET /api/v1/batches/{id}` includes the same `rerun_plan` summary
+and `final_trial_selection` map so API agents can preserve main/supplemental
+lineage without scraping the UI.
+Use `loom eval batch delivery-bundle <original-batch-id>` after the reruns
+finish to export that effective result with the original and supplemental
+batch lineage recorded in the manifest, ledger, artifact metadata, and Batch
+Detail download status.
+
+Raw data is still available when you need to debug or reproduce an API
+request. Look for `Diagnostics`, `Raw event data`, or explicit
+advanced disclosures. Those panels contain internal field names such
+as `task_filter`, `trial_config`, trajectory event payloads,
+fan-out errors, and rate-card payloads. They are intentionally closed
+by default so the normal workflow stays focused on what was launched,
+what is running, and what needs attention.
+
+Provider pages use the same model. A connection marked `Ready` means
+the last provider test passed. `Needs attention` means the last test
+failed and batches using that connection may fail. `Untested` means
+the connection has been saved but should be tested before real runs.
+Allowed-model summaries distinguish unrestricted discovered models
+from explicit allow-lists. Provider tabs are URL-addressable with
+`?tab=overview`, `?tab=models`, and `?tab=settings`, so operators can link
+directly to the relevant setup or debugging view.
+
+Contextual snippets are not a substitute for diagnostics. If a quickstart
+command fails, open the same page's diagnostic panel or detail view, then copy
+the relevant `loom eval batch show`, `loom eval trial show`, `loom eval trial
+download`, `loom providers test`, or `loom eval usage` command from the page
+to reproduce the issue from a shell.
+
+### Run Library
+
+Run Library is the org-wide place to inspect completed shared work. Team still
+controls execution, cost, provider credentials, members, and API tokens. The
+Library only exposes completed metadata and artifacts that passed sharing
+checks.
+
+Use the SPA top-level **Run Library** page:
+
+- **My team** shows your team's library rows.
+- **All teams** shows your team plus completed org-shared rows from other
+  teams.
+- Owner-team labels show who ran the original work.
+- State, team, artifact-type, search, benchmark, agent, model provider/name,
+  provider connection, and provider model filters narrow the table without
+  parsing display names or showing raw JSON payloads.
+- Artifact badges on the list are bounded previews; a `+` means the run has
+  more typed artifacts than the list page counted. Open the row or export
+  artifact metadata for the complete set.
+- Platform admins can use the team filter with internal team names across the
+  whole platform; ordinary users see only their joined teams.
+
+Open a Library row to inspect task selection, agent/model config, trial rollup,
+debug evidence, provenance, and artifact group previews. Safe shared artifacts
+expose Download, Copy URL, and Reuse actions. Blocked artifacts show only a safe
+reason and cannot be downloaded or reused by another team. Typed artifact rows
+also show the artifact type, owner team, source trial/batch, safety/redaction
+state, and content-hash prefix. Large-run detail views use a capped typed
+artifact preview instead of loading full legacy trial trajectory indexes or the
+complete typed artifact inventory. Use **Export artifact metadata** on the
+detail page to download safe typed artifact metadata for that run as JSONL.
+
+Clone config and reuse artifact both create new records in your current team and
+record `source_provenance`. They do not copy the source team's provider
+connection or credentials; choose a provider connection owned by your team when
+the source config requires one. The Run Library detail page shows that selector
+before cloning provider-backed work.
+
+From the CLI, export safe Run Library artifact metadata with:
+
+```bash
+loom eval artifact export \
+  --scope all \
+  --artifact-type metric_table \
+  --safety-state safe \
+  --format jsonl \
+  --output run-library-artifacts.jsonl
+```
+
+The export contains redacted metadata and storage pointers only; it does not
+copy object bodies or source-team provider credentials.
+
+### Pasting task ids
+
+The SPA's New batch form has an "Explicit task ids" subset mode
+that accepts a paste box. The parser handles every format users
+tend to paste from — notebooks, spreadsheets, chat messages, URLs,
+ranges, JSON arrays. All of the following paste cleanly:
+
+- **One per line** —
+  ```
+  HumanEval/0
+  HumanEval/1
+  HumanEval/2
+  ```
+- **Comma / semicolon / pipe / tab / 2+-space separated** —
+  `HumanEval/0, HumanEval/1, HumanEval/2`
+- **JSON array** (single or double quotes) —
+  `["HumanEval/0", "HumanEval/1"]`
+- **Python list literal** (trailing commas OK) —
+  `['HumanEval/0', 'HumanEval/1',]`
+- **Range shorthand** — `HumanEval/0-4` expands to 0..4.
+- **Prefix shorthand** — `HumanEval/0,1,2,3` expands to 0..3.
+- **Mixed range + list** — `HumanEval/0-2, HumanEval/3, HumanEval/4`.
+- **Markdown bullets** — `-`, `*`, `•`, `→`, `>`, numbered `1.` /
+  `2.`.
+- **Markdown single-column table** — header + separator + rows.
+- **CSV with header** — first column wins, sibling columns dropped.
+- **Triple-backtick code fences** — `` ``` `` lines are stripped,
+  contents kept.
+- **`#` comments** — everything after `#` on a line is dropped.
+- **URL prefixes** — `/api/v1/tasks/` and `/tasks/` are stripped.
+
+After parsing, the result is sorted + deduplicated. The preview
+line below the textarea shows `Parsed N ids` (or a red error
+naming the first offending segment).
+
+The "Validate against catalog" button does a single
+`GET /api/v1/tasks?task_ids=...` roundtrip and surfaces any
+unknown ids inline; submission itself validates server-side, so
+the catalog check is purely a UX prefetch.
+
+## Benchmarks and datasets
+
+### `loom datasets` reference
 
 ```
 loom datasets list                  # union: installed + catalog + remote
@@ -1008,21 +1256,9 @@ the agent call within the trial before marking the trial failed. If retry
 budget is exhausted, rerun the remaining failed cases from Batch Detail instead
 of launching the whole batch again.
 
-## `loom config` reference
+## Reference
 
-Config persists to `$XDG_CONFIG_HOME/loom/config.toml` (defaults to
-`~/.config/loom/config.toml`). Tokens are redacted in `loom config show`.
-
-```
-loom config set token.<provider> <key>    # provider in {anthropic, openai, google}
-loom config set server_url <url>          # optional Loom service URL
-loom config show
-```
-
-Env vars override config: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
-`GOOGLE_API_KEY`, `LOOM_SERVER_URL`, `LOOM_API_TOKEN`.
-
-## `loom run` reference
+### `loom run` reference
 
 ```
 loom run
@@ -1050,19 +1286,6 @@ loom run
   ships 11 concrete adapters (claude-code, codex, openhands, aider,
   opencode, swe-agent, mini-swe-agent, openhands-sdk, gemini-cli,
   qwen-cli, kimi-cli)
-
-For service-mode `litellm` trials and Codex subprocess trials, API
-clients can include `trial_config.request_params` to pin non-sensitive
-generation controls such as `temperature`, `top_p`, `seed`, max output
-limits, reasoning effort, tool-choice mode, and provider decoding extras.
-Loom strips prompt/message payloads, headers, API keys, credentials, and unknown
-extras before forwarding the request, then exposes the effective
-controls in provider debug evidence. Codex needs an adapter-specific
-bridge because its CLI constructs provider requests itself: the worker
-passes sanitized per-trial controls to the Codex launcher as
-`LOOM_CODEX_SETTINGS_JSON`, and the launcher/Gateway sanitize those
-values again before forwarding and auditing them. Other subprocess
-agents need their own adapter-specific support.
 
 In service mode, the SPA and API only allow launch for agents whose
 runtime is ready in the deployed worker/sandbox contract. `GET
@@ -1116,10 +1339,24 @@ trial sandbox at spawn time on top of the benchmark's `task_image`.
 The first trial of a new `(task_image, agent)` combination takes a
 few extra minutes (package installs); subsequent trials hit the
 content-addressed cache and start instantly. See
-[`docs/operator-runbook.md#trial-cache-per-trial-agent-install`](operator-runbook.md#trial-cache-per-trial-agent-install)
+[`operator-runbook.md#trial-cache-per-trial-agent-install`](operator-runbook.md#trial-cache-per-trial-agent-install)
 for the operator-side knobs.
 
-## Rate cards
+### `loom config` reference
+
+Config persists to `$XDG_CONFIG_HOME/loom/config.toml` (defaults to
+`~/.config/loom/config.toml`). Tokens are redacted in `loom config show`.
+
+```
+loom config set token.<provider> <key>    # provider in {anthropic, openai, google}
+loom config set server_url <url>          # optional Loom service URL
+loom config show
+```
+
+Env vars override config: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+`GOOGLE_API_KEY`, `LOOM_SERVER_URL`, `LOOM_API_TOKEN`.
+
+### Rate cards
 
 Rate cards live at `~/.config/loom/rate-cards.toml`, seeded on first
 run from `src/loom_cli/data/default-rate-cards.toml`. Edit the file
@@ -1144,48 +1381,6 @@ When inspecting a main production batch plus linked supplemental reruns, pass
 `loom eval usage --batch-id <main-batch-id> --include-batch-family`. Add
 `--include-batches` to see the main and rerun child batches that contributed
 to the family total.
-
-<a id="pasting-task-ids"></a>
-
-## Pasting task ids
-
-The SPA's New batch form has an "Explicit task ids" subset mode
-that accepts a paste box. The parser handles every format users
-tend to paste from — notebooks, spreadsheets, chat messages, URLs,
-ranges, JSON arrays. All of the following paste cleanly:
-
-- **One per line** —
-  ```
-  HumanEval/0
-  HumanEval/1
-  HumanEval/2
-  ```
-- **Comma / semicolon / pipe / tab / 2+-space separated** —
-  `HumanEval/0, HumanEval/1, HumanEval/2`
-- **JSON array** (single or double quotes) —
-  `["HumanEval/0", "HumanEval/1"]`
-- **Python list literal** (trailing commas OK) —
-  `['HumanEval/0', 'HumanEval/1',]`
-- **Range shorthand** — `HumanEval/0-4` expands to 0..4.
-- **Prefix shorthand** — `HumanEval/0,1,2,3` expands to 0..3.
-- **Mixed range + list** — `HumanEval/0-2, HumanEval/3, HumanEval/4`.
-- **Markdown bullets** — `-`, `*`, `•`, `→`, `>`, numbered `1.` /
-  `2.`.
-- **Markdown single-column table** — header + separator + rows.
-- **CSV with header** — first column wins, sibling columns dropped.
-- **Triple-backtick code fences** — `` ``` `` lines are stripped,
-  contents kept.
-- **`#` comments** — everything after `#` on a line is dropped.
-- **URL prefixes** — `/api/v1/tasks/` and `/tasks/` are stripped.
-
-After parsing, the result is sorted + deduplicated. The preview
-line below the textarea shows `Parsed N ids` (or a red error
-naming the first offending segment).
-
-The "Validate against catalog" button does a single
-`GET /api/v1/tasks?task_ids=...` roundtrip and surfaces any
-unknown ids inline; submission itself validates server-side, so
-the catalog check is purely a UX prefetch.
 
 ## Troubleshooting
 
