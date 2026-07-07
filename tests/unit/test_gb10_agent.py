@@ -476,7 +476,76 @@ def test_apply_updates_source_checkout_before_compose(
         ],
     ]
     assert commands[2][:3] == ["docker", "compose", "--env-file"]
-    assert commands[2][3].startswith(str(env_file.parent / f".{env_file.name}."))
+    temp_env_path = Path(commands[2][3])
+    assert temp_env_path.parent != env_file.parent
+    assert not temp_env_path.exists()
+
+
+def test_apply_cleans_legacy_repo_temp_env_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_dir = tmp_path / "loom"
+    source_dir.mkdir()
+    env_file = source_dir / ".env"
+    env_file.write_text(
+        "LOOM_IMAGE_TAG=old-image\n"
+        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_MAX_CONCURRENT=5\n"
+        "LOOM_WORKER_ENV_CONFIG_VERSION=old-env\n",
+        encoding="utf-8",
+    )
+    stale_temp = source_dir / "..env.stale.tmp"
+    stale_temp.write_text("LOOM_WORKER_TOKEN=placeholder\n", encoding="utf-8")
+    unrelated = source_dir / "..env.stale.txt"
+    unrelated.write_text("keep\n", encoding="utf-8")
+    compose_file = source_dir / "docker-compose.remote-worker.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    desired = DesiredState(
+        environment="production",
+        pool_name="gb10-arm64",
+        image_tag="new-image",
+        max_concurrent=10,
+        env_config_version="new-env",
+        rollout_policy={"mode": "all"},
+        env={},
+    )
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(gb10_agent, "_fetch_desired_state", lambda _args: desired)
+    monkeypatch.setattr(gb10_agent, "_report_node", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        gb10_agent,
+        "_run",
+        lambda argv, *, dry_run: commands.append(list(argv)),
+    )
+
+    rc = gb10_agent._apply(
+        SimpleNamespace(
+            cp_url="http://cp:8080",
+            admin_token="env:LOOM_ADMIN_TOKEN",
+            environment="production",
+            pool_name="gb10-arm64",
+            hostname="trt-gb10-1",
+            env_file=env_file,
+            compose_file=[compose_file],
+            source_dir=source_dir,
+            worker_token=None,
+            service="worker",
+            drain_timeout_sec=600,
+            dry_run=False,
+            rollback=False,
+            force=False,
+            format="text",
+        )
+    )
+
+    assert rc == 0
+    assert not stale_temp.exists()
+    assert unrelated.exists()
+    temp_env_path = Path(commands[0][3])
+    assert temp_env_path.parent != source_dir
+    assert not temp_env_path.exists()
 
 
 def test_apply_stopped_intent_stops_without_restart(

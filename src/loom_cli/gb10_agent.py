@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -83,23 +84,15 @@ class DesiredState:
             rollout_policy=dict(data.get("rollout_policy") or {}),
             env={str(k): str(v) for k, v in dict(data.get("env") or {}).items()},
             target_slots=(
-                int(data["target_slots"])
-                if data.get("target_slots") is not None
-                else None
+                int(data["target_slots"]) if data.get("target_slots") is not None else None
             ),
-            host_intents={
-                str(k): str(v)
-                for k, v in dict(data.get("host_intents") or {}).items()
-            },
+            host_intents={str(k): str(v) for k, v in dict(data.get("host_intents") or {}).items()},
             force=bool(data.get("force", False)),
             previous_image_tag=data.get("previous_image_tag"),
             previous_max_concurrent=data.get("previous_max_concurrent"),
             previous_env_config_version=data.get("previous_env_config_version"),
             previous_source_git_commit=data.get("previous_source_git_commit"),
-            previous_env={
-                str(k): str(v)
-                for k, v in dict(data.get("previous_env") or {}).items()
-            },
+            previous_env={str(k): str(v) for k, v in dict(data.get("previous_env") or {}).items()},
         )
 
     def rollback_target(self) -> DesiredState:
@@ -297,9 +290,8 @@ def _desired_env_updates(desired: DesiredState, *, hostname: str | None = None) 
 
 def _redact_preview(key: str, value: str) -> str:
     upper_key = key.upper()
-    if (
-        any(part in upper_key for part in _SECRET_KEY_PARTS)
-        or any(value.strip().startswith(prefix) for prefix in _SECRET_VALUE_PREFIXES)
+    if any(part in upper_key for part in _SECRET_KEY_PARTS) or any(
+        value.strip().startswith(prefix) for prefix in _SECRET_VALUE_PREFIXES
     ):
         return "<redacted>"
     return value
@@ -472,10 +464,7 @@ def _source_matches_desired(
 ) -> bool:
     if not desired.source_git_commit:
         return True
-    return (
-        local.source_git_commit == desired.source_git_commit
-        and local.source_git_dirty is False
-    )
+    return local.source_git_commit == desired.source_git_commit and local.source_git_dirty is False
 
 
 def _update_source_checkout(
@@ -559,18 +548,48 @@ def _pull_or_build(compose_base: list[str], service: str, *, dry_run: bool) -> N
 
 
 def _write_temp_env_file(env_file: Path, rendered: str) -> Path:
+    runtime_dir = _runtime_temp_env_dir()
     with tempfile.NamedTemporaryFile(
         "w",
         encoding="utf-8",
         delete=False,
-        dir=env_file.parent,
-        prefix=f".{env_file.name}.",
+        dir=runtime_dir,
+        prefix=f"loom-{env_file.name.lstrip('.') or 'env'}-",
         suffix=".tmp",
     ) as f:
         f.write(rendered)
         temp_path = Path(f.name)
     temp_path.chmod(0o600)
     return temp_path
+
+
+def _runtime_temp_env_dir() -> Path:
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    if base:
+        path = Path(base) / "loom-gb10-agent"
+    else:
+        path = Path(tempfile.gettempdir()) / f"loom-gb10-agent-{os.getuid()}"
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+    return path
+
+
+def _cleanup_legacy_temp_env_files(env_file: Path) -> None:
+    prefix = f".{env_file.name}."
+    try:
+        candidates = list(env_file.parent.iterdir())
+    except OSError:
+        return
+    for candidate in candidates:
+        if (
+            candidate.name.startswith(prefix)
+            and candidate.name.endswith(".tmp")
+            and candidate.is_file()
+        ):
+            candidate.unlink(missing_ok=True)
 
 
 def _apply(args: argparse.Namespace) -> int:
@@ -623,6 +642,7 @@ def _apply(args: argparse.Namespace) -> int:
         if args.dry_run:
             _print_env_update_preview(updates)
         else:
+            _cleanup_legacy_temp_env_files(args.env_file)
             temp_env_file = _write_temp_env_file(args.env_file, rendered)
             compose_env_file = temp_env_file
         if not _source_matches_desired(desired=desired, local=local):

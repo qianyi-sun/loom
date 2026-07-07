@@ -21,6 +21,8 @@ build/
 .env
 .env.*
 !.env.example
+..env.*.tmp
+gb10-node-agent.env
 *.local
 .env.local
 
@@ -74,4 +76,3 @@ uv.lock
 # `loom cluster bootstrap-storage-lifecycle` (see docs/operator-runbook.md).
 # The active copy is per-deployment and must not be committed.
 config/storage-lifecycle.toml
-
