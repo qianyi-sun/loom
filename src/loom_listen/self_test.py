@@ -48,7 +48,7 @@ async def notify_round_trip(
 
     try:
         return await asyncio.wait_for(_wait_for_payload(), timeout=timeout_sec)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning(
             "listen_watcher_selftest_timeout channel=%s payload=%s timeout_sec=%s "
             "— watcher will fall back to poll-only mode",
@@ -58,5 +58,5 @@ async def notify_round_trip(
     finally:
         try:
             await conn.execute(f"UNLISTEN {_SELF_TEST_CHANNEL}")
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.debug("listen_watcher_selftest_unlisten_failed", exc_info=True)

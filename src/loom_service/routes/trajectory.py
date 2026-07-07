@@ -45,12 +45,11 @@ import psycopg
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-
-from loom_listen.metrics import PUSH_MODE_GAUGE as _PUSH_MODE_GAUGE
-from loom_listen.self_test import notify_round_trip
 from sqlalchemy import select
 
 from loom.db.schema import Trial, TrialEvent
+from loom_listen.metrics import PUSH_MODE_GAUGE as _PUSH_MODE_GAUGE
+from loom_listen.self_test import notify_round_trip
 from loom_service.auth_guards import (
     require_scope,
     require_team_or_admin,
