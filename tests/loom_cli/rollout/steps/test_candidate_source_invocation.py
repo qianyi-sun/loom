@@ -596,6 +596,8 @@ rate_card_provider = "yibuapi"
         "rate-card",
         "--rate-card-provider",
         "yibuapi",
+        "--admin-actor",
+        "rollout-production-defaults",
     ]
     assert calls[2]["argv"][3:] == [
         "providers",

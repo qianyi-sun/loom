@@ -1268,10 +1268,11 @@ It is separate from the Control Plane admin token. Step 12 resolves this source
 inside a temporary, private `$XDG_CONFIG_HOME` and writes only the token value
 there for the duration of `loom admin rate-cards sync-yibuapi` and
 `loom providers update/show`; rollout logs and inputs retain only the source
-reference. The server URL is derived from the rollout cluster config, for
-example `https://yylx.world/dev` for staging and `https://yylx.world/prod` for
-first prod. Do not use stdin `-`; the source must be replayable as `env:VAR` or
-`file:PATH`.
+reference. Provider default mutations set `X-Loom-Admin-Actor:
+rollout-production-defaults` for the service audit trail. The server URL is
+derived from the rollout cluster config, for example `https://yylx.world/dev`
+for staging and `https://yylx.world/prod` for first prod. Do not use stdin
+`-`; the source must be replayable as `env:VAR` or `file:PATH`.
 
 Step 14 defaults to `LOOM_SMOKE_SUBMIT_MODE=user-token`. In that mode, the live
 trial submit uses `LOOM_SMOKE_API_TOKEN`, and that credential must be a
