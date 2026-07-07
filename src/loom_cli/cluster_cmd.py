@@ -4147,6 +4147,20 @@ def _bootstrap_secrets(args: argparse.Namespace) -> int:
     return 0
 
 
+def _derive_pool_dsn(args: argparse.Namespace) -> int:
+    from loom_config.bootstrap import _rewrite_dsn_host_port
+
+    try:
+        pool_dsn = _rewrite_dsn_host_port(
+            args.dsn, host="loom-pgbouncer", port=6432,
+        )
+    except ValueError as exc:
+        print(f"derive-pool-dsn: {exc}", file=sys.stderr)
+        return 1
+    print(pool_dsn)
+    return 0
+
+
 def _bootstrap_storage_lifecycle(args: argparse.Namespace) -> int:
     """Apply storage retention rules from storage-lifecycle.toml.
 
@@ -4996,6 +5010,17 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_boot.set_defaults(handler=_bootstrap_secrets)
+
+    p_derive = sub.add_parser(
+        "derive-pool-dsn",
+        help="Derive the pgbouncer pool DSN from a direct-to-Postgres DSN "
+             "by rewriting host+port (#609).",
+    )
+    p_derive.add_argument(
+        "dsn",
+        help="Direct-to-Postgres DSN (postgresql+psycopg://user:pass@host:port/db)",
+    )
+    p_derive.set_defaults(handler=_derive_pool_dsn)
 
     p_lifecycle = sub.add_parser(
         "bootstrap-storage-lifecycle",
