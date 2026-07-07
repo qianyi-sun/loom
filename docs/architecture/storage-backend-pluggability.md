@@ -308,7 +308,10 @@ In order, after this design lands:
    back to env vars for the static-keys case so existing
    deployments keep working.
 4. **Staging-smoke variant against real AWS S3 in a CI account.**
-   Tests the `irsa` + `static_keys` paths end-to-end.
+   Tests the `irsa` + `static_keys` paths end-to-end when the CI
+   environment supplies the required AWS S3 static-key, region, and
+   bucket variables; otherwise the real-S3 subjob skips cleanly after
+   listing only the missing variable names.
 5. **GCS lifecycle renderer.** Lands when the first GCS deployment
    asks for it; not blocking on the rest.
 6. **Operator-runbook per-shape sections.** One subsection per
