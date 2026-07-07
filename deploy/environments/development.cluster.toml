@@ -15,3 +15,10 @@ artifacts_bucket = "loom-dev-artifacts"
 # the odd one out.
 [k8s_worker]
 enabled = true
+
+# Development kind clusters don't need pgbouncer (#609):
+# - Single-node kind has no realistic connection-count pressure.
+# - Extra Deployment slows kind boot with no upside.
+# - Staging/production use the schema default (enabled=true).
+[pgbouncer]
+enabled = false
