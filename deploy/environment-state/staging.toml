@@ -108,3 +108,5 @@ pools = ["gb10-arm64"]
 expected_repo_ref = "${IMAGE_TAG}"
 require_clean_repo = true
 require_worker_token_parity = true
+materialize = true
+env_template_glob = "/shared_work/qianyi/loom-worker-capacity/staging-gb10-worker-staging-*.env"

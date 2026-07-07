@@ -1268,11 +1268,15 @@ environment-state check is replayed during resume. Step 10 passes this source
 only to `loom admin environment-state check --worker-token` so external Slurm
 runner `env_file` fingerprints can be compared against the active protected
 worker token without writing token values to logs or evidence. It does not
-create the external runner env file or shared checkout. When the environment
-profile declares `external_slurm_runner_prerequisites`, materialize the
-declared `env_file` and `repo_dir` for the rollout image tag before rerunning
-step 10; the check should then prove existence, git HEAD, clean status, and
-worker-token fingerprint parity.
+pass the worker token to environment-state apply. When the environment profile
+declares `external_slurm_runner_prerequisites` with `materialize = true`, step
+10 first reconciles the declared `env_file` and `repo_dir` for the rollout
+image tag, then runs apply/check. The env file is copied from the profile's
+template glob when missing, only release keys and the active worker token are
+updated, mode is forced to `0600`, and evidence records paths, mode, git HEAD,
+clean status, and redacted worker-token fingerprint only. Profiles that do not
+opt in to `materialize = true` remain operator-owned prerequisites and must be
+created before rerunning step 10.
 
 `SERVICE_TOKEN_SOURCE` is a Service API token source reference for
 rollout-owned CLI commands that mutate or verify DB-backed service defaults.

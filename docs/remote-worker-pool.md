@@ -1312,6 +1312,14 @@ per node policy has a theoretical ceiling of 150 slots:
 }
 ```
 
+The staging environment-state profile opts into rollout-owned materialization
+for these external runner prerequisites. During `loom cluster rollout`, step 10
+copies the latest matching staging GB10 env file template when the target
+`env_file` is missing, rewrites only release keys plus the active worker token
+from the replayable `--worker-token` source, forces mode `0600`, and prepares a
+clean shared checkout at the target `repo_dir` before the environment-state
+check validates existence, git HEAD, clean status, and token parity.
+
 Keep the GB10 node-agent path only for Docker Compose rollout validation,
 legacy compatibility, or break-glass operation when Slurm is unavailable. The
 Control Plane does not SSH into hosts. Each `loom worker gb10-agent apply`
