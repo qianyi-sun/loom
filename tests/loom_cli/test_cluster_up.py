@@ -484,11 +484,12 @@ def _patch_full_up_path(
     collect_preflight, apply_manifests, collect_status. Returns a
     `captures` dict tests can inspect for what got called with what."""
     captures: dict[str, Any] = {}
+    apps_client = object()
 
     # k8s clients — opaque sentinels; preflight/status are patched.
     monkeypatch.setattr(
         "loom_cli.cluster_cmd._load_clients",
-        lambda _ctx: (object(), object(), object(), object()),
+        lambda _ctx: (apps_client, object(), object(), object()),
     )
 
     from loom_cli.cluster_cmd import PreflightCheck, PreflightReport
@@ -540,10 +541,11 @@ def _patch_full_up_path(
         _append_target_schema_doctor_check,
     )
 
-    def _apply(yaml_text, ns, *, context, extra_args=()):  # type: ignore[no-untyped-def]
+    def _apply(yaml_text, ns, *, context, extra_args=(), apps_v1=None):  # type: ignore[no-untyped-def]
         captures["apply_yaml_len"] = len(yaml_text)
         captures["apply_yaml_text"] = yaml_text
         captures["apply_ns"] = ns
+        captures["apply_apps_v1"] = apps_v1
         return ApplyResult(
             returncode=apply_returncode,
             summary_lines=(
@@ -608,6 +610,7 @@ def test_cli_up_happy_path(
     assert rc == 0
     assert captures.get("preflight_called") is True
     assert captures.get("target_doctor_called") is True
+    assert captures.get("apply_apps_v1") is not None
     assert captures.get("waited") is True
     out = capsys.readouterr().out
     assert "Preflight" in out

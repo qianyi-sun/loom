@@ -3094,6 +3094,7 @@ def apply_manifests(
     *,
     context: str | None,
     extra_args: tuple[str, ...] = (),
+    apps_v1: Any | None = None,
 ) -> ApplyResult:
     """Pipe rendered manifests into `kubectl apply -f -`. We shell out
     to kubectl rather than use the python client's apply path because
@@ -3114,24 +3115,287 @@ def apply_manifests(
             "on PATH.",
         )
 
+    apply_text = yaml_text
+    statefulset_patches: list[tuple[str, dict[str, Any]]] = []
+    if apps_v1 is not None:
+        prepared = _prepare_statefulsets_for_apply(
+            yaml_text,
+            apps_v1=apps_v1,
+            namespace=namespace,
+        )
+        if prepared.returncode != 0:
+            return ApplyResult(
+                returncode=prepared.returncode,
+                summary_lines=[],
+                stderr=prepared.stderr,
+            )
+        apply_text = prepared.yaml_text
+        statefulset_patches = prepared.statefulset_patches
+
+    summary_lines: list[str] = []
+    stderr_parts: list[str] = []
+
     cmd: list[str] = ["kubectl", "apply", "-n", namespace, "-f", "-"]
     if context:
         cmd.extend(["--context", context])
     cmd.extend(extra_args)
 
-    proc = subprocess.run(
-        cmd,
-        input=yaml_text,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    summary_lines = [line for line in proc.stdout.splitlines() if line.strip()]
+    if apply_text.strip():
+        proc = subprocess.run(
+            cmd,
+            input=apply_text,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        summary_lines.extend(line for line in proc.stdout.splitlines() if line.strip())
+        if proc.stderr:
+            stderr_parts.append(proc.stderr)
+        if proc.returncode != 0:
+            return ApplyResult(
+                returncode=proc.returncode,
+                summary_lines=summary_lines,
+                stderr="".join(stderr_parts),
+            )
+
+    for name, patch in statefulset_patches:
+        patch_cmd = [
+            "kubectl",
+            "patch",
+            "statefulset",
+            name,
+            "-n",
+            namespace,
+            "--type",
+            "merge",
+            "-p",
+            json.dumps(patch, sort_keys=True),
+        ]
+        if context:
+            patch_cmd.extend(["--context", context])
+        proc = subprocess.run(
+            patch_cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        summary_lines.extend(line for line in proc.stdout.splitlines() if line.strip())
+        if proc.stderr:
+            stderr_parts.append(proc.stderr)
+        if proc.returncode != 0:
+            return ApplyResult(
+                returncode=proc.returncode,
+                summary_lines=summary_lines,
+                stderr="".join(stderr_parts),
+            )
+
     return ApplyResult(
-        returncode=proc.returncode,
+        returncode=0,
         summary_lines=summary_lines,
-        stderr=proc.stderr,
+        stderr="".join(stderr_parts),
     )
+
+
+@dataclass(frozen=True)
+class _PreparedApply:
+    returncode: int
+    yaml_text: str
+    statefulset_patches: list[tuple[str, dict[str, Any]]]
+    stderr: str = ""
+
+
+_STATEFULSET_MUTABLE_SPEC_FIELDS = {
+    "replicas",
+    "template",
+    "updateStrategy",
+    "revisionHistoryLimit",
+    "persistentVolumeClaimRetentionPolicy",
+    "minReadySeconds",
+    "ordinals",
+}
+_STATEFULSET_IMMUTABLE_SPEC_FIELDS = (
+    "podManagementPolicy",
+    "selector",
+    "serviceName",
+    "volumeClaimTemplates",
+)
+
+
+def _prepare_statefulsets_for_apply(
+    yaml_text: str,
+    *,
+    apps_v1: Any,
+    namespace: str,
+) -> _PreparedApply:
+    import yaml
+
+    docs = [doc for doc in yaml.safe_load_all(yaml_text) if doc]
+    apply_docs: list[dict[str, Any]] = []
+    patches: list[tuple[str, dict[str, Any]]] = []
+    errors: list[str] = []
+
+    for doc in docs:
+        if not isinstance(doc, dict) or doc.get("kind") != "StatefulSet":
+            apply_docs.append(doc)
+            continue
+        metadata = _dict_child(doc, "metadata")
+        name = str(metadata.get("name") or "")
+        if not name:
+            apply_docs.append(doc)
+            continue
+        try:
+            live = apps_v1.read_namespaced_stateful_set(
+                name=name,
+                namespace=namespace,
+            )
+        except KeyError:
+            apply_docs.append(doc)
+            continue
+        except Exception as exc:
+            if _is_k8s_not_found(exc):
+                apply_docs.append(doc)
+                continue
+            errors.append(
+                f"could not read existing StatefulSet {name!r}: "
+                f"{_exception_to_note(exc)}"
+            )
+            continue
+
+        drift = _statefulset_immutable_drift(name, doc, _k8s_mapping(live, apps_v1))
+        if drift:
+            errors.extend(drift)
+            continue
+        patch = _statefulset_mutable_patch(doc)
+        if patch:
+            patches.append((name, patch))
+
+    if errors:
+        return _PreparedApply(
+            returncode=1,
+            yaml_text="",
+            statefulset_patches=[],
+            stderr=(
+                "existing StatefulSet immutable drift blocks safe apply:\n"
+                + "\n".join(f"  {line}" for line in errors)
+                + "\n"
+            ),
+        )
+    return _PreparedApply(
+        returncode=0,
+        yaml_text=yaml.safe_dump_all(apply_docs, sort_keys=False) if apply_docs else "",
+        statefulset_patches=patches,
+    )
+
+
+def _k8s_mapping(obj: Any, apps_v1: Any) -> dict[str, Any]:
+    if isinstance(obj, dict):
+        return obj
+    serializer = getattr(getattr(apps_v1, "api_client", None), "sanitize_for_serialization", None)
+    if callable(serializer):
+        serialised = serializer(obj)
+        if isinstance(serialised, dict):
+            return serialised
+    to_dict = getattr(obj, "to_dict", None)
+    if callable(to_dict):
+        mapped = to_dict()
+        if isinstance(mapped, dict):
+            return mapped
+    return {}
+
+
+def _dict_child(mapping: dict[str, Any], key: str) -> dict[str, Any]:
+    value = mapping.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def _statefulset_immutable_drift(
+    name: str,
+    desired: dict[str, Any],
+    live: dict[str, Any],
+) -> list[str]:
+    desired_spec = _dict_child(desired, "spec")
+    live_spec = _dict_child(live, "spec")
+    drift: list[str] = []
+    for field_name in _STATEFULSET_IMMUTABLE_SPEC_FIELDS:
+        desired_value = desired_spec.get(field_name)
+        live_value = live_spec.get(field_name)
+        if field_name == "podManagementPolicy":
+            desired_value = desired_value or "OrderedReady"
+            live_value = live_value or "OrderedReady"
+        if field_name == "volumeClaimTemplates":
+            desired_value = _normalise_volume_claim_templates(desired_value)
+            live_value = _normalise_volume_claim_templates(live_value)
+        else:
+            desired_value = _prune_k8s_defaults(desired_value)
+            live_value = _prune_k8s_defaults(live_value)
+        if desired_value != live_value:
+            drift.append(
+                f"{name}: spec.{field_name} differs from the live StatefulSet; "
+                "this field is immutable"
+            )
+    return drift
+
+
+def _normalise_volume_claim_templates(value: Any) -> Any:
+    if not isinstance(value, list):
+        return _prune_k8s_defaults(value)
+    normalised: list[Any] = []
+    for item in value:
+        if not isinstance(item, dict):
+            normalised.append(item)
+            continue
+        claim = dict(item)
+        claim.pop("apiVersion", None)
+        claim.pop("kind", None)
+        spec = claim.get("spec")
+        if isinstance(spec, dict):
+            spec = dict(spec)
+            spec.pop("volumeName", None)
+            if spec.get("storageClassName") in ("", None):
+                spec.pop("storageClassName", None)
+            if spec.get("volumeMode") in ("Filesystem", None):
+                spec.pop("volumeMode", None)
+            for optional_key in ("dataSource", "dataSourceRef", "selector"):
+                if spec.get(optional_key) in (None, {}, []):
+                    spec.pop(optional_key, None)
+            claim["spec"] = spec
+        normalised.append(_prune_k8s_defaults(claim))
+    return normalised
+
+
+def _prune_k8s_defaults(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, child in value.items():
+            pruned = _prune_k8s_defaults(child)
+            if pruned in (None, {}, []):
+                continue
+            out[key] = pruned
+        return out
+    if isinstance(value, list):
+        return [_prune_k8s_defaults(item) for item in value]
+    return value
+
+
+def _statefulset_mutable_patch(doc: dict[str, Any]) -> dict[str, Any]:
+    patch: dict[str, Any] = {}
+    metadata = _dict_child(doc, "metadata")
+    metadata_patch = {
+        key: metadata[key]
+        for key in ("labels", "annotations")
+        if key in metadata
+    }
+    if metadata_patch:
+        patch["metadata"] = metadata_patch
+    spec = _dict_child(doc, "spec")
+    spec_patch = {
+        key: spec[key]
+        for key in _STATEFULSET_MUTABLE_SPEC_FIELDS
+        if key in spec
+    }
+    if spec_patch:
+        patch["spec"] = spec_patch
+    return patch
 
 
 def wait_for_ready(
@@ -3314,6 +3578,7 @@ def _up_impl(args: argparse.Namespace) -> int:
             manifests,
             args.namespace,
             context=args.context,
+            apps_v1=apps_v1,
         )
     except RuntimeError as exc:
         # kubectl missing.
