@@ -661,7 +661,7 @@ def test_render_rejects_redirect_host_matching_canonical_host() -> None:
 def test_render_rejects_redirect_host_outside_www_counterpart() -> None:
     cfg = ClusterConfig(
         ingress_host="yylx.world",
-        ingress_redirect_hosts=("staging.yylx.world",),
+        ingress_redirect_hosts=("staging.example.com",),
     )
     with pytest.raises(ValueError, match="www/non-www counterpart"):
         render_manifests(cfg)
