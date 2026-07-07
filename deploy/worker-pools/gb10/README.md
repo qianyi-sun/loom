@@ -312,7 +312,10 @@ write desired state to the Control Plane, and each GB10 host periodically runs
 `loom worker gb10-agent apply` to compare the desired image tag, pool name,
 trial concurrency, and env/config version with its local env file. The Control
 Plane does not SSH into GB10 hosts and does not store worker tokens or MinIO
-credentials.
+credentials. Apply is restartable: when the local release metadata already
+matches the Control Plane but the active-intent Docker Compose worker is not
+running, the agent still runs `docker compose up -d worker` so a rerun repairs a
+missing worker container instead of reporting only `already current`.
 
 Create `/home/qianyi/loom-worker-build-staging/gb10-node-agent.env` on every
 host with mode `600`:
@@ -492,7 +495,10 @@ systemctl --user start loom-gb10-node-agent.service
 normally finishes as `ActiveState=inactive` / `SubState=dead`; check
 `systemctl --user show loom-gb10-node-agent.service -p Result -p ExecMainStatus`
 and expect `Result=success` with `ExecMainStatus=0`. Do not treat `is-active`
-returning inactive as a failed prep by itself.
+returning inactive as a failed prep by itself. Validate worker availability from
+the Control Plane status artifact instead: active release hosts must have a
+fresh `worker_id`, `worker_status=active`, `worker_fresh=true`, and
+`docker` in `worker_backend_names`.
 
 Rollback publishes the previous desired image/concurrency/env version back to
 the Control Plane first, then applies it locally. This keeps the periodic

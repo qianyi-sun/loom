@@ -712,8 +712,12 @@ non-secret desired image/env-config state and source-checkout provenance. The
 profile writes `source_git_commit` from `GIT_SHA`; active nodes must report a
 clean git checkout at that commit. Missing provenance, a stale
 `compose_project_dir`, a dirty checkout, or a source commit that differs from
-desired state is a hard failure even when image/env fields are current. During
-worker-token rotation, also run
+desired state is a hard failure even when image/env fields are current. The same
+artifact must also show a linked worker registry row for every active GB10 host:
+`worker_id` present, `worker_status=active`, `worker_fresh=true`, and
+`worker_backend_names` containing `docker`. This prevents release-gate from
+passing nodes that applied env/source state but have no fresh worker available
+for `/api/v1/backends` and smoke submission. During worker-token rotation, also run
 `loom worker gb10-agent plan/apply --worker-token file:/...` on each GB10 host,
 then verify `loom resources status --json` shows fresh `gb10-arm64` active
 workers and the Control Plane logs no new `/workers/register` 401s. The

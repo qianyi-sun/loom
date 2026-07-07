@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -263,6 +263,101 @@ def test_node_report_redacts_secret_looking_status_text(app) -> None:
     assert "<redacted>" in body
 
 
+def test_status_links_active_fresh_worker_by_hostname_and_pool(
+    app,
+    postgres_url: str,
+) -> None:
+    worker_id = _seed_worker(
+        postgres_url,
+        hostname="trt-gb10-1",
+        pool_name="gb10-arm64",
+        capabilities=[{"backend": "docker"}],
+    )
+    with TestClient(app) as client:
+        headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+        desired = client.put(
+            "/admin/gb10-worker-pools/production/gb10-arm64/desired-state",
+            headers=headers,
+            json={
+                "image_tag": "staging-abc123",
+                "max_concurrent": 10,
+                "env_config_version": "staging-abc123",
+                "host_intents": {"trt-gb10-1": "active"},
+            },
+        )
+        assert desired.status_code == 200, desired.text
+        report = client.post(
+            "/admin/gb10-worker-pools/production/gb10-arm64/nodes/trt-gb10-1/report",
+            headers=headers,
+            json={
+                "current_image_tag": "staging-abc123",
+                "current_max_concurrent": 10,
+                "current_env_config_version": "staging-abc123",
+                "current_intent": "active",
+                "apply_state": "applied",
+                "last_apply_result": "already current",
+            },
+        )
+        assert report.status_code == 200, report.text
+
+        status = client.get(
+            "/admin/gb10-worker-pools/status",
+            headers=headers,
+        )
+        assert status.status_code == 200, status.text
+        node = status.json()["nodes"][0]
+
+    assert node["worker_id"] == worker_id
+    assert node["worker_status"] == "active"
+    assert node["worker_fresh"] is True
+    assert node["worker_backend_names"] == ["docker"]
+
+
+def test_status_marks_stale_linked_worker_not_fresh(
+    app,
+    postgres_url: str,
+) -> None:
+    worker_id = _seed_worker(
+        postgres_url,
+        hostname="trt-gb10-1",
+        pool_name="gb10-arm64",
+        capabilities=[{"backend": "docker"}],
+        last_seen_at=datetime.now(UTC) - timedelta(seconds=120),
+    )
+    with TestClient(app) as client:
+        headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+        assert client.put(
+            "/admin/gb10-worker-pools/production/gb10-arm64/desired-state",
+            headers=headers,
+            json={
+                "image_tag": "staging-abc123",
+                "max_concurrent": 10,
+                "env_config_version": "staging-abc123",
+                "host_intents": {"trt-gb10-1": "active"},
+            },
+        ).status_code == 200
+        report = client.post(
+            "/admin/gb10-worker-pools/production/gb10-arm64/nodes/trt-gb10-1/report",
+            headers=headers,
+            json={
+                "current_image_tag": "staging-abc123",
+                "current_max_concurrent": 10,
+                "current_env_config_version": "staging-abc123",
+                "current_intent": "active",
+                "apply_state": "applied",
+                "worker_id": worker_id,
+            },
+        )
+        assert report.status_code == 200, report.text
+        status = client.get("/admin/gb10-worker-pools/status", headers=headers)
+        assert status.status_code == 200, status.text
+        node = status.json()["nodes"][0]
+
+    assert node["worker_id"] == worker_id
+    assert node["worker_status"] == "active"
+    assert node["worker_fresh"] is False
+
+
 # ──────────────────────────────────────────────────────────────────────
 # #368: stopped host intent must drain the worker registry
 # ──────────────────────────────────────────────────────────────────────
@@ -274,6 +369,9 @@ def _seed_worker(
     hostname: str,
     pool_name: str = "gb10-arm64",
     max_concurrent: int = 10,
+    capabilities: list[dict[str, str]] | None = None,
+    status: str = "active",
+    last_seen_at: datetime | None = None,
 ) -> str:
     """Insert an active worker row directly. Returns the worker id as
     str (UUID) so tests can pass it back in as the report worker_id."""
@@ -286,13 +384,17 @@ def _seed_worker(
                 id=worker_id,
                 hostname=hostname,
                 version="test",
-                capabilities=[],
+                capabilities=(
+                    capabilities
+                    if capabilities is not None
+                    else [{"backend": "docker"}]
+                ),
                 pool_name=pool_name,
                 max_concurrent=max_concurrent,
                 drain_state="active",
                 registered_at=datetime.now(UTC),
-                last_seen_at=datetime.now(UTC),
-                status="active",
+                last_seen_at=last_seen_at or datetime.now(UTC),
+                status=status,
             )
         )
         s.commit()

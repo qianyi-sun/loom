@@ -547,6 +547,73 @@ def _pull_or_build(compose_base: list[str], service: str, *, dry_run: bool) -> N
         _run([*compose_base, "build", service], dry_run=dry_run)
 
 
+def _compose_base(args: argparse.Namespace, env_file: Path) -> list[str]:
+    compose_base = [
+        "docker",
+        "compose",
+        "--env-file",
+        str(env_file),
+    ]
+    for compose_file in args.compose_file:
+        compose_base.extend(["-f", str(compose_file)])
+    return compose_base
+
+
+def _json_docs_from_compose_ps(stdout: str) -> list[dict[str, Any]]:
+    text = stdout.strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        docs: list[dict[str, Any]] = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parsed_line = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed_line, dict):
+                docs.append(parsed_line)
+        return docs
+    if isinstance(parsed, list):
+        return [item for item in parsed if isinstance(item, dict)]
+    if isinstance(parsed, dict):
+        return [parsed]
+    return []
+
+
+def _compose_service_is_running(compose_base: list[str], service: str) -> bool:
+    try:
+        result = subprocess.run(
+            [*compose_base, "ps", "--format", "json", service],
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+    for doc in _json_docs_from_compose_ps(result.stdout):
+        doc_service = str(doc.get("Service") or doc.get("Name") or "")
+        if (
+            doc_service
+            and doc_service != service
+            and not doc_service.endswith(f"-{service}")
+            and f"-{service}-" not in doc_service
+        ):
+            continue
+        state = str(doc.get("State") or "").lower()
+        status = str(doc.get("Status") or "").lower()
+        if state == "running" or status.startswith("up "):
+            return True
+    return False
+
+
 def _write_temp_env_file(env_file: Path, rendered: str) -> Path:
     runtime_dir = _runtime_temp_env_dir()
     with tempfile.NamedTemporaryFile(
@@ -624,12 +691,31 @@ def _apply(args: argparse.Namespace) -> int:
         _print_plan(plan, json_output=args.format == "json")
         return 0
     if not plan.needs_apply:
+        desired_intent = str(plan.desired.get("capacity_intent") or "active")
+        last_apply_result = "already current"
+        if desired_intent not in {"draining", "stopped"}:
+            compose_base = _compose_base(args, args.env_file)
+            try:
+                if not _compose_service_is_running(compose_base, args.service):
+                    _pull_or_build(compose_base, args.service, dry_run=args.dry_run)
+                    _run([*compose_base, "up", "-d", args.service], dry_run=args.dry_run)
+                    last_apply_result = "docker compose worker started"
+            except (RuntimeError, subprocess.CalledProcessError) as exc:
+                _report_node(
+                    args,
+                    desired=desired,
+                    local=local,
+                    apply_state="failed",
+                    error_message=str(exc),
+                )
+                sys.stderr.write(f"error: {exc}\n")
+                return 1
         _report_node(
             args,
             desired=desired,
             local=local,
             apply_state="applied",
-            last_apply_result="already current",
+            last_apply_result=last_apply_result,
         )
         _print_plan(plan, json_output=args.format == "json")
         return 0
@@ -651,14 +737,7 @@ def _apply(args: argparse.Namespace) -> int:
                 source_dir=source_dir,
                 dry_run=args.dry_run,
             )
-        compose_base = [
-            "docker",
-            "compose",
-            "--env-file",
-            str(compose_env_file),
-        ]
-        for compose_file in args.compose_file:
-            compose_base.extend(["-f", str(compose_file)])
+        compose_base = _compose_base(args, compose_env_file)
         desired_intent = str(plan.desired.get("capacity_intent") or "active")
         if desired_intent not in {"draining", "stopped"}:
             _pull_or_build(compose_base, args.service, dry_run=args.dry_run)

@@ -1529,7 +1529,7 @@ desired state.
 | 11 | gb10-prep | SSH ×N hosts after desired-state apply: fetch, checkout, write env file, install/start node-agent, verify. The GB10 node-agent unit is `Type=oneshot`; successful prep is verified from `systemctl show` `Result=success` and `ExecMainStatus=0`, even though the unit is normally `inactive/dead` after completion. This step intentionally runs after step 10 so a host-local node-agent cannot apply a stale Control Plane desired-state row (#593). |
 | 12 | cluster-up | candidate-source `loom cluster up --backup-manifest <path> --recover-sandbox-deadlines --sandbox-deadline-max-pods 4` using the same manifest verified by step 05 and preflighted by step 08 (#203 fix for updated replicas, #206 bounded kind/containerd sandbox-deadline retry) |
 | 13 | production-defaults | candidate-source `loom admin rate-cards sync-yibuapi --format json`, then `loom providers update/show` for hosted provider pricing defaults declared in the environment-state profile, using `--service-token <source>` in an isolated CLI config derived from the rollout route. This keeps DB-backed cost-attribution defaults from disappearing after a fresh rollout without depending on ambient operator login state. |
-| 14 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, run `loom cluster minio-storage-preflight --output minio-storage-preflight-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment`, rerun `loom admin environment-state check --format json`, then `loom cluster release-gate --manifest <that file> --minio-storage-preflight <that storage artifact>` (#339 fix for stale kind-import, #536 guard for GB10 status token drift, #593 post-prep env-state recheck). GB10 convergence mismatches are retried for up to 15 minutes so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. |
+| 14 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, run `loom cluster minio-storage-preflight --output minio-storage-preflight-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment`, rerun `loom admin environment-state check --format json`, then `loom cluster release-gate --manifest <that file> --minio-storage-preflight <that storage artifact>` (#339 fix for stale kind-import, #536 guard for GB10 status token drift, #593 post-prep env-state recheck). GB10 convergence mismatches are retried for up to 15 minutes so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. Active GB10 hosts must also show a linked fresh active docker worker registration (`worker_id`, `worker_status=active`, `worker_fresh=true`, `worker_backend_names` contains `docker`), because smoke/admin submission uses `/api/v1/backends`, not node-agent metadata alone. |
 | 15 | smoke | HTTP health + smoke identity + benchmarks + smoke task lookup. Default `user-token` mode submits a user-owned trial and checks trajectory/usage; `admin-on-behalf` mode submits an audited represented-user batch through the admin API, uses a batch-compatible current-GB10 default task, and polls batch success. |
 | 99 | summary | write `summary.md` from every prior step's result.json |
 
@@ -4959,7 +4959,11 @@ link it from #217; do not merge incomplete evidence.
   source git commit, active-vs-draining host intent, worker-token/env drift,
   and clean source-checkout provenance. Active nodes with missing provenance,
   dirty source, or a git commit that does not match desired `source_git_commit`
-  must be treated as stale even if their image/env fields look current.
+  must be treated as stale even if their image/env fields look current. Active
+  GB10 nodes must also include a fresh worker registry link: `worker_id`
+  present, `worker_status=active`, `worker_fresh=true`, and
+  `worker_backend_names` containing `docker`. A node-agent `already current`
+  result without that linked worker evidence is not sufficient for release.
 
   ```bash
   loom admin slurm-workers status \
@@ -4991,7 +4995,10 @@ link it from #217; do not merge incomplete evidence.
   release source. Current node-agent apply writes transient env files under the
   user runtime/tmp directory and removes legacy repo-root `..env.*.tmp` files on
   rerun; these files must not be the reason a GB10 node reports
-  `source_git_dirty=true`.
+  `source_git_dirty=true`. Node-agent apply also checks active-intent Docker
+  Compose liveness on no-drift reruns and restarts a missing worker container,
+  so rerunning the service is the durable recovery path when metadata is current
+  but `/api/v1/backends` has no active `docker` worker.
 
 - For elastic Slurm pools, the Control Plane records submitted worker jobs in
   `slurm_worker_jobs` and exposes safe capacity status with:

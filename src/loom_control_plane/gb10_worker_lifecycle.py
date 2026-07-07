@@ -7,12 +7,14 @@ from node-local pull agents. It does not SSH into GB10 hosts.
 from __future__ import annotations
 
 import re
+from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import GB10WorkerNodeStatus, GB10WorkerPoolDesiredState, Worker
@@ -38,6 +40,7 @@ _SECRET_VALUE_PATTERNS = (
     ),
 )
 _CAPACITY_INTENTS = {"active", "draining", "stopped"}
+_WORKER_FRESHNESS_SEC = 30
 
 
 class UnsafeDesiredEnvError(ValueError):
@@ -125,6 +128,36 @@ def _dt(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
 
+def _aware(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
+def _worker_is_fresh(row: Worker, *, now: datetime) -> bool:
+    last_seen_at = _aware(row.last_seen_at)
+    if last_seen_at is None:
+        return False
+    return row.status == "active" and last_seen_at >= now - timedelta(
+        seconds=_WORKER_FRESHNESS_SEC,
+    )
+
+
+def _worker_backend_names(capabilities: object) -> list[str]:
+    if not isinstance(capabilities, list):
+        return []
+    names: set[str] = set()
+    for cap in capabilities:
+        if not isinstance(cap, dict):
+            continue
+        backend = cap.get("backend", "docker")
+        if isinstance(backend, str) and backend:
+            names.add(backend)
+    return sorted(names)
+
+
 def desired_state_to_dict(row: GB10WorkerPoolDesiredState) -> dict[str, object]:
     return {
         "id": str(row.id),
@@ -144,18 +177,42 @@ def desired_state_to_dict(row: GB10WorkerPoolDesiredState) -> dict[str, object]:
         "previous_env_config_version": row.previous_env_config_version,
         "previous_source_git_commit": row.previous_source_git_commit,
         "previous_env": row.previous_env,
-        "created_at": _dt(row.created_at),
-        "updated_at": _dt(row.updated_at),
+        "created_at": _dt(_aware(row.created_at)),
+        "updated_at": _dt(_aware(row.updated_at)),
     }
 
 
-def node_status_to_dict(row: GB10WorkerNodeStatus) -> dict[str, object]:
+def node_status_to_dict(
+    row: GB10WorkerNodeStatus,
+    *,
+    worker: Worker | None = None,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    now = now or datetime.now(UTC)
+    worker_id = row.worker_id
+    worker_status = None
+    worker_last_seen_at = None
+    worker_fresh = False
+    worker_backend_names: list[str] = []
+    worker_drain_state = None
+    if worker is not None:
+        worker_id = worker.id
+        worker_status = worker.status
+        worker_last_seen_at = _aware(worker.last_seen_at)
+        worker_fresh = _worker_is_fresh(worker, now=now)
+        worker_backend_names = _worker_backend_names(worker.capabilities)
+        worker_drain_state = worker.drain_state
     return {
         "id": str(row.id),
         "environment": row.environment,
         "pool_name": row.pool_name,
         "hostname": row.hostname,
-        "worker_id": str(row.worker_id) if row.worker_id is not None else None,
+        "worker_id": str(worker_id) if worker_id is not None else None,
+        "worker_status": worker_status,
+        "worker_last_seen_at": _dt(worker_last_seen_at),
+        "worker_fresh": worker_fresh,
+        "worker_backend_names": worker_backend_names,
+        "worker_drain_state": worker_drain_state,
         "current_image_tag": row.current_image_tag,
         "current_max_concurrent": row.current_max_concurrent,
         "current_env_config_version": row.current_env_config_version,
@@ -172,10 +229,10 @@ def node_status_to_dict(row: GB10WorkerNodeStatus) -> dict[str, object]:
         "compose_project_dir": row.compose_project_dir,
         "source_git_commit": row.source_git_commit,
         "source_git_dirty": row.source_git_dirty,
-        "last_heartbeat_at": _dt(row.last_heartbeat_at),
-        "last_apply_at": _dt(row.last_apply_at),
-        "created_at": _dt(row.created_at),
-        "updated_at": _dt(row.updated_at),
+        "last_heartbeat_at": _dt(_aware(row.last_heartbeat_at)),
+        "last_apply_at": _dt(_aware(row.last_apply_at)),
+        "created_at": _dt(_aware(row.created_at)),
+        "updated_at": _dt(_aware(row.updated_at)),
     }
 
 
@@ -420,7 +477,78 @@ async def fetch_lifecycle_status(
             GB10WorkerNodeStatus.hostname,
         ),
     )).scalars().all()
+    now = datetime.now(UTC)
+    worker_by_id, workers_by_node = await _fetch_matching_workers(
+        session,
+        node_rows=node_rows,
+    )
     return {
         "desired_states": [desired_state_to_dict(row) for row in desired_rows],
-        "nodes": [node_status_to_dict(row) for row in node_rows],
+        "nodes": [
+            node_status_to_dict(
+                row,
+                worker=_worker_for_node(
+                    row,
+                    worker_by_id=worker_by_id,
+                    workers_by_node=workers_by_node,
+                    now=now,
+                ),
+                now=now,
+            )
+            for row in node_rows
+        ],
     }
+
+
+async def _fetch_matching_workers(
+    session: AsyncSession,
+    *,
+    node_rows: Sequence[GB10WorkerNodeStatus],
+) -> tuple[dict[UUID, Worker], dict[tuple[str, str], list[Worker]]]:
+    if not node_rows:
+        return {}, {}
+    conditions: list[Any] = []
+    for row in node_rows:
+        conditions.append(
+            (Worker.hostname == row.hostname) & (Worker.pool_name == row.pool_name),
+        )
+        if row.worker_id is not None:
+            conditions.append(Worker.id == row.worker_id)
+    worker_rows = (await session.execute(
+        select(Worker).where(or_(*conditions)),
+    )).scalars().all()
+    worker_by_id = {row.id: row for row in worker_rows}
+    workers_by_node: dict[tuple[str, str], list[Worker]] = defaultdict(list)
+    for worker_row in worker_rows:
+        workers_by_node[(worker_row.hostname, worker_row.pool_name)].append(
+            worker_row,
+        )
+    return worker_by_id, dict(workers_by_node)
+
+
+def _worker_for_node(
+    row: GB10WorkerNodeStatus,
+    *,
+    worker_by_id: dict[UUID, Worker],
+    workers_by_node: dict[tuple[str, str], list[Worker]],
+    now: datetime,
+) -> Worker | None:
+    if row.worker_id is not None:
+        worker = worker_by_id.get(row.worker_id)
+        if worker is not None:
+            return worker
+    candidates = workers_by_node.get((row.hostname, row.pool_name), [])
+    if not candidates:
+        return None
+
+    def _rank(worker: Worker) -> tuple[int, int, datetime, datetime]:
+        last_seen_at = _aware(worker.last_seen_at) or datetime.min.replace(tzinfo=UTC)
+        registered_at = _aware(worker.registered_at) or datetime.min.replace(tzinfo=UTC)
+        return (
+            1 if _worker_is_fresh(worker, now=now) else 0,
+            1 if worker.status == "active" else 0,
+            last_seen_at,
+            registered_at,
+        )
+
+    return max(candidates, key=_rank)
