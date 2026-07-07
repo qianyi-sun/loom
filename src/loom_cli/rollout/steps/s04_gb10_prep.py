@@ -212,6 +212,30 @@ def _ssh(host: GB10Host, remote_cmd: str) -> SubprocessResult:
     return run_captured(argv)
 
 
+def _parse_systemctl_properties(stdout: str) -> dict[str, str]:
+    props: dict[str, str] = {}
+    for line in stdout.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            props[key] = value
+    return props
+
+
+def _node_agent_service_is_prepared(props: dict[str, str]) -> bool:
+    if props.get("ActiveState") == "active":
+        return True
+    return (
+        props.get("Type") == "oneshot"
+        and props.get("Result") == "success"
+        and props.get("ExecMainStatus") == "0"
+    )
+
+
+def _node_agent_status_summary(props: dict[str, str]) -> str:
+    keys = ("Type", "Result", "ExecMainStatus", "ActiveState", "SubState")
+    return " ".join(f"{key}={props.get(key, '<missing>')}" for key in keys)
+
+
 def _env_file_update_command(ctx: RolloutContext, host: GB10Host) -> str:
     updates = {
         "IMAGE_TAG": ctx.image_tag,
@@ -356,14 +380,6 @@ class GB10PrepStep(BaseStep):
                     f"grep -q '^LOOM_WORKER_ENV_CONFIG_VERSION={image_tag}$' {env_file_path}",
                 ),
             ]
-            if host.node_agent_service:
-                service = shlex.quote(host.node_agent_service)
-                checks.append(
-                    (
-                        "node-agent-active",
-                        f"systemctl --user is-active --quiet {service}",
-                    )
-                )
             for _label, cmd in checks:
                 r = _ssh(host, cmd)
                 if r.returncode != 0:
@@ -373,6 +389,32 @@ class GB10PrepStep(BaseStep):
                         return VerifyOutcome.UNKNOWN
                     # SSH succeeded but the release predicate did not match:
                     # the previous prep did not finish and resume should rerun.
+                    return VerifyOutcome.MISMATCH
+            if host.node_agent_service:
+                service = shlex.quote(host.node_agent_service)
+                r = _ssh(
+                    host,
+                    "systemctl --user show "
+                    f"{service} "
+                    "-p Type "
+                    "-p Result "
+                    "-p ExecMainStatus "
+                    "-p ActiveState "
+                    "-p SubState",
+                )
+                if r.returncode != 0:
+                    if r.returncode == 255:
+                        return VerifyOutcome.UNKNOWN
+                    step_dir.stderr_path().write_text(
+                        f"node-agent-status failed on {host.ssh_target}: rc={r.returncode}\n",
+                    )
+                    return VerifyOutcome.MISMATCH
+                props = _parse_systemctl_properties(r.stdout)
+                if not _node_agent_service_is_prepared(props):
+                    step_dir.stderr_path().write_text(
+                        "node-agent-status mismatch on "
+                        f"{host.ssh_target}: {_node_agent_status_summary(props)}\n",
+                    )
                     return VerifyOutcome.MISMATCH
         return VerifyOutcome.MATCH
 
