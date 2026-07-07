@@ -1,4 +1,4 @@
-"""Step 12 — release gate (#340, #444)."""
+"""Step 14 — release gate (#340, #444)."""
 
 from __future__ import annotations
 
@@ -21,7 +21,11 @@ from loom_cli.rollout.steps.candidate_source import (
     rollout_cluster_config,
 )
 from loom_cli.rollout.steps.s02_build_images import ROLLOUT_IMAGES, image_tag
-from loom_cli.rollout.steps.s10_env_state import _profile_path_for
+from loom_cli.rollout.steps.s10_env_state import (
+    _is_gb10_node_status_drift_only,
+    _profile_path_for,
+    environment_state_check_argv,
+)
 from loom_cli.rollout.steps.subcommand_step import SubcommandStep
 from loom_cli.rollout.steps.subprocess_util import SubprocessResult, run_captured
 
@@ -118,13 +122,14 @@ def _image_identities_from_inspect(
 
 
 class ReleaseGateStep(SubcommandStep):
-    number = 13
+    number = 14
     name = "release-gate"
 
     def _inputs_fingerprint(self, ctx: RolloutContext) -> dict[str, object]:
         return {
             "admin_token_source": ctx.admin_token_source,
             "expect_admin_token_fingerprint": ctx.expect_admin_token_fingerprint,
+            "worker_token_source": ctx.worker_token_source,
             "cluster_config_sha256": ctx.cluster_config_sha256,
             "environment": ctx.environment,
             "image_tag": ctx.image_tag,
@@ -162,11 +167,7 @@ class ReleaseGateStep(SubcommandStep):
         return step_dir.artifact_path(f"image-identities-{ctx.image_tag}.json")
 
     def environment_state_check_path(self, step_dir: StepDir) -> Path:
-        return (
-            step_dir.path.parent
-            / "10-env-state"
-            / "environment-state-check.json"
-        )
+        return step_dir.artifact_path("environment-state-check.json")
 
     def release_manifest_argv(
         self,
@@ -322,7 +323,7 @@ class ReleaseGateStep(SubcommandStep):
         if not rendered_path.is_file():
             raise FileNotFoundError(
                 f"rendered manifest not found at {rendered_path}; step 07 must "
-                "succeed before step 12 can record image identities"
+                "succeed before release-gate can record image identities"
             )
         rendered_images = _rendered_deployment_images(
             rendered_path.read_text(encoding="utf-8"),
@@ -389,6 +390,9 @@ class ReleaseGateStep(SubcommandStep):
             "release_manifest": str(self.release_manifest_path(ctx, step_dir)),
             "minio_storage_preflight": str(
                 self.minio_storage_preflight_path(ctx, step_dir),
+            ),
+            "environment_state_check": str(
+                self.environment_state_check_path(step_dir),
             ),
             "gb10_workers_status": str(self.gb10_status_path(ctx, step_dir)),
             "hf_mirror_boundary_evidence": str(
@@ -457,9 +461,10 @@ class ReleaseGateStep(SubcommandStep):
             )
 
         gb10_cmd = list(self.gb10_status_argv(ctx, step_dir))
-        gate_cmd = list(self.argv(ctx, step_dir))
+        env_state_check_cmd = environment_state_check_argv(ctx, step_dir)
         gb10_retry_log = step_dir.artifact_path("gb10-workers-status.retries.log")
         last_gate: SubprocessResult | None = None
+        last_env_state_check: SubprocessResult | None = None
         for attempt in range(1, _GB10_STATUS_MAX_ATTEMPTS + 1):
             gb10 = run_captured(
                 gb10_cmd,
@@ -489,6 +494,41 @@ class ReleaseGateStep(SubcommandStep):
                     artifacts=artifacts,
                 )
 
+            if env_state_check_cmd is not None:
+                env_state_check = run_captured(
+                    list(env_state_check_cmd),
+                    stdout_log=self.environment_state_check_path(step_dir),
+                    stderr_log=step_dir.artifact_path("environment-state-check.stderr"),
+                    cwd=cwd,
+                    env=env,
+                    timeout_sec=60,
+                )
+                last_env_state_check = env_state_check
+                if env_state_check.returncode != 0:
+                    if _is_gb10_node_status_drift_only(env_state_check.stdout):
+                        gb10_retry_log.open("a", encoding="utf-8").write(
+                            f"attempt {attempt}/{_GB10_STATUS_MAX_ATTEMPTS}: "
+                            "environment-state check still reports GB10 "
+                            "node-status drift\n"
+                        )
+                        if attempt < _GB10_STATUS_MAX_ATTEMPTS:
+                            time.sleep(_GB10_STATUS_RETRY_DELAY_SEC)
+                            continue
+                    return RunResult(
+                        exit_code=env_state_check.returncode,
+                        summary=(
+                            "environment-state check exited "
+                            f"{env_state_check.returncode}"
+                        ),
+                        error=(
+                            env_state_check.stderr.strip().splitlines()[-1]
+                            if env_state_check.stderr.strip()
+                            else "environment-state check reported drift"
+                        ),
+                        artifacts=artifacts,
+                    )
+
+            gate_cmd = list(self.argv(ctx, step_dir))
             gate = run_captured(
                 gate_cmd,
                 stdout_log=step_dir.stdout_path(),
@@ -502,7 +542,7 @@ class ReleaseGateStep(SubcommandStep):
                     exit_code=0,
                     summary=(
                         "release-manifest + MinIO storage + GB10 status + "
-                        "release-gate exited 0"
+                        "environment-state check + release-gate exited 0"
                     ),
                     artifacts=artifacts,
                 )
@@ -523,15 +563,29 @@ class ReleaseGateStep(SubcommandStep):
             )
             if attempt < _GB10_STATUS_MAX_ATTEMPTS:
                 time.sleep(_GB10_STATUS_RETRY_DELAY_SEC)
-        assert last_gate is not None
-        return RunResult(
-            exit_code=last_gate.returncode,
-            summary=f"release-gate exited {last_gate.returncode}",
-            error=(
-                last_gate.stderr.strip().splitlines()[-1]
-                if last_gate.stderr.strip()
-                else f"release-gate exited {last_gate.returncode}"
-            ),
-            artifacts=artifacts,
-        )
+        if last_env_state_check is not None and last_env_state_check.returncode != 0:
+            return RunResult(
+                exit_code=last_env_state_check.returncode,
+                summary=(
+                    "environment-state check exited "
+                    f"{last_env_state_check.returncode}"
+                ),
+                error=(
+                    last_env_state_check.stderr.strip().splitlines()[-1]
+                    if last_env_state_check.stderr.strip()
+                    else "environment-state check still reports GB10 node-status drift"
+                ),
+                artifacts=artifacts,
+            )
+        if last_gate is not None:
+            return RunResult(
+                exit_code=last_gate.returncode,
+                summary=f"release-gate exited {last_gate.returncode}",
+                error=(
+                    last_gate.stderr.strip().splitlines()[-1]
+                    if last_gate.stderr.strip()
+                    else f"release-gate exited {last_gate.returncode}"
+                ),
+                artifacts=artifacts,
+            )
         raise AssertionError("unreachable release-gate branch")

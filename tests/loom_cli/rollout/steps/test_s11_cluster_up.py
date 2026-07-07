@@ -19,7 +19,7 @@ class TestClusterUpStepArgv:
         )
         ev = EvidenceDirectory(tmp_path, "test-rid")
         ev.ensure()
-        step_dir = ev.step_dir(11, "cluster-up")
+        step_dir = ev.step_dir(12, "cluster-up")
 
         argv = list(ClusterUpStep().argv(ctx, step_dir))
         config_path = Path(argv[argv.index("--config") + 1])
@@ -41,7 +41,7 @@ class TestClusterUpStepArgv:
         ctx = make_ctx(tmp_path)
         ev = EvidenceDirectory(tmp_path, "test-rid")
         ev.ensure()
-        step_dir = ev.step_dir(11, "cluster-up")
+        step_dir = ev.step_dir(12, "cluster-up")
 
         argv = list(ClusterUpStep().argv(ctx, step_dir))
 
@@ -51,7 +51,7 @@ class TestClusterUpStepArgv:
         ctx = make_ctx(tmp_path, namespace="loom-staging")
         ev = EvidenceDirectory(tmp_path, "test-rid")
         ev.ensure()
-        step_dir = ev.step_dir(11, "cluster-up")
+        step_dir = ev.step_dir(12, "cluster-up")
 
         argv = list(ClusterUpStep().argv(ctx, step_dir))
 
@@ -68,7 +68,7 @@ class TestClusterUpStepArgv:
         )
         ev = EvidenceDirectory(tmp_path, "test-rid")
         ev.ensure()
-        step_dir = ev.step_dir(11, "cluster-up")
+        step_dir = ev.step_dir(12, "cluster-up")
 
         argv = list(ClusterUpStep().argv(ctx, step_dir))
 

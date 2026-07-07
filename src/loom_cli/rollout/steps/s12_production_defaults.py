@@ -1,4 +1,4 @@
-"""Step 12 — production service defaults (#482).
+"""Step 13 — production service defaults (#482).
 
 Protected rollouts must restore DB-backed production defaults that are not
 Kubernetes manifests: hosted provider pricing modes and official rate-card
@@ -123,7 +123,7 @@ def _error_excerpt(value: str, *, secret_values: tuple[str, ...]) -> str:
 
 
 class ProductionDefaultsStep(BaseStep):
-    number = 12
+    number = 13
     name = "production-defaults"
 
     def _inputs_fingerprint(self, ctx: RolloutContext) -> dict[str, object]:

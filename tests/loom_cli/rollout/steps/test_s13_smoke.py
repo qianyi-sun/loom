@@ -19,7 +19,7 @@ def test_smoke_posts_current_trial_config_contract_with_user_owned_token(
     ctx = make_ctx(tmp_path)
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(14, "smoke")
+    step_dir = ev.step_dir(15, "smoke")
     captured_payloads: list[dict[str, Any]] = []
 
     monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-token")
@@ -93,7 +93,7 @@ def test_smoke_uses_token_when_heading_platform_trajectory_download_url(
     ctx = make_ctx(tmp_path)
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(14, "smoke")
+    step_dir = ev.step_dir(15, "smoke")
 
     monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "smoke-user-token")
     monkeypatch.setenv("LOOM_SMOKE_TASK_ID", "terminal-bench-2/hello-world")
@@ -199,7 +199,7 @@ def test_smoke_get_probes_platform_trajectory_when_head_not_allowed(
     ctx = make_ctx(tmp_path)
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(14, "smoke")
+    step_dir = ev.step_dir(15, "smoke")
 
     monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "smoke-user-token")
     monkeypatch.setenv("LOOM_SMOKE_TASK_ID", "terminal-bench-2/hello-world")
@@ -320,7 +320,7 @@ def test_current_gb10_smoke_defaults_to_gb10_compatible_task_and_pool(
     ctx = make_ctx(tmp_path, scope="current-gb10", exclude_oldlab=True)
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(14, "smoke")
+    step_dir = ev.step_dir(15, "smoke")
     captured_payloads: list[dict[str, Any]] = []
 
     monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "smoke-user-token")
@@ -391,7 +391,7 @@ def test_full_cluster_smoke_keeps_terminal_bench_default_without_pool(
     ctx = make_ctx(tmp_path, scope="full-cluster")
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(14, "smoke")
+    step_dir = ev.step_dir(15, "smoke")
     captured_payloads: list[dict[str, Any]] = []
 
     monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "smoke-user-token")
@@ -460,7 +460,7 @@ def test_smoke_rejects_non_user_owned_smoke_token_before_submit(
     ctx = make_ctx(tmp_path)
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(14, "smoke")
+    step_dir = ev.step_dir(15, "smoke")
 
     monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-token")
     monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "legacy-token")
@@ -510,7 +510,7 @@ def test_admin_on_behalf_smoke_submits_batch_with_admin_source_ref(
     )
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(14, "smoke")
+    step_dir = ev.step_dir(15, "smoke")
     captured_payloads: list[dict[str, Any]] = []
     captured_headers: list[dict[str, str]] = []
 
@@ -609,7 +609,7 @@ def test_admin_on_behalf_smoke_fails_fast_on_fanout_submit_failure(
     ctx = make_ctx(tmp_path, scope="current-gb10", exclude_oldlab=True)
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(14, "smoke")
+    step_dir = ev.step_dir(15, "smoke")
 
     monkeypatch.setenv("LOOM_CP_ADMIN_TOKEN", admin_token)
     monkeypatch.setenv("LOOM_SMOKE_SUBMIT_MODE", "admin-on-behalf")
@@ -694,7 +694,7 @@ def test_admin_on_behalf_smoke_reuses_existing_deterministic_batch(
     ctx = make_ctx(tmp_path, scope="current-gb10", exclude_oldlab=True)
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(14, "smoke")
+    step_dir = ev.step_dir(15, "smoke")
     batch_name = (
         "rollout-smoke-"
         + hashlib.sha256(
@@ -794,7 +794,7 @@ def test_admin_on_behalf_smoke_rejects_non_admin_identity_before_submit(
     ctx = make_ctx(tmp_path)
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(14, "smoke")
+    step_dir = ev.step_dir(15, "smoke")
 
     monkeypatch.setenv("LOOM_CP_ADMIN_TOKEN", "team-token")
     monkeypatch.setenv("LOOM_SMOKE_SUBMIT_MODE", "admin-on-behalf")
@@ -849,7 +849,7 @@ def test_admin_on_behalf_smoke_requires_represented_identity_before_http(
     ctx = make_ctx(tmp_path)
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(14, "smoke")
+    step_dir = ev.step_dir(15, "smoke")
 
     monkeypatch.setenv("LOOM_CP_ADMIN_TOKEN", "admin-token")
     monkeypatch.setenv("LOOM_SMOKE_SUBMIT_MODE", "admin-on-behalf")
@@ -890,7 +890,7 @@ def test_admin_on_behalf_smoke_fails_before_http_when_admin_fingerprint_drifts(
     )
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(14, "smoke")
+    step_dir = ev.step_dir(15, "smoke")
 
     monkeypatch.setenv("LOOM_CP_ADMIN_TOKEN", "admin-token-from-env")
     monkeypatch.setenv("LOOM_SMOKE_SUBMIT_MODE", "admin-on-behalf")
@@ -947,7 +947,7 @@ def test_smoke_rejects_missing_smoke_task_before_submit(
     ctx = make_ctx(tmp_path)
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(14, "smoke")
+    step_dir = ev.step_dir(15, "smoke")
 
     monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "smoke-user-token")
     monkeypatch.setenv("LOOM_SMOKE_TASK_ID", "missing/task")

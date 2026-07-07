@@ -1,4 +1,4 @@
-"""Step 11 — cluster up + wait for convergence (#340)."""
+"""Step 12 — cluster up + wait for convergence (#340)."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from loom_cli.rollout.steps.subcommand_step import SubcommandStep
 
 
 class ClusterUpStep(SubcommandStep):
-    number = 11
+    number = 12
     name = "cluster-up"
 
     # Cluster up polls for convergence; give it a generous ceiling.
