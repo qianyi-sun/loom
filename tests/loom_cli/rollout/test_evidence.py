@@ -38,8 +38,8 @@ class TestEvidenceDirectory:
         s4 = ev.step_dir(4, "kind-load")
         assert s4.path.name == "04-kind-load"
         assert s4.path.is_dir()
-        s13 = ev.step_dir(13, "cluster-up")
-        assert s13.path.name == "13-cluster-up"
+        s12 = ev.step_dir(12, "cluster-up")
+        assert s12.path.name == "12-cluster-up"
 
     def test_step_dir_slugifies_names(self, tmp_path: Path) -> None:
         ev = EvidenceDirectory(tmp_path, "rid")

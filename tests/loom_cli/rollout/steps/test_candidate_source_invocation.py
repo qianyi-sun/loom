@@ -365,7 +365,7 @@ def test_env_state_passes_worker_token_source_to_check_only(
     assert "staging-worker-token-value" not in str(check_argv)
 
 
-def test_env_state_retries_gb10_source_convergence_drift(
+def test_env_state_defers_gb10_node_status_drift_to_release_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -391,32 +391,26 @@ def test_env_state_retries_gb10_source_convergence_drift(
             )
         if "check" in argv:
             check_attempts += 1
-            if check_attempts == 1:
-                return SubprocessResult(
-                    argv=list(argv),
-                    returncode=1,
-                    stdout=json.dumps(
-                        {
-                            "ok": False,
-                            "drift": [
-                                {
-                                    "path": (
-                                        "gb10_worker_node_status"
-                                        "[production/gb10-arm64/trt-gb10-1]"
-                                        ".source_git_commit"
-                                    ),
-                                    "desired": "80f7e01",
-                                    "live": "2e6cf2f",
-                                },
-                            ],
-                        }
-                    ),
-                    stderr="",
-                )
             return SubprocessResult(
                 argv=list(argv),
-                returncode=0,
-                stdout=json.dumps({"ok": True, "drift": []}),
+                returncode=1,
+                stdout=json.dumps(
+                    {
+                        "ok": False,
+                        "drift": [
+                            {
+                                "path": (
+                                    "gb10_worker_node_status"
+                                    "[production/gb10-arm64/trt-gb10-1]"
+                                    ".source_git_commit"
+                                ),
+                                "desired": "80f7e01",
+                                "live": "2e6cf2f",
+                            },
+                        ],
+                        "autoscaler_blockers": [],
+                    }
+                ),
                 stderr="",
             )
         raise AssertionError(argv)
@@ -426,33 +420,20 @@ def test_env_state_retries_gb10_source_convergence_drift(
         lambda ctx: str(profile),
     )
     monkeypatch.setattr("loom_cli.rollout.steps.s10_env_state.run_captured", fake_run)
-    monkeypatch.setattr(
-        "loom_cli.rollout.steps.s10_env_state._ENV_STATE_CHECK_MAX_ATTEMPTS",
-        2,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        "loom_cli.rollout.steps.s10_env_state._ENV_STATE_CHECK_RETRY_DELAY_SEC",
-        0.0,
-        raising=False,
-    )
 
     result = EnvStateStep().run(ctx, step_dir)
 
     assert result.exit_code == 0
-    assert check_attempts == 2
-    assert len([call for call in calls if "check" in call]) == 2
+    assert check_attempts == 1
+    assert len([call for call in calls if "check" in call]) == 1
     retry_log = step_dir.artifact_path("environment-state-check.retries.log")
-    assert "gb10 convergence drift" in retry_log.read_text()
+    assert "gb10 node-status drift deferred to release-gate" in retry_log.read_text()
 
 
-def test_gb10_rollout_convergence_retry_budget_covers_worker_image_builds() -> None:
-    from loom_cli.rollout.steps import s10_env_state, s12_release_gate
+def test_release_gate_convergence_retry_budget_covers_worker_image_builds() -> None:
+    from loom_cli.rollout.steps import s12_release_gate
 
     min_budget_sec = 15 * 60
-    assert (
-        s10_env_state._ENV_STATE_CHECK_MAX_ATTEMPTS * s10_env_state._ENV_STATE_CHECK_RETRY_DELAY_SEC
-    ) >= min_budget_sec
     assert (
         s12_release_gate._GB10_STATUS_MAX_ATTEMPTS * s12_release_gate._GB10_STATUS_RETRY_DELAY_SEC
     ) >= min_budget_sec
@@ -501,7 +482,7 @@ frontend_api_base_path = "/dev"
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     worktree = _prepare_candidate_worktree(ev)
-    step_dir = ev.step_dir(12, "production-defaults")
+    step_dir = ev.step_dir(13, "production-defaults")
     profile = tmp_path / "staging.toml"
     profile.write_text(
         """
@@ -630,7 +611,7 @@ def test_production_defaults_requires_service_token_source_for_mutations(
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     _prepare_candidate_worktree(ev)
-    step_dir = ev.step_dir(12, "production-defaults")
+    step_dir = ev.step_dir(13, "production-defaults")
     profile = tmp_path / "staging.toml"
     profile.write_text(
         """
@@ -683,7 +664,7 @@ frontend_api_base_path = "/dev"
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     _prepare_candidate_worktree(ev)
-    step_dir = ev.step_dir(12, "production-defaults")
+    step_dir = ev.step_dir(13, "production-defaults")
     profile = tmp_path / "staging.toml"
     profile.write_text(
         """
@@ -850,7 +831,7 @@ def test_cluster_up_runs_loom_cli_from_candidate_worktree(
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     worktree = _prepare_candidate_worktree(ev)
-    step_dir = ev.step_dir(11, "cluster-up")
+    step_dir = ev.step_dir(12, "cluster-up")
     seen: dict[str, Any] = {}
 
     def fake_run(argv, **kwargs):
@@ -880,7 +861,7 @@ def test_release_gate_argv_passes_generated_release_manifest(tmp_path: Path) -> 
     ctx = make_ctx(tmp_path, image_tag="staging-abc123")
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(13, "release-gate")
+    step_dir = ev.step_dir(14, "release-gate")
 
     argv = list(ReleaseGateStep().argv(ctx, step_dir))
 
@@ -895,7 +876,7 @@ def test_release_gate_argv_passes_hf_mirror_boundary_evidence_for_staging(
     ctx = make_ctx(tmp_path, image_tag="staging-abc123", environment="staging")
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(13, "release-gate")
+    step_dir = ev.step_dir(14, "release-gate")
 
     argv = list(ReleaseGateStep().argv(ctx, step_dir))
 
@@ -937,13 +918,13 @@ def test_rollout_cluster_commands_use_config_with_context_image_tag(
     rendered_config = Path(
         render_call["argv"][render_call["argv"].index("--config") + 1],
     )
-    cluster_up_argv = list(ClusterUpStep().argv(ctx, ev.step_dir(11, "cluster-up")))
+    cluster_up_argv = list(ClusterUpStep().argv(ctx, ev.step_dir(12, "cluster-up")))
     cluster_up_config = Path(cluster_up_argv[cluster_up_argv.index("--config") + 1])
     manifest_argv = list(
-        ReleaseGateStep().release_manifest_argv(ctx, ev.step_dir(13, "release-gate")),
+        ReleaseGateStep().release_manifest_argv(ctx, ev.step_dir(14, "release-gate")),
     )
     release_manifest_config = Path(manifest_argv[manifest_argv.index("--config") + 1])
-    gate_argv = list(ReleaseGateStep().argv(ctx, ev.step_dir(13, "release-gate")))
+    gate_argv = list(ReleaseGateStep().argv(ctx, ev.step_dir(14, "release-gate")))
     release_gate_config = Path(gate_argv[gate_argv.index("--config") + 1])
 
     assert rendered_config != ctx.cluster_config_path
@@ -994,7 +975,7 @@ def test_rollout_cluster_config_is_stable_after_first_synthesis(
         'image_tag = "staging-old"\nnamespace = "changed-after-render"\n',
     )
 
-    cluster_up_argv = list(ClusterUpStep().argv(ctx, ev.step_dir(11, "cluster-up")))
+    cluster_up_argv = list(ClusterUpStep().argv(ctx, ev.step_dir(12, "cluster-up")))
     cluster_up_config = Path(cluster_up_argv[cluster_up_argv.index("--config") + 1])
     rendered_raw = tomllib.loads(cluster_up_config.read_text())
 
@@ -1057,7 +1038,7 @@ trt-gb10-1 = "active"
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
 
-    result = GB10PrepStep().run(ctx, ev.step_dir(4, "gb10-prep"))
+    result = GB10PrepStep().run(ctx, ev.step_dir(11, "gb10-prep"))
 
     assert result.exit_code == 1
     assert result.error is not None
@@ -1099,7 +1080,7 @@ def test_gb10_prep_clones_preserves_env_and_starts_node_agent(
 
     monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
 
-    result = GB10PrepStep().run(ctx, ev.step_dir(4, "gb10-prep"))
+    result = GB10PrepStep().run(ctx, ev.step_dir(11, "gb10-prep"))
 
     assert result.exit_code == 0
     assert any(
@@ -1120,11 +1101,18 @@ def test_release_gate_run_generates_manifest_then_gates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ctx = make_ctx(tmp_path, image_tag="staging-abc123")
+    profile = tmp_path / "deploy" / "environment-state" / "staging.toml"
+    profile.parent.mkdir(parents=True)
+    profile.write_text('environment = "staging"\n', encoding="utf-8")
+    ctx.cluster_config_path.write_text(
+        f'env_state_profile = "{profile}"\n',
+        encoding="utf-8",
+    )
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     worktree = _prepare_candidate_worktree(ev)
     _write_rendered_service(ev)
-    step_dir = ev.step_dir(13, "release-gate")
+    step_dir = ev.step_dir(14, "release-gate")
     calls: list[dict[str, Any]] = []
 
     def fake_run(argv, **kwargs):
@@ -1154,6 +1142,26 @@ def test_release_gate_run_generates_manifest_then_gates(
         if "release-manifest" in argv:
             output = Path(argv[argv.index("--output") + 1])
             output.write_text(_release_manifest_with_gb10_contract())
+        if argv[3:6] == ["admin", "environment-state", "check"]:
+            stdout = json.dumps(
+                {
+                    "environment": "production",
+                    "control_plane_environment": "production",
+                    "ok": True,
+                    "drift": [],
+                    "autoscaler_blockers": [],
+                }
+            )
+            if kwargs.get("stdout_log"):
+                kwargs["stdout_log"].write_text(stdout)
+            if kwargs.get("stderr_log"):
+                kwargs["stderr_log"].write_text("")
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout=stdout,
+                stderr="",
+            )
         if kwargs.get("stdout_log"):
             kwargs["stdout_log"].write_text("ok\n")
         if kwargs.get("stderr_log"):
@@ -1170,7 +1178,7 @@ def test_release_gate_run_generates_manifest_then_gates(
     result = ReleaseGateStep().run(ctx, step_dir)
 
     assert result.exit_code == 0
-    assert len(calls) == 5
+    assert len(calls) == 6
     assert calls[0]["argv"][:3] == ["docker", "image", "inspect"]
     for call in calls[1:]:
         _assert_candidate_invocation(call, worktree=worktree)
@@ -1179,14 +1187,19 @@ def test_release_gate_run_generates_manifest_then_gates(
     assert calls[2]["argv"][calls[2]["argv"].index("--namespace") + 1] == ctx.namespace
     assert calls[3]["argv"][3:6] == ["admin", "gb10-workers", "status"]
     assert calls[3]["argv"][calls[3]["argv"].index("--environment") + 1] == "production"
-    assert calls[4]["argv"][3:5] == ["cluster", "release-gate"]
+    assert calls[4]["argv"][3:6] == ["admin", "environment-state", "check"]
+    assert calls[5]["argv"][3:5] == ["cluster", "release-gate"]
     manifest = step_dir.artifact_path("release-manifest-staging-abc123.json")
     storage = step_dir.artifact_path("minio-storage-preflight-staging-abc123.json")
+    env_state_check = step_dir.artifact_path("environment-state-check.json")
     assert calls[1]["argv"][calls[1]["argv"].index("--output") + 1] == str(manifest)
     assert calls[2]["argv"][calls[2]["argv"].index("--output") + 1] == str(storage)
-    assert calls[4]["argv"][calls[4]["argv"].index("--manifest") + 1] == str(manifest)
-    assert calls[4]["argv"][calls[4]["argv"].index("--minio-storage-preflight") + 1] == str(storage)
-    assert "--gb10-workers-status" in calls[4]["argv"]
+    assert calls[5]["argv"][calls[5]["argv"].index("--manifest") + 1] == str(manifest)
+    assert calls[5]["argv"][calls[5]["argv"].index("--minio-storage-preflight") + 1] == str(storage)
+    assert calls[5]["argv"][calls[5]["argv"].index("--environment-state-check") + 1] == (
+        str(env_state_check)
+    )
+    assert "--gb10-workers-status" in calls[5]["argv"]
 
 
 def test_release_gate_records_expected_image_identities_before_manifest(
@@ -1224,7 +1237,7 @@ spec:
 """,
         encoding="utf-8",
     )
-    step_dir = ev.step_dir(13, "release-gate")
+    step_dir = ev.step_dir(14, "release-gate")
 
     def fake_run(argv, **kwargs):
         if list(argv[:3]) == ["docker", "image", "inspect"]:
@@ -1297,7 +1310,7 @@ def test_release_gate_run_fails_fast_when_gb10_status_fails(
     ev.ensure()
     _prepare_candidate_worktree(ev)
     _write_rendered_service(ev)
-    step_dir = ev.step_dir(13, "release-gate")
+    step_dir = ev.step_dir(14, "release-gate")
     calls: list[list[str]] = []
 
     def fake_run(argv, **kwargs):
@@ -1356,7 +1369,7 @@ def test_release_gate_current_gb10_requires_manifest_desired_state(
     ev.ensure()
     _prepare_candidate_worktree(ev)
     _write_rendered_service(ev)
-    step_dir = ev.step_dir(13, "release-gate")
+    step_dir = ev.step_dir(14, "release-gate")
     calls: list[list[str]] = []
 
     def fake_run(argv, **kwargs):
@@ -1441,7 +1454,7 @@ def test_release_gate_retries_transient_gb10_status_cp_unreachable(
     ev.ensure()
     _prepare_candidate_worktree(ev)
     _write_rendered_service(ev)
-    step_dir = ev.step_dir(13, "release-gate")
+    step_dir = ev.step_dir(14, "release-gate")
     calls: list[list[str]] = []
     gb10_attempts = 0
 
@@ -1531,7 +1544,7 @@ def test_release_gate_retries_gb10_convergence_until_node_agent_reports_current(
     ev.ensure()
     _prepare_candidate_worktree(ev)
     _write_rendered_service(ev, image_tag="staging-53897aa")
-    step_dir = ev.step_dir(13, "release-gate")
+    step_dir = ev.step_dir(14, "release-gate")
     status_attempts = 0
     gate_attempts = 0
 

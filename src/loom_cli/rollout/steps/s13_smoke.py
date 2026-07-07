@@ -1,4 +1,4 @@
-"""Step 13 — end-to-end live smoke (#340).
+"""Step 15 — end-to-end live smoke (#340).
 
 Concrete smoke, default ``user-token`` mode:
 
@@ -711,7 +711,7 @@ def _run_admin_on_behalf_smoke(
 
 
 class SmokeStep(BaseStep):
-    number = 14
+    number = 15
     name = "smoke"
 
     def _inputs_fingerprint(self, ctx: RolloutContext) -> dict[str, object]:

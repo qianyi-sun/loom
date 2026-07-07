@@ -65,14 +65,30 @@ class TestRolloutCLIDryRun:
         ])
         assert rc == 0
         out = capsys.readouterr().out
-        for name in (
-            "resolve-target", "worktree", "build-images",
-            "kind-load-images", "gb10-prep", "backup",
-            "audit", "render", "preflight", "migrate",
-            "env-state", "cluster-up", "release-gate",
-            "smoke", "summary",
-        ):
-            assert name in out, f"step {name!r} missing from dry-run output"
+        assert "steps:\n" in out
+        step_lines = [
+            line.strip()
+            for line in out.splitlines()
+            if line.startswith("  ")
+        ]
+        assert step_lines == [
+            "00 resolve-target",
+            "01 worktree",
+            "02 build-images",
+            "03 kind-load-images",
+            "05 backup",
+            "06 audit",
+            "07 render",
+            "08 preflight",
+            "09 migrate",
+            "10 env-state",
+            "11 gb10-prep",
+            "12 cluster-up",
+            "13 production-defaults",
+            "14 release-gate",
+            "15 smoke",
+            "99 summary",
+        ]
 
     def test_dry_run_refuses_scope_conflict(
         self,
@@ -480,10 +496,10 @@ class TestRolloutCLIRealRun:
         })
         state = RolloutState.new(
             rollout_id=rollout_id,
-            steps=[(12, "production-defaults")],
+            steps=[(13, "production-defaults")],
         )
         state.mark_step_failed(
-            12,
+            13,
             finished_at="2026-07-07T00:12:00Z",
             error="planned failure",
         )

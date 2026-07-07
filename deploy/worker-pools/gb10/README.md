@@ -319,7 +319,15 @@ GB10 hosts install `uv` under `/home/qianyi/.local/bin`; the node-agent systemd
 unit sets PATH explicitly so the timer works from a non-interactive user
 service environment.
 
-Install the node-agent service and timer:
+Install the node-agent service and timer only after the Control Plane desired
+state has already been updated for the target release. In the standard
+protected rollout, `loom cluster rollout` does that ordering for you: step 10
+applies `deploy/environment-state/staging.toml`, then step 11 performs GB10
+prep and starts the host-local node-agent. Do not enable fleet-wide node-agent
+apply before env-state points at the target image/source, or hosts can
+correctly apply the previous release target.
+
+Manual install after env-state is current:
 
 ```bash
 for i in $(seq 1 15); do

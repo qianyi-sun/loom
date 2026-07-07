@@ -827,10 +827,13 @@ knob you need.
    `ok=false`, or non-empty `drift` array keeps the protected release gate red
    and blocks workload-validation anchors.
    `loom cluster rollout` step 10 applies the profile once and then retries
-   pure `gb10_worker_node_status[...]` drift for a bounded window so asynchronous
-   GB10 node-agent source-checkout updates can report back. Mixed drift, such
-   as OLDLAB jobs or missing external-runner prerequisites, is not retried and
-   must be corrected in the operator profile or live state before rerunning.
+   the immediate check once. Pure `gb10_worker_node_status[...]` drift is
+   recorded but deferred because step 11 has not started the host-local
+   node-agent yet; mixed drift, such as OLDLAB jobs or missing external-runner
+   prerequisites, still fails before host prep. Step 14 reruns the
+   environment-state check after GB10 prep and before release-gate, retrying
+   only pure GB10 node-status drift for a bounded window while asynchronous
+   source-checkout updates report back.
    When the release manifest records GB10 desired state, also generate
    `loom admin gb10-workers status --format json` with the release image/env
    target and pass it to `loom cluster release-gate --gb10-workers-status`.
@@ -844,7 +847,7 @@ knob you need.
    release-contract error, even if a `gb10-workers status` artifact exists,
    because it proves no external worker target was declared. A GB10 desired
    state without `[gb10_pool]` hosts is also a release-contract error because
-   rollout step 04 would have no actual hosts to prepare. For the v1.0 staging
+   rollout step 11 would have no actual hosts to prepare. For the v1.0 staging
    gate, `deploy/environments/staging.cluster.toml` enumerates all 15 GB10
    hosts, writes only non-secret release marker keys to each host-local env
    file, and starts the host-local GB10 node-agent service; release-gate then
@@ -1202,8 +1205,8 @@ that drops the env vars breaks CI before the rollout does.
 ## One-command rollout driver (#340)
 
 `loom cluster rollout` orchestrates the full staging rollout: resolve
-target ref → worktree → build → kind-load → GB10 prep → backup → audit →
-render → preflight → migrate → env-state → cluster up → production
+target ref → worktree → build → kind-load → backup → audit → render →
+preflight → migrate → env-state → GB10 prep → cluster up → production
 defaults → release-gate → smoke → summary. Every step writes evidence
 into a per-rollout directory tree; a re-run of the same command safely
 resumes from the interrupted step.
@@ -1273,7 +1276,7 @@ worker-token fingerprint parity.
 
 `SERVICE_TOKEN_SOURCE` is a Service API token source reference for
 rollout-owned CLI commands that mutate or verify DB-backed service defaults.
-It is separate from the Control Plane admin token. Step 12 resolves this source
+It is separate from the Control Plane admin token. Step 13 resolves this source
 inside a temporary, private `$XDG_CONFIG_HOME` and writes only the token value
 there for the duration of `loom admin rate-cards sync-yibuapi` and
 `loom providers update/show`; rollout logs and inputs retain only the source
@@ -1283,7 +1286,7 @@ derived from the rollout cluster config, for example `https://yylx.world/dev`
 for staging and `https://yylx.world/prod` for first prod. Do not use stdin
 `-`; the source must be replayable as `env:VAR` or `file:PATH`.
 
-Step 14 defaults to `LOOM_SMOKE_SUBMIT_MODE=user-token`. In that mode, the live
+Step 15 defaults to `LOOM_SMOKE_SUBMIT_MODE=user-token`. In that mode, the live
 trial submit uses `LOOM_SMOKE_API_TOKEN`, and that credential must be a
 user-owned API token whose `/api/v1/auth/whoami` reports
 `credential_type=user_owned_api_token` and includes `submit` scope. Admin
@@ -1383,7 +1386,7 @@ Each invocation gets a directory under `<rollout-root>/rollouts/`:
 ├── 00-resolve-target/       # per-step: result.json, stdout.log, stderr.log,
 ├── 01-worktree/             # step-specific artifacts (rendered.yaml,
 ├── ...                      # loaded-images.json, migration.yaml, etc.)
-├── 14-smoke/
+├── 15-smoke/
 └── 99-summary/summary.md
 ```
 
@@ -1425,26 +1428,30 @@ Each step is a small Python module under
 `inputs_hash`, `verify` and `run` — see the source for the exact
 observability and mutation contract:
 
+Step number 04 is intentionally unused. GB10 prep used to run there, but
+#593 moved it after env-state so node-agent startup cannot apply a stale
+desired state.
+
 | # | Step | Delegates to |
 |---|---|---|
 | 00 | resolve-target | git rev-parse; validates image-tag ↔ sha7 |
 | 01 | worktree | `git worktree add` at target sha |
 | 02 | build-images | `docker build` × every rollout-critical image (#365) |
 | 03 | kind-load-images | candidate-source `loom cluster load-images` (#96) |
-| 04 | gb10-prep | SSH ×N hosts: fetch, checkout, write env file, verify |
 | 05 | backup | candidate-source `loom cluster backup check --manifest <path>` (#363) |
 | 06 | audit | candidate-source `loom cluster audit` |
 | 07 | render | candidate-source `loom cluster render` → `rendered.yaml` |
 | 08 | preflight | candidate-source `loom cluster preflight --backup-manifest <path>` using the same manifest verified by step 05 |
 | 09 | migrate | candidate-source `loom cluster render-migration` + `kubectl wait` (#332) |
-| 10 | env-state | candidate-source `loom admin environment-state apply/check --admin-token <source> --expect-admin-token-fingerprint <fingerprint>` (#331 fix for stop-on-disable, #533 guard for scoped admin token drift). Pure GB10 node-status convergence drift is retried for up to 15 minutes so node-agent image builds can finish; mixed drift still fails immediately. |
-| 11 | cluster-up | candidate-source `loom cluster up --backup-manifest <path> --recover-sandbox-deadlines --sandbox-deadline-max-pods 4` using the same manifest verified by step 05 and preflighted by step 08 (#203 fix for updated replicas, #206 bounded kind/containerd sandbox-deadline retry) |
-| 12 | production-defaults | candidate-source `loom admin rate-cards sync-yibuapi --format json`, then `loom providers update/show` for hosted provider pricing defaults declared in the environment-state profile, using `--service-token <source>` in an isolated CLI config derived from the rollout route. This keeps DB-backed cost-attribution defaults from disappearing after a fresh rollout without depending on ambient operator login state. |
-| 13 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, run `loom cluster minio-storage-preflight --output minio-storage-preflight-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment` with the same `--admin-token <source> --expect-admin-token-fingerprint <fingerprint>` contract as step 10, then `loom cluster release-gate --manifest <that file> --minio-storage-preflight <that storage artifact>` (#339 fix for stale kind-import, #536 guard for GB10 status token drift). GB10 convergence mismatches are retried for up to 15 minutes so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. |
-| 14 | smoke | HTTP health + smoke identity + benchmarks + smoke task lookup. Default `user-token` mode submits a user-owned trial and checks trajectory/usage; `admin-on-behalf` mode submits an audited represented-user batch through the admin API, uses a batch-compatible current-GB10 default task, and polls batch success. |
+| 10 | env-state | candidate-source `loom admin environment-state apply/check --admin-token <source> --expect-admin-token-fingerprint <fingerprint>` (#331 fix for stop-on-disable, #533 guard for scoped admin token drift). Pure GB10 node-status convergence drift is recorded and deferred because step 11 has not started node-agent apply yet; mixed drift still fails immediately. |
+| 11 | gb10-prep | SSH ×N hosts after desired-state apply: fetch, checkout, write env file, install/start node-agent, verify. This step intentionally runs after step 10 so a host-local node-agent cannot apply a stale Control Plane desired-state row (#593). |
+| 12 | cluster-up | candidate-source `loom cluster up --backup-manifest <path> --recover-sandbox-deadlines --sandbox-deadline-max-pods 4` using the same manifest verified by step 05 and preflighted by step 08 (#203 fix for updated replicas, #206 bounded kind/containerd sandbox-deadline retry) |
+| 13 | production-defaults | candidate-source `loom admin rate-cards sync-yibuapi --format json`, then `loom providers update/show` for hosted provider pricing defaults declared in the environment-state profile, using `--service-token <source>` in an isolated CLI config derived from the rollout route. This keeps DB-backed cost-attribution defaults from disappearing after a fresh rollout without depending on ambient operator login state. |
+| 14 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, run `loom cluster minio-storage-preflight --output minio-storage-preflight-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment`, rerun `loom admin environment-state check --format json`, then `loom cluster release-gate --manifest <that file> --minio-storage-preflight <that storage artifact>` (#339 fix for stale kind-import, #536 guard for GB10 status token drift, #593 post-prep env-state recheck). GB10 convergence mismatches are retried for up to 15 minutes so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. |
+| 15 | smoke | HTTP health + smoke identity + benchmarks + smoke task lookup. Default `user-token` mode submits a user-owned trial and checks trajectory/usage; `admin-on-behalf` mode submits an audited represented-user batch through the admin API, uses a batch-compatible current-GB10 default task, and polls batch success. |
 | 99 | summary | write `summary.md` from every prior step's result.json |
 
-Step 13 deliberately writes a narrow image-identity artifact instead of full
+Step 14 deliberately writes a narrow image-identity artifact instead of full
 `docker image inspect` output. The artifact is keyed by Deployment/container and
 contains the rendered image tag plus immutable `image_id` and optional
 `repo_digest` for images built by this rollout. External images, such as Envoy,
@@ -1520,7 +1527,7 @@ records the exact pod/reason/operation diagnostics. `loom cluster release-gate`
 uses the same classifier and keeps the release red even if a target-generation
 pod is Ready but an old pod is still stuck in sandbox teardown.
 
-The one-command rollout driver runs step 11 with
+The one-command rollout driver runs step 12 with
 `--backup-manifest "$BACKUP_MANIFEST" --recover-sandbox-deadlines
 --sandbox-deadline-max-pods 4`. `cluster up` runs its own protected preflight,
 so the rollout carries the same manifest that step 05 verified and step 08
@@ -1655,7 +1662,7 @@ YibuAPI provider connections should use `pricing_source=rate-card` with
 normally stay `tokens-only`, which reports token totals and
 `cost_status=not_applicable` without assigning a fabricated dollar amount.
 Protected rollout profiles can declare `[rate_card_sync.yibuapi]` plus
-`[[hosted_provider_pricing_defaults]]`; step 12 applies and verifies those
+`[[hosted_provider_pricing_defaults]]`; step 13 applies and verifies those
 defaults on every rollout before release-gate or smoke can proceed.
 
 ## Trial-cache (per-trial agent install)
@@ -3491,7 +3498,7 @@ real rollout blocker. Fix it by updating the Secret/profile and restarting the
 operator context; do not replace it with hand-written DB rows.
 
 For protected current-GB10 rollout smoke, also publish the checked-in release
-smoke fixture through the same official local-benchmark path before step 14.
+smoke fixture through the same official local-benchmark path before step 15.
 This creates a real DB task row and internal `s3://` bundle source for
 `loom-smoke/gb10-oracle-hello-world`; it is idempotent and uses the same target
 DB/MinIO environment variables as the catalog commands above.

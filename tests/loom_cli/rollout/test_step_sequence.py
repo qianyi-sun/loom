@@ -66,6 +66,18 @@ class TestDefaultStepSequence:
         got = {s.name for s in default_step_sequence()}
         assert got == expected, f"unexpected step names: {got ^ expected}"
 
+    def test_gb10_prep_runs_after_desired_state_apply(self) -> None:
+        """GB10 node-agent must not apply a stale release target.
+
+        GB10 prep can start the host-local node-agent. The control plane
+        desired state must therefore be updated before prep starts, and
+        prep must still run before cluster convergence and release-gate.
+        """
+        names = [s.name for s in default_step_sequence()]
+        assert names.index("env-state") < names.index("gb10-prep")
+        assert names.index("gb10-prep") < names.index("cluster-up")
+        assert names.index("gb10-prep") < names.index("release-gate")
+
     def test_release_gate_step_uses_env_state_and_gb10_status_artifacts(
         self,
         tmp_path,
@@ -81,16 +93,17 @@ class TestDefaultStepSequence:
         render_dir = ev.step_dir(7, "render")
         render_dir.path.mkdir(parents=True, exist_ok=True)
         render_dir.artifact_path("rendered.yaml").write_text("yaml")
-        env_state_dir = ev.step_dir(10, "env-state")
-        env_state_dir.path.mkdir(parents=True, exist_ok=True)
-        env_state_dir.artifact_path("environment-state-check.json").write_text("{}")
-        gb10_dir = ev.step_dir(13, "release-gate")
+        gb10_dir = ev.step_dir(14, "release-gate")
         gb10_dir.path.mkdir(parents=True, exist_ok=True)
+        release_gate_env_state_check = gb10_dir.artifact_path(
+            "environment-state-check.json"
+        )
+        release_gate_env_state_check.write_text("{}")
 
         argv = list(ReleaseGateStep().argv(ctx, gb10_dir))
 
         assert "--environment-state-check" in argv
-        assert str(env_state_dir.artifact_path("environment-state-check.json")) in argv
+        assert str(release_gate_env_state_check) in argv
         assert "--gb10-workers-status" in argv
         assert str(gb10_dir.artifact_path("gb10-workers-status-staging-abc123.json")) in argv
 
