@@ -64,6 +64,17 @@ enabled = false
 
 [llm_gateway_sandbox]
 enabled = false
+# PgBouncer connection multiplexer (#609). When enabled, renders a Deployment (2 replicas), Service (loom-pgbouncer:6432), PodDisruptionBudget, and NetworkPolicy; bootstrap populates *-db-url-pool secrets by deriving from the direct DSN. Rollback: enabled=false, re-render, redeploy — services fall back to db_url (direct). See docs/architecture/pgbouncer-transaction-mode-design.md.
+
+[pgbouncer]
+enabled = true
+default_pool_size = 25
+max_client_conn = 500
+min_pool_size = 5
+# Postgres runtime tuning knobs. max_connections bumped from Postgres default 100 to leave room for pgbouncer backend pool (default_pool_size × pgbouncer.replicas) + LISTEN watchers + Alembic + admin slack.
+
+[postgres]
+max_connections = 150
 
 [replicas]
 service = 2
@@ -73,6 +84,7 @@ web = 0
 worker = 3
 egress_xds = 0
 egress_proxy = 0
+pgbouncer = 2
 # Production worker Deployment capacity knobs. One worker pod handles max_concurrent trials; replicas.worker multiplies total in-cluster trial slots.
 
 [worker_capacity]

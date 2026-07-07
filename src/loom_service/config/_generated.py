@@ -36,6 +36,7 @@ class LoomServiceSettings(BaseSettings):
     bind_port: int = 8090
     control_plane_url: HttpUrl = cast(HttpUrl, "http://loom-control-plane:8080")
     db_url: PostgresDsn
+    db_url_pool: PostgresDsn = cast(PostgresDsn, "")
     dev_reload: bool = False
     gateway_url: HttpUrl = cast(HttpUrl, "http://loom-llm-gateway:9100")
     k8s_worker_enabled: bool = True

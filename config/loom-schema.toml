@@ -16,6 +16,14 @@ required    = true
 secret      = { key_per_service = { control-plane = "cp-db-url", llm-gateway = "gw-db-url", loom-service = "svc-db-url" } }
 description = "Postgres connection string. Per-service Secret keys so DB credentials rotate independently."
 
+[service_config.db_url_pool]
+used_by     = ["control-plane", "llm-gateway", "loom-service"]
+python_type = "PostgresDsn"
+required    = false
+default     = ""
+secret      = { key_per_service = { control-plane = "cp-db-url-pool", llm-gateway = "gw-db-url-pool", loom-service = "svc-db-url-pool" } }
+description = "PgBouncer pool DSN (transaction-mode multiplexer, #609). When non-empty, SQLAlchemy engines use this instead of db_url. Empty (default) = direct-to-Postgres, no pooler. LISTEN/NOTIFY watchers and Alembic migrations always use db_url regardless."
+
 [service_config.db_pool_size]
 used_by     = ["control-plane"]
 python_type = "int"
@@ -1072,7 +1080,7 @@ python_type = "table"
 # into gateway-router (PR-C2), so by default the components stay
 # scaled to zero. Operators flip both to 1+ when enabling sandbox-
 # isolated egress.
-fields      = { service = 2, control_plane = 2, gateway = 2, web = 0, worker = 3, egress_xds = 0, egress_proxy = 0 }
+fields      = { service = 2, control_plane = 2, gateway = 2, web = 0, worker = 3, egress_xds = 0, egress_proxy = 0, pgbouncer = 2 }
 
 [render_config.k8s_worker]
 python_type = "table"
@@ -1124,3 +1132,13 @@ python_type = "table"
 # Closes #78 Phase B — per-node edge auth instead of destination-
 # only.
 fields      = { enabled = false }
+
+[render_config.pgbouncer]
+python_type = "table"
+description = "PgBouncer connection multiplexer (#609). When enabled, renders a Deployment (2 replicas), Service (loom-pgbouncer:6432), PodDisruptionBudget, and NetworkPolicy; bootstrap populates *-db-url-pool secrets by deriving from the direct DSN. Rollback: enabled=false, re-render, redeploy — services fall back to db_url (direct). See docs/architecture/pgbouncer-transaction-mode-design.md."
+fields      = { enabled = true, default_pool_size = 25, max_client_conn = 500, min_pool_size = 5 }
+
+[render_config.postgres]
+python_type = "table"
+description = "Postgres runtime tuning knobs. max_connections bumped from Postgres default 100 to leave room for pgbouncer backend pool (default_pool_size × pgbouncer.replicas) + LISTEN watchers + Alembic + admin slack."
+fields      = { max_connections = 150 }
