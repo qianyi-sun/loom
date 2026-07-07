@@ -9,7 +9,23 @@ import pytest
 
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.evidence import EvidenceDirectory
-from loom_cli.rollout.steps.s13_smoke import SmokeStep, _trajectory_head_request
+from loom_cli.rollout.steps.s13_smoke import (
+    SmokeStep,
+    _ingress_base,
+    _trajectory_head_request,
+)
+
+
+def test_smoke_api_base_uses_frontend_api_base_path(tmp_path) -> None:
+    ctx = make_ctx(tmp_path)
+    ctx.cluster_config_path.write_text(
+        'ingress_host = "yylx.world"\n'
+        'frontend_route_path = "/dev"\n'
+        'frontend_api_base_path = "/dev"\n',
+        encoding="utf-8",
+    )
+
+    assert _ingress_base(ctx) == "https://yylx.world/dev"
 
 
 def test_smoke_posts_current_trial_config_contract_with_user_owned_token(
@@ -190,6 +206,30 @@ def test_trajectory_head_request_keeps_external_signed_url_anonymous() -> None:
     assert req.full_url == "https://minio.internal/traj?X-Amz-Signature=abc"
     assert req.get_method() == "HEAD"
     assert req.get_header("Authorization") is None
+
+
+def test_trajectory_head_request_authenticates_prefixed_platform_url() -> None:
+    req = _trajectory_head_request(
+        "https://yylx.world/dev/api/v1/trials/trial-1/trajectory/download",
+        ingress_base="https://yylx.world/dev",
+        token="smoke-user-token",
+    )
+
+    assert req.full_url == "https://yylx.world/dev/api/v1/trials/trial-1/trajectory/download"
+    assert req.get_method() == "HEAD"
+    assert req.get_header("Authorization") == "Bearer smoke-user-token"
+
+
+def test_trajectory_head_request_normalizes_root_api_url_to_prefixed_api_base() -> None:
+    req = _trajectory_head_request(
+        "https://yylx.world/api/v1/trials/trial-1/trajectory/download",
+        ingress_base="https://yylx.world/dev",
+        token="smoke-user-token",
+    )
+
+    assert req.full_url == "https://yylx.world/dev/api/v1/trials/trial-1/trajectory/download"
+    assert req.get_method() == "HEAD"
+    assert req.get_header("Authorization") == "Bearer smoke-user-token"
 
 
 def test_smoke_get_probes_platform_trajectory_when_head_not_allowed(

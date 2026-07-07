@@ -62,11 +62,24 @@ class _AdminOnBehalfConfig:
 
 
 def _ingress_base(ctx: RolloutContext) -> str:
-    # Cluster-config declares ingress_host; smoke assumes HTTPS.
+    # Cluster-config declares ingress_host plus optional prod/dev route
+    # prefixes; smoke exercises the same public API base as users.
     from loom_cli.cluster_config import load_cluster_config
 
     cfg = load_cluster_config(ctx.cluster_config_path)
-    return f"https://{cfg.ingress_host}"
+    api_base_path = _normalise_public_path(
+        cfg.frontend_api_base_path or cfg.frontend_route_path,
+    )
+    return f"https://{cfg.ingress_host}{api_base_path}"
+
+
+def _normalise_public_path(value: str) -> str:
+    path = value.strip()
+    if not path or path == "/":
+        return ""
+    if not path.startswith("/"):
+        path = "/" + path
+    return path.rstrip("/")
 
 
 def _smoke_api_token(ctx: RolloutContext) -> str | None:
@@ -170,18 +183,23 @@ def _trajectory_head_request(
 ) -> urllib.request.Request:
     parsed_url = urllib.parse.urlparse(url)
     parsed_base = urllib.parse.urlparse(ingress_base)
+    api_base_path = _normalise_public_path(parsed_base.path)
     needs_platform_auth = _same_host(parsed_url, parsed_base) and (
-        parsed_url.path.startswith("/api/")
+        _is_platform_api_path(parsed_url.path, api_base_path=api_base_path)
     )
     head_url = url
     if needs_platform_auth:
         # Service download URLs are authenticated API routes. Normalize back to
         # the operator-declared HTTPS ingress before attaching the smoke token.
+        path = _normalise_platform_api_path(
+            parsed_url.path,
+            api_base_path=api_base_path,
+        )
         head_url = urllib.parse.urlunparse(
             (
                 parsed_base.scheme,
                 parsed_base.netloc,
-                parsed_url.path,
+                path,
                 parsed_url.params,
                 parsed_url.query,
                 parsed_url.fragment,
@@ -191,6 +209,22 @@ def _trajectory_head_request(
     if needs_platform_auth:
         req.add_header("Authorization", f"Bearer {token}")
     return req
+
+
+def _is_platform_api_path(path: str, *, api_base_path: str) -> bool:
+    root_api = path == "/api" or path.startswith("/api/")
+    if not api_base_path:
+        return root_api
+    prefixed_api = path == f"{api_base_path}/api" or path.startswith(
+        f"{api_base_path}/api/",
+    )
+    return root_api or prefixed_api
+
+
+def _normalise_platform_api_path(path: str, *, api_base_path: str) -> str:
+    if api_base_path and (path == "/api" or path.startswith("/api/")):
+        return api_base_path + path
+    return path
 
 
 def _trajectory_get_probe_request(
