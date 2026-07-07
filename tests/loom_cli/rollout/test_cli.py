@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 
 from loom_cli.__main__ import main
+from loom_cli.rollout.context import sha256_of_file
+from loom_cli.rollout.evidence import EvidenceDirectory
+from loom_cli.rollout.state import RolloutState
 
 
 class _FakeSubprocess:
@@ -442,6 +445,85 @@ class TestRolloutCLIRealRun:
         assert captured["ctx"].to_inputs_dict()["service_token_source"] == (
             "file:/secure/path/service-token"
         )
+
+    def test_resume_reuses_persisted_resolved_sha_when_target_branch_moved(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cfg = tmp_path / "cluster-config.toml"
+        cfg.write_text("image_tag = 'staging-948f6e8'\n")
+        backup = tmp_path / "backup-manifest.json"
+        backup.write_text("{}")
+        rollout_id = "20260707t000020z-staging-948f6e8"
+        evidence = EvidenceDirectory(tmp_path, rollout_id)
+        evidence.ensure()
+        old_sha = "948f6e8d17815b24e6df3af05e456658e8daa386"
+        new_sha = "468c23f9ca1a9484eb0f522bb3f75f1b8ff2b56c"
+        evidence.write_inputs({
+            "image_tag": "staging-948f6e8",
+            "target_ref": "origin/dev",
+            "resolved_sha": old_sha,
+            "cluster_name": "loom-staging",
+            "namespace": "loom-staging",
+            "environment": "staging",
+            "cp_url": "http://control-node.lan:18081",
+            "admin_token_source": "env:LOOM_CP_ADMIN_TOKEN",
+            "expect_admin_token_fingerprint": None,
+            "worker_token_source": None,
+            "service_token_source": None,
+            "cluster_config_path": str(cfg),
+            "cluster_config_sha256": sha256_of_file(cfg),
+            "rollout_root": str(tmp_path),
+            "scope": "current-gb10",
+            "exclude_oldlab": False,
+        })
+        state = RolloutState.new(
+            rollout_id=rollout_id,
+            steps=[(12, "production-defaults")],
+        )
+        state.mark_step_failed(
+            12,
+            finished_at="2026-07-07T00:12:00Z",
+            error="planned failure",
+        )
+        state.save(evidence.state_path())
+
+        class _MovedBranchSubprocess(_FakeSubprocess):
+            def __call__(self, argv, **kwargs):
+                result = super().__call__(argv, **kwargs)
+                if argv[:2] == ["git", "rev-parse"]:
+                    result.stdout = new_sha + "\n"
+                return result
+
+        monkeypatch.setattr(subprocess, "run", _MovedBranchSubprocess())
+        captured = {}
+
+        def fake_run_rollout(ctx, steps, evidence_dir):
+            captured["ctx"] = ctx
+            captured["evidence"] = evidence_dir
+            return 0
+
+        monkeypatch.setattr("loom_cli.rollout.cli.run_rollout", fake_run_rollout)
+
+        rc = main([
+            "cluster", "rollout",
+            "--ref", "origin/dev",
+            "--image-tag", "staging-948f6e8",
+            "--cluster-name", "loom-staging",
+            "--namespace", "loom-staging",
+            "--environment", "staging",
+            "--cp-url", "http://control-node.lan:18081",
+            "--cluster-config", str(cfg),
+            "--backup-manifest", str(backup),
+            "--rollout-root", str(tmp_path),
+            "--resume",
+        ])
+
+        assert rc == 0
+        assert captured["ctx"].target_ref == "origin/dev"
+        assert captured["ctx"].resolved_sha == old_sha
+        assert captured["evidence"].rollout_id == rollout_id
 
     def test_refuses_without_matching_cluster_config(
         self,
