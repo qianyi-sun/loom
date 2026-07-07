@@ -86,6 +86,27 @@ class TestBundleSizeEnforcement:
             )
             assert cumulative == 10000
 
+    def test_upload_bundle_dir_team_quota_checked_before_put(self) -> None:
+        client = MagicMock()
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle_dir = Path(tmp)
+            (bundle_dir / "a.bin").write_bytes(b"a" * 100)
+            (bundle_dir / "b.bin").write_bytes(b"b" * 100)
+
+            with pytest.raises(_BundleSizeExceededError) as exc_info:
+                _upload_bundle_dir(
+                    client,
+                    bucket="test-bucket",
+                    bundle_prefix="prefix",
+                    bundle_dir=bundle_dir,
+                    cumulative_bytes=0,
+                    team_storage_baseline=950,
+                    max_team_storage_bytes=1000,
+                )
+            assert exc_info.value.cumulative == 1050
+            assert exc_info.value.limit == 1000
+            client.put_object.assert_not_called()
+
 
 class TestGCQueryWindow:
     """Tests for GC retention window correctness."""
@@ -228,7 +249,7 @@ class TestStorageQuotaCheckLogic:
     """Tests for team storage quota enforcement at submit."""
 
     @pytest.mark.asyncio
-    async def test_storage_quota_rejects_when_at_limit(self) -> None:
+    async def test_storage_quota_rejects_when_at_limit_with_incoming(self) -> None:
         from unittest.mock import AsyncMock, patch
 
         from fastapi import HTTPException
@@ -250,6 +271,57 @@ class TestStorageQuotaCheckLogic:
                     minio_client=MagicMock(),
                     artifacts_bucket="artifacts",
                     default_max_storage_bytes=21_474_836_480,
+                    incoming_bytes=1,
                 )
         assert exc_info.value.status_code == 429
         assert exc_info.value.detail == "taskset_storage_quota_exceeded"
+
+    @pytest.mark.asyncio
+    async def test_storage_quota_allows_when_incoming_fits(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from loom_service.taskset_intake import check_taskset_storage_quota
+
+        session = AsyncMock()
+        session.execute = AsyncMock(
+            return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
+        )
+        with patch(
+            "loom_service.taskset_intake.team_taskset_storage_bytes",
+            return_value=1000,
+        ):
+            await check_taskset_storage_quota(
+                session,
+                team_id=uuid4(),
+                minio_client=MagicMock(),
+                artifacts_bucket="artifacts",
+                default_max_storage_bytes=2000,
+                incoming_bytes=500,
+            )
+
+    @pytest.mark.asyncio
+    async def test_storage_quota_rejects_when_incoming_would_exceed(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from fastapi import HTTPException
+
+        from loom_service.taskset_intake import check_taskset_storage_quota
+
+        session = AsyncMock()
+        session.execute = AsyncMock(
+            return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
+        )
+        with patch(
+            "loom_service.taskset_intake.team_taskset_storage_bytes",
+            return_value=1990,
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await check_taskset_storage_quota(
+                    session,
+                    team_id=uuid4(),
+                    minio_client=MagicMock(),
+                    artifacts_bucket="artifacts",
+                    default_max_storage_bytes=2000,
+                    incoming_bytes=20,
+                )
+        assert exc_info.value.status_code == 429

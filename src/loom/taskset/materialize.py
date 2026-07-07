@@ -194,6 +194,8 @@ def _upload_bundle_dir(
     bundle_dir: Path,
     cumulative_bytes: int = 0,
     max_bundle_bytes: int | None = None,
+    team_storage_baseline: int = 0,
+    max_team_storage_bytes: int | None = None,
 ) -> int:
     """Upload a bundle directory; returns updated cumulative byte count."""
     for path in bundle_dir.rglob("*"):
@@ -203,6 +205,14 @@ def _upload_bundle_dir(
         cumulative_bytes += len(data)
         if max_bundle_bytes is not None and cumulative_bytes > max_bundle_bytes:
             raise _BundleSizeExceededError(cumulative_bytes, max_bundle_bytes)
+        if (
+            max_team_storage_bytes is not None
+            and team_storage_baseline + cumulative_bytes > max_team_storage_bytes
+        ):
+            raise _BundleSizeExceededError(
+                team_storage_baseline + cumulative_bytes,
+                max_team_storage_bytes,
+            )
         rel = path.relative_to(bundle_dir).as_posix()
         _put_object(
             client,
@@ -684,15 +694,9 @@ def materialize_task_set(
                         bundle_dir=bundle_dir,
                         cumulative_bytes=cumulative_bytes,
                         max_bundle_bytes=max_bundle_bytes,
+                        team_storage_baseline=team_storage_baseline,
+                        max_team_storage_bytes=max_team_storage_bytes,
                     )
-                    if (
-                        max_team_storage_bytes is not None
-                        and team_storage_baseline + cumulative_bytes > max_team_storage_bytes
-                    ):
-                        raise _BundleSizeExceededError(
-                            team_storage_baseline + cumulative_bytes,
-                            max_team_storage_bytes,
-                        )
                 source = f"s3://{artifacts_bucket}/{bundle_prefix}/"
                 drafts.append(
                     TaskRowDraft(

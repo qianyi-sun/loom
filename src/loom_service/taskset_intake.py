@@ -175,8 +175,11 @@ async def check_taskset_storage_quota(
     minio_client: Any,
     artifacts_bucket: str,
     default_max_storage_bytes: int,
+    incoming_bytes: int = 0,
 ) -> None:
-    """Reject if team TaskSet blob storage is already at the configured cap."""
+    """Reject if team TaskSet blob storage is at or would exceed the cap."""
+    if incoming_bytes < 0:
+        raise ValueError("incoming_bytes must be non-negative")
     quota_row = (await session.execute(
         select(TeamQuota).where(TeamQuota.team_id == team_id),
     )).scalar_one_or_none()
@@ -192,7 +195,7 @@ async def check_taskset_storage_quota(
         bucket=artifacts_bucket,
         team_id=team_id,
     )
-    if team_bytes >= max_storage:
+    if team_bytes + incoming_bytes > max_storage:
         raise HTTPException(
             status_code=429,
             detail="taskset_storage_quota_exceeded",
@@ -246,13 +249,6 @@ async def submit_task_set(
 ) -> TaskSetIntakeResult:
     await check_taskset_count_quota(
         session, team_id=team_id, default_max_count=taskset_quota_max_count,
-    )
-    await check_taskset_storage_quota(
-        session,
-        team_id=team_id,
-        minio_client=minio_client,
-        artifacts_bucket=artifacts_bucket,
-        default_max_storage_bytes=taskset_quota_max_storage_bytes,
     )
     manifest_model, raw_manifest = await parse_manifest_upload(
         manifest_upload,
@@ -312,6 +308,20 @@ async def submit_task_set(
     manifest_bytes = yaml.safe_dump(
         raw_manifest, sort_keys=False,
     ).encode("utf-8")
+
+    incoming_bytes = len(manifest_bytes)
+    if verifier_bytes is not None:
+        incoming_bytes += len(verifier_bytes)
+    if transform_bytes is not None:
+        incoming_bytes += len(transform_bytes)
+    await check_taskset_storage_quota(
+        session,
+        team_id=team_id,
+        minio_client=minio_client,
+        artifacts_bucket=artifacts_bucket,
+        default_max_storage_bytes=taskset_quota_max_storage_bytes,
+        incoming_bytes=incoming_bytes,
+    )
 
     normalized = normalize_intents(
         manifest_model,
