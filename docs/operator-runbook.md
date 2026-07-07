@@ -1329,7 +1329,10 @@ Optional flags:
   for this `--image-tag`. Without `--resume`, an existing in-progress
   rollout for the same tag is a hard refusal (the driver won't start
   a second run against the same target — either resume or remove the
-  state.json).
+  state.json). When the persisted `target_ref` and `image_tag` match the
+  invocation, resume reuses the `resolved_sha` recorded in `inputs.json`;
+  moving refs such as `origin/dev` may advance after rollout launch without
+  rebinding an in-progress rollout to a different candidate SHA.
 - `--dry-run` — print the planned step list + resolved SHA and exit
   without touching anything. Safe to run any time.
 
@@ -1379,6 +1382,9 @@ Every step transitions through the tiny FSM
 `not_started → running → verifying → done | failed` and the driver
 persists after every transition, so `Ctrl-C` at any point followed by
 a re-run picks up where it left off. `state.json` version is `1`.
+`inputs.json` pins the rollout to the SHA resolved at launch. On `--resume`,
+the driver keeps that pinned SHA when the operator supplies the same target ref
+and image tag, even if the branch now points at a newer commit.
 
 ### Resume semantics
 
@@ -1399,7 +1405,9 @@ a re-run picks up where it left off. `state.json` version is `1`.
   mutation. (#340 acceptance criterion.)
 - Persisted `inputs.json` differs from current invocation → refused
   with a per-key diff. Prevents accidentally continuing a rollout
-  against a different target sha.
+  against a different target ref, image tag, cluster, namespace,
+  environment, config hash, credential source reference, scope, or OLDLAB
+  inclusion policy.
 
 ### Individual step reference
 

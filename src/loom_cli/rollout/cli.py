@@ -106,6 +106,27 @@ def _validate_physical_environment_target(args: argparse.Namespace) -> str | Non
     )
 
 
+def _persisted_resume_sha(
+    *,
+    evidence: EvidenceDirectory,
+    target_ref: str,
+    image_tag: str,
+) -> str | None:
+    """Return the pinned SHA from an existing rollout when it is replayable."""
+    if not evidence.inputs_path().is_file():
+        return None
+    persisted = evidence.read_inputs()
+    resolved_sha = persisted.get("resolved_sha")
+    if (
+        persisted.get("target_ref") == target_ref
+        and persisted.get("image_tag") == image_tag
+        and isinstance(resolved_sha, str)
+        and len(resolved_sha) == 40
+    ):
+        return resolved_sha
+    return None
+
+
 def build_parser(p: argparse.ArgumentParser) -> None:
     """Populate ``p`` with the rollout subcommand's arguments."""
     p.add_argument(
@@ -257,13 +278,6 @@ def handle(args: argparse.Namespace) -> int:
         sys.stderr.write(f"error: {physical_target_error}\n")
         return 2
 
-    # Resolve --ref → sha via git.
-    try:
-        resolved_sha = resolve_ref_to_sha(args.ref)
-    except Exception as exc:
-        sys.stderr.write(f"error: {exc}\n")
-        return 2
-
     cluster_config_path = Path(args.cluster_config)
     if not cluster_config_path.is_file():
         sys.stderr.write(
@@ -304,6 +318,22 @@ def handle(args: argparse.Namespace) -> int:
             return 2
         rollout_id = new_rollout_id(image_tag=args.image_tag)
         evidence = EvidenceDirectory(rollout_root, rollout_id)
+
+    resolved_sha = (
+        _persisted_resume_sha(
+            evidence=evidence,
+            target_ref=args.ref,
+            image_tag=args.image_tag,
+        )
+        if args.resume
+        else None
+    )
+    if resolved_sha is None:
+        try:
+            resolved_sha = resolve_ref_to_sha(args.ref)
+        except Exception as exc:
+            sys.stderr.write(f"error: {exc}\n")
+            return 2
 
     ctx = RolloutContext(
         image_tag=args.image_tag,
