@@ -105,6 +105,13 @@ def _field_line(entry: ServiceConfigEntry, service: str) -> str:
                 f"Field(default=None, validation_alias=\"{alias}\")"
             )
         if py in ("HttpUrl", "PostgresDsn"):
+            # Empty-string default for a URL type cannot be validated by pydantic;
+            # treat it as Optional with None default instead (#609).
+            if rendered_default == '""':
+                return (
+                    f"    {entry.name}: {annotation} | None = "
+                    f"Field(default=None, validation_alias=\"{alias}\")"
+                )
             default_expr = f"cast({py}, {rendered_default})"
         else:
             default_expr = rendered_default
@@ -119,6 +126,10 @@ def _field_line(entry: ServiceConfigEntry, service: str) -> str:
     if py == "str_list":
         return f"    {entry.name}: list[str] = {rendered_default}"
     if py in ("HttpUrl", "PostgresDsn"):
+        # Empty-string default for a URL type cannot be validated by pydantic;
+        # treat it as Optional with None default instead (#609).
+        if rendered_default == '""':
+            return f"    {entry.name}: {py} | None = None"
         return f"    {entry.name}: {py} = cast({py}, {rendered_default})"
     return f"    {entry.name}: {py} = {rendered_default}"
 

@@ -22,7 +22,7 @@ class GatewaySettings(BaseSettings):
     bind_host: str = "0.0.0.0"
     bind_port: int = 9100
     db_url: PostgresDsn
-    db_url_pool: PostgresDsn = cast(PostgresDsn, "")
+    db_url_pool: PostgresDsn | None = None
     dev_reload: bool = False
     egress_proxy_url: str = ""
     gateway_drain_timeout_sec: float = 270.0
