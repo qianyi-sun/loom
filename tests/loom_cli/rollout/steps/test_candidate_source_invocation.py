@@ -422,6 +422,7 @@ PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"
         encoding="utf-8",
     )
     calls: list[dict[str, Any]] = []
+    monkeypatch.setenv("PATH", "/usr/bin")
 
     def fake_run(argv, **kwargs):
         call = {
@@ -439,6 +440,9 @@ PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"
             )
         if list(argv)[:2] == ["bash", "-euo"]:
             assert kwargs["cwd"] == worktree
+            path_entries = kwargs["env"]["PATH"].split(os.pathsep)
+            assert path_entries[0] == str(Path(sys.executable).parent)
+            assert "/usr/bin" in path_entries[1:]
             assert kwargs["env"]["HF_TOKEN"] == hf_token
             assert kwargs["env"]["LOOM_SVC_DB_URL"] == db_url
             assert kwargs["env"]["PUBLISHED_SHA"] == (
