@@ -957,6 +957,11 @@ python_type = "str"
 default     = "0.7"
 description = "Image tag applied to every loom-* image."
 
+[render_config.runtime_environment]
+python_type = "str"
+default     = "production"
+description = "Backend runtime identity written to LOOM_ENV for service/control-plane/gateway pods. Staging profiles must set this to staging; production profiles set production."
+
 [render_config.ingress_host]
 python_type = "str"
 default     = "loom.example.com"

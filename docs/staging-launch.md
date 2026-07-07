@@ -113,17 +113,15 @@ Attach these to the release issue or release PR:
 - Environment desired-state transcript showing
   `loom admin environment-state apply` and
   `loom admin environment-state check` against
-  `deploy/environment-state/staging.toml` or
   `deploy/environment-state/staging.toml`, with the rollout `IMAGE_TAG` and
   `ENV_CONFIG_VERSION` variables supplied. This must converge worker-pool
   autoscaler policies, GB10 desired state, and any external Slurm autoscaler
   supervisor before Monitor/resource-pool screenshots are used as evidence. For
-  staging, the OLDLAB supervisor unit must point at the current rollout
-  checkout, include `--pool-name oldlab`, have an executable `ExecStart`
-  Python path and existing autoscaler script, have no recent failed service
-  result such as `status=203/EXEC`, and have its user timer active. The
-  staging profile targets the existing CP desired-state environment
-  `production` until GB10 node agents are renamed in a coordinated rollout.
+  staging, the rendered service/control-plane/gateway pods must have
+  `LOOM_ENV=staging`, and `environment-state` evidence must show staging
+  worker-pool policies and GB10 desired state keyed as `staging/gb10-arm64`.
+  Any current-path staging evidence that reports `production/gb10-arm64` is
+  drift, not a valid migration exception.
 - Benchmark reward acceptance transcript from
   `scripts/benchmark_reward_gate.py`: the readiness gate must pass against the
   user-visible catalog, and the supported-benchmark sweep gate must prove every
@@ -685,7 +683,7 @@ loom admin slurm-workers status \
 loom admin gb10-workers status \
   --cp-url http://control-node.lan:18081 \
   --admin-token file:/secure/path/admin-token \
-  --environment production \
+  --environment staging \
   --pool-name gb10-arm64 \
   --release-image-tag "$IMAGE_TAG" \
   --release-env-config-version "$ENV_CONFIG_VERSION" \

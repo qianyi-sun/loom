@@ -176,7 +176,7 @@ loom admin slurm-workers status \
 loom admin gb10-workers status \
   --cp-url "$CP_URL" \
   --admin-token "file:$ADMIN_TOKEN_FILE" \
-  --environment production \
+  --environment staging \
   --pool-name gb10-arm64 \
   --release-image-tag "$IMAGE_TAG" \
   --release-env-config-version "$ENV_CONFIG_VERSION" \

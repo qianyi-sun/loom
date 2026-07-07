@@ -1,4 +1,5 @@
 namespace = "loom-staging"
+runtime_environment = "staging"
 ingress_host = "yylx.world"
 ingress_redirect_hosts = ["www.yylx.world"]
 ingress_tls_secret_name = "loom-staging-tls"

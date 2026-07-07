@@ -23,7 +23,7 @@ spec:
                   name: loom-secrets
                   key: secret-store-master-key
             - name: LOOM_ENV
-              value: "production"
+              value: "{{ runtime_environment }}"
           volumeMounts:
             - name: loom-admin-secret
               mountPath: /var/run/loom/secrets/admin

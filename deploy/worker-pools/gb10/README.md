@@ -348,7 +348,7 @@ cd /home/trt/loom-remote-worker/loom
 uv run loom worker gb10-agent plan \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
-  --environment production \
+  --environment staging \
   --pool-name gb10-arm64 \
   --hostname trt-gb10-1 \
   --env-file /home/trt/loom-remote-worker/.env.remote-worker
@@ -362,9 +362,9 @@ credentials.
 For normal staging and staging rollouts, apply the repository
 environment-state profile instead of hand-patching Control Plane rows with
 one-off SQL or `curl`. The profile converges the GB10 Slurm autoscaler policy
-and the GB10 node-agent desired state together. The staging profile still
-writes the existing `production/gb10-arm64` CP desired-state key because that
-is what deployed GB10 node agents read today:
+and the GB10 node-agent desired state together. Current staging evidence must
+show the `staging/gb10-arm64` CP desired-state key; `production/gb10-arm64` is
+production-only and is drift for a staging rollout:
 
 ```bash
 loom admin environment-state apply \
@@ -398,7 +398,7 @@ write `target_slots` plus per-host `host_intents` of `active`, `draining`, or
 curl -sS -X PUT \
   -H "Authorization: Bearer $LOOM_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  http://127.0.0.1:18081/admin/gb10-worker-pools/production/gb10-arm64/desired-state \
+  http://127.0.0.1:18081/admin/gb10-worker-pools/staging/gb10-arm64/desired-state \
   -d '{
     "image_tag": "staging-<commit>",
     "source_git_commit": "<full-release-commit>",
@@ -437,7 +437,7 @@ not match desired `source_git_commit`. Save the JSON form and pass it to
 loom admin gb10-workers status \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_ADMIN_TOKEN \
-  --environment production \
+  --environment staging \
   --pool-name gb10-arm64 \
   --release-image-tag "$IMAGE_TAG" \
   --release-env-config-version "$ENV_CONFIG_VERSION" \
@@ -469,7 +469,7 @@ node-agent timer from reapplying the bad desired state after a manual rollback:
 uv run loom worker gb10-agent apply \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
-  --environment production \
+  --environment staging \
   --pool-name gb10-arm64 \
   --env-file /home/trt/loom-remote-worker/.env.remote-worker \
   --compose-file deploy/docker-compose.remote-worker.yml \

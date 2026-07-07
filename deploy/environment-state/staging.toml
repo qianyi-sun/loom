@@ -8,10 +8,6 @@
 #     --var ENV_CONFIG_VERSION="$ENV_CONFIG_VERSION"
 
 environment = "staging"
-# Existing GB10 node-agent installations still read the production CP
-# environment. Keep this target until the node-agent env can be renamed in a
-# coordinated rollout.
-control_plane_environment = "production"
 
 [[worker_pool_autoscaler_policies]]
 pool_name = "gb10-arm64"
