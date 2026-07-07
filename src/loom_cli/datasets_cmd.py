@@ -12,6 +12,7 @@ Subcommands:
 - register <slug> [--hf-org --hf-token --db-url --revision --mirror-to-object-store --minio-*]
 - verify <slug> [--limit --minio-* --bucket --seed]
 - audit [--all | <slug>] [--db-url] [--json]
+- hf-boundary-evidence <slug> --environment staging --output PATH
 
 The {import, publish, register, verify} subcommands were previously
 shipped as `python -m loom_benchmark_tool <cmd>`. Folded into
@@ -231,6 +232,51 @@ def _add_audit_args(p: argparse.ArgumentParser) -> None:
         "--minio-secret-key",
         default=_target_minio_env("SECRET_KEY"),
     )
+
+
+def _add_hf_boundary_evidence_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("benchmark")
+    p.add_argument("--environment", required=True, choices=("staging", "production"))
+    p.add_argument("--output", required=True, type=Path)
+    p.add_argument(
+        "--namespace",
+        default=None,
+        help=(
+            "Kubernetes namespace whose loom-service pod owns DB/MinIO env. "
+            "When supplied, catalog audit, source summary, and canary summary "
+            "are collected through kubectl exec without printing secrets."
+        ),
+    )
+    p.add_argument("--kube-service-deployment", default="loom-service")
+    p.add_argument("--kube-service-container", default="loom-service")
+    p.add_argument(
+        "--db-url",
+        default=_target_db_url(),
+        help=(
+            "Postgres URL for non-kubernetes evidence generation. Prefer env "
+            "LOOM_DB_URL or LOOM_SVC_DB_URL."
+        ),
+    )
+    p.add_argument("--audit-json", type=Path, default=None)
+    p.add_argument("--source-summary-json", type=Path, default=None)
+    p.add_argument("--canary-summary-json", type=Path, default=None)
+    p.add_argument("--worker-boundary-json", type=Path, default=None)
+    p.add_argument("--canary-batch-id", default=None)
+    p.add_argument("--worker-pool", default="gb10-arm64")
+    p.add_argument("--cluster-config", type=Path, default=None)
+    p.add_argument(
+        "--gb10-workers-status",
+        type=Path,
+        default=None,
+        help=(
+            "Release-gate GB10 status artifact path, kept with generated "
+            "evidence for traceability."
+        ),
+    )
+    p.add_argument("--ssh-timeout-sec", type=float, default=60.0)
+    p.add_argument("--minio-endpoint", default=_target_minio_env("ENDPOINT"))
+    p.add_argument("--minio-access-key", default=_target_minio_env("ACCESS_KEY"))
+    p.add_argument("--minio-secret-key", default=_target_minio_env("SECRET_KEY"))
 
 
 def _source_env(name: str) -> str | None:
@@ -465,6 +511,10 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_audit_args(sub.add_parser(
         "audit",
         help="Inspect benchmark readiness from registered catalog/task rows.",
+    ))
+    _add_hf_boundary_evidence_args(sub.add_parser(
+        "hf-boundary-evidence",
+        help="Generate secret-safe HF mirror/token-boundary release evidence.",
     ))
     _add_provision_catalog_provision_args(sub.add_parser(
         "provision-catalog",
@@ -1251,6 +1301,12 @@ def _cmd_sync_config(args: argparse.Namespace) -> int:
         return 1
 
 
+def _cmd_hf_boundary_evidence(args: argparse.Namespace) -> int:
+    from loom_cli.hf_boundary_evidence import run_hf_boundary_evidence_command
+
+    return run_hf_boundary_evidence_command(args)
+
+
 _DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "list": _cmd_list,
     "show": _cmd_show,
@@ -1261,6 +1317,7 @@ _DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "register": _cmd_register,
     "verify": _cmd_verify,
     "audit": _cmd_audit,
+    "hf-boundary-evidence": _cmd_hf_boundary_evidence,
     "provision-catalog": _cmd_provision_catalog_provision,
     "validate-local": _cmd_validate_local,
     "validate": _cmd_validate_local,

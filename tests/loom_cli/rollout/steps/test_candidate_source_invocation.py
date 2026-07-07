@@ -1476,7 +1476,7 @@ def test_release_gate_run_generates_manifest_then_gates(
     result = ReleaseGateStep().run(ctx, step_dir)
 
     assert result.exit_code == 0
-    assert len(calls) == 6
+    assert len(calls) == 7
     assert calls[0]["argv"][:3] == ["docker", "image", "inspect"]
     for call in calls[1:]:
         _assert_candidate_invocation(call, worktree=worktree)
@@ -1486,18 +1486,28 @@ def test_release_gate_run_generates_manifest_then_gates(
     assert calls[3]["argv"][3:6] == ["admin", "gb10-workers", "status"]
     assert calls[3]["argv"][calls[3]["argv"].index("--environment") + 1] == "production"
     assert calls[4]["argv"][3:6] == ["admin", "environment-state", "check"]
-    assert calls[5]["argv"][3:5] == ["cluster", "release-gate"]
+    assert calls[5]["argv"][3:5] == ["datasets", "hf-boundary-evidence"]
+    assert calls[6]["argv"][3:5] == ["cluster", "release-gate"]
     manifest = step_dir.artifact_path("release-manifest-staging-abc123.json")
     storage = step_dir.artifact_path("minio-storage-preflight-staging-abc123.json")
     env_state_check = step_dir.artifact_path("environment-state-check.json")
+    hf_boundary = step_dir.artifact_path(
+        "hf-mirror-boundary-evidence-staging-abc123.json",
+    )
     assert calls[1]["argv"][calls[1]["argv"].index("--output") + 1] == str(manifest)
     assert calls[2]["argv"][calls[2]["argv"].index("--output") + 1] == str(storage)
-    assert calls[5]["argv"][calls[5]["argv"].index("--manifest") + 1] == str(manifest)
-    assert calls[5]["argv"][calls[5]["argv"].index("--minio-storage-preflight") + 1] == str(storage)
-    assert calls[5]["argv"][calls[5]["argv"].index("--environment-state-check") + 1] == (
+    assert calls[5]["argv"][calls[5]["argv"].index("--environment") + 1] == ctx.environment
+    assert calls[5]["argv"][calls[5]["argv"].index("--namespace") + 1] == ctx.namespace
+    assert calls[5]["argv"][calls[5]["argv"].index("--gb10-workers-status") + 1] == (
+        str(step_dir.artifact_path("gb10-workers-status-staging-abc123.json"))
+    )
+    assert calls[5]["argv"][calls[5]["argv"].index("--output") + 1] == str(hf_boundary)
+    assert calls[6]["argv"][calls[6]["argv"].index("--manifest") + 1] == str(manifest)
+    assert calls[6]["argv"][calls[6]["argv"].index("--minio-storage-preflight") + 1] == str(storage)
+    assert calls[6]["argv"][calls[6]["argv"].index("--environment-state-check") + 1] == (
         str(env_state_check)
     )
-    assert "--gb10-workers-status" in calls[5]["argv"]
+    assert "--gb10-workers-status" in calls[6]["argv"]
 
 
 def test_release_gate_records_expected_image_identities_before_manifest(
@@ -1796,10 +1806,19 @@ def test_release_gate_retries_transient_gb10_status_cp_unreachable(
                 kwargs["stdout_log"].write_text('{"nodes":[],"desired_states":[]}\n')
             if kwargs.get("stderr_log"):
                 kwargs["stderr_log"].write_text("")
+                return SubprocessResult(
+                    argv=list(argv),
+                    returncode=0,
+                    stdout='{"nodes":[],"desired_states":[]}\n',
+                    stderr="",
+                )
+        if "hf-boundary-evidence" in argv:
+            output = Path(argv[argv.index("--output") + 1])
+            output.write_text('{"environment":"staging"}\n', encoding="utf-8")
             return SubprocessResult(
                 argv=list(argv),
                 returncode=0,
-                stdout='{"nodes":[],"desired_states":[]}\n',
+                stdout="wrote HF boundary evidence\n",
                 stderr="",
             )
         if "release-gate" in argv:
@@ -1829,6 +1848,7 @@ def test_release_gate_retries_transient_gb10_status_cp_unreachable(
         ["admin", "gb10-workers", "status"],
         ["admin", "gb10-workers", "status"],
         ["admin", "gb10-workers", "status"],
+        ["datasets", "hf-boundary-evidence", "skilllearnbench"],
         ["cluster", "release-gate", "--manifest"],
     ]
 
@@ -1881,6 +1901,15 @@ def test_release_gate_retries_gb10_convergence_until_node_agent_reports_current(
                 argv=list(argv),
                 returncode=0,
                 stdout=body,
+                stderr="",
+            )
+        if "hf-boundary-evidence" in argv:
+            output = Path(argv[argv.index("--output") + 1])
+            output.write_text('{"environment":"staging"}\n', encoding="utf-8")
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout="wrote HF boundary evidence\n",
                 stderr="",
             )
         if "release-gate" in argv:
