@@ -36,6 +36,8 @@ postgres_image = "postgres:16"
 postgres_storage_gi = 50
 # Approved BYO provider egress targets as IP-or-CIDR:TCP-port entries, e.g. ["202.78.161.51:18001"]. Hostnames must be resolved by the operator before rendering because Kubernetes NetworkPolicy enforces CIDRs, not DNS names.
 provider_egress_allowlist = []
+# Backend runtime identity written to LOOM_ENV for service/control-plane/gateway pods. Staging profiles must set this to staging; production profiles set production.
+runtime_environment = "production"
 # Object-store bucket used by loom-service for trial trajectories. Set per environment when deployments share an object-store endpoint.
 trajectories_bucket = "trajectories"
 # Registry repo path for the shared trial-image cache (#547 item #2). Enables cross-node build sharing so workers on node B can pull layered images built on node A instead of rebuilding. Empty (default) = per-worker local cache only. Set to e.g. `ghcr.io/qianyi-sun/loom-trial-cache` on staging/production to activate. Workers need push+pull credentials via a mounted docker-config secret; without them the pull-fail case falls back cleanly to a local build (harmless).

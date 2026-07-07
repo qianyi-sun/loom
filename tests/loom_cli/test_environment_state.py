@@ -1513,9 +1513,9 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     gb10_policy = next(
         policy for policy in profile.autoscaler_policies if policy["pool_name"] == "gb10-arm64"
     )
-    expected_cp_environment = "production" if environment == "staging" else environment
     assert profile.environment == environment
-    assert gb10_policy["environment"] == expected_cp_environment
+    assert profile.control_plane_environment == environment
+    assert gb10_policy["environment"] == environment
     assert gb10_policy["actuator"] == "slurm"
     assert gb10_policy["max_slots"] == 150
     assert gb10_policy["actuator_config"]["backend"] == "docker"
@@ -1532,7 +1532,7 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     gb10_state = next(
         state for state in profile.gb10_desired_states if state["pool_name"] == "gb10-arm64"
     )
-    assert gb10_state["environment"] == expected_cp_environment
+    assert gb10_state["environment"] == environment
     assert gb10_state["image_tag"] == "staging-test"
     assert gb10_state["env_config_version"] == "staging-test"
     assert gb10_state["source_git_commit"] == ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")

@@ -43,6 +43,16 @@ def _load_docs(yaml_text: str) -> list[dict]:
     return [d for d in yaml.safe_load_all(yaml_text) if d]
 
 
+def _deployment_env_value(docs: list[dict], deployment: str, env_name: str) -> str | None:
+    doc = next(
+        d for d in docs
+        if d.get("kind") == "Deployment" and d["metadata"]["name"] == deployment
+    )
+    env = doc["spec"]["template"]["spec"]["containers"][0]["env"]
+    item = next((entry for entry in env if entry["name"] == env_name), None)
+    return item.get("value") if item else None
+
+
 # Schema default flipped k8s_worker.enabled to false (#383): profiles
 # that share OLDLAB hosts with Slurm must not double-schedule the host.
 # Render tests that exercise the worker Deployment / worker
@@ -721,6 +731,24 @@ def test_render_profile_ingress_routes_api_and_spa_under_frontend_prefix(
         (f"{route_path}(/|$)(api/v1.*)", "ImplementationSpecific", "loom-service", 8090),
         (f"{route_path}(/|$)(.*)", "ImplementationSpecific", "loom-web", 80),
     ]
+
+
+@pytest.mark.parametrize(
+    ("filename", "runtime_environment"),
+    [
+        ("production.cluster.toml", "production"),
+        ("staging.cluster.toml", "staging"),
+    ],
+)
+def test_render_profiles_set_backend_runtime_environment(
+    filename: str,
+    runtime_environment: str,
+) -> None:
+    cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / filename)
+    docs = _load_docs(render_manifests(cfg))
+
+    for deployment in ("loom-control-plane", "loom-service", "loom-llm-gateway"):
+        assert _deployment_env_value(docs, deployment, "LOOM_ENV") == runtime_environment
 
 
 def test_render_custom_storage_sizes() -> None:

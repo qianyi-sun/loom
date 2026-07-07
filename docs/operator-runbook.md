@@ -631,6 +631,10 @@ knob you need.
    every rollout-critical runtime row. After the images and secrets are live,
    apply the repository profile for the target environment, then check for
    drift before trusting Monitor capacity or benchmark validation evidence.
+   Staging cluster configs must render backend pods with `LOOM_ENV=staging`,
+   and staging environment-state evidence must use the `staging` control-plane
+   desired-state key. A `production/gb10-arm64` desired-state in staging
+   evidence is drift.
    Run the check from the Slurm submit/shared-storage host when the profile
    contains external Slurm runner pools; the gate also verifies runner env
    files, worker-token fingerprints, shared git checkouts, clean git status,
@@ -811,13 +815,12 @@ knob you need.
    `admin_token_fingerprint` fails, refresh the operator token source from the
    canonical protected-environment secret before rerunning; do not work around
    it by switching to an untracked token.
-   The staging profile currently targets the legacy Control Plane
-   environment name `production` because existing GB10 node agents read that
-   desired-state key; the CLI still requires `--environment staging` so
-   operators do not accidentally apply the staging profile. Pass the resolved
-   release commit as `GIT_SHA`; the GB10 desired state stores it as
-   `source_git_commit`, so node-agent status and release-gate checks can
-   reject a clean image/env rollout whose host checkout is still stale.
+   Staging profiles must target the `staging` Control Plane desired-state
+   environment. Evidence showing `production/gb10-arm64` for a staging rollout
+   is drift, not a compatibility exception. Pass the resolved release commit as
+   `GIT_SHA`; the GB10 desired state stores it as `source_git_commit`, so
+   node-agent status and release-gate checks can reject a clean image/env
+   rollout whose host checkout is still stale.
    When a release manifest records this profile, pass the JSON check artifact
    to `loom cluster release-gate --environment-state-check`; a missing artifact,
    `ok=false`, or non-empty `drift` array keeps the protected release gate red
@@ -4834,7 +4837,7 @@ link it from #217; do not merge incomplete evidence.
   loom admin gb10-workers status \
     --cp-url http://control-node.lan:18081 \
     --admin-token file:/secure/path/admin-token \
-    --environment production \
+    --environment staging \
     --pool-name gb10-arm64 \
     --release-image-tag "$IMAGE_TAG" \
     --release-env-config-version "$ENV_CONFIG_VERSION"
@@ -4842,7 +4845,7 @@ link it from #217; do not merge incomplete evidence.
   loom worker gb10-agent apply \
     --cp-url http://127.0.0.1:18081 \
     --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
-    --environment production \
+    --environment staging \
     --pool-name gb10-arm64 \
     --env-file /home/trt/loom-remote-worker/.env.remote-worker \
     --compose-file deploy/docker-compose.remote-worker.yml \

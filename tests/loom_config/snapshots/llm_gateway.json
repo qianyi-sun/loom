@@ -34,6 +34,11 @@
     "default": "''",
     "required": false
   },
+  "gateway_drain_timeout_sec": {
+    "annotation": "<class 'float'>",
+    "default": "270.0",
+    "required": false
+  },
   "google_api_key": {
     "annotation": "pydantic.types.SecretStr | None",
     "default": "None",

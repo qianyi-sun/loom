@@ -194,6 +194,11 @@
     "default": "7",
     "required": false
   },
+  "taskset_manifest_max_bytes": {
+    "annotation": "<class 'int'>",
+    "default": "1048576",
+    "required": false
+  },
   "taskset_materializer_batch_size": {
     "annotation": "<class 'int'>",
     "default": "1",

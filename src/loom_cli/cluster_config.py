@@ -122,6 +122,7 @@ if TYPE_CHECKING:
     @dataclass(frozen=True)
     class ClusterConfig:
         image_tag: str = "0.7"
+        runtime_environment: str = "production"
         env_state_profile: str = ""
         gb10_pool: _Gb10PoolConfig = field(default_factory=_Gb10PoolConfig)
         ingress_cert_manager_cluster_issuer: str = ""

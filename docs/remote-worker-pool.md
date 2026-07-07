@@ -645,9 +645,9 @@ Desired state is stored per `(environment, pool_name)` and includes:
 
 For staging and staging release rollouts, apply the repository
 environment-state profile so the Slurm autoscaler policy and GB10 compatibility
-desired state converge together. The staging profile writes the existing
-`production/gb10-arm64` CP key until GB10 node-agent environment names are
-renamed in a coordinated rollout. Run this from the Slurm submit host when the
+desired state converge together. The staging profile must write the
+`staging/gb10-arm64` CP key; `production/gb10-arm64` belongs to production and
+is drift in current-path staging evidence. Run this from the Slurm submit host when the
 profile declares an external Slurm autoscaler supervisor; staging uses that
 path to install and check the OLDLAB user timer, and the rendered service must
 call the repo one-shot with `--pool-name oldlab` so it cannot reconcile GB10 as
@@ -688,7 +688,7 @@ admin API:
 curl -sS -X PUT \
   -H "Authorization: Bearer $LOOM_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  http://control-node.lan:18081/admin/gb10-worker-pools/production/gb10-arm64/desired-state \
+  http://control-node.lan:18081/admin/gb10-worker-pools/staging/gb10-arm64/desired-state \
   -d '{
     "image_tag": "staging-<commit>",
     "source_git_commit": "<full-release-commit>",
@@ -724,7 +724,7 @@ desired source tree.
 loom admin gb10-workers status \
   --cp-url http://control-node.lan:18081 \
   --admin-token env:LOOM_ADMIN_TOKEN \
-  --environment production \
+  --environment staging \
   --pool-name gb10-arm64 \
   --release-image-tag "$IMAGE_TAG" \
   --release-env-config-version "$ENV_CONFIG_VERSION"
@@ -743,14 +743,14 @@ SIGTERM and uses the existing drain path before restart.
 loom worker gb10-agent plan \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
-  --environment production \
+  --environment staging \
   --pool-name gb10-arm64 \
   --env-file /home/trt/loom-remote-worker/.env.remote-worker
 
 loom worker gb10-agent apply \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
-  --environment production \
+  --environment staging \
   --pool-name gb10-arm64 \
   --env-file /home/trt/loom-remote-worker/.env.remote-worker \
   --compose-file deploy/docker-compose.remote-worker.yml \
@@ -767,7 +767,7 @@ Output shows only changed key names and redacted values.
 loom worker gb10-agent plan \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
-  --environment production \
+  --environment staging \
   --pool-name gb10-arm64 \
   --env-file /home/trt/loom-remote-worker/.env.remote-worker \
   --worker-token file:/secure/path/current-worker-token
@@ -775,7 +775,7 @@ loom worker gb10-agent plan \
 loom worker gb10-agent apply \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
-  --environment production \
+  --environment staging \
   --pool-name gb10-arm64 \
   --env-file /home/trt/loom-remote-worker/.env.remote-worker \
   --compose-file deploy/docker-compose.remote-worker.yml \

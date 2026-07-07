@@ -1031,6 +1031,14 @@ _FRONTEND_ENVIRONMENTS = frozenset(
         "production",
     }
 )
+_RUNTIME_ENVIRONMENTS = frozenset(
+    {
+        "local",
+        "development",
+        "staging",
+        "production",
+    }
+)
 
 
 def _normalise_static_host_path_root(config: ClusterConfig) -> str | None:
@@ -1157,6 +1165,16 @@ def _frontend_route_context(config: ClusterConfig) -> dict[str, Any]:
         "frontend_public_origin": f"https://{config.ingress_host}",
         "frontend_prefixed_route": bool(route_path),
     }
+
+
+def _runtime_environment_context(config: ClusterConfig) -> dict[str, str]:
+    environment = config.runtime_environment.strip()
+    if environment not in _RUNTIME_ENVIRONMENTS:
+        raise ValueError(
+            "runtime_environment must be one of "
+            f"{sorted(_RUNTIME_ENVIRONMENTS)!r}; got {environment!r}",
+        )
+    return {"runtime_environment": environment}
 
 
 def _ingress_redirect_hosts(config: ClusterConfig) -> tuple[str, ...]:
@@ -1341,6 +1359,7 @@ def render_manifests(config: ClusterConfig) -> str:
     ctx = config.to_render_context()
     ctx.update(_persistent_storage_context(config))
     ctx.update(_frontend_route_context(config))
+    ctx.update(_runtime_environment_context(config))
     ctx["ingress_redirect_hosts"] = _ingress_redirect_hosts(config)
     ctx["provider_egress_rules"] = _provider_egress_rules(config)
     try:
