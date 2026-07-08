@@ -114,6 +114,11 @@ class _LoomBlock(BaseModel):
     tier: str | None = None
     region: str | None = None
     provider_connection_id: str | None = None
+    # #672 PR-3: caller-declared dialect that overrides the default
+    # ``openai_chat`` audit label. The family-run skill_patcher_llm
+    # adapter sends ``family_evolver`` so cost + audit dashboards can
+    # partition adapter spend from agent spend on the same trial.
+    dialect: str | None = None
 
 
 class ChatRequest(BaseModel):
@@ -218,6 +223,11 @@ async def chat_completions(
             detail=(f"loom.trial_id is not a valid UUID: {exc}"),
         ) from exc
     audit_step_id = ctx.step_id if ctx.step_id is not None else req.loom.step_id
+    # #672 PR-3: the caller may declare a non-default dialect string
+    # so llm_calls audit rows attribute the spend correctly (e.g. the
+    # family-run skill_patcher_llm adapter sends ``family_evolver``).
+    # None → keep the historical ``openai_chat`` label.
+    audit_dialect = req.loom.dialect or "openai_chat"
 
     # Provider extraction: "provider/name" or bare "name" (defaults openai).
     raw_model = req.model
@@ -369,6 +379,7 @@ async def chat_completions(
             audit_team_id=audit_team_id,
             audit_trial_id=audit_trial_id,
             audit_step_id=audit_step_id,
+            audit_dialect=audit_dialect,
             provider_label=byo_row.provider_type,
             request_params=normalize_request_params(raw_body),
         )
@@ -392,7 +403,7 @@ async def chat_completions(
                     team_id=audit_team_id,
                     trial_id=audit_trial_id,
                     step_id=audit_step_id,
-                    dialect="openai_chat",
+                    dialect=audit_dialect,
                     model=model_name,
                     provider=byo_row.provider_type if byo_row is not None else provider,
                     request_params=normalize_request_params(raw_body),
@@ -485,7 +496,7 @@ async def chat_completions(
             team_id=audit_team_id,
             trial_id=audit_trial_id,
             step_id=audit_step_id,
-            dialect="openai_chat",
+            dialect=audit_dialect,
             model=model_name,
             usage=usage_for_audit,
             cost_usd=cost,
@@ -537,6 +548,7 @@ async def _forward_openai_compatible_byo_chat(
     audit_team_id: UUID,
     audit_trial_id: UUID,
     audit_step_id: str,
+    audit_dialect: str,
     provider_label: str,
     request_params: dict[str, Any],
 ) -> tuple[dict[str, Any], int]:
@@ -581,7 +593,7 @@ async def _forward_openai_compatible_byo_chat(
                 team_id=audit_team_id,
                 trial_id=audit_trial_id,
                 step_id=audit_step_id,
-                dialect="openai_chat",
+                dialect=audit_dialect,
                 model=model_name,
                 provider=provider_label,
                 request_params=request_params,
@@ -600,7 +612,7 @@ async def _forward_openai_compatible_byo_chat(
                 team_id=audit_team_id,
                 trial_id=audit_trial_id,
                 step_id=audit_step_id,
-                dialect="openai_chat",
+                dialect=audit_dialect,
                 model=model_name,
                 provider=provider_label,
                 request_params=request_params,
@@ -623,7 +635,7 @@ async def _forward_openai_compatible_byo_chat(
                 team_id=audit_team_id,
                 trial_id=audit_trial_id,
                 step_id=audit_step_id,
-                dialect="openai_chat",
+                dialect=audit_dialect,
                 model=model_name,
                 provider=provider_label,
                 attempt=outcome.attempt,

@@ -138,6 +138,13 @@ class LocalTrialRunner:
     sandbox_secrets_root: Path | None = None
     sandbox_step_jwt_ttl_sec: int = 600
     sandbox_extra_hosts: tuple[tuple[str, str], ...] = ()
+    # #672 PR-3: bind-mount tuples for the family-run state directory.
+    # Populated by the worker main loop after prepare_family_state_mount
+    # downloads the shared state tarball; each entry is
+    # (host_path, container_path, mode) — e.g. ("/tmp/foo",
+    # "/root/.skills", "rw"). Appended alongside the JWT rotator mount
+    # inside :meth:`run`.
+    family_state_volumes: tuple[tuple[str, str, str], ...] = ()
     sidecar_runtime_factory: TaskSidecarRuntimeFactory | None = None
     # #5 Slice 3b: optional CP-side event sink. When the worker is
     # configured to dual-write trajectory events into Postgres
@@ -223,6 +230,13 @@ class LocalTrialRunner:
             # sandbox. The rotator owns the file on the HOST side; the
             # sandbox sees atomic-replaced contents.
             sandbox_volumes = ((str(jwt_dir), "/run/loom", "ro"),)
+
+        # #672 PR-3: append the family-run state volumes so the sandbox
+        # sees the shared skills directory alongside any JWT rotator
+        # mount. Cleanup of the host-side staging dir happens in the
+        # worker main loop's finally block.
+        if self.family_state_volumes:
+            sandbox_volumes = sandbox_volumes + self.family_state_volumes
 
         # Plan 23: agent + model live on TrialConfig and are required.
         # TaskConfig.agent.* is no longer consulted for service-mode

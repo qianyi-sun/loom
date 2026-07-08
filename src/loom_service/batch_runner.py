@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.schema import (
     Batch,
+    BatchFamilyState,
     LlmCall,
     Task,
     Trial,
@@ -74,6 +75,12 @@ class PendingUnit:
     required_worker_pool: str | None = None
     provider_connection_id: UUID | None = None
     provider_model_id: str | None = None
+    # #672 PR-3: populated when the parent batch opted into family-run
+    # mode; the batch_runner looks the key up from batch_family_state
+    # by task_id at fanout time. The CP submit endpoint persists it
+    # onto ``trials.family_key`` so the scheduler's claim query can
+    # gate the trial on family sequence position.
+    family_key: str | None = None
 
 
 def next_batch_state(
@@ -451,6 +458,46 @@ async def _coverage_pending_units(
     return units, errors
 
 
+def _with_family_key(
+    unit: PendingUnit, family_key: str | None,
+) -> PendingUnit:
+    """Return a copy of ``unit`` with ``family_key`` set. #672 PR-3."""
+    if family_key is None:
+        return unit
+    return PendingUnit(
+        task_id=unit.task_id,
+        combination_idx=unit.combination_idx,
+        trial_config=unit.trial_config,
+        sample_idx=unit.sample_idx,
+        required_worker_pool=unit.required_worker_pool,
+        provider_connection_id=unit.provider_connection_id,
+        provider_model_id=unit.provider_model_id,
+        family_key=family_key,
+    )
+
+
+async def _load_family_key_map(
+    session: AsyncSession, batch_id: UUID,
+) -> dict[str, str]:
+    """Return ``task_id -> family_key`` from the batch's seeded family
+    state (#672 PR-3).
+
+    Empty dict when the batch is not in family-run mode — the fanout
+    path treats it as ``.get(task_id) -> None``.
+    """
+    rows = (await session.execute(
+        select(
+            BatchFamilyState.family_key,
+            BatchFamilyState.task_sequence,
+        ).where(BatchFamilyState.batch_id == batch_id),
+    )).all()
+    out: dict[str, str] = {}
+    for family_key, task_sequence in rows:
+        for task_id in (task_sequence or []):
+            out[str(task_id)] = str(family_key)
+    return out
+
+
 def _rerun_targets(batch: Batch) -> list[dict[str, Any]]:
     return [item for item in (batch.rerun_targets or []) if isinstance(item, dict)]
 
@@ -539,6 +586,7 @@ async def _submit_one(
     provider_model_id: str | None = None,
     combination_idx: int | None = None,
     required_worker_pool: str | None = None,
+    family_key: str | None = None,
 ) -> _SubmitResult:
     idempotency_key = _idempotency_key(
         batch_id,
@@ -562,6 +610,8 @@ async def _submit_one(
         payload["provider_connection_id"] = str(provider_connection_id)
     if provider_model_id is not None:
         payload["provider_model_id"] = provider_model_id
+    if family_key is not None:
+        payload["family_key"] = family_key
     headers: dict[str, str] = {}
     if authorization:
         headers["Authorization"] = authorization
@@ -791,6 +841,12 @@ async def run_once(
                 rerun_pending_units = await _pending_rerun_units(
                     s, b, targets, failed_fanout_keys,
                 )
+                family_key_map = await _load_family_key_map(s, b.id)
+                if family_key_map:
+                    rerun_pending_units = [
+                        _with_family_key(u, family_key_map.get(u.task_id))
+                        for u in rerun_pending_units
+                    ]
                 work.append((b.id, rerun_pending_units))
                 continue
             task_ids = await resolve_task_filter(
@@ -967,6 +1023,12 @@ async def run_once(
                     fanout_errors_by_batch.setdefault(b.id, []).extend(
                         coverage_errors,
                     )
+                family_key_map = await _load_family_key_map(s, b.id)
+                if family_key_map:
+                    pending_units = [
+                        _with_family_key(u, family_key_map.get(u.task_id))
+                        for u in pending_units
+                    ]
                 work.append((b.id, pending_units))
         await s.commit()
 
@@ -986,6 +1048,7 @@ async def run_once(
                     provider_model_id=unit.provider_model_id,
                     combination_idx=unit.combination_idx,
                     required_worker_pool=unit.required_worker_pool,
+                    family_key=unit.family_key,
                 )
                 if (
                     not submit_result.ok

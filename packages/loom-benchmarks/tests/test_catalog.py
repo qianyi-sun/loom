@@ -227,3 +227,26 @@ def test_browsecomp_upstream_is_pinned_full_csv_set() -> None:
         "csv_url": "https://openaipublic.blob.core.windows.net/simple-evals/browse_comp_test_set.csv",
         "csv_etag": "0x8DD785A972BF8A0",
     }
+
+
+def test_skillflow_iterative_catalog_declares_family_run_defaults() -> None:
+    """#672 PR-3: the iterative variant opts into family-run mode via
+    the catalog's ``family_run_defaults`` block. The batches route
+    reads this and seeds ``batch_family_state`` at accept time."""
+    entry = CATALOG["skillflow-iterative"]
+    assert entry.family_run_defaults is not None
+    defaults = entry.family_run_defaults
+    assert defaults["enabled"] is True
+    assert defaults["adapter"]["name"] == "skill_patcher_llm"
+    assert defaults["family_key_extractor"]["name"] == "instance_id_prefix"
+    assert defaults["sequencer"]["name"] == "ranking_file"
+    assert defaults["failure_policy"]["name"] == "stall_family"
+    assert defaults["state_backend"]["name"] == "s3_artifacts"
+    assert defaults["mount_path"] == "/root/.skills"
+
+
+def test_default_skillflow_has_no_family_run_defaults() -> None:
+    """Backward compatibility: the single-shot ``skillflow`` catalog
+    entry stays classic. Operators pick ``skillflow-iterative``
+    explicitly to opt into shared-skill mode."""
+    assert CATALOG["skillflow"].family_run_defaults is None

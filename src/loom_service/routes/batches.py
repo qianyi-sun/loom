@@ -17,7 +17,10 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal, NoReturn, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NoReturn, cast
+
+if TYPE_CHECKING:
+    from loom.family_run.spec import FamilyRunSpec
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
@@ -70,6 +73,7 @@ from loom_service.failure_taxonomy import (
     is_auto_safe_rerun,
     is_replaceable_by_successful_supplemental,
 )
+from loom_service.family_run_seed import prepare_family_run_state
 from loom_service.metrics import SUBMISSION_REJECTS_TOTAL
 from loom_service.monitor_filters import (
     apply_batch_monitor_filters,
@@ -98,6 +102,45 @@ from loom_service.usage_accounting import (
 from loom_service.worker_backends import get_active_backends
 
 router = APIRouter()
+
+
+def _catalog_family_run_defaults(benchmark_id: str | None) -> FamilyRunSpec | None:
+    """Fetch the ``family_run_defaults`` block from the benchmark
+    catalog (JSON shipped in ``loom_benchmarks``). None when the
+    benchmark has no defaults or when the entry is missing.
+    """
+    from loom.family_run.spec import FamilyRunSpec
+
+    if benchmark_id is None:
+        return None
+    try:
+        from loom_benchmarks.catalog import CATALOG
+    except ImportError:
+        return None
+    entry = CATALOG.get(benchmark_id)
+    if entry is None or entry.family_run_defaults is None:
+        return None
+    return FamilyRunSpec.model_validate(entry.family_run_defaults)
+
+
+def _build_service_state_backend(request: Request) -> Any:
+    """Materialise a state backend on the service side.
+
+    Wraps the boto3 MinIO client into a :class:`MinioObjectStore` +
+    :class:`S3ArtifactsStateBackend`. Kept as a helper so tests can
+    monkey-patch it with a fake without touching the route body.
+    """
+    from loom.family_run.state_backends import S3ArtifactsStateBackend
+    from loom.trajectory.storage import MinioObjectStore
+
+    settings = request.app.state.settings
+    store = MinioObjectStore(
+        endpoint_url=settings.minio_endpoint,
+        access_key=settings.minio_access_key.get_secret_value(),
+        secret_key=settings.minio_secret_key.get_secret_value(),
+        region=settings.minio_region,
+    )
+    return S3ArtifactsStateBackend(store=store, bucket=settings.artifacts_bucket)
 
 _RERUNNABLE_FAILURE_REASONS: frozenset[str] = frozenset(
     {
@@ -184,6 +227,25 @@ def _sanitize_trial_config(config: dict[str, Any]) -> dict[str, Any]:
     if "request_params" in out:
         out["request_params"] = sanitize_request_extras(out.get("request_params"))
     return out
+
+
+def _extract_family_run_override(
+    trial_config: dict[str, Any],
+) -> FamilyRunSpec | None:
+    """Read the optional ``family_run`` block off the trial_config.
+
+    Returns ``None`` when the field is absent (classic mode) or the
+    value is ``None``. Any parse error is surfaced to the caller as a
+    :class:`ValueError` — the batches route translates that into a 400.
+    """
+    from loom.family_run.spec import FamilyRunSpec
+
+    raw = trial_config.get("family_run")
+    if raw is None:
+        return None
+    if isinstance(raw, FamilyRunSpec):
+        return raw
+    return FamilyRunSpec.model_validate(raw)
 
 
 def _normalize_required_worker_pools(values: Sequence[str]) -> list[str]:
@@ -1078,6 +1140,51 @@ async def _create_batch_record(
     s.add(b)
     await s.flush()
     await s.refresh(b)
+
+    # #672 PR-3 hot-path: if the trial_config opted the batch into
+    # family-run mode (or the benchmark catalog carries defaults),
+    # resolve the spec, seed per-family state, and record the resolved
+    # spec on the batch. The batch_runner reads batch_family_state to
+    # stamp trials.family_key at CP-submit time; the scheduler's claim
+    # query then gates trial claims by family sequence position.
+    override_family_run = _extract_family_run_override(trial_config)
+    # Resolve the catalog default off the tasks' shared benchmark_id.
+    # Family-run is rejected for multi-benchmark batches unless the
+    # trial_config carries a fully-formed override — mixing benchmark
+    # defaults across tasks would silently pick one arbitrary benchmark
+    # and apply it to foreign tasks.
+    task_rows = (await s.execute(
+        select(Task).where(Task.id.in_(list(valid_task_ids))),
+    )).scalars().all()
+    distinct_benchmarks = {
+        t.benchmark_id for t in task_rows if t.benchmark_id is not None
+    }
+    catalog_default = None
+    if len(distinct_benchmarks) == 1:
+        catalog_default = _catalog_family_run_defaults(
+            next(iter(distinct_benchmarks)),
+        )
+    if override_family_run is not None or catalog_default is not None:
+        try:
+            state_backend = _build_service_state_backend(request)
+            seeded = await prepare_family_run_state(
+                session=s,
+                batch_id=b.id,
+                tasks=task_rows,
+                catalog_default=catalog_default,
+                override=override_family_run,
+                state_backend=state_backend,
+            )
+        except ValueError as exc:
+            _reject_submission(
+                reason="invalid_family_run_spec",
+                status_code=400,
+                detail=f"family_run spec resolution failed: {exc}",
+            )
+        if seeded is not None:
+            b.family_run_spec = seeded.resolved_spec.model_dump(mode="json")
+            await s.flush()
+
     usage_projection = _empty_usage_projection()
     budget_projection = project_batch_budget(b, usage_projection)
     return {

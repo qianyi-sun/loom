@@ -67,6 +67,49 @@ def test_trial_config_empty_agent_name_422s():
         TrialConfig(agent_name="", agent_model=_MODEL)
 
 
+def test_trial_config_family_run_roundtrip():
+    """#672 PR-3 hot-path: the optional family_run block round-trips
+    through model_validate and dump so the batches route can persist
+    it and the resolver merges it with catalog defaults."""
+    payload = {
+        "agent_name": _AGENT,
+        "agent_model": _MODEL.model_dump(mode="json"),
+        "family_run": {
+            "enabled": True,
+            "adapter": {"name": "skill_patcher_llm", "params": {}},
+            "mount_path": "/root/.skills",
+        },
+    }
+    c = TrialConfig.model_validate(payload)
+    assert c.family_run is not None
+    assert c.family_run.enabled is True
+    assert c.family_run.adapter is not None
+    assert c.family_run.adapter.name == "skill_patcher_llm"
+    assert c.family_run.mount_path == "/root/.skills"
+    dumped = c.model_dump(mode="json")
+    assert dumped["family_run"]["enabled"] is True
+
+
+def test_trial_config_family_run_absent_default():
+    """Backward compatibility: omitting family_run keeps the field None
+    and the batch runs in the classic mode."""
+    c = TrialConfig(agent_name=_AGENT, agent_model=_MODEL)
+    assert c.family_run is None
+    dumped = c.model_dump(mode="json")
+    assert dumped["family_run"] is None
+
+
+def test_trial_config_family_run_unknown_key_forbidden():
+    """Extra=forbid on FamilyRunSpec rejects typo'd role names so a
+    misconfigured trial_config fails at submission, not at claim time."""
+    with pytest.raises(ValidationError):
+        TrialConfig.model_validate({
+            "agent_name": _AGENT,
+            "agent_model": _MODEL.model_dump(mode="json"),
+            "family_run": {"enabled": True, "unknown_role": {"name": "x"}},
+        })
+
+
 def test_trial_config_sanitizes_request_params():
     c = TrialConfig(
         agent_name=_AGENT,
