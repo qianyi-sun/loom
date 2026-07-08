@@ -1,17 +1,32 @@
 {% import "_env.j2" as env_macros %}
-{# When k8s_worker.enabled is false the whole loom-worker Deployment
+{# When k8s_worker.enabled is false the whole loom-worker workload
    is omitted from the rendered manifest. Protected static-host-path
    profiles still render the trajectories PVC so the retained PV/PVC
    boundary exists before protected preflight.
    Trial execution capacity for these profiles comes from external
-   Slurm-managed pools. See #383 and #554. #}
+   Slurm-managed pools. See #383 and #554.
+
+   Dynamic-storage profiles render loom-worker as a StatefulSet with
+   volumeClaimTemplates so each replica gets its own RWO PVC. RWO
+   Longhorn volumes can only attach to one node at a time, which
+   blocks scaling a Deployment past 1 replica on multi-node k3s.
+   See #673. Static-host-path profiles keep the single-replica
+   Deployment shape (retained PV bound to a fixed-name PVC). #}
 {% if k8s_worker.enabled %}
 apiVersion: apps/v1
+{% if static_host_path_storage %}
 kind: Deployment
+{% else %}
+kind: StatefulSet
+{% endif %}
 metadata:
   name: loom-worker
 spec:
   replicas: {{ replicas.worker }}
+{% if not static_host_path_storage %}
+  serviceName: loom-worker
+  podManagementPolicy: Parallel
+{% endif %}
   selector:
     matchLabels: { app: loom-worker }
   template:
@@ -59,9 +74,11 @@ spec:
               cpu: {{ worker_capacity.cpu_limit | tojson }}
               memory: {{ worker_capacity.memory_limit | tojson }}
       volumes:
+{% if static_host_path_storage %}
         - name: trajectories
           persistentVolumeClaim:
             claimName: loom-worker-trajectories
+{% endif %}
         - name: docker-sock
           hostPath:
             path: /var/run/docker.sock
@@ -73,18 +90,35 @@ spec:
             items:
               - key: .dockerconfigjson
                 path: config.json
+{% if not static_host_path_storage %}
+  volumeClaimTemplates:
+    - metadata:
+        name: trajectories
+      spec:
+        accessModes: [ ReadWriteOnce ]
+        resources: { requests: { storage: {{ worker_trajectory_storage_gi }}Gi } }
+---
+# Headless Service required by the StatefulSet for stable per-pod
+# DNS names (loom-worker-0.loom-worker, ...). No ClusterIP: workers
+# do not receive inbound traffic — they poll the control plane.
+apiVersion: v1
+kind: Service
+metadata:
+  name: loom-worker
+spec:
+  clusterIP: None
+  selector: { app: loom-worker }
+{% endif %}
 ---
 {% endif %}
-{% if k8s_worker.enabled or static_host_path_storage %}
+{% if static_host_path_storage %}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: loom-worker-trajectories
 spec:
   accessModes: [ ReadWriteOnce ]
-{% if static_host_path_storage %}
   storageClassName: ""
   volumeName: {{ worker_trajectories_pv_name }}
-{% endif %}
   resources: { requests: { storage: {{ worker_trajectory_storage_gi }}Gi } }
 {% endif %}

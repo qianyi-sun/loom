@@ -109,6 +109,10 @@ _COMPONENT_DEPLOYMENTS: tuple[tuple[str, str], ...] = (
     ("loom-control-plane", "loom-control-plane"),
     ("loom-llm-gateway", "loom-llm-gateway"),
     ("loom-web", "loom-web"),
+    # loom-worker is emitted as a Deployment on static-host-path
+    # profiles and as a StatefulSet on dynamic-storage profiles
+    # (#673). `_collect_workload` probes both shapes so status covers
+    # either without needing a config plumb-through.
     ("loom-worker", "loom-worker"),
 )
 
@@ -130,7 +134,7 @@ _COMPONENT_DESCRIPTIONS: dict[str, str] = {
     "loom-control-plane": "Internal scheduler + worker control",
     "loom-llm-gateway": "Provider-connection facade",
     "loom-web": "SPA (paused by default)",
-    "loom-worker": "Trial runner Deployment (scales horizontally)",
+    "loom-worker": "Trial runner StatefulSet (per-pod RWO PVCs)",
     "postgres": "Postgres (state)",
     "minio": "Object store (trajectories + ATIF)",
 }
@@ -629,6 +633,20 @@ def _effective_kube_context(context: str | None) -> str | None:
     return str(name) if name else None
 
 
+def _read_optional_stateful_set(api: Any, name: str, namespace: str) -> Any | None:
+    """Best-effort StatefulSet read. Returns the resource on success,
+    None if the api client can't read StatefulSets or the name is not
+    found. Used by `_collect_workload` to transparently cover the
+    Deployment/StatefulSet dual shape for loom-worker (#673)."""
+    reader = getattr(api, "read_namespaced_stateful_set", None)
+    if not callable(reader):
+        return None
+    try:
+        return reader(name=name, namespace=namespace)
+    except Exception:
+        return None
+
+
 def _collect_workload(
     api: Any,
     namespace: str,
@@ -652,6 +670,48 @@ def _collect_workload(
     for display_name, k8s_name in deployments:
         try:
             d = apps.read_namespaced_deployment(name=k8s_name, namespace=namespace)
+        except Exception as exc:
+            # #673: loom-worker on dynamic-storage profiles is a
+            # StatefulSet rather than a Deployment. If the Deployment
+            # read 404s and a StatefulSet with the same name exists,
+            # report the StatefulSet's status under the same display
+            # name so wait_for_ready doesn't spuriously stall.
+            if k8s_name == "loom-worker":
+                sts = _read_optional_stateful_set(apps, k8s_name, namespace)
+                if sts is not None:
+                    stat = getattr(sts, "status", None)
+                    spec = getattr(sts, "spec", None)
+                    desired = int(getattr(spec, "replicas", 0) or 0)
+                    ready = int(getattr(stat, "ready_replicas", 0) or 0)
+                    out.append(
+                        ComponentStatus(
+                            name=display_name,
+                            kind="StatefulSet",
+                            ready=ready,
+                            desired=desired,
+                            available=ready > 0,
+                            generation=_int_or_none(
+                                getattr(getattr(sts, "metadata", None), "generation", None),
+                            ),
+                            observed_generation=_int_or_none(
+                                getattr(stat, "observed_generation", None),
+                            ),
+                            updated=_int_or_none(getattr(stat, "updated_replicas", None)),
+                        )
+                    )
+                    continue
+            out.append(
+                ComponentStatus(
+                    name=display_name,
+                    kind="Deployment",
+                    ready=0,
+                    desired=0,
+                    available=False,
+                    note=_exception_to_note(exc),
+                )
+            )
+            continue
+        try:
             spec = d.spec
             stat = d.status
             metadata = getattr(d, "metadata", None)
@@ -1416,7 +1476,12 @@ def _rendered_deployment_images(yaml_text: str) -> dict[str, dict[str, str]]:
 
     images: dict[str, dict[str, str]] = {}
     for doc in yaml.safe_load_all(yaml_text):
-        if not isinstance(doc, dict) or doc.get("kind") != "Deployment":
+        # Deployments are the primary shape; the loom-worker workload
+        # is emitted as a StatefulSet on dynamic-storage profiles
+        # (#673) — treat it the same as far as image drift is
+        # concerned so the rollout builder still sees every managed
+        # loom-* image.
+        if not isinstance(doc, dict) or doc.get("kind") not in ("Deployment", "StatefulSet"):
             continue
         metadata = doc.get("metadata")
         spec = doc.get("spec")
@@ -1462,17 +1527,24 @@ def rendered_image_checks(
                 namespace=namespace,
             )
         except Exception as exc:
-            for container_name, expected_image in expected_images.items():
-                checks.append(
-                    DeploymentImageCheck(
-                        deployment=deployment_name,
-                        container=container_name,
-                        expected_image=expected_image,
-                        live_image=None,
-                        error=_exception_to_note(exc),
-                    ),
-                )
-            continue
+            # #673: loom-worker on dynamic-storage profiles is a
+            # StatefulSet, not a Deployment. Fall back to the
+            # StatefulSet shape before reporting a drift error.
+            sts = _read_optional_stateful_set(apps_v1, deployment_name, namespace)
+            if sts is not None:
+                deployment = sts
+            else:
+                for container_name, expected_image in expected_images.items():
+                    checks.append(
+                        DeploymentImageCheck(
+                            deployment=deployment_name,
+                            container=container_name,
+                            expected_image=expected_image,
+                            live_image=None,
+                            error=_exception_to_note(exc),
+                        ),
+                    )
+                continue
         pod_template = getattr(getattr(deployment, "spec", None), "template", None)
         pod_spec = getattr(pod_template, "spec", None)
         live_containers: dict[str, str] = {}
@@ -3074,6 +3146,9 @@ def prune_disabled_profile_resources(
             return
         deleted.append(label)
 
+    # Dynamic-storage profiles render loom-worker as a StatefulSet
+    # (#673); static-host-path profiles keep the Deployment shape.
+    # Try both — the not-found path is a no-op in either direction.
     _delete(
         "deployment.apps/loom-worker",
         lambda: apps_v1.delete_namespaced_deployment(
@@ -3081,6 +3156,26 @@ def prune_disabled_profile_resources(
             namespace=namespace,
         ),
     )
+    delete_sts = getattr(apps_v1, "delete_namespaced_stateful_set", None)
+    if callable(delete_sts):
+        _delete(
+            "statefulset.apps/loom-worker",
+            lambda: delete_sts(
+                name="loom-worker",
+                namespace=namespace,
+            ),
+        )
+    # StatefulSet's headless Service (#673). Not-found is fine when the
+    # profile never rendered the StatefulSet shape.
+    delete_svc = getattr(_core_v1, "delete_namespaced_service", None)
+    if callable(delete_svc):
+        _delete(
+            "service/loom-worker",
+            lambda: delete_svc(
+                name="loom-worker",
+                namespace=namespace,
+            ),
+        )
     _delete(
         "networkpolicy.networking.k8s.io/loom-worker",
         lambda: networking_v1.delete_namespaced_network_policy(

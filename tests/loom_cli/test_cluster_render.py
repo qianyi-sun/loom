@@ -289,23 +289,29 @@ def test_load_config_path_none_returns_defaults() -> None:
 
 
 def test_render_produces_valid_yaml_with_expected_kinds() -> None:
-    """Smoke: every document parses, the set covers the 8 Deployments
-    + 1 DaemonSet + 9 Services + 2 StatefulSets + 1 PVC + 1 Ingress
-    + 1 PodDisruptionBudget + 10 NetworkPolicies + 2 ConfigMaps
+    """Smoke: every document parses, the set covers the 7 Deployments
+    + 1 DaemonSet + 10 Services + 3 StatefulSets + 1 Ingress
+    + 1 PodDisruptionBudget + 11 NetworkPolicies + 2 ConfigMaps
     (Grafana dashboards + egress-proxy bootstrap) expected by
     cluster-deploy.md §Component map + sandbox-isolation.md."""
     text = render_manifests(_DEFAULT_CFG)
     assert text.startswith("apiVersion: apps/v1\nkind: StatefulSet\n")
     docs = _load_docs(text)
     kinds = [d["kind"] for d in docs]
-    assert kinds.count("StatefulSet") == 2  # postgres, minio
-    # cp, service, gateway, worker, web + egress-xds + egress-proxy + pgbouncer
-    assert kinds.count("Deployment") == 8
+    # postgres, minio, worker (#673: dynamic-storage worker uses a
+    # StatefulSet with volumeClaimTemplates so multi-node RWO PVCs
+    # don't strand replicas).
+    assert kinds.count("StatefulSet") == 3
+    # cp, service, gateway, web + egress-xds + egress-proxy + pgbouncer
+    assert kinds.count("Deployment") == 7
     assert kinds.count("DaemonSet") == 1  # gateway-router
-    # postgres + pgbouncer + minio + cp + gateway + service + web + ingress + egress = 9
-    assert kinds.count("Service") == 9
+    # postgres + pgbouncer + minio + cp + gateway + service + web
+    # + ingress + egress + worker (headless, StatefulSet peer DNS) = 10
+    assert kinds.count("Service") == 10
     assert kinds.count("Ingress") == 1
-    assert kinds.count("PersistentVolumeClaim") == 1
+    # Dynamic-storage default: worker PVCs live in the StatefulSet's
+    # volumeClaimTemplates, so no top-level PVC survives here.
+    assert kinds.count("PersistentVolumeClaim") == 0
     # pgbouncer PodDisruptionBudget.
     assert kinds.count("PodDisruptionBudget") == 1
     # NetworkPolicies: postgres + minio + cp + gateway + worker + svc
@@ -321,7 +327,7 @@ def test_worker_manifest_sets_subprocess_gateway_url_for_sandboxes() -> None:
     )
     docs = _load_docs(render_manifests(cfg))
     worker = next(
-        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
+        d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-worker"
     )
     env = worker["spec"]["template"]["spec"]["containers"][0]["env"]
     by_name = {entry["name"]: entry for entry in env}
@@ -337,7 +343,7 @@ def test_worker_manifest_injects_optional_hf_token_secret() -> None:
     """
     docs = _load_docs(render_manifests(_DEFAULT_CFG))
     worker = next(
-        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
+        d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-worker"
     )
     env = worker["spec"]["template"]["spec"]["containers"][0]["env"]
     by_name = {entry["name"]: entry for entry in env}
@@ -356,7 +362,7 @@ def test_worker_manifest_injects_optional_hf_token_secret() -> None:
 def test_worker_manifest_mounts_docker_registry_auth_config() -> None:
     docs = _load_docs(render_manifests(_DEFAULT_CFG))
     worker = next(
-        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
+        d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-worker"
     )
     pod_spec = worker["spec"]["template"]["spec"]
     container = pod_spec["containers"][0]
@@ -394,7 +400,7 @@ def test_worker_manifest_renders_configured_capacity_and_resources() -> None:
     )
     docs = _load_docs(render_manifests(cfg))
     worker = next(
-        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
+        d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-worker"
     )
     container = worker["spec"]["template"]["spec"]["containers"][0]
     env = [entry for entry in container["env"] if entry["name"] == "LOOM_WORKER_MAX_CONCURRENT"]
@@ -796,13 +802,13 @@ def test_render_custom_storage_sizes() -> None:
         "storage"
     ]
     assert minio_storage == "2000Gi"
-    worker_pvc = next(
-        d
-        for d in docs
-        if d["kind"] == "PersistentVolumeClaim"
-        and d["metadata"]["name"] == "loom-worker-trajectories"
+    worker = next(
+        d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-worker"
     )
-    assert worker_pvc["spec"]["resources"]["requests"]["storage"] == "500Gi"
+    worker_storage = worker["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"][
+        "storage"
+    ]
+    assert worker_storage == "500Gi"
 
 
 def test_render_static_host_path_storage_binds_critical_state_to_retain_pvs() -> None:
@@ -905,7 +911,7 @@ def test_render_worker_max_concurrent_schema_default() -> None:
     duplicate env-var ordering."""
     docs = _load_docs(render_manifests(_DEFAULT_CFG))
     worker = next(
-        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
+        d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-worker"
     )
     env_list = worker["spec"]["template"]["spec"]["containers"][0]["env"]
     concurrent_entries = [e for e in env_list if e["name"] == "LOOM_WORKER_MAX_CONCURRENT"]
@@ -919,7 +925,7 @@ def test_render_worker_pool_name_schema_default() -> None:
     """Fixed Kubernetes workers should register under an explicit pool."""
     docs = _load_docs(render_manifests(_DEFAULT_CFG))
     worker = next(
-        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
+        d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-worker"
     )
     env_list = worker["spec"]["template"]["spec"]["containers"][0]["env"]
     pool_entries = [e for e in env_list if e["name"] == "LOOM_WORKER_POOL_NAME"]
@@ -1043,12 +1049,14 @@ def test_default_config_disables_k8s_worker() -> None:
 
 def test_render_omits_worker_deployment_when_disabled() -> None:
     """Default dynamic rendering with k8s_worker.enabled=false must omit
-    the whole loom-worker Deployment + trajectories PVC + worker
-    NetworkPolicy, not merely scale it to zero replicas — belt-and-
-    suspenders against `kubectl scale` drift."""
+    the whole loom-worker workload (StatefulSet + headless Service +
+    trajectories PVC + NetworkPolicy), not merely scale it to zero
+    replicas — belt-and-suspenders against `kubectl scale` drift."""
     docs = _load_docs(render_manifests(ClusterConfig()))
     kinds_names = {(d["kind"], d["metadata"]["name"]) for d in docs}
     assert ("Deployment", "loom-worker") not in kinds_names
+    assert ("StatefulSet", "loom-worker") not in kinds_names
+    assert ("Service", "loom-worker") not in kinds_names
     assert (
         "PersistentVolumeClaim",
         "loom-worker-trajectories",
@@ -1057,12 +1065,22 @@ def test_render_omits_worker_deployment_when_disabled() -> None:
 
 
 def test_render_includes_worker_when_enabled_via_profile() -> None:
-    """development.cluster.toml opts back in for local kind clusters."""
+    """development.cluster.toml opts back in for local kind clusters.
+
+    Dynamic-storage profiles render loom-worker as a StatefulSet with
+    per-pod PVCs from volumeClaimTemplates so RWO Longhorn volumes on
+    multi-node clusters don't strand additional replicas (#673). The
+    headless Service backs stable per-pod DNS.
+    """
     docs = _load_docs(render_manifests(_DEFAULT_CFG))
     kinds_names = {(d["kind"], d["metadata"]["name"]) for d in docs}
-    assert ("Deployment", "loom-worker") in kinds_names
-    assert ("PersistentVolumeClaim", "loom-worker-trajectories") in kinds_names
+    assert ("StatefulSet", "loom-worker") in kinds_names
+    assert ("Service", "loom-worker") in kinds_names
     assert ("NetworkPolicy", "loom-worker") in kinds_names
+    # Top-level PVC exists only for static_host_path_storage; dynamic
+    # profiles get per-pod PVCs (trajectories-loom-worker-0, ...) via
+    # volumeClaimTemplates.
+    assert ("PersistentVolumeClaim", "loom-worker-trajectories") not in kinds_names
 
 
 def test_load_shipped_profile_files_have_explicit_k8s_worker_setting() -> None:

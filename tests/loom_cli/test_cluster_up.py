@@ -148,15 +148,27 @@ _FakeApiException.__name__ = "ApiException"
 
 
 class _FakeAppsForPrune:
-    def __init__(self, deployments: set[str]) -> None:
+    def __init__(
+        self,
+        deployments: set[str],
+        stateful_sets: set[str] | None = None,
+    ) -> None:
         self.deployments = set(deployments)
+        self.stateful_sets: set[str] = set(stateful_sets or ())
         self.deleted_deployments: list[str] = []
+        self.deleted_stateful_sets: list[str] = []
 
     def delete_namespaced_deployment(self, *, name: str, namespace: str) -> None:
         if name not in self.deployments:
             raise _FakeApiException(404)
         self.deleted_deployments.append(f"{namespace}/{name}")
         self.deployments.remove(name)
+
+    def delete_namespaced_stateful_set(self, *, name: str, namespace: str) -> None:
+        if name not in self.stateful_sets:
+            raise _FakeApiException(404)
+        self.deleted_stateful_sets.append(f"{namespace}/{name}")
+        self.stateful_sets.remove(name)
 
 
 class _FakeNetworkingForPrune:
@@ -172,9 +184,11 @@ class _FakeNetworkingForPrune:
 
 
 class _FakeCoreForPrune:
-    def __init__(self, pvcs: set[str]) -> None:
+    def __init__(self, pvcs: set[str], services: set[str] | None = None) -> None:
         self.pvcs = set(pvcs)
+        self.services: set[str] = set(services or ())
         self.deleted_pvcs: list[str] = []
+        self.deleted_services: list[str] = []
 
     def read_namespaced_persistent_volume_claim(self, *, name: str, namespace: str) -> object:
         if name not in self.pvcs:
@@ -183,6 +197,12 @@ class _FakeCoreForPrune:
 
     def delete_namespaced_persistent_volume_claim(self, *, name: str, namespace: str) -> None:
         self.deleted_pvcs.append(f"{namespace}/{name}")
+
+    def delete_namespaced_service(self, *, name: str, namespace: str) -> None:
+        if name not in self.services:
+            raise _FakeApiException(404)
+        self.deleted_services.append(f"{namespace}/{name}")
+        self.services.remove(name)
 
 
 class _FakePruneResult:
@@ -209,6 +229,7 @@ class _FakePruneResult:
 
 
 def test_prune_disabled_worker_resources_deletes_workload_and_policy_but_retains_pvc() -> None:
+    # Legacy Deployment shape (static-host-path profile).
     apps = _FakeAppsForPrune({"loom-worker"})
     net = _FakeNetworkingForPrune({"loom-worker"})
     core = _FakeCoreForPrune({"loom-worker-trajectories"})
@@ -222,10 +243,46 @@ def test_prune_disabled_worker_resources_deletes_workload_and_policy_but_retains
     )
 
     assert apps.deleted_deployments == ["loom-staging/loom-worker"]
+    assert apps.deleted_stateful_sets == []
+    assert net.deleted_network_policies == ["loom-staging/loom-worker"]
+    assert core.deleted_pvcs == []
+    assert core.deleted_services == []
+    assert result.deleted == [
+        "deployment.apps/loom-worker",
+        "networkpolicy.networking.k8s.io/loom-worker",
+    ]
+    assert result.retained == ["persistentvolumeclaim/loom-worker-trajectories"]
+    assert result.failed == []
+
+
+def test_prune_disabled_worker_resources_deletes_statefulset_and_headless_service() -> None:
+    """Dynamic-storage profiles render loom-worker as a StatefulSet
+    with a headless Service (#673). Prune must clean both — otherwise
+    disabled-worker profiles leak the StatefulSet and its per-pod PVCs
+    stay bound."""
+    apps = _FakeAppsForPrune(set(), stateful_sets={"loom-worker"})
+    net = _FakeNetworkingForPrune({"loom-worker"})
+    core = _FakeCoreForPrune(
+        {"loom-worker-trajectories"},
+        services={"loom-worker"},
+    )
+
+    result = cluster_cmd.prune_disabled_profile_resources(
+        apps,
+        net,
+        core,
+        cluster_cmd.ClusterConfig(),
+        namespace="loom-staging",
+    )
+
+    assert apps.deleted_deployments == []
+    assert apps.deleted_stateful_sets == ["loom-staging/loom-worker"]
+    assert core.deleted_services == ["loom-staging/loom-worker"]
     assert net.deleted_network_policies == ["loom-staging/loom-worker"]
     assert core.deleted_pvcs == []
     assert result.deleted == [
-        "deployment.apps/loom-worker",
+        "statefulset.apps/loom-worker",
+        "service/loom-worker",
         "networkpolicy.networking.k8s.io/loom-worker",
     ]
     assert result.retained == ["persistentvolumeclaim/loom-worker-trajectories"]

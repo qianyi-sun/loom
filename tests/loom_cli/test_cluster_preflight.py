@@ -769,6 +769,8 @@ def _rendered_deployment_env_names(deployment_name: str) -> set[str]:
     # #383: default schema disables the k8s worker Deployment. This
     # helper inspects the worker/service env for boundary checks, so
     # opt into the worker-enabled shape used by development profile.
+    # #673: loom-worker now renders as a StatefulSet on dynamic-storage
+    # profiles; accept either kind so the helper covers both shapes.
     k8s_worker_cls = type(ClusterConfig().k8s_worker)
     cfg = ClusterConfig(k8s_worker=k8s_worker_cls(enabled=True))
     docs = list(yaml.safe_load_all(render_manifests(cfg)))
@@ -776,7 +778,7 @@ def _rendered_deployment_env_names(deployment_name: str) -> set[str]:
         doc
         for doc in docs
         if doc
-        and doc.get("kind") == "Deployment"
+        and doc.get("kind") in ("Deployment", "StatefulSet")
         and doc.get("metadata", {}).get("name") == deployment_name
     )
     env = deployment["spec"]["template"]["spec"]["containers"][0]["env"]

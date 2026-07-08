@@ -1,9 +1,11 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: loom-worker
 spec:
   replicas: 3
+  serviceName: loom-worker
+  podManagementPolicy: Parallel
   selector:
     matchLabels:
       app: loom-worker
@@ -91,9 +93,9 @@ spec:
         - name: LOOM_WORKER_SETUP_HEALTH_WAIT_TIMEOUT_SEC
           value: '300.0'
         - name: LOOM_WORKER_STORAGE_AUTH_KIND
-          value: 'static_keys'
+          value: static_keys
         - name: LOOM_WORKER_STORAGE_BACKEND
-          value: 'minio'
+          value: minio
         - name: LOOM_TASK_IMAGE_BUILD_MAX_BYTES
           value: '536870912'
         - name: LOOM_TASK_IMAGE_BUILD_MAX_FILES
@@ -135,9 +137,6 @@ spec:
           value: '16'
         - name: LOOM_WORKER_POOL_NAME
           value: k8s-worker
-        # Subprocess agents run inside Docker sandboxes, not the worker pod.
-        # They cannot resolve k8s Service DNS, so inject the operator-
-        # selected sandbox-facing bridge URL.
         - name: LOOM_WORKER_SUBPROCESS_GATEWAY_URL
           value: http://host.docker.internal:30443/openai/v1
         volumeMounts:
@@ -156,9 +155,6 @@ spec:
             cpu: '8'
             memory: 16Gi
       volumes:
-      - name: trajectories
-        persistentVolumeClaim:
-          claimName: loom-worker-trajectories
       - name: docker-sock
         hostPath:
           path: /var/run/docker.sock
@@ -170,14 +166,21 @@ spec:
           items:
           - key: .dockerconfigjson
             path: config.json
+  volumeClaimTemplates:
+  - metadata:
+      name: trajectories
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 100Gi
 ---
 apiVersion: v1
-kind: PersistentVolumeClaim
+kind: Service
 metadata:
-  name: loom-worker-trajectories
+  name: loom-worker
 spec:
-  accessModes:
-  - ReadWriteOnce
-  resources:
-    requests:
-      storage: 100Gi
+  clusterIP: None
+  selector:
+    app: loom-worker

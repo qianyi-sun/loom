@@ -796,11 +796,16 @@ def _disabled_k8s_worker_check(
     if cluster_config.get("k8s_worker_enabled") is not False:
         return None
 
+    # Dynamic-storage profiles render loom-worker as a StatefulSet
+    # (#673); static-host-path profiles keep the Deployment shape.
+    # Either kind lingering after k8s_worker.enabled flips false is
+    # a fail. Look at both.
     deployment_found = False
     deployment_error: str | None = None
     desired_replicas: int | None = None
     ready_replicas: int | None = None
     updated_replicas: int | None = None
+    workload_kind: str | None = None
     try:
         deployment = apps_v1.read_namespaced_deployment(
             name="loom-worker",
@@ -811,10 +816,29 @@ def _disabled_k8s_worker_check(
             deployment_error = _exception_note(exc)
     else:
         deployment_found = True
+        workload_kind = "Deployment"
         desired_replicas = _int_or_none(_get_field(_get_field(deployment, "spec"), "replicas")) or 0
         status = _get_field(deployment, "status")
         ready_replicas = _int_or_none(_get_field(status, "ready_replicas")) or 0
         updated_replicas = _int_or_none(_get_field(status, "updated_replicas")) or 0
+
+    if not deployment_found and deployment_error is None:
+        read_sts = getattr(apps_v1, "read_namespaced_stateful_set", None)
+        if callable(read_sts):
+            try:
+                sts = read_sts(name="loom-worker", namespace=namespace)
+            except Exception as exc:
+                if not _is_not_found(exc):
+                    deployment_error = _exception_note(exc)
+            else:
+                deployment_found = True
+                workload_kind = "StatefulSet"
+                desired_replicas = (
+                    _int_or_none(_get_field(_get_field(sts, "spec"), "replicas")) or 0
+                )
+                status = _get_field(sts, "status")
+                ready_replicas = _int_or_none(_get_field(status, "ready_replicas")) or 0
+                updated_replicas = _int_or_none(_get_field(status, "updated_replicas")) or 0
 
     ready_pods: list[str] = []
     pod_list_error: str | None = None
@@ -837,6 +861,7 @@ def _disabled_k8s_worker_check(
         "deployment": "loom-worker",
         "namespace": namespace,
         "deployment_found": deployment_found,
+        "workload_kind": workload_kind,
         "desired_replicas": desired_replicas,
         "ready_replicas": ready_replicas,
         "updated_replicas": updated_replicas,
@@ -848,7 +873,10 @@ def _disabled_k8s_worker_check(
             outcome="fail",
             detail="disabled k8s worker prune state is unverifiable",
             evidence={**evidence, "deployment_error": deployment_error},
-            remediation="restore Kubernetes Deployment read access and rerun release-gate",
+            remediation=(
+                "restore Kubernetes Deployment/StatefulSet read access and "
+                "rerun release-gate"
+            ),
         )
     if pod_list_error is not None:
         return ReleaseGateCheck(
@@ -866,9 +894,10 @@ def _disabled_k8s_worker_check(
             evidence=evidence,
             remediation=(
                 "rerun `loom cluster up` with the disabled-worker profile or "
-                "delete stale deploy/loom-worker and networkpolicy/loom-worker; "
-                "preserve persistentvolumeclaim/loom-worker-trajectories unless "
-                "an operator explicitly approves artifact deletion"
+                "delete stale deploy/loom-worker (or statefulset/loom-worker) "
+                "and networkpolicy/loom-worker; preserve "
+                "persistentvolumeclaim/loom-worker-trajectories unless an "
+                "operator explicitly approves artifact deletion"
             ),
         )
     return ReleaseGateCheck(
