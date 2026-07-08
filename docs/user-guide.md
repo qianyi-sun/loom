@@ -371,10 +371,12 @@ bundle** card. API clients can call
 `mode` (`lightweight`, `raw-harbor`, or `raw-harbor-tb2-v1`) and
 `supplemental_batch_ids`, poll
 `GET /api/v1/batches/{id}/delivery-export`, and download through the returned
-`/api/v1/batches/.../delivery-export/.../download` URL. Creating a bundle
-requires submit/admin scope; reading or downloading an existing bundle only
-requires normal read access. These routes are team-scoped and never expose raw
-MinIO/S3 URLs.
+route-aware `/api/v1/batches/.../delivery-export/.../download` URL. On hosted
+staging/prod this URL includes the public route prefix, for example
+`https://yylx.world/dev/api/v1/...` or `https://yylx.world/prod/api/v1/...`.
+Creating a bundle requires submit/admin scope; reading or downloading an
+existing bundle only requires normal read access. These routes are team-scoped
+and never expose raw MinIO/S3 URLs.
 
 ### Cross-team submission (platform admins)
 

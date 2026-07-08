@@ -54,6 +54,7 @@ from loom_service.monitor_filters import (
 )
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
+from loom_service.public_links import public_url_for
 from loom_service.routes.object_downloads import stream_object_response
 from loom_service.stale_running_debug import trial_stale_running_debug_context
 from loom_service.usage_accounting import (
@@ -489,7 +490,8 @@ def _projected_artifacts(
             "key": key,
             "size": max(size_int, 0),
             "download_url": str(
-                request.url_for(
+                public_url_for(
+                    request,
                     "download_artifact",
                     trial_id=str(trial_id),
                 ).include_query_params(key=key),
@@ -597,10 +599,10 @@ async def get_trial(
     # Both user-facing URLs stay on loom_service so remote browser
     # clients do not need direct MinIO reachability.
     base["atif_url"] = str(
-        request.url_for("download_atif", trial_id=str(trial.id)),
+        public_url_for(request, "download_atif", trial_id=str(trial.id)),
     )
     base["trajectory_url"] = str(
-        request.url_for("download_trajectory", trial_id=str(trial.id)),
+        public_url_for(request, "download_trajectory", trial_id=str(trial.id)),
     )
     # `*_ready` flags so the SPA can avoid rendering a download link
     # that's going to 404. The trajectory exists as soon as the worker

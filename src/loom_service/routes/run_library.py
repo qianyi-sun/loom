@@ -28,6 +28,7 @@ from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
 from loom_service.monitor_filters import apply_batch_monitor_filters
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
+from loom_service.public_links import public_url_for
 from loom_service.routes.object_downloads import stream_object_response
 
 router = APIRouter()
@@ -447,7 +448,8 @@ def _serialize_typed_artifact(
     }
     if can_download and request is not None:
         entry["download_url"] = str(
-            request.url_for(
+            public_url_for(
+                request,
                 "download_run_library_artifact",
                 trial_id=str(artifact.trial_id),
             ).include_query_params(key=key),
@@ -544,7 +546,8 @@ def _serialize_legacy_artifact(
         },
         "parents": [],
         "download_url": str(
-            request.url_for(
+            public_url_for(
+                request,
                 "download_run_library_artifact",
                 trial_id=str(trial.id),
             ).include_query_params(key=key),

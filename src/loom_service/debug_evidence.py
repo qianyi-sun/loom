@@ -23,6 +23,7 @@ from loom.request_params import coerce_request_params
 from loom.security.redaction import redact_mapping
 from loom.trial.stale_running import effective_agent_timeout_sec
 from loom_service.failure_taxonomy import classify_trial_outcome
+from loom_service.public_links import public_url_for
 from loom_service.usage_accounting import (
     classify_no_call_evidence_failure,
     llm_call_counts_by_trial_id,
@@ -291,7 +292,8 @@ def _artifact_refs(
                 "share_status": item.get("share_status") or "pending_scan",
                 "blocked_reason": item.get("blocked_reason"),
                 "download_url": str(
-                    request.url_for(
+                    public_url_for(
+                        request,
                         "download_artifact",
                         trial_id=str(trial_id),
                     ).include_query_params(key=key),
@@ -739,13 +741,14 @@ def build_trial_debug_evidence(
             "atif": {
                 "ready": atif_ready,
                 "download_url": str(
-                    request.url_for("download_atif", trial_id=str(trial.id)),
+                    public_url_for(request, "download_atif", trial_id=str(trial.id)),
                 ),
             },
             "trajectory": {
                 "ready": trajectory_ready,
                 "download_url": str(
-                    request.url_for(
+                    public_url_for(
+                        request,
                         "download_trajectory",
                         trial_id=str(trial.id),
                     ),

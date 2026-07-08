@@ -746,6 +746,10 @@ def test_render_profile_ingress_routes_api_and_spa_under_frontend_prefix(
         (f"{route_path}(/|$)(api/v1.*)", "ImplementationSpecific", "loom-service", 8090),
         (f"{route_path}(/|$)(.*)", "ImplementationSpecific", "loom-web", 80),
     ]
+    assert (
+        _deployment_env_value(docs, "loom-service", "LOOM_SVC_PUBLIC_BASE_URL")
+        == f"https://yylx.world{route_path}"
+    )
 
 
 @pytest.mark.parametrize(

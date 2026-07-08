@@ -1056,7 +1056,12 @@ def _messages_from_raw_log(
                 if isinstance(item, dict) and isinstance(item.get("role"), str):
                     msg: dict[str, Any] = {"role": item["role"]}
                     if "content" in item:
-                        msg["content"] = item["content"]
+                        content = item["content"]
+                        msg["content"] = (
+                            _normalize_tb2_assistant_content(content)
+                            if normalize_tb2 and item["role"] == "assistant"
+                            else content
+                        )
                     messages.append(msg)
     assistant = _assistant_message_from_raw_log(raw_log)
     if assistant is not None:
@@ -1565,17 +1570,17 @@ def _artifact_response(
     batch_id: UUID,
     manifest: dict[str, Any],
     sha256: str,
+    public_base_url: str | None = None,
 ) -> dict[str, Any]:
     storage = artifact.storage if isinstance(artifact.storage, dict) else {}
     filename = str(storage.get("filename") or artifact.name)
+    download_path = f"/api/v1/batches/{batch_id}/delivery-export/{artifact.id}/download"
     return {
         "id": str(artifact.id),
         "status": "ready",
         "archive_filename": filename,
         "sha256": sha256,
-        "download_url": (
-            f"/api/v1/batches/{batch_id}/delivery-export/{artifact.id}/download"
-        ),
+        "download_url": _public_download_url(public_base_url, download_path),
         "manifest": manifest,
         "object_validation": manifest.get("object_validation", {"checked": 0, "missing": []}),
         "storage": {
@@ -1587,10 +1592,17 @@ def _artifact_response(
     }
 
 
+def _public_download_url(public_base_url: str | None, path: str) -> str:
+    if public_base_url and public_base_url.strip():
+        return f"{public_base_url.strip().rstrip('/')}{path}"
+    return path
+
+
 async def latest_delivery_export(
     session: Any,
     *,
     batch_id: UUID,
+    public_base_url: str | None = None,
 ) -> dict[str, Any]:
     artifacts = list(
         (
@@ -1620,6 +1632,7 @@ async def latest_delivery_export(
             batch_id=batch_id,
             manifest=manifest,
             sha256=sha256,
+            public_base_url=public_base_url,
         )
     return {"status": "not_ready", "reason": "no_delivery_export"}
 
@@ -1653,6 +1666,7 @@ async def create_delivery_export(
     main_batch_id: UUID,
     supplemental_batch_ids: list[UUID] | None,
     mode: DeliveryExportMode = "lightweight",
+    public_base_url: str | None = None,
 ) -> dict[str, Any]:
     main, supplements = await _load_batch_family(session, main_batch_id, supplemental_batch_ids)
     batch_ids = [main.id, *[batch.id for batch in supplements]]
@@ -1779,6 +1793,7 @@ async def create_delivery_export(
         batch_id=main.id,
         manifest=manifest,
         sha256=sha256,
+        public_base_url=public_base_url,
     )
 
 
