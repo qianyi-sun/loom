@@ -507,7 +507,10 @@ and expect `Result=success` with `ExecMainStatus=0`. Do not treat `is-active`
 returning inactive as a failed prep by itself. Validate worker availability from
 the Control Plane status artifact instead: active release hosts must have a
 fresh `worker_id`, `worker_status=active`, `worker_fresh=true`, and
-`docker` in `worker_backend_names`.
+`docker` in `worker_backend_names`. Protected rollout retries release-target
+mismatches from `loom admin gb10-workers status` while a fresh compose worker
+registers and emits its first heartbeats; persistent stale worker evidence after
+that retry window is a host-runtime failure to repair, not a gate to bypass.
 
 Rollback publishes the previous desired image/concurrency/env version back to
 the Control Plane first, then applies it locally. This keeps the periodic
