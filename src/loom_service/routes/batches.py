@@ -399,7 +399,17 @@ async def _reject_if_known_failed_provider_model(
             ),
         )
     ).scalar_one_or_none()
-    if row is None or row.last_preflight_status != "failed":
+    if row is None:
+        _reject_submission(
+            reason="provider_model_cache",
+            status_code=400,
+            detail=(
+                f"provider model {provider_model_id!r} is not in the model cache "
+                "for this provider connection; run `loom providers models "
+                "NAME --refresh` or choose a cached model"
+            ),
+        )
+    if row.last_preflight_status != "failed":
         return
     detail = (
         f"provider model {provider_model_id!r} last preflight failed for this provider connection"

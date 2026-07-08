@@ -16,7 +16,7 @@ def test_operator_runbook_uses_current_provider_model_syntax() -> None:
     assert "loom providers models list" not in runbook
     assert "loom providers models mz_tn_canada_qianyi --refresh" in runbook
     assert (
-        "loom providers models mz_tn_canada_qianyi --preflight glm5.1-thinking"
+        "loom providers models mz_tn_canada_qianyi --preflight glm-5.1-thinking"
         in runbook
     )
 
@@ -31,7 +31,7 @@ def test_operator_runbook_staging_batch_smoke_matches_cli_contract() -> None:
         in runbook
     )
     assert "--provider mz_tn_canada_qianyi" in runbook
-    assert "--model glm5.1-thinking" in runbook
+    assert "--model glm-5.1-thinking" in runbook
     assert "--agent opencode" in runbook
     assert "--required-worker-pool gb10-arm64" in runbook
 

@@ -88,6 +88,9 @@ Common failures:
 - Empty model list: run `loom providers models NAME --refresh`; if the endpoint
   does not implement useful discovery, add model ids manually from the web
   Models tab or the provider model API.
+- Model missing from the picker or batch submission: batch creation rejects
+  provider model ids that are absent from the connection's cached model catalog.
+  Refresh, add the id manually, or choose a cached model before submitting.
 - Model advertised but not runnable: run
   `loom providers models NAME --preflight MODEL`. A failed preflight is stored
   on that connection/model and New Batch warns before submit; the API rejects

@@ -276,8 +276,8 @@ loom providers models lab-vllm --preflight qwen2.5-coder-7b-instruct
 ```
 
 If the model server does not expose a useful `/models` catalog, add the model id
-manually from the provider page or provider model API, then preflight it before
-launching large batches.
+manually from the provider page or provider model API before submitting a batch.
+Preflight that cached model before launching large batches.
 
 ### Delivery bundles for release handoff
 

@@ -207,6 +207,16 @@ async def app_setup(
                 encrypted_api_key_ref=f"loom://team:{t}/{cid}",
                 created_by="admin:0",
             ))
+        for cid, model_id in (
+            (conn_a, "gpt-4o"),
+            (conn_b, "gpt-4o-mini"),
+        ):
+            s.execute(insert(ProviderModelCache).values(
+                provider_connection_id=cid,
+                model_id=model_id,
+                upstream_present=True,
+                visible=True,
+            ))
         # Soft-delete one of team_a's connections.
         s.execute(
             ProviderConnection.__table__.update()
@@ -446,6 +456,31 @@ def test_batch_create_with_known_failed_preflight_model_returns_400(
     assert "sk-" not in detail
 
 
+def test_batch_create_with_uncached_provider_model_returns_400(
+    app_setup,
+) -> None:
+    app, tokens, ids = app_setup
+    c = _client(app)
+    r = c.post(
+        "/api/v1/batches",
+        headers=_auth(tokens["a"]),
+        json={
+            "name": "uncached-provider-model",
+            "task_filter": {"task_ids": [ids["task_id"]]},
+            "trial_config": {"agent_name": "oracle", "agent_model": None},
+            "provider_connection_id": str(ids["conn_a"]),
+            "provider_model_id": "gpt-never-cached",
+        },
+    )
+
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "gpt-never-cached" in detail
+    assert "model cache" in detail
+    assert "loom providers models" in detail
+    assert "sk-" not in detail
+
+
 def test_platform_admin_batch_create_with_explicit_team_uses_target_team_provider(
     app_setup,
 ) -> None:
@@ -601,6 +636,41 @@ def test_shared_provider_can_be_used_by_target_team_for_batch_create(
     sync_engine.dispose()
     assert row.team_id == ids["team_b"]
     assert row.provider_connection_id == ids["conn_a"]
+
+
+def test_shared_provider_batch_create_with_uncached_model_returns_400(
+    app_setup,
+) -> None:
+    app, tokens, ids = app_setup
+    sync_engine = create_engine(str(app.state.settings.db_url))
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(insert(ProviderConnectionShare).values(
+            provider_connection_id=ids["conn_a"],
+            target_team_id=ids["team_b"],
+            created_by_actor="test",
+        ))
+        s.commit()
+    sync_engine.dispose()
+
+    c = _client(app)
+    r = c.post(
+        "/api/v1/batches",
+        headers=_auth(tokens["b"]),
+        json={
+            "name": "shared-provider-uncached-model",
+            "task_filter": {"task_ids": [ids["task_id"]]},
+            "trial_config": {"agent_name": "oracle", "agent_model": None},
+            "provider_connection_id": str(ids["conn_a"]),
+            "provider_model_id": "gpt-never-cached",
+        },
+    )
+
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "gpt-never-cached" in detail
+    assert "model cache" in detail
+    assert "sk-" not in detail
 
 
 def test_batch_create_without_provider_succeeds(app_setup) -> None:

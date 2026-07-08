@@ -796,7 +796,7 @@ async def test_admin_on_behalf_usage_is_attributed_to_real_actor(
                 usage_attributed_actor=f"user:{admin_user_id}",
                 expected_trial_count=1,
                 provider_connection_id=provider_id,
-                provider_model_id="glm5.1-thinking",
+                provider_model_id="glm-5.1-thinking",
             )
         )
         conn.execute(
@@ -812,7 +812,7 @@ async def test_admin_on_behalf_usage_is_attributed_to_real_actor(
                 batch_id=batch_id,
                 submitted_by_user_id=represented_user_id,
                 provider_connection_id=provider_id,
-                provider_model_id="glm5.1-thinking",
+                provider_model_id="glm-5.1-thinking",
                 result={"aggregate_reward": 1.0},
             )
         )
@@ -822,7 +822,7 @@ async def test_admin_on_behalf_usage_is_attributed_to_real_actor(
                 team_id=team_id,
                 trial_id=trial_id,
                 step_id="main",
-                model="glm5.1-thinking",
+                model="glm-5.1-thinking",
                 dialect="openai_chat",
                 input_tokens=300,
                 output_tokens=40,

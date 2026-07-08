@@ -750,7 +750,7 @@ def test_shared_provider_cannot_be_mutated_by_target_team(app_setup) -> None:
     update = c.patch(
         f"/api/v1/provider-connections/{conn_id}",
         headers=_auth(tokens["team_a"]),
-        json={"allowed_models": ["glm5.1-thinking"]},
+        json={"allowed_models": ["glm-5.1-thinking"]},
     )
     assert update.status_code == 404
 
