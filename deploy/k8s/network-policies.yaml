@@ -117,6 +117,13 @@ spec:
     - port: 5432
       protocol: TCP
   - to:
+    - podSelector:
+        matchLabels:
+          app: loom-pgbouncer
+    ports:
+    - port: 6432
+      protocol: TCP
+  - to:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: kube-system
@@ -161,6 +168,13 @@ spec:
           cnpg.io/cluster: loom-postgres
     ports:
     - port: 5432
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-pgbouncer
+    ports:
+    - port: 6432
       protocol: TCP
   - to:
     - podSelector:
@@ -283,6 +297,13 @@ spec:
   - to:
     - podSelector:
         matchLabels:
+          app: loom-pgbouncer
+    ports:
+    - port: 6432
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
           app: loom-minio
     ports:
     - port: 9000
@@ -369,6 +390,13 @@ spec:
           cnpg.io/cluster: loom-postgres
     ports:
     - port: 5432
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-pgbouncer
+    ports:
+    - port: 6432
       protocol: TCP
   - to:
     - namespaceSelector:
@@ -466,6 +494,13 @@ spec:
           cnpg.io/cluster: loom-postgres
     ports:
     - port: 5432
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-pgbouncer
+    ports:
+    - port: 6432
       protocol: TCP
   - to:
     - namespaceSelector:

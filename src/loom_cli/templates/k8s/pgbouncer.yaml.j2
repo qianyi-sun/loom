@@ -35,6 +35,13 @@ spec:
               value: "5432"
             - name: POSTGRESQL_DATABASE
               value: loom
+            # bitnamilegacy defaults the [databases] section entry name
+            # to `postgres` unless PGBOUNCER_DATABASE overrides it.
+            # Loom's DSN uses dbname=loom so the client-side alias
+            # must be `loom` for pgbouncer to match. Without this,
+            # every SQLAlchemy engine gets "no such database: loom".
+            - name: PGBOUNCER_DATABASE
+              value: loom
             - name: PGBOUNCER_PORT
               value: "6432"
             - name: PGBOUNCER_POOL_MODE

@@ -1,3 +1,4 @@
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -10,76 +11,102 @@ spec:
       maxUnavailable: 0
       maxSurge: 1
   selector:
-    matchLabels: { app: loom-pgbouncer }
+    matchLabels:
+      app: loom-pgbouncer
   template:
     metadata:
-      labels: { app: loom-pgbouncer }
+      labels:
+        app: loom-pgbouncer
       annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9127"
+        prometheus.io/scrape: 'true'
+        prometheus.io/port: '9127'
     spec:
       containers:
-        - name: pgbouncer
-          image: bitnamilegacy/pgbouncer:1.24.0
-          ports:
-            - { containerPort: 6432, name: sql }
-          env:
-            - name: POSTGRESQL_USERNAME
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: postgres-user } }
-            - name: POSTGRESQL_PASSWORD
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: postgres-password } }
-            - name: POSTGRESQL_HOST
-              value: loom-postgres
-            - name: POSTGRESQL_PORT
-              value: "5432"
-            - name: POSTGRESQL_DATABASE
-              value: loom
-            - name: PGBOUNCER_PORT
-              value: "6432"
-            - name: PGBOUNCER_POOL_MODE
-              value: transaction
-            - name: PGBOUNCER_DEFAULT_POOL_SIZE
-              value: "25"
-            - name: PGBOUNCER_MIN_POOL_SIZE
-              value: "5"
-            - name: PGBOUNCER_MAX_CLIENT_CONN
-              value: "500"
-            - name: PGBOUNCER_AUTH_TYPE
-              value: plain
-            - name: PGBOUNCER_RESERVE_POOL_SIZE
-              value: "5"
-            - name: PGBOUNCER_RESERVE_POOL_TIMEOUT
-              value: "3"
-            - name: PGBOUNCER_SERVER_IDLE_TIMEOUT
-              value: "600"
-            - name: PGBOUNCER_SERVER_LIFETIME
-              value: "3600"
-          readinessProbe:
-            tcpSocket: { port: 6432 }
-            initialDelaySeconds: 3
-            periodSeconds: 5
-          resources:
-            requests: { cpu: 100m, memory: 128Mi }
-            limits: { cpu: 500m, memory: 512Mi }
-        - name: exporter
-          image: prometheuscommunity/pgbouncer-exporter:v0.12.1
-          args:
-            - "--pgBouncer.connectionString=postgres://loom@localhost:6432/pgbouncer?sslmode=disable"
-          ports:
-            - { containerPort: 9127, name: metrics }
-          resources:
-            requests: { cpu: 20m, memory: 32Mi }
-            limits: { cpu: 100m, memory: 128Mi }
+      - name: pgbouncer
+        image: bitnamilegacy/pgbouncer:1.24.0
+        ports:
+        - containerPort: 6432
+          name: sql
+        env:
+        - name: POSTGRESQL_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: postgres-user
+        - name: POSTGRESQL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: postgres-password
+        - name: POSTGRESQL_HOST
+          value: loom-postgres
+        - name: POSTGRESQL_PORT
+          value: '5432'
+        - name: POSTGRESQL_DATABASE
+          value: loom
+        - name: PGBOUNCER_DATABASE
+          value: loom
+        - name: PGBOUNCER_PORT
+          value: '6432'
+        - name: PGBOUNCER_POOL_MODE
+          value: transaction
+        - name: PGBOUNCER_DEFAULT_POOL_SIZE
+          value: '25'
+        - name: PGBOUNCER_MIN_POOL_SIZE
+          value: '5'
+        - name: PGBOUNCER_MAX_CLIENT_CONN
+          value: '500'
+        - name: PGBOUNCER_AUTH_TYPE
+          value: plain
+        - name: PGBOUNCER_RESERVE_POOL_SIZE
+          value: '5'
+        - name: PGBOUNCER_RESERVE_POOL_TIMEOUT
+          value: '3'
+        - name: PGBOUNCER_SERVER_IDLE_TIMEOUT
+          value: '600'
+        - name: PGBOUNCER_SERVER_LIFETIME
+          value: '3600'
+        readinessProbe:
+          tcpSocket:
+            port: 6432
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+      - name: exporter
+        image: prometheuscommunity/pgbouncer-exporter:v0.12.1
+        args:
+        - --pgBouncer.connectionString=postgres://loom@localhost:6432/pgbouncer?sslmode=disable
+        ports:
+        - containerPort: 9127
+          name: metrics
+        resources:
+          requests:
+            cpu: 20m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: loom-pgbouncer
 spec:
-  selector: { app: loom-pgbouncer }
+  selector:
+    app: loom-pgbouncer
   ports:
-    - { name: sql, port: 6432, targetPort: 6432 }
-    - { name: metrics, port: 9127, targetPort: 9127 }
+  - name: sql
+    port: 6432
+    targetPort: 6432
+  - name: metrics
+    port: 9127
+    targetPort: 9127
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -88,4 +115,5 @@ metadata:
 spec:
   minAvailable: 1
   selector:
-    matchLabels: { app: loom-pgbouncer }
+    matchLabels:
+      app: loom-pgbouncer
