@@ -48,20 +48,22 @@ class _FakeConn:
 class _FakeConnectable:
     """Fake engine — supports `with connectable.connect() as conn`."""
 
-    def __init__(self, conn: "_FakeConn") -> None:
+    def __init__(self, conn: _FakeConn) -> None:
         self._conn = conn
 
-    def connect(self):  # type: ignore[no-untyped-def]
-        conn = self._conn
+    def connect(self) -> _FakeCtx:
+        return _FakeCtx(self._conn)
 
-        class _Ctx:
-            def __enter__(self_ctx):  # noqa: ANN001
-                return conn
 
-            def __exit__(self_ctx, *a):  # noqa: ANN001
-                return None
+class _FakeCtx:
+    def __init__(self, conn: _FakeConn) -> None:
+        self._conn = conn
 
-        return _Ctx()
+    def __enter__(self) -> _FakeConn:
+        return self._conn
+
+    def __exit__(self, *_args: object) -> None:
+        return None
 
 
 def test_probe_passes_on_direct_connection() -> None:
