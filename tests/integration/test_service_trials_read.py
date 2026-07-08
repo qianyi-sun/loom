@@ -1096,6 +1096,7 @@ async def test_trial_detail_exposes_projected_artifacts(
     postgres_url: str,
 ) -> None:
     app, raw, team_id, trial_ids = trials_setup
+    app.state.settings.public_base_url = "https://yylx.world/dev"
     artifact_key = f"{team_id}/{trial_ids[0]}/main/result.txt"
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -1145,7 +1146,7 @@ async def test_trial_detail_exposes_projected_artifacts(
         }
     ]
     assert body["artifacts"][0]["download_url"] == (
-        f"http://svc/api/v1/trials/{trial_ids[0]}/artifacts/download"
+        f"https://yylx.world/dev/api/v1/trials/{trial_ids[0]}/artifacts/download"
         f"?key={team_id}%2F{trial_ids[0]}%2Fmain%2Fresult.txt"
     )
     assert "localhost:9000" not in body["artifacts"][0]["download_url"]

@@ -21,6 +21,7 @@ from loom_service.delivery_export import (
     load_delivery_artifact,
 )
 from loom_service.dependencies import SessionAndCtx
+from loom_service.public_links import public_base_url
 from loom_service.routes.object_downloads import stream_object_response
 
 router = APIRouter()
@@ -63,12 +64,17 @@ async def _load_authorized_batch(
 
 @router.get("/batches/{batch_id}/delivery-export")
 async def get_batch_delivery_export(
+    request: Request,
     sc: SessionAndCtx,
     batch_id: UUID,
 ) -> dict[str, object]:
     batch, _ctx = await _load_authorized_batch(sc, batch_id)
     session, _ = sc
-    return await latest_delivery_export(session, batch_id=batch.id)
+    return await latest_delivery_export(
+        session,
+        batch_id=batch.id,
+        public_base_url=public_base_url(request),
+    )
 
 
 @router.post("/batches/{batch_id}/delivery-export", status_code=201)
@@ -93,6 +99,7 @@ async def create_batch_delivery_export(
                 payload.supplemental_batch_ids if payload is not None else None
             ),
             mode=mode,
+            public_base_url=public_base_url(request),
         )
     except DeliveryExportError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc

@@ -488,6 +488,7 @@ async def test_raw_harbor_tb2_delivery_export_streams_sample_compatible_bundle(
     selected_trials: dict[str, UUID] = delivery_setup["selected_trials"]  # type: ignore[assignment]
     task_ids: list[str] = delivery_setup["task_ids"]  # type: ignore[assignment]
     fake_s3 = delivery_setup["fake_s3"]
+    app.state.settings.public_base_url = "https://yylx.world/dev"
 
     task_bundle_key = f"{task_ids[0]}/task.toml"
     fake_s3.objects[("task-bundles", task_bundle_key)] = (  # type: ignore[attr-defined]
@@ -643,6 +644,7 @@ async def test_raw_harbor_tb2_delivery_export_streams_sample_compatible_bundle(
     assert body["manifest"]["object_counts"]["provider_logs"] == 5
     assert body["manifest"]["object_counts"]["task_bundle_files"] == 2
     assert body["archive_filename"].endswith("-raw-harbor-tb2-v1.tar.gz")
+    assert body["download_url"].startswith("https://yylx.world/dev/api/v1/batches/")
 
     archive_key = body["storage"]["key"]
     archive_bytes = fake_s3.objects[(body["storage"]["bucket"], archive_key)]  # type: ignore[attr-defined]
@@ -712,6 +714,20 @@ async def test_raw_harbor_tb2_delivery_export_streams_sample_compatible_bundle(
                 ),
             },
         ]
+        history_sft_row = next(
+            json.loads(line)
+            for line in sft_lines
+            if len(json.loads(line)["messages"]) == 4
+        )
+        history_assistant = history_sft_row["messages"][1]
+        assert history_assistant["role"] == "assistant"
+        assert json.loads(history_assistant["content"]) == {
+            "analysis": "fresh shell",
+            "plan": "inspect files",
+            "commands": [{"keystrokes": "ls -la\n", "duration": 5}],
+            "task_complete": False,
+        }
+        assert "state_analysis" not in history_assistant["content"]
         artifact_manifest = json.load(
             tar.extractfile(  # type: ignore[arg-type]
                 f"agent_runs/{first_task}/{first_trial}/artifact_manifest.json"
