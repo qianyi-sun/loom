@@ -101,6 +101,7 @@ success_or_retry_exhausted = "loom.family_run.advance:SuccessOrRetryExhaustedPre
 
 [project.entry-points."loom.family.adapters"]
 noop = "loom.family_run.adapters:NoopAdapter"
+skill_patcher_llm = "loom.family_run.skill_patcher_llm:SkillPatcherLLMAdapter"
 
 [project.entry-points."loom.family.failure_policies"]
 stall_family = "loom.family_run.failure:StallFamilyPolicy"
