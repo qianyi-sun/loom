@@ -511,6 +511,10 @@ fresh `worker_id`, `worker_status=active`, `worker_fresh=true`, and
 mismatches from `loom admin gb10-workers status` while a fresh compose worker
 registers and emits its first heartbeats; persistent stale worker evidence after
 that retry window is a host-runtime failure to repair, not a gate to bypass.
+Protected rollout also disables the older `loom-gb10-worker.service` before
+starting node-agent. That legacy service is a direct Docker Compose path and
+must not remain enabled, because user-manager/default-target starts during SSH
+can race node-agent and recreate the worker outside the release-state boundary.
 The staging desired-state profile sets
 `LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS=7200` so the earliest host in a 15-host
 serial prep does not idle-exit before release-gate and smoke can observe all
