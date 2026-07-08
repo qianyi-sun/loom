@@ -11,6 +11,7 @@ from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.evidence import EvidenceDirectory
 from loom_cli.rollout.steps.s13_smoke import (
     SmokeStep,
+    _admin_on_behalf_config,
     _ingress_base,
     _trajectory_head_request,
 )
@@ -705,6 +706,29 @@ def test_admin_on_behalf_smoke_submits_batch_with_admin_source_ref(
             "05-submit.json",
         ).read_text()
     )
+
+
+def test_admin_on_behalf_config_resolves_team_id_source(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(
+        tmp_path,
+        smoke_submit_mode="admin-on-behalf",
+        smoke_on_behalf_username="devansh",
+        smoke_on_behalf_team_id="env:LOOM_SMOKE_ON_BEHALF_TEAM_ID",
+        smoke_admin_actor="qianyi",
+    )
+    monkeypatch.setenv(
+        "LOOM_SMOKE_ON_BEHALF_TEAM_ID",
+        "11111111-1111-4111-8111-111111111111",
+    )
+
+    config, error = _admin_on_behalf_config(ctx)
+
+    assert error is None
+    assert config is not None
+    assert config.team_id == "11111111-1111-4111-8111-111111111111"
 
 
 def test_admin_on_behalf_smoke_fails_fast_on_fanout_submit_failure(

@@ -14,7 +14,10 @@ from loom.models.types import LogLevel
 
 class WorkerSettings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="LOOM_WORKER_", env_file=".env", extra="forbid",
+        dotenv_filtering="only_existing",
+        env_prefix="LOOM_WORKER_",
+        env_file=".env",
+        extra="forbid",
     )
 
     benchmark_cache: Path | None = None

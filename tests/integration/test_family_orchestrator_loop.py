@@ -65,14 +65,14 @@ async def _seed_minimal_batch(
     queries touch plus foreign-key constraints must be satisfied.
     """
     await session.execute(text("""
-        INSERT INTO teams (id, name, slug)
-        VALUES (:tid, 'test-team', 'test-team')
-    """), {"tid": team_id})
+        INSERT INTO teams (id, name)
+        VALUES (:tid, :name)
+    """), {"tid": team_id, "name": f"test-team-{team_id}"})
     for tid in task_ids:
         await session.execute(text("""
-            INSERT INTO tasks (id, config, source_checksum)
-            VALUES (:tid, '{}'::jsonb, 'sha256:test')
-        """), {"tid": tid})
+            INSERT INTO tasks (id, config, checksum)
+            VALUES (:tid, '{}'::jsonb, :checksum)
+        """), {"tid": tid, "checksum": "0" * 64})
     await session.execute(text("""
         INSERT INTO batches (
             id, team_id, name, task_filter, trial_config,

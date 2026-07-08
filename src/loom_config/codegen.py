@@ -143,7 +143,10 @@ def render_service_settings(schema: Schema, service: str) -> str:
         + "\n\n"
         + f"class {cls_name}(BaseSettings):\n"
         + "    model_config = SettingsConfigDict(\n"
-        + f"        env_prefix=\"LOOM_{prefix}_\", env_file=\".env\", extra=\"forbid\",\n"
+        + "        dotenv_filtering=\"only_existing\",\n"
+        + f"        env_prefix=\"LOOM_{prefix}_\",\n"
+        + "        env_file=\".env\",\n"
+        + "        extra=\"forbid\",\n"
         + "    )\n\n"
         + body
         + "\n\n\n"

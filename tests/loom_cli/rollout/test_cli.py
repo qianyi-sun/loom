@@ -36,6 +36,111 @@ class _FakeSubprocess:
 
 
 class TestRolloutCLIDryRun:
+    def test_refuses_short_rollout_without_environment_selector(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(subprocess, "run", _FakeSubprocess())
+
+        rc = main([
+            "cluster", "rollout",
+            "--ref", "origin/dev",
+            "--dry-run",
+        ])
+
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "environment selector" in err
+        assert "staging" in err
+        assert "prod" in err
+
+    def test_staging_preset_dry_run_expands_stable_inputs_and_derived_tag(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fake = _FakeSubprocess()
+        monkeypatch.setattr(subprocess, "run", fake)
+        monkeypatch.setattr("loom_cli.rollout.cli.new_rollout_id", lambda *, image_tag: f"rid-{image_tag}")
+
+        rc = main([
+            "cluster", "rollout",
+            "staging",
+            "--ref", "origin/dev",
+            "--rollout-root", str(tmp_path),
+            "--dry-run",
+        ])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "preset: staging" in out
+        assert "resolved_sha: " + ("a" * 40) in out
+        assert "image_tag: staging-aaaaaaa" in out
+        assert "rollout_id: rid-staging-aaaaaaa" in out
+        assert "cluster_name: loom-staging" in out
+        assert "namespace: loom-staging" in out
+        assert "environment: staging" in out
+        assert "cp_url: http://127.0.0.1:18081" in out
+        assert "cluster_config_path: deploy/environments/staging.cluster.toml" in out
+        assert "backup_manifest_path: /data/loom-staging/backups/latest/backup-manifest.json" in out
+        assert "rollout_root: " + str(tmp_path) in out
+        assert "scope: current-gb10" in out
+        assert "admin_token_source: file:" in out
+        assert "worker_token_source: file:" in out
+        assert "service_token_source: file:" in out
+        assert "smoke_submit_mode: admin-on-behalf" in out
+        assert "smoke_on_behalf_username: devansh" in out
+        assert "smoke_on_behalf_team_id: env:LOOM_SMOKE_ON_BEHALF_TEAM_ID" in out
+        assert "smoke_admin_actor: codex-v1-release-gate" in out
+        assert "raw-secret" not in out
+        assert "steps:\n" in out
+
+    def test_staging_preset_allows_explicit_image_tag_override(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(subprocess, "run", _FakeSubprocess())
+        monkeypatch.setattr("loom_cli.rollout.cli.new_rollout_id", lambda *, image_tag: f"rid-{image_tag}")
+
+        rc = main([
+            "cluster", "rollout",
+            "staging",
+            "--ref", "origin/dev",
+            "--image-tag", "staging-manual",
+            "--rollout-root", str(tmp_path),
+            "--dry-run",
+        ])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "image_tag: staging-manual" in out
+        assert "rollout_id: rid-staging-manual" in out
+
+    def test_prod_preset_fails_closed_until_configured(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(subprocess, "run", _FakeSubprocess())
+
+        rc = main([
+            "cluster", "rollout",
+            "prod",
+            "--ref", "main",
+            "--rollout-root", str(tmp_path),
+            "--dry-run",
+        ])
+
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "prod preset not configured" in err
+        assert "staging" not in err.lower()
+
     def test_dry_run_prints_step_list(
         self,
         tmp_path: Path,
@@ -489,6 +594,33 @@ class TestRolloutCLIRealRun:
         assert captured["ctx"].to_inputs_dict()[
             "backup_manifest_min_remaining_hours"
         ] == 4
+
+    def test_passes_gb10_prep_concurrency_into_rollout_inputs(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(subprocess, "run", _FakeSubprocess())
+        captured = {}
+
+        def fake_run_rollout(ctx, steps, evidence):
+            captured["ctx"] = ctx
+            return 0
+
+        monkeypatch.setattr("loom_cli.rollout.cli.run_rollout", fake_run_rollout)
+
+        rc = main([
+            "cluster", "rollout",
+            "staging",
+            "--ref", "origin/dev",
+            "--image-tag", "staging-aaaaaaa",
+            "--rollout-root", str(tmp_path),
+            "--gb10-prep-concurrency", "7",
+        ])
+
+        assert rc == 0
+        assert captured["ctx"].gb10_prep_concurrency == 7
+        assert captured["ctx"].to_inputs_dict()["gb10_prep_concurrency"] == 7
 
     def test_passes_protected_admin_token_contract_into_rollout_context(
         self,

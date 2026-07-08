@@ -960,7 +960,7 @@ Recommended idle-exit values:
 |---|---:|---|
 | Fixed Kubernetes worker | unset | Keep baseline capacity online. |
 | Dev or staging elastic Slurm | 300 seconds | Release idle allocations quickly while preserving short queue bursts. |
-| Staging GB10 release-managed Compose | 7200 seconds | Keep all 15 hosts fresh through serial prep, release-gate, and smoke validation. |
+| Staging GB10 release-managed Compose | 7200 seconds | Keep all 15 hosts fresh through bounded-parallel prep, release-gate, and smoke validation. |
 | Production OLDLAB elastic Slurm | 600-900 seconds | Avoid churn during real batch bursts; use 900 seconds when submissions are bursty. |
 
 Keep Slurm `--time` as a hard upper bound even when idle-exit is enabled.

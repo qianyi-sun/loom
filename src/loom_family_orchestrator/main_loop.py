@@ -84,7 +84,7 @@ SELECT id,
        state,
        result,
        attempt_count,
-       trajectory_uri
+       trajectory_index->>'trajectory_uri' AS trajectory_uri
   FROM trials
  WHERE batch_id = (:batch_id)::uuid
    AND family_key = (:family_key)::text

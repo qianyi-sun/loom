@@ -39,6 +39,23 @@ def _stub_required_env(cls: type[Any], monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(env_name, stub)
 
 
+def _required_env_lines(cls: type[Any], prefix: str) -> list[str]:
+    lines: list[str] = []
+    for name, field in cls.model_fields.items():
+        if not field.is_required():
+            continue
+        env_name = prefix + name.upper()
+        ann = str(field.annotation)
+        if "PostgresDsn" in ann or "HttpUrl" in ann or "AnyUrl" in ann:
+            value = DIRECT
+        elif "int" in ann.lower():
+            value = "1"
+        else:
+            value = "stub"
+        lines.append(f"{env_name}={value}")
+    return lines
+
+
 @pytest.mark.parametrize(
     "settings_cls",
     [ControlPlaneSettings, LoomServiceSettings, GatewaySettings],
@@ -85,3 +102,37 @@ def test_db_engine_url_uses_pool_when_set(
     s = settings_cls()
     assert s.db_engine_url == POOL
     assert s.db_engine_connect_args == {"prepare_threshold": None}
+
+
+@pytest.mark.parametrize(
+    "settings_cls",
+    [ControlPlaneSettings, LoomServiceSettings, GatewaySettings],
+)
+def test_dotenv_ignores_other_loom_service_prefixes(
+    settings_cls: type[Any],
+    tmp_path: Any,
+) -> None:
+    prefix_map = {
+        "ControlPlaneSettings": "LOOM_CP_",
+        "LoomServiceSettings": "LOOM_SVC_",
+        "GatewaySettings": "LOOM_GW_",
+    }
+    prefix = prefix_map[settings_cls.__name__]
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                *_required_env_lines(settings_cls, prefix),
+                f"{prefix}DB_URL={DIRECT}",
+                "LOOM_WORKER_TOKEN=worker-token",
+                "LOOM_ADMIN_TOKEN=admin-token",
+                "LOOM_SECRET_STORE_MASTER_KEY=master-key",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    s = settings_cls(_env_file=env_file)
+
+    assert s.db_engine_url == DIRECT

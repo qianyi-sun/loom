@@ -13,6 +13,7 @@ def test_renders_control_plane_with_all_field_kinds() -> None:
     schema = load_schema(_REPO_SCHEMA)
     src = render_service_settings(schema, "control-plane")
     assert "class ControlPlaneSettings(BaseSettings):" in src
+    assert 'dotenv_filtering="only_existing"' in src
     assert "step_jwt_signing_key: SecretStr" in src
     assert "admin_secret_file: Path | None = None" in src
     assert "bind_port: int = 8080" in src

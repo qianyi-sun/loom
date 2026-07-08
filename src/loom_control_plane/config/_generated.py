@@ -14,7 +14,10 @@ from loom.models.types import LogLevel
 
 class ControlPlaneSettings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="LOOM_CP_", env_file=".env", extra="forbid",
+        dotenv_filtering="only_existing",
+        env_prefix="LOOM_CP_",
+        env_file=".env",
+        extra="forbid",
     )
 
     admin_secret_file: Path | None = None
