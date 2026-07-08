@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
-from loom_llm_gateway.drain import DrainState, drain_and_report
+from loom_llm_gateway.drain import drain_and_report, ensure_drain_state
 
 router = APIRouter()
 
@@ -31,7 +31,7 @@ async def drain(request: Request) -> dict[str, object]:
     the current in-flight count without re-triggering the wait
     (still bounded by the same timeout).
     """
-    drain_state: DrainState = request.app.state.drain
+    drain_state = ensure_drain_state(request.app)
     settings = request.app.state.settings
     timeout_sec = float(settings.gateway_drain_timeout_sec)
     return await drain_and_report(drain_state, timeout_sec=timeout_sec)

@@ -894,7 +894,9 @@ team is selected. For a shared provider, filter by `provider_connection_id` and
 use `breakdown_by=team` or `breakdown_by=user` to separate owner-team usage
 from each consuming shared team/user. Admin-on-behalf submissions keep the
 represented team/user on the batch for product ownership, but usage and billing
-are attributed to the real acting admin/user. Admin usage views can request
+are attributed to the real acting admin/user. The represented user/team sees
+the run in monitor views and can use normal owner actions such as detail,
+debug, rerun, cancel, and artifact download. Admin usage views can request
 per-batch drilldown; token-only or self-deployed calls show token totals with
 `cost_status=not_applicable` instead of a fabricated dollar amount. Failed
 upstream provider attempts show as `pricing_mode=failed-upstream` and

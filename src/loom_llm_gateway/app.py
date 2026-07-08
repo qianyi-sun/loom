@@ -21,7 +21,7 @@ from loom.db.schema_startup import assert_schema_at_head
 from loom.security.secret_store import assert_existing_secrets_decryptable
 from loom.startup_retry import retry_startup_dependency
 from loom_llm_gateway.config import GatewaySettings
-from loom_llm_gateway.drain import DrainState, install_drain_middleware
+from loom_llm_gateway.drain import ensure_drain_state, install_drain_middleware
 from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.rate_card import RateCardCache
 from loom_llm_gateway.routes import (
@@ -70,7 +70,7 @@ def create_app(settings: GatewaySettings) -> FastAPI:
         # #547: drain state must be attached BEFORE middleware runs its
         # first request. Live-migrated to app.state so the middleware
         # and both /healthz and /drain share one instance.
-        app.state.drain = DrainState()
+        ensure_drain_state(app)
         app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
         await retry_startup_dependency(
             lambda: _assert_secret_store_startup(app.state.session_factory),

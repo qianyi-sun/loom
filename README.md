@@ -112,7 +112,8 @@ Provider owners can share one connection with another team without cloning or
 revealing the API key. The target team can list/select/use the shared provider,
 but only the owner team or a platform admin can update, rotate, test, or delete
 it. Usage and cost views remain attributed to the consuming team/user; delegated
-submissions such as admin-on-behalf attribute spend to the real acting user.
+submissions such as admin-on-behalf leave monitor visibility and owner actions
+with the represented user/team while attributing spend to the real acting user.
 
 **Option 2: User-hosted inference on the user's cluster.** The cluster runs an
 OpenAI-compatible HTTP service, usually vLLM. Loom only needs HTTPS reachability

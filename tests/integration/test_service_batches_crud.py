@@ -267,11 +267,11 @@ async def test_post_batch_materializes_count(
     assert detail_body["submitted_by_user"]["team_id"] == str(team_id)
 
 
-async def test_admin_submit_on_behalf_records_represented_user_and_audit(
+async def test_admin_submit_on_behalf_records_represented_user_owner_access_and_audit(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
 ) -> None:
-    app, _raw, team_id = camp_setup
+    app, raw, team_id = camp_setup
     sync_engine = create_engine(postgres_url)
     represented_username = ""
     with sync_engine.begin() as conn:
@@ -303,6 +303,18 @@ async def test_admin_submit_on_behalf_records_represented_user_and_audit(
             f"/api/v1/batches/{created.json().get('batch_id')}",
             headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
         )
+        represented_list = await ac.get(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        represented_detail = await ac.get(
+            f"/api/v1/batches/{created.json().get('batch_id')}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        represented_cancel = await ac.post(
+            f"/api/v1/batches/{created.json().get('batch_id')}/cancel",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
         audit = await ac.get(
             "/api/v1/admin/audit-events?limit=20",
             headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
@@ -318,9 +330,25 @@ async def test_admin_submit_on_behalf_records_represented_user_and_audit(
     assert submitted["username"] == represented_username
     assert submitted["team_id"] == str(team_id)
 
+    assert represented_list.status_code == 200, represented_list.text
+    listed = represented_list.json()["items"]
+    assert body["batch_id"] in {item["id"] for item in listed}
+    assert represented_detail.status_code == 200, represented_detail.text
+    assert represented_detail.json()["submitted_by_user"]["username"] == represented_username
+    assert represented_detail.json()["owner_team"]["id"] == str(team_id)
+    assert represented_cancel.status_code == 200, represented_cancel.text
+    assert represented_cancel.json() == {
+        "batch_id": body["batch_id"],
+        "state": "cancelled",
+    }
+
     with sync_engine.begin() as conn:
         batch_row = conn.execute(
-            select(Batch.submitted_by_user_id).where(
+            select(
+                Batch.submitted_by_user_id,
+                Batch.usage_attributed_user_id,
+                Batch.usage_attributed_actor,
+            ).where(
                 Batch.id == UUID(body["batch_id"]),
             ),
         ).one()
@@ -329,6 +357,8 @@ async def test_admin_submit_on_behalf_records_represented_user_and_audit(
         ).scalar_one()
     sync_engine.dispose()
     assert batch_row.submitted_by_user_id == represented_user_id
+    assert batch_row.usage_attributed_user_id is None
+    assert batch_row.usage_attributed_actor == "release-operator"
 
     assert audit.status_code == 200, audit.text
     event = next(
