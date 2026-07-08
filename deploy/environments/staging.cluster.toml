@@ -49,3 +49,13 @@ hosts = [
   { ssh_target = "trt-gb10-14", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
   { ssh_target = "trt-gb10-15", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
 ]
+
+# Staging is running a single-node kind cluster on bb8-1 today (#637).
+# Pinned to single-node until the k3s multi-node cluster is
+# provisioned; flip to `multi_node = true` in the same PR that lands
+# the k3s cutover so manifests match reality.
+[topology]
+multi_node = false
+storage_backend = "host_path"
+postgres_replicas = 1
+minio_replicas = 1

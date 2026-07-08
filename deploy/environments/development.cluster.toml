@@ -22,3 +22,12 @@ enabled = true
 # - Staging/production use the schema default (enabled=true).
 [pgbouncer]
 enabled = false
+
+# Development kind clusters are single-node by construction (#637).
+# Kept explicit to avoid a silent shape change if the schema default
+# ever flips.
+[topology]
+multi_node = false
+storage_backend = "host_path"
+postgres_replicas = 1
+minio_replicas = 1
