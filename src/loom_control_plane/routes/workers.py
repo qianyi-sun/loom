@@ -96,6 +96,11 @@ async def claim_trial(
     CLAIM_LATENCY_SEC.labels(result="hit").observe(elapsed)
 
     pc_id = row["provider_connection_id"]
+    # #672 family-runs: propagate the family gate so the worker can
+    # bind-mount the resolved state_uri before starting the sandbox.
+    family_run_spec = row.get("family_run_spec") if hasattr(row, "get") else row["family_run_spec"]
+    family_state_uri = row.get("family_state_uri") if hasattr(row, "get") else row["family_state_uri"]
+    family_key = row.get("family_key") if hasattr(row, "get") else row["family_key"]
     return JSONResponse({
         "trial_id": str(row["id"]),
         "team_id": str(row["team_id"]),
@@ -106,6 +111,9 @@ async def claim_trial(
         "provider_connection_id": (
             str(pc_id) if pc_id is not None else None
         ),
+        "family_key": family_key,
+        "family_state_uri": family_state_uri,
+        "family_run_spec": family_run_spec,
         "state": "claimed",
     })
 

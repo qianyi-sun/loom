@@ -137,10 +137,15 @@ spec:
   policyTypes: [Ingress, Egress]
   ingress:
     # MinIO is the object store: trajectories + artifacts.
+    # Peer-to-peer entry (loom-minio -> loom-minio) is required in
+    # distributed mode (multi_node=true) so erasure-set reads can
+    # reach shards on other pods. Without it, list serves from local
+    # metadata but GetObject fails with NoSuchKey — see #668.
     - from:
         - podSelector: { matchLabels: { app: loom-service } }
         - podSelector: { matchLabels: { app: loom-worker } }
         - podSelector: { matchLabels: { app: loom-llm-gateway } }
+        - podSelector: { matchLabels: { app: loom-minio } }
       ports:
         - { port: 9000, protocol: TCP }
   egress:
@@ -153,6 +158,11 @@ spec:
       ports:
         - { port: 53, protocol: UDP }
         - { port: 53, protocol: TCP }
+    # Peer egress for distributed MinIO — see ingress comment above.
+    - to:
+        - podSelector: { matchLabels: { app: loom-minio } }
+      ports:
+        - { port: 9000, protocol: TCP }
 
 ---
 apiVersion: networking.k8s.io/v1

@@ -12,6 +12,12 @@ Ordering (most → least important):
 spec §3.1.1 v1's derive_requires_caps does not emit a mounted_fs requirement.
 If we add it later, the matching predicate goes here and the helper signature
 grows the corresponding parameter.
+
+#672 family-runs: a trial whose `family_key` is set is only claimable
+when the matching `batch_family_state` row is `pending` and its
+``task_sequence[current_index]`` equals the trial's task_id. The claim
+also flips the family state from `pending` to `running` in the same
+transaction so a second concurrent claim can't race the family gate.
 """
 
 from __future__ import annotations
@@ -24,9 +30,11 @@ from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# The family predicate uses ``task_sequence[current_index + 1]`` because
+# Postgres arrays are 1-indexed while ``current_index`` counts from 0.
 _CLAIM_SQL = text("""
 WITH next AS (
-  SELECT t.id
+  SELECT t.id, t.family_key, t.batch_id
     FROM trials t
     JOIN team_quotas q ON q.team_id = t.team_id
    WHERE t.state = 'queued'
@@ -39,6 +47,17 @@ WITH next AS (
      )
      AND t.requires_caps->>'gpu_vendor' = ANY(:worker_gpu_vendors)
      AND (t.requires_caps->'network_policies') <@ (:worker_network_policies)::jsonb
+     AND (
+       t.family_key IS NULL
+       OR EXISTS (
+         SELECT 1
+           FROM batch_family_state bfs
+          WHERE bfs.batch_id = t.batch_id
+            AND bfs.family_key = t.family_key
+            AND bfs.state = 'pending'
+            AND bfs.task_sequence[bfs.current_index + 1] = t.task_id
+       )
+     )
      AND EXISTS (
        SELECT 1
          FROM workers w
@@ -56,6 +75,19 @@ WITH next AS (
        t.submitted_at ASC
    LIMIT 1
    FOR UPDATE OF t SKIP LOCKED
+),
+-- Same-transaction family gate: flip the picked family to 'running' so a
+-- concurrent claim on a sibling task blocks on the predicate above.
+family_lock AS (
+  UPDATE batch_family_state bfs
+     SET state = 'running',
+         updated_at = NOW()
+    FROM next n
+   WHERE n.family_key IS NOT NULL
+     AND bfs.batch_id = n.batch_id
+     AND bfs.family_key = n.family_key
+     AND bfs.state = 'pending'
+  RETURNING bfs.batch_id, bfs.family_key, bfs.state_uri
 )
 UPDATE trials t
    SET state = 'claimed',
@@ -68,7 +100,12 @@ UPDATE trials t
   FROM next
  WHERE t.id = next.id
  RETURNING t.id, t.team_id, t.task_id, t.config, t.requires_caps,
-           t.attempt_count, t.provider_connection_id;
+           t.attempt_count, t.provider_connection_id,
+           t.family_key, t.batch_id,
+           (SELECT state_uri FROM family_lock) AS family_state_uri,
+           (SELECT b.family_run_spec
+              FROM batches b
+             WHERE b.id = t.batch_id) AS family_run_spec;
 """)
 
 
