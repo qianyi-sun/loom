@@ -6,6 +6,7 @@ import os
 from urllib.parse import urlsplit
 
 from fastapi import Request
+from starlette.datastructures import URL
 
 
 def public_base_url(request: Request) -> str:
@@ -17,11 +18,33 @@ def public_base_url(request: Request) -> str:
     if forwarded:
         return forwarded
 
-    return str(request.base_url).rstrip("/")
+    request_base = getattr(request, "base_url", None)
+    if request_base is not None:
+        return str(request_base).rstrip("/")
+    return ""
+
+
+def public_url_for(request: Request, name: str, **path_params: object) -> URL:
+    """Build a public URL for a named service route.
+
+    ``request.url_for`` sees the service's internal root-mounted ``/api`` path.
+    Deployed staging/prod routes are mounted under browser prefixes such as
+    ``/dev`` and ``/prod``; ``public_base_url`` carries that browser prefix.
+    """
+
+    internal = urlsplit(str(request.url_for(name, **path_params)))
+    path = internal.path or ""
+    query = f"?{internal.query}" if internal.query else ""
+    base = public_base_url(request)
+    if not base and internal.scheme and internal.netloc:
+        base = f"{internal.scheme}://{internal.netloc}"
+    return URL(f"{base}{path}{query}")
 
 
 def _configured_public_base_url(request: Request) -> str | None:
-    settings = getattr(request.app.state, "settings", None)
+    app = getattr(request, "app", None)
+    state = getattr(app, "state", None)
+    settings = getattr(state, "settings", None)
     settings_base = getattr(settings, "public_base_url", None)
     candidates = (
         str(settings_base) if settings_base else None,
@@ -34,15 +57,16 @@ def _configured_public_base_url(request: Request) -> str | None:
 
 
 def _forwarded_public_base_url(request: Request) -> str | None:
-    forwarded = request.headers.get("forwarded")
+    headers = getattr(request, "headers", {})
+    forwarded = headers.get("forwarded")
     if forwarded:
         parsed = _parse_forwarded_header(forwarded)
         if parsed is not None:
             return parsed
 
-    proto = _first_header_value(request.headers.get("x-forwarded-proto"))
-    host = _first_header_value(request.headers.get("x-forwarded-host"))
-    port = _first_header_value(request.headers.get("x-forwarded-port"))
+    proto = _first_header_value(headers.get("x-forwarded-proto"))
+    host = _first_header_value(headers.get("x-forwarded-host"))
+    port = _first_header_value(headers.get("x-forwarded-port"))
     if proto is None or host is None:
         return None
     if proto not in {"http", "https"}:

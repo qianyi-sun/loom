@@ -147,6 +147,24 @@
       "splits": ["test"]
     },
     {
+      "name": "skillflow-iterative",
+      "display_name": "SkillFlow (iterative shared skills)",
+      "series": "skill",
+      "upstream": {"kind": "git", "locator": "https://huggingface.co/datasets/zhang-ziao/SkillFlow-Task", "revision": "main"},
+      "license": {"spdx": "NOASSERTION", "url": "https://github.com/ZhangZi-a/SkillFlow"},
+      "splits": ["test"],
+      "family_run_defaults": {
+        "enabled": true,
+        "family_key_extractor": {"name": "instance_id_prefix", "params": {"depth": 1}},
+        "sequencer": {"name": "ranking_file", "params": {"path": "ALL_TASK_DIFFICULTY_RANKING.json"}},
+        "advance_predicate": {"name": "always_on_terminal"},
+        "adapter": {"name": "skill_patcher_llm"},
+        "failure_policy": {"name": "stall_family", "params": {"max_retries": 3, "backoff_sec": 60}},
+        "state_backend": {"name": "s3_artifacts"},
+        "mount_path": "/root/.skills"
+      }
+    },
+    {
       "name": "skilllearnbench",
       "display_name": "SkillLearnBench",
       "series": "skill",

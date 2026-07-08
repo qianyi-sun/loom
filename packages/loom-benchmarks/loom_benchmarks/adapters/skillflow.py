@@ -507,3 +507,20 @@ PY
 ''',
             out_dir=out_dir,
         )
+
+
+class SkillFlowIterativeAdapter(SkillFlowAdapter):
+    """SkillFlow variant that opts into family-run iterative execution (#672).
+
+    Identical converter to :class:`SkillFlowAdapter`; the catalog
+    ``skillflow-iterative`` entry supplies the ``family_run_defaults``
+    block (extractor / sequencer / adapter / state backend) so the
+    batches route seeds ``batch_family_state`` at accept time and the
+    scheduler serialises the family under one skills tarball.
+
+    Ships as a separate entry-point so operators can pick the family-run
+    experience explicitly without breaking existing single-shot
+    ``skillflow`` clones.
+    """
+
+    name = "skillflow-iterative"

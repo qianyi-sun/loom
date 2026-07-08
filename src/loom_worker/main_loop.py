@@ -576,6 +576,64 @@ async def _claim_available_trials(
     return claimed
 
 
+async def _prepare_family_state_mount_if_any(
+    *,
+    payload: dict[str, Any],
+    settings: WorkerSettings,
+    trial_id: UUID,
+    object_store: ObjectStore,
+) -> Any:
+    """Download the family-run state tarball when the claim payload
+    carries a ``family_state_uri`` (#672 PR-3).
+
+    Returns None for classic trials so the runner picks up an empty
+    ``family_state_volumes`` tuple. Raises are propagated so the trial
+    is marked ``failed`` via the outer ``_mark_setup_failed`` path —
+    a family-run trial that can't hydrate its shared state has no way
+    to run correctly.
+    """
+    from loom.family_run.prestart import (
+        FamilyStateMount,
+        prepare_family_state_mount,
+    )
+    from loom.family_run.state_backends import S3ArtifactsStateBackend
+
+    state_uri = payload.get("family_state_uri")
+    if not state_uri:
+        return None
+    family_run_spec = payload.get("family_run_spec") or {}
+    state_backend_ref = family_run_spec.get("state_backend") or {}
+    backend_name = state_backend_ref.get("name") or "s3_artifacts"
+    if backend_name != "s3_artifacts":
+        # Only the built-in backend is wired in v1; when a caller ships
+        # a custom entry-point the plugin will need to be resolvable
+        # from the worker's python env. For now we fail loud instead
+        # of silently mounting an empty dir.
+        raise RuntimeError(
+            f"unsupported family_run state_backend {backend_name!r}; "
+            "only 's3_artifacts' is wired in the worker path",
+        )
+    # `artifacts` is the canonical bucket ensured at worker startup
+    # (see _ensure_runtime_buckets) — matches loom_service's default.
+    backend = S3ArtifactsStateBackend(
+        store=object_store,
+        bucket="artifacts",
+    )
+    mount_path = family_run_spec.get("mount_path") or "/root/.skills"
+    timeout_sec = getattr(
+        settings, "family_state_download_timeout_sec", 120.0,
+    )
+    mount: FamilyStateMount = await prepare_family_state_mount(
+        trial_id=str(trial_id),
+        state_uri=state_uri,
+        mount_path=mount_path,
+        state_backend=backend,
+        backend_params=state_backend_ref.get("params") or {},
+        download_timeout_sec=timeout_sec,
+    )
+    return mount
+
+
 async def _resolve_layered_trial_image(
     *,
     task_image: str,
@@ -761,6 +819,20 @@ async def _spawn_trial(
             else None
         )
 
+        # #672 PR-3: when the CP claim payload carries a family_state_uri,
+        # download the shared skills tarball into a per-trial staging
+        # dir and hand the (host, container, mode) volume tuple to the
+        # runner. Cleanup lives in the outer finally block below.
+        family_state_mount = await _prepare_family_state_mount_if_any(
+            payload=payload,
+            settings=settings,
+            trial_id=trial_id,
+            object_store=object_store,
+        )
+        family_state_volumes: tuple[tuple[str, str, str], ...] = ()
+        if family_state_mount is not None:
+            family_state_volumes = (family_state_mount.as_volume_tuple(),)
+
         runner = LocalTrialRunner(
             trial_id=trial_id,
             team_id=team_id,
@@ -823,6 +895,7 @@ async def _spawn_trial(
             ),
             sandbox_step_jwt_ttl_sec=settings.sandbox_step_jwt_ttl_sec,
             sandbox_extra_hosts=_sandbox_extra_hosts_for_url(subprocess_gateway_url_str),
+            family_state_volumes=family_state_volumes,
             sidecar_runtime_factory=lambda: DockerTaskSidecarRuntime(
                 task_config=task_config,
                 task_dir=task_dir,
@@ -881,6 +954,13 @@ async def _spawn_trial(
             )
         finally:
             shutil.rmtree(task_dir, ignore_errors=True)
+            # #672 PR-3: release the family-state staging dir. The
+            # runner uses the bind-mount for the trial's lifetime;
+            # after the sandbox stops, the tarball has been re-uploaded
+            # by any subsequent adapter.evolve call, so the local copy
+            # can go.
+            if family_state_mount is not None:
+                family_state_mount.cleanup()
 
     await pool.spawn(_setup_run_and_cleanup())
 

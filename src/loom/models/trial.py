@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from loom.family_run.spec import FamilyRunSpec
 from loom.models.mcp import MCPConnection
 from loom.models.networking import NetworkPolicy
 from loom.models.skill import SkillRef
@@ -84,6 +85,12 @@ class TrialConfig(BaseModel):
     # the payload, just as a literal null.
     agent_name: str = Field(min_length=1)
     agent_model: ModelSpec | None
+
+    # #672 family-runs: optional per-batch override merged with the
+    # benchmark catalog's ``family_run_defaults`` at batch-accept time.
+    # When neither this override nor the catalog opts in, the batch runs
+    # in the classic mode - fully backward compatible.
+    family_run: FamilyRunSpec | None = None
 
     @field_validator("request_params", mode="before")
     @classmethod
