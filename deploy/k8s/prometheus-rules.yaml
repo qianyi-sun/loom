@@ -650,3 +650,113 @@ spec:
               which enforces the direct/pool DSN invariants when
               pgbouncer.enabled=true.
             runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/architecture/pgbouncer-transaction-mode-design.md"
+
+    - name: loom.minio.health
+      interval: 30s
+      rules:
+        # MinIO write-path latency degradation. p95 write duration
+        # spiking indicates disk contention (single-node MinIO) or
+        # erasure recovery in progress (distributed MinIO). Trial
+        # finalize latency inherits this — long-running trials block
+        # on trajectory + artifact uploads at the end.
+        - alert: LoomMinioWriteLatencyHigh
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le, api) (
+                rate(minio_s3_requests_duration_seconds_bucket{
+                  api=~"PutObject|CompleteMultipartUpload"
+                }[5m])
+              )
+            ) > 2.0
+          for: 10m
+          labels:
+            severity: warning
+            component: minio
+          annotations:
+            summary: "MinIO PutObject/CompleteMultipartUpload p95 > 2s"
+            description: |
+              Trial finalize latency is inheriting slow MinIO writes.
+              Under single-node MinIO this signals disk saturation
+              (see LoomMinioPVCUsageHigh) or CPU/network throttling.
+              Under distributed MinIO this can indicate erasure
+              recovery from a degraded disk/node.
+
+              Triage:
+                kubectl exec -it deploy/loom-service -- \
+                  mc admin info local
+                kubectl top pod -n loom -l app=loom-minio
+
+              Fix: if single-node, plan cutover to distributed mode
+              (#610). If distributed, check `mc admin heal --scan` for
+              in-progress heal operations and let them finish.
+            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/architecture/multi-node-topology.md"
+
+        # MinIO server-side errors. 5xx from PutObject/GetObject means
+        # trial artifacts and trajectories are outright failing to
+        # persist — not just slow. Every 5xx is a lost audit trail.
+        - alert: LoomMinioRequestErrorRateHigh
+          expr: |
+            sum by (api) (
+              rate(minio_s3_requests_errors_total{api=~"PutObject|GetObject|CompleteMultipartUpload"}[5m])
+            )
+            /
+            sum by (api) (
+              rate(minio_s3_requests_total{api=~"PutObject|GetObject|CompleteMultipartUpload"}[5m])
+            )
+            > 0.01
+          for: 5m
+          labels:
+            severity: critical
+            component: minio
+          annotations:
+            summary: "MinIO server errors > 1% on write/read paths"
+            description: |
+              MinIO is returning server-side errors on more than 1% of
+              write/read requests over 5m. Trial finalize is lossy or
+              broken. On single-node MinIO check disk / process
+              health; on distributed MinIO check per-drive status.
+
+              Triage:
+                kubectl logs -n loom -l app=loom-minio --tail=200 \
+                  | grep -Ei 'error|WARN'
+                kubectl exec -it deploy/loom-service -- \
+                  mc admin info local
+
+              Rollback path if the distributed pool is misbehaving and
+              the pre-#610 single-node MinIO was kept online for 24h
+              after cutover: flip `MINIO_ENDPOINT` back to the
+              single-node service; write path recovers immediately.
+            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/architecture/multi-node-topology.md"
+
+        # Distributed MinIO cluster health. `minio_cluster_nodes_online_total`
+        # falling below expected means one of the erasure peers is
+        # unreachable — MinIO can serve reads/writes with one node
+        # down (given N-parity ≥ 1) but every additional loss narrows
+        # the safety margin. Fires only when the topology.multi_node
+        # StatefulSet actually deploys — single-node MinIO has no
+        # such metric.
+        - alert: LoomMinioNodeOffline
+          expr: minio_cluster_nodes_offline_total > 0
+          for: 5m
+          labels:
+            severity: warning
+            component: minio
+          annotations:
+            summary: "One or more MinIO distributed nodes offline"
+            description: |
+              At least one MinIO pod in the distributed pool is
+              unreachable from its peers. Erasure quorum is still met
+              (pool tolerates N-parity failures) but every additional
+              loss narrows the margin.
+
+              Triage:
+                kubectl get pods -n loom -l app=loom-minio
+                kubectl describe pod -n loom -l app=loom-minio \
+                  | grep -A5 Events
+
+              If the pod restarted cleanly, `minio_cluster_nodes_offline_total`
+              returns to 0 within 60s. If it stays > 0, inspect the pod's
+              logs for peer-discovery failures (headless service DNS,
+              NetworkPolicy).
+            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/architecture/multi-node-topology.md"
