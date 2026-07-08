@@ -20,6 +20,12 @@ describe("quickstartSnippets", () => {
     ]);
   });
 
+  it("preserves route-prefixed server URLs in login commands", () => {
+    expect(cliLoginCommands("https://yylx.world/prod/")).toContain(
+      "loom auth login --server https://yylx.world/prod --username USER --password env:LOOM_PASSWORD",
+    );
+  });
+
   it("uses env/file based secrets for hosted provider setup", () => {
     const command = hostedProviderCommands(
       "https://loom.example.com",
@@ -30,6 +36,18 @@ describe("quickstartSnippets", () => {
     expect(command).toContain("--api-key env:PROVIDER_API_KEY");
     expect(command).toContain("loom providers test together-prod");
     expect(command).not.toContain("sk-");
+  });
+
+  it("preserves route-prefixed server URLs in provider setup commands", () => {
+    const command = hostedProviderCommands(
+      "https://yylx.world/dev/",
+      "yibuapi-staging",
+    ).join("\n");
+
+    expect(command).toContain(
+      "loom auth login --server https://yylx.world/dev --username USER --password env:LOOM_PASSWORD",
+    );
+    expect(command).toContain("loom providers test yibuapi-staging");
   });
 
   it("builds safe batch and download commands", () => {
@@ -60,6 +78,12 @@ describe("quickstartSnippets", () => {
     ]);
     expect(commands.some((command) => containsUnsafeSnippetValue(command))).toBe(
       false,
+    );
+  });
+
+  it("preserves route-prefixed server URLs in benchmark catalog commands", () => {
+    expect(benchmarkCatalogCommands("https://yylx.world/dev/")[0]).toBe(
+      "loom datasets list --remote --server-url https://yylx.world/dev --token env:LOOM_API_TOKEN",
     );
   });
 
