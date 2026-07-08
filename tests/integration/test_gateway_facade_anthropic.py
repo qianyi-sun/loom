@@ -38,6 +38,10 @@ from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.rate_card import RateCardCache
+from tests.integration.gateway_db import (
+    delete_all_teams_and_quotas,
+    delete_team_and_quota,
+)
 
 _TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
 
@@ -182,8 +186,7 @@ async def facade_setup(
             s.execute(delete(ProviderConnection))
             s.execute(delete(Secret))
             s.execute(delete(Token))
-            s.execute(delete(TeamQuota))
-            s.execute(delete(Team))
+            delete_all_teams_and_quotas(s)
             s.commit()
         sync_engine.dispose()
 
@@ -549,8 +552,7 @@ async def test_facade_returns_404_for_cross_team_connection(
     )
     sync_engine = create_engine(postgres_url)
     with session_local() as s:
-        s.execute(delete(TeamQuota).where(TeamQuota.team_id == other_team))
-        s.execute(delete(Team).where(Team.id == other_team))
+        delete_team_and_quota(s, other_team)
         s.commit()
     sync_engine.dispose()
     assert r.status_code == 404

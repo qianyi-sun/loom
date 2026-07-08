@@ -13,9 +13,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, insert, text
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import LlmCall, ProviderConnection, RateCard, Secret, Team, TeamQuota, Token
+from loom.db.schema import LlmCall, ProviderConnection, RateCard, Secret, Team, Token
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
+from tests.integration.gateway_db import delete_all_teams_and_quotas, delete_team_and_quota
 
 
 @pytest.fixture
@@ -67,8 +68,7 @@ def seed_data(postgres_url: str) -> tuple[UUID, str]:
         s.execute(delete(ProviderConnection))
         s.execute(delete(Secret))
         s.execute(delete(Token))
-        s.execute(delete(TeamQuota))
-        s.execute(delete(Team))
+        delete_all_teams_and_quotas(s)
         s.execute(delete(RateCard))
         s.commit()
     engine.dispose()
@@ -895,24 +895,37 @@ def test_chat_byo_cross_team_returns_404(  # type: ignore[no-untyped-def]
 
     eng = _create_engine(postgres_url)
     sf = _sessionmaker(eng)
-    with sf() as s:
-        s.execute(insert(Team).values(id=other_team, name="other"))
-        s.commit()
-    eng.dispose()
-    other_conn = _seed_byo_connection(postgres_url, other_team)
-    with TestClient(app) as client:
-        r = client.post(
-            "/v1/chat/completions",
-            headers={"Authorization": f"Bearer {raw_token}"},
-            json={
-                "model": "openai/gpt-3.5-turbo",
-                "messages": [{"role": "user", "content": "hi"}],
-                "loom": {
-                    "team_id": str(team_id),
-                    "trial_id": str(uuid4()),
-                    "step_id": "main",
-                    "provider_connection_id": str(other_conn),
+    try:
+        with sf() as s:
+            s.execute(insert(Team).values(id=other_team, name="other"))
+            s.commit()
+        eng.dispose()
+        other_conn = _seed_byo_connection(postgres_url, other_team)
+        with TestClient(app) as client:
+            r = client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": f"Bearer {raw_token}"},
+                json={
+                    "model": "openai/gpt-3.5-turbo",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "loom": {
+                        "team_id": str(team_id),
+                        "trial_id": str(uuid4()),
+                        "step_id": "main",
+                        "provider_connection_id": str(other_conn),
+                    },
                 },
-            },
-        )
-    assert r.status_code == 404
+            )
+        assert r.status_code == 404
+    finally:
+        eng = _create_engine(postgres_url)
+        sf = _sessionmaker(eng)
+        with sf() as s:
+            from sqlalchemy import delete
+
+            s.execute(delete(ProviderConnection).where(
+                ProviderConnection.team_id == other_team,
+            ))
+            delete_team_and_quota(s, other_team)
+            s.commit()
+        eng.dispose()

@@ -17,12 +17,13 @@ from sqlalchemy.orm import sessionmaker
 
 from loom.agent.gateway_client import GatewayCallRequest
 from loom.agent.http_gateway_client import HttpLLMGatewayClient
-from loom.db.schema import RateCard, Team, TeamQuota, Token
+from loom.db.schema import RateCard, Team, Token
 from loom.models.trajectory import ChatMessage
 from loom.models.types import ModelSpec
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.rate_card import RateCardCache
+from tests.integration.gateway_db import delete_all_teams_and_quotas
 
 
 @pytest.fixture
@@ -86,8 +87,7 @@ async def gateway_app(
         await async_engine.dispose()
         with sync_factory() as s:
             s.execute(delete(Token))
-            s.execute(delete(TeamQuota))
-            s.execute(delete(Team))
+            delete_all_teams_and_quotas(s)
             s.execute(delete(RateCard))
             s.commit()
         sync_engine.dispose()

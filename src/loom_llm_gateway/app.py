@@ -109,6 +109,10 @@ def create_app(settings: GatewaySettings) -> FastAPI:
     app: FastAPI = FastAPI(
         title="Loom LLM Gateway", version="0.0.1", lifespan=lifespan,
     )
+    # #547: attach before middleware registration so the first request
+    # (including ASGI-transport integration tests that skip lifespan)
+    # can increment in_flight. Lifespan startup reuses this instance.
+    ensure_drain_state(app)
     # #547: register middleware BEFORE routers so it wraps every route.
     install_drain_middleware(app)
     app.include_router(health.router)
