@@ -4256,12 +4256,14 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    failures, not platform failures.
 13. **Trajectory + artifact download.** `GET /api/v1/trials/{id}/trajectory`
     streams event pages; `GET /api/v1/trials/{id}/trajectory/download`
-    returns raw JSONL; `GET /api/v1/trials/{id}/atif` returns the ATIF JSON;
-    artifact `download_url` entries from trial detail return object bodies. The
-    URLs must stay on `/api/v1/trials/...`, not raw MinIO/S3 signed URLs, and
-    cross-team callers must not be able to use owner-team artifact proxy URLs.
-    Verify the public CLI path with `loom eval trial download ...`; it should
-    write the object body locally without printing internal object-store URLs.
+    returns raw JSONL, using `trial_events` as the fallback source when the
+    legacy object-store copy is absent; `GET /api/v1/trials/{id}/atif` returns
+    the ATIF JSON; artifact `download_url` entries from trial detail return
+    object bodies. The URLs must stay on `/api/v1/trials/...`, not raw
+    MinIO/S3 signed URLs, and cross-team callers must not be able to use
+    owner-team artifact proxy URLs. Verify the public CLI path with
+    `loom eval trial download ...`; it should write the object body locally
+    without printing internal object-store URLs.
 14. **Batch-family delivery bundle.** For a release or customer handoff, create
     the one-command delivery archive from the finished source batch:
     ```bash

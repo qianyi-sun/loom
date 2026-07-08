@@ -7,10 +7,11 @@ bucket the worker's TrajectoryWriter writes to, at the key
 `/trials/{id}/events?after_seq=N` + `/trials/{id}/stream` read
 events from there.
 
-#5 Slice 3c flipped both reads to the Postgres `trial_events` table
+#5 Slice 3c flipped event reads to the Postgres `trial_events` table
 (populated by Slice 3a's CP endpoint via Slice 3b's worker
-dual-write). MinIO remains the audit-log copy and the trajectory
-download endpoint.
+dual-write). MinIO remains the audit-log copy and the first download
+source for legacy object-backed trials; when that object is absent,
+the download endpoint reconstructs JSONL from `trial_events`.
 
 #5 Slice 3e replaces the SSE inner poll loop with a psycopg LISTEN
 consumer that waits on the `trial_events_inserted` channel (added
@@ -39,12 +40,13 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from typing import Annotated, Any, cast
+from urllib.parse import quote
 from uuid import UUID
 
 import psycopg
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 
 from loom.db.schema import Trial, TrialEvent
@@ -55,6 +57,7 @@ from loom_service.auth_guards import (
     require_team_or_admin,
 )
 from loom_service.dependencies import SessionAndCtx
+from loom_service.metrics import ARTIFACT_DOWNLOAD_BYTES
 from loom_service.routes.object_downloads import stream_object_response
 
 logger = logging.getLogger(__name__)
@@ -167,6 +170,40 @@ async def _read_events_from_postgres(
     return [row[0] for row in rows]
 
 
+async def _read_all_events_from_postgres(
+    session: Any, *, trial_id: UUID,
+) -> list[dict[str, Any]]:
+    rows = (
+        await session.execute(
+            select(TrialEvent.payload)
+            .where(TrialEvent.trial_id == trial_id)
+            .order_by(TrialEvent.seq.asc()),
+        )
+    ).all()
+    return [row[0] for row in rows]
+
+
+def _postgres_events_download_response(
+    events: list[dict[str, Any]], *, trial_id: UUID,
+) -> Response:
+    content = "".join(
+        json.dumps(event, separators=(",", ":")) + "\n"
+        for event in events
+    ).encode("utf-8")
+    headers = {
+        "Content-Disposition": (
+            f"attachment; filename*=UTF-8''{quote(f'{trial_id}-events.jsonl', safe='')}"
+        ),
+        "Content-Length": str(len(content)),
+    }
+    ARTIFACT_DOWNLOAD_BYTES.labels(artifact_kind="trajectory").inc(len(content))
+    return Response(
+        content=content,
+        headers=headers,
+        media_type="application/x-ndjson",
+    )
+
+
 @router.get("/trials/{trial_id}/trajectory")
 async def list_events(
     request: Request,
@@ -234,20 +271,33 @@ async def download_trajectory(
     request: Request,
     sc: SessionAndCtx,
     trial_id: UUID,
-) -> StreamingResponse:
+) -> Response:
     settings = request.app.state.settings
     s, ctx = sc
     require_scope(ctx, "read:own")
     trial = await _load_trial(s, trial_id, ctx)
 
-    return stream_object_response(
-        client=request.app.state.minio_client,
-        bucket=settings.trajectories_bucket,
-        key=_key(trial.team_id, trial.id),
-        filename=f"{trial.id}-events.jsonl",
-        artifact_kind="trajectory",
-        media_type="application/x-ndjson",
-    )
+    try:
+        return stream_object_response(
+            client=request.app.state.minio_client,
+            bucket=settings.trajectories_bucket,
+            key=_key(trial.team_id, trial.id),
+            filename=f"{trial.id}-events.jsonl",
+            artifact_kind="trajectory",
+            media_type="application/x-ndjson",
+        )
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+
+    events = await _read_all_events_from_postgres(s, trial_id=trial.id)
+    if not events:
+        raise HTTPException(
+            status_code=404,
+            detail="download object not found",
+        )
+    return _postgres_events_download_response(events, trial_id=trial.id)
+
 
 
 async def _read_events_with_minio_fallback(

@@ -3,9 +3,11 @@
 Loom emits **two** trajectory artifacts per trial:
 
 1. **`events.jsonl`** — event-sourced append-only JSONL written
-   incrementally as the trial runs. Lives at MinIO key
-   `<team_id>/<trial_id>/events.jsonl` (service mode) or
-   `<output_dir>/<trial_id>/events.jsonl` (CLI mode).
+   incrementally as the trial runs. In service mode the user-facing
+   trajectory API reads the durable `trial_events` table first, with
+   the legacy MinIO key `<team_id>/<trial_id>/events.jsonl` kept as
+   the object fallback and audit copy. CLI mode writes
+   `<output_dir>/<trial_id>/events.jsonl`.
 2. **`atif.json`** — ATIF v1.7 projection computed from the
    trajectory at finalize. Lives at MinIO key
    `<team_id>/<trial_id>/atif.json` (or alongside events.jsonl on
@@ -183,10 +185,13 @@ path:
 
 `GET /api/v1/trials/{id}` reads this projection to return ready flags
 and authenticated service download URLs for ATIF, trajectory, and artifacts.
-`loom_service` streams those object bodies from the internal MinIO/S3 endpoint
-to the caller, so browser and laptop clients do not need direct object-store
-network access. A succeeded trial should not require clients to scan object
-storage, guess artifact keys, or open a separate MinIO tunnel.
+`loom_service` proxies object-backed downloads from the internal MinIO/S3
+endpoint to the caller, so browser and laptop clients do not need direct
+object-store network access. For Postgres-backed trials whose legacy
+`events.jsonl` object is absent, `GET /api/v1/trials/{id}/trajectory/download`
+reconstructs the JSONL body from `trial_events` in `seq` order. A succeeded
+trial should not require clients to scan object storage, guess artifact keys,
+or open a separate MinIO tunnel.
 
 Artifact share states are security metadata, not download URLs:
 

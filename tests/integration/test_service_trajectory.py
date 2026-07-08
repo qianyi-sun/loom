@@ -113,6 +113,74 @@ async def test_trajectory_download_proxies_object_through_service(
     assert b'"kind": "trial_start"' in r.content
 
 
+async def test_trajectory_download_falls_back_to_postgres_events(
+    traj_setup: tuple[FastAPI, str, UUID, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id, _trial_id = traj_setup
+    postgres_trial = uuid4()
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        task_row_id = s.execute(
+            select(Task.id).limit(1),
+        ).scalar_one()
+        s.execute(insert(Trial).values(
+            id=postgres_trial,
+            task_id=task_row_id,
+            team_id=team_id,
+            state="succeeded",
+            config={},
+            requires_caps={},
+            result={"aggregate_reward": 1.0},
+            submitted_at=datetime.now(UTC),
+            started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
+        ))
+        s.commit()
+    sync_engine.dispose()
+    _seed_trial_events_postgres(postgres_url, postgres_trial, [
+        {
+            "seq": 0,
+            "kind": "trial_start",
+            "source": "worker",
+            "schema_version": 1,
+            "payload": {
+                "seq": 0,
+                "kind": "trial_start",
+                "marker": "postgres-download",
+            },
+        },
+        {
+            "seq": 1,
+            "kind": "trial_end",
+            "source": "worker",
+            "schema_version": 1,
+            "payload": {
+                "seq": 1,
+                "kind": "trial_end",
+                "marker": "postgres-download",
+            },
+        },
+    ])
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+        follow_redirects=False,
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/trials/{postgres_trial}/trajectory/download",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/x-ndjson")
+    lines = [json.loads(line) for line in r.text.splitlines()]
+    assert [line["seq"] for line in lines] == [0, 1]
+    assert all(line["marker"] == "postgres-download" for line in lines)
+
+
 async def test_artifact_download_proxies_object_through_service(
     traj_setup: tuple[FastAPI, str, UUID, UUID],
     postgres_url: str,
