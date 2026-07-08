@@ -816,6 +816,33 @@ knob you need.
      --evidence-out "$ROLLOUT_DIR/worker-capacity-staging-release.json"
    ```
 
+   For long staging validation, do not rely on a human remembering that the
+   compose workers may idle-exit after the rollout smoke. Wrap the validation
+   command with the live capacity runner from `platform-dev`. It activates the
+   bounded staging lease, starts the host-local node-agent on the declared GB10
+   hosts, waits for fresh docker workers, runs the validation command, and then
+   stops workers on success or drains them on failure:
+
+   ```bash
+   uv run python scripts/ops/staging_validation_capacity_runner.py \
+     --cp-url http://127.0.0.1:18081 \
+     --admin-token file:/shared_work/qianyi/loom-worker-capacity/staging-admin-token \
+     --environment staging \
+     --pool-name gb10-arm64 \
+     --ssh-config deploy/worker-pools/gb10/ssh_config \
+     --ssh-identity /shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519 \
+     --lease-ttl 6h \
+     --evidence-dir "$ROLLOUT_DIR/staging-validation-capacity" \
+     --release-intent auto \
+     --wait-for-release \
+     --validation-command ./scripts/run-v1-staging-user-validation.sh
+   ```
+
+   The runner requires a replayable `env:` or `file:` admin-token source. It
+   rejects literal tokens and stdin sources, writes only redacted/source-ref
+   evidence, and adjusts the safe worker idle-exit env to the requested lease
+   TTL while validation is active.
+
    A production promotion manifest must record the latest staging lease status in
    `checks.prod_staging_isolation.staging_capacity`. The release gate requires
    `staging_slots=0`, no active lease, and `new_staging_claims_allowed=false` unless
@@ -2899,6 +2926,12 @@ shared provider, but cannot rotate, update, test, refresh/hide/unhide models,
 or delete the owner connection. Audit metadata records the provider id/name,
 owner team, target team, actor, and action only; do not include provider API
 keys or secret refs in issue comments or evidence.
+
+Runtime LLM calls use the same share boundary. The gateway facade accepts a
+provider connection when the step token's team owns it or has an explicit
+`provider_connection_shares` row. The gateway still decrypts only the
+owner-side secret; `llm_calls`, usage, and cost views stay attributed to the
+consuming team/user represented by the trial rather than to the provider owner.
 
 For shared-provider spend review, filter usage by the single
 `provider_connection_id` and break down by consuming team or user:

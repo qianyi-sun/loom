@@ -6,7 +6,7 @@ Each dialect-specific route is a thin module that:
 2. Calls `parse_connection_id_header` to extract + UUID-parse the
    `x-loom-provider-connection-id` header.
 3. Calls `resolve_facade_connection` to look up the connection and
-   restrict by team + supported type.
+   restrict by team ownership/share + supported type.
 4. Decrypts the api_key via SecretStore.
 5. Builds the dialect-specific upstream request (URL + headers).
 6. Forwards and audits via `record_call`.
@@ -25,7 +25,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from loom.auth import AuthContext, verify_bearer_token
-from loom.db.schema import ProviderConnection
+from loom.db.schema import ProviderConnection, ProviderConnectionShare
 from loom.models.types import ModelSpec
 from loom.security.redaction import redact_text
 from loom.security.secret_store import (
@@ -181,7 +181,7 @@ async def resolve_facade_connection(
     supported_types: frozenset[str],
     dialect_label: str,
 ) -> ProviderConnection:
-    """Lookup, team-scope, soft-delete, and dialect-type checks all in
+    """Lookup, ownership/share-scope, soft-delete, and dialect-type checks all in
     one helper. 404 (not 403) on cross-team to match loom_service's
     existence-hiding convention; the 400 on type mismatch surfaces a
     diagnostic hint pointing the operator at the matched facade.
@@ -197,11 +197,25 @@ async def resolve_facade_connection(
             ),
         )
     ).scalar_one_or_none()
-    if row is None or row.team_id != team_id:
+    if row is None:
         raise HTTPException(
             status_code=404,
             detail="provider_connection not found",
         )
+    if row.team_id != team_id:
+        shared = (
+            await session.execute(
+                select(ProviderConnectionShare.provider_connection_id).where(
+                    ProviderConnectionShare.provider_connection_id == connection_id,
+                    ProviderConnectionShare.target_team_id == team_id,
+                ),
+            )
+        ).scalar_one_or_none()
+        if shared is None:
+            raise HTTPException(
+                status_code=404,
+                detail="provider_connection not found",
+            )
     if row.provider_type not in supported_types:
         raise HTTPException(
             status_code=400,

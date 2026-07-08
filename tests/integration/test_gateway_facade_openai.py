@@ -26,6 +26,7 @@ from loom.auth import mint_step_jwt
 from loom.db.schema import (
     LlmCall,
     ProviderConnection,
+    ProviderConnectionShare,
     RateCard,
     Secret,
     Team,
@@ -194,6 +195,7 @@ async def facade_setup(
         with session_local() as s:
             s.execute(delete(LlmCall))
             s.execute(delete(RateCard))
+            s.execute(delete(ProviderConnectionShare))
             s.execute(delete(ProviderConnection))
             s.execute(delete(Secret))
             s.execute(delete(Token))
@@ -716,6 +718,55 @@ async def test_facade_returns_404_for_cross_team_connection(
         s.commit()
     sync_engine.dispose()
     assert r.status_code == 404
+
+
+async def test_facade_routes_shared_provider_for_target_team_and_records_usage_to_target(
+    facade_setup,
+    postgres_url: str,
+) -> None:
+    app, _jwt_owner, _owner_team_id, _owner_trial_id, conn_id, captures = facade_setup
+    settings: GatewaySettings = app.state.settings  # type: ignore[attr-defined]
+    target_team = uuid4()
+    target_trial = uuid4()
+    target_jwt = mint_step_jwt(
+        team_id=target_team,
+        trial_id=target_trial,
+        step_id="shared-provider-step",
+        ttl_sec=60,
+        signing_key=settings.step_jwt_signing_key.get_secret_value(),
+        provider_connection_id=conn_id,
+    )
+
+    sync_engine = create_engine(postgres_url)
+    session_local = sessionmaker(sync_engine)
+    with session_local() as s:
+        s.execute(insert(Team).values(id=target_team, name=f"target-{target_team}"))
+        s.execute(insert(TeamQuota).values(team_id=target_team))
+        s.execute(insert(ProviderConnectionShare).values(
+            provider_connection_id=conn_id,
+            target_team_id=target_team,
+            created_by_actor="test:provider-share",
+        ))
+        s.commit()
+    sync_engine.dispose()
+
+    r = await _post(app, target_jwt)
+    assert r.status_code == 200, r.text
+    requests: list[httpx.Request] = captures["requests"]  # type: ignore[assignment]
+    assert len(requests) == 1
+    assert requests[0].headers["Authorization"] == "Bearer sk-upstream-XYZ"
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+    sync_engine.dispose()
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert row["team_id"] == target_team
+    assert row["trial_id"] == target_trial
+    assert row["step_id"] == "shared-provider-step"
+    assert row["input_tokens"] == 100
+    assert row["output_tokens"] == 50
 
 
 async def test_facade_returns_404_for_soft_deleted_connection(

@@ -216,7 +216,8 @@ loom providers unshare smoke-openai --target-team-id <team-uuid>
 
 The target team can list, select, and use the shared provider. Only the owner
 team or a platform admin can update, rotate, test, refresh, hide, unhide, or
-delete it.
+delete it. During a run, the LLM Gateway uses the owner-side stored secret but
+records calls and cost against the consuming team/user for the submitted trial.
 
 Submit, monitor, inspect usage, and download through public `/api/v1` routes:
 
