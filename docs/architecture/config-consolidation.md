@@ -3,7 +3,7 @@
 > **Cross-repo issue/PR refs:** `#N` in this document points to the
 > pre-2026-06-26 `carinrc/loom` archive tracker (numbering was reset on
 > the new canonical repo `qianyi-sun/loom`). See
-> [`../repo-migration.md`](../repo-migration.md).
+> [`../repo-migration.md`](../contributing/repo-migration.md).
 
 > **Status**: shipped in #150 (closes #146). Single schema at
 > `config/loom-schema.toml` now drives Pydantic Settings codegen,
@@ -23,7 +23,7 @@ covered:
 2. `src/loom_llm_gateway/config.py` — same field, different prefix
 3. `src/loom_cli/templates/k8s/control-plane.yaml.j2` — `valueFrom: secretKeyRef` env block
 4. `src/loom_cli/templates/k8s/llm-gateway.yaml.j2` — same
-5. `docs/operator-runbook.md` — Secret bootstrap example
+5. `docs/runbooks/operator-runbook.md` — Secret bootstrap example
 6. `.github/workflows/cluster-smoke.yml` — Secret seed
 7. `.github/workflows/staging-smoke.yml` — Secret seed
 
@@ -269,7 +269,7 @@ Each step is independently revertible:
 4. Per template, swap env block to the schema-driven macro. Render golden test stays green.
 5. Replace `cluster_config.py` with the generic loader against `render_config`. Regenerate `config/cluster-config.example.toml`.
 6. Add `loom cluster doctor` + wire into `loom cluster preflight`.
-7. Add `loom cluster bootstrap-secrets` + update `docs/operator-runbook.md`, `.github/workflows/cluster-smoke.yml`, `.github/workflows/staging-smoke.yml` to use it.
+7. Add `loom cluster bootstrap-secrets` + update `docs/runbooks/operator-runbook.md`, `.github/workflows/cluster-smoke.yml`, `.github/workflows/staging-smoke.yml` to use it.
 
 ## Edge cases handled at implementation time
 

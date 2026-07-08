@@ -15,7 +15,7 @@ in the static manifest.
 ## Manifest
 
 The machine-readable contract lives in
-[`docs/benchmark-score-alignment.json`](benchmark-score-alignment.json). Every
+[`docs/score-alignment/manifest.json`](manifest.json). Every
 v1.0-supported benchmark must have:
 
 - a canonical reference source;
@@ -28,7 +28,7 @@ Run the local gate before accepting a benchmark as score-credible:
 
 ```bash
 python scripts/benchmark_score_alignment_gate.py manifest \
-  --manifest docs/benchmark-score-alignment.json
+  --manifest docs/score-alignment/manifest.json
 ```
 
 The gate intentionally does not call model-provider APIs. It validates that the

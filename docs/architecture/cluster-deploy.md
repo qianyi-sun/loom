@@ -2,7 +2,7 @@
 
 **Status: shipped.** The full `loom cluster` CLI is operational —
 `status`, `render`, `preflight`, `audit`, `up`, `down`, `doctor`,
-`bootstrap-secrets`. See [`../operator-runbook.md`](../operator-runbook.md)
+`bootstrap-secrets`. See [`../operator-runbook.md`](../runbooks/operator-runbook.md)
 for day-2 procedures and [`config-consolidation.md`](config-consolidation.md)
 for the schema that drives manifest generation and Secret bootstrap.
 Originally tracked pre-migration as carinrc#76 (cluster deploy CLI) and

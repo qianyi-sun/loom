@@ -37,7 +37,7 @@ through the selected agent's declared skill injection mode.
 ## SkillMarkdown Artifact Extension
 
 `skill_markdown` uses the base typed artifact schema from
-[adr-typed-artifacts-lineage-sharing.md](adr-typed-artifacts-lineage-sharing.md).
+[adr-typed-artifacts-lineage-sharing.md](typed-artifacts-lineage-sharing.md).
 Its type-specific metadata must include:
 
 ```json

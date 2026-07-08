@@ -8,12 +8,12 @@ troubleshooting.
 
 Loom's product boundary and architecture are in the
 [repo README](../README.md). Provider setup for hosted APIs and self-hosted
-GPU-cluster vLLM lives in [`provider-onboarding.md`](provider-onboarding.md).
+GPU-cluster vLLM lives in [`provider-onboarding.md`](integrations/provider-onboarding.md).
 
 > **Cross-repo issue/PR refs:** bare `#N` in this guide may point to the
 > pre-2026-06-26 `carinrc/loom` archive tracker (numbering was reset on
 > the new canonical repo `qianyi-sun/loom`). See
-> [`repo-migration.md`](repo-migration.md).
+> [`repo-migration.md`](contributing/repo-migration.md).
 
 ## Install
 
@@ -166,7 +166,7 @@ loom service down -v   # remove Postgres + MinIO volumes
 Local compose is for development, not public hosting. Production or shared
 deployments use `loom cluster` with Kubernetes, TLS Ingress, protected
 environment secrets, and release-promotion evidence. See
-[`operator-runbook.md`](operator-runbook.md).
+[`operator-runbook.md`](runbooks/operator-runbook.md).
 
 Running the local service stack requires Docker CLI with the Compose
 plugin; on macOS, install and start Docker Desktop, then verify
@@ -547,7 +547,7 @@ local disk.
 
 The full hosted-provider registration workflow, including OpenAI-compatible
 endpoints and provider-native APIs, lives in
-[`provider-onboarding.md`](provider-onboarding.md).
+[`provider-onboarding.md`](integrations/provider-onboarding.md).
 
 Quick recap for `loom run`:
 
@@ -1359,7 +1359,7 @@ trial sandbox at spawn time on top of the benchmark's `task_image`.
 The first trial of a new `(task_image, agent)` combination takes a
 few extra minutes (package installs); subsequent trials hit the
 content-addressed cache and start instantly. See
-[`operator-runbook.md#trial-cache-per-trial-agent-install`](operator-runbook.md#trial-cache-per-trial-agent-install)
+[`operator-runbook.md#trial-cache-per-trial-agent-install`](runbooks/operator-runbook.md#trial-cache-per-trial-agent-install)
 for the operator-side knobs.
 
 ### `loom config` reference

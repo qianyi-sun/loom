@@ -12,7 +12,7 @@ emergency staging drain. The sections below remain the detailed reference.
 > **Cross-repo issue/PR refs:** bare `#N` in this document may point to
 > the pre-2026-06-26 `carinrc/loom` archive tracker (numbering was reset
 > on the new canonical repo `qianyi-sun/loom`). See
-> [`repo-migration.md`](repo-migration.md).
+> [`repo-migration.md`](../contributing/repo-migration.md).
 
 ## Environment isolation
 
@@ -3100,7 +3100,7 @@ the same connection/model.
 ## GPU-cluster checkpoint provider onboarding
 
 For Lux-like clusters, prefer the user-facing bundle generator documented in
-[`provider-onboarding.md`](provider-onboarding.md#gpu-cluster-checkpoint):
+[`provider-onboarding.md`](../integrations/provider-onboarding.md#gpu-cluster-checkpoint):
 
 ```bash
 loom inference deploy slurm \
@@ -3207,7 +3207,7 @@ If you're not using kube-prometheus-stack, import each JSON file manually:
 | Worker Fleet | `deploy/grafana/dashboards/worker.json` | Trial throughput, duration, failure rates, heartbeats |
 
 For the on-call alert → dashboard mapping, see
-[`docs/architecture/observability.md`](architecture/observability.md).
+[`docs/architecture/observability.md`](../architecture/observability.md).
 
 ## Production alerts
 
@@ -3936,7 +3936,7 @@ contract, Harbor/upstream parity decision, and same-output replay case:
 
 ```bash
 python scripts/benchmark_score_alignment_gate.py manifest \
-  --manifest docs/benchmark-score-alignment.json
+  --manifest docs/score-alignment/manifest.json
 ```
 
 Layer 1 answers whether Loom scores a fixed output correctly. Layer 2 matched
@@ -4657,7 +4657,7 @@ screenshots remain manual release evidence unless the staging environment adds a
 mock provider and browser automation job.
 
 For the final staging #49/#129 full/max-slot three-cluster canary, use
-[`docs/full-max-slot-canary-runbook.md`](full-max-slot-canary-runbook.md).
+[`docs/runbooks/full-max-slot-canary-runbook.md`](full-max-slot-canary-runbook.md).
 That runbook is GO-gated: prepare the commands, preflight checklist, stop
 conditions, and evidence directory up front, but do not submit the canary until
 the coordinator confirms the clean anchor and #190 targeted durability evidence.

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
-_RUNBOOK = _ROOT / "docs" / "full-max-slot-canary-runbook.md"
+_RUNBOOK = _ROOT / "docs" / "runbooks" / "full-max-slot-canary-runbook.md"
 
 
 def test_full_max_slot_runbook_defaults_to_external_worker_pools() -> None:

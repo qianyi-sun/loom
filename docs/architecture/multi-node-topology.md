@@ -166,6 +166,6 @@ CNPG-side alerts come from the operator's built-in `PodMonitor` (`monitoring.ena
 ## Related documents
 
 - `docs/architecture/pgbouncer-transaction-mode-design.md` — connection multiplexer that sits in front of Postgres (CNPG or single-pod).
-- `docs/operator-runbook.md` — production runbook, includes cluster stand-up, bootstrap, alerts.
+- `docs/runbooks/operator-runbook.md` — production runbook, includes cluster stand-up, bootstrap, alerts.
 - Issue #637 — Postgres HA follow-up (this doc's home).
 - Issue #610 — MinIO distributed follow-up.

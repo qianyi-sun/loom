@@ -1,8 +1,8 @@
 # Contributor quickstart
 
 For people working on Loom itself, not just running it. End-user
-docs live in [`user-guide.md`](user-guide.md) +
-[`operator-runbook.md`](operator-runbook.md).
+docs live in [`user-guide.md`](../user-guide.md) +
+[`operator-runbook.md`](../runbooks/operator-runbook.md).
 
 The canonical public development repository is
 [`qianyi-sun/loom`](https://github.com/qianyi-sun/loom):
@@ -183,12 +183,12 @@ is the final `coverage report` after both pytest commands have completed.
 
 Use issue-scoped PRs into `dev` for normal development; `main` is
 release-only and receives promotion PRs from `dev`. See
-[`../CONTRIBUTING.md`](../CONTRIBUTING.md) for issue ownership, commit
+[`../CONTRIBUTING.md`](../../CONTRIBUTING.md) for issue ownership, commit
 style, PR requirements, and the definition of done.
 
 New contributors should start from an open issue or discuss scope in a
 new issue before implementing. PRs use
-[`.github/PULL_REQUEST_TEMPLATE.md`](../.github/PULL_REQUEST_TEMPLATE.md)
+[`.github/PULL_REQUEST_TEMPLATE.md`](../../.github/PULL_REQUEST_TEMPLATE.md)
 and must link the issue they advance. Maintainers mark actively owned
 issues with a `[WIP] ` title prefix, keep the project status current,
 and enable GitHub auto-merge for normal `dev` PRs.

@@ -10,7 +10,7 @@ def _read(path: str) -> str:
 
 
 def test_operator_runbook_uses_current_provider_model_syntax() -> None:
-    runbook = _read("docs/operator-runbook.md")
+    runbook = _read("docs/runbooks/operator-runbook.md")
 
     assert "loom providers models refresh" not in runbook
     assert "loom providers models list" not in runbook
@@ -22,7 +22,7 @@ def test_operator_runbook_uses_current_provider_model_syntax() -> None:
 
 
 def test_operator_runbook_staging_batch_smoke_matches_cli_contract() -> None:
-    runbook = _read("docs/operator-runbook.md")
+    runbook = _read("docs/runbooks/operator-runbook.md")
 
     assert "--benchmark hello-world" not in runbook
     assert "--provider smoke-openai --model gpt-4o-mini --agent oracle" not in runbook
@@ -37,7 +37,7 @@ def test_operator_runbook_staging_batch_smoke_matches_cli_contract() -> None:
 
 
 def test_operator_runbook_staging_gate_matches_current_launch_scope() -> None:
-    runbook = _read("docs/operator-runbook.md")
+    runbook = _read("docs/runbooks/operator-runbook.md")
     gate_section = runbook.split("## Staging smoke gate", maxsplit=1)[1].split(
         "## Capacity planning", maxsplit=1,
     )[0]

@@ -27,7 +27,7 @@ Migration safety:
 - New writes (after this migration applies) are still gated by the
   constraint — `NOT VALID` only skips the back-check of existing rows.
 
-See docs/operator-runbook.md "Trial state/result consistency" for the
+See docs/runbooks/operator-runbook.md "Trial state/result consistency" for the
 operator cleanup command.
 """
 

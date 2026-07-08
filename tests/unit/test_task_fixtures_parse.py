@@ -1,6 +1,6 @@
 """Regression: every fixture under tests/fixtures/tasks/ must parse
 against TaskConfig (extra='forbid' would otherwise silently mask schema
-drift between docs/agent-authoring-guide.md and the actual Pydantic
+drift between docs/integrations/authoring-a-task.md and the actual Pydantic
 models).
 
 Bug 1 from the post-Plan-7 review: in-box-cli/task.toml had `mode =

@@ -2,12 +2,12 @@
 
 > **Cross-repo issue/PR refs:** bare `#N` and `carinrc/loom#N` refer to
 > the pre-2026-06-26 archive tracker. Canonical follow-up work lives on
-> `qianyi-sun/loom` (see [`repo-migration.md`](repo-migration.md)); use
+> `qianyi-sun/loom` (see [`repo-migration.md`](../contributing/repo-migration.md)); use
 > full-URL form when it matters which repo. Numbering is fresh on the
 > new tracker, so bare `#N` on the archive is likely a different issue
 > from `qianyi-sun/loom#N`.
 
-Layer 1 (see [`benchmark-score-alignment.md`](benchmark-score-alignment.md))
+Layer 1 (see [`benchmark-score-alignment.md`](layer-1.md))
 declares the manifest: each v1.0 benchmark's canonical reference, score
 semantics, and replay-case definitions. Layer 2 records the actual
 alignment evidence for each benchmark: the parity decision (Harbor vs.
@@ -15,7 +15,7 @@ upstream canonical), the replay tests that prove Loom's verifier matches
 the canonical scorer, and any observed deltas or known limitations.
 
 This file is the human-readable narrative. The machine-readable form
-lives in [`benchmark-score-alignment.json`](benchmark-score-alignment.json)
+lives in [`benchmark-score-alignment.json`](manifest.json)
 under each benchmark's `layer2_evidence` field; the `harbor_reference`
 block at the top of that manifest pins the Harbor repo and commit this
 document is written against.
@@ -30,7 +30,7 @@ tracked under canonical #32, with historical archive sub-issue
 carinrc/loom#538 preserving the original correction context. The pinned
 adapter inventory at
 that commit is captured in
-[`docs/research/harbor-adapter-snapshot-2026-06-25.md`](research/harbor-adapter-snapshot-2026-06-25.md).
+[`docs/research/harbor-adapter-snapshot-2026-06-25.md`](../research/harbor-adapter-snapshot-2026-06-25.md).
 All sections below reference the real Harbor.
 
 ## Reference target
@@ -87,7 +87,7 @@ implementation.
   - `packages/loom-benchmarks/tests/test_aime_adapter.py::test_aime_run_sh_is_self_contained_and_writes_verifier_result`
   - `packages/loom-benchmarks/tests/test_aime_adapter.py::test_aime_checker_rejects_wrong_answer`
   - `packages/loom-benchmarks/tests/test_aime_adapter.py::test_aime_checker_picks_last_integer`
-- **Evidence:** historical archive issue [carinrc/loom#540](https://github.com/carinrc/loom/issues/540) closed with paired evidence; narrative and per-trial files are in [`benchmark-score-alignment-layer3.md`](benchmark-score-alignment-layer3.md#aime--paired-loom-aime-24--aime-25-vs-harbor-aime-on-claude-haiku-4-5).
+- **Evidence:** historical archive issue [carinrc/loom#540](https://github.com/carinrc/loom/issues/540) closed with paired evidence; narrative and per-trial files are in [`benchmark-score-alignment-layer3.md`](layer-3.md#aime--paired-loom-aime-24--aime-25-vs-harbor-aime-on-claude-haiku-4-5).
 
 ### aime-25
 
@@ -99,7 +99,7 @@ implementation.
 - **Replay tests (verifier semantics):**
   - `packages/loom-benchmarks/tests/test_aime_adapter.py::test_aime_2025_emits_script_path`
   - `packages/loom-benchmarks/tests/test_aime_adapter.py::test_aime_checker_extracts_last_integer`
-- **Evidence:** historical archive issue [carinrc/loom#540](https://github.com/carinrc/loom/issues/540) closed with paired evidence; narrative and per-trial files are in [`benchmark-score-alignment-layer3.md`](benchmark-score-alignment-layer3.md#aime--paired-loom-aime-24--aime-25-vs-harbor-aime-on-claude-haiku-4-5).
+- **Evidence:** historical archive issue [carinrc/loom#540](https://github.com/carinrc/loom/issues/540) closed with paired evidence; narrative and per-trial files are in [`benchmark-score-alignment-layer3.md`](layer-3.md#aime--paired-loom-aime-24--aime-25-vs-harbor-aime-on-claude-haiku-4-5).
 
 ### gpqa
 
@@ -111,7 +111,7 @@ implementation.
 - **Paired result:** Loom `litellm` + `claude-haiku-4-5` scored 101/198 (51.01%); Harbor `terminus-2` + the same model scored 115/198 (58.08%). The +7.07 pp Harbor delta is attributed to agent-runtime differences, not verifier divergence.
 - **Replay tests (verifier semantics):**
   - `packages/loom-benchmarks/tests/test_gpqa_adapter.py::test_gpqa_verifier_scores_correct_letter`
-- **Evidence:** historical archive issue [carinrc/loom#541](https://github.com/carinrc/loom/issues/541) closed with paired evidence; narrative and per-trial files are in [`benchmark-score-alignment-layer3.md`](benchmark-score-alignment-layer3.md#gpqa-diamond--paired-loom-vs-harbor-on-claude-haiku-4-5).
+- **Evidence:** historical archive issue [carinrc/loom#541](https://github.com/carinrc/loom/issues/541) closed with paired evidence; narrative and per-trial files are in [`benchmark-score-alignment-layer3.md`](layer-3.md#gpqa-diamond--paired-loom-vs-harbor-on-claude-haiku-4-5).
 
 ### livecodebench
 

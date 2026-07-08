@@ -247,4 +247,4 @@ Rollback window closes at step 11. Everything before that is fully reversible.
 
 - Repo PR: (link here after opening)
 - Parent tracking: #417
-- Precondition validation: run the `staging` variants of `docs/staging-launch.md` §"Preflight" section
+- Precondition validation: run the `staging` variants of `docs/runbooks/staging-launch.md` §"Preflight" section

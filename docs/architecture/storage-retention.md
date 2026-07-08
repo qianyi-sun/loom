@@ -262,6 +262,6 @@ through the remediation paths in priority order.
 
 ## See also
 
-- [`operator-runbook.md#storage-retention-policy`](../operator-runbook.md#storage-retention-policy) — operator workflow.
-- [`operator-runbook.md#minio-pvc-usage`](../operator-runbook.md#minio-pvc-usage) — alert response.
+- [`operator-runbook.md#storage-retention-policy`](../runbooks/operator-runbook.md#storage-retention-policy) — operator workflow.
+- [`operator-runbook.md#minio-pvc-usage`](../runbooks/operator-runbook.md#minio-pvc-usage) — alert response.
 - [`cluster-deploy.md`](cluster-deploy.md) — where MinIO sits in the deploy.

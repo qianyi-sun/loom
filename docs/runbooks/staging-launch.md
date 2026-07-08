@@ -24,25 +24,25 @@ evidence needed before `dev` can be promoted to `main`.
 ## Required Documentation
 
 - Public deployment and private service boundary:
-  [`docs/operator-runbook.md`](operator-runbook.md) and
-  [`docs/architecture/cluster-deploy.md`](architecture/cluster-deploy.md).
+  [`docs/runbooks/operator-runbook.md`](operator-runbook.md) and
+  [`docs/architecture/cluster-deploy.md`](../architecture/cluster-deploy.md).
 - Browser and CLI onboarding:
-  [`docs/user-guide.md#web-sessions-and-teams`](user-guide.md#web-sessions-and-teams)
+  [`docs/user-guide.md#web-sessions-and-teams`](../user-guide.md#web-sessions-and-teams)
   and
-  [`docs/user-guide.md#public-server-cli-flow`](user-guide.md#public-server-cli-flow).
+  [`docs/user-guide.md#public-server-cli-flow`](../user-guide.md#public-server-cli-flow).
 - Run Library and artifact reuse:
-  [`docs/user-guide.md#run-library`](user-guide.md#run-library) and
-  [`docs/architecture/run-library.md`](architecture/run-library.md).
+  [`docs/user-guide.md#run-library`](../user-guide.md#run-library) and
+  [`docs/architecture/run-library.md`](../architecture/run-library.md).
 - Security model:
-  [`SECURITY.md`](../SECURITY.md),
-  [`docs/architecture/auth-threat-model.md`](architecture/auth-threat-model.md),
+  [`SECURITY.md`](../../SECURITY.md),
+  [`docs/architecture/auth-threat-model.md`](../architecture/auth-threat-model.md),
   and
-  [`docs/architecture/auth-registration-spec.md`](architecture/auth-registration-spec.md).
+  [`docs/architecture/auth-registration-spec.md`](../architecture/auth-registration-spec.md).
 - Troubleshooting:
-  [`docs/operator-runbook.md#alarm-response-troubleshooting-matrix`](operator-runbook.md#alarm-response-troubleshooting-matrix)
+  [`docs/runbooks/operator-runbook.md#alarm-response-troubleshooting-matrix`](operator-runbook.md#alarm-response-troubleshooting-matrix)
   plus the provider, sharing, and download checks in the staging smoke gate.
 - Full/max-slot three-cluster canary preparation:
-  [`docs/full-max-slot-canary-runbook.md`](full-max-slot-canary-runbook.md).
+  [`docs/runbooks/full-max-slot-canary-runbook.md`](full-max-slot-canary-runbook.md).
 
 ## Evidence Required
 
@@ -154,7 +154,7 @@ Attach these to the release issue or release PR:
   the full production batch.
 - Layer 1 score-credibility transcript from
   `scripts/benchmark_score_alignment_gate.py manifest --manifest
-  docs/benchmark-score-alignment.json`, proving that every v1.0-supported
+  docs/score-alignment/manifest.json`, proving that every v1.0-supported
   benchmark has a canonical scoring reference, score semantics, Harbor/upstream
   parity decision, and at least one same-output replay case definition.
 - If a remote-worker pool is attached, private tunnel evidence from
@@ -210,7 +210,7 @@ Attach these to the release issue or release PR:
 - Leak-scan note showing seeded fake secrets and internal service URLs were not
   found in API responses, audit excerpts, or downloaded safe artifacts.
 - For the final #49/#129 full/max-slot three-cluster canary, use
-  [`docs/full-max-slot-canary-runbook.md`](full-max-slot-canary-runbook.md).
+  [`docs/runbooks/full-max-slot-canary-runbook.md`](full-max-slot-canary-runbook.md).
   The canary must wait for a clean staging anchor, completed #190 targeted
   durability validation, and an explicit coordinator `GO`. The batch must use
   repeated `--required-worker-pool` flags for `oldlab` and

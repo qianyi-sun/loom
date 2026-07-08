@@ -69,6 +69,6 @@ preliminary/caveated rather than canonical #222 acceptance.
 ## Related
 
 - #248 / #249 ship the `terminus-2` adapter that closes the agent-scaffold caveat above.
-- `docs/benchmark-score-alignment-layer3.md` records this result as
+- `docs/score-alignment/layer-3.md` records this result as
   preliminary/caveated evidence; the Terminus-2 re-run remains the canonical
   Layer-3 acceptance path for #222.

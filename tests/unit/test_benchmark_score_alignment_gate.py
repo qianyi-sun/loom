@@ -8,8 +8,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "benchmark_score_alignment_gate.py"
-MANIFEST = ROOT / "docs" / "benchmark-score-alignment.json"
-LAYER3_DOC = ROOT / "docs" / "benchmark-score-alignment-layer3.md"
+MANIFEST = ROOT / "docs" / "score-alignment" / "manifest.json"
+LAYER3_DOC = ROOT / "docs" / "score-alignment" / "layer-3.md"
 
 
 def _load_module():

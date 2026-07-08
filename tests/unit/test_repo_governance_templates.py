@@ -20,7 +20,7 @@ def test_contributing_and_pr_template_accept_issue_scoped_external_prs() -> None
 
 def test_normal_dev_prs_use_auto_merge_after_required_ci() -> None:
     contributing = _read("CONTRIBUTING.md")
-    quickstart = _read("docs/contributor-quickstart.md")
+    quickstart = _read("docs/contributing/contributor-quickstart.md")
     pr_template = _read(".github/PULL_REQUEST_TEMPLATE.md")
 
     assert "Wait for CI green before merge" not in contributing
@@ -31,7 +31,7 @@ def test_normal_dev_prs_use_auto_merge_after_required_ci() -> None:
 
 def test_release_promotion_template_requires_first_prod_evidence() -> None:
     contributing = _read("CONTRIBUTING.md")
-    operator_runbook = _read("docs/operator-runbook.md")
+    operator_runbook = _read("docs/runbooks/operator-runbook.md")
     pr_template = _read(".github/PULL_REQUEST_TEMPLATE.md")
 
     for required_text in (
