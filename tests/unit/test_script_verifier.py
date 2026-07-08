@@ -118,3 +118,102 @@ async def test_script_verifier_missing_output_preserves_exec_diagnostics():
     assert result.error.detail["stdout_tail"] == "setup started\nlast stdout line\n"
     assert result.error.detail["stderr_tail"] == "permission denied\n"
     assert result.error.detail["duration_sec"] == 1.25
+
+
+# ---- #688: standard task-context env vars ----
+
+def _task_with_single_artifact(artifact: str):
+    from loom.models.task import (
+        AgentDefaults,
+        EnvironmentConfig,
+        StepConfig,
+        TaskConfig,
+        TaskMetadata,
+        VerifierDefaults,
+    )
+    return TaskConfig(
+        task=TaskMetadata(id="t/1", name="t 1"),
+        environment=EnvironmentConfig(os="linux", docker_image="python:3.11-slim"),
+        agent=AgentDefaults(name="oracle"),
+        verifier=VerifierDefaults(name="script", args={"script_path": "/x/run.sh"}),
+        steps=[StepConfig(name="main", artifacts=[artifact])],
+    )
+
+
+async def test_script_verifier_exports_loom_task_dir():
+    captured_env: dict[str, str] = {}
+
+    def _capture_handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        captured_env.update(env or {})
+        return ExecResult(
+            return_code=0, stdout=b"", stderr=b"",
+            truncated=False, duration_sec=0.01,
+        )
+
+    fake = FakeDriver(exec_handler=_capture_handler)
+    await fake.start(options=StartOptions())
+    fake.filesystem[PurePosixPath("/loom/verifier/output.json")] = b'{"rewards": {}}'
+
+    v = ScriptVerifier(script_path=PurePosixPath("/workspace/verifier/run.sh"))
+    await v.verify(
+        task=None,  # type: ignore[arg-type]
+        env=fake,
+        artifacts_dir=PurePosixPath("/workspace/artifacts"),
+        trajectory=None,  # type: ignore[arg-type]
+    )
+    # Workspace derives from artifacts_dir.parent.
+    assert captured_env["LOOM_TASK_DIR"] == "/workspace"
+    # LOOM_AGENT_OUTPUT stays unset when task is None (no artifact
+    # convention to resolve).
+    assert "LOOM_AGENT_OUTPUT" not in captured_env
+
+
+async def test_script_verifier_exports_loom_agent_output_for_single_file_artifact():
+    captured_env: dict[str, str] = {}
+
+    def _capture_handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        captured_env.update(env or {})
+        return ExecResult(
+            return_code=0, stdout=b"", stderr=b"",
+            truncated=False, duration_sec=0.01,
+        )
+
+    fake = FakeDriver(exec_handler=_capture_handler)
+    await fake.start(options=StartOptions())
+    fake.filesystem[PurePosixPath("/loom/verifier/output.json")] = b'{"rewards": {}}'
+
+    task = _task_with_single_artifact("final_answer.txt")
+    v = ScriptVerifier(script_path=PurePosixPath("/workspace/verifier/run.sh"))
+    await v.verify(
+        task=task, env=fake,
+        artifacts_dir=PurePosixPath("/workspace/artifacts"),
+        trajectory=None,  # type: ignore[arg-type]
+    )
+    assert captured_env["LOOM_AGENT_OUTPUT"] == "/workspace/final_answer.txt"
+
+
+async def test_script_verifier_skips_agent_output_for_glob_artifact():
+    captured_env: dict[str, str] = {}
+
+    def _capture_handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        captured_env.update(env or {})
+        return ExecResult(
+            return_code=0, stdout=b"", stderr=b"",
+            truncated=False, duration_sec=0.01,
+        )
+
+    fake = FakeDriver(exec_handler=_capture_handler)
+    await fake.start(options=StartOptions())
+    fake.filesystem[PurePosixPath("/loom/verifier/output.json")] = b'{"rewards": {}}'
+
+    task = _task_with_single_artifact("outputs/*.json")
+    v = ScriptVerifier(script_path=PurePosixPath("/workspace/verifier/run.sh"))
+    await v.verify(
+        task=task, env=fake,
+        artifacts_dir=PurePosixPath("/workspace/artifacts"),
+        trajectory=None,  # type: ignore[arg-type]
+    )
+    # LOOM_AGENT_OUTPUT is unset for glob-based artifacts — the verifier
+    # script has to walk LOOM_TASK_DIR itself.
+    assert "LOOM_AGENT_OUTPUT" not in captured_env
+    assert captured_env["LOOM_TASK_DIR"] == "/workspace"
