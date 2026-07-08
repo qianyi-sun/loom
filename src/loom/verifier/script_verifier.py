@@ -45,10 +45,32 @@ class ScriptVerifier:
     ) -> VerifierResult:
         await env.exec("mkdir -p /loom/verifier", user="root")
         cmd = f"sh {self.script_path.as_posix()}"
+        # Standard task-context env vars for verifier scripts:
+        # - LOOM_TASK_DIR: where the bundle was materialized (DockerDriver
+        #   defaults to /workspace; other drivers may differ, but the
+        #   value here comes from the driver's workspace path via
+        #   `artifacts_dir.parent`).
+        # - LOOM_AGENT_OUTPUT: if the task's first step declares exactly
+        #   one artifact that is a bare file path (no glob metachars),
+        #   resolve it against the workspace. Scripts that grade a single
+        #   agent-produced answer file (AIME, GAIA, etc.) can rely on
+        #   this without inventing their own convention. Multi-artifact
+        #   or glob-based tasks (HumanEval, SWE-Bench) get their pytest
+        #   verifier and don't need this variable set. See #688.
+        # - LOOM_VERIFIER_OUTPUT: the path the script must write its
+        #   result JSON to (unchanged; existing contract).
+        workspace = artifacts_dir.parent.as_posix()
+        script_env = {
+            "LOOM_TASK_DIR": workspace,
+            "LOOM_VERIFIER_OUTPUT": _OUTPUT_PATH.as_posix(),
+        }
+        agent_output = _agent_output_path(task, workspace=workspace)
+        if agent_output is not None:
+            script_env["LOOM_AGENT_OUTPUT"] = agent_output
         exec_result = await env.exec(
             cmd,
             user=self.user,
-            env={"LOOM_VERIFIER_OUTPUT": _OUTPUT_PATH.as_posix()},
+            env=script_env,
         )
         diagnostic = _exec_diagnostic(
             exec_result=exec_result,
@@ -100,6 +122,24 @@ class ScriptVerifier:
             structured=data.get("structured"),
             confidence=data.get("confidence"),
         )
+
+
+def _agent_output_path(task: TaskConfig | None, *, workspace: str) -> str | None:
+    """Resolve LOOM_AGENT_OUTPUT for the given task, or return None.
+
+    Set only when the task's first step declares exactly one artifact
+    that is a plain relative file path (no `*`, `?`, `[` globbing).
+    Multi-artifact or glob-based tasks don't get a single output
+    variable — those verifiers should walk `LOOM_TASK_DIR` themselves."""
+    if task is None or not task.steps:
+        return None
+    artifacts = task.steps[0].artifacts
+    if len(artifacts) != 1:
+        return None
+    artifact = artifacts[0]
+    if any(c in artifact for c in "*?["):
+        return None
+    return f"{workspace.rstrip('/')}/{artifact.lstrip('/')}"
 
 
 async def _output_dir_post_mortem(
