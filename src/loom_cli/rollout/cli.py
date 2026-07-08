@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from loom_cli.rollout.context import RolloutContext, sha256_of_file
@@ -25,6 +26,69 @@ from loom_cli.rollout.steps.s00_resolve_target import resolve_ref_to_sha
 _STAGING_CLUSTER_NAME = "loom-staging"
 _STAGING_NAMESPACE = "loom-staging"
 _STAGING_DATA_ROOT = "/data/loom-staging"
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+@dataclass(frozen=True, slots=True)
+class RolloutPreset:
+    """Repo-owned stable rollout inputs for one protected environment."""
+
+    name: str
+    configured: bool
+    cluster_name: str | None = None
+    namespace: str | None = None
+    environment: str | None = None
+    cp_url: str | None = None
+    cluster_config_path: Path | None = None
+    backup_manifest_path: Path | None = None
+    rollout_root: Path | None = None
+    admin_token_source: str | None = None
+    worker_token_source: str | None = None
+    service_token_source: str | None = None
+    smoke_submit_mode: str | None = None
+    smoke_task_id: str | None = None
+    smoke_required_worker_pool: str | None = None
+    smoke_agent: str | None = None
+    smoke_on_behalf_username: str | None = None
+    smoke_on_behalf_team_id: str | None = None
+    smoke_admin_actor: str | None = None
+    scope: str | None = None
+
+
+_ROLLOUT_PRESETS: dict[str, RolloutPreset] = {
+    "staging": RolloutPreset(
+        name="staging",
+        configured=True,
+        cluster_name=_STAGING_CLUSTER_NAME,
+        namespace=_STAGING_NAMESPACE,
+        environment="staging",
+        cp_url="http://127.0.0.1:18081",
+        cluster_config_path=Path("deploy/environments/staging.cluster.toml"),
+        backup_manifest_path=Path(
+            "/data/loom-staging/backups/latest/backup-manifest.json",
+        ),
+        rollout_root=Path(_STAGING_DATA_ROOT),
+        admin_token_source=(
+            "file:/shared_work/qianyi/loom-worker-capacity/staging-admin-token"
+        ),
+        worker_token_source=(
+            "file:/shared_work/qianyi/loom-worker-capacity/staging-worker-token"
+        ),
+        service_token_source=(
+            "file:/shared_work/qianyi/loom-worker-capacity/staging-service-token"
+        ),
+        smoke_submit_mode="admin-on-behalf",
+        smoke_task_id="loom-smoke/gb10-oracle-hello-world",
+        smoke_required_worker_pool="gb10-arm64",
+        smoke_agent="oracle",
+        smoke_on_behalf_username="devansh",
+        smoke_on_behalf_team_id="env:LOOM_SMOKE_ON_BEHALF_TEAM_ID",
+        smoke_admin_actor="codex-v1-release-gate",
+        scope="current-gb10",
+    ),
+    # Explicit selector is reserved now, but first-prod values are not ready.
+    "prod": RolloutPreset(name="prod", configured=False),
+}
 
 
 def _replayable_secret_source(source: str, *, flag_name: str) -> str:
@@ -110,6 +174,171 @@ def _validate_physical_environment_target(args: argparse.Namespace) -> str | Non
     )
 
 
+def _selector(args: argparse.Namespace) -> str | None:
+    value = getattr(args, "environment_selector", None)
+    if isinstance(value, str) and value.strip():
+        return value.strip().lower()
+    return None
+
+
+def _derive_image_tag(selector: str | None, resolved_sha: str) -> str:
+    prefix = selector or "rollout"
+    return f"{prefix}-{resolved_sha[:7]}"
+
+
+def _resolve_preset_path(path: Path) -> Path:
+    if path.is_absolute():
+        return path
+    return _REPO_ROOT / path
+
+
+def _resolve_with_preset(
+    args: argparse.Namespace,
+    *,
+    resolved_sha: str | None,
+) -> tuple[str | None, str | None]:
+    """Merge preset values into omitted CLI args.
+
+    The legacy full-argv mode remains available for explicit one-off operator
+    use. Preset mode is selected only by the positional environment selector,
+    and it never falls back from one environment to another.
+    """
+    selector = _selector(args)
+    if selector is None:
+        required = (
+            "image_tag",
+            "cluster_name",
+            "environment",
+            "cp_url",
+            "cluster_config",
+            "backup_manifest",
+            "rollout_root",
+        )
+        if all(getattr(args, name, None) for name in required):
+            return None, None
+        return (
+            None,
+            "rollout requires an explicit environment selector "
+            "('staging' or 'prod') for preset mode, or the complete manual "
+            "argument set including --environment, --image-tag, "
+            "--cluster-name, --cp-url, --cluster-config, --backup-manifest, "
+            "and --rollout-root",
+        )
+
+    preset = _ROLLOUT_PRESETS.get(selector)
+    if preset is None:
+        return (
+            None,
+            f"unknown rollout environment selector {selector!r}; choose staging or prod",
+        )
+    if not preset.configured:
+        return (
+            None,
+            f"{selector} preset not configured; configure first-prod rollout values before use",
+        )
+
+    assert preset.cluster_name is not None
+    assert preset.namespace is not None
+    assert preset.environment is not None
+    assert preset.cp_url is not None
+    assert preset.cluster_config_path is not None
+    assert preset.backup_manifest_path is not None
+    assert preset.rollout_root is not None
+
+    if args.image_tag is None and resolved_sha is not None:
+        args.image_tag = _derive_image_tag(selector, resolved_sha)
+    if args.cluster_name is None:
+        args.cluster_name = preset.cluster_name
+    if args.namespace is None:
+        args.namespace = preset.namespace
+    if args.environment is None:
+        args.environment = preset.environment
+    if args.cp_url is None:
+        args.cp_url = preset.cp_url
+    if args.cluster_config is None:
+        args.cluster_config = str(_resolve_preset_path(preset.cluster_config_path))
+    if args.backup_manifest is None:
+        args.backup_manifest = str(preset.backup_manifest_path)
+    if args.rollout_root is None:
+        args.rollout_root = str(preset.rollout_root)
+    if args.admin_token is None and preset.admin_token_source is not None:
+        args.admin_token = preset.admin_token_source
+    if args.worker_token is None and preset.worker_token_source is not None:
+        args.worker_token = preset.worker_token_source
+    if args.service_token is None and preset.service_token_source is not None:
+        args.service_token = preset.service_token_source
+    if args.smoke_submit_mode is None:
+        args.smoke_submit_mode = preset.smoke_submit_mode
+    if args.smoke_task_id is None:
+        args.smoke_task_id = preset.smoke_task_id
+    if args.smoke_required_worker_pool is None:
+        args.smoke_required_worker_pool = preset.smoke_required_worker_pool
+    if args.smoke_agent is None:
+        args.smoke_agent = preset.smoke_agent
+    if args.smoke_on_behalf_username is None:
+        args.smoke_on_behalf_username = preset.smoke_on_behalf_username
+    if args.smoke_on_behalf_team_id is None:
+        args.smoke_on_behalf_team_id = preset.smoke_on_behalf_team_id
+    if args.smoke_admin_actor is None:
+        args.smoke_admin_actor = preset.smoke_admin_actor
+    if args.scope is None:
+        args.scope = preset.scope or "current-gb10"
+    return selector, None
+
+
+def _validate_required_args(args: argparse.Namespace) -> str | None:
+    required = {
+        "--image-tag": args.image_tag,
+        "--cluster-name": args.cluster_name,
+        "--environment": args.environment,
+        "--cp-url": args.cp_url,
+        "--cluster-config": args.cluster_config,
+        "--backup-manifest": args.backup_manifest,
+        "--rollout-root": args.rollout_root,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        return "missing required rollout inputs: " + ", ".join(missing)
+    return None
+
+
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(_REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def _dry_run_inputs(
+    ctx: RolloutContext,
+    *,
+    preset_name: str | None,
+) -> list[tuple[str, object]]:
+    return [
+        ("preset", preset_name or "manual"),
+        ("image_tag", ctx.image_tag),
+        ("cluster_name", ctx.cluster_name),
+        ("namespace", ctx.namespace),
+        ("environment", ctx.environment),
+        ("cp_url", ctx.cp_url),
+        ("cluster_config_path", _display_path(ctx.cluster_config_path)),
+        ("backup_manifest_path", str(ctx.backup_manifest_path)),
+        ("rollout_root", str(ctx.rollout_root)),
+        ("scope", ctx.scope),
+        ("admin_token_source", ctx.admin_token_source),
+        ("worker_token_source", ctx.worker_token_source),
+        ("service_token_source", ctx.service_token_source),
+        ("smoke_submit_mode", ctx.smoke_submit_mode),
+        ("smoke_task_id", ctx.smoke_task_id),
+        ("smoke_required_worker_pool", ctx.smoke_required_worker_pool),
+        ("smoke_agent", ctx.smoke_agent),
+        ("smoke_on_behalf_username", ctx.smoke_on_behalf_username),
+        ("smoke_on_behalf_team_id", ctx.smoke_on_behalf_team_id),
+        ("smoke_admin_actor", ctx.smoke_admin_actor),
+        ("gb10_prep_concurrency", ctx.gb10_prep_concurrency),
+    ]
+
+
 def _persisted_resume_sha(
     *,
     evidence: EvidenceDirectory,
@@ -134,13 +363,23 @@ def _persisted_resume_sha(
 def build_parser(p: argparse.ArgumentParser) -> None:
     """Populate ``p`` with the rollout subcommand's arguments."""
     p.add_argument(
+        "environment_selector",
+        nargs="?",
+        choices=tuple(_ROLLOUT_PRESETS),
+        help=(
+            "Explicit rollout environment preset selector. Use 'staging' for "
+            "the current staging rollout preset. 'prod' is reserved and fails "
+            "closed until first-prod values are configured."
+        ),
+    )
+    p.add_argument(
         "--ref",
         required=True,
         help="Git ref to resolve to a SHA (e.g. origin/dev, or a tag/sha).",
     )
     p.add_argument(
         "--image-tag",
-        required=True,
+        default=None,
         help=(
             "Target release image tag; the driver validates that the "
             "resolved --ref sha starts with the tag's `sha7` suffix "
@@ -149,17 +388,17 @@ def build_parser(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--cluster-name",
-        required=True,
+        default=None,
         help="Name of the target kind cluster (as in `kind get clusters`).",
     )
     p.add_argument(
         "--namespace",
-        default="loom",
+        default=None,
         help="Kubernetes namespace. Defaults to `loom`.",
     )
     p.add_argument(
         "--environment",
-        required=True,
+        default=None,
         help=(
             "Protected environment name (e.g. staging). Used by the "
             "backup and release-gate steps to bind evidence to the "
@@ -168,7 +407,7 @@ def build_parser(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--cp-url",
-        required=True,
+        default=None,
         help=(
             "Operator-reachable Control Plane admin base URL used by rollout "
             "steps that call `loom admin ...`, for example "
@@ -177,7 +416,7 @@ def build_parser(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--admin-token",
-        default="env:LOOM_CP_ADMIN_TOKEN",
+        default=None,
         type=_replayable_admin_token_source,
         help=(
             "Admin token source for protected Control Plane admin calls. "
@@ -278,12 +517,12 @@ def build_parser(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--cluster-config",
-        required=True,
+        default=None,
         help="Path to the operator's cluster-config.toml.",
     )
     p.add_argument(
         "--backup-manifest",
-        required=True,
+        default=None,
         help=(
             "Path to a pre-existing backup manifest for --environment. "
             "The dumps are produced by the operator per the runbook; the "
@@ -304,7 +543,7 @@ def build_parser(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--rollout-root",
-        required=True,
+        default=None,
         help=(
             "Root of the evidence directory tree "
             "(created by `loom cluster bootstrap-evidence-paths`)."
@@ -312,12 +551,22 @@ def build_parser(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--scope",
-        default="current-gb10",
+        default=None,
         choices=("current-gb10", "full-cluster"),
         help=(
             "Rollout scope. current-gb10 targets the current GB10 pool; "
             "full-cluster requires evidence across all release-managed "
             "worker pools."
+        ),
+    )
+    p.add_argument(
+        "--gb10-prep-concurrency",
+        type=int,
+        default=None,
+        help=(
+            "Optional bounded host-level concurrency for rollout step 11 "
+            "gb10-prep. Each host still runs its internal command sequence "
+            "serially."
         ),
     )
     p.add_argument(
@@ -346,6 +595,34 @@ def build_parser(p: argparse.ArgumentParser) -> None:
 
 def handle(args: argparse.Namespace) -> int:
     """Handler wired up from `loom cluster rollout`."""
+    selector_name = _selector(args)
+    resolved_sha: str | None = None
+    if selector_name and args.image_tag is None:
+        preset = _ROLLOUT_PRESETS.get(selector_name)
+        if preset is not None and preset.configured:
+            try:
+                resolved_sha = resolve_ref_to_sha(args.ref)
+            except Exception as exc:
+                sys.stderr.write(f"error: {exc}\n")
+                return 2
+    preset_name, preset_error = _resolve_with_preset(
+        args,
+        resolved_sha=resolved_sha,
+    )
+    if preset_error is not None:
+        sys.stderr.write(f"error: {preset_error}\n")
+        return 2
+    required_error = _validate_required_args(args)
+    if required_error is not None:
+        sys.stderr.write(f"error: {required_error}\n")
+        return 2
+    if args.namespace is None:
+        args.namespace = "loom"
+    if args.admin_token is None:
+        args.admin_token = "env:LOOM_CP_ADMIN_TOKEN"
+    if args.scope is None:
+        args.scope = "current-gb10"
+
     physical_target_error = _validate_physical_environment_target(args)
     if physical_target_error is not None:
         sys.stderr.write(f"error: {physical_target_error}\n")
@@ -361,6 +638,9 @@ def handle(args: argparse.Namespace) -> int:
         sys.stderr.write(
             "error: --backup-manifest-min-remaining-hours must be >= 0\n"
         )
+        return 2
+    if args.gb10_prep_concurrency is not None and args.gb10_prep_concurrency < 1:
+        sys.stderr.write("error: --gb10-prep-concurrency must be >= 1\n")
         return 2
     cfg_sha = sha256_of_file(cluster_config_path)
     rollout_root = Path(args.rollout_root)
@@ -397,7 +677,7 @@ def handle(args: argparse.Namespace) -> int:
         rollout_id = new_rollout_id(image_tag=args.image_tag)
         evidence = EvidenceDirectory(rollout_root, rollout_id)
 
-    resolved_sha = (
+    persisted_sha = (
         _persisted_resume_sha(
             evidence=evidence,
             target_ref=args.ref,
@@ -406,6 +686,8 @@ def handle(args: argparse.Namespace) -> int:
         if args.resume
         else None
     )
+    if persisted_sha is not None:
+        resolved_sha = persisted_sha
     if resolved_sha is None:
         try:
             resolved_sha = resolve_ref_to_sha(args.ref)
@@ -442,8 +724,15 @@ def handle(args: argparse.Namespace) -> int:
         ),
         scope=args.scope,
         exclude_oldlab=args.exclude_oldlab,
+        gb10_prep_concurrency=args.gb10_prep_concurrency,
         resume=args.resume,
-        metadata={"rollout_id": rollout_id},
+        metadata={
+            key: value
+            for key, value in {
+                "rollout_id": rollout_id,
+            }.items()
+            if value is not None
+        },
     )
 
     steps = default_step_sequence()
@@ -452,8 +741,10 @@ def handle(args: argparse.Namespace) -> int:
         sys.stdout.write(
             f"rollout_id: {rollout_id}\n"
             f"resolved_sha: {resolved_sha}\n"
-            f"steps:\n"
         )
+        for key, value in _dry_run_inputs(ctx, preset_name=preset_name):
+            sys.stdout.write(f"{key}: {value}\n")
+        sys.stdout.write("steps:\n")
         for step in steps:
             sys.stdout.write(
                 f"  {step.number:02d} {step.name}\n"

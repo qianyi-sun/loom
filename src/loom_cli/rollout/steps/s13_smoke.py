@@ -424,6 +424,14 @@ def _admin_on_behalf_config(
     assert represented_username is not None
     assert team_id is not None
     assert admin_actor is not None
+    if team_id.startswith(("env:", "file:")):
+        try:
+            team_id = resolve_secret_source(
+                team_id,
+                flag_name="--smoke-on-behalf-team-id",
+            )
+        except SecretSourceError as exc:
+            return None, str(exc)
     return _AdminOnBehalfConfig(
         represented_username=represented_username,
         team_id=team_id,

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
+import time
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -1838,6 +1840,153 @@ def test_gb10_prep_clones_preserves_env_and_starts_node_agent(
     node_agent_idx = calls.index("systemctl --user start loom-gb10-node-agent.service")
     assert legacy_idx < node_agent_idx
     assert calls[-1] == "systemctl --user start loom-gb10-node-agent.service"
+
+
+def test_gb10_prep_runs_hosts_with_bounded_parallelism(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
+    identity = _write_dummy_identity(tmp_path / "gb10-rollout-ed25519")
+    ctx.cluster_config_path.write_text(
+        "[gb10_pool]\n"
+        f'ssh_identity_file = "{identity}"\n'
+        "hosts = [\n"
+        '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom-staging", env_file_path = "/srv/loom-staging/.env" },\n'
+        '  { ssh_target = "trt-gb10-2", repo_path = "/srv/loom-staging", env_file_path = "/srv/loom-staging/.env" },\n'
+        '  { ssh_target = "trt-gb10-3", repo_path = "/srv/loom-staging", env_file_path = "/srv/loom-staging/.env" },\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def fake_prep_one_host(ctx, host, host_dir):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.05)
+        (host_dir / "prep.log").write_text(f"{host.ssh_target}\n", encoding="utf-8")
+        with lock:
+            active -= 1
+        return True, f"prepped {host.ssh_target}"
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s04_gb10_prep._prep_one_host",
+        fake_prep_one_host,
+    )
+
+    step = GB10PrepStep()
+    step.host_concurrency = 2
+    result = step.run(ctx, ev.step_dir(11, "gb10-prep"))
+
+    assert result.exit_code == 0
+    assert max_active == 2
+    stdout = ev.step_dir(11, "gb10-prep").stdout_path().read_text()
+    assert "started=3 succeeded=3 failed=0 retried=0 concurrency=2" in stdout
+
+
+def test_gb10_prep_slow_failing_host_does_not_block_other_hosts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
+    identity = _write_dummy_identity(tmp_path / "gb10-rollout-ed25519")
+    ctx.cluster_config_path.write_text(
+        "[gb10_pool]\n"
+        f'ssh_identity_file = "{identity}"\n'
+        "hosts = [\n"
+        '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom-staging", env_file_path = "/srv/loom-staging/.env" },\n'
+        '  { ssh_target = "trt-gb10-2", repo_path = "/srv/loom-staging", env_file_path = "/srv/loom-staging/.env" },\n'
+        '  { ssh_target = "trt-gb10-3", repo_path = "/srv/loom-staging", env_file_path = "/srv/loom-staging/.env" },\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    host1_active = False
+    progressed_while_host1_active: set[str] = set()
+    lock = threading.Lock()
+
+    def fake_prep_one_host(ctx, host, host_dir):
+        nonlocal host1_active
+        if host.ssh_target == "trt-gb10-1":
+            with lock:
+                host1_active = True
+            time.sleep(0.08)
+            (host_dir / "prep.log").write_text("failed\n", encoding="utf-8")
+            with lock:
+                host1_active = False
+            return False, "checkout failed on trt-gb10-1: rc=1"
+        with lock:
+            if host1_active:
+                progressed_while_host1_active.add(host.ssh_target)
+        (host_dir / "prep.log").write_text("ok\n", encoding="utf-8")
+        return True, f"prepped {host.ssh_target}"
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s04_gb10_prep._prep_one_host",
+        fake_prep_one_host,
+    )
+
+    step = GB10PrepStep()
+    step.host_concurrency = 2
+    step.max_retries = 1
+    result = step.run(ctx, ev.step_dir(11, "gb10-prep"))
+
+    assert result.exit_code == 1
+    assert "trt-gb10-1" in str(result.error)
+    assert progressed_while_host1_active
+    assert (ev.step_dir(11, "gb10-prep").path / "host-trt-gb10-2" / "prep.log").is_file()
+    assert (ev.step_dir(11, "gb10-prep").path / "host-trt-gb10-3" / "prep.log").is_file()
+    stdout = ev.step_dir(11, "gb10-prep").stdout_path().read_text()
+    assert "started=3 succeeded=2 failed=1 retried=0 concurrency=2" in stdout
+
+
+def test_gb10_prep_retry_count_is_per_host_and_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
+    identity = _write_dummy_identity(tmp_path / "gb10-rollout-ed25519")
+    ctx.cluster_config_path.write_text(
+        "[gb10_pool]\n"
+        f'ssh_identity_file = "{identity}"\n'
+        "hosts = [\n"
+        '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom-staging", env_file_path = "/srv/loom-staging/.env" },\n'
+        '  { ssh_target = "trt-gb10-2", repo_path = "/srv/loom-staging", env_file_path = "/srv/loom-staging/.env" },\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    attempts: dict[str, int] = {}
+
+    def fake_prep_one_host(ctx, host, host_dir):
+        attempts[host.ssh_target] = attempts.get(host.ssh_target, 0) + 1
+        if host.ssh_target == "trt-gb10-1" and attempts[host.ssh_target] == 1:
+            return False, "fetch failed on trt-gb10-1: rc=128"
+        (host_dir / "prep.log").write_text("ok\n", encoding="utf-8")
+        return True, f"prepped {host.ssh_target}"
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s04_gb10_prep._prep_one_host",
+        fake_prep_one_host,
+    )
+
+    step = GB10PrepStep()
+    step.host_concurrency = 2
+    step.backoff_sec = 0
+    result = step.run(ctx, ev.step_dir(11, "gb10-prep"))
+
+    assert result.exit_code == 0
+    assert attempts == {"trt-gb10-1": 2, "trt-gb10-2": 1}
+    stdout = ev.step_dir(11, "gb10-prep").stdout_path().read_text()
+    assert "started=2 succeeded=2 failed=0 retried=1 concurrency=2" in stdout
 
 
 def test_release_gate_run_generates_manifest_then_gates(
