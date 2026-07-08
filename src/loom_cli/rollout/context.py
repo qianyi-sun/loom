@@ -51,6 +51,21 @@ class RolloutContext:
         service_token_source: Optional secret-source reference for protected
             Service API calls made by rollout-owned CLI subcommands. This is
             persisted as a source reference only, never the raw token value.
+        smoke_submit_mode: Optional rollout smoke submit mode. When unset, the
+            smoke step preserves its legacy environment fallback.
+        smoke_api_token_source: Optional secret-source reference for
+            user-token smoke mode. This is persisted as a source reference
+            only, never the raw token value.
+        smoke_task_id: Optional explicit smoke task id.
+        smoke_required_worker_pool: Optional worker-pool constraint for the
+            smoke submission.
+        smoke_agent: Optional smoke agent name.
+        smoke_on_behalf_username: Optional represented username for
+            admin-on-behalf smoke.
+        smoke_on_behalf_team_id: Optional represented team id for
+            admin-on-behalf smoke.
+        smoke_admin_actor: Optional audited admin actor for admin-on-behalf
+            smoke submissions.
         cluster_config_path: Path to the operator's cluster-config.toml.
         cluster_config_sha256: sha256 of cluster_config_path contents at launch.
         rollout_root: Root of the evidence directory tree (#174 model).
@@ -91,6 +106,14 @@ class RolloutContext:
     expect_admin_token_fingerprint: str | None = None
     worker_token_source: str | None = None
     service_token_source: str | None = None
+    smoke_submit_mode: str | None = None
+    smoke_api_token_source: str | None = None
+    smoke_task_id: str | None = None
+    smoke_required_worker_pool: str | None = None
+    smoke_agent: str | None = None
+    smoke_on_behalf_username: str | None = None
+    smoke_on_behalf_team_id: str | None = None
+    smoke_admin_actor: str | None = None
     scope: str = "current-gb10"
     exclude_oldlab: bool = False
     resume: bool = False
@@ -115,6 +138,14 @@ class RolloutContext:
             "expect_admin_token_fingerprint": self.expect_admin_token_fingerprint,
             "worker_token_source": self.worker_token_source,
             "service_token_source": self.service_token_source,
+            "smoke_submit_mode": self.smoke_submit_mode,
+            "smoke_api_token_source": self.smoke_api_token_source,
+            "smoke_task_id": self.smoke_task_id,
+            "smoke_required_worker_pool": self.smoke_required_worker_pool,
+            "smoke_agent": self.smoke_agent,
+            "smoke_on_behalf_username": self.smoke_on_behalf_username,
+            "smoke_on_behalf_team_id": self.smoke_on_behalf_team_id,
+            "smoke_admin_actor": self.smoke_admin_actor,
             "cluster_config_path": str(self.cluster_config_path),
             "cluster_config_sha256": self.cluster_config_sha256,
             "rollout_root": str(self.rollout_root),

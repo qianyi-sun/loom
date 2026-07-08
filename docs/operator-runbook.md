@@ -1238,10 +1238,6 @@ systemd-run --user --unit "$unit" --collect \
   /bin/bash -lc '"'"'
     set -euo pipefail
     cd /home/qianyi/dev/loom
-    export LOOM_SMOKE_SUBMIT_MODE=admin-on-behalf
-    export LOOM_SMOKE_ON_BEHALF_USERNAME=devansh
-    export LOOM_SMOKE_ON_BEHALF_TEAM_ID=<agentic-rl-team-uuid>
-    export LOOM_SMOKE_ADMIN_ACTOR=codex-v1-release-gate
     exec .venv/bin/loom cluster rollout \
       --ref origin/dev \
       --image-tag staging-abc1234 \
@@ -1257,6 +1253,10 @@ systemd-run --user --unit "$unit" --collect \
       --expect-admin-token-fingerprint "sha256:<12-hex> len=<N>" \
       --worker-token file:/shared_work/qianyi/loom-worker-capacity/staging-worker-token \
       --service-token file:/shared_work/qianyi/loom-worker-capacity/staging-service-token \
+      --smoke-submit-mode admin-on-behalf \
+      --smoke-on-behalf-username devansh \
+      --smoke-on-behalf-team-id <agentic-rl-team-uuid> \
+      --smoke-admin-actor codex-v1-release-gate \
       --scope current-gb10
   '"'"'
 '
@@ -1367,32 +1367,34 @@ derived from the rollout cluster config, for example `https://yylx.world/dev`
 for staging and `https://yylx.world/prod` for first prod. Do not use stdin
 `-`; the source must be replayable as `env:VAR` or `file:PATH`.
 
-Step 15 defaults to `LOOM_SMOKE_SUBMIT_MODE=user-token`. In that mode, the live
-trial submit uses `LOOM_SMOKE_API_TOKEN`, and that credential must be a
-user-owned API token whose `/api/v1/auth/whoami` reports
-`credential_type=user_owned_api_token` and includes `submit` scope. Admin
-secrets, internal service credentials, and legacy team tokens are refused before
-trial submission because they cannot create user-facing work under the
-account-auth model. For `--scope=current-gb10`, `LOOM_SMOKE_TASK_ID` defaults
-to `loom-smoke/gb10-oracle-hello-world` with
+Step 15 defaults to `user-token` mode. In that mode, pass a replayable
+`--smoke-api-token env:VAR` or `--smoke-api-token file:PATH` source; the
+legacy `LOOM_SMOKE_API_TOKEN` environment variable remains an interactive
+fallback, but it is not a complete detached rollout input unless the systemd
+unit also sets it. The credential must be a user-owned API token whose
+`/api/v1/auth/whoami` reports `credential_type=user_owned_api_token` and
+includes `submit` scope. Admin secrets, internal service credentials, and
+legacy team tokens are refused before trial submission because they cannot
+create user-facing work under the account-auth model. For
+`--scope=current-gb10`, `--smoke-task-id` defaults to
+`loom-smoke/gb10-oracle-hello-world` with
 `required_worker_pool=gb10-arm64`, because that task is oracle-compatible and
 declares `cpu_arch=any`. For `--scope=full-cluster`, the default is
 `terminal-bench-2/hello-world` with no required pool. Override
-`LOOM_SMOKE_TASK_ID` only with another short task that exists in the live
+`--smoke-task-id` only with another short task that exists in the live
 `/api/v1/tasks/{id}` catalog and is compatible with the rollout scope and
 selected worker pool. If the override must target a specific pool, set
-`LOOM_SMOKE_REQUIRED_WORKER_POOL` explicitly; the driver only injects the GB10
+`--smoke-required-worker-pool` explicitly; the driver only injects the GB10
 pool for its built-in current-gb10 default.
 
 For a release canary where an operator must represent an active user/team and a
-user-owned smoke token is unavailable, set
-`LOOM_SMOKE_SUBMIT_MODE=admin-on-behalf` and provide:
+user-owned smoke token is unavailable, pass the admin-on-behalf smoke flags:
 
 ```bash
-export LOOM_SMOKE_SUBMIT_MODE=admin-on-behalf
-export LOOM_SMOKE_ON_BEHALF_USERNAME=devansh
-export LOOM_SMOKE_ON_BEHALF_TEAM_ID=<agentic-rl-team-uuid>
-export LOOM_SMOKE_ADMIN_ACTOR=<operator-name>
+--smoke-submit-mode admin-on-behalf \
+--smoke-on-behalf-username devansh \
+--smoke-on-behalf-team-id <agentic-rl-team-uuid> \
+--smoke-admin-actor <operator-name>
 ```
 
 The rollout driver resolves the admin credential only from `--admin-token`'s
