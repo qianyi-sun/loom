@@ -56,6 +56,32 @@ def test_batch_identity_compacts_benchmarks_models_and_suffix() -> None:
     assert "++" not in identity.name
 
 
+def test_batch_identity_prefers_combination_provider_model_id() -> None:
+    identity = build_batch_identity(
+        task_filter={"benchmark_id": "source-useful-frontier-5003"},
+        trial_config={},
+        combinations=[
+            {
+                "agent_name": "terminus-2",
+                "agent_model": {
+                    "provider": "openai",
+                    "name": "facade-default",
+                },
+                "provider_model_id": "glm-5.1-thinking",
+                "n_per_task": 1,
+                "label": "",
+            },
+        ],
+        n_per_task=1,
+        backend="docker",
+    )
+
+    assert identity.name == (
+        "source-useful-frontier-5003 | terminus-2/glm-5.1-thinking x1"
+    )
+    assert "terminus-2/openai/glm-5.1-thinking x1" in identity.description
+
+
 def test_batch_identity_uses_trial_config_when_combinations_are_absent() -> None:
     identity = build_batch_identity(
         task_filter={"benchmark_id": "livecodebench", "subset_kind": "all"},

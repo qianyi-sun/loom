@@ -184,6 +184,8 @@ export interface Combination {
   agent_name: string;
   agent_model: { provider: string; name: string } | null;
   n_per_task: number;
+  provider_connection_id?: string | null;
+  provider_model_id?: string | null;
 }
 
 /** Plan 28 PR-3: structured task_filter discriminated by subset_kind.

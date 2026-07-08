@@ -1019,6 +1019,87 @@ async def test_post_batch_confirmed_soft_budget_persists_budget_projection(
     assert detail_body["budget_remaining_usd"] == pytest.approx(1.0)
 
 
+async def test_post_batch_combination_provider_budget_summarizes_per_combo(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    provider_a = _insert_budget_provider(
+        postgres_url,
+        team_id,
+        pricing_data={"input_usd_per_1m": 1.0, "output_usd_per_1m": 0.0},
+    )
+    provider_b = _insert_budget_provider(
+        postgres_url,
+        team_id,
+        pricing_data={"input_usd_per_1m": 2.0, "output_usd_per_1m": 0.0},
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "combination-budget",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {},
+                "combinations": [
+                    {
+                        "agent_name": "litellm",
+                        "agent_model": {
+                            "provider": "openai",
+                            "name": "glm-5.1-thinking",
+                        },
+                        "provider_connection_id": str(provider_a),
+                        "provider_model_id": "glm-5.1-thinking",
+                        "n_per_task": 1,
+                        "label": "provider-a",
+                    },
+                    {
+                        "agent_name": "litellm",
+                        "agent_model": {
+                            "provider": "openai",
+                            "name": "glm-5.1-thinking",
+                        },
+                        "provider_connection_id": str(provider_b),
+                        "provider_model_id": "glm-5.1-thinking",
+                        "n_per_task": 2,
+                        "label": "provider-b",
+                    },
+                ],
+                "budget_usd": 20.0,
+                "budget_policy": "soft",
+                "budget_confirmed": True,
+            },
+        )
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["expected_trial_count"] == 9
+    assert body["pre_run_estimated_cost_usd"] == pytest.approx(15.0)
+    diagnostics = body["budget_diagnostics"]
+    assert diagnostics[0]["reason"] == "combination_budget_estimate"
+    items = diagnostics[0]["items"]
+    assert [
+        (
+            item["combination_idx"],
+            item["label"],
+            item["provider_connection_id"],
+            item["provider_model_id"],
+            item["expected_trial_count"],
+            item["pre_run_estimated_cost_usd"],
+        )
+        for item in items
+    ] == [
+        (0, "provider-a", str(provider_a), "glm-5.1-thinking", 3, 3.0),
+        (1, "provider-b", str(provider_b), "glm-5.1-thinking", 6, 12.0),
+    ]
+
+
 async def test_legacy_team_token_cannot_create_batch(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
@@ -2243,10 +2324,12 @@ async def test_list_batches_filters_by_query_provider_and_model_fields(
                                 "name": "qwen3.6-35b-a3b",
                             },
                             "n_per_task": 1,
+                            "provider_connection_id": str(provider_connection_id),
+                            "provider_model_id": "qwen3.6-35b-a3b",
                         }
                     ],
-                    "provider_connection_id": provider_connection_id,
-                    "provider_model_id": "qwen3.6-35b-a3b",
+                    "provider_connection_id": None,
+                    "provider_model_id": None,
                 },
                 {
                     "id": wrong_provider_id,

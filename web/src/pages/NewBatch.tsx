@@ -131,7 +131,7 @@ interface ComboRow {
 }
 
 type ProviderSelectionResult =
-  | { ok: true; value: ProviderOverride | null }
+  | { ok: true; value: ProviderOverride[] }
   | { ok: false; error: string };
 
 function newRow(): ComboRow {
@@ -1099,6 +1099,11 @@ export default function NewBatch(): JSX.Element {
         agent_model: agentModel,
         n_per_task: n,
       };
+      const override = buildProviderOverride(r.picker, selectedAgent.needs_model);
+      if (override) {
+        combo.provider_connection_id = override.provider_connection_id;
+        combo.provider_model_id = override.provider_model_id;
+      }
       if (label) combo.label = label;
       out.push(combo);
     }
@@ -1116,29 +1121,7 @@ export default function NewBatch(): JSX.Element {
       const override = buildProviderOverride(r.picker, selectedAgent.needs_model);
       if (override) overrides.push(override);
     }
-    if (overrides.length === 0) return { ok: true, value: null };
-    const first = overrides[0];
-    const mismatch = overrides.find(
-      (o) =>
-        o.provider_connection_id !== first.provider_connection_id ||
-        o.provider_model_id !== first.provider_model_id,
-    );
-    if (mismatch) {
-      return {
-        ok: false,
-        error: (
-          "BYO provider batches currently require one provider " +
-          "connection and model across all combinations."
-        ),
-      };
-    }
-    return {
-      ok: true,
-      value: {
-        ...first,
-        manual_model: overrides.some((o) => o.manual_model),
-      },
-    };
+    return { ok: true, value: overrides };
   }
 
   const submit = async (): Promise<void> => {
@@ -1250,12 +1233,20 @@ export default function NewBatch(): JSX.Element {
       }
     }
 
-    const providerOverride = providerSelection.value;
+    const providerOverrides = providerSelection.value;
     try {
-      if (providerOverride?.manual_model) {
+      const manualOverrides = new Map<string, ProviderOverride>();
+      for (const override of providerOverrides) {
+        if (!override.manual_model) continue;
+        manualOverrides.set(
+          `${override.provider_connection_id}\u0000${override.provider_model_id}`,
+          override,
+        );
+      }
+      for (const override of manualOverrides.values()) {
         await api.addProviderConnectionModel(
-          providerOverride.provider_connection_id,
-          { model_id: providerOverride.provider_model_id },
+          override.provider_connection_id,
+          { model_id: override.provider_model_id },
         );
       }
     } catch (e) {
@@ -1270,12 +1261,6 @@ export default function NewBatch(): JSX.Element {
       task_filter,
       trial_config,
       combinations: combos.value,
-      ...(providerOverride
-        ? {
-            provider_connection_id: providerOverride.provider_connection_id,
-            provider_model_id: providerOverride.provider_model_id,
-          }
-        : {}),
     };
     const suffix = nameSuffix.trim();
     if (suffix) payload.name_suffix = suffix;

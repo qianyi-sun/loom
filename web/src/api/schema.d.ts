@@ -881,6 +881,8 @@ export interface components {
       agent_name: string;
       agent_model: { provider: string; name: string } | null;
       n_per_task: number;
+      provider_connection_id?: string | null;
+      provider_model_id?: string | null;
     };
     BatchList: {
       items: components["schemas"]["Batch"][];

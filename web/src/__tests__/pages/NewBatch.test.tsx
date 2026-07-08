@@ -94,6 +94,19 @@ const MODELS_RESPONSE = {
       hidden_reason: null,
       last_seen_at: "2026-06-16T00:00:00Z",
     },
+    {
+      provider: "openai",
+      name: "qwen3.6-35b-a3b",
+      provider_connection_id: "33333333-3333-4333-8333-333333333333",
+      provider_connection_name: "Shared YibuAPI",
+      provider_connection_type: "openai-compatible",
+      source: "discovered",
+      agent_capable: true,
+      recommended: true,
+      visibility: "default",
+      hidden_reason: null,
+      last_seen_at: "2026-06-16T00:00:00Z",
+    },
   ],
 };
 
@@ -133,6 +146,25 @@ const PROVIDER_CONNECTIONS_RESPONSE = {
       pricing_source: "tokens-only",
       pricing_data: null,
       rate_card_provider: "openai",
+      created_by: "test:web",
+      created_at: "2026-06-16T00:00:00Z",
+      updated_at: "2026-06-16T00:00:00Z",
+    },
+    {
+      id: "33333333-3333-4333-8333-333333333333",
+      team_id: "22222222-2222-4222-8222-222222222222",
+      name: "Shared YibuAPI",
+      type: "openai-compatible",
+      base_url: "https://yibuapi.example/v1",
+      upstream_host: "yibuapi.example",
+      resolved_egress_ips: ["203.0.113.20"],
+      allowed_models: null,
+      status: "valid",
+      last_validated_at: "2026-06-16T00:00:00Z",
+      last_validation_error: null,
+      pricing_source: "rate-card",
+      pricing_data: null,
+      rate_card_provider: "yibuapi",
       created_by: "test:web",
       created_at: "2026-06-16T00:00:00Z",
       updated_at: "2026-06-16T00:00:00Z",
@@ -674,6 +706,8 @@ describe("NewBatch", () => {
           source: "api",
         },
         n_per_task: 1,
+        provider_connection_id: "11111111-1111-4111-8111-111111111111",
+        provider_model_id: "deepseek-chat",
       },
     ]);
   });
@@ -1106,10 +1140,8 @@ describe("NewBatch", () => {
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
     const body = batchCall(spy)!.body;
-    expect(body.provider_connection_id).toBe(
-      "11111111-1111-4111-8111-111111111111",
-    );
-    expect(body.provider_model_id).toBe("deepseek-chat");
+    expect(body.provider_connection_id).toBeUndefined();
+    expect(body.provider_model_id).toBeUndefined();
     expect(body.combinations).toEqual([
       {
         agent_name: "litellm",
@@ -1119,6 +1151,56 @@ describe("NewBatch", () => {
           source: "api",
         },
         n_per_task: 1,
+        provider_connection_id: "11111111-1111-4111-8111-111111111111",
+        provider_model_id: "deepseek-chat",
+      },
+    ]);
+  });
+
+  it("submits different BYO provider routes per combination", async () => {
+    const spy = mockEndpoints({ matchingTasks: 12 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+    await pickBackend();
+    await pickBenchmark();
+
+    await user.selectOptions(
+      await screen.findByLabelText(/^Provider connection$/i),
+      "11111111-1111-4111-8111-111111111111",
+    );
+    await user.selectOptions(
+      await screen.findByLabelText(/^Model$/i),
+      "openai|deepseek-chat|11111111-1111-4111-8111-111111111111",
+    );
+
+    await user.click(screen.getByRole("button", { name: /\+ Add combination/i }));
+    const providerSelects = await screen.findAllByLabelText(/^Provider connection$/i);
+    const modelSelects = await screen.findAllByLabelText(/^Model$/i);
+    await user.selectOptions(
+      providerSelects[1],
+      "33333333-3333-4333-8333-333333333333",
+    );
+    await user.selectOptions(
+      modelSelects[1],
+      "openai|qwen3.6-35b-a3b|33333333-3333-4333-8333-333333333333",
+    );
+
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
+    const body = batchCall(spy)!.body;
+    expect(body.provider_connection_id).toBeUndefined();
+    expect(body.provider_model_id).toBeUndefined();
+    expect(body.combinations).toMatchObject([
+      {
+        agent_name: "litellm",
+        provider_connection_id: "11111111-1111-4111-8111-111111111111",
+        provider_model_id: "deepseek-chat",
+      },
+      {
+        agent_name: "litellm",
+        provider_connection_id: "33333333-3333-4333-8333-333333333333",
+        provider_model_id: "qwen3.6-35b-a3b",
       },
     ]);
   });
@@ -1160,9 +1242,11 @@ describe("NewBatch", () => {
       model_id: "manual-vllm-checkpoint",
     });
     const body = batchCall(spy)!.body;
-    expect(body.provider_connection_id).toBe(
+    expect(body.provider_connection_id).toBeUndefined();
+    expect(body.provider_model_id).toBeUndefined();
+    expect(body.combinations[0].provider_connection_id).toBe(
       "11111111-1111-4111-8111-111111111111",
     );
-    expect(body.provider_model_id).toBe("manual-vllm-checkpoint");
+    expect(body.combinations[0].provider_model_id).toBe("manual-vllm-checkpoint");
   });
 });

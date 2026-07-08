@@ -374,6 +374,35 @@ name and description from the benchmark/subset, combinations, provider/model,
 and backend. Use `--name-suffix` only when you need an extra human label after
 the generated prefix.
 
+For an agent × provider-model matrix, submit API-shaped combinations directly.
+Each combination can carry its own `provider_connection_id` and
+`provider_model_id`; batch-level provider fields are only defaults for legacy
+single-provider submissions:
+
+```bash
+loom eval batch create \
+  --name-suffix glm-vs-qwen \
+  --benchmark humaneval \
+  --combinations-json '[
+    {
+      "label": "terminus-glm",
+      "agent_name": "terminus-2",
+      "agent_model": {"provider": "openai", "name": "glm-5.1-thinking", "source": "api"},
+      "provider_connection_id": "11111111-1111-4111-8111-111111111111",
+      "provider_model_id": "glm-5.1-thinking",
+      "n_per_task": 1
+    },
+    {
+      "label": "opencode-qwen",
+      "agent_name": "opencode",
+      "agent_model": {"provider": "openai", "name": "qwen3.6-35b-a3b", "source": "api"},
+      "provider_connection_id": "33333333-3333-4333-8333-333333333333",
+      "provider_model_id": "qwen3.6-35b-a3b",
+      "n_per_task": 1
+    }
+  ]'
+```
+
 Provider connections are team-scoped. A platform admin using a user-owned API
 token can submit on behalf of a different team by passing `--team-id`; this
 also scopes provider-name lookup so the selected provider must belong to the

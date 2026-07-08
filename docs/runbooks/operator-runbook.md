@@ -3092,10 +3092,11 @@ curl -X POST \
 
 Manual entries are tied to the provider connection and remain visible
 after refreshes even when upstream `/models` omits them. The SPA's
-normal launch flow selects one provider connection and one concrete
-model id for a batch; the current backend contract stores that override
-at batch level, so all BYO-provider combinations in one batch must share
-the same connection/model.
+normal launch flow stores the selected provider connection and concrete
+model id on each agent/model combination. Batch-level provider fields
+remain a compatibility default, but new multi-combination submissions can
+mix provider connections and provider models in one batch; the runner
+persists each trial's effective provider route.
 
 ## GPU-cluster checkpoint provider onboarding
 

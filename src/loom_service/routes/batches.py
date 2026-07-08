@@ -86,6 +86,7 @@ from loom_service.task_config_validation import (
 )
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
 from loom_service.usage_accounting import (
+    PreRunBudgetEstimate,
     empty_usage_projection,
     estimate_pre_run_batch_budget,
     price_snapshots_for_trials,
@@ -388,6 +389,7 @@ async def _reject_if_known_failed_provider_model(
     *,
     provider_connection_id: UUID | None,
     provider_model_id: str | None,
+    context: str | None = None,
 ) -> None:
     if provider_connection_id is None or not provider_model_id:
         return
@@ -400,20 +402,20 @@ async def _reject_if_known_failed_provider_model(
         )
     ).scalar_one_or_none()
     if row is None:
+        prefix = f"{context}: " if context else ""
         _reject_submission(
             reason="provider_model_cache",
             status_code=400,
             detail=(
-                f"provider model {provider_model_id!r} is not in the model cache "
+                f"{prefix}provider model {provider_model_id!r} is not in the model cache "
                 "for this provider connection; run `loom providers models "
                 "NAME --refresh` or choose a cached model"
             ),
         )
     if row.last_preflight_status != "failed":
         return
-    detail = (
-        f"provider model {provider_model_id!r} last preflight failed for this provider connection"
-    )
+    prefix = f"{context}: " if context else ""
+    detail = f"{prefix}provider model {provider_model_id!r} last preflight failed for this provider connection"
     if row.last_preflight_error_code:
         detail += f" ({row.last_preflight_error_code})"
     detail += "; run provider model preflight again or choose another model"
@@ -422,6 +424,146 @@ async def _reject_if_known_failed_provider_model(
         status_code=400,
         detail=detail,
     )
+
+
+def _effective_provider_fields(
+    payload: _CreateBatch,
+    combo: Combination | None,
+) -> tuple[UUID | None, str | None]:
+    if combo is None:
+        return payload.provider_connection_id, payload.provider_model_id
+    return (
+        combo.provider_connection_id or payload.provider_connection_id,
+        combo.provider_model_id or payload.provider_model_id,
+    )
+
+
+def _combination_context(index: int, combo: Combination) -> str:
+    label = combo.label or _derive_combination_label(combo)
+    return f"combinations[{index}] {label!r}"
+
+
+def _merge_budget_source(values: set[str]) -> str:
+    if not values:
+        return "none"
+    if len(values) == 1:
+        return next(iter(values))
+    return "mixed"
+
+
+def _merge_budget_confidence(values: set[str]) -> str:
+    if not values:
+        return "unavailable"
+    if "unavailable" in values:
+        return "unavailable"
+    if len(values) == 1:
+        return next(iter(values))
+    return "mixed"
+
+
+async def _estimate_pre_run_budget_for_payload(
+    session: Any,
+    *,
+    payload: _CreateBatch,
+    provider_connections_by_id: dict[UUID, ProviderConnection],
+    task_count: int,
+    expected_trial_count: int,
+    required_worker_pool_count: int,
+    settings: Any,
+    budget_usd: float | None,
+    budget_policy: str,
+    provider_connection: ProviderConnection | None,
+) -> tuple[PreRunBudgetEstimate, list[dict[str, Any]]]:
+    if not payload.combinations:
+        estimate = await estimate_pre_run_batch_budget(
+            session,
+            provider_connection=provider_connection,
+            provider_model_id=payload.provider_model_id,
+            expected_trial_count=expected_trial_count,
+            settings=settings,
+            budget_usd=budget_usd,
+            budget_policy=budget_policy,
+        )
+        return estimate, []
+
+    estimates: list[PreRunBudgetEstimate] = []
+    items: list[dict[str, Any]] = []
+    for i, combo in enumerate(payload.combinations):
+        conn_id, model_id = _effective_provider_fields(payload, combo)
+        combo_expected = task_count * int(combo.n_per_task)
+        if i == 0:
+            combo_expected += required_worker_pool_count
+        estimate = await estimate_pre_run_batch_budget(
+            session,
+            provider_connection=(
+                provider_connections_by_id.get(conn_id)
+                if conn_id is not None
+                else None
+            ),
+            provider_model_id=model_id,
+            expected_trial_count=combo_expected,
+            settings=settings,
+            budget_usd=budget_usd,
+            budget_policy=budget_policy,
+        )
+        estimates.append(estimate)
+        items.append({
+            "combination_idx": i,
+            "label": combo.label or _derive_combination_label(combo),
+            "provider_connection_id": str(conn_id) if conn_id else None,
+            "provider_model_id": model_id,
+            "expected_trial_count": combo_expected,
+            "pre_run_estimated_cost_usd": (
+                estimate.pre_run_estimated_cost_usd
+            ),
+            "cost_estimate_source": estimate.cost_estimate_source,
+            "cost_estimate_confidence": estimate.cost_estimate_confidence,
+            "unpriced_reason": estimate.unpriced_reason,
+            "pre_run_estimated_llm_calls_count": (
+                estimate.pre_run_estimated_llm_calls_count
+            ),
+            "pre_run_estimated_prompt_tokens": (
+                estimate.pre_run_estimated_prompt_tokens
+            ),
+            "pre_run_estimated_completion_tokens": (
+                estimate.pre_run_estimated_completion_tokens
+            ),
+        })
+
+    costs = [estimate.pre_run_estimated_cost_usd for estimate in estimates]
+    total_cost = sum(cast(float, cost) for cost in costs) if all(
+        cost is not None for cost in costs
+    ) else None
+    aggregate = PreRunBudgetEstimate(
+        budget_usd=estimates[0].budget_usd if estimates else budget_usd,
+        budget_policy=budget_policy,
+        pre_run_estimated_cost_usd=total_cost,
+        cost_estimate_source=_merge_budget_source({
+            estimate.cost_estimate_source for estimate in estimates
+        }),
+        cost_estimate_confidence=_merge_budget_confidence({
+            estimate.cost_estimate_confidence for estimate in estimates
+        }),
+        pre_run_estimated_llm_calls_count=sum(
+            estimate.pre_run_estimated_llm_calls_count
+            for estimate in estimates
+        ),
+        pre_run_estimated_prompt_tokens=sum(
+            estimate.pre_run_estimated_prompt_tokens
+            for estimate in estimates
+        ),
+        pre_run_estimated_completion_tokens=sum(
+            estimate.pre_run_estimated_completion_tokens
+            for estimate in estimates
+        ),
+        unpriced_reason=(
+            None if total_cost is not None else "one_or_more_combinations_unpriced"
+        ),
+    )
+    return aggregate, [{
+        "reason": "combination_budget_estimate",
+        "items": items,
+    }]
 
 
 def _agents_in_batch(
@@ -712,12 +854,28 @@ async def _create_batch_record(
 
     # Validate provider_connection_id before task materialization/fan-out
     # work so known bad provider/model input returns a direct actionable error.
+    # Combination-level provider fields override the batch-level value; the
+    # batch-level value remains the backward-compatible default.
     provider_connection: ProviderConnection | None = None
-    if payload.provider_connection_id is not None:
+    provider_connection_ids: set[UUID] = set()
+    provider_model_checks: list[tuple[UUID | None, str | None, str | None]] = []
+    if payload.combinations:
+        for i, combo in enumerate(payload.combinations):
+            conn_id, model_id = _effective_provider_fields(payload, combo)
+            if conn_id is not None:
+                provider_connection_ids.add(conn_id)
+            provider_model_checks.append((conn_id, model_id, _combination_context(i, combo)))
+    else:
+        conn_id, model_id = _effective_provider_fields(payload, None)
+        if conn_id is not None:
+            provider_connection_ids.add(conn_id)
+        provider_model_checks.append((conn_id, model_id, None))
+
+    for conn_id in sorted(provider_connection_ids, key=str):
         try:
             await validate_provider_connection(
                 s,
-                payload.provider_connection_id,
+                conn_id,
                 team_id=submission_team_id,
             )
         except HTTPException:
@@ -725,11 +883,16 @@ async def _create_batch_record(
                 reason="provider_connection",
             ).inc()
             raise
+
+    for conn_id, model_id, context in provider_model_checks:
         await _reject_if_known_failed_provider_model(
             s,
-            provider_connection_id=payload.provider_connection_id,
-            provider_model_id=payload.provider_model_id,
+            provider_connection_id=conn_id,
+            provider_model_id=model_id,
+            context=context,
         )
+
+    if payload.provider_connection_id is not None:
         provider_connection = (
             await s.execute(
                 select(ProviderConnection).where(
@@ -738,6 +901,17 @@ async def _create_batch_record(
                 ),
             )
         ).scalar_one_or_none()
+    provider_connections_by_id: dict[UUID, ProviderConnection] = {}
+    if provider_connection_ids:
+        provider_rows = (
+            await s.execute(
+                select(ProviderConnection).where(
+                    ProviderConnection.id.in_(list(provider_connection_ids)),
+                    ProviderConnection.deleted_at.is_(None),
+                ),
+            )
+        ).scalars().all()
+        provider_connections_by_id = {row.id: row for row in provider_rows}
 
     task_result = await resolve_task_filter_with_diagnostics(
         s,
@@ -805,14 +979,17 @@ async def _create_batch_record(
     elif budget_policy == "none":
         budget_policy = "hard"
 
-    budget_estimate = await estimate_pre_run_batch_budget(
+    budget_estimate, budget_diagnostics = await _estimate_pre_run_budget_for_payload(
         s,
-        provider_connection=provider_connection,
-        provider_model_id=payload.provider_model_id,
+        payload=payload,
+        provider_connections_by_id=provider_connections_by_id,
+        task_count=len(valid_task_ids),
         expected_trial_count=expected,
+        required_worker_pool_count=len(required_worker_pools),
         settings=request.app.state.settings,
         budget_usd=payload.budget_usd,
         budget_policy=budget_policy,
+        provider_connection=provider_connection,
     )
     if budget_policy != "none":
         pre_run_cost = budget_estimate.pre_run_estimated_cost_usd
@@ -896,6 +1073,7 @@ async def _create_batch_record(
         pre_run_cost_estimate_confidence=(
             budget_estimate.cost_estimate_confidence
         ),
+        budget_diagnostics=budget_diagnostics,
     )
     s.add(b)
     await s.flush()

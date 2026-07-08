@@ -1055,6 +1055,98 @@ async def test_runner_forwards_batch_provider_connection_fields(
     assert {t.provider_model_id for t in trials} == {"deepseek-chat"}
 
 
+async def test_runner_forwards_combination_provider_connection_fields(
+    runner_setup: tuple[
+        async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
+    ],
+    postgres_url: str,
+) -> None:
+    session_factory, http_client, team_id, _task_ids, captured = runner_setup
+    conn_a = uuid4()
+    conn_b = uuid4()
+    async with session_factory() as s:
+        for conn_id, display_name in (
+            (conn_a, "Combo provider A"),
+            (conn_b, "Combo provider B"),
+        ):
+            s.add(ProviderConnection(
+                id=conn_id,
+                team_id=team_id,
+                provider_type="openai-compatible",
+                display_name=display_name,
+                base_url="https://api.openai.com/v1",
+                upstream_host="api.openai.com",
+                resolved_egress_ips=["104.18.0.1"],
+                encrypted_api_key_ref=f"test://{conn_id}",
+                status="valid",
+                pricing_source="tokens-only",
+                rate_card_provider="openai",
+                created_by="test:runner",
+            ))
+        await s.flush()
+        c = Batch(
+            team_id=team_id,
+            name="combo-providers",
+            task_filter={"license": "MIT", "subset_kind": "first_n", "n": 1},
+            trial_config={},
+            combinations=[
+                {
+                    "agent_name": "litellm",
+                    "agent_model": {"provider": "openai", "name": "glm-5.1-thinking"},
+                    "provider_connection_id": str(conn_a),
+                    "provider_model_id": "glm-5.1-thinking",
+                    "n_per_task": 1,
+                    "label": "glm",
+                },
+                {
+                    "agent_name": "litellm",
+                    "agent_model": {"provider": "openai", "name": "qwen3.6-35b-a3b"},
+                    "provider_connection_id": str(conn_b),
+                    "provider_model_id": "qwen3.6-35b-a3b",
+                    "n_per_task": 1,
+                    "label": "qwen",
+                },
+            ],
+            state="submitted",
+            created_by_token_prefix="abcdef12",
+            expected_trial_count=2,
+            provider_connection_id=None,
+            provider_model_id=None,
+        )
+        s.add(c)
+        await s.commit()
+        await s.refresh(c)
+        cid = c.id
+
+    await run_once(
+        session_factory=session_factory,
+        http_client=http_client,
+        batch_size=10,
+        submit_rate_per_sec=100,
+    )
+
+    assert captured
+    payloads_by_combo = {body["combination_idx"]: body for body in captured}
+    assert payloads_by_combo[0]["provider_connection_id"] == str(conn_a)
+    assert payloads_by_combo[0]["provider_model_id"] == "glm-5.1-thinking"
+    assert payloads_by_combo[1]["provider_connection_id"] == str(conn_b)
+    assert payloads_by_combo[1]["provider_model_id"] == "qwen3.6-35b-a3b"
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        trials = s.execute(
+            select(Trial)
+            .where(Trial.batch_id == cid)
+            .order_by(Trial.combination_idx.asc()),
+        ).scalars().all()
+    sync_engine.dispose()
+    assert [(t.combination_idx, t.provider_connection_id, t.provider_model_id) for t in trials] == [
+        (0, conn_a, "glm-5.1-thinking"),
+        (1, conn_b, "qwen3.6-35b-a3b"),
+    ]
+
+
 async def test_runner_skips_invalid_task_configs_and_adjusts_expected(
     runner_setup: tuple[
         async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],

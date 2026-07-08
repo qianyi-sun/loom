@@ -123,6 +123,39 @@ def _load_task_filter_json(raw: str) -> dict[str, Any]:
     return cast(dict[str, Any], data)
 
 
+def _load_combinations_json(raw: str) -> list[dict[str, Any]]:
+    """Parse --combinations-json argument. JSON string or @path/to/file."""
+    if raw.startswith("@"):
+        path = raw[1:]
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except OSError as exc:
+            raise argparse.ArgumentTypeError(
+                f"--combinations-json @{path}: {exc}",
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise argparse.ArgumentTypeError(
+                f"--combinations-json @{path}: invalid JSON: {exc}",
+            ) from exc
+    else:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise argparse.ArgumentTypeError(
+                f"--combinations-json: invalid JSON: {exc}",
+            ) from exc
+    if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
+        raise argparse.ArgumentTypeError(
+            "--combinations-json must be a JSON array of objects",
+        )
+    if not data:
+        raise argparse.ArgumentTypeError(
+            "--combinations-json must contain at least one combination",
+        )
+    return cast(list[dict[str, Any]], data)
+
+
 def _agent_items_from_response(data: Any) -> list[dict[str, Any]]:
     if isinstance(data, dict):
         items = data.get("items")
@@ -481,51 +514,78 @@ def _batch_create(args: argparse.Namespace) -> int:
                 return 1
         cfg = require_logged_in()
         with authed_client(cfg) as c:
-            needs_model, agent_err = _agent_needs_model(c, args.agent)
-            if agent_err is not None:
-                sys.stderr.write(agent_err)
-                return 2
-            assert needs_model is not None
-
-            if needs_model:
-                missing = [
+            combinations = args.combinations_json
+            conn: dict[str, Any] | None = None
+            if combinations is not None:
+                conflicting = [
                     flag
                     for flag, value in (
+                        ("--agent", args.agent),
                         ("--provider", args.provider),
                         ("--model", args.model),
+                        ("--agent-provider", args.agent_provider),
+                        ("--n-per-task", args.n_per_task),
                     )
-                    if not value
+                    if value is not None
                 ]
-                if missing:
+                if conflicting:
                     message = (
-                        f"error: agent {args.agent!r} requires --provider and "
-                        "--model for batch creation; missing " + ", ".join(missing) + ".\n"
+                        "error: --combinations-json carries agent/model/provider "
+                        "routing; omit " + ", ".join(conflicting) + ".\n"
                     )
                     sys.stderr.write(message)
                     return 2
-            elif args.provider or args.model or args.agent_provider:
-                sys.stderr.write(
-                    f"error: agent {args.agent!r} does not take a model; omit "
-                    "--provider, --model, and --agent-provider.\n",
-                )
-                return 2
+                trial_config: dict[str, Any] = {}
+            else:
+                if args.agent is None:
+                    sys.stderr.write(
+                        "error: --agent is required unless --combinations-json is supplied.\n",
+                    )
+                    return 2
+                needs_model, agent_err = _agent_needs_model(c, args.agent)
+                if agent_err is not None:
+                    sys.stderr.write(agent_err)
+                    return 2
+                assert needs_model is not None
 
-            trial_config: dict[str, Any] = {
-                "agent_name": args.agent,
-                "agent_model": None,
-            }
-            conn: dict[str, Any] | None = None
-            if needs_model:
-                conn = _resolve_by_name(
-                    c,
-                    args.provider,
-                    team_id=args.team_id,
-                )
-                trial_config["agent_model"] = _build_agent_model(
-                    conn["type"],
-                    args.model,
-                    agent_provider_override=args.agent_provider,
-                )
+                if needs_model:
+                    missing = [
+                        flag
+                        for flag, value in (
+                            ("--provider", args.provider),
+                            ("--model", args.model),
+                        )
+                        if not value
+                    ]
+                    if missing:
+                        message = (
+                            f"error: agent {args.agent!r} requires --provider and "
+                            "--model for batch creation; missing " + ", ".join(missing) + ".\n"
+                        )
+                        sys.stderr.write(message)
+                        return 2
+                elif args.provider or args.model or args.agent_provider:
+                    sys.stderr.write(
+                        f"error: agent {args.agent!r} does not take a model; omit "
+                        "--provider, --model, and --agent-provider.\n",
+                    )
+                    return 2
+
+                trial_config = {
+                    "agent_name": args.agent,
+                    "agent_model": None,
+                }
+                if needs_model:
+                    conn = _resolve_by_name(
+                        c,
+                        args.provider,
+                        team_id=args.team_id,
+                    )
+                    trial_config["agent_model"] = _build_agent_model(
+                        conn["type"],
+                        args.model,
+                        agent_provider_override=args.agent_provider,
+                    )
             # --benchmark / --task-set are shortcuts for common task_filter
             # shapes. Operators wanting richer filters use --task-filter JSON
             # instead. Multiple selector forms are rejected so precedence stays
@@ -571,6 +631,8 @@ def _batch_create(args: argparse.Namespace) -> int:
             if conn is not None:
                 payload["provider_connection_id"] = conn["id"]
                 payload["provider_model_id"] = args.model
+            if combinations is not None:
+                payload["combinations"] = combinations
             if args.n_per_task is not None:
                 payload["n_per_task"] = args.n_per_task
             if args.backend is not None:
@@ -1222,7 +1284,22 @@ def dispatch(argv: list[str]) -> int:
             "omit for no-model agents such as oracle."
         ),
     )
-    p_bc.add_argument("--agent", required=True)
+    p_bc.add_argument(
+        "--agent",
+        default=None,
+        help="Agent name for the legacy single-combination create path.",
+    )
+    p_bc.add_argument(
+        "--combinations-json",
+        dest="combinations_json",
+        type=_load_combinations_json,
+        default=None,
+        help=(
+            "Combination matrix as JSON array or @path. Each object uses the "
+            "API Combination shape: agent_name, agent_model, n_per_task, "
+            "optional label, provider_connection_id, and provider_model_id."
+        ),
+    )
     p_bc.add_argument(
         "--benchmark",
         default=None,
