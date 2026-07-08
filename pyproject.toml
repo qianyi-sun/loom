@@ -87,6 +87,29 @@ dev = [
 [project.scripts]
 loom = "loom_cli.__main__:main"
 
+[project.entry-points."loom.family.keys"]
+instance_id_prefix = "loom.family_run.keys:InstanceIdPrefixExtractor"
+
+[project.entry-points."loom.family.sequencers"]
+alphabetical = "loom.family_run.sequencers:AlphabeticalSequencer"
+ranking_file = "loom.family_run.sequencers:RankingFileSequencer"
+submitted_order = "loom.family_run.sequencers:SubmittedOrderSequencer"
+
+[project.entry-points."loom.family.advance"]
+always_on_terminal = "loom.family_run.advance:AlwaysOnTerminalPredicate"
+success_or_retry_exhausted = "loom.family_run.advance:SuccessOrRetryExhaustedPredicate"
+
+[project.entry-points."loom.family.adapters"]
+noop = "loom.family_run.adapters:NoopAdapter"
+
+[project.entry-points."loom.family.failure_policies"]
+stall_family = "loom.family_run.failure:StallFamilyPolicy"
+skip_and_advance = "loom.family_run.failure:SkipAndAdvancePolicy"
+abort_family = "loom.family_run.failure:AbortFamilyPolicy"
+
+[project.entry-points."loom.family.state_backends"]
+s3_artifacts = "loom.family_run.state_backends:S3ArtifactsStateBackend"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["loom*", "loom_drivers*"]

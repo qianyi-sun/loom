@@ -45,3 +45,27 @@ def test_resolve_plugin_available_names_listed_in_error(monkeypatch):
     )
     with pytest.raises(RegistryError, match="a, b"):
         resolve_plugin("loom.family.sequencers", PluginRef(name="missing"))
+
+
+def test_shipped_plugins_all_discoverable():
+    """Every zero-arg plugin declared in pyproject.toml is discoverable.
+
+    ``s3_artifacts`` requires constructor arguments (store + bucket) so
+    it isn't zero-arg constructable. The batch-submit / orchestrator
+    code that instantiates it builds the correct constructor call.
+    """
+    combos = [
+        ("loom.family.keys", "instance_id_prefix"),
+        ("loom.family.sequencers", "alphabetical"),
+        ("loom.family.sequencers", "ranking_file"),
+        ("loom.family.sequencers", "submitted_order"),
+        ("loom.family.advance", "always_on_terminal"),
+        ("loom.family.advance", "success_or_retry_exhausted"),
+        ("loom.family.adapters", "noop"),
+        ("loom.family.failure_policies", "stall_family"),
+        ("loom.family.failure_policies", "skip_and_advance"),
+        ("loom.family.failure_policies", "abort_family"),
+    ]
+    for group, name in combos:
+        plugin = resolve_plugin(group, PluginRef(name=name))
+        assert plugin is not None
