@@ -14,6 +14,7 @@ Also enforces:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
@@ -22,6 +23,9 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 
 from loom.auth import verify_bearer_token
+from loom.family_run.orchestration import apply_advance_decision
+from loom.family_run.registry import resolve_plugin
+from loom.family_run.spec import AdvanceDecision, ResolvedFamilyRunSpec
 from loom.models.result import FailureReason, TrialState
 from loom_control_plane.metrics import STATE_PATCH_TOTAL
 
@@ -69,6 +73,164 @@ SELECT id
 _TERMINAL = {
     TrialState.SUCCEEDED, TrialState.FAILED, TrialState.CANCELLED,
 }
+
+# #672 family-runs: at finalize, load the batch's family_run_spec and the
+# trial's family row so the advance predicate can decide next steps.
+_FAMILY_FINALIZE_LOAD_SQL = text("""
+SELECT t.family_key,
+       t.batch_id,
+       t.task_id,
+       t.attempt_count,
+       t.state           AS trial_state,
+       t.result,
+       b.family_run_spec AS spec,
+       bfs.task_sequence,
+       bfs.current_index,
+       bfs.attempt_count AS family_attempt_count,
+       bfs.state         AS family_state
+  FROM trials t
+  JOIN batches b ON b.id = t.batch_id
+  JOIN batch_family_state bfs
+    ON bfs.batch_id = t.batch_id
+   AND bfs.family_key = t.family_key
+ WHERE t.id = (:trial_id)::uuid
+   AND t.family_key IS NOT NULL
+   AND b.family_run_spec IS NOT NULL
+   FOR UPDATE OF bfs
+""")
+
+_FAMILY_FINALIZE_UPDATE_SQL = text("""
+UPDATE batch_family_state
+   SET state = (:new_state)::text,
+       current_index = (:new_current_index)::int,
+       attempt_count = (:new_attempt_count)::int,
+       updated_at = NOW()
+ WHERE batch_id = (:batch_id)::uuid
+   AND family_key = (:family_key)::text
+""")
+
+# #672 PR-1 shortcut: SKIP/ABORT decisions cancel any remaining queued
+# trials in the same family so the batch settles cleanly.
+_FAMILY_CANCEL_REMAINING_SQL = text("""
+UPDATE trials
+   SET state = 'cancelled',
+       finished_at = NOW()
+ WHERE batch_id = (:batch_id)::uuid
+   AND family_key = (:family_key)::text
+   AND state = 'queued'
+""")
+
+
+def _reward_from_result(result: Any) -> float | None:
+    if not isinstance(result, dict):
+        return None
+    reward = result.get("reward")
+    if isinstance(reward, (int, float)):
+        return float(reward)
+    return None
+
+
+@dataclass
+class _TrialShim:
+    id: UUID
+    task_id: str
+    state: str
+    reward: float | None
+    attempt_count: int
+
+
+@dataclass
+class _FamilyShim:
+    batch_id: UUID
+    family_key: str
+    task_sequence: list[str]
+    current_index: int
+    attempt_count: int
+
+
+async def _finalize_family(
+    session: Any,
+    *,
+    trial_id: UUID,
+    new_state: TrialState,
+) -> None:
+    """Evaluate the family's advance predicate + persist the new state.
+
+    Called from ``patch_state`` after a trial transitions to a terminal
+    state (succeeded/failed/cancelled). No-op when the trial isn't part
+    of a family-run batch. PR-1 also applies a ``noop`` shortcut so the
+    framework works end-to-end without the orchestrator service; PR-2
+    removes that shortcut once the real orchestrator lands.
+    """
+    row = (
+        await session.execute(
+            _FAMILY_FINALIZE_LOAD_SQL, {"trial_id": trial_id},
+        )
+    ).mappings().one_or_none()
+    if row is None:
+        return
+
+    spec = ResolvedFamilyRunSpec.model_validate(row["spec"])
+    predicate = resolve_plugin("loom.family.advance", spec.advance_predicate)
+    trial_shim = _TrialShim(
+        id=trial_id,
+        task_id=row["task_id"],
+        state=new_state.value,
+        reward=_reward_from_result(row["result"]),
+        attempt_count=row["attempt_count"],
+    )
+    family_shim = _FamilyShim(
+        batch_id=row["batch_id"],
+        family_key=row["family_key"],
+        task_sequence=list(row["task_sequence"]),
+        current_index=row["current_index"],
+        attempt_count=row["family_attempt_count"],
+    )
+    decision: AdvanceDecision = predicate.decide(
+        trial=trial_shim,
+        family=family_shim,
+        spec=spec,
+        params=spec.advance_predicate.params,
+    )
+    next_state = apply_advance_decision(family_shim, decision)
+
+    # PR-1 noop shortcut: when the adapter is the framework-shipped
+    # ``noop`` (identity) adapter, there is no orchestrator to bump the
+    # index after ADVANCE. Apply the bump in-line so PR-1 lands
+    # self-contained. TODO(PR-2): remove this branch once the
+    # orchestrator service handles the ``adapting`` -> ``pending``
+    # transition.
+    persist_state = next_state.state
+    persist_index = next_state.current_index
+    persist_attempt = next_state.attempt_count
+    if decision == AdvanceDecision.ADVANCE and spec.adapter.name == "noop":
+        bumped_index = family_shim.current_index + 1
+        if bumped_index >= len(family_shim.task_sequence):
+            persist_state = "done"
+        else:
+            persist_state = "pending"
+        persist_index = bumped_index
+        persist_attempt = 0
+
+    await session.execute(
+        _FAMILY_FINALIZE_UPDATE_SQL,
+        {
+            "batch_id": row["batch_id"],
+            "family_key": row["family_key"],
+            "new_state": persist_state,
+            "new_current_index": persist_index,
+            "new_attempt_count": persist_attempt,
+        },
+    )
+
+    if decision in (AdvanceDecision.SKIP, AdvanceDecision.ABORT):
+        await session.execute(
+            _FAMILY_CANCEL_REMAINING_SQL,
+            {
+                "batch_id": row["batch_id"],
+                "family_key": row["family_key"],
+            },
+        )
 
 
 @router.patch("/trials/{trial_id}/state")
@@ -157,6 +319,15 @@ async def patch_state(
             "is_terminal": new_state in _TERMINAL,
             "allowed_from": allowed_from,
         })).mappings().one_or_none()
+
+        # #672 family-runs: on terminal state, evaluate the advance
+        # predicate + persist the family's new position within the same
+        # transaction. No-op for non-family trials.
+        if row is not None and new_state in _TERMINAL:
+            await _finalize_family(
+                session, trial_id=trial_id, new_state=new_state,
+            )
+
         await session.commit()
 
     if row is None:
