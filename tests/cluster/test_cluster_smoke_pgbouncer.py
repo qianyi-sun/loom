@@ -17,7 +17,7 @@ so it does not interfere with an operator's existing kind context.
 
 Note: Loom service images are not built during this test.  The smoke
 validates only the manifest-render fidelity and the pgbouncer Deployment
-readiness (which uses the public ``bitnami/pgbouncer`` image).  Service
+readiness (which uses the public ``bitnamilegacy/pgbouncer`` image).  Service
 pods that reference internal ``loom-*`` images will remain in
 ``ImagePullBackOff``/``ErrImageNeverPull`` — that is expected and does not
 affect the pgbouncer assertions.

@@ -421,6 +421,22 @@ knob you need.
    bash /tmp/loom-secret.sh
    ```
 
+   **When `pgbouncer.enabled=true` (default per #609):** the command emits a
+   shell script rather than a single `kubectl create secret` line, because
+   the `*-db-url-pool` secrets are mechanically derived from their direct
+   siblings via `loom cluster derive-pool-dsn` (called as a `$(...)` shell
+   substitution). Operators only edit the direct-URL slots (`cp-db-url`,
+   `gw-db-url`, `svc-db-url`) — the corresponding `*-db-url-pool` values are
+   computed at execution time by rewriting host `loom-postgres` → `loom-pgbouncer`
+   and port `5432` → `6432`. Do not paste the shell-script output into a
+   terminal blindly; the `$(...)` substitutions won't expand until `bash` runs
+   them.
+
+   Rollback path for pgbouncer: set `pgbouncer.enabled=false` in the
+   profile, re-render manifests, `kubectl apply`. Services fall back to
+   `db_url` (direct) and the pool secrets go unused. No secret rotation,
+   no data migration. See `docs/architecture/pgbouncer-transaction-mode-design.md`.
+
    The `worker-token` value is overwritten in step 6.
 
    Create the singleton admin secret file with the operator CLI and mount it as
