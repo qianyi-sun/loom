@@ -80,6 +80,16 @@ def _bundle_checksum(bundle_dir: Path) -> str:
     for path in sorted(bundle_dir.rglob("*")):
         if path.is_dir():
             continue
+        # HuggingFace's snapshot_download seeds the snapshot directory
+        # with `.huggingface/` cache metadata and `.gitattributes` files
+        # that are not present at publish time. If we include them in
+        # the hash, mirror-time recomputation diverges from the manifest
+        # even though the actual task bundle is byte-identical. Skip any
+        # dotfile / dotdir on the walk; task bundles have no legitimate
+        # use for dotfiles today.
+        rel_parts = path.relative_to(bundle_dir).parts
+        if any(p.startswith(".") for p in rel_parts):
+            continue
         rel = path.relative_to(bundle_dir).as_posix().encode("utf-8")
         hasher.update(b"\x00" + rel + b"\x00")
         hasher.update(path.read_bytes())
