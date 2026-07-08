@@ -196,7 +196,10 @@ entry needs it on day one.
 For each service `S`, emit a `BaseSettings` subclass with:
 
 - `env_prefix = f"LOOM_{service_prefix[S]}_"`
-- `env_file = ".env"`, `extra = "forbid"` (matches today's `SettingsConfigDict`).
+- `env_file = ".env"`, `dotenv_filtering = "only_existing"`, and
+  `extra = "forbid"`. Dotenv loading accepts a shared repo `.env` that contains
+  other Loom service prefixes, while constructor kwargs still fail fast on
+  unknown fields.
 - One field per `service_config.E` entry where `S in E.used_by`. Field shape is resolved by these rules, applied in order:
   1. `E.required = true` → emit `name: T` with no default (Pydantic raises if env var missing).
   2. Else `E.default` set → emit `name: T = <default>`.
@@ -275,7 +278,10 @@ Each step is independently revertible:
 
 - **Gateway's `LocalProviderConfig` parser** (multi-name env-var pattern `LOOM_GW_LOCAL_<NAME>_BASE_URL` + `_API_KEY`) stays as hand-written code in `loom_llm_gateway/config.py`. The schema covers one-name-one-entry; complex parsers remain imperative.
 - **Worker-only Path fields** (`docker_socket`, `fixtures_root`, `benchmark_cache`, `trajectory_cache_dir`) map cleanly: `used_by = ["worker"]`, `python_type = "Path"`, optional via no `required`.
-- **`extra = "forbid"`** stays on the generated `SettingsConfigDict`. Any env var not in the schema fails fast at service startup — same protection the hand-written classes have today.
+- **`extra = "forbid"`** stays on the generated `SettingsConfigDict` for
+  constructor kwargs and programmatic settings, while dotenv uses
+  `only_existing` filtering so one shared `.env` can hold multiple Loom service
+  prefixes without making unrelated services fail startup.
 - **Boolean envs** (`dev_reload`, `enable_worker_vllm`, `team_registration_open`) use `python_type = "bool"`; Pydantic's standard truthy-string parsing applies.
 - **`generate` is a shell command, not a function name.** `loom cluster bootstrap-secrets` runs it via `subprocess.run` with `shell=False` after `shlex.split`. The operator sees the exact command in `--dry-run` output before any cluster mutation.
 

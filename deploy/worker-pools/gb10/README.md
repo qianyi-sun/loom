@@ -522,9 +522,12 @@ must not remain enabled, because user-manager/default-target starts during SSH
 can race node-agent and recreate the worker outside the release-state boundary.
 The staging desired-state profile sets
 `LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS=7200` so the earliest host in a 15-host
-serial prep does not idle-exit before release-gate and smoke can observe all
-150 slots. Do not reduce this below the protected rollout convergence plus
-smoke window.
+bounded-parallel prep does not idle-exit before release-gate and smoke can
+observe all 150 slots. `loom cluster rollout` step 11 keeps each host's prep
+sequence ordered, but submits independent hosts with bounded concurrency. Tune
+that host-level fanout through `--gb10-prep-concurrency N`; do not make it
+unbounded, and do not reduce the idle-exit window below the protected rollout
+convergence plus smoke window.
 
 Rollback publishes the previous desired image/concurrency/env version back to
 the Control Plane first, then applies it locally. This keeps the periodic

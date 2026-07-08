@@ -49,6 +49,21 @@
     "default": "False",
     "required": false
   },
+  "family_adapter_call_timeout_sec": {
+    "annotation": "<class 'float'>",
+    "default": "300.0",
+    "required": false
+  },
+  "family_orchestrator_poll_sec": {
+    "annotation": "<class 'float'>",
+    "default": "5.0",
+    "required": false
+  },
+  "family_state_download_timeout_sec": {
+    "annotation": "<class 'float'>",
+    "default": "120.0",
+    "required": false
+  },
   "llm_gateway_url": {
     "annotation": "<class 'pydantic.networks.HttpUrl'>",
     "default": "'http://loom-llm-gateway:9100'",
@@ -87,6 +102,11 @@
   "signed_url_expiry_sec": {
     "annotation": "<class 'int'>",
     "default": "3600",
+    "required": false
+  },
+  "skill_evolver_default_model": {
+    "annotation": "<class 'str'>",
+    "default": "'anthropic/claude-sonnet-4-6'",
     "required": false
   },
   "slurm_worker_controller_allowed_nodes": {

@@ -39,6 +39,11 @@
     "default": "False",
     "required": false
   },
+  "family_state_download_timeout_sec": {
+    "annotation": "<class 'float'>",
+    "default": "120.0",
+    "required": false
+  },
   "fixtures_root": {
     "annotation": "pathlib.Path | None",
     "default": "None",

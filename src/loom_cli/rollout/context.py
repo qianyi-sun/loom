@@ -87,6 +87,8 @@ class RolloutContext:
         exclude_oldlab: Operator opt-out of the OLDLAB worker pool.
             Refused when scope=full-cluster per the #340 acceptance criteria
             (you can't claim full-cluster acceptance while excluding a pool).
+        gb10_prep_concurrency: Optional bounded host-level concurrency for
+            rollout step 11. ``None`` uses the step's conservative default.
         resume: Whether this invocation is a resume of a prior run.
     """
 
@@ -116,6 +118,7 @@ class RolloutContext:
     smoke_admin_actor: str | None = None
     scope: str = "current-gb10"
     exclude_oldlab: bool = False
+    gb10_prep_concurrency: int | None = None
     resume: bool = False
 
     # Extra state — not hashed into inputs, just carried for convenience.
@@ -154,6 +157,7 @@ class RolloutContext:
             ),
             "scope": self.scope,
             "exclude_oldlab": self.exclude_oldlab,
+            "gb10_prep_concurrency": self.gb10_prep_concurrency,
         }
 
     def is_full_cluster_scope(self) -> bool:
