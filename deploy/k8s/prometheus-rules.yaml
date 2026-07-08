@@ -552,3 +552,101 @@ spec:
                     sum by (result) (rate(loom_worker_trials_completed_total[5m]))
                 - Check recent trial trajectories for common failure
                   reasons.
+
+    - name: loom.pgbouncer.health
+      interval: 30s
+      rules:
+        # pgbouncer's backend pool is saturated — clients are queueing
+        # for a free Postgres backend. Under continuous autoscaling to
+        # 100+ concurrent trials this signals that `default_pool_size`
+        # needs bumping (schema field, no code change). Metric emitted
+        # by prometheuscommunity/pgbouncer-exporter sidecar.
+        - alert: LoomPgbouncerClientWaiting
+          expr: sum(pgbouncer_pool_client_waiting_connections) > 0
+          for: 1m
+          labels:
+            severity: warning
+            component: pgbouncer
+          annotations:
+            summary: "pgbouncer clients waiting for a backend > 60s"
+            description: |
+              At least one client has been queued waiting for a free
+              Postgres backend from pgbouncer's pool for more than 60s.
+              Every additional waiting client is a request stalling in
+              SQLAlchemy pool_pre_ping or in the app's DB call path.
+
+              Triage:
+                kubectl exec deploy/loom-pgbouncer -c pgbouncer -- \
+                  psql -h localhost -p 6432 -U loom pgbouncer -c 'SHOW POOLS'
+
+              Fix: bump `pgbouncer.default_pool_size` in the environment
+              profile (currently 25) and re-render + apply. Verify
+              Postgres `max_connections` (currently 150) has headroom
+              for `pgbouncer.replicas × default_pool_size + LISTEN
+              watchers + admin slack`.
+            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/architecture/pgbouncer-transaction-mode-design.md"
+
+        # pgbouncer pod is unreachable. Under normal operation, kind's
+        # Service should route between the 2 replicas; both being
+        # scrape-unreachable means the whole path is down. Same tier
+        # as Postgres SPOF — every SQLAlchemy engine returns 5xx until
+        # a pod recovers.
+        - alert: LoomPgbouncerScrapeDown
+          expr: up{job="pgbouncer-exporter"} == 0
+          for: 3m
+          labels:
+            severity: critical
+            component: pgbouncer
+          annotations:
+            summary: "pgbouncer-exporter unreachable — pgbouncer may be down"
+            description: |
+              Prometheus can't reach pgbouncer-exporter on port 9127.
+              Either the pgbouncer pod is down, or the sidecar exporter
+              is stuck. Every service SQLAlchemy engine routes through
+              pgbouncer.
+
+              Triage:
+                kubectl get pods -n loom -l app=loom-pgbouncer
+                kubectl logs -n loom -l app=loom-pgbouncer -c pgbouncer --tail=200
+                kubectl logs -n loom -l app=loom-pgbouncer -c exporter --tail=100
+
+              Rollback path if pgbouncer is broken: set
+              `pgbouncer.enabled=false` in the profile, re-render,
+              apply. Services fall back to db_url (direct-to-Postgres).
+
+    - name: loom.listen.health
+      interval: 30s
+      rules:
+        # LISTEN watcher fell back to poll-only mode at boot. Its
+        # NOTIFY self-test round-trip didn't complete within 1s,
+        # meaning the connection likely routes through pgbouncer
+        # transaction mode (which silently drops NOTIFY delivery).
+        # Not a correctness failure — the poll fallback keeps the
+        # snapshot fresh — but latency degrades from <100ms to poll-
+        # interval seconds. Emitted by src/loom_listen/self_test.py.
+        - alert: LoomListenWatcherPollFallback
+          expr: loom_listen_watcher_push_mode == 0
+          for: 2m
+          labels:
+            severity: warning
+            component: listen-watcher
+          annotations:
+            summary: "LISTEN watcher {{ $labels.watcher }} in poll-only mode"
+            description: |
+              The LISTEN watcher labeled `{{ $labels.watcher }}` failed
+              its boot-time NOTIFY round-trip probe and is now serving
+              from the poll timer instead of NOTIFY push. Push-mode
+              latency (~100ms) has degraded to poll-interval latency
+              (5-10s).
+
+              Root cause: the watcher's DSN routes through pgbouncer
+              transaction mode. Watcher connections MUST be direct-to-
+              Postgres. Check that `LOOM_EGRESS_XDS_DB_URL` and
+              `svc-db-url` in `loom-secrets` point at `loom-postgres:5432`
+              (direct), not `loom-pgbouncer:6432`.
+
+              Verify with:
+                loom cluster doctor
+              which enforces the direct/pool DSN invariants when
+              pgbouncer.enabled=true.
+            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/architecture/pgbouncer-transaction-mode-design.md"
