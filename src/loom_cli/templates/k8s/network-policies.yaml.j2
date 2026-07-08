@@ -104,6 +104,8 @@ spec:
     # Postgres for state + DNS.
     - to:
         - podSelector: { matchLabels: { app: loom-postgres } }
+        # CNPG-managed Postgres pods (topology.multi_node=true) — #642
+        - podSelector: { matchLabels: { cnpg.io/cluster: loom-postgres } }
       ports:
         - { port: 5432, protocol: TCP }
     - to:
@@ -142,6 +144,8 @@ spec:
     # opens up only to the proxy.
     - to:
         - podSelector: { matchLabels: { app: loom-postgres } }
+        # CNPG-managed Postgres pods (topology.multi_node=true) — #642
+        - podSelector: { matchLabels: { cnpg.io/cluster: loom-postgres } }
       ports:
         - { port: 5432, protocol: TCP }
     - to:
@@ -250,6 +254,8 @@ spec:
         - { port: 9100, protocol: TCP }
     - to:
         - podSelector: { matchLabels: { app: loom-postgres } }
+        # CNPG-managed Postgres pods (topology.multi_node=true) — #642
+        - podSelector: { matchLabels: { cnpg.io/cluster: loom-postgres } }
       ports:
         - { port: 5432, protocol: TCP }
     - to:
@@ -336,6 +342,8 @@ spec:
   egress:
     - to:
         - podSelector: { matchLabels: { app: loom-postgres } }
+        # CNPG-managed Postgres pods (topology.multi_node=true) — #642
+        - podSelector: { matchLabels: { cnpg.io/cluster: loom-postgres } }
       ports:
         - { port: 5432, protocol: TCP }
     - to:
@@ -420,6 +428,8 @@ spec:
   egress:
     - to:
         - podSelector: { matchLabels: { app: loom-postgres } }
+        # CNPG-managed Postgres pods (topology.multi_node=true) — #642
+        - podSelector: { matchLabels: { cnpg.io/cluster: loom-postgres } }
       ports:
         - { port: 5432, protocol: TCP }
     - to:
