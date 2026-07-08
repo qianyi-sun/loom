@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -39,7 +38,7 @@ class _FakeResult:
         outer = self
 
         class _M:
-            def one_or_none(self_inner):  # type: ignore[no-untyped-def]
+            def one_or_none(self) -> Any:
                 return outer.row
 
         return _M()

@@ -8,9 +8,9 @@ from uuid import uuid4
 import pytest
 
 from loom.family_run.spec import PluginRef, ResolvedFamilyRunSpec
+from loom.family_run.state_backends import S3ArtifactsStateBackend
 from loom.family_run.submit import seed_family_state
 from loom.trajectory.storage import FakeObjectStore
-from loom.family_run.state_backends import S3ArtifactsStateBackend
 
 
 @dataclass
