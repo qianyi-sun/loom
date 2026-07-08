@@ -975,8 +975,15 @@ def _pod_unready_reason(pod: Any) -> str:
 _TEMPLATE_ORDER: tuple[str, ...] = (
     "persistent-storage.yaml.j2",
     "postgres.yaml.j2",
+    # Multi-node HA shape (#637): CNPG Cluster CR. Renders only when
+    # topology.multi_node = true; otherwise expands to empty output
+    # and single-node postgres.yaml.j2 above owns the Postgres shape.
+    "postgres-cnpg.yaml.j2",
     "pgbouncer.yaml.j2",
     "minio.yaml.j2",
+    # Multi-node MinIO distributed shape (#610). Same conditional
+    # rendering as postgres-cnpg above.
+    "minio-distributed.yaml.j2",
     "control-plane.yaml.j2",
     "loom-service.yaml.j2",
     "llm-gateway.yaml.j2",

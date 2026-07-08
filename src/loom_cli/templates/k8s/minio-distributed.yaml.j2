@@ -1,0 +1,132 @@
+{# Distributed MinIO for multi-node HA (#610, #637).
+
+  Renders only when topology.multi_node = true. Runs
+  topology.minio_replicas MinIO pods with erasure coding across nodes.
+  Each pod has its own persistent volume; MinIO's server args include
+  a peer-discovery URL that resolves via the headless service.
+
+  Storage class picked by topology.storage_backend the same way as
+  Postgres. Longhorn recommended in production so a node loss doesn't
+  take a MinIO instance permanently offline.
+
+  The public Service (loom-minio) is unchanged from single-node — same
+  DNS name for consumers. The headless Service (loom-minio-headless)
+  is new; MinIO uses it internally for peer discovery via stable Pod
+  hostnames like `loom-minio-0.loom-minio-headless...`.
+#}
+{% if topology.multi_node %}
+apiVersion: v1
+kind: Service
+metadata:
+  # Headless service for MinIO peer discovery. Not for clients — the
+  # existing loom-minio ClusterIP service serves those.
+  name: loom-minio-headless
+spec:
+  clusterIP: None
+  selector: { app: loom-minio }
+  ports:
+    - { name: api, port: 9000, targetPort: 9000 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: loom-minio
+spec:
+  serviceName: loom-minio-headless
+  replicas: {{ topology.minio_replicas }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: { app: loom-minio }
+  template:
+    metadata:
+      labels: { app: loom-minio }
+    spec:
+{% if topology.anti_affinity == "required" %}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: { app: loom-minio }
+              topologyKey: kubernetes.io/hostname
+{% elif topology.anti_affinity == "preferred" %}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels: { app: loom-minio }
+                topologyKey: kubernetes.io/hostname
+{% endif %}
+      containers:
+        - name: minio
+          image: {{ minio_image }}
+          args:
+            - server
+            # Peer discovery: MinIO expands the shell-style range at
+            # startup and dials each peer. All pods must be able to
+            # resolve their peers via the headless service DNS.
+            - "http://loom-minio-{0...{{ topology.minio_replicas - 1 }}}.loom-minio-headless.{{ namespace }}.svc.cluster.local:9000/data"
+            - --console-address
+            - ":9001"
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-access-key } }
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-secret-key } }
+          ports:
+            - { containerPort: 9000, name: api }
+            - { containerPort: 9001, name: console }
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: 9000 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /minio/health/live, port: 9000 }
+            initialDelaySeconds: 60
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits: { cpu: 2, memory: 4Gi }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ ReadWriteOnce ]
+{% if topology.storage_backend == "longhorn" %}
+        storageClassName: longhorn
+{% elif topology.storage_backend == "host_path" %}
+        storageClassName: ""
+{% endif %}
+        resources:
+          requests:
+            storage: {{ minio_storage_gi }}Gi
+---
+# Client-facing Service. Same name / port as single-node so existing
+# consumers (loom-service, loom-control-plane, workers) reach MinIO
+# via the unchanged `loom-minio` DNS name.
+apiVersion: v1
+kind: Service
+metadata:
+  name: loom-minio
+spec:
+  selector: { app: loom-minio }
+  ports:
+    - { name: api, port: 9000, targetPort: 9000 }
+    - { name: console, port: 9001, targetPort: 9001 }
+---
+# PDB: minAvailable must be sized so MinIO's erasure quorum survives
+# voluntary disruptions. With 4 pods and standard 2-parity, quorum
+# requires ≥ 3 running.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: loom-minio
+spec:
+  minAvailable: {{ topology.minio_replicas - 1 }}
+  selector:
+    matchLabels: { app: loom-minio }
+{% endif %}
