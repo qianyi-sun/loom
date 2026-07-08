@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import shlex
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,6 +48,16 @@ class GB10Host:
     ssh_config_path: str | None = None
     ssh_identity_file: str | None = None
     ssh_certificate_file: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HostPrepResult:
+    """Aggregated prep result for one GB10 host."""
+
+    host: str
+    ok: bool
+    summary: str
+    attempts: int
 
 
 def gb10_hosts_for(ctx: RolloutContext) -> list[GB10Host]:
@@ -317,6 +328,16 @@ path.write_text("\\n".join(out) + "\\n", encoding="utf-8")
 PY"""
 
 
+def _host_evidence_dir(step_dir: StepDir, host: GB10Host) -> Path:
+    safe = (
+        host.ssh_target
+        .replace("@", "_at_")
+        .replace("/", "_")
+        .replace(":", "_")
+    )
+    return step_dir.path / f"host-{safe}"
+
+
 def _prep_one_host(
     ctx: RolloutContext,
     host: GB10Host,
@@ -378,6 +399,49 @@ def _prep_one_host(
     return True, f"prepped {host.ssh_target}"
 
 
+def _prep_host_with_retries(
+    *,
+    ctx: RolloutContext,
+    host: GB10Host,
+    host_dir: Path,
+    max_retries: int,
+    backoff_sec: float,
+) -> HostPrepResult:
+    ok = False
+    last_summary = ""
+    attempts = 0
+    host_dir.mkdir(exist_ok=True)
+    for attempt in range(1, max_retries + 1):
+        attempts = attempt
+        try:
+            ok, last_summary = _prep_one_host(ctx, host, host_dir)
+        except Exception as exc:  # pragma: no cover - defensive evidence path
+            ok = False
+            last_summary = f"gb10-prep crashed on {host.ssh_target}: {exc!r}"
+            (host_dir / "prep.log").write_text(last_summary + "\n")
+        if ok:
+            break
+        if attempt < max_retries:
+            time.sleep(backoff_sec * attempt)
+    return HostPrepResult(
+        host=host.ssh_target,
+        ok=ok,
+        summary=last_summary,
+        attempts=attempts,
+    )
+
+
+def _gb10_prep_concurrency(
+    ctx: RolloutContext,
+    *,
+    host_count: int,
+    default: int,
+) -> int:
+    value = ctx.gb10_prep_concurrency or default
+    value = max(1, value)
+    return min(host_count, value)
+
+
 class GB10PrepStep(BaseStep):
     number = 11
     name = "gb10-prep"
@@ -386,6 +450,8 @@ class GB10PrepStep(BaseStep):
     max_retries: int = 3
     #: Backoff seconds between retries (multiplied by attempt#).
     backoff_sec: float = 5.0
+    #: Conservative host-level parallelism; individual host commands stay ordered.
+    host_concurrency: int = 4
 
     def _inputs_fingerprint(self, ctx: RolloutContext) -> dict[str, object]:
         return {
@@ -487,23 +553,38 @@ class GB10PrepStep(BaseStep):
         if auth_error:
             step_dir.stderr_path().write_text(auth_error + "\n")
             return RunResult(exit_code=1, error=auth_error)
-        # Per-host subdir for logs.
-        summaries: list[str] = []
-        failures: list[str] = []
-        for host in hosts:
-            host_dir = step_dir.path / f"host-{host.ssh_target.replace('@', '_at_')}"
-            host_dir.mkdir(exist_ok=True)
-            ok = False
-            last_summary = ""
-            for attempt in range(1, self.max_retries + 1):
-                ok, last_summary = _prep_one_host(ctx, host, host_dir)
-                if ok:
-                    break
-                if attempt < self.max_retries:
-                    time.sleep(self.backoff_sec * attempt)
-            summaries.append(last_summary)
-            if not ok:
-                failures.append(host.ssh_target)
+        concurrency = _gb10_prep_concurrency(
+            ctx,
+            host_count=len(hosts),
+            default=self.host_concurrency,
+        )
+        ordered_results: list[HostPrepResult | None] = [None] * len(hosts)
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            future_to_index = {
+                executor.submit(
+                    _prep_host_with_retries,
+                    ctx=ctx,
+                    host=host,
+                    host_dir=_host_evidence_dir(step_dir, host),
+                    max_retries=self.max_retries,
+                    backoff_sec=self.backoff_sec,
+                ): index
+                for index, host in enumerate(hosts)
+            }
+            for future in as_completed(future_to_index):
+                ordered_results[future_to_index[future]] = future.result()
+
+        results = [result for result in ordered_results if result is not None]
+        failures = [result.host for result in results if not result.ok]
+        retried_hosts = sum(1 for result in results if result.attempts > 1)
+        summary = (
+            f"started={len(hosts)} "
+            f"succeeded={len(hosts) - len(failures)} "
+            f"failed={len(failures)} "
+            f"retried={retried_hosts} "
+            f"concurrency={concurrency}"
+        )
+        summaries = [summary, *(result.summary for result in results)]
         step_dir.stdout_path().write_text("\n".join(summaries) + "\n")
         if failures:
             return RunResult(

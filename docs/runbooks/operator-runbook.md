@@ -1293,30 +1293,34 @@ unit=loom-rollout-staging-abc1234
 systemd-run --user --unit "$unit" --collect \
   /bin/bash -lc '"'"'
     set -euo pipefail
+    export LOOM_SMOKE_ON_BEHALF_TEAM_ID="<agentic-rl-team-uuid>"
     cd /home/qianyi/dev/loom
-    exec .venv/bin/loom cluster rollout \
+    exec .venv/bin/loom cluster rollout staging \
       --ref origin/dev \
       --image-tag staging-abc1234 \
-      --cluster-name loom-staging \
-      --namespace loom-staging \
-      --environment staging \
-      --cp-url http://127.0.0.1:18081 \
-      --cluster-config deploy/environments/staging.cluster.toml \
-      --backup-manifest /data/loom-staging/backups/latest/backup-manifest.json \
-      --backup-manifest-min-remaining-hours 2 \
-      --rollout-root /data/loom-staging \
-      --admin-token file:/shared_work/qianyi/loom-worker-capacity/staging-admin-token \
       --expect-admin-token-fingerprint "sha256:<12-hex> len=<N>" \
-      --worker-token file:/shared_work/qianyi/loom-worker-capacity/staging-worker-token \
-      --service-token file:/shared_work/qianyi/loom-worker-capacity/staging-service-token \
-      --smoke-submit-mode admin-on-behalf \
-      --smoke-on-behalf-username devansh \
-      --smoke-on-behalf-team-id <agentic-rl-team-uuid> \
-      --smoke-admin-actor codex-v1-release-gate \
-      --scope current-gb10
+      --gb10-prep-concurrency 4
   '"'"'
 '
 ```
+
+The `staging` preset is explicit and repo-owned. It supplies the stable
+non-secret and source-reference inputs for the current staging rollout:
+`cluster-name=loom-staging`, `namespace=loom-staging`,
+`environment=staging`, `cp-url=http://127.0.0.1:18081`,
+`cluster-config=deploy/environments/staging.cluster.toml`,
+`backup-manifest=/data/loom-staging/backups/latest/backup-manifest.json`,
+`rollout-root=/data/loom-staging`, current GB10 scope, staging admin/worker/
+service token file references, and admin-on-behalf smoke defaults for
+`devansh`. If `--image-tag` is omitted, the CLI derives `staging-<sha7>` from
+the resolved `--ref`. Use `loom cluster rollout staging --ref origin/dev
+--dry-run` to inspect the resolved preset, rollout id, SHA, image tag, and
+redacted expanded inputs before launching a detached unit.
+
+`prod` is also an explicit selector, but it fails closed until first-prod
+values are configured; it never falls back to staging values. Manual full-argv
+mode remains available for diagnostics, but normal staging rollouts should use
+the preset so rerun/resume commands do not depend on terminal history.
 
 The release invocation intentionally does not use `ssh -A`. `platform-dev` is
 the fixed rollout runner, and step 11 authenticates to GB10 through the
@@ -1349,8 +1353,13 @@ deploy identity's public key or SSH certificate trust on the GB10 hosts; do not
 run the release rollout itself through forwarded-agent authentication.
 
 To resume the same fixed version after a failed or disconnected run, start a
-new detached unit with the same command and append `--resume`. Do not edit
-`state.json` or manually repair host evidence.
+new detached unit with the same preset command and append `--resume`. Do not
+edit `state.json` or manually repair host evidence. Step 11 (`gb10-prep`) uses
+bounded host-level parallelism: each host still runs checkout, env update,
+legacy worker retirement, and node-agent start in order, while independent
+hosts are submitted concurrently. The default is conservative; tune it with
+`--gb10-prep-concurrency N` after validating GB10 SSH and Git load for the
+current rollout.
 
 Inspect the systemd unit plus rollout evidence instead of relying on terminal
 history:
@@ -1445,13 +1454,12 @@ selected worker pool. If the override must target a specific pool, set
 pool for its built-in current-gb10 default.
 
 For a release canary where an operator must represent an active user/team and a
-user-owned smoke token is unavailable, pass the admin-on-behalf smoke flags:
+user-owned smoke token is unavailable, use the admin-on-behalf smoke inputs.
+The staging preset already supplies the stable mode, username, task, required
+worker pool, and audit actor:
 
 ```bash
---smoke-submit-mode admin-on-behalf \
---smoke-on-behalf-username devansh \
---smoke-on-behalf-team-id <agentic-rl-team-uuid> \
---smoke-admin-actor <operator-name>
+export LOOM_SMOKE_ON_BEHALF_TEAM_ID="<agentic-rl-team-uuid>"
 ```
 
 The rollout driver resolves the admin credential only from `--admin-token`'s
@@ -5196,7 +5204,8 @@ link it from #217; do not merge incomplete evidence.
 - Release-managed staging GB10 Docker Compose workers use a 7200-second idle
   window from `deploy/environment-state/staging.toml`. That is the validation
   lease bound for the 15 hosts x 10 slots gate; shorter values can let early
-  hosts exit during serial prep before release-gate observes fresh workers.
+  hosts exit during bounded-parallel prep before release-gate observes fresh
+  workers.
 - For shared OLDLAB and GB10 pools, prefer the worker-pool autoscaler over
   manual SSH, Docker Compose, or Slurm operations. Check current policy and
   decisions with:
