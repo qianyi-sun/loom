@@ -1,3 +1,7 @@
+{# When topology.multi_node is true, Postgres runs as a CloudNativePG
+   Cluster (see postgres-cnpg.yaml.j2). This single-pod StatefulSet is
+   only rendered on single-node topologies where CNPG isn't warranted. #}
+{% if not topology.multi_node %}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -50,3 +54,4 @@ spec:
   ports:
     - port: 5432
       targetPort: 5432
+{% endif %}

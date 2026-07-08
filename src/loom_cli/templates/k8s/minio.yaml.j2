@@ -1,3 +1,7 @@
+{# When topology.multi_node is true, MinIO runs in distributed mode
+   (see minio-distributed.yaml.j2). This single-pod StatefulSet is
+   only rendered on single-node topologies. #}
+{% if not topology.multi_node %}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -53,3 +57,4 @@ spec:
     - name: console
       port: 9001
       targetPort: 9001
+{% endif %}

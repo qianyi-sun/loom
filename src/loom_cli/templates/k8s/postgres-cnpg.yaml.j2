@@ -1,0 +1,112 @@
+{# CloudNativePG-managed Postgres cluster for multi-node HA (#637).
+
+  Renders only when topology.multi_node = true. Requires the CloudNativePG
+  operator (postgresql.cnpg.io/v1 CRDs) to be installed in the target
+  cluster BEFORE this manifest is applied — the runbook covers the
+  operator install. The Cluster CR asks CNPG to run
+  topology.postgres_replicas Postgres pods with streaming replication,
+  automatic failover, and PDB management handled by the operator.
+
+  A companion ExternalName service `loom-postgres` bridges the DNS
+  name that pgbouncer, Alembic, LISTEN watchers, and existing NetworkPolicy
+  entries expect. CNPG creates loom-postgres-rw / loom-postgres-ro /
+  loom-postgres-r automatically; we alias the -rw service back to
+  `loom-postgres` so nothing else needs to change.
+
+  Storage class is picked by topology.storage_backend:
+  - "longhorn" (recommended for production) -> storageClassName: longhorn
+  - "host_path" -> single-node local storage (unusual on multi_node=true
+    but supported for testing on a single k3s node)
+#}
+{% if topology.multi_node %}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: loom-postgres
+spec:
+  instances: {{ topology.postgres_replicas }}
+  imageName: {{ postgres_image }}
+
+  postgresql:
+    parameters:
+      max_connections: "{{ postgres.max_connections }}"
+      # CNPG requires a few knobs raised to accommodate replication +
+      # WAL shipping. Everything else stays at Postgres defaults so
+      # this doesn't drift from the single-node shape.
+      shared_buffers: "256MB"
+
+  bootstrap:
+    initdb:
+      database: loom
+      owner: loom
+      secret:
+        name: loom-postgres-cnpg-credentials
+
+  # Reference existing loom-secrets so credential rotation stays a
+  # single Secret. CNPG will read postgres-user / postgres-password
+  # keys from the Secret named below.
+  superuserSecret:
+    name: loom-postgres-cnpg-credentials
+
+  storage:
+    size: {{ postgres_storage_gi }}Gi
+{% if topology.storage_backend == "longhorn" %}
+    storageClass: longhorn
+{% elif topology.storage_backend == "host_path" %}
+    storageClass: ""
+{% endif %}
+
+  affinity:
+{% if topology.anti_affinity == "required" %}
+    enablePodAntiAffinity: true
+    topologyKey: kubernetes.io/hostname
+    podAntiAffinityType: required
+{% elif topology.anti_affinity == "preferred" %}
+    enablePodAntiAffinity: true
+    topologyKey: kubernetes.io/hostname
+    podAntiAffinityType: preferred
+{% endif %}
+
+  # PodDisruptionBudget: CNPG manages the PDB automatically to enforce
+  # minAvailable = instances - 1 (keep quorum during voluntary
+  # disruption). No manual PDB needed.
+
+  monitoring:
+    enablePodMonitor: true
+---
+# Credentials Secret shape CNPG expects (username + password keys).
+# The `loom cluster bootstrap-secrets` runbook step provisions this
+# from postgres-user + postgres-password in loom-secrets.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: loom-postgres-cnpg-credentials
+  annotations:
+    cnpg.io/reload: "true"
+type: kubernetes.io/basic-auth
+stringData:
+  # Bootstrap runbook writes actual values via:
+  #   kubectl create secret generic loom-postgres-cnpg-credentials \
+  #     --from-literal=username=loom \
+  #     --from-literal=password=<same as postgres-password>
+  # This entry is placeholder-only for the render output.
+  username: PLACEHOLDER_BOOTSTRAP_WRITES_THIS
+  password: PLACEHOLDER_BOOTSTRAP_WRITES_THIS
+---
+# Backwards-compatibility Service: everything else in Loom (pgbouncer,
+# LISTEN watchers, Alembic, NetworkPolicy selectors) expects a Service
+# named `loom-postgres` on port 5432. CNPG creates {name}-rw for the
+# primary; alias it via ExternalName so no other code needs to know
+# about CNPG.
+apiVersion: v1
+kind: Service
+metadata:
+  name: loom-postgres
+spec:
+  type: ExternalName
+  externalName: loom-postgres-rw.{{ namespace }}.svc.cluster.local
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+{% endif %}
