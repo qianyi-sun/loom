@@ -11,7 +11,9 @@ Loom emits **two** trajectory artifacts per trial:
 2. **`atif.json`** — ATIF v1.7 projection computed from the
    trajectory at finalize. Lives at MinIO key
    `<team_id>/<trial_id>/atif.json` (or alongside events.jsonl on
-   disk in CLI mode).
+   disk in CLI mode). In service mode the authenticated ATIF download
+   route proxies that object first, then reprojects from durable
+   `trial_events` when the object-store copy is absent.
 
 The two coexist by design: trajectories are write-optimized (append,
 no merging) and lossless; ATIF is read-optimized (one document per
@@ -187,9 +189,13 @@ path:
 and authenticated service download URLs for ATIF, trajectory, and artifacts.
 `loom_service` proxies object-backed downloads from the internal MinIO/S3
 endpoint to the caller, so browser and laptop clients do not need direct
-object-store network access. For Postgres-backed trials whose legacy
-`events.jsonl` object is absent, `GET /api/v1/trials/{id}/trajectory/download`
-reconstructs the JSONL body from `trial_events` in `seq` order. A succeeded
+object-store network access. For Postgres-backed trials whose legacy object
+copy is absent, `GET /api/v1/trials/{id}/trajectory/download` reconstructs the
+JSONL body from `trial_events` in `seq` order, and
+`GET /api/v1/trials/{id}/atif` reprojects ATIF from the same typed rows plus
+`trials.result.agent` metadata. If rows exist but the event stream or
+projection metadata is insufficient for ATIF, the service returns HTTP 409 with
+a user-actionable message and keeps trajectory download available. A succeeded
 trial should not require clients to scan object storage, guess artifact keys,
 or open a separate MinIO tunnel.
 
