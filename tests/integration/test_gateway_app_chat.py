@@ -929,3 +929,47 @@ def test_chat_byo_cross_team_returns_404(  # type: ignore[no-untyped-def]
             delete_team_and_quota(s, other_team)
             s.commit()
         eng.dispose()
+
+
+def test_chat_records_family_evolver_dialect_from_loom_block(
+    app, seed_data, postgres_url,
+):  # type: ignore[no-untyped-def]
+    """#672 PR-3: when the client sets ``loom.dialect`` on a chat call,
+    the resulting ``llm_calls`` row must carry that value instead of
+    the default ``openai_chat`` so cost dashboards can partition
+    family-run adapter spend from agent spend on the same trial.
+    """
+    team_id, raw_token = seed_data
+    trial_id = uuid4()
+    with TestClient(app) as client:
+        r = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_token}"},
+            json={
+                "model": "anthropic/claude-opus-4-7",
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(team_id),
+                    "trial_id": str(trial_id),
+                    "step_id": "main",
+                    "dialect": "family_evolver",
+                },
+            },
+        )
+        assert r.status_code == 200, r.text
+
+    from sqlalchemy import create_engine as _ce
+    from sqlalchemy.orm import sessionmaker as _sm
+
+    eng = _ce(postgres_url)
+    sf = _sm(eng)
+    try:
+        with sf() as s:
+            rows = s.execute(
+                text("SELECT dialect FROM llm_calls WHERE trial_id = :tid"),
+                {"tid": trial_id},
+            ).all()
+        assert len(rows) == 1
+        assert rows[0].dialect == "family_evolver"
+    finally:
+        eng.dispose()

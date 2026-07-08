@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -80,6 +80,11 @@ class CatalogEntry(BaseModel):
     # Per-benchmark knobs the adapter reads via `self._params`.
     # AIME's per-year adapters use this to share a single base class.
     params: dict[str, str] = Field(default_factory=dict)
+    # #672 family-runs: benchmark-level defaults for the family-run
+    # resolver. Any subset of :class:`FamilyRunSpec` roles is legal;
+    # the batches route validates the shape at accept-time so a typo
+    # here surfaces without waiting for the first trial to claim.
+    family_run_defaults: dict[str, Any] | None = None
 
 
 class Catalog(BaseModel):

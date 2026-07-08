@@ -237,6 +237,16 @@ async def submit_trial(
         # and the FK enforces existence at INSERT time).
         provider_connection_id = payload.get("provider_connection_id")
         provider_model_id = payload.get("provider_model_id")
+        # #672 PR-3: family_key is set by the batch_runner when the
+        # parent batch opted into family-run mode. NULL for classic
+        # batches; the scheduler's claim query gates trials whose
+        # family_key is set on the matching batch_family_state row.
+        family_key = payload.get("family_key")
+        if family_key is not None and not isinstance(family_key, str):
+            raise HTTPException(
+                status_code=400,
+                detail="family_key must be a string when supplied",
+            )
         insert_values: dict[str, Any] = {
             "id": trial_id,
             "team_id": submit_team_id,
@@ -254,6 +264,7 @@ async def submit_trial(
             "combination_idx": combination_idx,
             "provider_connection_id": provider_connection_id,
             "provider_model_id": provider_model_id,
+            "family_key": family_key,
         }
         if idempotency_key is not None:
             # The partial unique index is `WHERE idempotency_key IS NOT
