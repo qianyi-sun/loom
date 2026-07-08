@@ -178,10 +178,12 @@ async def test_trial_appends_llm_calls_before_finalize(tmp_path: Path) -> None:
     assert captured_calls == [trial_id]
 
     # The local JSONL has both llm_call events appended.
-    lines = local_path.read_text().splitlines()
-    llm_call_lines = [line for line in lines if json.loads(line).get("kind") == "llm_call"]
-    assert len(llm_call_lines) == 5
-    parsed = [json.loads(line) for line in llm_call_lines]
+    parsed_lines = [json.loads(line) for line in local_path.read_text().splitlines()]
+    assert [event["seq"] for event in parsed_lines] == list(range(len(parsed_lines)))
+    assert parsed_lines[-1]["kind"] == "trial_end"
+
+    parsed = [event for event in parsed_lines if event.get("kind") == "llm_call"]
+    assert len(parsed) == 5
     assert parsed[0]["input_tokens"] == 100
     assert parsed[1]["input_tokens"] == 80
     assert parsed[2]["input_tokens"] == 10

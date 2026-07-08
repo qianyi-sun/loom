@@ -33,6 +33,7 @@ from loom.models.trajectory import (
 from loom.models.trial import TrialConfig
 from loom.security.redaction import redact_text
 from loom.trajectory.cp_event_sink import CpEventSink
+from loom.trajectory.llm_call_events import llm_call_row_to_event
 from loom.trajectory.storage import ObjectStore
 from loom.trajectory.writer import TrajectoryWriter
 from loom.trial.finalize import finalize_trajectory
@@ -335,6 +336,23 @@ class Trial:
                         await asyncio.shield(
                             self.ctx.driver.stop(delete=self.ctx.trial_config.delete_env),
                         )
+                # Plan 9/11 amendment A11.1: BEFORE the writer closes,
+                # query CP for llm_calls rows and append each as an
+                # LLMCallEvent-shaped dict so finalize_trajectory's ATIF
+                # projection sees them. Keep these before TrialEndEvent so
+                # terminal state remains the last event in the canonical log.
+                if (
+                    self.ctx.llm_calls_fetcher is not None
+                    and not _agent_emits_gateway_llm_call_events(self.ctx.agent)
+                ):
+                    try:
+                        await self._append_llm_call_events(writer)
+                    except Exception:
+                        logger.exception(
+                            "failed to fetch llm_calls; trajectory will be "
+                            "finalized without LLMCallEvents",
+                        )
+
                 try:
                     await writer.append(
                         TrialEndEvent(
@@ -351,24 +369,6 @@ class Trial:
                     )
                 except Exception:
                     logger.exception("failed to append TrialEndEvent")
-
-                # Plan 9/11 amendment A11.1: BEFORE the writer closes,
-                # query CP for llm_calls rows and append each as an
-                # LLMCallEvent-shaped dict so finalize_trajectory's ATIF
-                # projection sees them. The writer is still open here
-                # (inside `async with writer:`); skip silently if the
-                # context didn't supply a fetcher (v0.7 behavior).
-                if (
-                    self.ctx.llm_calls_fetcher is not None
-                    and not _agent_emits_gateway_llm_call_events(self.ctx.agent)
-                ):
-                    try:
-                        await self._append_llm_call_events(writer)
-                    except Exception:
-                        logger.exception(
-                            "failed to fetch llm_calls; trajectory will be "
-                            "finalized without LLMCallEvents",
-                        )
         finally:
             try:
                 atif_uri = await asyncio.wait_for(
@@ -442,81 +442,10 @@ class Trial:
         message-level semantics, this projection is the source of
         truth for billing.
         """
-        from loom.models.trajectory import ChatMessage, LLMCallEvent
-        from loom.models.types import ModelSpec
-        from loom.request_params import coerce_request_params
-
         assert self.ctx.llm_calls_fetcher is not None
         rows = await self.ctx.llm_calls_fetcher(self.ctx.trial_id)
-        _provider_by_dialect = {
-            "openai_chat": "openai",
-            "openai_responses": "openai",
-            # Facade routes (`/openai/v1/...`, `/anthropic/v1/...`,
-            # `/google/v1beta/...` — cluster-deploy.md provider-
-            # connection plumbing) write the *_facade dialect strings.
-            # Map each to the matching provider so the projection
-            # produces ModelSpec(provider=<provider>, ...) rather
-            # than the "unknown" fallback.
-            "openai_facade": "openai",
-            "anthropic_facade": "anthropic",
-            "gemini_facade": "google",
-            "anthropic": "anthropic",
-            "gemini": "google",
-        }
         for row in rows:
-            captured_at_raw = row.get("captured_at")
-            emitted_at = (
-                datetime.fromisoformat(
-                    str(captured_at_raw).replace("Z", "+00:00"),
-                )
-                if captured_at_raw
-                else datetime.now(UTC)
-            )
-            extras = row.get("provider_extras") or {}
-            event = LLMCallEvent(
-                emitted_at=emitted_at,
-                trial_id=self.ctx.trial_id,
-                step_id=str(row.get("step_id") or "__trial__"),
-                seq=0,  # appended out-of-band; ATIF sorts by emitted_at
-                model=ModelSpec(
-                    provider=_provider_by_dialect.get(
-                        str(row.get("dialect") or ""),
-                        "unknown",
-                    ),
-                    name=str(row.get("model") or "unknown"),
-                ),
-                rate_card_hash=str(row.get("rate_card_hash") or ""),
-                system_prompt=None,
-                messages=[],
-                response=ChatMessage(role="assistant", content=""),
-                finish_reason="synthetic",
-                input_tokens=int(row.get("input_tokens") or 0),
-                cached_input_tokens=int(
-                    extras.get("cache_read_input_tokens", 0)
-                    + extras.get("cachedContentTokenCount", 0),
-                ),
-                cache_write_tokens=int(
-                    extras.get("cache_creation_input_tokens", 0),
-                ),
-                output_tokens=int(row.get("output_tokens") or 0),
-                thinking_tokens=int(
-                    extras.get("reasoning_tokens", 0) + extras.get("thoughtsTokenCount", 0),
-                ),
-                provider_extras={
-                    k: int(v) for k, v in extras.items() if isinstance(v, int | float)
-                },
-                request_params=coerce_request_params(row.get("request_params")),
-                cost_usd_snapshot=float(row.get("cost_usd") or 0.0),
-                duration_sec=0.0,
-                streamed=False,
-                time_to_first_token_sec=None,
-                gateway_request_id=str(row.get("id") or ""),
-                # #298 Slice B: surface retry count from llm_calls row.
-                # Defaults to 1 when the CP payload lacks the field
-                # (pre-Slice B services).
-                attempt=int(row.get("attempt") or 1),
-            )
-            await writer.append(event)
+            await writer.append(llm_call_row_to_event(row, trial_id=self.ctx.trial_id, seq=0))
 
 
 def _agent_emits_gateway_llm_call_events(agent: AgentRuntime) -> bool:
