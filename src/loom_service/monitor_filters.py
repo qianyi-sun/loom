@@ -90,9 +90,19 @@ def apply_batch_monitor_filters(
             Batch.combinations.contains([{"agent_model": {"name": model_name}}]),
         ))
     if provider_connection_id is not None:
-        stmt = stmt.where(Batch.provider_connection_id == provider_connection_id)
+        stmt = stmt.where(or_(
+            Batch.provider_connection_id == provider_connection_id,
+            Batch.combinations.contains([
+                {"provider_connection_id": str(provider_connection_id)},
+            ]),
+        ))
     if provider_model_id:
-        stmt = stmt.where(Batch.provider_model_id == provider_model_id)
+        stmt = stmt.where(or_(
+            Batch.provider_model_id == provider_model_id,
+            Batch.combinations.contains([
+                {"provider_model_id": provider_model_id},
+            ]),
+        ))
     wanted = split_state_filter(state)
     if wanted:
         stmt = stmt.where(Batch.state.in_(wanted))

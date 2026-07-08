@@ -163,11 +163,17 @@ def _combination_part(
     for combo in combo_dicts:
         agent = str(combo.get("agent_name") or "default")
         model = combo.get("agent_model")
+        routed_model_id = str(
+            combo.get("provider_model_id") or provider_model_id or "",
+        )
         samples = _positive_int(combo.get("n_per_task")) or n_per_task
         if isinstance(combo.get("label"), str) and combo["label"].strip():
             name_base = _short_token(combo["label"])
         elif isinstance(model, dict):
-            name_base = f"{_short_token(agent)}/{_short_model_name(str(model.get('name') or provider_model_id or 'model'))}"
+            name_base = (
+                f"{_short_token(agent)}/"
+                f"{_short_model_name(str(routed_model_id or model.get('name') or 'model'))}"
+            )
         else:
             name_base = _short_token(agent)
         name_items.append(f"{name_base} x{samples}")
@@ -175,7 +181,7 @@ def _combination_part(
         if isinstance(model, dict):
             provider = str(model.get("provider") or "model")
             model_name = _short_model_name(
-                str(model.get("name") or provider_model_id or "model"),
+                str(routed_model_id or model.get("name") or "model"),
             )
             desc_items.append(f"{agent}/{provider}/{model_name} x{samples}")
         else:

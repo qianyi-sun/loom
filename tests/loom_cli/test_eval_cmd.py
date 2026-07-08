@@ -497,6 +497,77 @@ def test_batch_create_with_benchmark_shortcut(
     assert body["provider_model_id"] == "gpt-4o"
 
 
+def test_batch_create_with_combinations_json_routes_provider_per_combo(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    combinations = [
+        {
+            "agent_name": "terminus-2",
+            "agent_model": {
+                "provider": "openai",
+                "name": "glm-5.1-thinking",
+                "source": "api",
+            },
+            "provider_connection_id": "11111111-1111-4111-8111-111111111111",
+            "provider_model_id": "glm-5.1-thinking",
+            "n_per_task": 1,
+            "label": "terminus-glm",
+        },
+        {
+            "agent_name": "opencode",
+            "agent_model": {
+                "provider": "openai",
+                "name": "qwen3.6-35b-a3b",
+                "source": "api",
+            },
+            "provider_connection_id": "33333333-3333-4333-8333-333333333333",
+            "provider_model_id": "qwen3.6-35b-a3b",
+            "n_per_task": 2,
+            "label": "opencode-qwen",
+        },
+    ]
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 300,
+            "n_per_task": 1,
+            "backend": "docker",
+            "combinations": combinations,
+            "state": "submitted",
+            "created_at": "2026-06-16T00:00:00Z",
+        },
+    )
+
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--combinations-json",
+            json.dumps(combinations),
+            "--benchmark",
+            "source-useful-frontier-5003",
+            "--name",
+            "matrix-run",
+        ]
+    )
+
+    assert rc == 0
+    assert "Created batch 'matrix-run'" in capsys.readouterr().out
+    assert len(mock_server.requests) == 1
+    req = mock_server[0]
+    assert req.method == "POST"
+    assert req.url.path == "/api/v1/batches"
+    body = json.loads(req.content)
+    assert body["trial_config"] == {}
+    assert body["task_filter"] == {"benchmark_id": "source-useful-frontier-5003"}
+    assert body["combinations"] == combinations
+    assert "provider_connection_id" not in body
+    assert "provider_model_id" not in body
+
+
 def test_batch_create_with_task_set_shortcut(
     mock_server: MockServer,
     capsys: pytest.CaptureFixture[str],

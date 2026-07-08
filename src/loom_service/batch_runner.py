@@ -65,7 +65,15 @@ class _SubmitResult:
     error: dict[str, Any] | None = None
 
 
-PendingUnit = tuple[str, int | None, dict[str, Any], int, str | None]
+@dataclass(frozen=True)
+class PendingUnit:
+    task_id: str
+    combination_idx: int | None
+    trial_config: dict[str, Any]
+    sample_idx: int
+    required_worker_pool: str | None = None
+    provider_connection_id: UUID | None = None
+    provider_model_id: str | None = None
 
 
 def next_batch_state(
@@ -167,6 +175,30 @@ def _materialize_trial_config(
     out["agent_name"] = combination["agent_name"]
     out["agent_model"] = combination.get("agent_model")
     return out
+
+
+def _coerce_uuid(value: object) -> UUID | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, UUID):
+        return value
+    return UUID(str(value))
+
+
+def _effective_provider_fields(
+    batch: Batch,
+    combination: Mapping[str, Any] | None,
+) -> tuple[UUID | None, str | None]:
+    conn_id = batch.provider_connection_id
+    model_id = batch.provider_model_id
+    if combination is not None:
+        conn_id = _coerce_uuid(
+            combination.get("provider_connection_id"),
+        ) or conn_id
+        raw_model_id = combination.get("provider_model_id")
+        if isinstance(raw_model_id, str) and raw_model_id:
+            model_id = raw_model_id
+    return conn_id, model_id
 
 
 def _batch_required_worker_pools(batch: Batch) -> list[str]:
@@ -347,6 +379,10 @@ async def _coverage_pending_units(
         combination_idx = 0
         cfg = _materialize_trial_config(shared_config, batch.combinations[0])
         base_sample_idx = int(batch.combinations[0].get("n_per_task", 1))
+    provider_connection_id, provider_model_id = _effective_provider_fields(
+        batch,
+        batch.combinations[0] if batch.combinations else None,
+    )
 
     task_cpu_arches = await _task_cpu_arches(session, task_ids)
     pool_cpu_arches_by_name = await _known_pool_cpu_arches(session, required_pools)
@@ -401,7 +437,17 @@ async def _coverage_pending_units(
         )
         if key in failed_fanout_keys or key in existing_idempotency_keys:
             continue
-        units.append((task_id, combination_idx, cfg, sample_idx, pool))
+        units.append(
+            PendingUnit(
+                task_id=task_id,
+                combination_idx=combination_idx,
+                trial_config=cfg,
+                sample_idx=sample_idx,
+                required_worker_pool=pool,
+                provider_connection_id=provider_connection_id,
+                provider_model_id=provider_model_id,
+            ),
+        )
     return units, errors
 
 
@@ -464,7 +510,20 @@ async def _pending_rerun_units(
                 continue
             combination = batch.combinations[combination_idx]
         cfg = _materialize_trial_config(shared_config, combination)
-        pending.append((task_id, combination_idx, cfg, sample_idx, None))
+        provider_connection_id, provider_model_id = _effective_provider_fields(
+            batch,
+            combination,
+        )
+        pending.append(
+            PendingUnit(
+                task_id=task_id,
+                combination_idx=combination_idx,
+                trial_config=cfg,
+                sample_idx=sample_idx,
+                provider_connection_id=provider_connection_id,
+                provider_model_id=provider_model_id,
+            ),
+        )
     return pending
 
 
@@ -712,9 +771,9 @@ async def run_once(
     # exists in the DB. For multi-combination, combination_idx is
     # 0..len(combinations)-1.
     #
-    # Each work item is (batch_id, [(task_id, combination_idx_or_None,
-    # trial_config, sample_idx), ...]).
-    work: list[tuple[UUID, UUID | None, str | None, list[PendingUnit]]] = []
+    # Each work item is (batch_id, pending units). A PendingUnit carries the
+    # effective provider route for that task/combination/sample.
+    work: list[tuple[UUID, list[PendingUnit]]] = []
     fanout_errors_by_batch: dict[UUID, list[dict[str, Any]]] = {}
     async with session_factory() as s:
         batches_to_process = (await s.execute(
@@ -732,10 +791,7 @@ async def run_once(
                 rerun_pending_units = await _pending_rerun_units(
                     s, b, targets, failed_fanout_keys,
                 )
-                work.append((
-                    b.id, b.provider_connection_id, b.provider_model_id,
-                    rerun_pending_units,
-                ))
+                work.append((b.id, rerun_pending_units))
                 continue
             task_ids = await resolve_task_filter(
                 s,
@@ -817,6 +873,9 @@ async def run_once(
                     combo_config = _materialize_trial_config(
                         shared_config, combo,
                     )
+                    provider_connection_id, provider_model_id = (
+                        _effective_provider_fields(b, combo)
+                    )
                     n = int(combo.get("n_per_task", 1))
                     for t in task_ids:
                         for s_idx in range(n):
@@ -828,7 +887,14 @@ async def run_once(
                             if (t, c_idx, s_idx) in existing_multi:
                                 continue
                             pending_units.append(
-                                (t, c_idx, combo_config, s_idx, None),
+                                PendingUnit(
+                                    task_id=t,
+                                    combination_idx=c_idx,
+                                    trial_config=combo_config,
+                                    sample_idx=s_idx,
+                                    provider_connection_id=provider_connection_id,
+                                    provider_model_id=provider_model_id,
+                                ),
                             )
                 coverage_units, coverage_errors = await _coverage_pending_units(
                     s,
@@ -843,10 +909,7 @@ async def run_once(
                     fanout_errors_by_batch.setdefault(b.id, []).extend(
                         coverage_errors,
                     )
-                work.append((
-                    b.id, b.provider_connection_id, b.provider_model_id,
-                    pending_units,
-                ))
+                work.append((b.id, pending_units))
             else:
                 # Single-combination: keep the 2-tuple key shape and
                 # the None combination_idx so the resulting
@@ -870,6 +933,10 @@ async def run_once(
                 }
                 pending_units = []
                 cfg = dict(b.trial_config)
+                provider_connection_id, provider_model_id = _effective_provider_fields(
+                    b,
+                    None,
+                )
                 for t in task_ids:
                     for s_idx in range(b.n_per_task):
                         key = _idempotency_key(b.id, t, s_idx)
@@ -877,7 +944,16 @@ async def run_once(
                             continue
                         if (t, s_idx) in existing_single:
                             continue
-                        pending_units.append((t, None, cfg, s_idx, None))
+                        pending_units.append(
+                            PendingUnit(
+                                task_id=t,
+                                combination_idx=None,
+                                trial_config=cfg,
+                                sample_idx=s_idx,
+                                provider_connection_id=provider_connection_id,
+                                provider_model_id=provider_model_id,
+                            ),
+                        )
                 coverage_units, coverage_errors = await _coverage_pending_units(
                     s,
                     b,
@@ -891,28 +967,25 @@ async def run_once(
                     fanout_errors_by_batch.setdefault(b.id, []).extend(
                         coverage_errors,
                     )
-                work.append((
-                    b.id, b.provider_connection_id, b.provider_model_id,
-                    pending_units,
-                ))
+                work.append((b.id, pending_units))
         await s.commit()
 
     # Phase 2: HTTP fanout. No DB locks.
-    for batch_id, provider_connection_id, provider_model_id, pending_units in work:
+    for batch_id, pending_units in work:
         for chunk_start in range(0, len(pending_units), batch_size):
             chunk = pending_units[chunk_start:chunk_start + batch_size]
-            for tid, combo_idx, cfg, s_idx, required_pool in chunk:
+            for unit in chunk:
                 submit_result = await _submit_one(
                     http_client,
                     authorization=cp_authorization,
                     batch_id=batch_id,
-                    task_id=tid,
-                    sample_idx=s_idx,
-                    trial_config=cfg,
-                    provider_connection_id=provider_connection_id,
-                    provider_model_id=provider_model_id,
-                    combination_idx=combo_idx,
-                    required_worker_pool=required_pool,
+                    task_id=unit.task_id,
+                    sample_idx=unit.sample_idx,
+                    trial_config=unit.trial_config,
+                    provider_connection_id=unit.provider_connection_id,
+                    provider_model_id=unit.provider_model_id,
+                    combination_idx=unit.combination_idx,
+                    required_worker_pool=unit.required_worker_pool,
                 )
                 if (
                     not submit_result.ok
@@ -971,7 +1044,7 @@ async def run_once(
 
     # Phase 3: advance state for the batches we processed.
     async with session_factory() as s:
-        for batch_id, _provider_connection_id, _provider_model_id, _ in work:
+        for batch_id, _ in work:
             row = (await s.execute(
                 select(Batch).where(Batch.id == batch_id),
             )).scalar_one_or_none()

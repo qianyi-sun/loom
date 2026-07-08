@@ -12,6 +12,8 @@ trial_config + Batch.n_per_task as they did before this PR.
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from loom.models.types import ModelSpec
@@ -40,3 +42,9 @@ class Combination(BaseModel):
     # Falls back to a derived value `"{agent_name}"` or
     # `"{agent_name}/{provider}/{name}"` if None.
     label: str | None = Field(default=None, max_length=200)
+
+    # Optional provider route for this Combination. When omitted, the
+    # Batch-level provider_connection_id / provider_model_id remains the
+    # backward-compatible default.
+    provider_connection_id: UUID | None = None
+    provider_model_id: str | None = None

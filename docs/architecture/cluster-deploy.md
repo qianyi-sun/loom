@@ -449,14 +449,15 @@ and preflight status/error metadata. `view=raw` includes suppressed tool/API
 entries such as
 Amap/APISports/TuShare-style ids with classifier reasons for debugging.
 
-`Trial` and `Batch` payloads gain `provider_connection_id` + `provider_model_id` (both nullable for legacy/local or non-model-backed paths). In v1.0 service-mode submissions, model-backed agents should use a provider connection owned by or explicitly shared with the submitting team rather than an implied platform-hosted model provider. Trial FK has no cascade — soft-delete keeps audit/billing references valid. Batch fan-out forwards the batch-level provider fields to every materialized trial; per-combination provider connections are intentionally not part of this schema slice. Shared provider connections keep one owner-side secret and rotation point; target teams can use/list/read the connection but cannot mutate the credential or model cache. Facade-routed runtime calls authorize the connection against the trial team's ownership/share boundary, decrypt the owner-side secret server-side, and record usage/cost against the consuming trial team/user.
+`Trial` and `Batch` payloads gain `provider_connection_id` + `provider_model_id` (both nullable for legacy/local or non-model-backed paths). `Combination` rows may also carry those fields; the effective route is `combination.provider_*` first, then the batch-level provider fields as backward-compatible defaults. In v1.0 service-mode submissions, model-backed agents should use a provider connection owned by or explicitly shared with the submitting team rather than an implied platform-hosted model provider. Trial FK has no cascade — soft-delete keeps audit/billing references valid. Batch fan-out writes each trial's effective provider fields, so one batch can compare multiple agent × provider-model combinations without cloning provider secrets or splitting batches. Shared provider connections keep one owner-side secret and rotation point; target teams can use/list/read the connection but cannot mutate the credential or model cache. Facade-routed runtime calls authorize the connection against the trial team's ownership/share boundary, decrypt the owner-side secret server-side, and record usage/cost against the consuming trial team/user.
 
 Benchmark task images remain model/provider/agent agnostic. The task image owns
 benchmark dependencies, task assets, harness code, and verifier behavior only.
 User choices for agent, provider, and model live in the submitted run/trial
 payload (`trial_config.agent_name`, `trial_config.agent_model`,
-`provider_connection_id`, `provider_model_id`) and are injected by the service,
-worker, and sandbox launch boundary at execution time. Agent runtime bits may
+`provider_connection_id`, `provider_model_id`, or the per-combination provider
+fields) and are injected by the service, worker, and sandbox launch boundary at
+execution time. Agent runtime bits may
 come from the worker image, a cached layered sandbox image, or an install
 script, but changing a selected model/provider/agent must not require
 republishing a benchmark task image.

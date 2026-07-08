@@ -14,12 +14,14 @@ import httpx
 import pytest
 from botocore.config import Config
 from fastapi import FastAPI
-from sqlalchemy import create_engine, delete, insert
+from sqlalchemy import create_engine, delete, insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import (
     Batch,
+    ProviderConnection,
+    ProviderModelCache,
     RateCard,
     Task,
     Team,
@@ -166,6 +168,7 @@ async def setup(
         with sl() as s:
             s.execute(delete(Trial))
             s.execute(delete(Batch))
+            s.execute(delete(ProviderConnection))
             s.execute(delete(Task))
             s.execute(delete(Token))
             s.execute(delete(Worker))
@@ -352,6 +355,148 @@ async def test_combinations_compute_expected_count(
     body = r.json()
     assert body["expected_trial_count"] == 60
     assert len(body["combinations"]) == 2
+
+
+async def test_combinations_preserve_per_combo_provider_routing(
+    setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    app, raw = setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    conn_a = uuid4()
+    conn_b = uuid4()
+    with sl() as s:
+        team_id = s.execute(select(Token.team_id).where(Token.type == "team")).scalar_one()
+        for conn_id, display_name, model_id in (
+            (conn_a, "Combo provider A", "glm-5.1-thinking"),
+            (conn_b, "Combo provider B", "qwen3.6-35b-a3b"),
+        ):
+            s.execute(insert(ProviderConnection).values(
+                id=conn_id,
+                team_id=team_id,
+                provider_type="openai-compatible",
+                display_name=display_name,
+                base_url="https://api.example.test/v1",
+                upstream_host="api.example.test",
+                resolved_egress_ips=["203.0.113.10"],
+                encrypted_api_key_ref=f"test://{conn_id}",
+                status="valid",
+                pricing_source="tokens-only",
+                created_by="test:combo",
+            ))
+            s.execute(insert(ProviderModelCache).values(
+                provider_connection_id=conn_id,
+                model_id=model_id,
+                last_preflight_status="valid",
+            ))
+        s.commit()
+    sync_engine.dispose()
+
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "combo-provider-routing",
+            "task_filter": {"license": "MIT", "subset_kind": "first_n", "n": 2},
+            "trial_config": {},
+            "combinations": [
+                {
+                    "agent_name": "litellm",
+                    "agent_model": {"provider": "openai", "name": "glm-5.1-thinking"},
+                    "provider_connection_id": str(conn_a),
+                    "provider_model_id": "glm-5.1-thinking",
+                    "n_per_task": 1,
+                    "label": "litellm-glm",
+                },
+                {
+                    "agent_name": "litellm",
+                    "agent_model": {"provider": "openai", "name": "qwen3.6-35b-a3b"},
+                    "provider_connection_id": str(conn_b),
+                    "provider_model_id": "qwen3.6-35b-a3b",
+                    "n_per_task": 1,
+                    "label": "litellm-qwen",
+                },
+            ],
+        },
+    )
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["expected_trial_count"] == 4
+    assert body["combinations"][0]["provider_connection_id"] == str(conn_a)
+    assert body["combinations"][0]["provider_model_id"] == "glm-5.1-thinking"
+    assert body["combinations"][1]["provider_connection_id"] == str(conn_b)
+    assert body["combinations"][1]["provider_model_id"] == "qwen3.6-35b-a3b"
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        batch = s.execute(select(Batch).where(Batch.id == body["batch_id"])).scalar_one()
+        assert batch.provider_connection_id is None
+        assert batch.provider_model_id is None
+        assert batch.combinations[0]["provider_connection_id"] == str(conn_a)
+        assert batch.combinations[1]["provider_model_id"] == "qwen3.6-35b-a3b"
+    sync_engine.dispose()
+
+
+async def test_combinations_reject_provider_model_cache_per_combo(
+    setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    app, raw = setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    conn_id = uuid4()
+    with sl() as s:
+        team_id = s.execute(select(Token.team_id).where(Token.type == "team")).scalar_one()
+        s.execute(insert(ProviderConnection).values(
+            id=conn_id,
+            team_id=team_id,
+            provider_type="openai-compatible",
+            display_name="Combo provider",
+            base_url="https://api.example.test/v1",
+            upstream_host="api.example.test",
+            resolved_egress_ips=["203.0.113.10"],
+            encrypted_api_key_ref=f"test://{conn_id}",
+            status="valid",
+            pricing_source="tokens-only",
+            created_by="test:combo",
+        ))
+        s.execute(insert(ProviderModelCache).values(
+            provider_connection_id=conn_id,
+            model_id="bad-model",
+            last_preflight_status="failed",
+            last_preflight_error_code="upstream_404",
+        ))
+        s.commit()
+    sync_engine.dispose()
+
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "combo-provider-cache-fail",
+            "task_filter": {"license": "MIT", "subset_kind": "first_n", "n": 1},
+            "trial_config": {},
+            "combinations": [
+                {
+                    "agent_name": "litellm",
+                    "agent_model": {"provider": "openai", "name": "bad-model"},
+                    "provider_connection_id": str(conn_id),
+                    "provider_model_id": "bad-model",
+                    "n_per_task": 1,
+                    "label": "bad-combo",
+                },
+            ],
+        },
+    )
+
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "combinations[0]" in detail
+    assert "bad-combo" in detail
+    assert "last preflight failed" in detail
 
 
 async def test_combinations_reject_agent_in_trial_config(

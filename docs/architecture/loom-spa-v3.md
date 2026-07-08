@@ -826,12 +826,16 @@ sends this shape when more than one combination is selected:
       "label": "claude-opus",
       "agent_name": "claude-code",
       "agent_model": {"provider": "anthropic", "name": "claude-opus-4-7"},
+      "provider_connection_id": "11111111-1111-4111-8111-111111111111",
+      "provider_model_id": "claude-opus-4-7",
       "n_per_task": 3
     },
     {
       "label": "gpt-4o",
       "agent_name": "claude-code",
       "agent_model": {"provider": "openai", "name": "gpt-4o"},
+      "provider_connection_id": "33333333-3333-4333-8333-333333333333",
+      "provider_model_id": "gpt-4o",
       "n_per_task": 3
     }
   ]
@@ -857,6 +861,13 @@ Server-side validation:
 - Every Combination's `agent_name` must be in the agent catalog.
 - Combination `label`s are unique within the Batch (case-sensitive).
 - `combinations` cap: 16 entries max.
+- Combination-level `provider_connection_id` / `provider_model_id`
+  override batch-level provider fields. Batch-level provider fields
+  remain valid defaults for legacy single-provider submissions. The
+  service validates every effective provider connection and cached
+  provider model before creating the batch, estimates budget by
+  provider/model combination, and the runner writes each Trial's
+  effective provider route.
 
 ### GET /api/v1/backends (new)
 
