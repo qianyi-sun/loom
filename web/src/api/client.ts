@@ -193,6 +193,8 @@ export interface Combination {
 export interface TaskFilter {
   benchmark_id?: string;
   benchmark_ids?: string[];
+  task_set_id?: string;
+  task_set_ids?: string[];
   tag_filters?: Record<string, string[]>;
   task_ids?: string[];
   license?: string;

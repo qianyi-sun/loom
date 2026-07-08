@@ -59,15 +59,10 @@ def build_batch_identity(
 
 
 def _task_part(task_filter: dict[str, Any]) -> tuple[str, str]:
-    benchmark_ids = task_filter.get("benchmark_ids")
-    if isinstance(benchmark_ids, list) and benchmark_ids:
-        ids = [str(item) for item in benchmark_ids if str(item)]
-        compact = _join_compact(ids, max_items=3)
-        return compact, ", ".join(ids)
-
-    benchmark_id = task_filter.get("benchmark_id")
-    if isinstance(benchmark_id, str) and benchmark_id:
-        return _short_token(benchmark_id), benchmark_id
+    source_ids = _source_ids(task_filter)
+    if source_ids:
+        compact = _join_compact(source_ids, max_items=3)
+        return compact, ", ".join(source_ids)
 
     task_ids = task_filter.get("task_ids")
     if isinstance(task_ids, list) and task_ids:
@@ -79,6 +74,28 @@ def _task_part(task_filter: dict[str, Any]) -> tuple[str, str]:
         return _short_token(license_value), f"license {license_value}"
 
     return "custom", "custom task filter"
+
+
+def _source_ids(task_filter: dict[str, Any]) -> list[str]:
+    ids: list[str] = []
+
+    benchmark_ids = task_filter.get("benchmark_ids")
+    if isinstance(benchmark_ids, list):
+        ids.extend(str(item) for item in benchmark_ids if str(item))
+    else:
+        benchmark_id = task_filter.get("benchmark_id")
+        if isinstance(benchmark_id, str) and benchmark_id:
+            ids.append(benchmark_id)
+
+    task_set_ids = task_filter.get("task_set_ids")
+    if isinstance(task_set_ids, list):
+        ids.extend(str(item) for item in task_set_ids if str(item))
+    else:
+        task_set_id = task_filter.get("task_set_id")
+        if isinstance(task_set_id, str) and task_set_id:
+            ids.append(task_set_id)
+
+    return ids
 
 
 def _subset_part(task_filter: dict[str, Any]) -> tuple[str, str]:

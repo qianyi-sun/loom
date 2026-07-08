@@ -13,6 +13,9 @@ Filter shape (`task_filter`):
 - `benchmark_ids: list[str]` — multi-select; takes precedence over
   the singular form. Empty list ⇒ zero tasks (the SPA's group-select
   uses this convention)
+- `task_set_id: str` — singular team-owned TaskSet filter
+- `task_set_ids: list[str]` — multi-select TaskSet filter; takes
+  precedence over the singular form. Empty list ⇒ zero tasks
 - `tag_filters: dict[str, list[str]]` — JSONB containment match per
   key; AND across keys, OR within each key's values
 - `subset_kind: "all" | "first_n" | "last_n" | "random_n" | "explicit"`
@@ -26,6 +29,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy import cast, false, or_, select
@@ -33,7 +37,8 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.benchmark_readiness import CURRENTLY_UNSUPPORTED_BENCHMARK_IDS
-from loom.db.schema import Task
+from loom.db.schema import Task, TaskSet
+from loom.db.task_set_visibility import visible_task_sets
 
 # Recognized task_filter keys. Anything else is rejected so a typo
 # (`liscense` instead of `license`) doesn't silently match nothing.
@@ -46,6 +51,8 @@ FILTER_KEYS: frozenset[str] = frozenset(
         "n",
         "seed",
         "benchmark_ids",
+        "task_set_id",
+        "task_set_ids",
         "tag_filters",
     }
 )
@@ -63,18 +70,82 @@ class TaskFilterResult:
 async def resolve_task_filter(
     session: AsyncSession,
     task_filter: Mapping[str, Any],
+    *,
+    team_id: UUID | None = None,
 ) -> list[str]:
     return (
         await resolve_task_filter_with_diagnostics(
             session,
             task_filter,
+            team_id=team_id,
         )
     ).task_ids
+
+
+def _task_set_ids_from_filter(task_filter: Mapping[str, Any]) -> list[str] | None:
+    task_set_ids_raw = task_filter.get("task_set_ids")
+    if task_set_ids_raw is not None:
+        if not isinstance(task_set_ids_raw, (list, tuple)) or not all(
+            isinstance(x, str) for x in task_set_ids_raw
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="task_filter.task_set_ids must be a list of strings",
+            )
+        return list(task_set_ids_raw)
+
+    task_set_id_raw = task_filter.get("task_set_id")
+    if task_set_id_raw is None:
+        return None
+    if not isinstance(task_set_id_raw, str):
+        raise HTTPException(
+            status_code=400,
+            detail="task_filter.task_set_id must be a string",
+        )
+    return [task_set_id_raw]
+
+
+async def _reject_invisible_or_unrunnable_task_sets(
+    session: AsyncSession,
+    *,
+    team_id: UUID | None,
+    task_set_ids: list[str] | None,
+) -> None:
+    if task_set_ids is None or not task_set_ids:
+        return
+
+    rows = (
+        await session.execute(
+            visible_task_sets(team_id=team_id).where(
+                TaskSet.id.in_(task_set_ids),
+            ),
+        )
+    ).scalars().all()
+    visible_by_id = {row.id: row for row in rows}
+    missing = sorted(set(task_set_ids) - set(visible_by_id))
+    if missing:
+        raise HTTPException(status_code=404, detail="task set not found")
+
+    unrunnable = sorted(
+        row.id
+        for row in visible_by_id.values()
+        if row.status not in {"ready", "partial"}
+    )
+    if unrunnable:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "task_filter references TaskSets that are not ready: "
+                f"{unrunnable}"
+            ),
+        )
 
 
 async def resolve_task_filter_with_diagnostics(
     session: AsyncSession,
     task_filter: Mapping[str, Any],
+    *,
+    team_id: UUID | None = None,
 ) -> TaskFilterResult:
     """Materialize a task_filter into a list of Task.id strings.
 
@@ -100,6 +171,12 @@ async def resolve_task_filter_with_diagnostics(
             status_code=400,
             detail=(f"unknown subset_kind {subset_kind!r}. valid: {sorted(SUBSET_KINDS)}"),
         )
+    task_set_ids = _task_set_ids_from_filter(task_filter)
+    await _reject_invisible_or_unrunnable_task_sets(
+        session,
+        team_id=team_id,
+        task_set_ids=task_set_ids,
+    )
 
     # Build the candidate query using the predicate keys. subset_kind
     # / n / seed are applied to the candidate set in Python.
@@ -111,6 +188,15 @@ async def resolve_task_filter_with_diagnostics(
     # each key's value list.
     stmt = select(Task.id).order_by(
         Task.id.asc(),
+    )
+    visible_task_set_ids = visible_task_sets(team_id=team_id).with_only_columns(
+        TaskSet.id,
+    )
+    stmt = stmt.where(
+        or_(
+            Task.task_set_id.is_(None),
+            Task.task_set_id.in_(visible_task_set_ids),
+        ),
     )
     if CURRENTLY_UNSUPPORTED_BENCHMARK_IDS:
         stmt = stmt.where(
@@ -124,8 +210,11 @@ async def resolve_task_filter_with_diagnostics(
     if "task_ids" in task_filter:
         ids = [str(x) for x in task_filter["task_ids"]]
         stmt = stmt.where(Task.id.in_(ids))
+    source_selector_seen = False
+    source_clauses: list[Any] = []
     benchmark_ids_raw = task_filter.get("benchmark_ids")
     if benchmark_ids_raw is not None:
+        source_selector_seen = True
         if not isinstance(benchmark_ids_raw, (list, tuple)) or not all(
             isinstance(x, str) for x in benchmark_ids_raw
         ):
@@ -134,11 +223,16 @@ async def resolve_task_filter_with_diagnostics(
                 detail="task_filter.benchmark_ids must be a list of strings",
             )
         if benchmark_ids_raw:
-            stmt = stmt.where(Task.benchmark_id.in_(list(benchmark_ids_raw)))
-        else:
-            stmt = stmt.where(false())
+            source_clauses.append(Task.benchmark_id.in_(list(benchmark_ids_raw)))
     elif "benchmark_id" in task_filter:
-        stmt = stmt.where(Task.benchmark_id == task_filter["benchmark_id"])
+        source_selector_seen = True
+        source_clauses.append(Task.benchmark_id == task_filter["benchmark_id"])
+    if task_set_ids is not None:
+        source_selector_seen = True
+        if task_set_ids:
+            source_clauses.append(Task.task_set_id.in_(task_set_ids))
+    if source_selector_seen:
+        stmt = stmt.where(or_(*source_clauses) if source_clauses else false())
     tag_filters_raw = task_filter.get("tag_filters")
     if tag_filters_raw is not None:
         if not isinstance(tag_filters_raw, dict):

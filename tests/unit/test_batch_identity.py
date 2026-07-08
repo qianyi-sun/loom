@@ -73,6 +73,25 @@ def test_batch_identity_uses_trial_config_when_combinations_are_absent() -> None
     assert "litellm/openai/o3-mini x3" in identity.description
 
 
+def test_batch_identity_describes_task_set_sources() -> None:
+    identity = build_batch_identity(
+        task_filter={
+            "benchmark_ids": ["humaneval"],
+            "task_set_ids": ["ts/team-uuid/sample-tasks"],
+            "subset_kind": "all",
+        },
+        trial_config={"agent_name": "litellm"},
+        combinations=[],
+        n_per_task=1,
+        backend="docker",
+    )
+
+    assert identity.name.startswith(
+        "humaneval+ts/team-uuid/sample-tasks | litellm x1",
+    )
+    assert "Tasks: humaneval, ts/team-uuid/sample-tasks" in identity.description
+
+
 def test_batch_identity_describes_tag_filters() -> None:
     identity = build_batch_identity(
         task_filter={

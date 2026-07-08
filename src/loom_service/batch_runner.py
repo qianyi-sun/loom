@@ -737,7 +737,11 @@ async def run_once(
                     rerun_pending_units,
                 ))
                 continue
-            task_ids = await resolve_task_filter(s, b.task_filter)
+            task_ids = await resolve_task_filter(
+                s,
+                b.task_filter,
+                team_id=b.team_id,
+            )
             task_ids, invalid_tasks = await split_valid_task_configs(
                 s, task_ids,
             )

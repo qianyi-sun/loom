@@ -526,25 +526,36 @@ def _batch_create(args: argparse.Namespace) -> int:
                     args.model,
                     agent_provider_override=args.agent_provider,
                 )
-            # --benchmark is a SHORTCUT for the most common task_filter:
-            # `{"benchmark_id": <slug>}`. Operators wanting richer
-            # filters use --task-filter JSON instead. Both: rejected so
-            # the precedence is explicit.
+            # --benchmark / --task-set are shortcuts for common task_filter
+            # shapes. Operators wanting richer filters use --task-filter JSON
+            # instead. Multiple selector forms are rejected so precedence stays
+            # explicit.
             task_filter: dict[str, Any]
-            if args.task_filter is not None and args.benchmark is not None:
+            selector_count = sum(
+                1
+                for selected in (
+                    args.task_filter is not None,
+                    args.benchmark is not None,
+                    args.task_set is not None,
+                )
+                if selected
+            )
+            if selector_count > 1:
                 sys.stderr.write(
-                    "error: --benchmark and --task-filter are mutually "
-                    "exclusive (--benchmark B is sugar for "
-                    '--task-filter \'{"benchmark_id":"B"}\').\n',
+                    "error: --benchmark, --task-set, and --task-filter are "
+                    "mutually exclusive.\n",
                 )
                 return 2
             if args.task_filter is not None:
                 task_filter = args.task_filter
             elif args.benchmark is not None:
                 task_filter = {"benchmark_id": args.benchmark}
+            elif args.task_set is not None:
+                task_filter = {"task_set_id": args.task_set}
             else:
                 sys.stderr.write(
-                    "error: one of --benchmark or --task-filter is required.\n",
+                    "error: one of --benchmark, --task-set, or --task-filter "
+                    "is required.\n",
                 )
                 return 2
             payload: dict[str, Any] = {
@@ -1216,6 +1227,15 @@ def dispatch(argv: list[str]) -> int:
         "--benchmark",
         default=None,
         help=('Benchmark slug — shortcut for --task-filter \'{"benchmark_id":"..."}\'.'),
+    )
+    p_bc.add_argument(
+        "--task-set",
+        dest="task_set",
+        default=None,
+        help=(
+            "TaskSet id — shortcut for --task-filter "
+            '\'{"task_set_id":"..."}\'. Use `loom tasksets list` to find ids.'
+        ),
     )
     p_bc.add_argument(
         "--task-filter",

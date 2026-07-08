@@ -80,6 +80,11 @@ interface BenchmarkItem {
 
 const FAN_OUT_CONFIRM_THRESHOLD = 200;
 const MAX_COMBINATIONS = 16;
+const TASK_SET_ID_PREFIX = "ts/";
+
+function isTaskSetId(id: string): boolean {
+  return id.startsWith(TASK_SET_ID_PREFIX);
+}
 
 const RETRY_REASONS = [
   { value: "worker_crash", label: "Worker crash" },
@@ -323,7 +328,7 @@ function benchmarkReadinessBadgeClass(r: BenchmarkItem): string {
 }
 
 /**
- * Series-grouped benchmark multi-select.
+ * Series-grouped task source multi-select.
  *
  * Groups rows by `series` (NULL → "Other" at the bottom). Each group
  * has a "Select all" affordance — the SPA's group-select path the
@@ -384,7 +389,7 @@ function BenchmarkPicker({
 
   if (loading && items.length === 0) {
     return (
-      <p className="mt-1 text-xs text-slate-500">Loading benchmarks…</p>
+      <p className="mt-1 text-xs text-slate-500">Loading task sources…</p>
     );
   }
 
@@ -419,8 +424,8 @@ function BenchmarkPicker({
                 aria-label={`Select all in series ${seriesLabel}`}
                 title={
                   populated > 0
-                    ? `Select or clear all ready benchmarks in the ${seriesLabel} series.`
-                    : `The ${seriesLabel} series has no ready benchmarks to select.`
+                    ? `Select or clear all ready sources in the ${seriesLabel} group.`
+                    : `The ${seriesLabel} group has no ready sources to select.`
                 }
                 className="h-4 w-4 border-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
               />
@@ -451,6 +456,7 @@ function BenchmarkPicker({
               const selectable = benchmarkSelectable(r);
               const readinessLabel = benchmarkReadinessLabel(r);
               const readinessMessage = benchmarkReadinessMessage(r);
+              const sourceKind = isTaskSetId(r.id) ? "TaskSet" : "benchmark";
               return (
                 <label
                   key={r.id}
@@ -466,7 +472,7 @@ function BenchmarkPicker({
                     checked={selected.has(r.id)}
                     onChange={() => toggleOne(r.id)}
                     disabled={!selectable}
-                    aria-label={`Select benchmark ${r.id}`}
+                    aria-label={`Select ${sourceKind} ${r.id}`}
                     className="h-4 w-4 border-slate-300 disabled:cursor-not-allowed"
                   />
                   <span className="min-w-0 flex-1">
@@ -644,7 +650,7 @@ function joinCompact(items: string[], maxItems: number, clean = true): string {
 }
 
 function identityTaskPart(args: {
-  benchmarkIds: string[];
+  sourceIds: string[];
   subsetKind: SubsetKind;
   explicitCount: number;
 }): { name: string; description: string } {
@@ -654,10 +660,10 @@ function identityTaskPart(args: {
       description: `${args.explicitCount} explicit task id(s)`,
     };
   }
-  if (args.benchmarkIds.length > 0) {
+  if (args.sourceIds.length > 0) {
     return {
-      name: joinCompact(args.benchmarkIds, 3),
-      description: args.benchmarkIds.join(", "),
+      name: joinCompact(args.sourceIds, 3),
+      description: args.sourceIds.join(", "),
     };
   }
   return { name: "custom", description: "selected tasks" };
@@ -745,7 +751,7 @@ function cleanIdentitySuffix(value: string): string {
 }
 
 function buildIdentityPreview(args: {
-  benchmarkIds: string[];
+  sourceIds: string[];
   tagFilters: Record<string, string[]>;
   subsetKind: SubsetKind;
   subsetN: string;
@@ -850,12 +856,25 @@ export default function NewBatch(): JSX.Element {
   // "Parsed N ids" preview as the user types.
   const parsed = useMemo(() => parseTaskIds(explicitText), [explicitText]);
 
+  const selectedSourceIdsSorted = useMemo(
+    () => Array.from(selectedBenchmarks).sort(),
+    [selectedBenchmarks],
+  );
+  const benchmarkIdsSorted = useMemo(
+    () => selectedSourceIdsSorted.filter((id) => !isTaskSetId(id)),
+    [selectedSourceIdsSorted],
+  );
+  const taskSetIdsSorted = useMemo(
+    () => selectedSourceIdsSorted.filter(isTaskSetId),
+    [selectedSourceIdsSorted],
+  );
+
   // Per-benchmark tag-key discovery. Fires once per selected benchmark
   // so we can union the keys/values and render one checkbox group per
   // distinct key. Cheap enough to refetch on selection changes; keyed
   // by benchmark id so React Query dedupes identical refetches.
   const tagQueries = useQueries({
-    queries: Array.from(selectedBenchmarks).map((id) => ({
+    queries: benchmarkIdsSorted.map((id) => ({
       queryKey: ["benchmark-tags", id],
       queryFn: () => api.listBenchmarkTags(id),
       staleTime: 5 * 60 * 1000,
@@ -905,7 +924,9 @@ export default function NewBatch(): JSX.Element {
   // query is in flight.
   const hasTagFilter = Object.values(tagFilters).some((v) => v.size > 0);
   const sumOfSelectedTasks = useMemo(() => {
-    if (!benchmarks.data || selectedBenchmarks.size === 0) return undefined;
+    if (!benchmarks.data || !evalTaskSets.data || selectedBenchmarks.size === 0) {
+      return undefined;
+    }
     let total = 0;
     let allKnown = true;
     for (const b of benchmarks.data.items as BenchmarkItem[]) {
@@ -916,18 +937,22 @@ export default function NewBatch(): JSX.Element {
       }
       total += b.task_count;
     }
+    for (const ts of evalTaskSets.data.items) {
+      if (!selectedBenchmarks.has(ts.task_set_id)) continue;
+      if (typeof ts.task_count !== "number") {
+        allKnown = false;
+        break;
+      }
+      total += ts.task_count;
+    }
     return allKnown ? total : undefined;
-  }, [benchmarks.data, selectedBenchmarks]);
+  }, [benchmarks.data, evalTaskSets.data, selectedBenchmarks]);
 
   // Build the same `task_filter` the submit handler would send. The
   // count endpoint returns the runnable count after stored TaskConfig
   // validation, so placeholder/unpublished rows do not make the form
   // advertise launchable trials. Keyed by the filter shape so React
   // Query dedupes and refetches only when the filter actually changes.
-  const benchmarkIdsSorted = useMemo(
-    () => Array.from(selectedBenchmarks).sort(),
-    [selectedBenchmarks],
-  );
   const tagFiltersPayload = useMemo(() => {
     const out: Record<string, string[]> = {};
     for (const [k, vs] of Object.entries(tagFilters)) {
@@ -940,8 +965,9 @@ export default function NewBatch(): JSX.Element {
     if (selectedBenchmarks.size === 0) return null;
     const f: Record<string, unknown> = {
       subset_kind: subsetKind,
-      benchmark_ids: benchmarkIdsSorted,
     };
+    if (benchmarkIdsSorted.length > 0) f.benchmark_ids = benchmarkIdsSorted;
+    if (taskSetIdsSorted.length > 0) f.task_set_ids = taskSetIdsSorted;
     if (Object.keys(tagFiltersPayload).length > 0) {
       f.tag_filters = tagFiltersPayload;
     }
@@ -956,7 +982,7 @@ export default function NewBatch(): JSX.Element {
     return f;
   }, [
     subsetKind, selectedBenchmarks.size, benchmarkIdsSorted,
-    tagFiltersPayload, subsetN, subsetSeed,
+    taskSetIdsSorted, tagFiltersPayload, subsetN, subsetSeed,
   ]);
   // Only issue the count call when a tag filter is active — without
   // one the estimate from sumOfSelectedTasks is exact and a network
@@ -1128,7 +1154,7 @@ export default function NewBatch(): JSX.Element {
       }
     } else {
       if (selectedBenchmarks.size === 0) {
-        setLocalError("Pick at least one benchmark.");
+        setLocalError("Pick at least one benchmark or TaskSet.");
         return;
       }
       if (subsetKind !== "all") {
@@ -1159,7 +1185,7 @@ export default function NewBatch(): JSX.Element {
         setLocalError(
           hasTagFilter
             ? "Tag filters narrow the slate to zero tasks — adjust the filters or unselect them."
-            : "No tasks match the current benchmark + subset.",
+            : "No tasks match the current source selection + subset.",
         );
         return;
       }
@@ -1203,7 +1229,12 @@ export default function NewBatch(): JSX.Element {
     if (subsetKind === "explicit") {
       task_filter.task_ids = parsed.ids;
     } else {
-      task_filter.benchmark_ids = Array.from(selectedBenchmarks).sort();
+      if (benchmarkIdsSorted.length > 0) {
+        task_filter.benchmark_ids = benchmarkIdsSorted;
+      }
+      if (taskSetIdsSorted.length > 0) {
+        task_filter.task_set_ids = taskSetIdsSorted;
+      }
       const tagPayload: Record<string, string[]> = {};
       for (const [k, vs] of Object.entries(tagFilters)) {
         if (vs.size > 0) tagPayload[k] = Array.from(vs).sort();
@@ -1265,10 +1296,13 @@ export default function NewBatch(): JSX.Element {
   })();
 
   let countSummary = "";
+  const hasTaskSetSelection = taskSetIdsSorted.length > 0;
+  const sourceN = selectedBenchmarks.size;
+  const sourceLabel = hasTaskSetSelection ? "source" : "benchmark";
   if (subsetKind === "explicit") {
     countSummary = "";
   } else if (selectedBenchmarks.size === 0) {
-    countSummary = "Pick at least one benchmark to count matching tasks.";
+    countSummary = "Pick at least one benchmark or TaskSet to count matching tasks.";
   } else if (hasTagFilter && exactCount.isLoading) {
     // Real count is in flight; show the running upper-bound while we
     // wait so the page stays responsive.
@@ -1281,12 +1315,11 @@ export default function NewBatch(): JSX.Element {
   } else if (matchedTaskCount === 0) {
     countSummary = hasTagFilter
       ? "Tag filters narrow the slate to zero tasks — adjust the filters or unselect them."
-      : "No runnable tasks are provisioned for the selected benchmarks. Ask an admin or operator to run the deployment catalog provisioning step, or pick a different ready benchmark.";
+      : "No runnable tasks are provisioned for the selected sources. Ask an admin or operator to run the deployment catalog provisioning step, or pick a different ready source.";
   } else if (hasTagFilter) {
     countSummary = `${matchedTaskCount} task${matchedTaskCount === 1 ? "" : "s"} match the current benchmark + tag filters.`;
   } else {
-    const benchN = selectedBenchmarks.size;
-    countSummary = `${matchedTaskCount} task${matchedTaskCount === 1 ? "" : "s"} match across ${benchN} benchmark${benchN === 1 ? "" : "s"}.`;
+    countSummary = `${matchedTaskCount} task${matchedTaskCount === 1 ? "" : "s"} match across ${sourceN} ${sourceLabel}${sourceN === 1 ? "" : "s"}.`;
   }
 
   const selectedBackend = backends.data?.items.find((b) => b.name === backend);
@@ -1316,7 +1349,7 @@ export default function NewBatch(): JSX.Element {
   });
   const releaseScopeText =
     subsetKind === "all"
-      ? `Full benchmark run: ${matchedTaskCount ?? 0} tasks selected.`
+      ? `Full ${hasTaskSetSelection ? "source" : "benchmark"} run: ${matchedTaskCount ?? 0} tasks selected.`
       : subsetKind === "explicit"
         ? `Explicit task-id run: ${matchedTaskCount ?? 0} tasks selected.`
         : `Subset run: ${matchedTaskCount ?? 0} tasks selected.`;
@@ -1346,7 +1379,7 @@ export default function NewBatch(): JSX.Element {
       : "Pick a model before submitting."
     : "No model required for the selected agent.";
   const generatedIdentity = buildIdentityPreview({
-    benchmarkIds: benchmarkIdsSorted,
+    sourceIds: selectedSourceIdsSorted,
     tagFilters: tagFiltersPayload,
     subsetKind,
     subsetN,
@@ -1389,7 +1422,7 @@ export default function NewBatch(): JSX.Element {
           <Card>
             <Card.Header
               title="Task selection"
-              description="Choose the benchmark tasks to run. You can select whole benchmarks, narrow by tags, take a subset, or paste exact task IDs."
+              description="Choose benchmark or TaskSet tasks to run. You can select whole sources, narrow benchmarks by tags, take a subset, or paste exact task IDs."
             />
             <Card.Body className="space-y-4">
               <label className="block max-w-sm">
@@ -1431,10 +1464,10 @@ export default function NewBatch(): JSX.Element {
               <fieldset
                 className="block"
                 disabled={subsetKind === "explicit"}
-                aria-label="Benchmarks"
+                aria-label="Task sources"
               >
                 <FieldLabel hint={subsetKind === "explicit" ? "implied by ids" : "required"}>
-                  Benchmarks
+                  Task sources
                 </FieldLabel>
                 <BenchmarkPicker
                   items={[
@@ -1481,7 +1514,7 @@ export default function NewBatch(): JSX.Element {
                 </legend>
                 {(
                   [
-                    ["all", "All tasks in the benchmark"],
+                    ["all", "All tasks in selected sources"],
                     ["first_n", "First N by id"],
                     ["last_n", "Last N by id"],
                     ["random_n", "Random N (seeded)"],

@@ -132,10 +132,11 @@ async def count_tasks(payload: _CountReq, sc: SessionAndCtx) -> dict[str, Any]:
     the cost is dominated by the candidate query that COUNT(*) would
     do anyway; the in-Python trim is O(N) on top.
     """
-    s, _ctx = sc
+    s, ctx = sc
     task_result = await resolve_task_filter_with_diagnostics(
         s,
         payload.task_filter,
+        team_id=ctx.team_id,
     )
     valid_task_ids, _invalid_tasks = await split_valid_task_configs(
         s,

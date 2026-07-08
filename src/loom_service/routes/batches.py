@@ -742,6 +742,7 @@ async def _create_batch_record(
     task_result = await resolve_task_filter_with_diagnostics(
         s,
         payload.task_filter,
+        team_id=submission_team_id,
     )
     task_ids = task_result.task_ids
     # Audit M2: a filter materializing to zero tasks creates a

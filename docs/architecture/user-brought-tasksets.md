@@ -1,10 +1,15 @@
 # User-brought TaskSets
 
-Status: design (no implementation). This updates the earlier
-user-brought-benchmarks design by separating the user-facing object from the
-platform benchmark catalog. It complements [`benchmark-adapter.md`](benchmark-adapter.md)
-for native platform benchmarks and [`sandbox-isolation.md`](sandbox-isolation.md)
-for verifier and transform trust boundaries.
+Status: partially implemented. TaskSet intake/list/status/materialization
+fixtures exist, and run creation now accepts team-visible TaskSets through
+`task_filter.task_set_id` / `task_filter.task_set_ids` and
+`loom eval batch create --task-set`. Materialization workers, full TaskSet
+management UI, and live staging validation are still tracked separately. This
+updates the earlier user-brought-benchmarks design by separating the
+user-facing object from the platform benchmark catalog. It complements
+[`benchmark-adapter.md`](benchmark-adapter.md) for native platform benchmarks
+and [`sandbox-isolation.md`](sandbox-isolation.md) for verifier and transform
+trust boundaries.
 
 ## Goal
 
@@ -121,11 +126,12 @@ added later without re-shaping the public TaskSet list.
 ### `benchmarks` - preserved native benchmark catalog
 
 Native platform benchmarks remain in `benchmarks` with their existing meaning.
-Implementation may add a benchmark-compatible projection for evaluation-ready
-TaskSets if current run creation code needs a benchmark-shaped selector, but
-that projection is internal compatibility, not the user-owned source of truth.
+The current implementation does not project TaskSets into `benchmarks`; batch
+creation uses explicit TaskSet selectors in `task_filter` instead. If a future
+projection is added, it must remain internal compatibility, not the user-owned
+source of truth.
 
-If a projection is added, it must obey these rules:
+Any future projection must obey these rules:
 
 - System benchmark ids remain bare (`humaneval`, `skilllearnbench`, etc.).
 - User TaskSet projection ids are derived from `task_sets.id` and are never the
@@ -139,7 +145,8 @@ If a projection is added, it must obey these rules:
 User TaskSets materialize to canonical task bundles. The implementation can add
 `task_set_id` to `tasks` or maintain a compatibility `benchmark_id` projection,
 but every user-owned task row must remain traceable to its owning TaskSet and
-team.
+team. The current implementation links materialized user-owned task rows through
+`tasks.task_set_id`.
 
 ### Visibility helper
 
@@ -167,6 +174,11 @@ owned_eval_task_sets = visible_task_sets(team_id=team_id).where(
     TaskSet.evaluation_ready.is_(True)
 )
 ```
+
+Run creation must pass the caller team into task-filter resolution. Explicit
+TaskSet selectors are rejected unless the TaskSet is visible to that team and
+has status `ready` or `partial`. Even explicit `task_ids` are filtered so a
+team cannot run another team's TaskSet task by guessing an id.
 
 A repo-level lint test should reject bare `select(TaskSet)` outside the TaskSet
 visibility helper module. If an implementation adds benchmark-compatible
@@ -266,6 +278,21 @@ creation APIs can offer a combined selector of native benchmarks plus
 evaluation-ready TaskSets, but TaskSet management remains under
 `/api/v1/tasksets`.
 
+Batch creation accepts TaskSets through the existing batch API without
+renaming them as benchmarks:
+
+```json
+{
+  "task_filter": {
+    "task_set_id": "ts/<team_id>/<slug>",
+    "subset_kind": "all"
+  }
+}
+```
+
+For mixed source runs, `benchmark_id(s)` and `task_set_id(s)` are unioned as
+task sources before `task_ids`, tag filters, and subset filters are applied.
+
 ### CLI
 
 ```
@@ -275,6 +302,20 @@ loom tasksets rebuild <id>
 loom tasksets delete <id>
 loom tasksets list
 ```
+
+Evaluation/data-production batch creation can target one TaskSet directly:
+
+```
+loom eval batch create \
+  --task-set ts/<team_id>/<slug> \
+  --agent <agent> \
+  --provider <provider-connection> \
+  --model <model>
+```
+
+`--benchmark`, `--task-set`, and `--task-filter` are mutually exclusive CLI
+shortcuts. Use `--task-filter` when a run needs mixed native benchmark and
+TaskSet sources.
 
 `loom benchmarks list` remains the native benchmark listing. If a future
 evaluation CLI wants to show evaluation-ready TaskSets alongside native
@@ -386,6 +427,7 @@ UPDATE task_sets.evaluation_ready based on verifier validity
 ```
 user picks TaskSet
 API authz: visible_task_sets(user) must include it
+POST /api/v1/batches task_filter={"task_set_id":"ts/<team>/<slug>", ...}
 worker pulls task bundle
 agent/model runs -> trajectories, completions, and artifacts are persisted
 no verifier or benchmark score is required
@@ -396,6 +438,7 @@ no verifier or benchmark score is required
 ```
 user picks native Benchmark or evaluation-ready TaskSet
 API authz: visible_benchmarks(user) or visible_task_sets(user) must include it
+POST /api/v1/batches task_filter={"benchmark_id":"humaneval"} or {"task_set_id":"ts/<team>/<slug>"}
 worker pulls task bundle
 agent/model runs -> verifier runs in trial sandbox -> score/reward persisted
 ```
@@ -470,6 +513,10 @@ table.
   rest mocked.
 - Cross-team isolation: team A cannot list, get, rebuild, delete, data-run, or
   evaluation-run team B's TaskSet.
+- TaskSet run selection: owned `task_set_id` succeeds, native
+  `benchmark_id(s)` plus `task_set_id(s)` are source-unioned, cross-team
+  `task_set_id` is rejected, and guessed cross-team TaskSet `task_ids` do not
+  create runs.
 - Partial-failure materialization: a source with 30% malformed rows produces
   `partial` with the expected skip count.
 - Soft-delete + GC: 7-day timer respected; delete during GC window is
@@ -500,9 +547,6 @@ table.
 These do not block design approval; they require code-level reconciliation when
 the implementation plan is drafted.
 
-- Exact reconciliation with current `tasks` and run-creation schema: whether to
-  add `task_set_id` directly or use an internal benchmark-compatible projection
-  for the first slice.
 - Whether evaluation-ready TaskSets appear in `/api/v1/benchmarks` only behind
   an explicit flag, or only through run-creation selector endpoints.
 - Whether the `transform` sandbox should reuse an existing worker-side primitive
