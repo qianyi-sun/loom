@@ -80,6 +80,7 @@ async def test_openai_compatible_byo_chat_uses_egress_pool() -> None:
             audit_team_id=team_id,
             audit_trial_id=trial_id,
             audit_step_id="main",
+            audit_dialect="openai_chat",
             provider_label="openai-compatible",
             request_params={
                 "status": "available",
