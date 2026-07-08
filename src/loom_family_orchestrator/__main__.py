@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.storage_credentials import build_s3_client
 from loom_control_plane.config import ControlPlaneSettings
+from loom_family_orchestrator.gateway_client import OrchestratorGatewayClient
 from loom_family_orchestrator.main_loop import OrchestratorContext, run
 
 logger = logging.getLogger(__name__)
@@ -53,9 +55,37 @@ async def _amain() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _sigterm)
 
+    # #672 PR-3: wire an httpx client to the LLM gateway so the
+    # skill_patcher_llm adapter can call it. The orchestrator runs as
+    # a service account — the team_id + token come from env vars set
+    # on the Deployment. When either is missing, the adapter surfaces
+    # a ValueError at evolve() time and the orchestrator's failure
+    # policy takes over (retry / stall) rather than crashing the loop.
+    gateway_team_id = os.environ.get(
+        "LOOM_FAMILY_ORCHESTRATOR_GATEWAY_TEAM_ID", "",
+    )
+    gateway_token = os.environ.get(
+        "LOOM_FAMILY_ORCHESTRATOR_GATEWAY_TOKEN", "",
+    )
+    gateway_client: OrchestratorGatewayClient | None = None
+    if gateway_team_id and gateway_token:
+        gateway_client = OrchestratorGatewayClient(
+            base_url=str(settings.llm_gateway_url),
+            team_id=gateway_team_id,
+            token=gateway_token,
+            timeout_sec=settings.family_adapter_call_timeout_sec,
+        )
+    else:
+        logger.warning(
+            "family_orchestrator_gateway_unconfigured — set "
+            "LOOM_FAMILY_ORCHESTRATOR_GATEWAY_TEAM_ID + "
+            "LOOM_FAMILY_ORCHESTRATOR_GATEWAY_TOKEN to enable "
+            "adapter LLM calls",
+        )
+
     ctx = OrchestratorContext(
         session_factory=session_factory,
-        gateway=None,  # PR-3: wire up an httpx client to the LLM gateway.
+        gateway=gateway_client,
         object_store=object_store,
         artifacts_bucket="artifacts",
         state_backend_factory=None,
@@ -67,6 +97,8 @@ async def _amain() -> None:
     try:
         await run(ctx, stop_event=stop_event)
     finally:
+        if gateway_client is not None:
+            await gateway_client.aclose()
         await engine.dispose()
     logger.info("family_orchestrator_stopped")
 
