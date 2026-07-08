@@ -1,8 +1,11 @@
 """CP finalize hook: advance predicate + family state transition.
 
-The full DB round-trip is exercised by an integration test in
-``tests/integration/test_family_run_end_to_end.py``. This suite pins
-the pure decision logic via a mock session.
+The full DB round-trip is exercised by an integration test. This
+suite pins the pure decision logic via a mock session.
+
+PR-2 update: the noop shortcut is gone. Every ADVANCE decision
+transitions to ``adapting``; the orchestrator picks up all adapters
+uniformly (including ``noop``).
 """
 
 from __future__ import annotations
@@ -58,7 +61,12 @@ class _FakeSession:
 
 
 @pytest.mark.asyncio
-async def test_finalize_family_noop_shortcut_bumps_index_when_not_last() -> None:
+async def test_finalize_family_advance_goes_to_adapting_for_noop() -> None:
+    """PR-2: even the noop adapter routes through the orchestrator.
+
+    ADVANCE always transitions to ``adapting`` regardless of adapter
+    name; the orchestrator's noop path bumps the index from there.
+    """
     trial_id = uuid4()
     batch_id = uuid4()
     row = {
@@ -83,13 +91,16 @@ async def test_finalize_family_noop_shortcut_bumps_index_when_not_last() -> None
     _, update_params = session.executed[1]
     assert update_params["batch_id"] == batch_id
     assert update_params["family_key"] == "fam"
-    assert update_params["new_state"] == "pending"
-    assert update_params["new_current_index"] == 1
+    assert update_params["new_state"] == "adapting"
+    assert update_params["new_current_index"] == 0
     assert update_params["new_attempt_count"] == 0
 
 
 @pytest.mark.asyncio
-async def test_finalize_family_noop_shortcut_done_on_last() -> None:
+async def test_finalize_family_advance_goes_to_adapting_on_last_task() -> None:
+    """End of sequence also routes through ``adapting`` - the
+    orchestrator's post-evolve bump decides ``done``.
+    """
     trial_id = uuid4()
     batch_id = uuid4()
     row = {
@@ -110,8 +121,8 @@ async def test_finalize_family_noop_shortcut_done_on_last() -> None:
     await _finalize_family(session, trial_id=trial_id, new_state=TrialState.SUCCEEDED)
 
     _, update_params = session.executed[1]
-    assert update_params["new_state"] == "done"
-    assert update_params["new_current_index"] == 2
+    assert update_params["new_state"] == "adapting"
+    assert update_params["new_current_index"] == 1
 
 
 @pytest.mark.asyncio
@@ -124,8 +135,8 @@ async def test_finalize_family_no_op_when_not_family_trial() -> None:
 
 @pytest.mark.asyncio
 async def test_finalize_family_non_noop_goes_to_adapting() -> None:
-    """When adapter is not ``noop``, ADVANCE transitions to ``adapting``
-    for the future orchestrator (PR-2) to pick up.
+    """Non-noop adapters also transition to ``adapting`` - same path,
+    same orchestrator ownership.
     """
     trial_id = uuid4()
     batch_id = uuid4()
@@ -142,9 +153,6 @@ async def test_finalize_family_non_noop_goes_to_adapting() -> None:
         "family_attempt_count": 0,
         "family_state": "running",
     }
-    # Register a stub for the unknown adapter so registry doesn't need it.
-    # (It doesn't need to exist for finalize; only the advance predicate
-    # is resolved.)
     session = _FakeSession(load_row=row)
     await _finalize_family(session, trial_id=trial_id, new_state=TrialState.SUCCEEDED)
     _, update_params = session.executed[1]
