@@ -1932,7 +1932,7 @@ spec:
     assert result.exit_code == 0
 
 
-def test_release_gate_run_fails_fast_when_gb10_status_fails(
+def test_release_gate_run_fails_fast_when_gb10_status_hard_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1968,12 +1968,12 @@ def test_release_gate_run_fails_fast_when_gb10_status_fails(
             )
         if "gb10-workers" in argv:
             if kwargs.get("stderr_log"):
-                kwargs["stderr_log"].write_text("GB10 rollout target mismatch\n")
+                kwargs["stderr_log"].write_text("error: CP returned 500: internal error\n")
             return SubprocessResult(
                 argv=list(argv),
                 returncode=1,
                 stdout="{}",
-                stderr="GB10 rollout target mismatch\n",
+                stderr="error: CP returned 500: internal error\n",
             )
         raise AssertionError("release-gate should not run after GB10 status failure")
 
@@ -1982,7 +1982,7 @@ def test_release_gate_run_fails_fast_when_gb10_status_fails(
     result = ReleaseGateStep().run(ctx, step_dir)
 
     assert result.exit_code == 1
-    assert result.error == "GB10 rollout target mismatch"
+    assert result.error == "error: CP returned 500: internal error"
     non_docker_calls = [call for call in calls if call[:3] != ["docker", "image", "inspect"]]
     assert [call[3:6] for call in non_docker_calls] == [
         ["cluster", "release-manifest", "--config"],
@@ -2169,6 +2169,115 @@ def test_release_gate_retries_transient_gb10_status_cp_unreachable(
         ["cluster", "release-manifest", "--config"],
         ["cluster", "minio-storage-preflight", "--namespace"],
         ["admin", "gb10-workers", "status"],
+        ["admin", "gb10-workers", "status"],
+        ["admin", "gb10-workers", "status"],
+        ["datasets", "hf-boundary-evidence", "skilllearnbench"],
+        ["cluster", "release-gate", "--manifest"],
+    ]
+
+
+def test_release_gate_retries_gb10_status_release_target_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    _write_rendered_service(ev)
+    step_dir = ev.step_dir(14, "release-gate")
+    calls: list[list[str]] = []
+    gb10_attempts = 0
+
+    def fake_run(argv, **kwargs):
+        nonlocal gb10_attempts
+        calls.append(list(argv))
+        if list(argv[:3]) == ["docker", "image", "inspect"]:
+            return _docker_inspect_success(list(argv))
+        if "release-manifest" in argv:
+            output = Path(argv[argv.index("--output") + 1])
+            output.write_text(_release_manifest_with_gb10_contract())
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout="manifest\n",
+                stderr="",
+            )
+        if "minio-storage-preflight" in argv:
+            output = Path(argv[argv.index("--output") + 1])
+            output.write_text('{"outcome":"pass","checks":[]}\n', encoding="utf-8")
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout='{"outcome":"pass","checks":[]}\n',
+                stderr="",
+            )
+        if "gb10-workers" in argv:
+            gb10_attempts += 1
+            if gb10_attempts == 1:
+                if kwargs.get("stdout_log"):
+                    kwargs["stdout_log"].write_text(
+                        '{"nodes":[{"hostname":"trt-gb10-9"}],"desired_states":[]}\n',
+                    )
+                if kwargs.get("stderr_log"):
+                    kwargs["stderr_log"].write_text(
+                        "GB10 rollout target mismatch:\n"
+                        "  node trt-gb10-9 missing active/fresh docker worker "
+                        "registration worker_fresh=False\n",
+                    )
+                return SubprocessResult(
+                    argv=list(argv),
+                    returncode=1,
+                    stdout='{"nodes":[{"hostname":"trt-gb10-9"}],"desired_states":[]}\n',
+                    stderr=(
+                        "GB10 rollout target mismatch:\n"
+                        "  node trt-gb10-9 missing active/fresh docker worker "
+                        "registration worker_fresh=False\n"
+                    ),
+                )
+            if kwargs.get("stdout_log"):
+                kwargs["stdout_log"].write_text('{"nodes":[],"desired_states":[]}\n')
+            if kwargs.get("stderr_log"):
+                kwargs["stderr_log"].write_text("")
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout='{"nodes":[],"desired_states":[]}\n',
+                stderr="",
+            )
+        if "hf-boundary-evidence" in argv:
+            output = Path(argv[argv.index("--output") + 1])
+            output.write_text('{"environment":"staging"}\n', encoding="utf-8")
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout="wrote HF boundary evidence\n",
+                stderr="",
+            )
+        if "release-gate" in argv:
+            return SubprocessResult(
+                argv=list(argv),
+                returncode=0,
+                stdout="gb10-worker-convergence pass\n",
+                stderr="",
+            )
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s12_release_gate.run_captured", fake_run)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s12_release_gate._GB10_STATUS_RETRY_DELAY_SEC",
+        0.0,
+        raising=False,
+    )
+
+    result = ReleaseGateStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    assert gb10_attempts == 2
+    non_docker_calls = [call for call in calls if call[:3] != ["docker", "image", "inspect"]]
+    assert [call[3:6] for call in non_docker_calls] == [
+        ["cluster", "release-manifest", "--config"],
+        ["cluster", "minio-storage-preflight", "--namespace"],
         ["admin", "gb10-workers", "status"],
         ["admin", "gb10-workers", "status"],
         ["datasets", "hf-boundary-evidence", "skilllearnbench"],

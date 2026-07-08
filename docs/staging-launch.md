@@ -717,7 +717,10 @@ artifact must also show a linked worker registry row for every active GB10 host:
 `worker_id` present, `worker_status=active`, `worker_fresh=true`, and
 `worker_backend_names` containing `docker`. This prevents release-gate from
 passing nodes that applied env/source state but have no fresh worker available
-for `/api/v1/backends` and smoke submission. During worker-token rotation, also run
+for `/api/v1/backends` and smoke submission. Rollout release-gate retries direct
+`gb10-workers status` release-target mismatches while newly started workers
+register and heartbeat; persistent stale worker evidence after the retry window
+means the host runtime needs repair. During worker-token rotation, also run
 `loom worker gb10-agent plan/apply --worker-token file:/...` on each GB10 host,
 then verify `loom resources status --json` shows fresh `gb10-arm64` active
 workers and the Control Plane logs no new `/workers/register` 401s. The

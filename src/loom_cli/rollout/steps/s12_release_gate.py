@@ -503,7 +503,9 @@ class ReleaseGateStep(SubcommandStep):
                 timeout_sec=60,
             )
             if gb10.returncode != 0:
-                if _is_transient_cp_unreachable(gb10.stderr):
+                if _is_transient_cp_unreachable(
+                    gb10.stderr,
+                ) or _is_gb10_convergence_failure(gb10):
                     gb10_retry_log.open("a", encoding="utf-8").write(
                         f"attempt {attempt}/{_GB10_STATUS_MAX_ATTEMPTS}: {gb10.stderr.strip()}\n"
                     )
