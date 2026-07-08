@@ -658,7 +658,7 @@ def test_admin_on_behalf_smoke_submits_batch_with_admin_source_ref(
                 b'{"id":"batch-1","state":"finished","result_status":"succeeded",'
                 b'"expected_trial_count":1,'
                 b'"trial_summary":{"succeeded":1,"failed":0,"cancelled":0},'
-                b'"submitted_by_user":{"username":"devansh",'
+                b'"submitted_by_user":{"username":"Devansh",'
                 b'"team_id":"11111111-1111-4111-8111-111111111111"}}',
             )
         raise AssertionError(f"unexpected GET {url}")
@@ -849,7 +849,7 @@ def test_admin_on_behalf_smoke_reuses_existing_deterministic_batch(
                                 "name": batch_name,
                                 "team_id": ("11111111-1111-4111-8111-111111111111"),
                                 "submitted_by_user": {
-                                    "username": "devansh",
+                                    "username": "Devansh",
                                     "team_id": ("11111111-1111-4111-8111-111111111111"),
                                 },
                                 "task_filter": {
@@ -866,7 +866,7 @@ def test_admin_on_behalf_smoke_reuses_existing_deterministic_batch(
                 b'{"id":"batch-existing","state":"finished",'
                 b'"result_status":"succeeded","expected_trial_count":1,'
                 b'"trial_summary":{"succeeded":1},'
-                b'"submitted_by_user":{"username":"devansh",'
+                b'"submitted_by_user":{"username":"Devansh",'
                 b'"team_id":"11111111-1111-4111-8111-111111111111"}}',
             )
         raise AssertionError(f"unexpected GET {url}")

@@ -503,7 +503,10 @@ def _existing_admin_smoke_batch_id(
         if not isinstance(submitted_by_user, Mapping):
             continue
         if (
-            submitted_by_user.get("username") != cfg.represented_username
+            not _same_username(
+                submitted_by_user.get("username"),
+                cfg.represented_username,
+            )
             or submitted_by_user.get("team_id") != cfg.team_id
         ):
             continue
@@ -517,6 +520,10 @@ def _existing_admin_smoke_batch_id(
         if isinstance(batch_id, str) and batch_id:
             return batch_id
     return None
+
+
+def _same_username(left: object, right: str) -> bool:
+    return isinstance(left, str) and left.strip().casefold() == right.strip().casefold()
 
 
 def _json_int(value: object) -> int | None:
@@ -563,7 +570,7 @@ def _admin_batch_succeeded(
         return False, "batch response has no submitted_by_user"
     username = submitted_by_user.get("username")
     team_id = submitted_by_user.get("team_id")
-    if username != cfg.represented_username or team_id != cfg.team_id:
+    if not _same_username(username, cfg.represented_username) or team_id != cfg.team_id:
         return (
             False,
             "batch submitted_by_user does not match represented "
