@@ -55,6 +55,77 @@ spec:
         - { port: 53, protocol: UDP }
         - { port: 53, protocol: TCP }
 
+{% if topology.multi_node %}
+---
+# CNPG-managed Postgres pods (#637). The `loom-postgres` NetworkPolicy
+# above targets `app: loom-postgres` which never matches CNPG pods —
+# they're labeled `cnpg.io/cluster: loom-postgres`. Without this
+# policy, CNPG pods have no ingress restrictions under multi_node=true.
+# Same ingress rules as the single-node policy plus CNPG's internal
+# replication traffic between primary and replicas.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loom-postgres-cnpg
+spec:
+  podSelector:
+    matchLabels: { cnpg.io/cluster: loom-postgres }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Client traffic on 5432 from the same tier as the single-node
+    # policy above.
+    - from:
+        - podSelector: { matchLabels: { app: loom-control-plane } }
+        - podSelector: { matchLabels: { app: loom-llm-gateway } }
+        - podSelector: { matchLabels: { app: loom-service } }
+        - podSelector: { matchLabels: { app: loom-migration } }
+{% if pgbouncer.enabled %}
+        - podSelector: { matchLabels: { app: loom-pgbouncer } }
+{% endif %}
+      ports:
+        - { port: 5432, protocol: TCP }
+    # CNPG replication + operator control traffic between cluster pods.
+    # Primary-to-replica streaming replication uses 5432; the CNPG
+    # instance manager gRPC sidecar listens on 8000.
+    - from:
+        - podSelector: { matchLabels: { cnpg.io/cluster: loom-postgres } }
+      ports:
+        - { port: 5432, protocol: TCP }
+        - { port: 8000, protocol: TCP }
+    # CNPG operator (in cnpg-system namespace) reaches instance
+    # manager gRPC to trigger backups / promotions / etc.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+      ports:
+        - { port: 8000, protocol: TCP }
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    # Peer replication + gRPC between CNPG pods.
+    - to:
+        - podSelector: { matchLabels: { cnpg.io/cluster: loom-postgres } }
+      ports:
+        - { port: 5432, protocol: TCP }
+        - { port: 8000, protocol: TCP }
+    # Operator reachability (health, promote signals).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+      ports:
+        - { port: 9443, protocol: TCP }
+{% endif %}
+
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
