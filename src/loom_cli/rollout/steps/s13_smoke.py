@@ -82,14 +82,44 @@ def _normalise_public_path(value: str) -> str:
     return path.rstrip("/")
 
 
-def _smoke_api_token(ctx: RolloutContext) -> str | None:
-    return os.environ.get("LOOM_SMOKE_API_TOKEN") or ctx.metadata.get(
+def _smoke_api_token_source(ctx: RolloutContext) -> str | None:
+    source = ctx.smoke_api_token_source or ctx.metadata.get(
+        "smoke_api_token_source",
+    )
+    if isinstance(source, str) and source.strip():
+        return source.strip()
+    return None
+
+
+def _resolve_smoke_api_token(ctx: RolloutContext) -> tuple[str | None, str | None]:
+    source = _smoke_api_token_source(ctx)
+    if source is not None:
+        try:
+            return (
+                resolve_secret_source(source, flag_name="--smoke-api-token"),
+                None,
+            )
+        except SecretSourceError as exc:
+            return None, str(exc)
+    token = os.environ.get("LOOM_SMOKE_API_TOKEN") or ctx.metadata.get(
         "smoke_api_token",
     )
+    if isinstance(token, str) and token.strip():
+        return token.strip(), None
+    return None, None
+
+
+def _smoke_api_token(ctx: RolloutContext) -> str | None:
+    token, _error = _resolve_smoke_api_token(ctx)
+    return token
 
 
 def _config_value(ctx: RolloutContext, env_name: str, metadata_key: str) -> str | None:
-    value = os.environ.get(env_name) or ctx.metadata.get(metadata_key)
+    value = (
+        getattr(ctx, metadata_key, None)
+        or os.environ.get(env_name)
+        or ctx.metadata.get(metadata_key)
+    )
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
@@ -109,9 +139,7 @@ def _smoke_task_id(ctx: RolloutContext, *, submit_mode: str = "user-token") -> s
 
 
 def _explicit_smoke_task_id(ctx: RolloutContext) -> str | None:
-    return os.environ.get("LOOM_SMOKE_TASK_ID") or ctx.metadata.get(
-        "smoke_task_id",
-    )
+    return _config_value(ctx, "LOOM_SMOKE_TASK_ID", "smoke_task_id")
 
 
 def _smoke_required_worker_pool(
@@ -783,7 +811,13 @@ class SmokeStep(BaseStep):
                 },
             )
         else:
-            fingerprint["smoke_api_token_present"] = bool(_smoke_api_token(ctx))
+            smoke_api_token_source = _smoke_api_token_source(ctx)
+            fingerprint["smoke_api_token_source"] = smoke_api_token_source
+            fingerprint["smoke_api_token_present"] = (
+                smoke_api_token_source is not None
+                or bool(os.environ.get("LOOM_SMOKE_API_TOKEN"))
+                or bool(ctx.metadata.get("smoke_api_token"))
+            )
         return fingerprint
 
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:
@@ -798,13 +832,16 @@ class SmokeStep(BaseStep):
                     "'user-token' or 'admin-on-behalf'"
                 ),
             )
-        token = _smoke_api_token(ctx)
+        token, token_error = _resolve_smoke_api_token(ctx)
+        if token_error is not None:
+            return RunResult(exit_code=2, error=token_error)
         if not token:
             return RunResult(
                 exit_code=2,
                 error=(
                     "smoke requires a user-owned submit token — set "
-                    "$LOOM_SMOKE_API_TOKEN or provide smoke_api_token via "
+                    "--smoke-api-token env:VAR/file:PATH, set "
+                    "$LOOM_SMOKE_API_TOKEN, or provide smoke_api_token via "
                     "rollout metadata"
                 ),
             )

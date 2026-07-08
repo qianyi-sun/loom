@@ -102,6 +102,71 @@ def test_smoke_posts_current_trial_config_contract_with_user_owned_token(
     }
 
 
+def test_smoke_resolves_user_token_from_context_secret_source(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token_file = tmp_path / "smoke-token"
+    token_file.write_text("smoke-user-token\n", encoding="utf-8")
+    ctx = make_ctx(
+        tmp_path,
+        smoke_api_token_source=f"file:{token_file}",
+        smoke_task_id="terminal-bench-2/hello-world",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(15, "smoke")
+
+    monkeypatch.delenv("LOOM_SMOKE_API_TOKEN", raising=False)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s13_smoke._ingress_base",
+        lambda _ctx: "https://loom.test",
+    )
+
+    def fake_get(url: str, *, token: str | None = None) -> tuple[int, bytes]:
+        assert token == "smoke-user-token"
+        if url.endswith("/api/v1/health"):
+            return 200, b'{"status":"ok"}'
+        if url.endswith("/api/v1/auth/whoami"):
+            return (
+                200,
+                b'{"credential_type":"user_owned_api_token","scopes":["read:own","submit"]}',
+            )
+        if url.endswith("/api/v1/benchmarks"):
+            return 200, b'{"items":[{"id":"terminal-bench-2"}]}'
+        if url.endswith("/api/v1/tasks/terminal-bench-2/hello-world"):
+            return (
+                200,
+                b'{"id":"terminal-bench-2/hello-world","benchmark_id":"terminal-bench-2"}',
+            )
+        if url.endswith("/api/v1/trials/trial-1"):
+            return 200, b'{"id":"trial-1","state":"succeeded","aggregate_reward":1.0}'
+        if url.endswith("/api/v1/usage"):
+            return 200, b'{"items":[]}'
+        raise AssertionError(f"unexpected GET {url}")
+
+    def fake_post(
+        url: str,
+        payload: dict[str, object],
+        *,
+        token: str | None = None,
+    ) -> tuple[int, bytes]:
+        assert url.endswith("/api/v1/trials")
+        assert token == "smoke-user-token"
+        return 201, b'{"trial_id":"trial-1"}'
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s13_smoke._http_get", fake_get)
+    monkeypatch.setattr("loom_cli.rollout.steps.s13_smoke._http_post", fake_post)
+
+    result = SmokeStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    fingerprint = SmokeStep()._inputs_fingerprint(ctx)
+    assert fingerprint["smoke_api_token_source"] == f"file:{token_file}"
+    assert "smoke-user-token" not in json.dumps(fingerprint, sort_keys=True)
+    assert "smoke-user-token" not in step_dir.stdout_path().read_text()
+
+
 def test_smoke_uses_token_when_heading_platform_trajectory_download_url(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -547,6 +612,10 @@ def test_admin_on_behalf_smoke_submits_batch_with_admin_source_ref(
         expect_admin_token_fingerprint=fingerprint,
         scope="current-gb10",
         exclude_oldlab=True,
+        smoke_submit_mode="admin-on-behalf",
+        smoke_on_behalf_username="devansh",
+        smoke_on_behalf_team_id="11111111-1111-4111-8111-111111111111",
+        smoke_admin_actor="qianyi",
     )
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
@@ -555,13 +624,10 @@ def test_admin_on_behalf_smoke_submits_batch_with_admin_source_ref(
     captured_headers: list[dict[str, str]] = []
 
     monkeypatch.setenv("LOOM_CP_ADMIN_TOKEN", admin_token)
-    monkeypatch.setenv("LOOM_SMOKE_SUBMIT_MODE", "admin-on-behalf")
-    monkeypatch.setenv("LOOM_SMOKE_ON_BEHALF_USERNAME", "devansh")
-    monkeypatch.setenv(
-        "LOOM_SMOKE_ON_BEHALF_TEAM_ID",
-        "11111111-1111-4111-8111-111111111111",
-    )
-    monkeypatch.setenv("LOOM_SMOKE_ADMIN_ACTOR", "qianyi")
+    monkeypatch.delenv("LOOM_SMOKE_SUBMIT_MODE", raising=False)
+    monkeypatch.delenv("LOOM_SMOKE_ON_BEHALF_USERNAME", raising=False)
+    monkeypatch.delenv("LOOM_SMOKE_ON_BEHALF_TEAM_ID", raising=False)
+    monkeypatch.delenv("LOOM_SMOKE_ADMIN_ACTOR", raising=False)
     monkeypatch.setattr(
         "loom_cli.rollout.steps.s13_smoke._ingress_base",
         lambda _ctx: "https://loom.test",

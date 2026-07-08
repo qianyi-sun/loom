@@ -311,6 +311,57 @@ class TestRolloutCLIRealRun:
         assert "stdin source '-' is not replayable for rollout" in err
         assert "env:VAR or file:PATH" in err
 
+    def test_refuses_literal_smoke_api_token_before_evidence_capture(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        raw_token = "raw-smoke-secret"
+
+        with pytest.raises(SystemExit) as excinfo:
+            main([
+                "cluster", "rollout",
+                "--ref", "origin/dev",
+                "--image-tag", "staging-aaaaaaa",
+                "--cluster-name", "loom-staging",
+                "--namespace", "loom-staging",
+                "--environment", "staging",
+                "--cp-url", "http://control-node.lan:18081",
+                "--smoke-api-token", raw_token,
+                "--cluster-config", "/tmp/cluster-config.toml",
+                "--backup-manifest", "/tmp/backup-manifest.json",
+                "--rollout-root", "/tmp/rollout-root",
+            ])
+
+        assert excinfo.value.code == 2
+        err = capsys.readouterr().err
+        assert "literal values are rejected" in err
+        assert "env:VAR | file:PATH" in err
+        assert raw_token not in err
+
+    def test_refuses_stdin_smoke_api_token_for_replayable_rollout(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main([
+                "cluster", "rollout",
+                "--ref", "origin/dev",
+                "--image-tag", "staging-aaaaaaa",
+                "--cluster-name", "loom-staging",
+                "--namespace", "loom-staging",
+                "--environment", "staging",
+                "--cp-url", "http://control-node.lan:18081",
+                "--smoke-api-token", "-",
+                "--cluster-config", "/tmp/cluster-config.toml",
+                "--backup-manifest", "/tmp/backup-manifest.json",
+                "--rollout-root", "/tmp/rollout-root",
+            ])
+
+        assert excinfo.value.code == 2
+        err = capsys.readouterr().err
+        assert "stdin source '-' is not replayable for rollout" in err
+        assert "env:VAR or file:PATH" in err
+
     def test_passes_cp_url_into_rollout_context(
         self,
         tmp_path: Path,
@@ -347,6 +398,59 @@ class TestRolloutCLIRealRun:
         assert rc == 0
         assert captured["ctx"].cp_url == "http://control-node.lan:18081"
         assert captured["ctx"].backup_manifest_min_remaining_hours == 2
+
+    def test_passes_smoke_inputs_into_rollout_context(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cfg = tmp_path / "cluster-config.toml"
+        cfg.write_text("image_tag = 'x'\n")
+        backup = tmp_path / "backup-manifest.json"
+        backup.write_text("{}")
+        monkeypatch.setattr(subprocess, "run", _FakeSubprocess())
+        captured = {}
+
+        def fake_run_rollout(ctx, steps, evidence):
+            captured["ctx"] = ctx
+            return 0
+
+        monkeypatch.setattr("loom_cli.rollout.cli.run_rollout", fake_run_rollout)
+
+        rc = main([
+            "cluster", "rollout",
+            "--ref", "origin/dev",
+            "--image-tag", "staging-aaaaaaa",
+            "--cluster-name", "loom-staging",
+            "--namespace", "loom-staging",
+            "--environment", "staging",
+            "--cp-url", "http://control-node.lan:18081",
+            "--cluster-config", str(cfg),
+            "--backup-manifest", str(backup),
+            "--rollout-root", str(tmp_path),
+            "--smoke-submit-mode", "admin-on-behalf",
+            "--smoke-api-token", "file:/run/loom/smoke-token",
+            "--smoke-task-id", "loom-smoke/gb10-oracle-hello-world",
+            "--smoke-required-worker-pool", "gb10-arm64",
+            "--smoke-agent", "oracle",
+            "--smoke-on-behalf-username", "devansh",
+            "--smoke-on-behalf-team-id", "agentic-rl-team-id",
+            "--smoke-admin-actor", "codex-v1-release-gate",
+        ])
+
+        assert rc == 0
+        ctx = captured["ctx"]
+        assert ctx.smoke_submit_mode == "admin-on-behalf"
+        assert ctx.smoke_api_token_source == "file:/run/loom/smoke-token"
+        assert ctx.smoke_task_id == "loom-smoke/gb10-oracle-hello-world"
+        assert ctx.smoke_required_worker_pool == "gb10-arm64"
+        assert ctx.smoke_agent == "oracle"
+        assert ctx.smoke_on_behalf_username == "devansh"
+        assert ctx.smoke_on_behalf_team_id == "agentic-rl-team-id"
+        assert ctx.smoke_admin_actor == "codex-v1-release-gate"
+        inputs = ctx.to_inputs_dict()
+        assert inputs["smoke_api_token_source"] == "file:/run/loom/smoke-token"
+        assert "smoke-token-secret" not in str(inputs)
 
     def test_passes_backup_manifest_min_remaining_hours_into_rollout_context(
         self,

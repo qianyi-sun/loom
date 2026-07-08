@@ -69,6 +69,10 @@ def _replayable_service_token_source(source: str) -> str:
     return _replayable_secret_source(source, flag_name="--service-token")
 
 
+def _replayable_smoke_api_token_source(source: str) -> str:
+    return _replayable_secret_source(source, flag_name="--smoke-api-token")
+
+
 def _validate_physical_environment_target(args: argparse.Namespace) -> str | None:
     """Return a rollout-target error when logical env and physical target diverge."""
     environment = str(args.environment).strip().lower()
@@ -213,6 +217,64 @@ def build_parser(p: argparse.ArgumentParser) -> None:
             "hosted provider pricing. Use a replayable env:VAR or file:PATH "
             "reference so raw tokens never enter argv or rollout evidence."
         ),
+    )
+    p.add_argument(
+        "--smoke-submit-mode",
+        default=None,
+        choices=("user-token", "admin-on-behalf"),
+        help=(
+            "Step 15 smoke submit mode. When omitted, the smoke step preserves "
+            "the legacy LOOM_SMOKE_SUBMIT_MODE fallback. Use admin-on-behalf "
+            "for v1.0 represented-user release validation."
+        ),
+    )
+    p.add_argument(
+        "--smoke-api-token",
+        default=None,
+        type=_replayable_smoke_api_token_source,
+        help=(
+            "User-owned smoke API token source for step 15 user-token mode. "
+            "Use a replayable env:VAR or file:PATH reference so raw tokens "
+            "never enter argv or rollout evidence. Not used by "
+            "admin-on-behalf mode."
+        ),
+    )
+    p.add_argument(
+        "--smoke-task-id",
+        default=None,
+        help=(
+            "Optional explicit smoke task id. current-gb10 defaults to "
+            "loom-smoke/gb10-oracle-hello-world."
+        ),
+    )
+    p.add_argument(
+        "--smoke-required-worker-pool",
+        default=None,
+        help=(
+            "Optional worker-pool requirement for smoke submission. "
+            "current-gb10 defaults to gb10-arm64 when the task id is not "
+            "overridden."
+        ),
+    )
+    p.add_argument(
+        "--smoke-agent",
+        default=None,
+        help="Optional smoke agent name. Defaults to oracle.",
+    )
+    p.add_argument(
+        "--smoke-on-behalf-username",
+        default=None,
+        help="Represented username for admin-on-behalf smoke mode.",
+    )
+    p.add_argument(
+        "--smoke-on-behalf-team-id",
+        default=None,
+        help="Represented team id for admin-on-behalf smoke mode.",
+    )
+    p.add_argument(
+        "--smoke-admin-actor",
+        default=None,
+        help="Audit actor string for admin-on-behalf smoke submissions.",
     )
     p.add_argument(
         "--cluster-config",
@@ -363,6 +425,14 @@ def handle(args: argparse.Namespace) -> int:
         expect_admin_token_fingerprint=args.expect_admin_token_fingerprint,
         worker_token_source=args.worker_token,
         service_token_source=args.service_token,
+        smoke_submit_mode=args.smoke_submit_mode,
+        smoke_api_token_source=args.smoke_api_token,
+        smoke_task_id=args.smoke_task_id,
+        smoke_required_worker_pool=args.smoke_required_worker_pool,
+        smoke_agent=args.smoke_agent,
+        smoke_on_behalf_username=args.smoke_on_behalf_username,
+        smoke_on_behalf_team_id=args.smoke_on_behalf_team_id,
+        smoke_admin_actor=args.smoke_admin_actor,
         cluster_config_path=cluster_config_path,
         cluster_config_sha256=cfg_sha,
         rollout_root=rollout_root,
