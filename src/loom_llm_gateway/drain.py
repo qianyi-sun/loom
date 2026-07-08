@@ -92,6 +92,22 @@ class DrainState:
             )
 
 
+def ensure_drain_state(app: FastAPI) -> DrainState:
+    """Return the app-wide drain state, creating it for no-lifespan tests.
+
+    Runtime startup installs this during lifespan before serving traffic. Some
+    ASGI test harnesses bypass lifespan and seed only the dependencies a route
+    needs, so the request path must still fail closed instead of crashing with a
+    missing ``app.state.drain``.
+    """
+    drain_state = getattr(app.state, "drain", None)
+    if isinstance(drain_state, DrainState):
+        return drain_state
+    drain_state = DrainState()
+    app.state.drain = drain_state
+    return drain_state
+
+
 def install_drain_middleware(app: FastAPI) -> None:
     """Attach the request-counting middleware to the FastAPI app.
 
@@ -110,7 +126,7 @@ def install_drain_middleware(app: FastAPI) -> None:
     ) -> Response:
         if request.url.path in excluded_paths:
             return await call_next(request)
-        drain_state: DrainState = request.app.state.drain
+        drain_state = ensure_drain_state(request.app)
         await drain_state.enter()
         try:
             return await call_next(request)

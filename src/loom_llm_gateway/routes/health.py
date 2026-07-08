@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request, Response
 
+from loom_llm_gateway.drain import ensure_drain_state
+
 router = APIRouter()
 
 
@@ -16,18 +18,17 @@ async def healthz(request: Request) -> Response:
     the pod from the routing pool and no NEW requests arrive. In-flight
     requests continue to completion via the drain mechanism (#547).
     """
-    drain_state = getattr(request.app.state, "drain", None)
-    if drain_state is not None:
-        in_flight, draining = await drain_state.snapshot()
-        if draining:
-            return Response(
-                status_code=503,
-                content=(
-                    b'{"status":"draining",'
-                    b'"in_flight":' + str(in_flight).encode() + b"}"
-                ),
-                media_type="application/json",
-            )
+    drain_state = ensure_drain_state(request.app)
+    in_flight, draining = await drain_state.snapshot()
+    if draining:
+        return Response(
+            status_code=503,
+            content=(
+                b'{"status":"draining",'
+                b'"in_flight":' + str(in_flight).encode() + b"}"
+            ),
+            media_type="application/json",
+        )
     return Response(
         status_code=200,
         content=b'{"status":"ok"}',

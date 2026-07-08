@@ -2905,7 +2905,10 @@ loom eval usage \
 Admin-on-behalf submissions keep the represented team/user on the batch for
 product ownership, but usage and billing attribution follows the real acting
 admin/user when that identity is available. Singleton break-glass admin calls
-fall back to the required audit actor string.
+fall back to the required audit actor string. The represented team/user keeps
+normal owner permissions for monitor/detail/debug/rerun/cancel and artifact
+access; the admin actor is not the product owner merely because it submitted
+the run.
 
 Run the `--pricing-source rate-card` update only after the Gateway's
 `rate_cards` table has matching `(provider, model)` entries. Facade calls

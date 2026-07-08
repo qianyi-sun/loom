@@ -520,6 +520,8 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
         "free_slots": 10,
         "running_tasks": 1,
         "starting_tasks": 1,
+        "pre_start_heartbeat_fresh_tasks": 0,
+        "oldest_starting_task_age_sec": None,
         "queued_tasks": 1,
     }
     assert body["resources"]["pools"] == [
@@ -545,6 +547,8 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
             "free_slots": 10,
             "running_tasks": 0,
             "starting_tasks": 0,
+            "pre_start_heartbeat_fresh_tasks": 0,
+            "oldest_starting_task_age_sec": None,
             "queued_tasks": 1,
             "last_autoscaler_decision": "noop",
             "last_autoscaler_reason": "at_target",
@@ -577,6 +581,8 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
             "free_slots": 0,
             "running_tasks": 1,
             "starting_tasks": 1,
+            "pre_start_heartbeat_fresh_tasks": 0,
+            "oldest_starting_task_age_sec": None,
             "queued_tasks": 1,
             "last_autoscaler_decision": "blocked",
             "last_autoscaler_reason": "queued_deficit",
