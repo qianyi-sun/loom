@@ -5,9 +5,7 @@ from __future__ import annotations
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from tests.integration.test_service_tasksets import _manifest_bytes
-
-pytest_plugins = ["tests.integration.test_service_tasksets"]
+from tests.integration.taskset_fixtures import _manifest_bytes
 
 
 @pytest.mark.parametrize(

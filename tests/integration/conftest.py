@@ -26,6 +26,7 @@ from testcontainers.minio import MinioContainer
 from loom.db.schema import Task, Team, TeamQuota, Token, Trial
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from tests.integration.taskset_fixtures import tasksets_minio, tasksets_setup  # noqa: F401
 
 
 @pytest.fixture(scope="module")
