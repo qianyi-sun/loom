@@ -124,6 +124,59 @@ def test_status_mismatches_accept_stopped_nonfresh_worker() -> None:
     )
 
 
+def test_status_mismatches_accept_draining_nonfresh_worker() -> None:
+    status = {
+        "nodes": [
+            {
+                "hostname": "trt-gb10-1",
+                "desired_intent": "draining",
+                "current_intent": "draining",
+                "apply_state": "draining",
+                "current_image_tag": "staging-abc1234",
+                "current_env_config_version": "staging-abc1234",
+                "worker_fresh": False,
+                "worker_backend_names": [],
+            },
+        ],
+    }
+
+    assert (
+        runner.status_mismatches(
+            status,
+            hosts=("trt-gb10-1",),
+            intent="draining",
+            image_tag="staging-abc1234",
+            env_config_version="staging-abc1234",
+        )
+        == []
+    )
+
+
+def test_status_mismatches_require_nonfresh_draining_worker() -> None:
+    status = {
+        "nodes": [
+            {
+                "hostname": "trt-gb10-1",
+                "desired_intent": "draining",
+                "current_intent": "draining",
+                "apply_state": "draining",
+                "current_image_tag": "staging-abc1234",
+                "current_env_config_version": "staging-abc1234",
+                "worker_fresh": True,
+                "worker_backend_names": ["docker"],
+            },
+        ],
+    }
+
+    assert runner.status_mismatches(
+        status,
+        hosts=("trt-gb10-1",),
+        intent="draining",
+        image_tag="staging-abc1234",
+        env_config_version="staging-abc1234",
+    ) == ["trt-gb10-1: worker still fresh after draining intent"]
+
+
 def test_parse_args_rejects_literal_admin_token() -> None:
     with pytest.raises(SystemExit):
         runner._parse_args(

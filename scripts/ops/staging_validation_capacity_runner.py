@@ -274,7 +274,11 @@ def status_mismatches(
             errors.append(f"{host}: desired_intent={node.get('desired_intent')!r}")
         if node.get("current_intent") != intent:
             errors.append(f"{host}: current_intent={node.get('current_intent')!r}")
-        expected_apply_state = "stopped" if intent == "stopped" else "applied"
+        expected_apply_state = {
+            "active": "applied",
+            "draining": "draining",
+            "stopped": "stopped",
+        }[intent]
         if node.get("apply_state") != expected_apply_state:
             errors.append(f"{host}: apply_state={node.get('apply_state')!r}")
         if node.get("current_image_tag") != image_tag:
@@ -289,6 +293,8 @@ def status_mismatches(
             backend_names = node.get("worker_backend_names") or []
             if "docker" not in backend_names:
                 errors.append(f"{host}: docker backend missing")
+        elif intent == "draining" and node.get("worker_fresh") is True:
+            errors.append(f"{host}: worker still fresh after draining intent")
         elif intent == "stopped" and node.get("worker_fresh") is True:
             errors.append(f"{host}: worker still fresh after stopped intent")
     return errors
