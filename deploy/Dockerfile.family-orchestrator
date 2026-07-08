@@ -1,0 +1,9 @@
+FROM python:3.11-slim
+# Mirrors Dockerfile.control-plane's pattern (#199 PyPI-timeout guard).
+ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
+WORKDIR /app
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY migrations ./migrations
+RUN pip install --no-cache-dir -e .
+CMD ["python", "-m", "loom_family_orchestrator"]

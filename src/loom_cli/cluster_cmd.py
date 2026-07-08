@@ -1045,6 +1045,10 @@ _TEMPLATE_ORDER: tuple[str, ...] = (
     # rendering as postgres-cnpg above.
     "minio-distributed.yaml.j2",
     "control-plane.yaml.j2",
+    # #672 family-runs: orchestrator sibling. Ships with the CP env
+    # block (same LOOM_CP_* prefix) so the deployment is trivially
+    # co-configured.
+    "family-orchestrator.yaml.j2",
     "loom-service.yaml.j2",
     "llm-gateway.yaml.j2",
     # HPA for loom-llm-gateway (#547). Renders only when
