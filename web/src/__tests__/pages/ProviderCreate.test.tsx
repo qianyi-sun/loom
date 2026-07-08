@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { setFrontendConfigForTests } from "../../lib/frontendConfig";
 import ProviderCreate from "../../pages/ProviderCreate";
 
 function renderPage(initialPath = "/providers/new") {
@@ -23,7 +24,10 @@ function renderPage(initialPath = "/providers/new") {
 
 describe("ProviderCreate", () => {
   beforeEach(() => window.localStorage.setItem("loom_token", "t"));
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    setFrontendConfigForTests(null);
+    vi.restoreAllMocks();
+  });
 
   it("happy path POSTs then redirects to /providers/:id", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
@@ -41,11 +45,21 @@ describe("ProviderCreate", () => {
   });
 
   it("shows the two provider setup paths in human language", () => {
+    setFrontendConfigForTests({
+      environment: "staging",
+      environmentLabel: "Staging",
+      routePath: "/dev",
+      apiBase: "/dev",
+      apiRouteBase: `${window.location.origin}/dev/api`,
+    });
     renderPage();
     expect(screen.getByText(/third-party api/i)).toBeInTheDocument();
     expect(screen.getByText(/gpu cluster checkpoint/i)).toBeInTheDocument();
     expect(screen.getAllByText(/loom inference deploy slurm/i).length).toBeGreaterThan(0);
     expect(screen.getByText("Hosted API CLI")).toBeInTheDocument();
+    expect(
+      screen.getByText(/loom auth login --server/i),
+    ).toHaveTextContent(`${window.location.origin}/dev`);
     expect(screen.getByText(/loom providers create/)).toHaveTextContent(
       "--api-key env:PROVIDER_API_KEY",
     );

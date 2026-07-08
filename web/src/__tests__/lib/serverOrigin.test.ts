@@ -18,6 +18,18 @@ describe("currentServerOrigin", () => {
     expect(currentServerOrigin()).toBe(`${window.location.origin}/dev`);
   });
 
+  it("includes the production route path for first-prod deployments", () => {
+    setFrontendConfigForTests({
+      environment: "prod",
+      environmentLabel: "Production",
+      routePath: "/prod",
+      apiBase: "/prod",
+      apiRouteBase: `${window.location.origin}/prod/api`,
+    });
+
+    expect(currentServerOrigin()).toBe(`${window.location.origin}/prod`);
+  });
+
   it("keeps the bare origin for root-route deployments", () => {
     setFrontendConfigForTests({
       environment: "local",
