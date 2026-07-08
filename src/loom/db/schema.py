@@ -1091,6 +1091,10 @@ class Batch(Base):
     submitted_by_user_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
     )
+    usage_attributed_user_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+    usage_attributed_actor: Mapped[str | None] = mapped_column(Text, nullable=True)
     expected_trial_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0,
     )
@@ -1299,6 +1303,10 @@ class Trial(Base):
     submitted_by_user_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
     )
+    usage_attributed_user_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+    usage_attributed_actor: Mapped[str | None] = mapped_column(Text, nullable=True)
     visibility: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'org'"), default="org",
     )
@@ -1661,6 +1669,39 @@ class ProviderConnection(Base):
     # Maintained by the trigger created in migration 0018 — updates
     # automatically on every UPDATE. Don't set explicitly in app code.
     updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+
+class ProviderConnectionShare(Base):
+    """Authorization for one target team to use another team's provider.
+
+    The source connection and its encrypted secret remain owned by the
+    provider team. Sharing grants use/list/read access only; mutation and
+    rotation stay with the owner team or platform admins.
+    """
+    __tablename__ = "provider_connection_shares"
+    __table_args__ = (
+        Index(
+            "provider_connection_shares_target_team_idx",
+            "target_team_id",
+        ),
+    )
+    provider_connection_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("provider_connections.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    target_team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("teams.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    created_by_actor: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
     )
 

@@ -206,6 +206,18 @@ loom providers models smoke-openai --refresh
 loom providers models smoke-openai --preflight gpt-4o-mini
 ```
 
+Provider owners can share a connection with another team without copying or
+revealing the API key:
+
+```bash
+loom providers share smoke-openai --target-team-id <team-uuid>
+loom providers unshare smoke-openai --target-team-id <team-uuid>
+```
+
+The target team can list, select, and use the shared provider. Only the owner
+team or a platform admin can update, rotate, test, refresh, hide, unhide, or
+delete it.
+
 Submit, monitor, inspect usage, and download through public `/api/v1` routes:
 
 ```bash
@@ -878,14 +890,19 @@ Usage follows the same team-context model. Ordinary users see usage scoped to
 their current team and do not enter raw team ids. Platform admins can leave the
 team filter blank for platform-wide usage or choose an internal team by name;
 the copyable CLI command still includes the stable `--team-id` value when a
-team is selected. Admin usage views can request per-batch drilldown; token-only
-or self-deployed calls show token totals with `cost_status=not_applicable`
-instead of a fabricated dollar amount. Failed upstream provider attempts show
-as `pricing_mode=failed-upstream` and `cost_status=failed_upstream`, so they
-remain inspectable without being counted as priced provider usage. Usage views
-also show `usage_estimate_confidence`: `high` means the provider returned a
-complete usage block, while `partial` or `missing` means token and cost totals
-are lower confidence because some provider usage fields were absent.
+team is selected. For a shared provider, filter by `provider_connection_id` and
+use `breakdown_by=team` or `breakdown_by=user` to separate owner-team usage
+from each consuming shared team/user. Admin-on-behalf submissions keep the
+represented team/user on the batch for product ownership, but usage and billing
+are attributed to the real acting admin/user. Admin usage views can request
+per-batch drilldown; token-only or self-deployed calls show token totals with
+`cost_status=not_applicable` instead of a fabricated dollar amount. Failed
+upstream provider attempts show as `pricing_mode=failed-upstream` and
+`cost_status=failed_upstream`, so they remain inspectable without being counted
+as priced provider usage. Usage views also show `usage_estimate_confidence`:
+`high` means the provider returned a complete usage block, while `partial` or
+`missing` means token and cost totals are lower confidence because some
+provider usage fields were absent.
 
 The SPA defaults to readable summaries instead of raw API payloads.
 New Batch explains task selection, agent/model combinations, backend,
@@ -979,9 +996,9 @@ detail page to download safe typed artifact metadata for that run as JSONL.
 
 Clone config and reuse artifact both create new records in your current team and
 record `source_provenance`. They do not copy the source team's provider
-connection or credentials; choose a provider connection owned by your team when
-the source config requires one. The Run Library detail page shows that selector
-before cloning provider-backed work.
+connection or credentials; choose a provider connection owned by or shared with
+your team when the source config requires one. The Run Library detail page
+shows that selector before cloning provider-backed work.
 
 From the CLI, export safe Run Library artifact metadata with:
 

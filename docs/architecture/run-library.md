@@ -86,9 +86,10 @@ legacy artifact JSON still says `share_status = "shared"`.
 - `POST /api/v1/run-library/batches/{batch_id}/clone-config`: create a new
   batch record in the caller's team using the shared task filter, trial config,
   backend, and combinations. Source provider connections are never copied; if
-  the source used a provider connection, the caller must choose one owned by
-  the destination team. Run Library detail returns the source provider ids only
-  as metadata so clients can decide whether to require that selector.
+  the source used a provider connection, the caller must choose one owned by or
+  shared with the destination team. Run Library detail returns the source
+  provider ids only as metadata so clients can decide whether to require that
+  selector.
 - `GET /api/v1/run-library/trials/{trial_id}/artifacts/download`: stream a
   safe shared artifact through the authenticated Loom service. It never exposes
   raw object-store URLs.

@@ -1525,7 +1525,10 @@ async def clone_run_library_batch_config(
     if source.provider_connection_id is not None and payload.provider_connection_id is None:
         raise HTTPException(
             status_code=400,
-            detail="choose a provider_connection_id owned by your team",
+            detail=(
+                "choose a provider_connection_id owned by or shared with "
+                "your team"
+            ),
         )
     if payload.provider_connection_id is not None:
         await validate_provider_connection(
@@ -1552,6 +1555,10 @@ async def clone_run_library_batch_config(
         state="submitted",
         created_by_token_prefix=token_prefix,
         submitted_by_user_id=ctx.user_id,
+        usage_attributed_user_id=ctx.user_id,
+        usage_attributed_actor=(
+            f"user:{ctx.user_id}" if ctx.user_id is not None else None
+        ),
         expected_trial_count=source.expected_trial_count,
         n_per_task=source.n_per_task,
         backend=source.backend,
@@ -1717,6 +1724,10 @@ async def reuse_run_library_artifact(
         state="submitted",
         created_by_token_prefix=token_prefix,
         submitted_by_user_id=ctx.user_id,
+        usage_attributed_user_id=ctx.user_id,
+        usage_attributed_actor=(
+            f"user:{ctx.user_id}" if ctx.user_id is not None else None
+        ),
         expected_trial_count=batch.expected_trial_count if batch else 1,
         n_per_task=batch.n_per_task if batch else 1,
         backend=batch.backend if batch else "docker",

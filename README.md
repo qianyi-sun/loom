@@ -92,9 +92,10 @@ of this list.
 
 ## Bring Your Own Inference API
 
-Every real model-backed Loom run needs a provider connection owned by the team
-submitting the work. Loom encrypts the provider API key, stores only secret
-references in the database, and uses the LLM Gateway server-side during runtime.
+Every real model-backed Loom run needs a provider connection owned by, or
+explicitly shared with, the team submitting the work. Loom encrypts the
+provider API key, stores only secret references in the database, and uses the
+LLM Gateway server-side during runtime.
 
 Submission surface and inference source are independent choices. A user can
 submit from the hosted web app or CLI on any machine that can reach Loom, while
@@ -106,6 +107,12 @@ Together, Fireworks, a self-hosted vLLM), or provider-native APIs (Anthropic,
 Google). The team registers provider type, base URL, API key (`env:` or
 browser secret field), optional allowed model ids, and optional rate-card
 namespace.
+
+Provider owners can share one connection with another team without cloning or
+revealing the API key. The target team can list/select/use the shared provider,
+but only the owner team or a platform admin can update, rotate, test, or delete
+it. Usage and cost views remain attributed to the consuming team/user; delegated
+submissions such as admin-on-behalf attribute spend to the real acting user.
 
 **Option 2: User-hosted inference on the user's cluster.** The cluster runs an
 OpenAI-compatible HTTP service, usually vLLM. Loom only needs HTTPS reachability

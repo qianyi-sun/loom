@@ -489,6 +489,80 @@ def test_delete_resolves_then_calls_delete(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# share / unshare
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_share_resolves_then_posts_target_team(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    conn = _make_connection(name="yibuapi-prod")
+    target_team = "11111111-1111-1111-1111-111111111111"
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[
+        ("POST", f"/api/v1/provider-connections/{conn['id']}/shares")
+    ] = httpx.Response(201, json={
+        "provider_connection_id": conn["id"],
+        "provider_name": "yibuapi-prod",
+        "provider_owner_team_id": conn["team_id"],
+        "target_team_id": target_team,
+    })
+
+    rc = main([
+        "providers", "share", "yibuapi-prod",
+        "--target-team-id", target_team,
+        "--admin-actor", "release-operator",
+    ])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Shared provider connection 'yibuapi-prod'" in out
+    assert target_team in out
+    assert "api_key" not in out
+    assert mock_server[1].method == "POST"
+    assert mock_server[1].url.path == (
+        f"/api/v1/provider-connections/{conn['id']}/shares"
+    )
+    assert json.loads(mock_server[1].content) == {
+        "target_team_id": target_team,
+    }
+    assert mock_server[1].headers["X-Loom-Admin-Actor"] == "release-operator"
+
+
+def test_unshare_resolves_then_deletes_target_team(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    conn = _make_connection(name="yibuapi-prod")
+    target_team = "11111111-1111-1111-1111-111111111111"
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[
+        (
+            "DELETE",
+            f"/api/v1/provider-connections/{conn['id']}/shares/{target_team}",
+        )
+    ] = httpx.Response(204)
+
+    rc = main([
+        "providers", "unshare", "yibuapi-prod",
+        "--target-team-id", target_team,
+    ])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Unshared provider connection 'yibuapi-prod'" in out
+    assert target_team in out
+    assert "api_key" not in out
+    assert mock_server[1].method == "DELETE"
+    assert mock_server[1].url.path == (
+        f"/api/v1/provider-connections/{conn['id']}/shares/{target_team}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
 # test
 # ──────────────────────────────────────────────────────────────────────
 

@@ -6,8 +6,9 @@ The user supplies a UUID; the route must check that:
 
 1. The UUID parses (handled by Pydantic before this is called).
 2. The row exists.
-3. The row belongs to the caller's team (cross-team → 404, matching
-   provider connection route + gateway existence-hiding behavior).
+3. The row belongs to the caller's team or is explicitly shared with
+   that team (unshared cross-team → 404, matching provider route +
+   gateway existence-hiding behavior).
 4. The row is not soft-deleted (deleted_at IS NULL).
 
 Centralized here so the Trial and Batch routes use the same shape +
@@ -22,7 +23,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom.db.schema import ProviderConnection
+from loom.db.schema import ProviderConnection, ProviderConnectionShare
 
 
 async def validate_provider_connection(
@@ -57,6 +58,14 @@ async def validate_provider_connection(
             ),
         )
     if found_team_id != team_id:
+        shared = (await session.execute(
+            select(ProviderConnectionShare.provider_connection_id).where(
+                ProviderConnectionShare.provider_connection_id == provider_connection_id,
+                ProviderConnectionShare.target_team_id == team_id,
+            ),
+        )).scalar_one_or_none()
+        if shared is not None:
+            return
         raise HTTPException(
             status_code=404, detail="provider_connection not found",
         )

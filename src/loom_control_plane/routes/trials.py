@@ -67,13 +67,18 @@ async def submit_trial(
     batch_id = payload.get("batch_id")
     batch_team_id: UUID | None = None
     batch_submitter_user_id: UUID | None = None
+    batch_usage_user_id: UUID | None = None
+    batch_usage_actor: str | None = None
     if batch_id is not None:
         async with request.app.state.session_factory() as session:
             batch_row = (
                 await session.execute(
-                    select(Batch.team_id, Batch.submitted_by_user_id).where(
-                        Batch.id == batch_id,
-                    ),
+                    select(
+                        Batch.team_id,
+                        Batch.submitted_by_user_id,
+                        Batch.usage_attributed_user_id,
+                        Batch.usage_attributed_actor,
+                    ).where(Batch.id == batch_id),
                 )
             ).first()
         if batch_row is None:
@@ -83,6 +88,8 @@ async def submit_trial(
             )
         batch_team_id = batch_row.team_id
         batch_submitter_user_id = batch_row.submitted_by_user_id
+        batch_usage_user_id = batch_row.usage_attributed_user_id
+        batch_usage_actor = batch_row.usage_attributed_actor
 
     if ctx.team_id is not None:
         if "submit" not in ctx.scopes:
@@ -98,9 +105,13 @@ async def submit_trial(
         require_submitting_user(ctx)
         submit_team_id = ctx.team_id
         submitter_user_id = ctx.user_id
+        usage_user_id = ctx.user_id
+        usage_actor = f"user:{ctx.user_id}" if ctx.user_id is not None else None
     elif "submit:batch" in ctx.scopes and batch_team_id is not None:
         submit_team_id = batch_team_id
         submitter_user_id = batch_submitter_user_id
+        usage_user_id = batch_usage_user_id
+        usage_actor = batch_usage_actor
     else:
         raise HTTPException(status_code=401, detail="not authorized to submit")
 
@@ -236,6 +247,8 @@ async def submit_trial(
             "submit_priority": trial_config.submit_priority,
             "batch_id": batch_id,
             "submitted_by_user_id": submitter_user_id,
+            "usage_attributed_user_id": usage_user_id,
+            "usage_attributed_actor": usage_actor,
             "idempotency_key": idempotency_key,
             "sample_idx": sample_idx,
             "combination_idx": combination_idx,

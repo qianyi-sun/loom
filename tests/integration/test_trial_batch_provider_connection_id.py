@@ -31,10 +31,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import (
+    AdminAuditEvent,
     Artifact,
     ArtifactLineageEdge,
     Batch,
     ProviderConnection,
+    ProviderConnectionShare,
     ProviderModelCache,
     Secret,
     Task,
@@ -236,6 +238,7 @@ async def app_setup(
         "team_a": team_a, "team_b": team_b,
         "conn_a": conn_a, "conn_a_deleted": conn_a_deleted, "conn_b": conn_b,
         "task_id": task_id,
+        "admin_user": admin_user,
     }
     try:
         yield app, tokens, ids
@@ -248,6 +251,8 @@ async def app_setup(
             s.execute(delete(ArtifactLineageEdge))
             s.execute(delete(Artifact))
             s.execute(delete(Batch))
+            s.execute(delete(AdminAuditEvent))
+            s.execute(delete(ProviderConnectionShare))
             s.execute(delete(ProviderConnection))
             s.execute(delete(Secret))
             s.execute(delete(TaskSetMaterializationJob))
@@ -510,6 +515,92 @@ def test_platform_admin_api_token_batch_create_with_explicit_team(
     sync_engine.dispose()
     assert row.team_id == ids["team_b"]
     assert row.provider_connection_id == ids["conn_b"]
+
+
+def test_platform_admin_shares_provider_with_target_team_and_audits(
+    app_setup,
+) -> None:
+    app, tokens, ids = app_setup
+    c = _client(app)
+
+    r = c.post(
+        f"/api/v1/provider-connections/{ids['conn_a']}/shares",
+        headers={
+            **_auth(tokens["admin_api"]),
+            "X-Loom-Admin-Actor": "release-operator",
+        },
+        json={"target_team_id": str(ids["team_b"])},
+    )
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["provider_connection_id"] == str(ids["conn_a"])
+    assert body["provider_owner_team_id"] == str(ids["team_a"])
+    assert body["target_team_id"] == str(ids["team_b"])
+
+    listed = c.get("/api/v1/provider-connections", headers=_auth(tokens["b"]))
+    assert listed.status_code == 200, listed.text
+    listed_ids = {item["id"] for item in listed.json()["items"]}
+    assert str(ids["conn_a"]) in listed_ids
+    assert str(ids["conn_b"]) in listed_ids
+
+    audit = c.get(
+        "/api/v1/admin/audit-events?limit=20",
+        headers=_auth(tokens["admin_api"]),
+    )
+    assert audit.status_code == 200, audit.text
+    event = next(
+        item for item in audit.json()["items"]
+        if item["action"] == "provider_connection.share"
+    )
+    assert event["actor"] == f"user:{ids['admin_user']}"
+    assert event["target_id"] == str(ids["conn_a"])
+    assert event["metadata"]["provider_connection_id"] == str(ids["conn_a"])
+    assert event["metadata"]["provider_owner_team_id"] == str(ids["team_a"])
+    assert event["metadata"]["target_team_id"] == str(ids["team_b"])
+    assert "api_key" not in event["metadata"]
+
+
+def test_shared_provider_can_be_used_by_target_team_for_batch_create(
+    app_setup,
+) -> None:
+    app, tokens, ids = app_setup
+    sync_engine = create_engine(str(app.state.settings.db_url))
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(insert(ProviderConnectionShare).values(
+            provider_connection_id=ids["conn_a"],
+            target_team_id=ids["team_b"],
+            created_by_actor="test",
+        ))
+        s.commit()
+    sync_engine.dispose()
+
+    c = _client(app)
+    r = c.post(
+        "/api/v1/batches",
+        headers=_auth(tokens["b"]),
+        json={
+            "name": "batch-with-shared-provider",
+            "task_filter": {"task_ids": [ids["task_id"]]},
+            "trial_config": {"agent_name": "oracle", "agent_model": None},
+            "provider_connection_id": str(ids["conn_a"]),
+            "provider_model_id": "gpt-4o",
+        },
+    )
+
+    assert r.status_code == 201, r.text
+    sync_engine = create_engine(str(app.state.settings.db_url))
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        row = s.execute(
+            Batch.__table__.select().where(
+                Batch.id == UUID(r.json()["batch_id"]),
+            ),
+        ).one()
+    sync_engine.dispose()
+    assert row.team_id == ids["team_b"]
+    assert row.provider_connection_id == ids["conn_a"]
 
 
 def test_batch_create_without_provider_succeeds(app_setup) -> None:

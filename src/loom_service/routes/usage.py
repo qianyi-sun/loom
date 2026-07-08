@@ -54,7 +54,23 @@ _COST_SOURCE_SQL = f"l.provider_extras ->> '{COST_META_SOURCE_KEY}'"
 _COST_CONFIDENCE_SQL = f"l.provider_extras ->> '{COST_META_CONFIDENCE_KEY}'"
 _BREAKDOWN_FIELDS: dict[str, tuple[str, str]] = {
     "team": ("t.team_id::text", "tm.name"),
-    "user": ("tok.created_by_user_id::text", "usr.display_name"),
+    "user": (
+        "COALESCE("
+        "b.usage_attributed_user_id::text, "
+        "t.usage_attributed_user_id::text, "
+        "tok.created_by_user_id::text, "
+        "t.submitted_by_user_id::text, "
+        "b.submitted_by_user_id::text, "
+        "b.usage_attributed_actor, "
+        "t.usage_attributed_actor"
+        ")",
+        "COALESCE("
+        "usage_usr.display_name, "
+        "usage_usr.username, "
+        "b.usage_attributed_actor, "
+        "t.usage_attributed_actor"
+        ")",
+    ),
     "provider_connection": (
         "COALESCE(t.provider_connection_id, b.provider_connection_id)::text",
         "pc.display_name",
@@ -108,7 +124,14 @@ def _llm_usage_from_sql() -> str:
             ON pc.id = COALESCE(t.provider_connection_id, b.provider_connection_id)
           LEFT JOIN tokens tok
             ON LEFT(encode(tok.token_hash, 'hex'), 8) = b.created_by_token_prefix
-          LEFT JOIN users usr ON usr.id = tok.created_by_user_id
+          LEFT JOIN users usage_usr
+            ON usage_usr.id = COALESCE(
+                b.usage_attributed_user_id,
+                t.usage_attributed_user_id,
+                tok.created_by_user_id,
+                t.submitted_by_user_id,
+                b.submitted_by_user_id
+            )
          WHERE l.captured_at BETWEEN :start AND :end
     """
 
@@ -155,7 +178,15 @@ def _usage_where_filters(
         filters.append(f"{_pricing_mode_expr()} = :pricing_mode")
         params["pricing_mode"] = pricing_mode
     if user_id is not None:
-        filters.append("tok.created_by_user_id = :user_id")
+        filters.append(
+            "COALESCE("
+            "b.usage_attributed_user_id, "
+            "t.usage_attributed_user_id, "
+            "tok.created_by_user_id, "
+            "t.submitted_by_user_id, "
+            "b.submitted_by_user_id"
+            ") = :user_id",
+        )
         params["user_id"] = str(user_id)
     if not filters:
         return "", params

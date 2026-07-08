@@ -570,6 +570,8 @@ async def _create_batch_record(
     payload: _CreateBatch,
     *,
     submitted_by_user_id: UUID | None,
+    usage_attributed_user_id: UUID | None,
+    usage_attributed_actor: str | None,
 ) -> dict[str, Any]:
     submission_team_id = await _resolve_submission_team_id(
         s, ctx, payload.team_id,
@@ -862,6 +864,8 @@ async def _create_batch_record(
         state="submitted",
         created_by_token_prefix=token_prefix,
         submitted_by_user_id=submitted_by_user_id,
+        usage_attributed_user_id=usage_attributed_user_id,
+        usage_attributed_actor=usage_attributed_actor,
         expected_trial_count=expected,
         n_per_task=payload.n_per_task,
         backend=payload.backend,
@@ -922,6 +926,10 @@ async def create_batch(
         ctx,
         payload,
         submitted_by_user_id=ctx.user_id,
+        usage_attributed_user_id=ctx.user_id,
+        usage_attributed_actor=(
+            f"user:{ctx.user_id}" if ctx.user_id is not None else None
+        ),
     )
     await s.commit()
     return response
@@ -943,6 +951,8 @@ async def admin_create_batch_on_behalf(
         ctx,
         payload,
         submitted_by_user_id=represented_user.id,
+        usage_attributed_user_id=ctx.user_id,
+        usage_attributed_actor=actor,
     )
     await write_admin_audit_event(
         s,
@@ -2014,6 +2024,10 @@ async def rerun_failed_batch(
         state="submitted",
         created_by_token_prefix=token_prefix,
         submitted_by_user_id=ctx.user_id,
+        usage_attributed_user_id=ctx.user_id,
+        usage_attributed_actor=(
+            f"user:{ctx.user_id}" if ctx.user_id is not None else None
+        ),
         expected_trial_count=len(targets),
         n_per_task=1,
         backend=b.backend,

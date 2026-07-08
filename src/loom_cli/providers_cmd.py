@@ -1,4 +1,4 @@
-"""`loom providers {create,list,show,update,delete}` — manage
+"""`loom providers {create,list,show,update,delete,share,unshare}` — manage
 per-team LLM provider connections on the deployed Loom server.
 
 Wraps the routes shipped in `src/loom_service/routes/provider_connections.py`.
@@ -181,6 +181,18 @@ def _run_with_error_handling(fn: Callable[[], int]) -> int:
         return 2
 
 
+def _optional_admin_actor_headers(
+    args: argparse.Namespace,
+) -> tuple[dict[str, str] | None, int | None]:
+    admin_actor = args.admin_actor.strip() if args.admin_actor else None
+    if args.admin_actor is not None and not admin_actor:
+        sys.stderr.write("error: --admin-actor must not be empty\n")
+        return None, 2
+    if admin_actor is None:
+        return None, None
+    return {"X-Loom-Admin-Actor": admin_actor}, None
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Handlers
 # ──────────────────────────────────────────────────────────────────────
@@ -305,15 +317,9 @@ def _update(args: argparse.Namespace) -> int:
             )
             return 2
 
-        admin_actor = args.admin_actor.strip() if args.admin_actor else None
-        if args.admin_actor is not None and not admin_actor:
-            sys.stderr.write("error: --admin-actor must not be empty\n")
-            return 2
-        headers = (
-            {"X-Loom-Admin-Actor": admin_actor}
-            if admin_actor is not None
-            else None
-        )
+        headers, rc = _optional_admin_actor_headers(args)
+        if rc is not None:
+            return rc
         with authed_client(cfg) as c:
             row = _resolve_by_name(c, args.name)
             resp = c.patch(
@@ -326,6 +332,57 @@ def _update(args: argparse.Namespace) -> int:
         )
         print(f"Updated provider connection {body['name']!r}:")
         _print_connection_summary(body)
+        return 0
+
+    return _run_with_error_handling(_body)
+
+
+def _share(args: argparse.Namespace) -> int:
+    def _body() -> int:
+        cfg = require_logged_in()
+        headers, rc = _optional_admin_actor_headers(args)
+        if rc is not None:
+            return rc
+        with authed_client(cfg) as c:
+            row = _resolve_by_name(c, args.name)
+            resp = c.post(
+                f"/api/v1/provider-connections/{row['id']}/shares",
+                json={"target_team_id": args.target_team_id},
+                headers=headers,
+            )
+        body = assert_2xx(
+            resp,
+            action=f"share provider connection {args.name!r}",
+        )
+        print(
+            f"Shared provider connection {body['provider_name']!r} "
+            f"with team {body['target_team_id']}.",
+        )
+        print(f"provider_connection_id: {body['provider_connection_id']}")
+        print(f"provider_owner_team_id: {body['provider_owner_team_id']}")
+        return 0
+
+    return _run_with_error_handling(_body)
+
+
+def _unshare(args: argparse.Namespace) -> int:
+    def _body() -> int:
+        cfg = require_logged_in()
+        headers, rc = _optional_admin_actor_headers(args)
+        if rc is not None:
+            return rc
+        with authed_client(cfg) as c:
+            row = _resolve_by_name(c, args.name)
+            resp = c.delete(
+                f"/api/v1/provider-connections/{row['id']}/shares/"
+                f"{args.target_team_id}",
+                headers=headers,
+            )
+        assert_2xx(resp, action=f"unshare provider connection {args.name!r}")
+        print(
+            f"Unshared provider connection {args.name!r} from team "
+            f"{args.target_team_id}.",
+        )
         return 0
 
     return _run_with_error_handling(_body)
@@ -735,6 +792,48 @@ def dispatch(argv: list[str]) -> int:
     p_delete = sub.add_parser("delete", help="Soft-delete a connection.")
     p_delete.add_argument("name", help="Display name to delete.")
     p_delete.set_defaults(handler=_delete)
+
+    # --- share ---
+    p_share = sub.add_parser(
+        "share",
+        help="Share a provider connection with another team.",
+    )
+    p_share.add_argument("name", help="Display name to share.")
+    p_share.add_argument(
+        "--target-team-id",
+        required=True,
+        help="UUID of the team that should be allowed to use this provider.",
+    )
+    p_share.add_argument(
+        "--admin-actor",
+        default=None,
+        help=(
+            "Sets X-Loom-Admin-Actor for singleton-admin provider sharing. "
+            "Owner team tokens normally do not need this."
+        ),
+    )
+    p_share.set_defaults(handler=_share)
+
+    # --- unshare ---
+    p_unshare = sub.add_parser(
+        "unshare",
+        help="Remove a provider connection share from another team.",
+    )
+    p_unshare.add_argument("name", help="Display name to unshare.")
+    p_unshare.add_argument(
+        "--target-team-id",
+        required=True,
+        help="UUID of the team whose share should be removed.",
+    )
+    p_unshare.add_argument(
+        "--admin-actor",
+        default=None,
+        help=(
+            "Sets X-Loom-Admin-Actor for singleton-admin provider sharing. "
+            "Owner team tokens normally do not need this."
+        ),
+    )
+    p_unshare.set_defaults(handler=_unshare)
 
     # --- rotate-key ---
     p_rotate = sub.add_parser(
