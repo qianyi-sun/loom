@@ -213,6 +213,40 @@ Stop condition: do not run staging validation if the lease output is
 `--non-preemptible` without an explicit approval URL, or contains secret-like
 values.
 
+The lease manifest above is the audit contract; it does not itself start or
+release live GB10 workers. Long staging validation must run under the live
+capacity runner from the fixed `platform-dev` rollout host so reruns do not
+depend on a Mac SSH session or operator memory. The runner writes the active
+GB10 desired-state, starts each host-local node-agent, waits for fresh docker
+workers, runs the validation command, and then stops workers on success or
+drains them on failure:
+
+`READ-ONLY LIVE` until the validation command starts; `LIVE PROD AUTHORITY
+REQUIRED` for the desired-state and node-agent mutations.
+
+```bash
+uv run python scripts/ops/staging_validation_capacity_runner.py \
+  --cp-url http://127.0.0.1:18081 \
+  --admin-token file:/shared_work/qianyi/loom-worker-capacity/staging-admin-token \
+  --environment staging \
+  --pool-name gb10-arm64 \
+  --hosts trt-gb10-1,trt-gb10-2,trt-gb10-3,trt-gb10-4,trt-gb10-5,trt-gb10-6,trt-gb10-7,trt-gb10-8,trt-gb10-9,trt-gb10-10,trt-gb10-11,trt-gb10-12,trt-gb10-13,trt-gb10-14,trt-gb10-15 \
+  --ssh-config deploy/worker-pools/gb10/ssh_config \
+  --ssh-identity /shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519 \
+  --lease-ttl 6h \
+  --evidence-dir "$ROLLOUT_DIR/staging-validation-capacity" \
+  --release-intent auto \
+  --wait-for-release \
+  --validation-command ./scripts/run-v1-staging-user-validation.sh
+```
+
+Use a TTL that covers the expected validation window. The runner also writes
+`LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS=<ttl>` into the safe desired env while the
+lease is active, so idle gaps during the validation window do not silently drop
+all staging workers. In-flight tasks are still protected by the worker drain
+path; after a failed validation the default `auto` release intent switches to
+`draining` instead of stopping active work.
+
 ### 4. Prod-Pressure Status And Emergency Staging Drain
 
 Use `status` whenever production demand appears while a staging lease exists.
