@@ -11,6 +11,7 @@ active=false) actually stop and disable supervisors.
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 import re
@@ -195,6 +196,44 @@ def _release_vars(ctx: RolloutContext) -> dict[str, str]:
     }
 
 
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _materialize_rollout_root_profile(
+    ctx: RolloutContext,
+    *,
+    source_profile: Path,
+    step_dir: StepDir,
+) -> dict[str, Any]:
+    target = ctx.rollout_root / "environment-state" / f"{ctx.environment}.toml"
+    source_bytes = source_profile.read_bytes()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    changed = True
+    if target.is_file():
+        changed = target.read_bytes() != source_bytes
+    if changed:
+        tmp = target.with_name(f".{target.name}.tmp")
+        tmp.write_bytes(source_bytes)
+        tmp.chmod(0o600)
+        tmp.replace(target)
+    else:
+        target.chmod(0o600)
+    evidence = {
+        "changed": changed,
+        "mode": oct(target.stat().st_mode & 0o777),
+        "source_path": str(source_profile),
+        "source_sha256": _sha256_bytes(source_bytes),
+        "target_path": str(target),
+        "target_sha256": _sha256_bytes(target.read_bytes()),
+    }
+    step_dir.artifact_path("environment-state-profile-materialization.json").write_text(
+        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return evidence
+
+
 def _string_list(value: object, field: str) -> list[str]:
     if value is None:
         return []
@@ -220,9 +259,7 @@ def _catalog_env_file(catalog: dict[str, Any]) -> tuple[dict[str, str], dict[str
             f"catalog provisioning env_file does not exist: {path}",
         )
     values = {
-        key: str(value)
-        for key, value in dotenv_values(path).items()
-        if key and value is not None
+        key: str(value) for key, value in dotenv_values(path).items() if key and value is not None
     }
     evidence = {
         "path": str(path),
@@ -300,8 +337,7 @@ def _catalog_port_forward_int(
     value = default if raw is None else raw
     if not isinstance(value, int) or value <= 0 or value > 65535:
         raise CatalogProvisioningError(
-            f"catalog_provisioning.kubernetes_port_forward.{field} "
-            "must be a TCP port number",
+            f"catalog_provisioning.kubernetes_port_forward.{field} must be a TCP port number",
         )
     return value
 
@@ -315,8 +351,7 @@ def _catalog_port_forward_resource(
     value = default if raw is None else raw
     if not isinstance(value, str) or not value.strip():
         raise CatalogProvisioningError(
-            f"catalog_provisioning.kubernetes_port_forward.{field} "
-            "must be a non-empty string",
+            f"catalog_provisioning.kubernetes_port_forward.{field} must be a non-empty string",
         )
     return value.strip()
 
@@ -613,11 +648,14 @@ def _catalog_effective_env(
                     host="127.0.0.1",
                     port=minio.local_port,
                 )
-        yield env, {
-            "enabled": True,
-            "namespace": config.namespace,
-            "forwards": [_catalog_port_forward_evidence(handle) for handle in handles],
-        }
+        yield (
+            env,
+            {
+                "enabled": True,
+                "namespace": config.namespace,
+                "forwards": [_catalog_port_forward_evidence(handle) for handle in handles],
+            },
+        )
     finally:
         for handle in reversed(handles):
             _stop_catalog_port_forward(handle)
@@ -685,9 +723,7 @@ def _run_catalog_provisioning(
     stdout_log.write_text(redacted_stdout, encoding="utf-8")
     stderr_log.write_text(redacted_stderr, encoding="utf-8")
     env_evidence = {
-        name: effective_env[name]
-        for name in plan.required_env
-        if name in effective_env
+        name: effective_env[name] for name in plan.required_env if name in effective_env
     }
     evidence = {
         "required": True,
@@ -697,10 +733,7 @@ def _run_catalog_provisioning(
         "env_file": plan.env_file,
         "env_sources": plan.env_sources,
         "kubernetes_port_forward": port_forward_evidence,
-        "environment": [
-            entry.to_json()
-            for entry in redact_environment_mapping(env_evidence)
-        ],
+        "environment": [entry.to_json() for entry in redact_environment_mapping(env_evidence)],
         "stdout_log": str(stdout_log),
         "stderr_log": str(stderr_log),
     }
@@ -1099,6 +1132,11 @@ class EnvStateStep(BaseStep):
             message = redact_text(str(exc))
             step_dir.stderr_path().write_text(message + "\n", encoding="utf-8")
             return RunResult(exit_code=2, error=message)
+        _materialize_rollout_root_profile(
+            ctx,
+            source_profile=profile_path,
+            step_dir=step_dir,
+        )
 
         release_vars = [
             "--var",
@@ -1187,8 +1225,7 @@ class EnvStateStep(BaseStep):
                     encoding="utf-8",
                 )
                 step_dir.stderr_path().write_text(
-                    f"# apply\n{apply_.stderr}\n"
-                    f"# catalog-provisioning\n{catalog_stderr}\n",
+                    f"# apply\n{apply_.stderr}\n# catalog-provisioning\n{catalog_stderr}\n",
                     encoding="utf-8",
                 )
                 return catalog_result
@@ -1231,8 +1268,9 @@ class EnvStateStep(BaseStep):
             encoding="utf-8",
         )
         artifacts = {
-            "environment_state_check": str(
-                step_dir.artifact_path("environment-state-check.json")
+            "environment_state_check": str(step_dir.artifact_path("environment-state-check.json")),
+            "environment_state_profile_materialization": str(
+                step_dir.artifact_path("environment-state-profile-materialization.json")
             ),
         }
         if catalog_artifact is not None:

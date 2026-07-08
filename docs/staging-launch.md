@@ -125,8 +125,12 @@ Attach these to the release issue or release PR:
   `deploy/environment-state/staging.toml`, with the rollout `IMAGE_TAG` and
   `ENV_CONFIG_VERSION` variables supplied. This must converge worker-pool
   autoscaler policies, GB10 desired state, and any external Slurm autoscaler
-  supervisor before Monitor/resource-pool screenshots are used as evidence. For
-  staging, the rendered service/control-plane/gateway pods must have
+  supervisor before Monitor/resource-pool screenshots are used as evidence.
+  Protected rollout step 10 also materializes the candidate profile to
+  `/data/loom-staging/environment-state/staging.toml` and records
+  source/target sha256 plus mode evidence, so rerun/resume does not depend on a
+  stale physical profile copy. For staging, the rendered
+  service/control-plane/gateway pods must have
   `LOOM_ENV=staging`, and `environment-state` evidence must show staging
   worker-pool policies and GB10 desired state keyed as `staging/gb10-arm64`.
   Any current-path staging evidence that reports `production/gb10-arm64` is
