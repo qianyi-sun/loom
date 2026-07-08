@@ -27,6 +27,9 @@ class ControlPlaneSettings(BaseSettings):
     db_url: PostgresDsn
     db_url_pool: PostgresDsn | None = None
     dev_reload: bool = False
+    family_adapter_call_timeout_sec: float = 300.0
+    family_orchestrator_poll_sec: float = 5.0
+    family_state_download_timeout_sec: float = 120.0
     llm_gateway_url: HttpUrl = cast(HttpUrl, "http://loom-llm-gateway:9100")
     log_level: LogLevel = "info"
     metrics_port: int = 9090
@@ -35,6 +38,7 @@ class ControlPlaneSettings(BaseSettings):
     minio_region: str = "us-east-1"
     minio_secret_key: SecretStr
     signed_url_expiry_sec: int = 3600
+    skill_evolver_default_model: str = "anthropic/claude-sonnet-4-6"
     slurm_worker_controller_allowed_nodes: str = ""
     slurm_worker_controller_command_timeout_seconds: float = 20.0
     slurm_worker_controller_enabled: bool = False

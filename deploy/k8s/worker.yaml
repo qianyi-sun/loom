@@ -7,180 +7,196 @@ spec:
   serviceName: loom-worker
   podManagementPolicy: Parallel
   selector:
-    matchLabels:
-      app: loom-worker
+    matchLabels: { app: loom-worker }
   template:
     metadata:
-      labels:
-        app: loom-worker
+      labels: { app: loom-worker }
     spec:
       containers:
-      - name: worker
-        image: loom-worker:0.7
-        env:
-        - name: LOOM_WORKER_CLAIM_POLL_INTERVAL_SEC
-          value: '1.0'
-        - name: LOOM_WORKER_CONTROL_PLANE_URL
-          value: http://loom-control-plane:8080
-        - name: LOOM_WORKER_DOCKER_API_TIMEOUT_SEC
-          value: '1800'
-        - name: LOOM_WORKER_DOCKER_SOCKET
-          value: /var/run/docker.sock
-        - name: LOOM_WORKER_DRAIN_TIMEOUT_SEC
-          value: '600'
-        - name: LOOM_WORKER_ENABLE_WORKER_VLLM
-          value: 'False'
-        - name: LOOM_WORKER_GATEWAY_URL
-          value: http://loom-llm-gateway:9100
-        - name: LOOM_WORKER_HEARTBEAT_INTERVAL_SEC
-          value: '5.0'
-        - name: HF_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: huggingface-api-key
-              optional: true
-        - name: LOOM_WORKER_LOG_LEVEL
-          value: info
-        - name: LOOM_WORKER_METRICS_PORT
-          value: '9090'
-        - name: LOOM_WORKER_MINIO_ACCESS_KEY
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: minio-access-key
-        - name: LOOM_WORKER_MINIO_CONNECT_TIMEOUT_SEC
-          value: '5.0'
-        - name: LOOM_WORKER_MINIO_ENDPOINT
-          value: http://loom-minio:9000
-        - name: LOOM_WORKER_MINIO_MAX_POOL_CONNECTIONS
-          value: '256'
-        - name: LOOM_WORKER_MINIO_OPERATION_ATTEMPTS
-          value: '3'
-        - name: LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC
-          value: '300.0'
-        - name: LOOM_WORKER_MINIO_READ_TIMEOUT_SEC
-          value: '120.0'
-        - name: LOOM_WORKER_MINIO_REGION
-          value: us-east-1
-        - name: LOOM_WORKER_MINIO_SECRET_KEY
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: minio-secret-key
-        - name: LOOM_WORKER_PRE_START_HEARTBEAT_INTERVAL_SEC
-          value: '60.0'
-        - name: LOOM_WORKER_SANDBOX_ISOLATION
-          value: 'False'
-        - name: LOOM_WORKER_SANDBOX_SINGLETON_IMAGE
-          value: loom-llm-gateway-sandbox:dev
-        - name: LOOM_WORKER_SANDBOX_SINGLETON_SECRETS_DIR
-          value: /var/lib/loom/sandbox-secrets
-        - name: LOOM_WORKER_SANDBOX_STEP_JWT_TTL_SEC
-          value: '600'
-        - name: LOOM_WORKER_SANDBOX_WORKER_INDEX
-          value: '0'
-        - name: LOOM_WORKER_SETUP_HEALTH_DSTATE_MAX
-          value: '32'
-        - name: LOOM_WORKER_SETUP_HEALTH_GUARD_ENABLED
-          value: 'True'
-        - name: LOOM_WORKER_SETUP_HEALTH_IO_FULL_AVG10_MAX
-          value: '50.0'
-        - name: LOOM_WORKER_SETUP_HEALTH_MIN_SWAP_FREE_MB
-          value: '1024'
-        - name: LOOM_WORKER_SETUP_HEALTH_POLL_INTERVAL_SEC
-          value: '5.0'
-        - name: LOOM_WORKER_SETUP_HEALTH_WAIT_TIMEOUT_SEC
-          value: '300.0'
-        - name: LOOM_WORKER_STORAGE_AUTH_KIND
-          value: static_keys
-        - name: LOOM_WORKER_STORAGE_BACKEND
-          value: minio
-        - name: LOOM_TASK_IMAGE_BUILD_MAX_BYTES
-          value: '536870912'
-        - name: LOOM_TASK_IMAGE_BUILD_MAX_FILES
-          value: '2000'
-        - name: LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC
-          value: '300.0'
-        - name: LOOM_WORKER_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: worker-token
-        - name: LOOM_WORKER_TRAJECTORY_CACHE_DIR
-          value: /var/lib/loom/trajectories
-        - name: LOOM_WORKER_TRIAL_CACHE_BASE_IMAGE_PULL_TIMEOUT_SEC
-          value: '1800.0'
-        - name: LOOM_WORKER_TRIAL_CACHE_BUILD_LOCK_TIMEOUT_SEC
-          value: '1800.0'
-        - name: LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT
-          value: '1'
-        - name: LOOM_WORKER_TRIAL_CACHE_MIN_FREE_GB
-          value: '20'
-        - name: LOOM_WORKER_TRIAL_CACHE_REGISTRY_PULL_TIMEOUT_SEC
-          value: '15.0'
-        - name: LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO
-          value: ''
-        - name: LOOM_WORKER_TRIAL_CACHE_TTL_HOURS
-          value: '168'
-        - name: LOOM_WORKER_TRIAL_CANCEL_POLL_INTERVAL_SEC
-          value: '30.0'
-        - name: LOOM_WORKER_TRIAL_HARD_DEADLINE_GRACE_SEC
-          value: '600.0'
-        - name: LOOM_WORKER_TRIAL_HARD_DEADLINE_MULTIPLIER
-          value: '3.0'
-        - name: LOOM_WORKER_VLLM_GPU_MEMORY_UTILIZATION
-          value: '0.9'
-        - name: LOOM_WORKER_VLLM_TENSOR_PARALLEL_SIZE
-          value: '1'
-        - name: LOOM_WORKER_MAX_CONCURRENT
-          value: '16'
-        - name: LOOM_WORKER_POOL_NAME
-          value: k8s-worker
-        - name: LOOM_WORKER_SUBPROCESS_GATEWAY_URL
-          value: http://host.docker.internal:30443/openai/v1
-        volumeMounts:
-        - name: trajectories
-          mountPath: /var/lib/loom/trajectories
-        - name: docker-sock
-          mountPath: /var/run/docker.sock
-        - name: docker-config
-          mountPath: /root/.docker
-          readOnly: true
-        resources:
-          requests:
-            cpu: 500m
-            memory: 1Gi
-          limits:
-            cpu: '8'
-            memory: 16Gi
+        - name: worker
+          image: loom-worker:0.7
+          env:
+            - name: LOOM_WORKER_CLAIM_POLL_INTERVAL_SEC
+              value: "1.0"
+            - name: LOOM_WORKER_CONTROL_PLANE_URL
+              value: "http://loom-control-plane:8080"
+            - name: LOOM_WORKER_DOCKER_API_TIMEOUT_SEC
+              value: "1800"
+            - name: LOOM_WORKER_DOCKER_SOCKET
+              value: "/var/run/docker.sock"
+            - name: LOOM_WORKER_DRAIN_TIMEOUT_SEC
+              value: "600"
+            - name: LOOM_WORKER_ENABLE_WORKER_VLLM
+              value: "False"
+            - name: LOOM_WORKER_FAMILY_STATE_DOWNLOAD_TIMEOUT_SEC
+              value: "120.0"
+            - name: LOOM_WORKER_GATEWAY_URL
+              value: "http://loom-llm-gateway:9100"
+            - name: LOOM_WORKER_HEARTBEAT_INTERVAL_SEC
+              value: "5.0"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: huggingface-api-key
+                  optional: true
+            - name: LOOM_WORKER_LOG_LEVEL
+              value: "info"
+            - name: LOOM_WORKER_METRICS_PORT
+              value: "9090"
+            - name: LOOM_WORKER_MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: minio-access-key
+            - name: LOOM_WORKER_MINIO_CONNECT_TIMEOUT_SEC
+              value: "5.0"
+            - name: LOOM_WORKER_MINIO_ENDPOINT
+              value: "http://loom-minio:9000"
+            - name: LOOM_WORKER_MINIO_MAX_POOL_CONNECTIONS
+              value: "256"
+            - name: LOOM_WORKER_MINIO_OPERATION_ATTEMPTS
+              value: "3"
+            - name: LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC
+              value: "300.0"
+            - name: LOOM_WORKER_MINIO_READ_TIMEOUT_SEC
+              value: "120.0"
+            - name: LOOM_WORKER_MINIO_REGION
+              value: "us-east-1"
+            - name: LOOM_WORKER_MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: minio-secret-key
+            - name: LOOM_WORKER_PRE_START_HEARTBEAT_INTERVAL_SEC
+              value: "60.0"
+            - name: LOOM_WORKER_SANDBOX_ISOLATION
+              value: "False"
+            - name: LOOM_WORKER_SANDBOX_SINGLETON_IMAGE
+              value: "loom-llm-gateway-sandbox:dev"
+            - name: LOOM_WORKER_SANDBOX_SINGLETON_SECRETS_DIR
+              value: "/var/lib/loom/sandbox-secrets"
+            - name: LOOM_WORKER_SANDBOX_STEP_JWT_TTL_SEC
+              value: "600"
+            - name: LOOM_WORKER_SANDBOX_WORKER_INDEX
+              value: "0"
+            - name: LOOM_WORKER_SETUP_HEALTH_DSTATE_MAX
+              value: "32"
+            - name: LOOM_WORKER_SETUP_HEALTH_GUARD_ENABLED
+              value: "True"
+            - name: LOOM_WORKER_SETUP_HEALTH_IO_FULL_AVG10_MAX
+              value: "50.0"
+            - name: LOOM_WORKER_SETUP_HEALTH_MIN_SWAP_FREE_MB
+              value: "1024"
+            - name: LOOM_WORKER_SETUP_HEALTH_POLL_INTERVAL_SEC
+              value: "5.0"
+            - name: LOOM_WORKER_SETUP_HEALTH_WAIT_TIMEOUT_SEC
+              value: "300.0"
+            - name: LOOM_WORKER_STORAGE_AUTH_KIND
+              value: "static_keys"
+            - name: LOOM_WORKER_STORAGE_BACKEND
+              value: "minio"
+            - name: LOOM_TASK_IMAGE_BUILD_MAX_BYTES
+              value: "536870912"
+            - name: LOOM_TASK_IMAGE_BUILD_MAX_FILES
+              value: "2000"
+            - name: LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC
+              value: "300.0"
+            - name: LOOM_WORKER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: worker-token
+            - name: LOOM_WORKER_TRAJECTORY_CACHE_DIR
+              value: "/var/lib/loom/trajectories"
+            - name: LOOM_WORKER_TRIAL_CACHE_BASE_IMAGE_PULL_TIMEOUT_SEC
+              value: "1800.0"
+            - name: LOOM_WORKER_TRIAL_CACHE_BUILD_LOCK_TIMEOUT_SEC
+              value: "1800.0"
+            - name: LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT
+              value: "1"
+            - name: LOOM_WORKER_TRIAL_CACHE_MIN_FREE_GB
+              value: "20"
+            - name: LOOM_WORKER_TRIAL_CACHE_REGISTRY_PULL_TIMEOUT_SEC
+              value: "15.0"
+            - name: LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO
+              value: ""
+            - name: LOOM_WORKER_TRIAL_CACHE_TTL_HOURS
+              value: "168"
+            - name: LOOM_WORKER_TRIAL_CANCEL_POLL_INTERVAL_SEC
+              value: "30.0"
+            - name: LOOM_WORKER_TRIAL_HARD_DEADLINE_GRACE_SEC
+              value: "600.0"
+            - name: LOOM_WORKER_TRIAL_HARD_DEADLINE_MULTIPLIER
+              value: "3.0"
+            - name: LOOM_WORKER_VLLM_GPU_MEMORY_UTILIZATION
+              value: "0.9"
+            - name: LOOM_WORKER_VLLM_TENSOR_PARALLEL_SIZE
+              value: "1"
+
+            - name: LOOM_WORKER_MAX_CONCURRENT
+              value: "16"
+            - name: LOOM_WORKER_POOL_NAME
+              value: "k8s-worker"
+            # Subprocess agents run inside Docker sandboxes, not the worker pod.
+            # They cannot resolve k8s Service DNS, so inject the operator-
+            # selected sandbox-facing bridge URL.
+            - name: LOOM_WORKER_SUBPROCESS_GATEWAY_URL
+              value: "http://host.docker.internal:30443/openai/v1"
+          volumeMounts:
+            - name: trajectories
+              mountPath: /var/lib/loom/trajectories
+            - name: docker-sock
+              # NOTE: bind-mounting the host docker socket has obvious
+              # blast-radius implications. Production should swap this
+              # for a rootless / sysbox / kata-containers runtime.
+              #
+              # On clusters running the Pod Security Admission
+              # "restricted" profile (k8s 1.25+ default for new
+              # namespaces), this hostPath mount is rejected outright.
+              # You must either:
+              #   (a) label the namespace
+              #       pod-security.kubernetes.io/enforce=privileged,
+              #   (b) move workers to a dedicated cluster, or
+              #   (c) switch to a non-Docker driver (sysbox / kata).
+              mountPath: /var/run/docker.sock
+            - name: docker-config
+              mountPath: /root/.docker
+              readOnly: true
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "8"
+              memory: "16Gi"
       volumes:
-      - name: docker-sock
-        hostPath:
-          path: /var/run/docker.sock
-          type: Socket
-      - name: docker-config
-        secret:
-          secretName: docker-config
-          optional: true
-          items:
-          - key: .dockerconfigjson
-            path: config.json
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
+            type: Socket
+        - name: docker-config
+          secret:
+            secretName: docker-config
+            optional: true
+            items:
+              - key: .dockerconfigjson
+                path: config.json
   volumeClaimTemplates:
-  - metadata:
-      name: trajectories
-    spec:
-      accessModes:
-      - ReadWriteOnce
-      resources:
-        requests:
-          storage: 100Gi
+    - metadata:
+        name: trajectories
+      spec:
+        accessModes: [ ReadWriteOnce ]
+        resources: { requests: { storage: 100Gi } }
 ---
+# Headless Service required by the StatefulSet for stable per-pod
+# DNS names (loom-worker-0.loom-worker, ...). No ClusterIP: workers
+# do not receive inbound traffic — they poll the control plane.
 apiVersion: v1
 kind: Service
 metadata:
   name: loom-worker
 spec:
   clusterIP: None
-  selector:
-    app: loom-worker
+  selector: { app: loom-worker }
+---

@@ -1,0 +1,33 @@
+{% import "_env.j2" as env_macros %}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-family-orchestrator
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: loom-family-orchestrator }
+  template:
+    metadata:
+      labels: { app: loom-family-orchestrator }
+    spec:
+      containers:
+        - name: family-orchestrator
+          image: loom-family-orchestrator:{{ image_tag }}
+          {{ env_macros.env_block("control-plane", schema) | indent(10) }}
+            - name: LOOM_CP_ADMIN_SECRET_FILE
+              value: "/var/run/loom/secrets/admin/secrets.toml"
+            - name: LOOM_ENV
+              value: "{{ runtime_environment }}"
+          volumeMounts:
+            - name: loom-admin-secret
+              mountPath: /var/run/loom/secrets/admin
+              readOnly: true
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+      volumes:
+        - name: loom-admin-secret
+          secret:
+            secretName: loom-admin-secret
+            defaultMode: 0400

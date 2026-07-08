@@ -27,12 +27,13 @@ from loom_cli.rollout.steps.subprocess_util import run_captured
 #: can parametrize over the same list AND diff it against the rendered
 #: deploy manifests.
 ROLLOUT_IMAGES: tuple[tuple[str, str], ...] = (
-    ("loom-control-plane", "deploy/Dockerfile.control-plane"),
-    ("loom-llm-gateway",   "deploy/Dockerfile.gateway"),
-    ("loom-service",       "deploy/Dockerfile.service"),
-    ("loom-web",           "deploy/Dockerfile.web"),
-    ("loom-worker",        "deploy/Dockerfile.worker"),
-    ("loom-egress-xds",    "deploy/Dockerfile.egress-xds"),
+    ("loom-control-plane",       "deploy/Dockerfile.control-plane"),
+    ("loom-family-orchestrator", "deploy/Dockerfile.family-orchestrator"),
+    ("loom-llm-gateway",         "deploy/Dockerfile.gateway"),
+    ("loom-service",             "deploy/Dockerfile.service"),
+    ("loom-web",                 "deploy/Dockerfile.web"),
+    ("loom-worker",              "deploy/Dockerfile.worker"),
+    ("loom-egress-xds",          "deploy/Dockerfile.egress-xds"),
 )
 
 

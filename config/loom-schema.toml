@@ -451,6 +451,36 @@ python_type = "float"
 default     = 0.2
 description = "Default BackoffSpec.jitter snapshotted at submit time when unset. Fractional jitter in [0, 1]: actual wait = curve * Uniform(1-jitter, 1+jitter) to spread thundering-herd across restarts."
 
+# ─── family-run orchestrator (#672) ───
+# Shared across control-plane + worker: CP owns the finalize hook,
+# orchestrator (deployed as a CP-siblings service that loads
+# ControlPlaneSettings) owns the adapting -> pending transition, and
+# workers read family_state_download_timeout_sec at pre-start.
+
+[service_config.skill_evolver_default_model]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = "anthropic/claude-sonnet-4-6"
+description = "Cluster-default evolver model for skill_patcher_llm when the batch does not override it in trial_config.family_run.adapter.params.model."
+
+[service_config.family_orchestrator_poll_sec]
+used_by     = ["control-plane"]
+python_type = "float"
+default     = 5.0
+description = "Family-run orchestrator poll cadence for the adapting-state scan."
+
+[service_config.family_adapter_call_timeout_sec]
+used_by     = ["control-plane"]
+python_type = "float"
+default     = 300.0
+description = "Per-call timeout wrapping the family adapter's evolve(); a trip is fed to the batch's failure_policy."
+
+[service_config.family_state_download_timeout_sec]
+used_by     = ["control-plane", "worker"]
+python_type = "float"
+default     = 120.0
+description = "Bounds worker-side family state materialisation before trial start."
+
 [service_config.team_quota_max_attempts_ceiling_default]
 used_by     = ["loom-service"]
 python_type = "int"

@@ -25,6 +25,7 @@ class WorkerSettings(BaseSettings):
     docker_socket: Path = Path("/var/run/docker.sock")
     drain_timeout_sec: int = 600
     enable_worker_vllm: bool = False
+    family_state_download_timeout_sec: float = 120.0
     fixtures_root: Path | None = None
     gateway_url: HttpUrl = cast(HttpUrl, "http://loom-llm-gateway:9100")
     heartbeat_interval_sec: float = 5.0
