@@ -124,6 +124,20 @@ spec:
               kubernetes.io/metadata.name: cnpg-system
       ports:
         - { port: 9443, protocol: TCP }
+    # kube-apiserver reachability. The CNPG bootstrap-controller fetches
+    # the Cluster CR from the k8s apiserver on startup — without this,
+    # any pod that restarts after the NetworkPolicy takes effect
+    # CrashLoopBackOffs with `connection refused` on the apiserver
+    # ClusterIP. The primary that started before the policy sticks
+    # around by luck. See #678. ipBlock 0.0.0.0/0 is deliberately broad
+    # because apiserver endpoints are host-networked control-plane
+    # nodes (not pods), so podSelector/namespaceSelector don't match.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - { port: 443, protocol: TCP }
+        - { port: 6443, protocol: TCP }
 {% endif %}
 
 ---
