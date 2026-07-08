@@ -26,17 +26,24 @@ def _repo_root() -> Path:
 
 def _locally_tagged_deployment_images() -> set[str]:
     """Return the set of *image names* (part before ``:``) referenced by
-    a container in any managed Deployment under ``deploy/k8s/``.
+    a container in any managed Deployment or StatefulSet under
+    ``deploy/k8s/``.
 
     Registry-qualified images (``foo/bar``, ``registry.k8s.io/...``) are
     skipped — those are pulled from a public registry, not built by the
     rollout driver.
+
+    StatefulSet coverage is required because loom-worker renders as a
+    StatefulSet on dynamic-storage profiles (#673).
     """
     root = _repo_root() / "deploy" / "k8s"
     names: set[str] = set()
     for path in sorted(root.glob("*.yaml")):
         for doc in yaml.safe_load_all(path.read_text()):
-            if not isinstance(doc, dict) or doc.get("kind") != "Deployment":
+            if not isinstance(doc, dict) or doc.get("kind") not in (
+                "Deployment",
+                "StatefulSet",
+            ):
                 continue
             spec = doc.get("spec") or {}
             template = spec.get("template") or {}
@@ -47,6 +54,12 @@ def _locally_tagged_deployment_images() -> set[str]:
                     continue
                 head = str(image).split(":", 1)[0]
                 if "/" in head:
+                    continue
+                # Skip unqualified external images (e.g. `postgres:16`
+                # on the loom-postgres StatefulSet — pulled from Docker
+                # Hub, not built locally). Only loom-* images are
+                # produced by the rollout driver.
+                if not head.startswith("loom-"):
                     continue
                 names.add(head)
     return names
