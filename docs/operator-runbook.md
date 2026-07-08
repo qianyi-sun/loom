@@ -826,11 +826,15 @@ knob you need.
    to `loom cluster release-gate --environment-state-check`; a missing artifact,
    `ok=false`, or non-empty `drift` array keeps the protected release gate red
    and blocks workload-validation anchors.
-   `loom cluster rollout` step 10 applies the profile once and then retries
-   the immediate check once. Pure `gb10_worker_node_status[...]` drift is
-   recorded but deferred because step 11 has not started the host-local
-   node-agent yet; mixed drift, such as OLDLAB jobs or missing external-runner
-   prerequisites, still fails before host prep. Step 14 reruns the
+   `loom cluster rollout` step 10 first materializes the candidate
+   environment-state profile to
+   `/data/loom-staging/environment-state/staging.toml` with mode `0600`,
+   recording source/target sha256 evidence, then applies the candidate profile
+   once and retries the immediate check once. Pure
+   `gb10_worker_node_status[...]` drift is recorded but deferred because step
+   11 has not started the host-local node-agent yet; mixed drift, such as
+   OLDLAB jobs or missing external-runner prerequisites, still fails before
+   host prep. Step 14 reruns the
    environment-state check after GB10 prep and before release-gate, retrying
    only pure GB10 node-status drift for a bounded window while asynchronous
    source-checkout updates report back.
@@ -872,9 +876,12 @@ knob you need.
    when it is unset.
    Staging uses the same flow with `--environment staging` and
    `deploy/environment-state/staging.toml`. `loom cluster rollout` step 10 now
-   executes the profile's required catalog provisioning command after
-   environment-state apply and before environment-state check, writing
-   redacted `catalog-provisioning.*` evidence. The profile lists the
+   keeps the physical `/data/loom-staging/environment-state/staging.toml`
+   copy in sync with the candidate profile before mutation, so rerun/resume
+   evidence does not depend on a stale one-time manual copy. It then executes
+   the profile's required catalog provisioning command after environment-state
+   apply and before environment-state check, writing redacted
+   `catalog-provisioning.*` evidence. The profile lists the
    operator-only env keys required by that gate: `PUBLISHED_SHA`, `HF_TOKEN`,
    `LOOM_SVC_DB_URL`, and `LOOM_SVC_MINIO_*`; secret-bearing values must come
    from the protected `staging-catalog-provisioning.env` file or equivalent
@@ -1347,13 +1354,14 @@ runner `env_file` fingerprints can be compared against the active protected
 worker token without writing token values to logs or evidence. It does not
 pass the worker token to environment-state apply. When the environment profile
 declares `external_slurm_runner_prerequisites` with `materialize = true`, step
-10 first reconciles the declared `env_file` and `repo_dir` for the rollout
-image tag, then runs apply/check. The env file is copied from the profile's
-template glob when missing, only release keys and the active worker token are
-updated, mode is forced to `0600`, and evidence records paths, mode, git HEAD,
-clean status, and redacted worker-token fingerprint only. Profiles that do not
-opt in to `materialize = true` remain operator-owned prerequisites and must be
-created before rerunning step 10.
+10 first syncs the current profile into the rollout root, then reconciles the
+declared `env_file` and `repo_dir` for the rollout image tag before
+apply/check. The env file is copied from the profile's template glob when
+missing, only release keys and the active worker token are updated, mode is
+forced to `0600`, and evidence records paths, mode, git HEAD, clean status,
+and redacted worker-token fingerprint only. Profiles that do not opt in to
+`materialize = true` remain operator-owned prerequisites and must be created
+before rerunning step 10.
 
 `SERVICE_TOKEN_SOURCE` is a Service API token source reference for
 rollout-owned CLI commands that mutate or verify DB-backed service defaults.

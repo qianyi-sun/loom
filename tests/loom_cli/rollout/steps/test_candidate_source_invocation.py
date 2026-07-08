@@ -378,6 +378,57 @@ def test_env_state_passes_worker_token_source_to_check_only(
     assert "staging-worker-token-value" not in str(check_argv)
 
 
+def test_env_state_materializes_current_profile_under_rollout_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    step_dir = ev.step_dir(10, "env-state")
+    source_profile = tmp_path / "candidate" / "deploy" / "environment-state" / "staging.toml"
+    source_profile.parent.mkdir(parents=True)
+    source_profile.write_text(
+        'environment = "staging"\n\n[catalog_provisioning]\nrequired = false\n',
+        encoding="utf-8",
+    )
+    physical_profile = tmp_path / "environment-state" / "staging.toml"
+    physical_profile.parent.mkdir()
+    physical_profile.write_text('environment = "stale"\n', encoding="utf-8")
+
+    def fake_run(argv, **kwargs):
+        return SubprocessResult(
+            argv=list(argv),
+            returncode=0,
+            stdout=json.dumps({"ok": True, "drift": []}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._profile_path_for",
+        lambda ctx: str(source_profile),
+    )
+    monkeypatch.setattr("loom_cli.rollout.steps.s10_env_state.run_captured", fake_run)
+
+    result = EnvStateStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    assert physical_profile.read_text(encoding="utf-8") == source_profile.read_text(
+        encoding="utf-8",
+    )
+    assert oct(physical_profile.stat().st_mode & 0o777) == "0o600"
+    evidence = json.loads(
+        step_dir.artifact_path("environment-state-profile-materialization.json").read_text(
+            encoding="utf-8",
+        ),
+    )
+    assert evidence["source_path"] == str(source_profile)
+    assert evidence["target_path"] == str(physical_profile)
+    assert evidence["source_sha256"] == evidence["target_sha256"]
+    assert evidence["mode"] == "0o600"
+
+
 def test_env_state_runs_catalog_provisioning_between_apply_and_check(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -446,9 +497,7 @@ PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"
             assert "/usr/bin" in path_entries[1:]
             assert kwargs["env"]["HF_TOKEN"] == hf_token
             assert kwargs["env"]["LOOM_SVC_DB_URL"] == db_url
-            assert kwargs["env"]["PUBLISHED_SHA"] == (
-                "79087002d62bb22169a704bc941c8d614082d880"
-            )
+            assert kwargs["env"]["PUBLISHED_SHA"] == ("79087002d62bb22169a704bc941c8d614082d880")
             return SubprocessResult(
                 argv=list(argv),
                 returncode=0,
@@ -473,7 +522,11 @@ PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"
     result = EnvStateStep().run(ctx, step_dir)
 
     assert result.exit_code == 0
-    assert [call["argv"][3:6] for call in calls if call["argv"][:3] == [sys.executable, "-m", "loom_cli"]] == [
+    assert [
+        call["argv"][3:6]
+        for call in calls
+        if call["argv"][:3] == [sys.executable, "-m", "loom_cli"]
+    ] == [
         ["admin", "environment-state", "apply"],
         ["admin", "environment-state", "check"],
     ]
@@ -1780,8 +1833,7 @@ def test_gb10_prep_clones_preserves_env_and_starts_node_agent(
     assert "LOOM_WORKER_TOKEN" not in env_update
     assert "> /srv/loom-staging/.env" not in env_update
     legacy_idx = next(
-        idx for idx, call in enumerate(calls)
-        if "disable --now loom-gb10-worker.service" in call
+        idx for idx, call in enumerate(calls) if "disable --now loom-gb10-worker.service" in call
     )
     node_agent_idx = calls.index("systemctl --user start loom-gb10-node-agent.service")
     assert legacy_idx < node_agent_idx
