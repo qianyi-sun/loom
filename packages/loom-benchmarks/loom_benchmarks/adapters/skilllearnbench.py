@@ -58,6 +58,20 @@ class SkillLearnBenchAdapter(SkillFlowAdapter):
     def skill_method(self) -> str:
         return self._params.get("skill_method") or "human_authored"
 
+    @property
+    def online_mode(self) -> bool:
+        """When ``params.online_mode`` is truthy the adapter skips the
+        baked-in per-family skill copy at convert time - the family_run
+        state mount populates the target directory at trial start
+        instead (PR-4 #672 Item 7, Option B). Falsy value keeps the
+        legacy static-skill behaviour."""
+        raw = self._params.get("online_mode")
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            return raw.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(raw)
+
     def list_instances(
         self, *, source_dir: Path, split: str,
     ) -> Iterator[BenchmarkInstance]:
@@ -115,7 +129,9 @@ class SkillLearnBenchAdapter(SkillFlowAdapter):
             self._rewrite_classic_docker_unsupported_heredocs(out_dir)
             or normalized
         )
-        injected = self._inject_skills(instance, out_dir=out_dir)
+        injected = False if self.online_mode else self._inject_skills(
+            instance, out_dir=out_dir,
+        )
         if not injected and not normalized:
             return result
         # Skill injection/normalization mutated the bundle after super() hashed it.
@@ -264,3 +280,155 @@ class SkillLearnBenchAdapter(SkillFlowAdapter):
             )
         dockerfile.write_text("\n".join(rewritten) + "\n")
         return True
+
+
+# ─── Baseline matrix + online-mode subclasses (PR-4 #672 Item 1/2) ────
+#
+# Each named entry picks its ``skill_method`` (or ``online_mode=True``)
+# from the catalog row's ``params``. Adapter logic is inherited unchanged
+# from :class:`SkillLearnBenchAdapter`; the only reason to declare
+# distinct subclasses is so each row can be an independent entry point,
+# giving operators one clickable adapter per baseline / model / online-
+# seed permutation.
+
+
+_BASELINE_MODELS = (
+    "claude-haiku-4-5",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite-preview",
+    "gemini-3.1-pro-preview",
+)
+_BASELINE_PREFIXES = (
+    "b1-one-shot",
+    "b2-self-feedback",
+    "b3-teacher-feedback",
+    "b4-skill-creator",
+)
+
+
+class SkillLearnBenchHumanAuthoredAdapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-human-authored"
+
+
+class SkillLearnBenchB1OneShotClaudeHaiku45Adapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b1-one-shot-claude-haiku-4-5"
+
+
+class SkillLearnBenchB1OneShotClaudeOpus46Adapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b1-one-shot-claude-opus-4-6"
+
+
+class SkillLearnBenchB1OneShotClaudeSonnet46Adapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b1-one-shot-claude-sonnet-4-6"
+
+
+class SkillLearnBenchB1OneShotGemini3FlashPreviewAdapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b1-one-shot-gemini-3-flash-preview"
+
+
+class SkillLearnBenchB1OneShotGemini31FlashLitePreviewAdapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b1-one-shot-gemini-3.1-flash-lite-preview"
+
+
+class SkillLearnBenchB1OneShotGemini31ProPreviewAdapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b1-one-shot-gemini-3.1-pro-preview"
+
+
+class SkillLearnBenchB2SelfFeedbackClaudeHaiku45Adapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b2-self-feedback-claude-haiku-4-5"
+
+
+class SkillLearnBenchB2SelfFeedbackClaudeOpus46Adapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b2-self-feedback-claude-opus-4-6"
+
+
+class SkillLearnBenchB2SelfFeedbackClaudeSonnet46Adapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b2-self-feedback-claude-sonnet-4-6"
+
+
+class SkillLearnBenchB2SelfFeedbackGemini3FlashPreviewAdapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b2-self-feedback-gemini-3-flash-preview"
+
+
+class SkillLearnBenchB2SelfFeedbackGemini31FlashLitePreviewAdapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b2-self-feedback-gemini-3.1-flash-lite-preview"
+
+
+class SkillLearnBenchB2SelfFeedbackGemini31ProPreviewAdapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b2-self-feedback-gemini-3.1-pro-preview"
+
+
+class SkillLearnBenchB3TeacherFeedbackClaudeHaiku45Adapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b3-teacher-feedback-claude-haiku-4-5"
+
+
+class SkillLearnBenchB3TeacherFeedbackClaudeOpus46Adapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b3-teacher-feedback-claude-opus-4-6"
+
+
+class SkillLearnBenchB3TeacherFeedbackClaudeSonnet46Adapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b3-teacher-feedback-claude-sonnet-4-6"
+
+
+class SkillLearnBenchB3TeacherFeedbackGemini3FlashPreviewAdapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b3-teacher-feedback-gemini-3-flash-preview"
+
+
+class SkillLearnBenchB3TeacherFeedbackGemini31FlashLitePreviewAdapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b3-teacher-feedback-gemini-3.1-flash-lite-preview"
+
+
+class SkillLearnBenchB3TeacherFeedbackGemini31ProPreviewAdapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b3-teacher-feedback-gemini-3.1-pro-preview"
+
+
+class SkillLearnBenchB4SkillCreatorClaudeHaiku45Adapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b4-skill-creator-claude-haiku-4-5"
+
+
+class SkillLearnBenchB4SkillCreatorClaudeOpus46Adapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b4-skill-creator-claude-opus-4-6"
+
+
+class SkillLearnBenchB4SkillCreatorClaudeSonnet46Adapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b4-skill-creator-claude-sonnet-4-6"
+
+
+class SkillLearnBenchB4SkillCreatorGemini3FlashPreviewAdapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b4-skill-creator-gemini-3-flash-preview"
+
+
+class SkillLearnBenchB4SkillCreatorGemini31FlashLitePreviewAdapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b4-skill-creator-gemini-3.1-flash-lite-preview"
+
+
+class SkillLearnBenchB4SkillCreatorGemini31ProPreviewAdapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-b4-skill-creator-gemini-3.1-pro-preview"
+
+
+# Online-mode seeds (Item 2): each starts from a baseline's skill dir
+# but omits the baked-in copy at convert time (``online_mode=True``);
+# the family_run S3 mount populates the target directory at trial start
+# and the skill_patcher_llm adapter evolves it between family tasks.
+
+
+class SkillLearnBenchOnlineFromHumanAuthoredAdapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-online-from-human-authored"
+
+
+class SkillLearnBenchOnlineFromB1OneShotClaudeHaiku45Adapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-online-from-b1-one-shot-claude-haiku-4-5"
+
+
+class SkillLearnBenchOnlineFromB2SelfFeedbackClaudeHaiku45Adapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-online-from-b2-self-feedback-claude-haiku-4-5"
+
+
+class SkillLearnBenchOnlineFromB3TeacherFeedbackClaudeHaiku45Adapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-online-from-b3-teacher-feedback-claude-haiku-4-5"
+
+
+class SkillLearnBenchOnlineFromB4SkillCreatorClaudeHaiku45Adapter(SkillLearnBenchAdapter):
+    name = "skilllearnbench-online-from-b4-skill-creator-claude-haiku-4-5"

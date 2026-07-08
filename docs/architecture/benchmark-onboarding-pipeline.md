@@ -454,6 +454,41 @@ surfaces:
   instance, so the adapter must wrap each bundle with Loom `task.toml` and a
   verifier shim over upstream `tests/test.sh` before marking them runnable.
 
+### SkillLearnBench baseline coverage
+
+SkillLearnBench ships one skill-bundle set per (baseline, family) under the
+upstream repo's `skills/<baseline>/<family>/` tree. The catalog exposes each
+baseline as an independent row so the SPA can list them side by side and
+operators can submit one baseline per batch without re-typing catalog
+metadata. The row set has two flavors:
+
+- **Offline / static-skill rows** — the adapter reads `params.skill_method`
+  from the catalog row and copies the matching upstream directory into the
+  converted task bundle at publish time. There are 25 offline rows:
+  `skilllearnbench-human-authored` plus 4 baselines
+  (`b1-one-shot`, `b2-self-feedback`, `b3-teacher-feedback`,
+  `b4-skill-creator`) × 6 upstream author-model combinations
+  (`claude-haiku-4-5`, `claude-opus-4-6`, `claude-sonnet-4-6`,
+  `gemini-3-flash-preview`, `gemini-3.1-flash-lite-preview`,
+  `gemini-3.1-pro-preview`).
+- **Online / evolving rows** — the adapter ships an empty `skills/`
+  placeholder at publish time (`params.online_mode: "true"`) and the
+  family-run subsystem provisions the seed baseline into the per-family
+  state tarball at batch-submit time via
+  `skill_patcher_llm.initialize_state()` (see `docs/architecture/family-runs.md`
+  design PR). The scheduler serialises the family; between trials, the
+  evolver LLM applies a JSON patch to the shared skill dir and re-uploads
+  the tarball. There are 5 online seeds — one per baseline, canonicalised on
+  the `claude-haiku-4-5` author model so the SPA has one clickable "online"
+  row per starting point.
+
+Baseline correctness is asserted by
+`packages/loom-benchmarks/tests/test_skilllearnbench_baseline_matrix.py`:
+each offline row's converter yields a distinct sha256 of the produced
+`skills/` subtree, and the online-mode counterparts are shown to skip the
+baked-in copy so the family-run mount is the sole populator of the target
+directory.
+
 Defer heavy benchmarks until readiness tooling can explain blockers:
 
 - SWE-Bench and SWE-Bench Verified.

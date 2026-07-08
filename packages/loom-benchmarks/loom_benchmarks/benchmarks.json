@@ -5,162 +5,372 @@
       "name": "aime-22",
       "display_name": "AIME 2022",
       "series": "aime",
-      "upstream": {"kind": "huggingface", "locator": "AI-MO/aimo-validation-aime"},
-      "license": {"spdx": "proprietary-MAA", "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability", "execution_policy": "notice"},
-      "splits": ["train"],
-      "params": {"year": "2022"}
+      "upstream": {
+        "kind": "huggingface",
+        "locator": "AI-MO/aimo-validation-aime"
+      },
+      "license": {
+        "spdx": "proprietary-MAA",
+        "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability",
+        "execution_policy": "notice"
+      },
+      "splits": [
+        "train"
+      ],
+      "params": {
+        "year": "2022"
+      }
     },
     {
       "name": "aime-23",
       "display_name": "AIME 2023",
       "series": "aime",
-      "upstream": {"kind": "huggingface", "locator": "AI-MO/aimo-validation-aime"},
-      "license": {"spdx": "proprietary-MAA", "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability", "execution_policy": "notice"},
-      "splits": ["train"],
-      "params": {"year": "2023"}
+      "upstream": {
+        "kind": "huggingface",
+        "locator": "AI-MO/aimo-validation-aime"
+      },
+      "license": {
+        "spdx": "proprietary-MAA",
+        "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability",
+        "execution_policy": "notice"
+      },
+      "splits": [
+        "train"
+      ],
+      "params": {
+        "year": "2023"
+      }
     },
     {
       "name": "aime-24",
       "display_name": "AIME 2024",
       "series": "aime",
-      "upstream": {"kind": "huggingface", "locator": "AI-MO/aimo-validation-aime"},
-      "license": {"spdx": "proprietary-MAA", "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability", "execution_policy": "notice"},
-      "splits": ["train"],
-      "params": {"year": "2024"}
+      "upstream": {
+        "kind": "huggingface",
+        "locator": "AI-MO/aimo-validation-aime"
+      },
+      "license": {
+        "spdx": "proprietary-MAA",
+        "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability",
+        "execution_policy": "notice"
+      },
+      "splits": [
+        "train"
+      ],
+      "params": {
+        "year": "2024"
+      }
     },
     {
       "name": "aime-25",
       "display_name": "AIME 2025",
       "series": "aime",
-      "upstream": {"kind": "huggingface", "locator": "MathArena/aime_2025_I"},
-      "license": {"spdx": "proprietary-MAA", "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability", "execution_policy": "notice"},
-      "splits": ["train"]
+      "upstream": {
+        "kind": "huggingface",
+        "locator": "MathArena/aime_2025_I"
+      },
+      "license": {
+        "spdx": "proprietary-MAA",
+        "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability",
+        "execution_policy": "notice"
+      },
+      "splits": [
+        "train"
+      ]
     },
     {
       "name": "bfcl",
       "display_name": "BFCL",
       "series": "tool-use",
-      "upstream": {"kind": "git", "locator": "https://github.com/ShishirPatil/gorilla.git", "revision": "6ea57973c7a6097fd7c5915698c54c17c5b1b6c8"},
-      "license": {"spdx": "Apache-2.0", "url": "https://github.com/ShishirPatil/gorilla/blob/main/LICENSE"},
-      "splits": ["test"]
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/ShishirPatil/gorilla.git",
+        "revision": "6ea57973c7a6097fd7c5915698c54c17c5b1b6c8"
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "url": "https://github.com/ShishirPatil/gorilla/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ]
     },
     {
       "name": "browsecomp",
       "display_name": "BrowseComp",
       "series": "browsing",
-      "upstream": {"kind": "git", "locator": "https://github.com/openai/simple-evals.git", "revision": "652c89d0ca9df547706735883097e9537d40dc47"},
-      "license": {"spdx": "MIT", "url": "https://github.com/openai/simple-evals/blob/main/LICENSE"},
-      "splits": ["test"],
-      "params": {"rows": "1266", "csv_url": "https://openaipublic.blob.core.windows.net/simple-evals/browse_comp_test_set.csv", "csv_etag": "0x8DD785A972BF8A0"}
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/openai/simple-evals.git",
+        "revision": "652c89d0ca9df547706735883097e9537d40dc47"
+      },
+      "license": {
+        "spdx": "MIT",
+        "url": "https://github.com/openai/simple-evals/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "rows": "1266",
+        "csv_url": "https://openaipublic.blob.core.windows.net/simple-evals/browse_comp_test_set.csv",
+        "csv_etag": "0x8DD785A972BF8A0"
+      }
     },
     {
       "name": "gaia",
       "display_name": "GAIA",
       "series": "research-agent",
-      "upstream": {"kind": "huggingface", "locator": "gaia-benchmark/GAIA", "subset": "2023_all"},
-      "license": {"spdx": "CC-BY-4.0", "url": "https://huggingface.co/datasets/gaia-benchmark/GAIA"},
-      "splits": ["validation", "test"]
+      "upstream": {
+        "kind": "huggingface",
+        "locator": "gaia-benchmark/GAIA",
+        "subset": "2023_all"
+      },
+      "license": {
+        "spdx": "CC-BY-4.0",
+        "url": "https://huggingface.co/datasets/gaia-benchmark/GAIA"
+      },
+      "splits": [
+        "validation",
+        "test"
+      ]
     },
     {
       "name": "gpqa",
       "display_name": "GPQA Extended",
       "series": "reasoning",
-      "upstream": {"kind": "git", "locator": "https://github.com/idavidrein/gpqa.git", "revision": "56686c06f5e19865c153de0fdb11be3890014df7"},
-      "license": {"spdx": "MIT", "url": "https://github.com/idavidrein/gpqa/blob/main/LICENSE"},
-      "splits": ["test"],
-      "params": {"subset": "extended", "rows": "546"}
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/idavidrein/gpqa.git",
+        "revision": "56686c06f5e19865c153de0fdb11be3890014df7"
+      },
+      "license": {
+        "spdx": "MIT",
+        "url": "https://github.com/idavidrein/gpqa/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "subset": "extended",
+        "rows": "546"
+      }
     },
     {
       "name": "gpqa-diamond",
       "display_name": "GPQA Diamond",
       "series": "reasoning",
-      "upstream": {"kind": "git", "locator": "https://github.com/idavidrein/gpqa.git", "revision": "56686c06f5e19865c153de0fdb11be3890014df7"},
-      "license": {"spdx": "MIT", "url": "https://github.com/idavidrein/gpqa/blob/main/LICENSE"},
-      "splits": ["test"],
-      "params": {"subset": "diamond", "rows": "198"}
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/idavidrein/gpqa.git",
+        "revision": "56686c06f5e19865c153de0fdb11be3890014df7"
+      },
+      "license": {
+        "spdx": "MIT",
+        "url": "https://github.com/idavidrein/gpqa/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "subset": "diamond",
+        "rows": "198"
+      }
     },
     {
       "name": "hendrycks-math",
       "display_name": "MATH (Hendrycks)",
       "series": "reasoning",
-      "upstream": {"kind": "huggingface", "locator": "HuggingFaceTB/MATH", "subset": "all", "revision": "140a673f1f7182daf7923fdc7108e8cdbf97df46", "trust_remote_code": true},
-      "license": {"spdx": "MIT", "url": "https://github.com/hendrycks/math/blob/main/LICENSE"},
-      "splits": ["test"],
-      "params": {"subset": "all", "rows": "5000"}
+      "upstream": {
+        "kind": "huggingface",
+        "locator": "HuggingFaceTB/MATH",
+        "subset": "all",
+        "revision": "140a673f1f7182daf7923fdc7108e8cdbf97df46",
+        "trust_remote_code": true
+      },
+      "license": {
+        "spdx": "MIT",
+        "url": "https://github.com/hendrycks/math/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "subset": "all",
+        "rows": "5000"
+      }
     },
     {
       "name": "math-500",
       "display_name": "MATH-500",
       "series": "reasoning",
-      "upstream": {"kind": "huggingface", "locator": "HuggingFaceH4/MATH-500", "revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be"},
-      "license": {"spdx": "MIT", "url": "https://github.com/hendrycks/math/blob/main/LICENSE"},
-      "splits": ["test"],
-      "params": {"rows": "500"}
+      "upstream": {
+        "kind": "huggingface",
+        "locator": "HuggingFaceH4/MATH-500",
+        "revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be"
+      },
+      "license": {
+        "spdx": "MIT",
+        "url": "https://github.com/hendrycks/math/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "rows": "500"
+      }
     },
     {
       "name": "humaneval",
       "display_name": "HumanEval",
       "series": "code",
-      "upstream": {"kind": "huggingface", "locator": "openai/openai_humaneval"},
-      "license": {"spdx": "MIT", "url": "https://github.com/openai/human-eval/blob/master/LICENSE"},
-      "splits": ["test"]
+      "upstream": {
+        "kind": "huggingface",
+        "locator": "openai/openai_humaneval"
+      },
+      "license": {
+        "spdx": "MIT",
+        "url": "https://github.com/openai/human-eval/blob/master/LICENSE"
+      },
+      "splits": [
+        "test"
+      ]
     },
     {
       "name": "livecodebench",
       "display_name": "LiveCodeBench",
       "series": "code",
-      "upstream": {"kind": "huggingface", "locator": "livecodebench/code_generation_lite", "revision": "0fe84c3912ea0c4d4a78037083943e8f0c4dd505", "trust_remote_code": true},
-      "license": {"spdx": "CC-BY-NC-4.0", "url": "https://github.com/LiveCodeBench/LiveCodeBench/blob/main/LICENSE"},
-      "splits": ["test"]
+      "upstream": {
+        "kind": "huggingface",
+        "locator": "livecodebench/code_generation_lite",
+        "revision": "0fe84c3912ea0c4d4a78037083943e8f0c4dd505",
+        "trust_remote_code": true
+      },
+      "license": {
+        "spdx": "CC-BY-NC-4.0",
+        "url": "https://github.com/LiveCodeBench/LiveCodeBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ]
     },
     {
       "name": "mbpp",
       "display_name": "MBPP",
       "series": "code",
-      "upstream": {"kind": "huggingface", "locator": "google-research-datasets/mbpp", "subset": "sanitized"},
-      "license": {"spdx": "CC-BY-4.0", "url": "https://github.com/google-research/google-research/blob/master/mbpp/LICENSE"},
-      "splits": ["test"]
+      "upstream": {
+        "kind": "huggingface",
+        "locator": "google-research-datasets/mbpp",
+        "subset": "sanitized"
+      },
+      "license": {
+        "spdx": "CC-BY-4.0",
+        "url": "https://github.com/google-research/google-research/blob/master/mbpp/LICENSE"
+      },
+      "splits": [
+        "test"
+      ]
     },
     {
       "name": "mmlu-pro",
       "display_name": "MMLU-Pro",
       "series": "knowledge",
-      "upstream": {"kind": "huggingface", "locator": "TIGER-Lab/MMLU-Pro", "revision": "b189ec765aa7ed75c8acfea42df31fdae71f97be"},
-      "license": {"spdx": "MIT", "url": "https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro"},
-      "splits": ["test"],
-      "params": {"rows": "12032"}
+      "upstream": {
+        "kind": "huggingface",
+        "locator": "TIGER-Lab/MMLU-Pro",
+        "revision": "b189ec765aa7ed75c8acfea42df31fdae71f97be"
+      },
+      "license": {
+        "spdx": "MIT",
+        "url": "https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "rows": "12032"
+      }
     },
     {
       "name": "osworld",
       "display_name": "OSWorld",
       "series": "ui-agent",
-      "upstream": {"kind": "git", "locator": "https://github.com/xlang-ai/OSWorld.git", "revision": "main"},
-      "license": {"spdx": "Apache-2.0", "url": "https://github.com/xlang-ai/OSWorld/blob/main/LICENSE"},
-      "splits": ["test"]
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/xlang-ai/OSWorld.git",
+        "revision": "main"
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "url": "https://github.com/xlang-ai/OSWorld/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ]
     },
     {
       "name": "skillflow",
       "display_name": "SkillFlow",
       "series": "skill",
-      "upstream": {"kind": "git", "locator": "https://huggingface.co/datasets/zhang-ziao/SkillFlow-Task", "revision": "main"},
-      "license": {"spdx": "NOASSERTION", "url": "https://github.com/ZhangZi-a/SkillFlow"},
-      "splits": ["test"]
+      "upstream": {
+        "kind": "git",
+        "locator": "https://huggingface.co/datasets/zhang-ziao/SkillFlow-Task",
+        "revision": "main"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/ZhangZi-a/SkillFlow"
+      },
+      "splits": [
+        "test"
+      ]
     },
     {
       "name": "skillflow-iterative",
       "display_name": "SkillFlow (iterative shared skills)",
       "series": "skill",
-      "upstream": {"kind": "git", "locator": "https://huggingface.co/datasets/zhang-ziao/SkillFlow-Task", "revision": "main"},
-      "license": {"spdx": "NOASSERTION", "url": "https://github.com/ZhangZi-a/SkillFlow"},
-      "splits": ["test"],
+      "upstream": {
+        "kind": "git",
+        "locator": "https://huggingface.co/datasets/zhang-ziao/SkillFlow-Task",
+        "revision": "main"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/ZhangZi-a/SkillFlow"
+      },
+      "splits": [
+        "test"
+      ],
       "family_run_defaults": {
         "enabled": true,
-        "family_key_extractor": {"name": "instance_id_prefix", "params": {"depth": 1}},
-        "sequencer": {"name": "ranking_file", "params": {"path": "ALL_TASK_DIFFICULTY_RANKING.json"}},
-        "advance_predicate": {"name": "always_on_terminal"},
-        "adapter": {"name": "skill_patcher_llm"},
-        "failure_policy": {"name": "stall_family", "params": {"max_retries": 3, "backoff_sec": 60}},
-        "state_backend": {"name": "s3_artifacts"},
+        "family_key_extractor": {
+          "name": "instance_id_prefix",
+          "params": {
+            "depth": 1
+          }
+        },
+        "sequencer": {
+          "name": "ranking_file",
+          "params": {
+            "path": "ALL_TASK_DIFFICULTY_RANKING.json"
+          }
+        },
+        "advance_predicate": {
+          "name": "always_on_terminal"
+        },
+        "adapter": {
+          "name": "skill_patcher_llm"
+        },
+        "failure_policy": {
+          "name": "stall_family",
+          "params": {
+            "max_retries": 3,
+            "backoff_sec": 60
+          }
+        },
+        "state_backend": {
+          "name": "s3_artifacts"
+        },
         "mount_path": "/root/.skills"
       }
     },
@@ -168,51 +378,904 @@
       "name": "skilllearnbench",
       "display_name": "SkillLearnBench",
       "series": "skill",
-      "upstream": {"kind": "git", "locator": "https://github.com/cxcscmu/SkillLearnBench.git", "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"},
-      "license": {"spdx": "NOASSERTION", "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"},
-      "splits": ["test"],
-      "params": {"skill_method": "human_authored", "cpu_arch": "any"}
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "human_authored",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-human-authored",
+      "display_name": "SkillLearnBench (human-authored)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "human_authored",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b1-one-shot-claude-haiku-4-5",
+      "display_name": "SkillLearnBench (b1 one-shot, claude-haiku-4-5)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b1-one-shot-claude-haiku-4-5",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b1-one-shot-claude-opus-4-6",
+      "display_name": "SkillLearnBench (b1 one-shot, claude-opus-4-6)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b1-one-shot-claude-opus-4-6",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b1-one-shot-claude-sonnet-4-6",
+      "display_name": "SkillLearnBench (b1 one-shot, claude-sonnet-4-6)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b1-one-shot-claude-sonnet-4-6",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b1-one-shot-gemini-3-flash-preview",
+      "display_name": "SkillLearnBench (b1 one-shot, gemini-3-flash-preview)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b1-one-shot-gemini-3-flash-preview",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b1-one-shot-gemini-3.1-flash-lite-preview",
+      "display_name": "SkillLearnBench (b1 one-shot, gemini-3.1-flash-lite-preview)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b1-one-shot-gemini-3.1-flash-lite-preview",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b1-one-shot-gemini-3.1-pro-preview",
+      "display_name": "SkillLearnBench (b1 one-shot, gemini-3.1-pro-preview)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b1-one-shot-gemini-3.1-pro-preview",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b2-self-feedback-claude-haiku-4-5",
+      "display_name": "SkillLearnBench (b2 self-feedback, claude-haiku-4-5)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b2-self-feedback-claude-haiku-4-5",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b2-self-feedback-claude-opus-4-6",
+      "display_name": "SkillLearnBench (b2 self-feedback, claude-opus-4-6)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b2-self-feedback-claude-opus-4-6",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b2-self-feedback-claude-sonnet-4-6",
+      "display_name": "SkillLearnBench (b2 self-feedback, claude-sonnet-4-6)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b2-self-feedback-claude-sonnet-4-6",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b2-self-feedback-gemini-3-flash-preview",
+      "display_name": "SkillLearnBench (b2 self-feedback, gemini-3-flash-preview)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b2-self-feedback-gemini-3-flash-preview",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b2-self-feedback-gemini-3.1-flash-lite-preview",
+      "display_name": "SkillLearnBench (b2 self-feedback, gemini-3.1-flash-lite-preview)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b2-self-feedback-gemini-3.1-flash-lite-preview",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b2-self-feedback-gemini-3.1-pro-preview",
+      "display_name": "SkillLearnBench (b2 self-feedback, gemini-3.1-pro-preview)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b2-self-feedback-gemini-3.1-pro-preview",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b3-teacher-feedback-claude-haiku-4-5",
+      "display_name": "SkillLearnBench (b3 teacher-feedback, claude-haiku-4-5)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b3-teacher-feedback-claude-haiku-4-5",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b3-teacher-feedback-claude-opus-4-6",
+      "display_name": "SkillLearnBench (b3 teacher-feedback, claude-opus-4-6)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b3-teacher-feedback-claude-opus-4-6",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b3-teacher-feedback-claude-sonnet-4-6",
+      "display_name": "SkillLearnBench (b3 teacher-feedback, claude-sonnet-4-6)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b3-teacher-feedback-claude-sonnet-4-6",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b3-teacher-feedback-gemini-3-flash-preview",
+      "display_name": "SkillLearnBench (b3 teacher-feedback, gemini-3-flash-preview)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b3-teacher-feedback-gemini-3-flash-preview",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b3-teacher-feedback-gemini-3.1-flash-lite-preview",
+      "display_name": "SkillLearnBench (b3 teacher-feedback, gemini-3.1-flash-lite-preview)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b3-teacher-feedback-gemini-3.1-flash-lite-preview",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b3-teacher-feedback-gemini-3.1-pro-preview",
+      "display_name": "SkillLearnBench (b3 teacher-feedback, gemini-3.1-pro-preview)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b3-teacher-feedback-gemini-3.1-pro-preview",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b4-skill-creator-claude-haiku-4-5",
+      "display_name": "SkillLearnBench (b4 skill-creator, claude-haiku-4-5)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b4-skill-creator-claude-haiku-4-5",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b4-skill-creator-claude-opus-4-6",
+      "display_name": "SkillLearnBench (b4 skill-creator, claude-opus-4-6)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b4-skill-creator-claude-opus-4-6",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b4-skill-creator-claude-sonnet-4-6",
+      "display_name": "SkillLearnBench (b4 skill-creator, claude-sonnet-4-6)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b4-skill-creator-claude-sonnet-4-6",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b4-skill-creator-gemini-3-flash-preview",
+      "display_name": "SkillLearnBench (b4 skill-creator, gemini-3-flash-preview)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b4-skill-creator-gemini-3-flash-preview",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b4-skill-creator-gemini-3.1-flash-lite-preview",
+      "display_name": "SkillLearnBench (b4 skill-creator, gemini-3.1-flash-lite-preview)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b4-skill-creator-gemini-3.1-flash-lite-preview",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-b4-skill-creator-gemini-3.1-pro-preview",
+      "display_name": "SkillLearnBench (b4 skill-creator, gemini-3.1-pro-preview)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b4-skill-creator-gemini-3.1-pro-preview",
+        "cpu_arch": "any"
+      }
+    },
+    {
+      "name": "skilllearnbench-online-from-human-authored",
+      "display_name": "SkillLearnBench (online-evolving from human-authored)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "human_authored",
+        "cpu_arch": "any",
+        "online_mode": "true"
+      },
+      "family_run_defaults": {
+        "enabled": true,
+        "family_key_extractor": {
+          "name": "instance_id_prefix",
+          "params": {
+            "depth": 1
+          }
+        },
+        "sequencer": {
+          "name": "alphabetical"
+        },
+        "advance_predicate": {
+          "name": "always_on_terminal"
+        },
+        "adapter": {
+          "name": "skill_patcher_llm",
+          "params": {
+            "init_from_skill_method": "human_authored"
+          }
+        },
+        "failure_policy": {
+          "name": "stall_family",
+          "params": {
+            "max_retries": 3,
+            "backoff_sec": 60
+          }
+        },
+        "state_backend": {
+          "name": "s3_artifacts"
+        },
+        "mount_path": "/root/.skills"
+      }
+    },
+    {
+      "name": "skilllearnbench-online-from-b1-one-shot-claude-haiku-4-5",
+      "display_name": "SkillLearnBench (online-evolving from b1 one-shot, claude-haiku-4-5)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b1-one-shot-claude-haiku-4-5",
+        "cpu_arch": "any",
+        "online_mode": "true"
+      },
+      "family_run_defaults": {
+        "enabled": true,
+        "family_key_extractor": {
+          "name": "instance_id_prefix",
+          "params": {
+            "depth": 1
+          }
+        },
+        "sequencer": {
+          "name": "alphabetical"
+        },
+        "advance_predicate": {
+          "name": "always_on_terminal"
+        },
+        "adapter": {
+          "name": "skill_patcher_llm",
+          "params": {
+            "init_from_skill_method": "b1-one-shot-claude-haiku-4-5"
+          }
+        },
+        "failure_policy": {
+          "name": "stall_family",
+          "params": {
+            "max_retries": 3,
+            "backoff_sec": 60
+          }
+        },
+        "state_backend": {
+          "name": "s3_artifacts"
+        },
+        "mount_path": "/root/.skills"
+      }
+    },
+    {
+      "name": "skilllearnbench-online-from-b2-self-feedback-claude-haiku-4-5",
+      "display_name": "SkillLearnBench (online-evolving from b2 self-feedback, claude-haiku-4-5)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b2-self-feedback-claude-haiku-4-5",
+        "cpu_arch": "any",
+        "online_mode": "true"
+      },
+      "family_run_defaults": {
+        "enabled": true,
+        "family_key_extractor": {
+          "name": "instance_id_prefix",
+          "params": {
+            "depth": 1
+          }
+        },
+        "sequencer": {
+          "name": "alphabetical"
+        },
+        "advance_predicate": {
+          "name": "always_on_terminal"
+        },
+        "adapter": {
+          "name": "skill_patcher_llm",
+          "params": {
+            "init_from_skill_method": "b2-self-feedback-claude-haiku-4-5"
+          }
+        },
+        "failure_policy": {
+          "name": "stall_family",
+          "params": {
+            "max_retries": 3,
+            "backoff_sec": 60
+          }
+        },
+        "state_backend": {
+          "name": "s3_artifacts"
+        },
+        "mount_path": "/root/.skills"
+      }
+    },
+    {
+      "name": "skilllearnbench-online-from-b3-teacher-feedback-claude-haiku-4-5",
+      "display_name": "SkillLearnBench (online-evolving from b3 teacher-feedback, claude-haiku-4-5)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b3-teacher-feedback-claude-haiku-4-5",
+        "cpu_arch": "any",
+        "online_mode": "true"
+      },
+      "family_run_defaults": {
+        "enabled": true,
+        "family_key_extractor": {
+          "name": "instance_id_prefix",
+          "params": {
+            "depth": 1
+          }
+        },
+        "sequencer": {
+          "name": "alphabetical"
+        },
+        "advance_predicate": {
+          "name": "always_on_terminal"
+        },
+        "adapter": {
+          "name": "skill_patcher_llm",
+          "params": {
+            "init_from_skill_method": "b3-teacher-feedback-claude-haiku-4-5"
+          }
+        },
+        "failure_policy": {
+          "name": "stall_family",
+          "params": {
+            "max_retries": 3,
+            "backoff_sec": 60
+          }
+        },
+        "state_backend": {
+          "name": "s3_artifacts"
+        },
+        "mount_path": "/root/.skills"
+      }
+    },
+    {
+      "name": "skilllearnbench-online-from-b4-skill-creator-claude-haiku-4-5",
+      "display_name": "SkillLearnBench (online-evolving from b4 skill-creator, claude-haiku-4-5)",
+      "series": "skill",
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/cxcscmu/SkillLearnBench.git",
+        "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"
+      },
+      "license": {
+        "spdx": "NOASSERTION",
+        "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "skill_method": "b4-skill-creator-claude-haiku-4-5",
+        "cpu_arch": "any",
+        "online_mode": "true"
+      },
+      "family_run_defaults": {
+        "enabled": true,
+        "family_key_extractor": {
+          "name": "instance_id_prefix",
+          "params": {
+            "depth": 1
+          }
+        },
+        "sequencer": {
+          "name": "alphabetical"
+        },
+        "advance_predicate": {
+          "name": "always_on_terminal"
+        },
+        "adapter": {
+          "name": "skill_patcher_llm",
+          "params": {
+            "init_from_skill_method": "b4-skill-creator-claude-haiku-4-5"
+          }
+        },
+        "failure_policy": {
+          "name": "stall_family",
+          "params": {
+            "max_retries": 3,
+            "backoff_sec": 60
+          }
+        },
+        "state_backend": {
+          "name": "s3_artifacts"
+        },
+        "mount_path": "/root/.skills"
+      }
     },
     {
       "name": "swe-bench",
       "display_name": "SWE-Bench (full)",
       "series": "swe-bench",
-      "upstream": {"kind": "huggingface", "locator": "princeton-nlp/SWE-bench"},
-      "license": {"spdx": "MIT", "url": "https://github.com/princeton-nlp/SWE-bench/blob/main/LICENSE"},
-      "splits": ["test"]
+      "upstream": {
+        "kind": "huggingface",
+        "locator": "princeton-nlp/SWE-bench"
+      },
+      "license": {
+        "spdx": "MIT",
+        "url": "https://github.com/princeton-nlp/SWE-bench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ]
     },
     {
       "name": "swe-bench-verified",
       "display_name": "SWE-Bench Verified",
       "series": "swe-bench",
-      "upstream": {"kind": "huggingface", "locator": "princeton-nlp/SWE-bench_Verified", "revision": "c104f840cc67f8b6eec6f759ebc8b2693d585d4a"},
-      "license": {"spdx": "MIT", "url": "https://github.com/princeton-nlp/SWE-bench/blob/main/LICENSE"},
-      "splits": ["test"]
+      "upstream": {
+        "kind": "huggingface",
+        "locator": "princeton-nlp/SWE-bench_Verified",
+        "revision": "c104f840cc67f8b6eec6f759ebc8b2693d585d4a"
+      },
+      "license": {
+        "spdx": "MIT",
+        "url": "https://github.com/princeton-nlp/SWE-bench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ]
     },
     {
       "name": "swe-bench-multimodal",
       "display_name": "SWE-Bench Multimodal",
       "series": "swe-bench",
-      "upstream": {"kind": "huggingface", "locator": "princeton-nlp/SWE-bench_Multimodal"},
-      "license": {"spdx": "MIT", "url": "https://github.com/princeton-nlp/SWE-bench/blob/main/LICENSE"},
-      "splits": ["test"]
+      "upstream": {
+        "kind": "huggingface",
+        "locator": "princeton-nlp/SWE-bench_Multimodal"
+      },
+      "license": {
+        "spdx": "MIT",
+        "url": "https://github.com/princeton-nlp/SWE-bench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ]
     },
     {
       "name": "tau2-bench",
       "display_name": "tau2-bench",
       "series": "tool-use",
-      "upstream": {"kind": "git", "locator": "https://huggingface.co/datasets/HuggingFaceH4/tau2-bench-data", "revision": "60e37c7a19672769a6034c45a5c8b36e7cd3768b"},
-      "license": {"spdx": "MIT", "url": "https://github.com/sierra-research/tau2-bench/blob/main/LICENSE"},
-      "splits": ["test"],
-      "params": {"domains": "airline,retail,telecom", "rows": "278"}
+      "upstream": {
+        "kind": "git",
+        "locator": "https://huggingface.co/datasets/HuggingFaceH4/tau2-bench-data",
+        "revision": "60e37c7a19672769a6034c45a5c8b36e7cd3768b"
+      },
+      "license": {
+        "spdx": "MIT",
+        "url": "https://github.com/sierra-research/tau2-bench/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ],
+      "params": {
+        "domains": "airline,retail,telecom",
+        "rows": "278"
+      }
     },
     {
       "name": "webarena",
       "display_name": "WebArena",
       "series": "ui-agent",
-      "upstream": {"kind": "git", "locator": "https://github.com/web-arena-x/webarena.git", "revision": "main"},
-      "license": {"spdx": "Apache-2.0", "url": "https://github.com/web-arena-x/webarena/blob/main/LICENSE"},
-      "splits": ["test"]
+      "upstream": {
+        "kind": "git",
+        "locator": "https://github.com/web-arena-x/webarena.git",
+        "revision": "main"
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "url": "https://github.com/web-arena-x/webarena/blob/main/LICENSE"
+      },
+      "splits": [
+        "test"
+      ]
     }
   ]
 }
