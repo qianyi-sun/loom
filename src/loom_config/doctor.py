@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from loom_config.loader import Schema, ServiceConfigEntry
 
@@ -64,6 +65,26 @@ def reconcile(schema: Schema, core_v1_api: Any, namespace: str) -> DoctorReport:
     # 3) orphan secrets (key in loom-secrets but no schema entry refs it)
     violations.extend(_orphan_secret_violations(schema, secret_keys))
 
+    # 4) pgbouncer URL ↔ enabled invariants
+    pgbouncer_cfg = schema.render_config.get("pgbouncer", None)
+    if pgbouncer_cfg is not None and (pgbouncer_cfg.fields or {}).get("enabled"):
+        import base64
+        secret_values: dict[str, str] = {}
+        try:
+            secret = core_v1_api.read_namespaced_secret("loom-secrets", namespace)
+            for key in (
+                "cp-db-url", "gw-db-url", "svc-db-url",
+                "cp-db-url-pool", "gw-db-url-pool", "svc-db-url-pool",
+            ):
+                raw = (secret.data or {}).get(key)
+                if raw is not None:
+                    secret_values[key] = base64.b64decode(raw).decode("utf-8")
+        except Exception:
+            # Silently swallow: _secret_violations already surfaces
+            # missing-secret conditions.
+            pass
+        violations.extend(_check_pgbouncer_invariants(schema, secret_values))
+
     return DoctorReport(violations=violations)
 
 
@@ -103,6 +124,27 @@ def reconcile_rendered(
                     ))
 
     violations.extend(_orphan_secret_violations(schema, secret_keys))
+
+    # pgbouncer URL ↔ enabled invariants
+    pgbouncer_cfg = schema.render_config.get("pgbouncer", None)
+    if pgbouncer_cfg is not None and (pgbouncer_cfg.fields or {}).get("enabled"):
+        import base64
+        secret_values_r: dict[str, str] = {}
+        try:
+            secret = core_v1_api.read_namespaced_secret("loom-secrets", namespace)
+            for key in (
+                "cp-db-url", "gw-db-url", "svc-db-url",
+                "cp-db-url-pool", "gw-db-url-pool", "svc-db-url-pool",
+            ):
+                raw = (secret.data or {}).get(key)
+                if raw is not None:
+                    secret_values_r[key] = base64.b64decode(raw).decode("utf-8")
+        except Exception:
+            # Silently swallow: _secret_violations already surfaces
+            # missing-secret conditions.
+            pass
+        violations.extend(_check_pgbouncer_invariants(schema, secret_values_r))
+
     return DoctorReport(violations=violations)
 
 
@@ -218,8 +260,8 @@ def _rendered_deployment_envs(
             if not isinstance(container_name, str):
                 container_name = f"container-{index}"
             env = container.get("env", [])
-            names = {
-                entry.get("name")
+            names: set[str] = {
+                entry["name"]
                 for entry in env
                 if isinstance(entry, dict) and isinstance(entry.get("name"), str)
             }
@@ -241,3 +283,77 @@ def _service_from_workload_name(name: str, prefix: Mapping[str, str]) -> str | N
         if name.startswith(f"{workload_name}-") or name == workload_name:
             return svc
     return None
+
+
+# ---------------------------------------------------------------------------
+# pgbouncer URL invariant check (#609)
+# ---------------------------------------------------------------------------
+
+_PGBOUNCER_DIRECT_KEYS = ("cp-db-url", "gw-db-url", "svc-db-url")
+
+
+def _dsn_host(dsn: str) -> str:
+    """Return the hostname component of a DSN, or '' on parse failure."""
+    try:
+        return urlsplit(dsn).hostname or ""
+    except (ValueError, TypeError):
+        return ""
+
+
+def _check_pgbouncer_invariants(
+    schema: Schema,
+    secret_values: Mapping[str, str],
+) -> list[DoctorViolation]:
+    """Verify db_url ↔ pgbouncer.enabled host invariants (#609).
+
+    When ``pgbouncer.enabled=true``:
+
+    * ``cp-db-url``, ``gw-db-url``, ``svc-db-url`` MUST point at
+      ``loom-postgres`` (direct).  Alembic and LISTEN watchers depend on a
+      direct Postgres connection and are broken when routed through PgBouncer.
+
+    * ``cp-db-url-pool``, ``gw-db-url-pool``, ``svc-db-url-pool`` MUST point
+      at ``loom-pgbouncer``.  When pgbouncer is enabled but pool URLs still
+      resolve to ``loom-postgres``, services silently bypass the pool.
+
+    Missing secret keys are skipped — ``_secret_violations`` handles that.
+    """
+    pgbouncer_entry = schema.render_config.get("pgbouncer")
+    if pgbouncer_entry is None:
+        return []
+    fields = pgbouncer_entry.fields or {}
+    if not fields.get("enabled"):
+        return []
+
+    violations: list[DoctorViolation] = []
+    for direct_key in _PGBOUNCER_DIRECT_KEYS:
+        pool_key = f"{direct_key}-pool"
+
+        direct_url = secret_values.get(direct_key, "")
+        if direct_url:
+            host = _dsn_host(direct_url)
+            if host != "loom-postgres":
+                violations.append(DoctorViolation(
+                    entry=direct_key,
+                    kind="pgbouncer_invariant",
+                    detail=(
+                        f"{direct_key} host is {host!r}, expected 'loom-postgres'."
+                        " LISTEN watchers and Alembic require a direct Postgres"
+                        " connection."
+                    ),
+                ))
+
+        pool_url = secret_values.get(pool_key, "")
+        if pool_url:
+            host = _dsn_host(pool_url)
+            if host != "loom-pgbouncer":
+                violations.append(DoctorViolation(
+                    entry=pool_key,
+                    kind="pgbouncer_invariant",
+                    detail=(
+                        f"{pool_key} host is {host!r}, expected 'loom-pgbouncer'."
+                        " pgbouncer.enabled=true but service would bypass the pool."
+                    ),
+                ))
+
+    return violations

@@ -39,8 +39,22 @@ _C1 = UUID("00000000-0000-0000-0000-000000000001")
 _C2 = UUID("00000000-0000-0000-0000-000000000002")
 
 
+class _FakeNotify:
+    """Minimal NOTIFY event with a `payload` attribute, matching the
+    shape the self-test probe's `getattr(note, 'payload', '')` check
+    expects."""
+
+    def __init__(self, payload: str) -> None:
+        self.payload = payload
+
+
 class _FakeConn(WatcherConnection):
-    """Records close + serves notifications from an asyncio.Queue."""
+    """Records close + serves notifications from an asyncio.Queue.
+
+    `execute()` handles NOTIFY statements by auto-delivering the payload
+    so the startup self-test (notify_round_trip) succeeds without a
+    real Postgres connection.
+    """
 
     def __init__(self) -> None:
         self.notify_queue: asyncio.Queue[object] = asyncio.Queue()
@@ -48,6 +62,15 @@ class _FakeConn(WatcherConnection):
 
     async def close(self) -> None:
         self.closed = True
+
+    async def execute(self, sql: str) -> None:
+        """Accept LISTEN/UNLISTEN silently; auto-deliver NOTIFY payloads
+        so the self-test probe sees its own notification round-trip."""
+        import re
+        if sql.startswith("NOTIFY"):
+            m = re.search(r"'([^']+)'", sql)
+            if m:
+                await self.notify_queue.put(_FakeNotify(m.group(1)))
 
     async def notifies(self) -> AsyncIterator[object]:
         while True:

@@ -80,6 +80,7 @@ def test_control_plane_lifespan_configures_db_pool(
         assert client.get("/healthz").status_code == 200
 
     assert create_engine_calls == [{
+        "connect_args": {},
         "pool_pre_ping": True,
         "pool_size": 33,
         "max_overflow": 44,

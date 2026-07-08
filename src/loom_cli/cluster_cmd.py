@@ -975,6 +975,7 @@ def _pod_unready_reason(pod: Any) -> str:
 _TEMPLATE_ORDER: tuple[str, ...] = (
     "persistent-storage.yaml.j2",
     "postgres.yaml.j2",
+    "pgbouncer.yaml.j2",
     "minio.yaml.j2",
     "control-plane.yaml.j2",
     "loom-service.yaml.j2",
@@ -4128,14 +4129,36 @@ def _bootstrap_secrets(args: argparse.Namespace) -> int:
     from loom_config.bootstrap import render_bootstrap_command
 
     schema = _load_schema(_REPO_ROOT / "config" / "loom-schema.toml")
+    # Resolve pgbouncer_enabled: CLI flag overrides schema default.
+    pgbouncer_entry = schema.render_config.get("pgbouncer")
+    schema_pgbouncer_default: bool = bool(
+        pgbouncer_entry.fields.get("enabled", False) if pgbouncer_entry and pgbouncer_entry.fields else False
+    )
+    cli_pgbouncer: bool | None = getattr(args, "pgbouncer", None)
+    pgbouncer_enabled: bool = schema_pgbouncer_default if cli_pgbouncer is None else cli_pgbouncer
     print(
         render_bootstrap_command(
             schema,
             namespace=args.namespace,
             smoke_defaults=args.smoke_defaults,
             rotate=args.rotate,
+            pgbouncer_enabled=pgbouncer_enabled,
         )
     )
+    return 0
+
+
+def _derive_pool_dsn(args: argparse.Namespace) -> int:
+    from loom_config.bootstrap import _rewrite_dsn_host_port
+
+    try:
+        pool_dsn = _rewrite_dsn_host_port(
+            args.dsn, host="loom-pgbouncer", port=6432,
+        )
+    except ValueError as exc:
+        print(f"derive-pool-dsn: {exc}", file=sys.stderr)
+        return 1
+    print(pool_dsn)
     return 0
 
 
@@ -4978,7 +5001,27 @@ def dispatch(argv: list[str]) -> int:
         action="store_true",
         help="Run each entry's `generate` command to mint fresh values.",
     )
+    p_boot.add_argument(
+        "--pgbouncer",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Emit *-db-url-pool secrets derived from direct DSN "
+            "(default: schema default for pgbouncer.enabled)."
+        ),
+    )
     p_boot.set_defaults(handler=_bootstrap_secrets)
+
+    p_derive = sub.add_parser(
+        "derive-pool-dsn",
+        help="Derive the pgbouncer pool DSN from a direct-to-Postgres DSN "
+             "by rewriting host+port (#609).",
+    )
+    p_derive.add_argument(
+        "dsn",
+        help="Direct-to-Postgres DSN (postgresql+psycopg://user:pass@host:port/db)",
+    )
+    p_derive.set_defaults(handler=_derive_pool_dsn)
 
     p_lifecycle = sub.add_parser(
         "bootstrap-storage-lifecycle",

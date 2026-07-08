@@ -31,6 +31,12 @@ spec:
                 secretKeyRef:
                   name: loom-secrets
                   key: cp-db-url
+            - name: LOOM_CP_DB_URL_POOL
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: cp-db-url-pool
+                  optional: true
             - name: LOOM_CP_DEV_RELOAD
               value: "False"
             - name: LOOM_CP_LLM_GATEWAY_URL

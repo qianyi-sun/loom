@@ -36,6 +36,8 @@ from loom_egress_xds.config_builder import (
     Snapshot,
     build_snapshot,
 )
+from loom_listen.metrics import PUSH_MODE_GAUGE as _PUSH_MODE_GAUGE
+from loom_listen.self_test import notify_round_trip
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,13 @@ class WatcherConnection:
     """
 
     async def close(self) -> None:  # pragma: no cover - protocol stub
+        raise NotImplementedError
+
+    async def execute(self, sql: str) -> Any:  # pragma: no cover - protocol stub
+        """Execute a SQL statement. Required by the startup self-test
+        to issue LISTEN/NOTIFY/UNLISTEN on the synthetic probe channel.
+        The watcher's main loop does not call this directly — only the
+        self-test probe does."""
         raise NotImplementedError
 
     def notifies(self) -> AsyncIterator[Any]:  # pragma: no cover
@@ -132,13 +141,28 @@ class ProviderConnectionsWatcher:
                 try:
                     conn = await self._connection_factory()
                     backoff = self._settings.reconnect_backoff_base_sec
-                    listener_task = asyncio.create_task(
-                        self._listen_loop(conn),
-                    )
-                    await self._consume_until_disconnect(
-                        conn,
-                        listener_task,
-                    )
+                    push_ok = await notify_round_trip(conn, timeout_sec=1.0)
+                    if push_ok:
+                        _PUSH_MODE_GAUGE.labels(watcher="provider_connections").set(1)
+                        listener_task = asyncio.create_task(
+                            self._listen_loop(conn),
+                        )
+                        await self._consume_until_disconnect(
+                            conn,
+                            listener_task,
+                        )
+                    else:
+                        logger.error(
+                            "provider_connections_watcher_selftest_failed — "
+                            "NOTIFY round-trip timed out; running in poll-only mode. "
+                            "Check that the LISTEN connection is not routed through "
+                            "pgbouncer transaction mode.",
+                        )
+                        _PUSH_MODE_GAUGE.labels(watcher="provider_connections").set(0)
+                        # Poll-only: the poll_task is already running and will
+                        # keep driving rebuilds via self._wake. Block here until
+                        # stop() is requested so the reconnect loop doesn't spin.
+                        await self._stop.wait()
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:

@@ -1,6 +1,7 @@
 """`loom cluster doctor` core: schema-vs-cluster reconciliation."""
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -9,6 +10,24 @@ from loom_config.doctor import (
 )
 from loom_config.loader import load_schema
 
+# Correct DSN values that satisfy pgbouncer invariants:
+# direct URLs must resolve to loom-postgres; pool URLs to loom-pgbouncer.
+_DIRECT_DSN = base64.b64encode(
+    b"postgresql+psycopg://loom:pw@loom-postgres:5432/loom"
+).decode()
+_POOL_DSN = base64.b64encode(
+    b"postgresql+psycopg://loom:pw@loom-pgbouncer:6432/loom"
+).decode()
+
+_PGBOUNCER_SECRET_VALUES: dict[str, str] = {
+    "cp-db-url": _DIRECT_DSN,
+    "gw-db-url": _DIRECT_DSN,
+    "svc-db-url": _DIRECT_DSN,
+    "cp-db-url-pool": _POOL_DSN,
+    "gw-db-url-pool": _POOL_DSN,
+    "svc-db-url-pool": _POOL_DSN,
+}
+
 
 def _fake_clients(
     secret_keys: set[str],
@@ -16,7 +35,17 @@ def _fake_clients(
 ):
     core = MagicMock()
     secret = MagicMock()
-    secret.data = {k: "AAA=" for k in secret_keys}
+    # Build secret.data from the provided keys.  For db-url keys that are
+    # present in secret_keys, use correct pgbouncer-friendly DSN values so
+    # _check_pgbouncer_invariants does not fire spurious violations.  Any key
+    # that was intentionally omitted from secret_keys stays absent.
+    data: dict[str, str] = {}
+    for k in secret_keys:
+        data[k] = _PGBOUNCER_SECRET_VALUES.get(k, "AAA=")
+    # Pool keys (db_url_pool) are required=false so they never appear in
+    # secret_keys, but the pgbouncer invariant check skips absent keys, so
+    # no extra injection is needed.
+    secret.data = data
     core.read_namespaced_secret.return_value = secret
     pods_list = MagicMock()
     pods = []

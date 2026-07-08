@@ -59,6 +59,12 @@ spec:
             secretKeyRef:
               name: loom-secrets
               key: svc-db-url
+        - name: LOOM_SVC_DB_URL_POOL
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: svc-db-url-pool
+              optional: true
         - name: LOOM_SVC_DEV_RELOAD
           value: 'False'
         - name: LOOM_SVC_GATEWAY_URL

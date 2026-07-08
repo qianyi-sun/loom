@@ -98,7 +98,10 @@ async def _assert_schema_startup(engine: AsyncEngine) -> int:
 def create_app(settings: LoomServiceSettings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        engine = create_async_engine(str(settings.db_url))
+        engine = create_async_engine(
+            settings.db_engine_url,
+            connect_args=settings.db_engine_connect_args,
+        )
         await _assert_schema_startup(engine)
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         await retry_startup_dependency(

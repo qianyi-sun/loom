@@ -43,7 +43,7 @@ def test_gateway_lifespan_validates_existing_secret_store_rows(
     monkeypatch.setattr(
         gateway_app,
         "create_async_engine",
-        lambda _db_url: _FakeEngine(),
+        lambda _db_url, **_kwargs: _FakeEngine(),
     )
 
     app = gateway_app.create_app(
@@ -90,7 +90,7 @@ def test_gateway_lifespan_validates_schema_before_secret_rows(
     monkeypatch.setattr(
         gateway_app,
         "create_async_engine",
-        lambda _db_url: _FakeEngine(),
+        lambda _db_url, **_kwargs: _FakeEngine(),
     )
 
     app = gateway_app.create_app(
@@ -144,7 +144,7 @@ def test_gateway_lifespan_wraps_secret_validation_in_startup_retry(
     monkeypatch.setattr(
         gateway_app,
         "create_async_engine",
-        lambda _db_url: _FakeEngine(),
+        lambda _db_url, **_kwargs: _FakeEngine(),
     )
 
     app = gateway_app.create_app(
@@ -205,7 +205,7 @@ def test_service_lifespan_validates_existing_secret_store_rows(
     monkeypatch.setattr(
         service_app,
         "create_async_engine",
-        lambda _db_url: _FakeEngine(),
+        lambda _db_url, **_kwargs: _FakeEngine(),
     )
     _patch_service_background_loops(monkeypatch, service_app)
 
@@ -257,7 +257,7 @@ def test_service_lifespan_validates_schema_before_secret_rows(
     monkeypatch.setattr(
         service_app,
         "create_async_engine",
-        lambda _db_url: _FakeEngine(),
+        lambda _db_url, **_kwargs: _FakeEngine(),
     )
     _patch_service_background_loops(monkeypatch, service_app)
 
@@ -316,7 +316,7 @@ def test_service_lifespan_wraps_secret_validation_in_startup_retry(
     monkeypatch.setattr(
         service_app,
         "create_async_engine",
-        lambda _db_url: _FakeEngine(),
+        lambda _db_url, **_kwargs: _FakeEngine(),
     )
     _patch_service_background_loops(monkeypatch, service_app)
 

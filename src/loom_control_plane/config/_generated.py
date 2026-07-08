@@ -25,6 +25,7 @@ class ControlPlaneSettings(BaseSettings):
     db_pool_size: int = 20
     db_pool_timeout_sec: float = 30.0
     db_url: PostgresDsn
+    db_url_pool: PostgresDsn | None = None
     dev_reload: bool = False
     llm_gateway_url: HttpUrl = cast(HttpUrl, "http://loom-llm-gateway:9100")
     log_level: LogLevel = "info"

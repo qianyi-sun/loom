@@ -14,6 +14,7 @@ spec:
       containers:
         - name: postgres
           image: postgres:16
+          args: ["-c", "max_connections=150"]
           env:
             - name: POSTGRES_USER
               valueFrom: { secretKeyRef: { name: loom-secrets, key: postgres-user } }

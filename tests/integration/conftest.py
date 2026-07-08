@@ -3,6 +3,9 @@
 `minio` (session-scoped) brings up a single MinIO container for the
 suite. `traj_setup` is the common service-app + seeded trial + trajectory
 fixture used by trajectory + ATIF tests in this package.
+
+`pgbouncer_stack` brings up Postgres + pgbouncer (transaction mode) for
+pgbouncer integration tests (#609).
 """
 
 from __future__ import annotations
@@ -21,7 +24,11 @@ from fastapi import FastAPI
 from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
+from testcontainers.core.container import DockerContainer
+from testcontainers.core.network import Network
+from testcontainers.core.wait_strategies import LogMessageWaitStrategy
 from testcontainers.minio import MinioContainer
+from testcontainers.postgres import PostgresContainer
 
 from loom.db.schema import Task, Team, TeamQuota, Token, Trial
 from loom_service.app import create_app
@@ -146,3 +153,55 @@ async def traj_setup(
             s.execute(delete(Team))
             s.commit()
         sync_engine.dispose()
+
+
+@pytest.fixture
+def pgbouncer_stack() -> Iterator[dict[str, str]]:
+    """Bring up Postgres + pgbouncer configured in transaction mode.
+
+    Both containers share a private Docker network so pgbouncer can
+    reach Postgres by the hostname alias ``postgres``.  pgbouncer's
+    6432 port is also exposed to the host so test code can connect from
+    outside.
+
+    Uses ``edoburu/pgbouncer`` which is available on Docker Hub.
+    Env vars follow the edoburu image convention: DB_HOST, DB_USER,
+    DB_PASSWORD, DB_NAME, POOL_MODE, AUTH_TYPE, LISTEN_PORT.
+
+    Yields a dict with:
+      - ``direct_url``: DSN pointing at Postgres direct (psycopg driver)
+      - ``pool_url``:   DSN pointing at pgbouncer in transaction mode
+    """
+    with Network() as network:
+        with PostgresContainer(
+            "postgres:16-alpine",
+            username="test",
+            password="test",
+            dbname="test",
+            driver="psycopg",
+        ).with_network(network).with_network_aliases("postgres") as postgres:
+            pgbouncer = (
+                DockerContainer("edoburu/pgbouncer:latest")
+                .with_network(network)
+                .with_env("DB_HOST", "postgres")
+                .with_env("DB_PORT", "5432")
+                .with_env("DB_USER", "test")
+                .with_env("DB_PASSWORD", "test")
+                .with_env("DB_NAME", "test")
+                .with_env("POOL_MODE", "transaction")
+                .with_env("DEFAULT_POOL_SIZE", "10")
+                .with_env("MAX_CLIENT_CONN", "100")
+                .with_env("AUTH_TYPE", "plain")
+                .with_env("LISTEN_PORT", "6432")
+                .with_exposed_ports(6432)
+                # Wait until pgbouncer logs that it is listening.
+                .waiting_for(LogMessageWaitStrategy("listening on 0.0.0.0:6432"))
+            )
+            with pgbouncer:
+                direct_url = postgres.get_connection_url()
+                pool_ip = pgbouncer.get_container_host_ip()
+                pool_port = pgbouncer.get_exposed_port(6432)
+                pool_url = (
+                    f"postgresql+psycopg://test:test@{pool_ip}:{pool_port}/test"
+                )
+                yield {"direct_url": direct_url, "pool_url": pool_url}

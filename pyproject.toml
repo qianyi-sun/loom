@@ -123,7 +123,7 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["src/loom", "src/loom_llm_gateway", "src/loom_control_plane", "src/loom_worker", "src/loom_benchmark_tool", "src/loom_service", "src/loom_cli", "src/loom_drivers", "src/loom_egress_xds"]
+files = ["src/loom", "src/loom_llm_gateway", "src/loom_control_plane", "src/loom_worker", "src/loom_benchmark_tool", "src/loom_service", "src/loom_cli", "src/loom_drivers", "src/loom_egress_xds", "src/loom_listen"]
 plugins = ["pydantic.mypy"]
 
 # boto3 / botocore don't ship type stubs and the full boto3-stubs[s3] package
@@ -211,4 +211,6 @@ timeout_method = "signal"
 markers = [
   "swe_bench_smoke: SWE-Bench Verified end-to-end smoke; pulls ~5GB per-instance images. Opt-in via LOOM_RUN_SWE_BENCH_SMOKE=1.",
   "docker: integration tests that spin up real Docker containers via the host daemon (DockerDriver, network-policy, trial-e2e, subprocess-agent). Excluded from the default integration CI tier; run via the `integration-docker` workflow job or `pytest -m docker` locally.",
+  "integration: pgbouncer + Postgres container integration tests (#609). Require Docker; skip with `-m 'not integration'` in environments without Docker.",
+  "cluster_smoke: kind-based cluster smoke tests that render, apply, and verify Loom k8s manifests end-to-end. Require kind + Docker. Run via the `cluster-smoke` CI job or `pytest -m cluster_smoke` locally.",
 ]
