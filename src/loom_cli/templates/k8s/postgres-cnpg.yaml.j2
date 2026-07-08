@@ -81,25 +81,21 @@ spec:
 
   monitoring:
     enablePodMonitor: true
----
-# Credentials Secret shape CNPG expects (username + password keys).
-# The `loom cluster bootstrap-secrets` runbook step provisions this
-# from postgres-user + postgres-password in loom-secrets.
-apiVersion: v1
-kind: Secret
-metadata:
-  name: loom-postgres-cnpg-credentials
-  annotations:
-    cnpg.io/reload: "true"
-type: kubernetes.io/basic-auth
-stringData:
-  # Bootstrap runbook writes actual values via:
-  #   kubectl create secret generic loom-postgres-cnpg-credentials \
-  #     --from-literal=username=loom \
-  #     --from-literal=password=<same as postgres-password>
-  # This entry is placeholder-only for the render output.
-  username: PLACEHOLDER_BOOTSTRAP_WRITES_THIS
-  password: PLACEHOLDER_BOOTSTRAP_WRITES_THIS
+
+# The Secret `loom-postgres-cnpg-credentials` (kubernetes.io/basic-auth,
+# keys `username` + `password`) is deliberately NOT rendered here. Its
+# job is to carry the CNPG cluster's postgres credentials, and if we
+# emitted a placeholder alongside the template, every `kubectl apply`
+# would blow away the real credentials that the operator/runbook
+# provisioned. It must be created out-of-band before applying the
+# manifest — see the runbook step. Values should mirror
+# `postgres-user` and `postgres-password` from `loom-secrets`:
+#
+#   kubectl create secret generic loom-postgres-cnpg-credentials \
+#     --namespace {{ namespace }} \
+#     --type kubernetes.io/basic-auth \
+#     --from-literal=username=loom \
+#     --from-literal=password=<same as postgres-password in loom-secrets>
 ---
 # Backwards-compatibility Service: everything else in Loom (pgbouncer,
 # LISTEN watchers, Alembic, NetworkPolicy selectors) expects a Service

@@ -179,6 +179,14 @@ spec:
         - podSelector: { matchLabels: { cnpg.io/cluster: loom-postgres } }
       ports:
         - { port: 5432, protocol: TCP }
+    # pgbouncer for SQLAlchemy pool routing (#623). db_url_pool
+    # points at loom-pgbouncer:6432 when pgbouncer.enabled=true.
+{% if pgbouncer.enabled %}
+    - to:
+        - podSelector: { matchLabels: { app: loom-pgbouncer } }
+      ports:
+        - { port: 6432, protocol: TCP }
+{% endif %}
     - to:
         - namespaceSelector:
             matchLabels:
@@ -219,6 +227,14 @@ spec:
         - podSelector: { matchLabels: { cnpg.io/cluster: loom-postgres } }
       ports:
         - { port: 5432, protocol: TCP }
+    # pgbouncer for SQLAlchemy pool routing (#623). db_url_pool
+    # points at loom-pgbouncer:6432 when pgbouncer.enabled=true.
+{% if pgbouncer.enabled %}
+    - to:
+        - podSelector: { matchLabels: { app: loom-pgbouncer } }
+      ports:
+        - { port: 6432, protocol: TCP }
+{% endif %}
     - to:
         - podSelector: { matchLabels: { app: loom-minio } }
       ports:
@@ -329,6 +345,14 @@ spec:
         - podSelector: { matchLabels: { cnpg.io/cluster: loom-postgres } }
       ports:
         - { port: 5432, protocol: TCP }
+    # pgbouncer for SQLAlchemy pool routing (#623). db_url_pool
+    # points at loom-pgbouncer:6432 when pgbouncer.enabled=true.
+{% if pgbouncer.enabled %}
+    - to:
+        - podSelector: { matchLabels: { app: loom-pgbouncer } }
+      ports:
+        - { port: 6432, protocol: TCP }
+{% endif %}
     - to:
         - podSelector: { matchLabels: { app: loom-minio } }
       ports:
@@ -417,6 +441,14 @@ spec:
         - podSelector: { matchLabels: { cnpg.io/cluster: loom-postgres } }
       ports:
         - { port: 5432, protocol: TCP }
+    # pgbouncer for SQLAlchemy pool routing (#623). db_url_pool
+    # points at loom-pgbouncer:6432 when pgbouncer.enabled=true.
+{% if pgbouncer.enabled %}
+    - to:
+        - podSelector: { matchLabels: { app: loom-pgbouncer } }
+      ports:
+        - { port: 6432, protocol: TCP }
+{% endif %}
     - to:
         - namespaceSelector:
             matchLabels:
@@ -503,6 +535,14 @@ spec:
         - podSelector: { matchLabels: { cnpg.io/cluster: loom-postgres } }
       ports:
         - { port: 5432, protocol: TCP }
+    # pgbouncer for SQLAlchemy pool routing (#623). db_url_pool
+    # points at loom-pgbouncer:6432 when pgbouncer.enabled=true.
+{% if pgbouncer.enabled %}
+    - to:
+        - podSelector: { matchLabels: { app: loom-pgbouncer } }
+      ports:
+        - { port: 6432, protocol: TCP }
+{% endif %}
     - to:
         - namespaceSelector:
             matchLabels:
