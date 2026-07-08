@@ -1199,6 +1199,11 @@ class Batch(Base):
         JSONB, nullable=False, server_default=text("'[]'::jsonb"),
         default=list,
     )
+    # #672 family-runs: resolved spec persisted at batch-accept time;
+    # NULL for non-family-run batches. See `docs/architecture/family-runs.md`.
+    family_run_spec: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True,
+    )
 
     @property
     def failure_reason(self) -> str | None:
@@ -1319,6 +1324,49 @@ class Trial(Base):
     source_provenance: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb"),
         default=list,
+    )
+    # #672 family-runs: populated when the batch opts into family-run
+    # mode. Groups this trial with siblings in the same family so the
+    # scheduler predicate can serialise them. NULL for non-family trials.
+    family_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class BatchFamilyState(Base):
+    """Per-family progression state for family-run batches (#672).
+
+    Composite PK (batch_id, family_key). One row per (batch, family)
+    pair, seeded at batch-accept time. The scheduler consults
+    ``task_sequence[current_index]`` to gate claim eligibility; the CP
+    finalize hook advances the state after each trial terminates.
+    """
+
+    __tablename__ = "batch_family_state"
+
+    batch_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("batches.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    family_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    task_sequence: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False,
+    )
+    current_index: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0"),
+    )
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    state_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0"),
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
 
 

@@ -59,6 +59,11 @@ from loom_service.auth_guards import (
 from loom_service.dependencies import SessionAndCtx
 from loom_service.metrics import ARTIFACT_DOWNLOAD_BYTES
 from loom_service.routes.object_downloads import stream_object_response
+from loom_service.trajectory_reconstruction import (
+    read_all_events_from_postgres,
+    read_llm_calls_from_postgres,
+    reconstruct_postgres_trajectory_events,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -165,19 +170,6 @@ async def _read_events_from_postgres(
             )
             .order_by(TrialEvent.seq.asc())
             .limit(limit),
-        )
-    ).all()
-    return [row[0] for row in rows]
-
-
-async def _read_all_events_from_postgres(
-    session: Any, *, trial_id: UUID,
-) -> list[dict[str, Any]]:
-    rows = (
-        await session.execute(
-            select(TrialEvent.payload)
-            .where(TrialEvent.trial_id == trial_id)
-            .order_by(TrialEvent.seq.asc()),
         )
     ).all()
     return [row[0] for row in rows]
@@ -290,12 +282,18 @@ async def download_trajectory(
         if exc.status_code != 404:
             raise
 
-    events = await _read_all_events_from_postgres(s, trial_id=trial.id)
+    events = await read_all_events_from_postgres(s, trial_id=trial.id)
     if not events:
         raise HTTPException(
             status_code=404,
             detail="download object not found",
         )
+    llm_calls = await read_llm_calls_from_postgres(s, trial_id=trial.id)
+    events = reconstruct_postgres_trajectory_events(
+        events,
+        trial=trial,
+        llm_calls=llm_calls,
+    )
     return _postgres_events_download_response(events, trial_id=trial.id)
 
 

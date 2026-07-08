@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 import httpx
@@ -15,7 +16,7 @@ from fastapi import FastAPI
 from sqlalchemy import create_engine, insert, select, update
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Task, Trial
+from loom.db.schema import LlmCall, Task, Trial
 
 
 async def test_trajectory_paginates(
@@ -179,6 +180,123 @@ async def test_trajectory_download_falls_back_to_postgres_events(
     lines = [json.loads(line) for line in r.text.splitlines()]
     assert [line["seq"] for line in lines] == [0, 1]
     assert all(line["marker"] == "postgres-download" for line in lines)
+
+
+async def test_trajectory_download_enriches_sparse_postgres_events(
+    traj_setup: tuple[FastAPI, str, UUID, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id, _trial_id = traj_setup
+    postgres_trial = uuid4()
+    now = datetime.now(UTC)
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        task_row_id = s.execute(
+            select(Task.id).limit(1),
+        ).scalar_one()
+        s.execute(insert(Trial).values(
+            id=postgres_trial,
+            task_id=task_row_id,
+            team_id=team_id,
+            state="succeeded",
+            config={},
+            requires_caps={},
+            result={
+                "aggregate_reward": 0.75,
+                "task_id": task_row_id,
+                "agent": {
+                    "name": "opencode",
+                    "version": "1.0",
+                },
+            },
+            submitted_at=now,
+            started_at=now,
+            finished_at=now,
+        ))
+        s.execute(insert(LlmCall).values(
+            team_id=team_id,
+            trial_id=postgres_trial,
+            step_id="main",
+            dialect="openai_facade",
+            model="glm5.1-thinking",
+            input_tokens=101,
+            output_tokens=17,
+            provider_extras={
+                "reasoning_tokens": 9,
+                "ignored_text": "not persisted into the trajectory event",
+            },
+            request_params={
+                "status": "available",
+                "parameters": {"temperature": 0},
+            },
+            cost_usd=Decimal("0.123456"),
+            rate_card_hash="facade:test-card",
+            captured_at=now,
+            attempt=2,
+        ))
+        s.commit()
+    sync_engine.dispose()
+    _seed_trial_events_postgres(postgres_url, postgres_trial, [
+        {
+            "seq": 0,
+            "kind": "trial_start",
+            "source": "worker",
+            "schema_version": 1,
+            "payload": {
+                "emitted_at": now.isoformat(),
+                "trial_id": str(postgres_trial),
+                "step_id": "__trial__",
+                "seq": 0,
+                "kind": "trial_start",
+                "task_id": task_row_id,
+                "agent_name": "opencode",
+                "agent_mode": "out-of-box",
+            },
+        },
+    ])
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+        follow_redirects=False,
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/trials/{postgres_trial}/trajectory/download",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200
+    lines = [json.loads(line) for line in r.text.splitlines()]
+    assert [line["seq"] for line in lines] == [0, 1, 2]
+    assert [line["kind"] for line in lines] == [
+        "trial_start",
+        "llm_call",
+        "trial_end",
+    ]
+    llm_call = lines[1]
+    assert llm_call["model"] == {
+        "provider": "openai",
+        "name": "glm5.1-thinking",
+        "source": "api",
+        "local_server": None,
+        "hf_execution": "local-vllm",
+        "tier": None,
+        "region": None,
+        "max_input_tokens": None,
+        "max_output_tokens": None,
+    }
+    assert llm_call["input_tokens"] == 101
+    assert llm_call["output_tokens"] == 17
+    assert llm_call["thinking_tokens"] == 9
+    assert llm_call["provider_extras"] == {"reasoning_tokens": 9}
+    assert llm_call["request_params"] == {
+        "status": "available",
+        "parameters": {"temperature": 0},
+    }
+    assert llm_call["attempt"] == 2
+    assert lines[2]["final_state"] == "succeeded"
+    assert lines[2]["reward"] == {"aggregate_reward": 0.75}
 
 
 async def test_artifact_download_proxies_object_through_service(

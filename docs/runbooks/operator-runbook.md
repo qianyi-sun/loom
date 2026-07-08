@@ -4258,14 +4258,18 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
 13. **Trajectory + artifact download.** `GET /api/v1/trials/{id}/trajectory`
     streams event pages; `GET /api/v1/trials/{id}/trajectory/download`
     returns raw JSONL, using `trial_events` as the fallback source when the
-    legacy object-store copy is absent; `GET /api/v1/trials/{id}/atif` returns
-    the ATIF JSON from the object copy first, then reprojects it from
-    `trial_events` plus `trials.result.agent` metadata when the object copy is
-    absent. If ATIF cannot be safely reprojected, the service returns HTTP 409
-    and the raw trajectory remains downloadable for debugging. Artifact
-    `download_url` entries from trial detail return object bodies. The URLs
-    must stay on `/api/v1/trials/...`, not raw MinIO/S3 signed URLs, and
-    cross-team callers must not be able to use owner-team artifact proxy URLs.
+    legacy object-store copy is absent; fallback reconstruction must also fold
+    in gateway `llm_calls` rows and terminal `trials.state/result` so users do
+    not receive a sparse event table that omits usage or final state. The
+    service renumbers the reconstructed JSONL to a clean trial-wide sequence.
+    `GET /api/v1/trials/{id}/atif` returns the ATIF JSON from the object copy
+    first, then reprojects it from the same reconstructed event stream plus
+    `trials.result.agent` metadata when the object copy is absent. If ATIF
+    cannot be safely reprojected, the service returns HTTP 409 and the raw
+    trajectory remains downloadable for debugging. Artifact `download_url`
+    entries from trial detail return object bodies. The URLs must stay on
+    `/api/v1/trials/...`, not raw MinIO/S3 signed URLs, and cross-team callers
+    must not be able to use owner-team artifact proxy URLs.
     Verify the public CLI path with `loom eval trial download ...`; it should
     write the object body locally without printing internal object-store URLs.
 14. **Batch-family delivery bundle.** For a release or customer handoff, create
@@ -5235,3 +5239,37 @@ link it from #217; do not merge incomplete evidence.
 - MinIO: depends entirely on trajectory + artifact volume. 500 GiB
   PV in the manifest is a starting point — switch to a distributed
   MinIO deployment past ~10 TiB.
+
+## Family runs (#672)
+
+Batches can opt into ordered, adaptive execution across related trials
+via `trial_config.family_run`. See `docs/architecture/family-runs.md`
+for the design; the operator-facing shape is:
+
+```json
+{
+  "trial_config": {
+    "family_run": {
+      "enabled": true,
+      "family_key_extractor": {"name": "instance_id_prefix"},
+      "sequencer": {"name": "alphabetical"},
+      "advance_predicate": {"name": "always_on_terminal"},
+      "adapter": {"name": "noop"},
+      "failure_policy": {"name": "stall_family"},
+      "state_backend": {"name": "s3_artifacts"}
+    }
+  }
+}
+```
+
+The framework ships six plugin roles and default plugins for each; a
+benchmark's catalog entry can supply `family_run_defaults` so common
+cases work zero-config. When enabled, tasks are grouped by
+`family_key_extractor`, ordered by `sequencer`, and each family runs
+serially with the adapter deciding cross-trial state between them.
+
+PR-1 (framework skeleton) ships the `noop` adapter, plugin protocols,
+migrations (`batches.family_run_spec`, `trials.family_key`,
+`batch_family_state`), scheduler predicate, CP finalize hook, batch-
+submit seeder, and worker pre-start helper. The orchestrator service
+and `skill_patcher_llm` adapter ship in PR-2.
