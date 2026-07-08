@@ -29,6 +29,7 @@ from loom.db.schema import (
     ProviderModelCache,
     RateCard,
     Task,
+    TaskSet,
     Team,
     TeamMembership,
     TeamQuota,
@@ -220,6 +221,7 @@ async def camp_setup(
             s.execute(delete(AdminAuditEvent))
             s.execute(delete(ProviderConnection))
             s.execute(delete(Task))
+            s.execute(delete(TaskSet))
             s.execute(delete(Benchmark))
             s.execute(delete(Worker))
             s.execute(delete(TeamQuota))
@@ -266,6 +268,310 @@ async def test_post_batch_materializes_count(
     }
     assert detail_body["submitted_by_user"]["username"].startswith("BatchOwner-")
     assert detail_body["submitted_by_user"]["team_id"] == str(team_id)
+
+
+async def test_post_batch_accepts_owned_task_set_filter(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    task_set_id = f"ts/{team_id}/batch-taskset"
+    task_id = f"{task_set_id}/tasks/row-1"
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(TaskSet).values(
+                id=task_set_id,
+                owning_team_id=team_id,
+                slug="batch-taskset",
+                display_name="Batch TaskSet",
+                status="ready",
+                intents=["trajectory_generation"],
+                evaluation_ready=False,
+                task_count=1,
+                manifest_blob_uri=f"s3://bucket/tasksets/user/{team_id}/batch-taskset/manifest.yaml",
+            ),
+        )
+        conn.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="x" * 64,
+                config=_valid_task_config(task_id),
+                source=f"s3://bucket/tasksets/user/{team_id}/batch-taskset/tasks/row-1/",
+                task_set_id=task_set_id,
+                benchmark_id=None,
+            ),
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "TaskSet slate",
+                "task_filter": {"task_set_id": task_set_id},
+                "trial_config": {"agent": {"name": "oracle"}},
+            },
+        )
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["expected_trial_count"] == 1
+
+
+async def test_post_batch_unions_benchmark_and_task_set_filters(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    task_set_id = f"ts/{team_id}/mixed-taskset"
+    taskset_task_id = f"{task_set_id}/tasks/row-1"
+    benchmark_task_id = "humaneval/HumanEval/42"
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Benchmark).values(
+                id="humaneval",
+                display_name="HumanEval",
+                upstream_kind="huggingface",
+                upstream_locator="openai_humaneval",
+                upstream_revision="",
+                license_spdx="MIT",
+                license_url="https://example/license",
+                splits=["test"],
+            ),
+        )
+        conn.execute(
+            insert(Task).values(
+                id=benchmark_task_id,
+                checksum="x" * 64,
+                config=_valid_task_config(benchmark_task_id),
+                source="local",
+                license="MIT",
+                benchmark_id="humaneval",
+            ),
+        )
+        conn.execute(
+            insert(TaskSet).values(
+                id=task_set_id,
+                owning_team_id=team_id,
+                slug="mixed-taskset",
+                display_name="Mixed TaskSet",
+                status="ready",
+                intents=["trajectory_generation"],
+                evaluation_ready=False,
+                task_count=1,
+                manifest_blob_uri=f"s3://bucket/tasksets/user/{team_id}/mixed-taskset/manifest.yaml",
+            ),
+        )
+        conn.execute(
+            insert(Task).values(
+                id=taskset_task_id,
+                checksum="x" * 64,
+                config=_valid_task_config(taskset_task_id),
+                source=f"s3://bucket/tasksets/user/{team_id}/mixed-taskset/tasks/row-1/",
+                task_set_id=task_set_id,
+                benchmark_id=None,
+            ),
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "Mixed source slate",
+                "task_filter": {
+                    "benchmark_ids": ["humaneval"],
+                    "task_set_ids": [task_set_id],
+                },
+                "trial_config": {"agent": {"name": "oracle"}},
+            },
+        )
+
+    assert r.status_code == 201, r.text
+    assert r.json()["expected_trial_count"] == 2
+
+
+async def test_post_batch_rejects_cross_team_task_set_filter(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, _raw_a, team_a = camp_setup
+    team_b = uuid4()
+    user_b = uuid4()
+    raw_b = f"loom_team_{uuid4().hex}"
+    task_set_id = f"ts/{team_a}/private-taskset"
+    task_id = f"{task_set_id}/tasks/row-1"
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(insert(Team).values(id=team_b, name=f"t-{team_b}"))
+        conn.execute(
+            insert(User).values(
+                id=user_b,
+                username=f"BatchOther-{team_b.hex[:8]}",
+                username_normalized=f"batchother-{team_b.hex[:8]}",
+                status="active",
+                is_platform_admin=False,
+            ),
+        )
+        conn.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw_b.encode()).digest(),
+                type="team",
+                scopes=["submit", "read:own"],
+                team_id=team_b,
+                created_by_user_id=user_b,
+                issued_at=datetime.now(UTC),
+            ),
+        )
+        conn.execute(
+            insert(TeamMembership).values(
+                team_id=team_b,
+                user_id=user_b,
+                role="owner",
+            ),
+        )
+        conn.execute(
+            insert(TaskSet).values(
+                id=task_set_id,
+                owning_team_id=team_a,
+                slug="private-taskset",
+                display_name="Private TaskSet",
+                status="ready",
+                intents=["trajectory_generation"],
+                evaluation_ready=False,
+                task_count=1,
+                manifest_blob_uri=f"s3://bucket/tasksets/user/{team_a}/private-taskset/manifest.yaml",
+            ),
+        )
+        conn.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="x" * 64,
+                config=_valid_task_config(task_id),
+                source=f"s3://bucket/tasksets/user/{team_a}/private-taskset/tasks/row-1/",
+                task_set_id=task_set_id,
+                benchmark_id=None,
+            ),
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw_b}"},
+            json={
+                "name": "Cross-team TaskSet",
+                "task_filter": {"task_set_id": task_set_id},
+                "trial_config": {"agent": {"name": "oracle"}},
+            },
+        )
+
+    assert r.status_code == 404, r.text
+
+
+async def test_post_batch_rejects_cross_team_explicit_task_set_task_id(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, _raw_a, team_a = camp_setup
+    team_b = uuid4()
+    user_b = uuid4()
+    raw_b = f"loom_team_{uuid4().hex}"
+    task_set_id = f"ts/{team_a}/explicit-private-taskset"
+    task_id = f"{task_set_id}/tasks/row-1"
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(insert(Team).values(id=team_b, name=f"t-{team_b}"))
+        conn.execute(
+            insert(User).values(
+                id=user_b,
+                username=f"BatchExplicitOther-{team_b.hex[:8]}",
+                username_normalized=f"batchexplicitother-{team_b.hex[:8]}",
+                status="active",
+                is_platform_admin=False,
+            ),
+        )
+        conn.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw_b.encode()).digest(),
+                type="team",
+                scopes=["submit", "read:own"],
+                team_id=team_b,
+                created_by_user_id=user_b,
+                issued_at=datetime.now(UTC),
+            ),
+        )
+        conn.execute(
+            insert(TeamMembership).values(
+                team_id=team_b,
+                user_id=user_b,
+                role="owner",
+            ),
+        )
+        conn.execute(
+            insert(TaskSet).values(
+                id=task_set_id,
+                owning_team_id=team_a,
+                slug="explicit-private-taskset",
+                display_name="Explicit Private TaskSet",
+                status="ready",
+                intents=["trajectory_generation"],
+                evaluation_ready=False,
+                task_count=1,
+                manifest_blob_uri=(
+                    f"s3://bucket/tasksets/user/{team_a}/explicit-private-taskset/manifest.yaml"
+                ),
+            ),
+        )
+        conn.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="x" * 64,
+                config=_valid_task_config(task_id),
+                source=f"s3://bucket/tasksets/user/{team_a}/explicit-private-taskset/tasks/row-1/",
+                task_set_id=task_set_id,
+                benchmark_id=None,
+            ),
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw_b}"},
+            json={
+                "name": "Cross-team explicit TaskSet task",
+                "task_filter": {"task_ids": [task_id], "subset_kind": "explicit"},
+                "trial_config": {"agent": {"name": "oracle"}},
+            },
+        )
+
+    assert r.status_code == 400, r.text
+    assert "zero tasks" in r.json()["detail"]
 
 
 async def test_admin_submit_on_behalf_records_represented_user_owner_access_and_audit(

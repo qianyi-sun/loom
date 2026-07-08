@@ -224,6 +224,20 @@ const BACKENDS_RESPONSE = {
   ],
 };
 
+const TASKSETS_RESPONSE = {
+  items: [
+    {
+      task_set_id: "ts/team-uuid/sample-tasks",
+      display_name: "Sample Tasks",
+      status: "ready",
+      intents: ["trajectory_generation", "evaluation"],
+      evaluation_ready: true,
+      task_count: 2,
+      created_at: "2026-07-08T00:00:00Z",
+    },
+  ],
+};
+
 function tasksResponse(
   total: number,
   ids: string[] = Array.from({ length: total }, (_, i) => `humaneval/HumanEval/${i}`),
@@ -339,6 +353,7 @@ function mockEndpoints(opts: {
               ),
         });
       }
+      if (url.includes("/api/v1/tasksets")) return json(TASKSETS_RESPONSE);
       if (url.includes("/api/v1/backends")) return json(BACKENDS_RESPONSE);
       // `/tasks/count` MUST be checked before `/tasks` since the
       // substring match would otherwise route both to the list stub.
@@ -390,6 +405,14 @@ async function pickBenchmark(id: string = "humaneval"): Promise<void> {
   // by its accessible name and tick it.
   const cb = await screen.findByRole("checkbox", {
     name: new RegExp(`Select benchmark ${id}`, "i"),
+  });
+  await user.click(cb);
+}
+
+async function pickTaskSet(id: string = "ts/team-uuid/sample-tasks"): Promise<void> {
+  const user = userEvent.setup();
+  const cb = await screen.findByRole("checkbox", {
+    name: new RegExp(`Select TaskSet ${id}`, "i"),
   });
   await user.click(cb);
 }
@@ -512,7 +535,7 @@ describe("NewBatch", () => {
     );
   });
 
-  it("blocks submit when no benchmark is picked", async () => {
+  it("blocks submit when no task source is picked", async () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
@@ -520,7 +543,7 @@ describe("NewBatch", () => {
     await pickBackend();
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     expect(
-      await screen.findByText(/Pick at least one benchmark\./i),
+      await screen.findByText(/Pick at least one benchmark or TaskSet\./i),
     ).toBeInTheDocument();
     expect(batchCall(spy)).toBeNull();
   });
@@ -960,6 +983,23 @@ describe("NewBatch", () => {
     expect(batchCall(spy)!.body.task_filter).toEqual({
       subset_kind: "all",
       benchmark_ids: ["aime-22", "aime-25"],
+    });
+  });
+
+  it("submits evaluation-ready TaskSets with task_set_ids, not benchmark_ids", async () => {
+    const spy = mockEndpoints();
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+    await pickBackend();
+    await pickTaskSet();
+    await pickDefaultModel(user);
+    await screen.findByText(/2 tasks match across 1 source/i);
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
+    expect(batchCall(spy)!.body.task_filter).toEqual({
+      subset_kind: "all",
+      task_set_ids: ["ts/team-uuid/sample-tasks"],
     });
   });
 

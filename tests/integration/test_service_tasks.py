@@ -16,7 +16,7 @@ from sqlalchemy import create_engine, delete, insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Benchmark, Task, Team, TeamQuota, Token
+from loom.db.schema import Benchmark, Task, TaskSet, Team, TeamQuota, Token
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -150,6 +150,7 @@ async def tasks_setup(
         with sl() as s:
             s.execute(delete(Token))
             s.execute(delete(Task))
+            s.execute(delete(TaskSet))
             s.execute(delete(Benchmark))
             s.execute(delete(TeamQuota))
             s.execute(delete(Team))
@@ -382,6 +383,124 @@ async def test_count_benchmark_id_filter(
         )
     assert r.status_code == 200
     assert r.json() == {"count": 2}
+
+
+async def test_count_owned_task_set_id_filter(
+    tasks_setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    app, raw = tasks_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        team_id = s.execute(
+            select(Token.team_id).where(
+                Token.token_hash == hashlib.sha256(raw.encode()).digest(),
+            ),
+        ).scalar_one()
+        task_set_id = f"ts/{team_id}/count-taskset"
+        task_id = f"{task_set_id}/tasks/row-1"
+        s.execute(
+            insert(TaskSet).values(
+                id=task_set_id,
+                owning_team_id=team_id,
+                slug="count-taskset",
+                display_name="Count TaskSet",
+                status="ready",
+                intents=["trajectory_generation"],
+                evaluation_ready=False,
+                task_count=1,
+                manifest_blob_uri=(
+                    f"s3://bucket/tasksets/user/{team_id}/count-taskset/manifest.yaml"
+                ),
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="x" * 64,
+                config=_valid_task_config(task_id),
+                source=f"s3://bucket/tasksets/user/{team_id}/count-taskset/tasks/row-1/",
+                license="MIT",
+                task_set_id=task_set_id,
+                benchmark_id=None,
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/tasks/count",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"task_filter": {"task_set_id": task_set_id}},
+        )
+    assert r.status_code == 200
+    assert r.json() == {"count": 1}
+
+
+async def test_count_cross_team_explicit_task_set_task_id_returns_zero(
+    tasks_setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    app, raw = tasks_setup
+    team_b = uuid4()
+    task_set_id = f"ts/{team_b}/private-count-taskset"
+    task_id = f"{task_set_id}/tasks/row-1"
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(insert(Team).values(id=team_b, name=f"t-{team_b}"))
+        s.execute(
+            insert(TaskSet).values(
+                id=task_set_id,
+                owning_team_id=team_b,
+                slug="private-count-taskset",
+                display_name="Private Count TaskSet",
+                status="ready",
+                intents=["trajectory_generation"],
+                evaluation_ready=False,
+                task_count=1,
+                manifest_blob_uri=(
+                    f"s3://bucket/tasksets/user/{team_b}/private-count-taskset/manifest.yaml"
+                ),
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="x" * 64,
+                config=_valid_task_config(task_id),
+                source=f"s3://bucket/tasksets/user/{team_b}/private-count-taskset/tasks/row-1/",
+                license="MIT",
+                task_set_id=task_set_id,
+                benchmark_id=None,
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/tasks/count",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "task_filter": {
+                    "task_ids": [task_id],
+                    "subset_kind": "explicit",
+                }
+            },
+        )
+    assert r.status_code == 200
+    assert r.json() == {"count": 0}
 
 
 async def test_count_excludes_unsupported_ui_benchmarks(

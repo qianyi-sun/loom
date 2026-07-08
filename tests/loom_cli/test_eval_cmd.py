@@ -497,6 +497,49 @@ def test_batch_create_with_benchmark_shortcut(
     assert body["provider_model_id"] == "gpt-4o"
 
 
+def test_batch_create_with_task_set_shortcut(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 2,
+            "n_per_task": 1,
+            "backend": "docker",
+            "combinations": [],
+            "state": "submitted",
+            "created_at": "2026-06-16T00:00:00Z",
+        },
+    )
+    task_set_id = "ts/team-uuid/sample-tasks"
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "litellm",
+            "--task-set",
+            task_set_id,
+            "--name",
+            "taskset-run",
+        ]
+    )
+    assert rc == 0
+    assert "Created batch 'taskset-run'" in capsys.readouterr().out
+
+    body = json.loads(mock_server[1].content)
+    assert body["name"] == "taskset-run"
+    assert body["task_filter"] == {"task_set_id": task_set_id}
+
+
 def test_batch_create_refuses_stopped_storage_preflight_without_override(
     tmp_path: Path,
     mock_server: MockServer,
@@ -919,6 +962,36 @@ def test_batch_create_benchmark_and_task_filter_mutually_exclusive(
     assert ("POST", "/api/v1/batches") not in paths
 
 
+def test_batch_create_task_set_and_benchmark_mutually_exclusive(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_connection_lookup(mock_server)
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "litellm",
+            "--benchmark",
+            "humaneval",
+            "--task-set",
+            "ts/team-uuid/sample-tasks",
+            "--name",
+            "n",
+        ]
+    )
+    assert rc == 2
+    assert "mutually exclusive" in capsys.readouterr().err
+    paths = [(r.method, r.url.path) for r in mock_server.requests]
+    assert ("POST", "/api/v1/batches") not in paths
+
+
 def test_batch_create_requires_benchmark_or_filter(
     mock_server: MockServer,
     capsys: pytest.CaptureFixture[str],
@@ -940,7 +1013,10 @@ def test_batch_create_requires_benchmark_or_filter(
         ]
     )
     assert rc == 2
-    assert "one of --benchmark or --task-filter" in capsys.readouterr().err
+    assert (
+        "one of --benchmark, --task-set, or --task-filter"
+        in capsys.readouterr().err
+    )
 
 
 def test_batch_create_invalid_task_filter_json_rejected_at_argparse(
