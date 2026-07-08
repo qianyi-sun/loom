@@ -45,11 +45,30 @@ class _FakeConn:
             self._cursor._app_name = "unknown"
 
 
+class _FakeConnectable:
+    """Fake engine — supports `with connectable.connect() as conn`."""
+
+    def __init__(self, conn: "_FakeConn") -> None:
+        self._conn = conn
+
+    def connect(self):  # type: ignore[no-untyped-def]
+        conn = self._conn
+
+        class _Ctx:
+            def __enter__(self_ctx):  # noqa: ANN001
+                return conn
+
+            def __exit__(self_ctx, *a):  # noqa: ANN001
+                return None
+
+        return _Ctx()
+
+
 def test_probe_passes_on_direct_connection() -> None:
     from migrations.env import _assert_direct_postgres_connection
 
     conn = _FakeConn(app_name_persists=True)
-    _assert_direct_postgres_connection(conn)  # no raise
+    _assert_direct_postgres_connection(_FakeConnectable(conn))  # no raise
 
 
 def test_probe_raises_on_pgbouncer_transaction_mode() -> None:
@@ -57,7 +76,7 @@ def test_probe_raises_on_pgbouncer_transaction_mode() -> None:
 
     conn = _FakeConn(app_name_persists=False)
     with pytest.raises(RuntimeError, match="not direct-to-Postgres"):
-        _assert_direct_postgres_connection(conn)
+        _assert_direct_postgres_connection(_FakeConnectable(conn))
 
 
 def test_probe_error_message_mentions_fix() -> None:
@@ -67,7 +86,7 @@ def test_probe_error_message_mentions_fix() -> None:
 
     conn = _FakeConn(app_name_persists=False)
     with pytest.raises(RuntimeError) as excinfo:
-        _assert_direct_postgres_connection(conn)
+        _assert_direct_postgres_connection(_FakeConnectable(conn))
     msg = str(excinfo.value).lower()
     assert "loom-postgres" in msg or "direct" in msg
     assert "pgbouncer" in msg

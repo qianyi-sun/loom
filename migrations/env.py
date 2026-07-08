@@ -14,7 +14,7 @@ from loom.db import schema  # noqa: F401  (registers models with Base.metadata)
 from loom.db.base import Base
 
 
-def _assert_direct_postgres_connection(conn: Any) -> None:
+def _assert_direct_postgres_connection(connectable: Any) -> None:
     """Alembic MUST run direct-to-Postgres (#609).
 
     Under pgbouncer transaction mode, session-scoped operations
@@ -24,15 +24,17 @@ def _assert_direct_postgres_connection(conn: Any) -> None:
     enforcing at every migration run so future migration authors can't
     accidentally depend on session semantics that only work on one path.
 
-    Probe: SET a synthetic application_name, commit, read it back.
-    Under session-preserving semantics the value persists; under
+    Probe uses its OWN short-lived connection so Alembic's connection
+    is untouched. SET a synthetic application_name, commit, read it
+    back. Under session-preserving semantics the value persists; under
     pgbouncer transaction mode the next statement lands on a different
     backend with the default application_name.
     """
     marker = f"alembic-probe-{uuid4()}"
-    conn.exec_driver_sql(f"SET application_name = '{marker}'")
-    conn.commit()
-    actual = conn.exec_driver_sql("SHOW application_name").scalar()
+    with connectable.connect() as probe_conn:
+        probe_conn.exec_driver_sql(f"SET application_name = '{marker}'")
+        probe_conn.commit()
+        actual = probe_conn.exec_driver_sql("SHOW application_name").scalar()
     if actual != marker:
         raise RuntimeError(
             f"Alembic connection is not direct-to-Postgres. "
@@ -82,8 +84,8 @@ if hasattr(context, "config"):
             prefix="sqlalchemy.",
             poolclass=pool.NullPool,
         )
+        _assert_direct_postgres_connection(connectable)
         with connectable.connect() as connection:
-            _assert_direct_postgres_connection(connection)
             context.configure(connection=connection, target_metadata=target_metadata)
             with context.begin_transaction():
                 context.run_migrations()
