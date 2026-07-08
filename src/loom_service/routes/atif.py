@@ -21,7 +21,7 @@ from fastapi.responses import Response
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import select
 
-from loom.db.schema import Trial, TrialEvent
+from loom.db.schema import Trial
 from loom.models.trajectory import TrajectoryEvent
 from loom.trajectory.atif import project_to_atif
 from loom_service.auth_guards import (
@@ -31,6 +31,11 @@ from loom_service.auth_guards import (
 from loom_service.dependencies import SessionAndCtx
 from loom_service.metrics import ARTIFACT_DOWNLOAD_BYTES
 from loom_service.routes.object_downloads import stream_object_response
+from loom_service.trajectory_reconstruction import (
+    read_all_events_from_postgres,
+    read_llm_calls_from_postgres,
+    reconstruct_postgres_trajectory_events,
+)
 
 router = APIRouter()
 
@@ -42,19 +47,6 @@ _ATIF_EVENTS_UNAVAILABLE = (
     "atif projection unavailable from stored trajectory events; "
     "trajectory events are downloadable"
 )
-
-
-async def _read_all_events_from_postgres(
-    session: Any, *, trial_id: UUID,
-) -> list[dict[str, Any]]:
-    rows = (
-        await session.execute(
-            select(TrialEvent.payload)
-            .where(TrialEvent.trial_id == trial_id)
-            .order_by(TrialEvent.seq.asc()),
-        )
-    ).all()
-    return [row[0] for row in rows]
 
 
 def _projection_metadata(trial: Trial) -> tuple[str, str, str]:
@@ -160,10 +152,16 @@ async def download_atif(
         if exc.status_code != 404:
             raise
 
-    events = await _read_all_events_from_postgres(s, trial_id=trial.id)
+    events = await read_all_events_from_postgres(s, trial_id=trial.id)
     if not events:
         raise HTTPException(
             status_code=404,
             detail="download object not found",
         )
+    llm_calls = await read_llm_calls_from_postgres(s, trial_id=trial.id)
+    events = reconstruct_postgres_trajectory_events(
+        events,
+        trial=trial,
+        llm_calls=llm_calls,
+    )
     return _postgres_events_atif_response(events, trial=trial)

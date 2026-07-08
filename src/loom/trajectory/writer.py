@@ -78,6 +78,7 @@ class TrajectoryWriter:
         self._local_file: Any | None = None  # aiofiles handle
         self._closed = False
         self.parts_uploaded = 0
+        self._next_seq = 0
 
     @property
     def remote_uri(self) -> str:
@@ -106,6 +107,7 @@ class TrajectoryWriter:
     async def append(self, event: TrajectoryEvent) -> None:
         if self._closed:
             raise RuntimeError("append after close")
+        event = event.model_copy(update={"seq": self._assign_seq(event.seq)})
         line = event.model_dump_json().encode("utf-8") + b"\n"
         await self._write_line(line)
         # #5 Slice 3b: mirror the typed event to the CP sink. Sink
@@ -126,14 +128,33 @@ class TrajectoryWriter:
         if self._closed:
             raise RuntimeError("append after close")
         import json
-        line = (json.dumps(data, separators=(",", ":")) + "\n").encode("utf-8")
+        payload = dict(data)
+        raw_seq = payload.get("seq")
+        if isinstance(raw_seq, int):
+            payload["seq"] = self._assign_seq(raw_seq)
+        line = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
         await self._write_line(line)
         # #5 Slice 3b: mirror to CP sink. observe_raw skips payloads
         # without int seq + str kind (subprocess adapters that pre-date
         # the typed envelope), so a malformed adapter emit doesn't
         # break the sink.
         if self._cp_event_sink is not None:
-            await self._cp_event_sink.observe_raw(dict(data))
+            await self._cp_event_sink.observe_raw(payload)
+
+    def _assign_seq(self, proposed: int) -> int:
+        """Keep the persisted per-trial event sequence globally monotonic.
+
+        Older call sites used local counters per trial section, step, or
+        subprocess adapter. The CP event table de-duplicates by `(trial_id, seq)`,
+        so repeated local seqs silently dropped later events. The writer is the
+        single append boundary and normalizes those local counters into the
+        canonical trial-wide sequence before local JSONL, MinIO, and CP mirror
+        writes see the event.
+        """
+
+        assigned = proposed if proposed >= self._next_seq else self._next_seq
+        self._next_seq = assigned + 1
+        return assigned
 
     async def _write_line(self, line: bytes) -> None:
         assert self._local_file is not None

@@ -34,9 +34,12 @@ Every event is one JSON object per line. Minimum shape:
 }
 ```
 
-Per-trial events have a monotonic `(step_id, seq)` pair. Cross-step
-ordering is NOT guaranteed — concurrent steps in multi-step trials can
-emit in any interleaving.
+Per-trial events have a monotonic `seq`. Adapters and step runners may keep
+local counters internally, but `TrajectoryWriter` is the append boundary and
+normalizes every typed or raw event to the canonical trial-wide sequence before
+local JSONL, object storage, and the Control Plane `trial_events` mirror see it.
+This matters because the durable event table uses `(trial_id, seq)` as its
+idempotency key.
 
 ### Event kinds (snake_case)
 
@@ -89,6 +92,10 @@ Behavior:
   5 MiB EXCEPT the last one. The writer buffers smaller parts until
   the threshold is met. Test code passes `min_part_bytes=0` to keep
   small-event tests deterministic.
+- **Trial-wide sequence assignment** — callers can pass local event `seq`
+  values, but the writer rewrites duplicates or rewinds to the next global
+  trial sequence. This prevents the Control Plane mirror from dropping later
+  events as `(trial_id, seq)` duplicates.
 - **`finalize()`** uploads remaining bytes as the final part and
   closes the multipart upload.
 
@@ -162,8 +169,8 @@ Service mode enriches the ATIF with `llm_calls` fetched from the
 Gateway (via `llm_calls_fetcher` callback) before projection when the
 agent did not already write gateway-backed `llm_call` trajectory
 events. Synthetic `llm_call` events are billing summaries; full
-request/response bodies live in the Gateway database. CLI mode skips
-this step (no Gateway).
+request/response bodies must come from adapter/provider logs when they are
+captured. CLI mode skips this step (no Gateway).
 Synthetic events also carry the redacted `request_params` audit
 payload from `llm_calls`. Older rows that predate this field surface
 as `{"status":"unavailable_legacy","parameters":{}}` rather than
@@ -190,14 +197,16 @@ and authenticated service download URLs for ATIF, trajectory, and artifacts.
 `loom_service` proxies object-backed downloads from the internal MinIO/S3
 endpoint to the caller, so browser and laptop clients do not need direct
 object-store network access. For Postgres-backed trials whose legacy object
-copy is absent, `GET /api/v1/trials/{id}/trajectory/download` reconstructs the
-JSONL body from `trial_events` in `seq` order, and
-`GET /api/v1/trials/{id}/atif` reprojects ATIF from the same typed rows plus
-`trials.result.agent` metadata. If rows exist but the event stream or
-projection metadata is insufficient for ATIF, the service returns HTTP 409 with
-a user-actionable message and keeps trajectory download available. A succeeded
-trial should not require clients to scan object storage, guess artifact keys,
-or open a separate MinIO tunnel.
+copy is absent, `GET /api/v1/trials/{id}/trajectory/download` reconstructs an
+analysis-ready JSONL body from `trial_events`, gateway `llm_calls`, and the
+terminal `trials.state/result` row. The service renumbers the reconstructed
+stream to a clean trial-wide sequence and uses the same synthetic `llm_call`
+projection as worker finalize. `GET /api/v1/trials/{id}/atif` reprojects ATIF
+from that same reconstructed stream plus `trials.result.agent` metadata. If rows
+exist but the event stream or projection metadata is insufficient for ATIF, the
+service returns HTTP 409 with a user-actionable message and keeps trajectory
+download available. A succeeded trial should not require clients to scan object
+storage, guess artifact keys, or open a separate MinIO tunnel.
 
 Artifact share states are security metadata, not download URLs:
 
