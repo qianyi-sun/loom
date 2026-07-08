@@ -241,7 +241,7 @@ If the final URL uses a non-standard port, such as
 operator-approved egress rule before provider validation and Gateway calls can
 reach it. Send the operator the non-secret endpoint IP/CIDR and TCP port, not
 the provider API key. The operator flow is documented in
-[`operator-runbook.md`](operator-runbook.md#byo-provider-egress-allowlist).
+[`operator-runbook.md`](../runbooks/operator-runbook.md#byo-provider-egress-allowlist).
 
 When you generated the bundle with `--expose bastion-forward`, run the forward
 helper on the bastion after Slurm assigns a compute node:

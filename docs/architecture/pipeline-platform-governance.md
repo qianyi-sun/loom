@@ -213,7 +213,7 @@ safety state, redaction state, sharing policy, and retention metadata.
 
 The base contract and migration requirements are decided in carinrc#568
 (historical archive) and documented in
-[adr-typed-artifacts-lineage-sharing.md](adr-typed-artifacts-lineage-sharing.md).
+[adr-typed-artifacts-lineage-sharing.md](adr/typed-artifacts-lineage-sharing.md).
 Initial artifact families should cover trajectory bundles, completion sets,
 TaskSets, TaskSplits, skill markdown, workflow specs, verifier replay bundles,
 debug bundles, metrics, evidence bundles, and exports.
@@ -227,7 +227,7 @@ trial can reference, authorize, materialize, inject, and record in output
 provenance.
 
 The skill contract is decided in carinrc#567 (historical archive) and
-documented in [adr-skill-artifact-injection.md](adr-skill-artifact-injection.md).
+documented in [adr-skill-artifact-injection.md](adr/skill-artifact-injection.md).
 The first implementation epic is carinrc#573 (historical archive).
 
 ## Data Production Direction

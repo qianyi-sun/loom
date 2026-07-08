@@ -23,6 +23,6 @@ Trial fingerprint:
 
 Closing #217 G3 requires the equivalent evidence on the deployed
 public-beta cluster, plus a representative long task (e.g.
-`simple-web-scraper`). See `docs/operator-runbook.md` §
+`simple-web-scraper`). See `docs/runbooks/operator-runbook.md` §
 "Terminal-Bench 2.0 public-beta readiness" for the one-command-per-step
 recipe.

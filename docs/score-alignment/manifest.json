@@ -121,7 +121,7 @@
           "harbor_published_baseline_at_pin": {
             "note": "No parity_experiment.json published for adapters/aime at the pinned commit (gh api returns 404). This paired run is the only known terminus-2 + claude-haiku-4-5 reference at this Harbor commit."
           },
-          "layer3_doc_section": "docs/benchmark-score-alignment-layer3.md#aime--paired-loom-aime-24--aime-25-vs-harbor-aime-on-claude-haiku-4-5"
+          "layer3_doc_section": "docs/score-alignment/layer-3.md#aime--paired-loom-aime-24--aime-25-vs-harbor-aime-on-claude-haiku-4-5"
         },
         "stage_b_archive_issue": "https://github.com/carinrc/loom/issues/540"
       }
@@ -231,7 +231,7 @@
           "harbor_published_baseline_at_pin": {
             "note": "No parity_experiment.json published for adapters/aime at the pinned commit (gh api returns 404). This paired run is the only known terminus-2 + claude-haiku-4-5 reference at this Harbor commit."
           },
-          "layer3_doc_section": "docs/benchmark-score-alignment-layer3.md#aime--paired-loom-aime-24--aime-25-vs-harbor-aime-on-claude-haiku-4-5"
+          "layer3_doc_section": "docs/score-alignment/layer-3.md#aime--paired-loom-aime-24--aime-25-vs-harbor-aime-on-claude-haiku-4-5"
         },
         "stage_b_archive_issue": "https://github.com/carinrc/loom/issues/540"
       }
@@ -328,7 +328,7 @@
             "aggregate": 0.8721,
             "note": "Not the matched config for this paired run; reproducing it would require codex/gpt-5.2 access (yibuapi only serves anthropic dialect). Documented for reference."
           },
-          "layer3_doc_section": "docs/benchmark-score-alignment-layer3.md#gpqa-diamond--paired-loom-vs-harbor-on-claude-haiku-4-5"
+          "layer3_doc_section": "docs/score-alignment/layer-3.md#gpqa-diamond--paired-loom-vs-harbor-on-claude-haiku-4-5"
         },
         "stage_b_archive_issue": "https://github.com/carinrc/loom/issues/541"
       }

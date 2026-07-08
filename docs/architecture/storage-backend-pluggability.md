@@ -282,7 +282,7 @@ dashboard.
 
 | Deployment | Backup strategy | Loom's role |
 |---|---|---|
-| MinIO single-node (default) | `mc mirror` to a second disk or S3 (operator schedules cron) | Document the procedure (`docs/operator-runbook.md`); no automation |
+| MinIO single-node (default) | `mc mirror` to a second disk or S3 (operator schedules cron) | Document the procedure (`docs/runbooks/operator-runbook.md`); no automation |
 | MinIO distributed (on-prem) | Erasure coding + scheduled `mc mirror` for disaster recovery | Document expected redundancy level |
 | AWS S3 | Versioning + cross-region replication, both operator-configured | Document the recommended bucket policy |
 | GCS | Versioning + cross-region replication | Same |
@@ -339,5 +339,5 @@ These are the choices this spec makes:
 
 - [`storage-retention.md`](storage-retention.md) — the policy this design generalizes.
 - [`cluster-deploy.md`](cluster-deploy.md) — where MinIO sits in the deploy.
-- [`operator-runbook.md#minio-pvc-usage`](../operator-runbook.md#minio-pvc-usage) — the per-backend monitoring story this design needs to generalize.
+- [`operator-runbook.md#minio-pvc-usage`](../runbooks/operator-runbook.md#minio-pvc-usage) — the per-backend monitoring story this design needs to generalize.
 - #219 (shipped via #226), #220 (shipped via #226) — sibling issues whose downstream work this design unblocks.

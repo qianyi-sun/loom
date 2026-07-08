@@ -8,7 +8,7 @@
 FROM python:3.11-slim
 
 # #199: transient PyPI ReadTimeouts during rollout builds — see
-# docs/operator-runbook.md#rollout-build-resilience.
+# docs/runbooks/operator-runbook.md#rollout-build-resilience.
 ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
 
 WORKDIR /app

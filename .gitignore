@@ -73,6 +73,6 @@ uv.lock
 # Operator-owned storage lifecycle config. `config/storage-lifecycle.example.toml`
 # is the committed template; operators `cp` it to `config/storage-lifecycle.toml`
 # and tune per-workload retention windows before running
-# `loom cluster bootstrap-storage-lifecycle` (see docs/operator-runbook.md).
+# `loom cluster bootstrap-storage-lifecycle` (see docs/runbooks/operator-runbook.md).
 # The active copy is per-deployment and must not be committed.
 config/storage-lifecycle.toml

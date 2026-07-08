@@ -89,12 +89,12 @@ What we kept from Harbor (because it's right):
 
 ## See also
 
-- [architecture/overview.md](architecture/overview.md) — how Loom is
+- [architecture/overview.md](../architecture/overview.md) — how Loom is
   put together
-- [architecture/driver-protocol.md](architecture/driver-protocol.md)
+- [architecture/driver-protocol.md](../architecture/driver-protocol.md)
   — the six-method Driver Protocol that replaces Harbor's
   `BaseEnvironment`
-- [architecture/trajectory-and-atif.md](architecture/trajectory-and-atif.md)
+- [architecture/trajectory-and-atif.md](../architecture/trajectory-and-atif.md)
   — event-sourced trajectories + ATIF v1.7 projection
-- [architecture/service-mode.md](architecture/service-mode.md) —
+- [architecture/service-mode.md](../architecture/service-mode.md) —
   Control Plane, Worker, Gateway, DRF scheduling

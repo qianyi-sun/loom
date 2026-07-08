@@ -125,7 +125,7 @@ allowlist the IP/CIDR + TCP port in the Loom cluster egress config first.
 
 Full setup workflows for both options — including the `loom inference deploy
 slurm` helper that generates a Slurm bundle for GPU-cluster vLLM checkpoints —
-live in [`docs/provider-onboarding.md`](docs/provider-onboarding.md).
+live in [`docs/integrations/provider-onboarding.md`](docs/integrations/provider-onboarding.md).
 
 ## Providers and Agents
 
@@ -200,22 +200,22 @@ and exits — no DB, no team, no provider registration.
 - [`docs/index.md`](docs/index.md) — documentation map.
 - [`docs/user-guide.md`](docs/user-guide.md) — install, quickstarts, CLI and
   web workflows, backends, model sources, reference, and troubleshooting.
-- [`docs/provider-onboarding.md`](docs/provider-onboarding.md) — hosted API and
+- [`docs/integrations/provider-onboarding.md`](docs/integrations/provider-onboarding.md) — hosted API and
   self-hosted GPU-cluster provider setup, including the `loom inference deploy
   slurm` helper.
 - [`docs/architecture/overview.md`](docs/architecture/overview.md) — component
   map and execution model.
 - [`docs/architecture/service-mode.md`](docs/architecture/service-mode.md) —
   service-mode details.
-- [`docs/operator-runbook.md`](docs/operator-runbook.md) — production deploy,
+- [`docs/runbooks/operator-runbook.md`](docs/runbooks/operator-runbook.md) — production deploy,
   environment isolation, release gates, and operations.
-- [`docs/remote-worker-pool.md`](docs/remote-worker-pool.md) — attaching extra
+- [`docs/runbooks/remote-worker-pool.md`](docs/runbooks/remote-worker-pool.md) — attaching extra
   Docker/Slurm worker capacity.
-- [`docs/authoring-a-task.md`](docs/authoring-a-task.md) — creating a new task
+- [`docs/integrations/authoring-a-task.md`](docs/integrations/authoring-a-task.md) — creating a new task
   or benchmark adapter.
-- [`docs/loom-vs-harbor.md`](docs/loom-vs-harbor.md) — design tradeoffs and
+- [`docs/contributing/loom-vs-harbor.md`](docs/contributing/loom-vs-harbor.md) — design tradeoffs and
   gaps versus Harbor.
-- [`docs/contributor-quickstart.md`](docs/contributor-quickstart.md) — repo
+- [`docs/contributing/contributor-quickstart.md`](docs/contributing/contributor-quickstart.md) — repo
   layout, tests, and contribution workflow.
 
 ## License and Contributing

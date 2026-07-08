@@ -1,7 +1,7 @@
 name: staging-smoke
 
 # Closes step 1-3 + 12 of the manual staging smoke gate in
-# docs/operator-runbook.md by automating the deploy-and-verify
+# docs/runbooks/operator-runbook.md by automating the deploy-and-verify
 # round-trip with REAL images. Where the kind smoke (#107) uses
 # `loom cluster up --no-wait` against unbuilt images, this workflow
 # builds the five loom images, loads them into kind, runs

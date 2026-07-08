@@ -220,7 +220,7 @@ env-var API key the CLI puts in the sandbox.
 
 ## Per-trial agent installation
 
-(See `src/loom_worker/trial_cache.py` and `docs/operator-runbook.md`
+(See `src/loom_worker/trial_cache.py` and `docs/runbooks/operator-runbook.md`
 for the operator-facing knobs.)
 
 `AgentAdapter.install_script` is a multi-line shell script that

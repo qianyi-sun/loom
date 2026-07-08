@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-RUNBOOK = REPO_ROOT / "docs/first-prod-release-runbook.md"
+RUNBOOK = REPO_ROOT / "docs/runbooks/first-prod-release-runbook.md"
 
 
 def _runbook_text() -> str:
@@ -13,7 +13,7 @@ def _runbook_text() -> str:
 def test_first_prod_runbook_is_linked_from_operator_docs_and_index() -> None:
     assert RUNBOOK.is_file()
 
-    operator_runbook = (REPO_ROOT / "docs/operator-runbook.md").read_text(
+    operator_runbook = (REPO_ROOT / "docs/runbooks/operator-runbook.md").read_text(
         encoding="utf-8",
     )
     docs_index = (REPO_ROOT / "docs/index.md").read_text(encoding="utf-8")

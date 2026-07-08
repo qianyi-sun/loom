@@ -185,7 +185,7 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         "benchmark_score_alignment": {
             "status": "pass",
             "url": "https://github.com/qianyi-sun/loom/actions/runs/1010",
-            "manifest": "docs/benchmark-score-alignment.json",
+            "manifest": "docs/score-alignment/manifest.json",
             "benchmarks": ["aime-24", "aime-25", "humaneval", "mbpp"],
         },
         "hf_mirror_token_boundary": {

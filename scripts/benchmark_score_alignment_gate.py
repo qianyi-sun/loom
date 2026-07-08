@@ -38,7 +38,7 @@ except ImportError:  # pragma: no cover - direct script fallback.
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MANIFEST = REPO_ROOT / "docs" / "benchmark-score-alignment.json"
+DEFAULT_MANIFEST = REPO_ROOT / "docs" / "score-alignment" / "manifest.json"
 
 REFERENCE_REQUIRED = (
     "source_type",
@@ -257,7 +257,7 @@ def check_manifest(manifest: dict[str, Any]) -> list[CheckResult]:
                 status="fail",
                 detail=detail,
                 remediation=(
-                    "Update docs/benchmark-score-alignment.json so every "
+                    "Update docs/score-alignment/manifest.json so every "
                     "v1.0 benchmark has a canonical reference, score semantics, "
                     "Harbor/upstream decision, and at least one replay case."
                 ),
@@ -304,7 +304,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--manifest",
         type=Path,
         default=DEFAULT_MANIFEST,
-        help="Path to benchmark-score-alignment.json.",
+        help="Path to score-alignment/manifest.json.",
     )
     manifest.set_defaults(func=_run_manifest)
     return parser

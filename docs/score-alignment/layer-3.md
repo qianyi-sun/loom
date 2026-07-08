@@ -2,7 +2,7 @@
 
 > **Cross-repo issue/PR refs:** bare `#N` and `carinrc/loom#N` refer to
 > the pre-2026-06-26 archive tracker. Canonical follow-up work lives on
-> `qianyi-sun/loom` (see [`repo-migration.md`](repo-migration.md)); use
+> `qianyi-sun/loom` (see [`repo-migration.md`](../contributing/repo-migration.md)); use
 > full-URL form when it matters which repo.
 
 Layer 1 declared the manifest; Layer 2 recorded the adapter-level

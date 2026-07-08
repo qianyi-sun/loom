@@ -24,7 +24,7 @@ def test_local_python_version_is_pinned_to_ci_interpreter() -> None:
 
 
 def test_contributor_quickstart_uses_ci_python_for_local_verification() -> None:
-    text = (REPO_ROOT / "docs/contributor-quickstart.md").read_text(encoding="utf-8")
+    text = (REPO_ROOT / "docs/contributing/contributor-quickstart.md").read_text(encoding="utf-8")
 
     assert "uv python install 3.11" in text
     assert "uv sync --extra dev --python 3.11" in text
@@ -47,7 +47,7 @@ def test_contributor_quickstart_documents_full_fast_coverage_gate() -> None:
         if step.get("name") == "Coverage gate + summary (fast tier)"
     )
 
-    text = (REPO_ROOT / "docs/contributor-quickstart.md").read_text(encoding="utf-8")
+    text = (REPO_ROOT / "docs/contributing/contributor-quickstart.md").read_text(encoding="utf-8")
     normalized_text = _normalize_command(text)
     local_sibling_run = sibling_pytest_step["run"].replace(
         "--cov=src --cov=packages \\",

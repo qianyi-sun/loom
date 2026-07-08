@@ -608,7 +608,7 @@ manifest = {
         "benchmark_score_alignment": {
             "status": "pass",
             "url": "https://example.invalid/score-alignment",
-            "manifest": "docs/benchmark-score-alignment.md",
+            "manifest": "docs/score-alignment/layer-1.md",
             "benchmarks": ["humaneval"],
         },
         "hf_mirror_token_boundary": {
