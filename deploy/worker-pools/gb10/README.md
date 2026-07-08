@@ -227,7 +227,7 @@ LOOM_WORKER_POOL_NAME=gb10-arm64
 LOOM_WORKER_ENV_CONFIG_VERSION=manual-v1
 LOOM_WORKER_HOSTNAME=trt-gb10-N
 LOOM_WORKER_SANDBOX_WORKER_INDEX=N
-LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS=31536000
+LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS=7200
 LOOM_WORKER_LOG_LEVEL=info
 LOOM_WORKER_DOCKER_API_TIMEOUT_SEC=1800
 LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT=1
@@ -511,6 +511,11 @@ fresh `worker_id`, `worker_status=active`, `worker_fresh=true`, and
 mismatches from `loom admin gb10-workers status` while a fresh compose worker
 registers and emits its first heartbeats; persistent stale worker evidence after
 that retry window is a host-runtime failure to repair, not a gate to bypass.
+The staging desired-state profile sets
+`LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS=7200` so the earliest host in a 15-host
+serial prep does not idle-exit before release-gate and smoke can observe all
+150 slots. Do not reduce this below the protected rollout convergence plus
+smoke window.
 
 Rollback publishes the previous desired image/concurrency/env version back to
 the Control Plane first, then applies it locally. This keeps the periodic

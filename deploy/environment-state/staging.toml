@@ -82,6 +82,9 @@ trt-gb10-15 = "active"
 [gb10_worker_pool_desired_states.rollout_policy]
 mode = "all"
 
+[gb10_worker_pool_desired_states.env]
+LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS = "7200"
+
 [catalog_provisioning]
 required = true
 command = "loom datasets register skilllearnbench --hf-org PRHW --revision \"$PUBLISHED_SHA\" --mirror-to-object-store --bucket loom-benchmarks --registered-by catalog-provision && loom datasets publish-local deploy/catalog/gb10-smoke --bucket loom-benchmarks --imported-by catalog-provision && loom datasets audit --all --verify-bundles"

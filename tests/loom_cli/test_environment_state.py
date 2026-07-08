@@ -143,6 +143,26 @@ def test_load_environment_state_profile_normalizes_payloads_and_variables(
     ]
 
 
+def test_staging_gb10_desired_state_sets_two_hour_worker_idle_ttl() -> None:
+    profile = load_environment_state_profile(
+        Path("deploy/environment-state/staging.toml"),
+        variables={
+            "IMAGE_TAG": "staging-fe9b82c",
+            "ENV_CONFIG_VERSION": "staging-fe9b82c",
+            "GIT_SHA": "fe9b82c81e10347b2aa5d8afb2492984945b641a",
+        },
+        expected_environment="staging",
+    )
+
+    gb10 = next(
+        row
+        for row in profile.gb10_desired_states
+        if row["pool_name"] == "gb10-arm64"
+    )
+
+    assert gb10["env"]["LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS"] == "7200"
+
+
 def test_load_environment_state_profile_requires_placeholder_values(tmp_path: Path) -> None:
     profile_path = tmp_path / "staging.state.toml"
     _write_profile(profile_path)
