@@ -25,7 +25,15 @@ metadata:
   name: loom-postgres
 spec:
   instances: {{ topology.postgres_replicas }}
-  imageName: {{ postgres_image }}
+  # Intentionally NOT setting imageName: CNPG requires a specifically
+  # patched Postgres image (ghcr.io/cloudnative-pg/postgresql:*) that
+  # has the postgres UID 26 set up in /etc/passwd. The single-node
+  # postgres_image (postgres:16) fails initdb inside CNPG with
+  # "could not look up effective user ID 26". Letting CNPG pick its
+  # bundled default image avoids the compatibility footgun. If a
+  # specific major version needs pinning, add a topology.postgres_cnpg_image
+  # schema field — do NOT reuse postgres_image which targets the
+  # single-node vanilla shape.
 
   postgresql:
     parameters:

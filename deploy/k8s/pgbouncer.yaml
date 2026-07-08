@@ -62,7 +62,7 @@ spec:
             requests: { cpu: 100m, memory: 128Mi }
             limits: { cpu: 500m, memory: 512Mi }
         - name: exporter
-          image: prometheuscommunity/pgbouncer-exporter:0.7.0
+          image: prometheuscommunity/pgbouncer-exporter:v0.12.1
           args:
             - "--pgBouncer.connectionString=postgres://loom@localhost:6432/pgbouncer?sslmode=disable"
           ports:
