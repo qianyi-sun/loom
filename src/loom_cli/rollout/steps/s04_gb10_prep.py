@@ -32,6 +32,8 @@ from loom_cli.rollout.steps.subprocess_util import (
     run_captured,
 )
 
+_LEGACY_GB10_WORKER_SERVICE = "loom-gb10-worker.service"
+
 
 @dataclass(frozen=True, slots=True)
 class GB10Host:
@@ -236,6 +238,51 @@ def _node_agent_status_summary(props: dict[str, str]) -> str:
     return " ".join(f"{key}={props.get(key, '<missing>')}" for key in keys)
 
 
+def _legacy_worker_unit_retire_command() -> str:
+    service = shlex.quote(_LEGACY_GB10_WORKER_SERVICE)
+    return (
+        f"if systemctl --user list-unit-files {service} >/dev/null 2>&1 "
+        f"|| systemctl --user status {service} >/dev/null 2>&1; then "
+        f"systemctl --user disable --now {service}; "
+        f"systemctl --user reset-failed {service} >/dev/null 2>&1 || true; "
+        "fi"
+    )
+
+
+def _legacy_worker_unit_mismatch(
+    host: GB10Host,
+    step_dir: StepDir,
+) -> VerifyOutcome | None:
+    service = shlex.quote(_LEGACY_GB10_WORKER_SERVICE)
+    enabled = _ssh(host, f"systemctl --user is-enabled {service}")
+    if enabled.returncode == 255:
+        return VerifyOutcome.UNKNOWN
+    if enabled.returncode == 0 and enabled.stdout.strip() == "enabled":
+        step_dir.stderr_path().write_text(
+            f"legacy {_LEGACY_GB10_WORKER_SERVICE} is still enabled on "
+            f"{host.ssh_target}; rerun gb10-prep to retire it before "
+            "node-agent release-gate validation\n",
+        )
+        return VerifyOutcome.MISMATCH
+
+    status = _ssh(
+        host,
+        f"systemctl --user show {service} -p ActiveState -p SubState",
+    )
+    if status.returncode == 255:
+        return VerifyOutcome.UNKNOWN
+    if status.returncode == 0:
+        props = _parse_systemctl_properties(status.stdout)
+        if props.get("ActiveState") == "activating":
+            step_dir.stderr_path().write_text(
+                f"legacy {_LEGACY_GB10_WORKER_SERVICE} is still activating on "
+                f"{host.ssh_target}; rerun gb10-prep to avoid a parallel "
+                "compose worker start path\n",
+            )
+            return VerifyOutcome.MISMATCH
+    return None
+
+
 def _env_file_update_command(ctx: RolloutContext, host: GB10Host) -> str:
     updates = {
         "IMAGE_TAG": ctx.image_tag,
@@ -313,6 +360,7 @@ def _prep_one_host(
         ),
     ]
     if host.node_agent_service:
+        steps.append(("legacy-worker-unit", _legacy_worker_unit_retire_command()))
         service = shlex.quote(host.node_agent_service)
         steps.append(("node-agent", f"systemctl --user start {service}"))
     log_lines: list[str] = []
@@ -391,6 +439,9 @@ class GB10PrepStep(BaseStep):
                     # the previous prep did not finish and resume should rerun.
                     return VerifyOutcome.MISMATCH
             if host.node_agent_service:
+                legacy_outcome = _legacy_worker_unit_mismatch(host, step_dir)
+                if legacy_outcome is not None:
+                    return legacy_outcome
                 service = shlex.quote(host.node_agent_service)
                 r = _ssh(
                     host,

@@ -1608,6 +1608,8 @@ def test_gb10_prep_verify_checks_checkout_env_version_and_node_agent(
         'test "$(cd /srv/loom-staging && git rev-parse HEAD)" = dddddddddddddddddddddddddddddddddddddddd',
         "grep -q '^LOOM_IMAGE_TAG=staging-abc123$' /srv/loom-staging/.env",
         "grep -q '^LOOM_WORKER_ENV_CONFIG_VERSION=staging-abc123$' /srv/loom-staging/.env",
+        "systemctl --user is-enabled loom-gb10-worker.service",
+        "systemctl --user show loom-gb10-worker.service -p ActiveState -p SubState",
         "systemctl --user show loom-gb10-node-agent.service -p Type -p Result -p ExecMainStatus -p ActiveState -p SubState",
     ]
 
@@ -1666,6 +1668,69 @@ def test_gb10_prep_verify_accepts_successful_oneshot_node_agent(
     assert any("systemctl --user show" in call for call in calls)
 
 
+def test_gb10_prep_verify_retries_when_legacy_worker_unit_is_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(
+        tmp_path,
+        image_tag="staging-abc123",
+        resolved_sha="e" * 40,
+    )
+    identity = _write_dummy_identity(tmp_path / "gb10-rollout-ed25519")
+    ctx.cluster_config_path.write_text(
+        "[gb10_pool]\n"
+        f'ssh_identity_file = "{identity}"\n'
+        "hosts = [\n"
+        '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom-staging", '
+        'env_file_path = "/srv/loom-staging/.env", '
+        'node_agent_service = "loom-gb10-node-agent.service" },\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    calls: list[str] = []
+
+    def fake_ssh(host, remote_cmd):
+        calls.append(remote_cmd)
+        if "systemctl --user show loom-gb10-node-agent.service" in remote_cmd:
+            return SubprocessResult(
+                argv=["ssh", host.ssh_target, remote_cmd],
+                returncode=0,
+                stdout=(
+                    "Type=oneshot\n"
+                    "Result=success\n"
+                    "ExecMainStatus=0\n"
+                    "ActiveState=inactive\n"
+                    "SubState=dead\n"
+                ),
+                stderr="",
+            )
+        if "systemctl --user is-enabled loom-gb10-worker.service" in remote_cmd:
+            return SubprocessResult(
+                argv=["ssh", host.ssh_target, remote_cmd],
+                returncode=0,
+                stdout="enabled\n",
+                stderr="",
+            )
+        return SubprocessResult(
+            argv=["ssh", host.ssh_target, remote_cmd],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
+    step_dir = ev.step_dir(11, "gb10-prep")
+
+    outcome = GB10PrepStep().verify(ctx, step_dir)
+
+    assert outcome is VerifyOutcome.MISMATCH
+    assert "legacy" in step_dir.stderr_path().read_text()
+    assert any("loom-gb10-worker.service" in call for call in calls)
+
+
 def test_gb10_prep_clones_preserves_env_and_starts_node_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1714,6 +1779,12 @@ def test_gb10_prep_clones_preserves_env_and_starts_node_agent(
     assert "LOOM_WORKER_ENV_CONFIG_VERSION" in env_update
     assert "LOOM_WORKER_TOKEN" not in env_update
     assert "> /srv/loom-staging/.env" not in env_update
+    legacy_idx = next(
+        idx for idx, call in enumerate(calls)
+        if "disable --now loom-gb10-worker.service" in call
+    )
+    node_agent_idx = calls.index("systemctl --user start loom-gb10-node-agent.service")
+    assert legacy_idx < node_agent_idx
     assert calls[-1] == "systemctl --user start loom-gb10-node-agent.service"
 
 
