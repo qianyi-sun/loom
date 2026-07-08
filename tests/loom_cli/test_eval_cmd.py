@@ -1013,7 +1013,10 @@ def test_batch_create_requires_benchmark_or_filter(
         ]
     )
     assert rc == 2
-    assert "one of --benchmark or --task-filter" in capsys.readouterr().err
+    assert (
+        "one of --benchmark, --task-set, or --task-filter"
+        in capsys.readouterr().err
+    )
 
 
 def test_batch_create_invalid_task_filter_json_rejected_at_argparse(
