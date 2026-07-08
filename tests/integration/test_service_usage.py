@@ -732,6 +732,160 @@ async def test_admin_usage_filters_and_breakdowns_cover_cost_dimensions(
     assert by_key["priced"]["estimated_cost_usd"] == pytest.approx(0.01)
 
 
+async def test_admin_on_behalf_usage_is_attributed_to_real_actor(
+    usage_setup: tuple[FastAPI, str, str, str, str],
+    postgres_url: str,
+) -> None:
+    app, _team_raw, admin_raw, team_str, task_id = usage_setup
+    team_id = UUID(team_str)
+    admin_user_id = uuid4()
+    represented_user_id = uuid4()
+    provider_id = uuid4()
+    batch_id = uuid4()
+    trial_id = uuid4()
+    ts = datetime(2026, 6, 2, 15, tzinfo=UTC)
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(User).values(
+                id=admin_user_id,
+                email="admin-actor@example.test",
+                username="admin-actor",
+                username_normalized="admin-actor",
+                display_name="Admin Actor",
+                is_platform_admin=True,
+                status="active",
+            )
+        )
+        conn.execute(
+            insert(User).values(
+                id=represented_user_id,
+                email="represented@example.test",
+                username="represented",
+                username_normalized="represented",
+                display_name="Represented User",
+                status="active",
+            )
+        )
+        conn.execute(
+            insert(ProviderConnection).values(
+                id=provider_id,
+                team_id=team_id,
+                provider_type="openai-compatible",
+                display_name="shared yibuapi",
+                base_url="https://api.yibuapi.com/v1",
+                upstream_host="api.yibuapi.com",
+                encrypted_api_key_ref="env:YIBUAPI_KEY",
+                status="valid",
+                pricing_source="tokens-only",
+                rate_card_provider="yibuapi",
+                created_by="test",
+            )
+        )
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="admin-on-behalf usage",
+                task_filter={"task_ids": [task_id], "subset_kind": "explicit"},
+                trial_config={},
+                state="finished",
+                created_by_token_prefix="00000000",
+                submitted_by_user_id=represented_user_id,
+                usage_attributed_user_id=admin_user_id,
+                usage_attributed_actor=f"user:{admin_user_id}",
+                expected_trial_count=1,
+                provider_connection_id=provider_id,
+                provider_model_id="glm5.1-thinking",
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=trial_id,
+                task_id=task_id,
+                team_id=team_id,
+                state="succeeded",
+                config={},
+                requires_caps={},
+                submitted_at=ts,
+                finished_at=ts,
+                batch_id=batch_id,
+                submitted_by_user_id=represented_user_id,
+                provider_connection_id=provider_id,
+                provider_model_id="glm5.1-thinking",
+                result={"aggregate_reward": 1.0},
+            )
+        )
+        conn.execute(
+            insert(LlmCall).values(
+                id=uuid4(),
+                team_id=team_id,
+                trial_id=trial_id,
+                step_id="main",
+                model="glm5.1-thinking",
+                dialect="openai_chat",
+                input_tokens=300,
+                output_tokens=40,
+                provider_extras={},
+                cost_usd=Decimal("0"),
+                rate_card_hash="facade:tokens-only",
+                captured_at=ts,
+            )
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        breakdown = await ac.get(
+            "/api/v1/usage",
+            params={
+                "team_id": team_str,
+                "start": "2026-06-02",
+                "end": "2026-06-02",
+                "provider_connection_id": str(provider_id),
+                "breakdown_by": "user",
+            },
+            headers={"Authorization": f"Bearer {admin_raw}"},
+        )
+        admin_filtered = await ac.get(
+            "/api/v1/usage",
+            params={
+                "team_id": team_str,
+                "start": "2026-06-02",
+                "end": "2026-06-02",
+                "provider_connection_id": str(provider_id),
+                "user_id": str(admin_user_id),
+            },
+            headers={"Authorization": f"Bearer {admin_raw}"},
+        )
+        represented_filtered = await ac.get(
+            "/api/v1/usage",
+            params={
+                "team_id": team_str,
+                "start": "2026-06-02",
+                "end": "2026-06-02",
+                "provider_connection_id": str(provider_id),
+                "user_id": str(represented_user_id),
+            },
+            headers={"Authorization": f"Bearer {admin_raw}"},
+        )
+
+    assert breakdown.status_code == 200, breakdown.text
+    rows = breakdown.json()["buckets"]
+    assert len(rows) == 1
+    assert rows[0]["breakdown_key"] == str(admin_user_id)
+    assert rows[0]["breakdown_label"] == "Admin Actor"
+    assert rows[0]["llm_input_tokens"] == 300
+
+    assert admin_filtered.status_code == 200, admin_filtered.text
+    assert len(admin_filtered.json()["buckets"]) == 1
+    assert represented_filtered.status_code == 200, represented_filtered.text
+    assert represented_filtered.json()["buckets"] == []
+
+
 async def test_usage_groups_by_week(
     usage_setup: tuple[FastAPI, str, str, str, str],
 ) -> None:

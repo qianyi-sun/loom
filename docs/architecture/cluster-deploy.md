@@ -347,6 +347,8 @@ loom providers create --name N --type {openai-compatible,anthropic,google,custom
 loom providers {list,show,test} NAME
 loom providers models NAME [--refresh] [--preflight MODEL] [--hide MODEL] [--unhide MODEL]
 loom providers update NAME [--base-url URL] [--api-key SOURCE] ...
+loom providers share NAME --target-team-id UUID [--admin-actor ACTOR]
+loom providers unshare NAME --target-team-id UUID [--admin-actor ACTOR]
 loom providers delete NAME                                         # soft-delete
 
 loom eval run --provider N --model M --agent A --task ID
@@ -445,7 +447,7 @@ and preflight status/error metadata. `view=raw` includes suppressed tool/API
 entries such as
 Amap/APISports/TuShare-style ids with classifier reasons for debugging.
 
-`Trial` and `Batch` payloads gain `provider_connection_id` + `provider_model_id` (both nullable for legacy/local or non-model-backed paths). In v1.0 service-mode submissions, model-backed agents should use a team-owned provider connection rather than an implied platform-hosted model provider. Trial FK has no cascade — soft-delete keeps audit/billing references valid. Batch fan-out forwards the batch-level provider fields to every materialized trial; per-combination provider connections are intentionally not part of this schema slice.
+`Trial` and `Batch` payloads gain `provider_connection_id` + `provider_model_id` (both nullable for legacy/local or non-model-backed paths). In v1.0 service-mode submissions, model-backed agents should use a provider connection owned by or explicitly shared with the submitting team rather than an implied platform-hosted model provider. Trial FK has no cascade — soft-delete keeps audit/billing references valid. Batch fan-out forwards the batch-level provider fields to every materialized trial; per-combination provider connections are intentionally not part of this schema slice. Shared provider connections keep one owner-side secret and rotation point; target teams can use/list/read the connection but cannot mutate the credential or model cache.
 
 Benchmark task images remain model/provider/agent agnostic. The task image owns
 benchmark dependencies, task assets, harness code, and verifier behavior only.

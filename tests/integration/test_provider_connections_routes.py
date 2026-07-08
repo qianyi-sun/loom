@@ -30,6 +30,7 @@ from loom.admin_secret import AdminSecretVerifier
 from loom.db.schema import (
     AdminAuditEvent,
     ProviderConnection,
+    ProviderConnectionShare,
     Secret,
     Team,
     TeamQuota,
@@ -37,6 +38,7 @@ from loom.db.schema import (
 )
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from loom_service.provider_connection_lookup import validate_provider_connection
 
 # Use a fixed test master key so tests are deterministic.
 _TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
@@ -121,6 +123,7 @@ async def app_setup(
     raw_a = f"loom_team_{uuid4().hex}"
     raw_b = f"loom_team_{uuid4().hex}"
     raw_a_limited = f"loom_team_{uuid4().hex}"
+    raw_b_limited = f"loom_team_{uuid4().hex}"
 
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -156,12 +159,22 @@ async def app_setup(
                 issued_at=datetime.now(UTC),
             )
         )
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw_b_limited.encode()).digest(),
+                type="team",
+                scopes=["read:own", "submit"],
+                team_id=team_b,
+                issued_at=datetime.now(UTC),
+            )
+        )
         s.commit()
 
     tokens = {
         "team_a": raw_a,
         "team_a_limited": raw_a_limited,
         "team_b": raw_b,
+        "team_b_limited": raw_b_limited,
         "admin": RAW_ADMIN_TOKEN,
     }
     team_ids = {"a": team_a, "b": team_b}
@@ -173,6 +186,7 @@ async def app_setup(
         await engine.dispose()
         with sl() as s:
             s.execute(delete(AdminAuditEvent))
+            s.execute(delete(ProviderConnectionShare))
             s.execute(delete(ProviderConnection))
             s.execute(delete(Secret))
             s.execute(delete(Token))
@@ -482,7 +496,7 @@ def test_create_requires_provider_management_scope(app_setup) -> None:
     c = _client(app)
     r = c.post(
         "/api/v1/provider-connections",
-        headers=_auth(tokens["team_a_limited"]),
+        headers=_auth(tokens["team_b_limited"]),
         json={
             "name": "n",
             "type": "openai-compatible",
@@ -618,6 +632,227 @@ def test_get_cross_team_returns_404_not_403(app_setup) -> None:
     )
     assert r_nope.status_code == 404
     assert r.json()["detail"] == r_nope.json()["detail"]
+
+
+def test_owner_share_makes_provider_visible_and_valid_for_target_team(app_setup) -> None:
+    """A provider-owning team can share one provider with another team.
+
+    The target team can list/get/use the shared provider by id, but still
+    never receives raw secret material and does not become the owner team.
+    """
+    app, tokens, team_ids = app_setup
+    c = _client(app)
+    create = c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_b"]),
+        json={
+            "name": "shared-yibuapi",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
+    )
+    assert create.status_code == 201, create.text
+    conn_id = create.json()["id"]
+
+    before = c.get("/api/v1/provider-connections", headers=_auth(tokens["team_a"]))
+    assert before.status_code == 200
+    assert before.json()["items"] == []
+
+    share = c.post(
+        f"/api/v1/provider-connections/{conn_id}/shares",
+        headers=_auth(tokens["team_b"]),
+        json={"target_team_id": str(team_ids["a"])},
+    )
+    assert share.status_code == 201, share.text
+    assert share.json() == {
+        "provider_connection_id": conn_id,
+        "provider_name": "shared-yibuapi",
+        "provider_owner_team_id": str(team_ids["b"]),
+        "target_team_id": str(team_ids["a"]),
+    }
+
+    listed = c.get("/api/v1/provider-connections", headers=_auth(tokens["team_a"]))
+    assert listed.status_code == 200
+    items = listed.json()["items"]
+    assert [item["id"] for item in items] == [conn_id]
+    assert items[0]["team_id"] == str(team_ids["b"])
+    assert "api_key" not in items[0]
+    assert "encrypted_api_key_ref" not in items[0]
+
+    detail = c.get(
+        f"/api/v1/provider-connections/{conn_id}",
+        headers=_auth(tokens["team_a"]),
+    )
+    assert detail.status_code == 200
+    assert detail.json()["name"] == "shared-yibuapi"
+    assert "api_key" not in detail.json()
+    assert "encrypted_api_key_ref" not in detail.json()
+
+    async def _validate() -> None:
+        async with app.state.session_factory() as session:
+            await validate_provider_connection(
+                session,
+                UUID(conn_id),
+                team_id=team_ids["a"],
+            )
+
+    import anyio
+
+    anyio.run(_validate)
+
+    sync_engine = create_engine(str(app.state.settings.db_url))
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        events = (
+            s.execute(
+                AdminAuditEvent.__table__.select().where(
+                    AdminAuditEvent.target_id == conn_id,
+                    AdminAuditEvent.action == "provider_connection.share",
+                ),
+            )
+            .mappings()
+            .all()
+        )
+    sync_engine.dispose()
+    assert len(events) == 1
+    metadata = events[0]["metadata"]
+    assert metadata == {
+        "provider_connection_id": conn_id,
+        "provider_name": "shared-yibuapi",
+        "provider_owner_team_id": str(team_ids["b"]),
+        "target_team_id": str(team_ids["a"]),
+        "action": "share",
+    }
+    assert "api_key" not in json.dumps(metadata)
+
+
+def test_shared_provider_cannot_be_mutated_by_target_team(app_setup) -> None:
+    app, tokens, team_ids = app_setup
+    c = _client(app)
+    create = c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_b"]),
+        json={
+            "name": "owner-only-mutate",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
+    )
+    conn_id = create.json()["id"]
+    c.post(
+        f"/api/v1/provider-connections/{conn_id}/shares",
+        headers=_auth(tokens["team_b"]),
+        json={"target_team_id": str(team_ids["a"])},
+    )
+
+    update = c.patch(
+        f"/api/v1/provider-connections/{conn_id}",
+        headers=_auth(tokens["team_a"]),
+        json={"allowed_models": ["glm5.1-thinking"]},
+    )
+    assert update.status_code == 404
+
+    delete_resp = c.delete(
+        f"/api/v1/provider-connections/{conn_id}",
+        headers=_auth(tokens["team_a"]),
+    )
+    assert delete_resp.status_code == 404
+
+
+def test_provider_share_requires_owner_manage_scope_or_platform_admin(app_setup) -> None:
+    app, tokens, team_ids = app_setup
+    c = _client(app)
+    create = c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_b"]),
+        json={
+            "name": "admin-only-share",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
+    )
+    conn_id = create.json()["id"]
+
+    non_owner_attempt = c.post(
+        f"/api/v1/provider-connections/{conn_id}/shares",
+        headers=_auth(tokens["team_a"]),
+        json={"target_team_id": str(team_ids["a"])},
+    )
+    assert non_owner_attempt.status_code == 404
+
+    owner_limited_attempt = c.post(
+        f"/api/v1/provider-connections/{conn_id}/shares",
+        headers=_auth(tokens["team_a_limited"]),
+        json={"target_team_id": str(team_ids["a"])},
+    )
+    assert owner_limited_attempt.status_code == 403
+    assert "providers:manage" in owner_limited_attempt.json()["detail"]
+
+    admin_missing_actor = c.post(
+        f"/api/v1/provider-connections/{conn_id}/shares",
+        headers=_auth(tokens["admin"]),
+        json={"target_team_id": str(team_ids["a"])},
+    )
+    assert admin_missing_actor.status_code == 400
+    assert "X-Loom-Admin-Actor" in admin_missing_actor.json()["detail"]
+
+    admin_ok = c.post(
+        f"/api/v1/provider-connections/{conn_id}/shares",
+        headers={
+            **_auth(tokens["admin"]),
+            "X-Loom-Admin-Actor": "release-operator",
+        },
+        json={"target_team_id": str(team_ids["a"])},
+    )
+    assert admin_ok.status_code == 201, admin_ok.text
+
+
+def test_admin_unshare_revokes_target_team_visibility_and_validation(app_setup) -> None:
+    app, tokens, team_ids = app_setup
+    c = _client(app)
+    create = c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_b"]),
+        json={
+            "name": "temporary-share",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "k",
+        },
+    )
+    conn_id = create.json()["id"]
+    assert c.post(
+        f"/api/v1/provider-connections/{conn_id}/shares",
+        headers=_auth(tokens["team_b"]),
+        json={"target_team_id": str(team_ids["a"])},
+    ).status_code == 201
+
+    removed = c.delete(
+        f"/api/v1/provider-connections/{conn_id}/shares/{team_ids['a']}",
+        headers=_auth(tokens["team_b"]),
+    )
+    assert removed.status_code == 204
+
+    listed = c.get("/api/v1/provider-connections", headers=_auth(tokens["team_a"]))
+    assert listed.status_code == 200
+    assert listed.json()["items"] == []
+
+    async def _validate_rejected() -> None:
+        async with app.state.session_factory() as session:
+            with pytest.raises(Exception) as excinfo:
+                await validate_provider_connection(
+                    session,
+                    UUID(conn_id),
+                    team_id=team_ids["a"],
+                )
+            assert excinfo.value.status_code == 404
+
+    import anyio
+
+    anyio.run(_validate_rejected)
 
 
 # ──────────────────────────────────────────────────────────────────────

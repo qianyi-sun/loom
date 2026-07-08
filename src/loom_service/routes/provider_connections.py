@@ -29,13 +29,19 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import AuthContext
-from loom.db.schema import ProviderConnection, ProviderModelCache, TeamQuota
+from loom.db.schema import (
+    ProviderConnection,
+    ProviderConnectionShare,
+    ProviderModelCache,
+    Team,
+    TeamQuota,
+)
 from loom.security.secret_store import (
     InvalidRefError,
     LocalEncryptedSecretStore,
@@ -146,6 +152,21 @@ class ProviderConnectionListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     items: list[ProviderConnectionResponse]
+
+
+class ProviderConnectionShareRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_team_id: UUID
+
+
+class ProviderConnectionShareResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_connection_id: UUID
+    provider_name: str
+    provider_owner_team_id: UUID
+    target_team_id: UUID
 
 
 class ProviderConnectionTestResponse(BaseModel):
@@ -363,8 +384,8 @@ async def _get_active_connection(
 ) -> ProviderConnection:
     """Lookup a connection visible to `ctx`. Returns 404 for nonexistent
     / soft-deleted / cross-team rows alike — same response so existence
-    can't be probed across team boundaries. Admins (ctx.team_id is None)
-    see any team's rows; team tokens see only their own."""
+    can't be probed across team boundaries. Admins see any team's rows; team
+    tokens see their own rows plus rows explicitly shared with their team."""
     row = (await session.execute(
         select(ProviderConnection)
         .where(
@@ -374,7 +395,17 @@ async def _get_active_connection(
     )).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="provider_connection not found")
-    if not is_admin(ctx) and row.team_id != ctx.team_id:
+    if is_admin(ctx) or row.team_id == ctx.team_id:
+        return row
+    shared = None
+    if ctx.team_id is not None:
+        shared = (await session.execute(
+            select(ProviderConnectionShare.provider_connection_id).where(
+                ProviderConnectionShare.provider_connection_id == row.id,
+                ProviderConnectionShare.target_team_id == ctx.team_id,
+            ),
+        )).scalar_one_or_none()
+    if shared is None:
         raise HTTPException(status_code=404, detail="provider_connection not found")
     return row
 
@@ -405,6 +436,28 @@ def _require_provider_management(ctx: AuthContext) -> None:
     """Gate provider credential/catalog mutations for all non-admin callers."""
     if not is_admin(ctx):
         require_scope(ctx, "providers:manage")
+
+
+def _require_provider_owner_or_admin(
+    ctx: AuthContext,
+    row: ProviderConnection,
+) -> None:
+    if is_admin(ctx):
+        return
+    if ctx.team_id != row.team_id:
+        raise HTTPException(status_code=404, detail="provider_connection not found")
+
+
+def _share_response(
+    row: ProviderConnection,
+    target_team_id: UUID,
+) -> ProviderConnectionShareResponse:
+    return ProviderConnectionShareResponse(
+        provider_connection_id=row.id,
+        provider_name=row.display_name,
+        provider_owner_team_id=row.team_id,
+        target_team_id=target_team_id,
+    )
 
 
 async def _team_allows_private(session: AsyncSession, team_id: UUID) -> bool:
@@ -582,16 +635,33 @@ async def list_connections(
     )
     # Admins see all teams' connections, or can explicitly scope the
     # listing when resolving an on-behalf-of submission. Team tokens
-    # only see their own rows and cannot probe another team's names.
+    # see their own rows plus rows explicitly shared with their team.
     if team_id is not None:
         if not is_admin(ctx) and team_id != ctx.team_id:
             raise HTTPException(
                 status_code=403,
                 detail="cross-team provider listing requires admin scope",
             )
-        stmt = stmt.where(ProviderConnection.team_id == team_id)
+        shared_ids = select(ProviderConnectionShare.provider_connection_id).where(
+            ProviderConnectionShare.target_team_id == team_id,
+        )
+        stmt = stmt.where(
+            or_(
+                ProviderConnection.team_id == team_id,
+                ProviderConnection.id.in_(shared_ids),
+            ),
+        )
     elif not is_admin(ctx):
-        stmt = stmt.where(ProviderConnection.team_id == ctx.team_id)
+        assert ctx.team_id is not None
+        shared_ids = select(ProviderConnectionShare.provider_connection_id).where(
+            ProviderConnectionShare.target_team_id == ctx.team_id,
+        )
+        stmt = stmt.where(
+            or_(
+                ProviderConnection.team_id == ctx.team_id,
+                ProviderConnection.id.in_(shared_ids),
+            ),
+        )
     stmt = stmt.order_by(ProviderConnection.created_at.desc())
 
     rows = (await session.execute(stmt)).scalars().all()
@@ -610,6 +680,109 @@ async def get_connection(
     session, ctx = sc
     row = await _get_active_connection(session, connection_id, ctx)
     return _row_to_response(row)
+
+
+@router.post(
+    "/provider-connections/{connection_id}/shares",
+    response_model=ProviderConnectionShareResponse,
+    status_code=201,
+)
+async def share_connection(
+    request: Request,
+    connection_id: UUID,
+    payload: ProviderConnectionShareRequest,
+    sc: SessionAndCtx,
+    x_loom_admin_actor: str | None = Header(default=None),
+) -> ProviderConnectionShareResponse:
+    session, ctx = sc
+    _require_provider_management(ctx)
+    row = await _get_active_connection(session, connection_id, ctx)
+    _require_provider_owner_or_admin(ctx, row)
+
+    if payload.target_team_id == row.team_id:
+        raise HTTPException(
+            status_code=400,
+            detail="provider owner team already has access",
+        )
+    target_team_exists = (await session.execute(
+        select(Team.id).where(Team.id == payload.target_team_id),
+    )).scalar_one_or_none()
+    if target_team_exists is None:
+        raise HTTPException(status_code=404, detail="target team not found")
+
+    actor = _provider_audit_actor(ctx, x_loom_admin_actor)
+    stmt = pg_insert(ProviderConnectionShare).values(
+        provider_connection_id=row.id,
+        target_team_id=payload.target_team_id,
+        created_by_actor=actor,
+        created_by_user_id=ctx.user_id,
+    )
+    stmt = stmt.on_conflict_do_nothing(
+        index_elements=[
+            ProviderConnectionShare.provider_connection_id,
+            ProviderConnectionShare.target_team_id,
+        ],
+    )
+    await session.execute(stmt)
+    await write_admin_audit_event(
+        session,
+        actor=actor,
+        action="provider_connection.share",
+        target_type="provider_connection",
+        target_id=str(row.id),
+        request=request,
+        metadata={
+            "provider_connection_id": str(row.id),
+            "provider_name": row.display_name,
+            "provider_owner_team_id": str(row.team_id),
+            "target_team_id": str(payload.target_team_id),
+            "action": "share",
+        },
+    )
+    await session.commit()
+    return _share_response(row, payload.target_team_id)
+
+
+@router.delete(
+    "/provider-connections/{connection_id}/shares/{target_team_id}",
+    status_code=204,
+)
+async def unshare_connection(
+    request: Request,
+    connection_id: UUID,
+    target_team_id: UUID,
+    sc: SessionAndCtx,
+    x_loom_admin_actor: str | None = Header(default=None),
+) -> None:
+    session, ctx = sc
+    _require_provider_management(ctx)
+    row = await _get_active_connection(session, connection_id, ctx)
+    _require_provider_owner_or_admin(ctx, row)
+
+    actor = _provider_audit_actor(ctx, x_loom_admin_actor)
+    await session.execute(
+        delete(ProviderConnectionShare).where(
+            ProviderConnectionShare.provider_connection_id == row.id,
+            ProviderConnectionShare.target_team_id == target_team_id,
+        ),
+    )
+    await write_admin_audit_event(
+        session,
+        actor=actor,
+        action="provider_connection.unshare",
+        target_type="provider_connection",
+        target_id=str(row.id),
+        request=request,
+        metadata={
+            "provider_connection_id": str(row.id),
+            "provider_name": row.display_name,
+            "provider_owner_team_id": str(row.team_id),
+            "target_team_id": str(target_team_id),
+            "action": "unshare",
+        },
+    )
+    await session.commit()
+    return None
 
 
 @router.patch(
@@ -631,6 +804,7 @@ async def update_connection(
             detail="PATCH requires team-scoped or admin token",
         )
     row = await _get_active_connection(session, connection_id, ctx)
+    _require_provider_owner_or_admin(ctx, row)
     changed_fields: list[str] = []
 
     # base_url change → re-derive upstream_host + re-resolve IPs.
@@ -744,6 +918,7 @@ async def test_connection(
     session, ctx = sc
     _require_provider_management(ctx)
     row = await _get_active_connection(session, connection_id, ctx)
+    _require_provider_owner_or_admin(ctx, row)
 
     policy_error = await _refresh_current_egress_or_error(session, row)
     if policy_error is not None:
@@ -835,6 +1010,7 @@ async def create_manual_model(
     session, ctx = sc
     _require_provider_management(ctx)
     row = await _get_active_connection(session, connection_id, ctx)
+    _require_provider_owner_or_admin(ctx, row)
     now = datetime.now(UTC)
     capabilities = dict(payload.capabilities)
     capabilities["source"] = "manual"
@@ -902,6 +1078,7 @@ async def refresh_models(
     session, ctx = sc
     _require_provider_management(ctx)
     row = await _get_active_connection(session, connection_id, ctx)
+    _require_provider_owner_or_admin(ctx, row)
 
     policy_error = await _refresh_current_egress_or_error(session, row)
     if policy_error is not None:
@@ -1057,6 +1234,7 @@ async def preflight_cached_model(
     session, ctx = sc
     _require_provider_management(ctx)
     row = await _get_active_connection(session, connection_id, ctx)
+    _require_provider_owner_or_admin(ctx, row)
     cache_row = await _get_cached_model_or_404(session, row.id, model_id)
 
     policy_error = await _refresh_current_egress_or_error(session, row)
@@ -1118,6 +1296,7 @@ async def hide_model(
     session, ctx = sc
     _require_provider_management(ctx)
     row = await _get_active_connection(session, connection_id, ctx)
+    _require_provider_owner_or_admin(ctx, row)
     cache_row = await _get_cached_model_or_404(session, row.id, model_id)
     cache_row.visible = False
     cache_row.hidden_reason = "operator-hidden"
@@ -1145,6 +1324,7 @@ async def unhide_model(
     session, ctx = sc
     _require_provider_management(ctx)
     row = await _get_active_connection(session, connection_id, ctx)
+    _require_provider_owner_or_admin(ctx, row)
     cache_row = await _get_cached_model_or_404(session, row.id, model_id)
     if cache_row.upstream_present or _is_manual_model(cache_row):
         cache_row.visible = True
@@ -1178,6 +1358,7 @@ async def delete_connection(
     session, ctx = sc
     _require_provider_management(ctx)
     row = await _get_active_connection(session, connection_id, ctx)
+    _require_provider_owner_or_admin(ctx, row)
     await session.execute(
         update(ProviderConnection)
         .where(ProviderConnection.id == row.id)

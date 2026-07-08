@@ -2865,6 +2865,48 @@ loom providers update together-prod \
   --rate-card-provider together
 ```
 
+### Sharing a provider connection across teams
+
+Use provider sharing when one existing connection should serve another team
+without cloning the encrypted secret or asking an operator to read/paste the
+raw API key:
+
+```bash
+loom providers share yibuapi-prod --target-team-id "$TARGET_TEAM_ID"
+loom providers unshare yibuapi-prod --target-team-id "$TARGET_TEAM_ID"
+```
+
+Owner-team tokens with `providers:manage` can share their own provider. A
+singleton admin credential must include `--admin-actor` so the service can
+write an audit event. The target team can list, select, and submit with the
+shared provider, but cannot rotate, update, test, refresh/hide/unhide models,
+or delete the owner connection. Audit metadata records the provider id/name,
+owner team, target team, actor, and action only; do not include provider API
+keys or secret refs in issue comments or evidence.
+
+For shared-provider spend review, filter usage by the single
+`provider_connection_id` and break down by consuming team or user:
+
+```bash
+loom eval usage \
+  --start YYYY-MM-DD \
+  --end YYYY-MM-DD \
+  --provider-connection-id "$PROVIDER_CONNECTION_ID" \
+  --breakdown-by team
+
+loom eval usage \
+  --start YYYY-MM-DD \
+  --end YYYY-MM-DD \
+  --provider-connection-id "$PROVIDER_CONNECTION_ID" \
+  --team-id "$TARGET_TEAM_ID" \
+  --breakdown-by user
+```
+
+Admin-on-behalf submissions keep the represented team/user on the batch for
+product ownership, but usage and billing attribution follows the real acting
+admin/user when that identity is available. Singleton break-glass admin calls
+fall back to the required audit actor string.
+
 Run the `--pricing-source rate-card` update only after the Gateway's
 `rate_cards` table has matching `(provider, model)` entries. Facade calls
 with a missing entry still record tokens and use
