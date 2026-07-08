@@ -31,12 +31,6 @@ def apply_advance_decision(
     ``retry``  keeps ``current_index``, bumps ``attempt_count``, re-queues.
     ``skip``   bumps ``current_index``; if past the sequence end -> ``done``.
     ``abort``  terminates the family.
-
-    Note (#672 PR-1): the CP finalize hook applies a shortcut when the
-    resolved adapter's name is ``noop`` - it bumps ``current_index`` and
-    transitions directly to ``pending``/``done`` in-line so the framework
-    works end-to-end without the orchestrator service. PR-2 removes the
-    shortcut once the real orchestrator lands.
     """
     match decision:
         case AdvanceDecision.ADVANCE:

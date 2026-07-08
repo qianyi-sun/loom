@@ -157,10 +157,11 @@ async def _finalize_family(
     """Evaluate the family's advance predicate + persist the new state.
 
     Called from ``patch_state`` after a trial transitions to a terminal
-    state (succeeded/failed/cancelled). No-op when the trial isn't part
-    of a family-run batch. PR-1 also applies a ``noop`` shortcut so the
-    framework works end-to-end without the orchestrator service; PR-2
-    removes that shortcut once the real orchestrator lands.
+    state (succeeded/failed/cancelled). No-op when the trial isn't
+    part of a family-run batch. On ADVANCE, transitions the family to
+    ``adapting`` - the ``loom_family_orchestrator`` service picks it
+    up and runs the adapter, uniformly across all adapter names
+    including ``noop``.
     """
     row = (
         await session.execute(
@@ -194,23 +195,15 @@ async def _finalize_family(
     )
     next_state = apply_advance_decision(family_shim, decision)
 
-    # PR-1 noop shortcut: when the adapter is the framework-shipped
-    # ``noop`` (identity) adapter, there is no orchestrator to bump the
-    # index after ADVANCE. Apply the bump in-line so PR-1 lands
-    # self-contained. TODO(PR-2): remove this branch once the
-    # orchestrator service handles the ``adapting`` -> ``pending``
-    # transition.
+    # #672 PR-2: no more per-adapter shortcut. Every ADVANCE decision
+    # transitions to 'adapting'; the loom_family_orchestrator service
+    # runs the adapter (including noop) and applies the bump to
+    # pending/done. This keeps the finalize path uniform across
+    # adapters and prevents the CP finalize hook from silently
+    # short-circuiting orchestrator observability.
     persist_state = next_state.state
     persist_index = next_state.current_index
     persist_attempt = next_state.attempt_count
-    if decision == AdvanceDecision.ADVANCE and spec.adapter.name == "noop":
-        bumped_index = family_shim.current_index + 1
-        if bumped_index >= len(family_shim.task_sequence):
-            persist_state = "done"
-        else:
-            persist_state = "pending"
-        persist_index = bumped_index
-        persist_attempt = 0
 
     await session.execute(
         _FAMILY_FINALIZE_UPDATE_SQL,

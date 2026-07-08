@@ -1,18 +1,18 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: loom-control-plane
+  name: loom-family-orchestrator
 spec:
-  replicas: 2
+  replicas: 1
   selector:
-    matchLabels: { app: loom-control-plane }
+    matchLabels: { app: loom-family-orchestrator }
   template:
     metadata:
-      labels: { app: loom-control-plane }
+      labels: { app: loom-family-orchestrator }
     spec:
       containers:
-        - name: control-plane
-          image: loom-control-plane:0.7
+        - name: family-orchestrator
+          image: loom-family-orchestrator:0.7
           env:
             - name: LOOM_CP_BIND_HOST
               value: "0.0.0.0"
@@ -151,26 +151,11 @@ spec:
             - name: loom-admin-secret
               mountPath: /var/run/loom/secrets/admin
               readOnly: true
-          ports:
-            - containerPort: 8080
-          readinessProbe:
-            httpGet: { path: /healthz, port: 8080 }
-            periodSeconds: 5
           resources:
-            requests: { cpu: 200m, memory: 256Mi }
-            limits: { cpu: 1, memory: 1Gi }
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
       volumes:
         - name: loom-admin-secret
           secret:
             secretName: loom-admin-secret
             defaultMode: 0400
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: loom-control-plane
-spec:
-  selector: { app: loom-control-plane }
-  ports:
-    - port: 8080
-      targetPort: 8080

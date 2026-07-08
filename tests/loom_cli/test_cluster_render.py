@@ -30,6 +30,7 @@ _GOLDEN_FILES = (
     "pgbouncer.yaml",
     "minio.yaml",
     "control-plane.yaml",
+    "family-orchestrator.yaml",
     "loom-service.yaml",
     "llm-gateway.yaml",
     "worker.yaml",
@@ -289,7 +290,7 @@ def test_load_config_path_none_returns_defaults() -> None:
 
 
 def test_render_produces_valid_yaml_with_expected_kinds() -> None:
-    """Smoke: every document parses, the set covers the 7 Deployments
+    """Smoke: every document parses, the set covers the 8 Deployments
     + 1 DaemonSet + 10 Services + 3 StatefulSets + 1 Ingress
     + 1 PodDisruptionBudget + 11 NetworkPolicies + 2 ConfigMaps
     (Grafana dashboards + egress-proxy bootstrap) expected by
@@ -302,8 +303,9 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     # StatefulSet with volumeClaimTemplates so multi-node RWO PVCs
     # don't strand replicas).
     assert kinds.count("StatefulSet") == 3
-    # cp, service, gateway, web + egress-xds + egress-proxy + pgbouncer
-    assert kinds.count("Deployment") == 7
+    # cp, service, gateway, web + egress-xds + egress-proxy +
+    # pgbouncer + family-orchestrator (#672)
+    assert kinds.count("Deployment") == 8
     assert kinds.count("DaemonSet") == 1  # gateway-router
     # postgres + pgbouncer + minio + cp + gateway + service + web
     # + ingress + egress + worker (headless, StatefulSet peer DNS) = 10
