@@ -258,6 +258,13 @@ loom eval trial download <trial-id> --kind artifact \
   --output artifact.bin
 ```
 
+Trial downloads always go through the service API. The service proxies stored
+trajectory and ATIF objects when present; for newer Postgres-backed trials it
+can also reconstruct trajectory JSONL and ATIF from durable `trial_events`
+without exposing MinIO/S3 URLs. If ATIF projection metadata is missing, the
+ATIF download returns a structured conflict while trajectory download remains
+available for debugging.
+
 For a self-hosted inference service, register the final reachable `/v1` URL the
 same way:
 
