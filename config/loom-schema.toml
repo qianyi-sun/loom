@@ -1142,3 +1142,8 @@ fields      = { enabled = true, default_pool_size = 25, max_client_conn = 500, m
 python_type = "table"
 description = "Postgres runtime tuning knobs. max_connections bumped from Postgres default 100 to leave room for pgbouncer backend pool (default_pool_size × pgbouncer.replicas) + LISTEN watchers + Alembic + admin slack."
 fields      = { max_connections = 150 }
+
+[render_config.topology]
+python_type = "table"
+description = "Cluster topology (#637). `multi_node=true` opts into HA-shaped resources: Postgres replicas via CloudNativePG, distributed MinIO, cross-node anti-affinity, PDBs with minAvailable≥1, and Longhorn-backed persistent storage. `multi_node=false` renders single-pod stateful services with hostPath storage — the current pilot-cluster shape. Currently schema-default `false`; production will flip to `true` once the k3s multi-node cluster is provisioned. Profile overrides pin explicit values so a schema-default flip cannot silently break existing deployments. Storage backend `host_path` matches today; `longhorn` is the target for the multi-node production cluster; `nfs`/`csi` are unimplemented placeholders."
+fields      = { multi_node = false, storage_backend = "host_path", postgres_replicas = 1, minio_replicas = 1, min_available = 1, anti_affinity = "preferred" }

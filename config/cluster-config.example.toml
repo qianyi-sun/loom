@@ -85,6 +85,15 @@ worker = 3
 egress_xds = 0
 egress_proxy = 0
 pgbouncer = 2
+# Cluster topology (#637). `multi_node=true` opts into HA-shaped resources: Postgres replicas via CloudNativePG, distributed MinIO, cross-node anti-affinity, PDBs with minAvailable≥1, and Longhorn-backed persistent storage. `multi_node=false` renders single-pod stateful services with hostPath storage — the current pilot-cluster shape. Currently schema-default `false`; production will flip to `true` once the k3s multi-node cluster is provisioned. Profile overrides pin explicit values so a schema-default flip cannot silently break existing deployments. Storage backend `host_path` matches today; `longhorn` is the target for the multi-node production cluster; `nfs`/`csi` are unimplemented placeholders.
+
+[topology]
+multi_node = false
+storage_backend = "host_path"
+postgres_replicas = 1
+minio_replicas = 1
+min_available = 1
+anti_affinity = "preferred"
 # Production worker Deployment capacity knobs. One worker pod handles max_concurrent trials; replicas.worker multiplies total in-cluster trial slots.
 
 [worker_capacity]

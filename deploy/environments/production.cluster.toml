@@ -15,3 +15,14 @@ artifacts_bucket = "loom-prod-artifacts"
 # avoid double-scheduling the OLDLAB host Docker daemon. See #383.
 [k8s_worker]
 enabled = false
+
+# Production defaults to multi-node HA (#637). Postgres via
+# CloudNativePG (3 replicas), MinIO in distributed mode (4 pods),
+# Longhorn-backed persistent storage. Requires the k3s multi-node
+# cluster to be provisioned before deploying.
+[topology]
+multi_node = true
+storage_backend = "longhorn"
+postgres_replicas = 3
+minio_replicas = 4
+anti_affinity = "required"
