@@ -398,3 +398,14 @@ def test_gb10_smoke_catalog_fixture_is_publish_local_ready(
     assert raw["task"]["id"] == "loom-smoke/gb10-oracle-hello-world"
     assert raw["verifier"]["name"] == "pytest"
     assert raw["environment"]["cpu_arch"] in {"any", "arm64"}
+
+    dockerfile = (
+        root
+        / "tasks"
+        / "gb10-oracle-hello-world"
+        / "environment"
+        / "Dockerfile"
+    )
+    dockerfile_text = dockerfile.read_text(encoding="utf-8")
+    assert "pytest-jsonreport" not in dockerfile_text
+    assert "pytest-json-report" in dockerfile_text
