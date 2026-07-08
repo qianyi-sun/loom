@@ -302,6 +302,15 @@ def _ssh_base(args: argparse.Namespace) -> list[str]:
     return cmd
 
 
+def _node_agent_start_command(service: str) -> str:
+    quoted_service = shlex.quote(service)
+    return (
+        f"systemctl --user start --no-block {quoted_service} && "
+        f"systemctl --user show {quoted_service} "
+        "-p Type -p Result -p ExecMainStatus -p ActiveState -p SubState --no-pager"
+    )
+
+
 def start_node_agents(
     args: argparse.Namespace,
     *,
@@ -316,18 +325,14 @@ def start_node_agents(
             (run_dir / f"{host}.log").write_text(
                 "dry_run=true\n"
                 + "command="
-                + shlex.join([*_ssh_base(args), host, f"systemctl --user start {args.node_agent_service}"])
+                + shlex.join([*_ssh_base(args), host, _node_agent_start_command(args.node_agent_service)])
                 + "\n",
                 encoding="utf-8",
             )
         return PhaseResult(phase=f"node-agent-{phase}", ok=True, artifact=str(run_dir))
 
     processes: list[tuple[str, Path, subprocess.Popen[str]]] = []
-    remote = (
-        f"systemctl --user start {shlex.quote(args.node_agent_service)} && "
-        f"systemctl --user show {shlex.quote(args.node_agent_service)} "
-        "-p Type -p Result -p ExecMainStatus -p ActiveState -p SubState --no-pager"
-    )
+    remote = _node_agent_start_command(args.node_agent_service)
     for host in hosts:
         log_path = run_dir / f"{host}.log"
         handle = log_path.open("w", encoding="utf-8")
@@ -344,8 +349,22 @@ def start_node_agents(
 
     failed: list[str] = []
     for host, log_path, proc in processes:
-        rc = proc.wait()
+        timed_out = False
+        try:
+            rc: int | str = proc.wait(timeout=args.node_agent_command_timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            rc = "timeout"
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
         with log_path.open("a", encoding="utf-8") as handle:
+            if timed_out:
+                handle.write(
+                    f"\ntimed_out_after_seconds={args.node_agent_command_timeout}\n",
+                )
             handle.write(f"\nexit_code={rc}\nfinished_at={_iso(_now())}\n")
         if rc != 0:
             failed.append(host)
@@ -583,6 +602,15 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--ssh-config", required=True, type=Path)
     parser.add_argument("--ssh-identity", type=Path)
     parser.add_argument("--ssh-connect-timeout", type=int, default=10)
+    parser.add_argument(
+        "--node-agent-command-timeout",
+        type=float,
+        default=60.0,
+        help=(
+            "Per-host timeout for queueing node-agent systemd starts over SSH. "
+            "Control-plane status polling proves convergence after the start is queued."
+        ),
+    )
     parser.add_argument("--node-agent-service", default=DEFAULT_NODE_AGENT_SERVICE)
     parser.add_argument("--evidence-dir", required=True, type=Path)
     parser.add_argument("--lease-ttl", dest="lease_ttl_seconds", type=_parse_ttl, default=7200)

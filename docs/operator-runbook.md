@@ -843,6 +843,12 @@ knob you need.
    evidence, and adjusts the safe worker idle-exit env to the requested lease
    TTL while validation is active.
 
+   The runner queues node-agent starts with `systemctl --no-block` and relies on
+   the Control Plane status gate to prove fresh worker convergence or release.
+   Per-host SSH start calls are bounded by `--node-agent-command-timeout`, so a
+   long-running `Type=oneshot` node-agent cannot block summary writing or
+   restartable validation resume.
+
    A production promotion manifest must record the latest staging lease status in
    `checks.prod_staging_isolation.staging_capacity`. The release gate requires
    `staging_slots=0`, no active lease, and `new_staging_claims_allowed=false` unless

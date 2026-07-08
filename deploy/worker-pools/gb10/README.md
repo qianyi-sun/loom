@@ -512,6 +512,10 @@ fresh `worker_id`, `worker_status=active`, `worker_fresh=true`, and
 mismatches from `loom admin gb10-workers status` while a fresh compose worker
 registers and emits its first heartbeats; persistent stale worker evidence after
 that retry window is a host-runtime failure to repair, not a gate to bypass.
+Durable rollout and validation runners queue node-agent starts with
+`systemctl --user start --no-block` and bound the SSH start command. The CP
+status gate, not a synchronous `systemctl start` return, is the convergence
+contract for release/resume automation.
 Protected rollout also disables the older `loom-gb10-worker.service` before
 starting node-agent. That legacy service is a direct Docker Compose path and
 must not remain enabled, because user-manager/default-target starts during SSH

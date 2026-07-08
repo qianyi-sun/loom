@@ -247,6 +247,11 @@ all staging workers. In-flight tasks are still protected by the worker drain
 path; after a failed validation the default `auto` release intent switches to
 `draining` instead of stopping active work.
 
+The runner queues host-local node-agent starts with `systemctl --no-block` and
+uses the Control Plane status gate to prove convergence. A long-running
+`Type=oneshot` node-agent must not block summary writing or validation resume;
+per-host SSH start calls are bounded by `--node-agent-command-timeout`.
+
 ### 4. Prod-Pressure Status And Emergency Staging Drain
 
 Use `status` whenever production demand appears while a staging lease exists.

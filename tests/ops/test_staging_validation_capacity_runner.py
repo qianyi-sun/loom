@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
+from pathlib import Path
 
 import pytest
 from scripts.ops import staging_validation_capacity_runner as runner
@@ -159,3 +161,64 @@ def test_parse_ttl_suffixes() -> None:
     assert runner._parse_ttl("45m") == 2700
     with pytest.raises(argparse.ArgumentTypeError):
         runner._parse_ttl("forever")
+
+
+def _node_agent_args(tmp_path: Path, *, dry_run: bool = False) -> argparse.Namespace:
+    return argparse.Namespace(
+        dry_run=dry_run,
+        node_agent_command_timeout=0.01,
+        node_agent_service="loom-gb10-node-agent.service",
+        ssh_config=tmp_path / "ssh_config",
+        ssh_connect_timeout=10,
+        ssh_identity=None,
+    )
+
+
+def test_node_agent_start_uses_nonblocking_systemd_command(tmp_path: Path) -> None:
+    result = runner.start_node_agents(
+        _node_agent_args(tmp_path, dry_run=True),
+        hosts=("trt-gb10-1",),
+        phase="activate",
+        evidence_dir=tmp_path,
+    )
+
+    assert result.ok is True
+    log = next((Path(result.artifact or "")).glob("trt-gb10-1.log")).read_text()
+    assert "systemctl --user start --no-block loom-gb10-node-agent.service" in log
+
+
+def test_node_agent_start_times_out_per_host(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    created: list[HangingPopen] = []
+
+    class HangingPopen:
+        def __init__(self, cmd: list[str], **_: object) -> None:
+            self.cmd = cmd
+            self.killed = False
+            created.append(self)
+
+        def wait(self, timeout: float | None = None) -> int:
+            if timeout is None:
+                raise AssertionError("node-agent start must use a bounded wait timeout")
+            raise subprocess.TimeoutExpired(cmd=self.cmd, timeout=timeout)
+
+        def kill(self) -> None:
+            self.killed = True
+
+    monkeypatch.setattr(runner.subprocess, "Popen", HangingPopen)
+
+    result = runner.start_node_agents(
+        _node_agent_args(tmp_path),
+        hosts=("trt-gb10-8",),
+        phase="draining",
+        evidence_dir=tmp_path,
+    )
+
+    assert result.ok is False
+    assert result.detail == "node-agent failed on trt-gb10-8"
+    assert created and created[0].killed is True
+    log = next((Path(result.artifact or "")).glob("trt-gb10-8.log")).read_text()
+    assert "timed_out_after_seconds=0.01" in log
+    assert "exit_code=timeout" in log
