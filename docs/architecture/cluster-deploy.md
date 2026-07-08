@@ -435,9 +435,11 @@ when a later refresh does not return the id, which keeps self-hosted
 OpenAI-compatible endpoints usable when discovery is absent or noisy.
 Model discovery and entitlement are separate: `--refresh` only records
 advertised ids, while `--preflight MODEL` sends one minimal generation
-request and updates the nullable `last_preflight_*` fields. A known failed
-preflight warns in the SPA and blocks new batch creation for that exact
-provider/model pair; untested rows remain selectable.
+request and updates the nullable `last_preflight_*` fields. New batch creation
+requires the selected provider/model pair to exist in the connection's cached
+catalog. A known failed preflight warns in the SPA and blocks new batch
+creation for that exact provider/model pair; cached untested rows remain
+selectable.
 
 `GET /api/v1/models` returns a launch-safe catalog by default. It
 includes legacy rate-card tuples plus team-visible provider-connection

@@ -2661,7 +2661,7 @@ loom admin batches submit-on-behalf \
   --name-suffix opencode-yibuapi-smoke \
   --task-filter '{"task_ids":["source-useful-frontier-5003/shard003__software_development__buildsqliteissuetrackercli"]}' \
   --provider mz_tn_canada_qianyi \
-  --model glm5.1-thinking \
+  --model glm-5.1-thinking \
   --agent opencode \
   --n-per-task 1 \
   --backend docker \
@@ -3003,6 +3003,9 @@ Discovery and preflight are separate:
   `base_url` before sending a service-side request. If the current DNS/IP result
   violates the team egress policy, the operation is blocked before upstream
   contact; model preflight records `egress-policy-rejected`.
+- Batch creation rejects provider model ids that are absent from the connection's
+  cached model catalog. Run refresh, add the model manually, or choose a cached
+  model before submitting.
 - Untested rows remain selectable. Rows with a known failed preflight show a
   warning in New Batch, and `POST /api/v1/batches` rejects that
   provider/model pair until it passes preflight or the user chooses another
@@ -4064,11 +4067,11 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    HTTP response code. Exit code is 0 for valid, 1 for invalid.
 8. **Model discovery.** `loom providers models mz_tn_canada_qianyi --refresh`
    followed by `loom providers models mz_tn_canada_qianyi` returns a
-   non-empty catalog, including `glm5.1-thinking`. `curl /api/v1/models` from a
+   non-empty catalog, including `glm-5.1-thinking`. `curl /api/v1/models` from a
    user-owned API token shows the agent-capable view with provider namespace
    `yibuapi`.
 9. **Model preflight.** Run
-   `loom providers models mz_tn_canada_qianyi --preflight glm5.1-thinking`.
+   `loom providers models mz_tn_canada_qianyi --preflight glm-5.1-thinking`.
    The model row
    should show `preflight=valid`. A 401/403 should show `access-denied` without
    raw provider keys.
@@ -4115,7 +4118,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
      --name-suffix opencode-yibuapi-smoke \
      --task-filter '{"task_ids":["source-useful-frontier-5003/shard003__software_development__buildsqliteissuetrackercli"]}' \
      --provider mz_tn_canada_qianyi \
-     --model glm5.1-thinking \
+     --model glm-5.1-thinking \
      --agent opencode \
      --n-per-task 1 \
      --backend docker \
@@ -4544,7 +4547,7 @@ is missing. Do not close them from local tests alone.
       --team-b-token env:TEAM_B_TOKEN \
       --provider-connection-name mz_tn_canada_qianyi \
       --provider-model-provider yibuapi \
-      --provider-model-name glm5.1-thinking \
+      --provider-model-name glm-5.1-thinking \
       --batch-id "$TEAM_A_BATCH_ID" \
       --trial-id "$TEAM_A_TRIAL_ID" \
       --safe-artifact-key "$SAFE_ARTIFACT_KEY" \

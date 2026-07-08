@@ -402,7 +402,7 @@ python scripts/staging_smoke_gate.py \
   --team-b-token env:TEAM_B_TOKEN \
   --provider-connection-name mz_tn_canada_qianyi \
   --provider-model-provider yibuapi \
-  --provider-model-name glm5.1-thinking \
+  --provider-model-name glm-5.1-thinking \
   --batch-id "$TEAM_A_BATCH_ID" \
   --trial-id "$TEAM_A_TRIAL_ID" \
   --safe-artifact-key "$SAFE_ARTIFACT_KEY" \

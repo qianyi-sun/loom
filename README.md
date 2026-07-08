@@ -187,7 +187,7 @@ and exits — no DB, no team, no provider registration.
 |---|---|
 | Team | Owns provider credentials, user-owned API tokens, submitted runs, cost attribution, and members. |
 | Provider connection | Team-scoped inference API configuration. It can point to a hosted provider or a user-hosted endpoint. |
-| Model | Concrete model id selected from a provider connection. Refresh discovers models; preflight proves one model can generate. |
+| Model | Concrete model id selected from a provider connection's cached model catalog. Refresh discovers models; preflight proves one cached model can generate. |
 | Agent | Harness that drives a model through a task, such as `litellm`, coding-agent CLIs, or `oracle`. |
 | Benchmark | Adapter that publishes tasks into Loom's catalog. |
 | Batch | A submitted run plan: task filter plus one or more agent/model combinations. |

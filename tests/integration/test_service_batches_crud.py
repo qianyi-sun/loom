@@ -26,6 +26,7 @@ from loom.db.schema import (
     Benchmark,
     LlmCall,
     ProviderConnection,
+    ProviderModelCache,
     RateCard,
     Task,
     Team,
@@ -577,6 +578,14 @@ def _insert_budget_provider(
                 rate_card_provider=rate_card_provider,
                 created_by="test:budget",
                 status="valid",
+            )
+        )
+        conn.execute(
+            insert(ProviderModelCache).values(
+                provider_connection_id=provider_connection_id,
+                model_id="glm-5.1-thinking",
+                upstream_present=True,
+                visible=True,
             )
         )
     sync_engine.dispose()
