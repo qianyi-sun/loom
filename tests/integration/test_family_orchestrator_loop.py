@@ -109,6 +109,38 @@ async def _seed_minimal_batch(
         })
 
 
+async def _cleanup_minimal_batch(
+    session_factory: Any,
+    *,
+    team_id: UUID,
+    batch_id: UUID,
+    task_ids: list[str],
+) -> None:
+    async with session_factory() as session:
+        await session.execute(
+            text("DELETE FROM batch_family_state WHERE batch_id = :bid"),
+            {"bid": batch_id},
+        )
+        await session.execute(
+            text("DELETE FROM trials WHERE batch_id = :bid"),
+            {"bid": batch_id},
+        )
+        await session.execute(
+            text("DELETE FROM batches WHERE id = :bid"),
+            {"bid": batch_id},
+        )
+        for task_id in task_ids:
+            await session.execute(
+                text("DELETE FROM tasks WHERE id = :tid"),
+                {"tid": task_id},
+            )
+        await session.execute(
+            text("DELETE FROM teams WHERE id = :tid"),
+            {"tid": team_id},
+        )
+        await session.commit()
+
+
 @pytest.mark.asyncio
 async def test_orchestrator_iteration_transitions_adapting_to_pending(
     postgres_url: str,
@@ -123,70 +155,78 @@ async def test_orchestrator_iteration_transitions_adapting_to_pending(
     task_ids = [f"{family_key}/task1", f"{family_key}/task2"]
     trial_ids = [uuid4(), uuid4()]
 
-    async with session_factory() as session:
-        await _seed_minimal_batch(
-            session,
+    try:
+        async with session_factory() as session:
+            await _seed_minimal_batch(
+                session,
+                team_id=team_id,
+                batch_id=batch_id,
+                task_ids=task_ids,
+                family_key=family_key,
+                trial_ids=trial_ids,
+            )
+            await session.execute(text("""
+                INSERT INTO batch_family_state (
+                    batch_id, family_key, task_sequence, current_index,
+                    state, state_uri, attempt_count
+                )
+                VALUES (
+                    :bid, :fam, :seq, 0, 'adapting', 'uri://v1', 0
+                )
+            """), {
+                "bid": batch_id,
+                "fam": family_key,
+                "seq": task_ids,
+            })
+            await session.commit()
+
+        adapter = _CapturingAdapter(new_uri="uri://v2")
+        # Swap resolve_plugin so the "noop"-named adapter yields our capture,
+        # and any state backend request returns a stub.
+        from loom.family_run import registry as reg
+
+        def _fake_resolve(group: str, ref: PluginRef) -> Any:
+            if group == "loom.family.adapters":
+                return adapter
+            return reg.resolve_plugin(group, ref)
+
+        monkeypatch.setattr(
+            "loom_family_orchestrator.main_loop.resolve_plugin", _fake_resolve,
+        )
+
+        ctx = OrchestratorContext(
+            session_factory=session_factory,
+            gateway=object(),
+            object_store=None,
+            artifacts_bucket="artifacts",
+            state_backend_factory=(lambda spec: _NullBackend()),
+            settings_default_model="anthropic/claude-sonnet-4-6",
+            adapter_call_timeout_sec=10.0,
+            poll_sec=0.01,
+        )
+
+        picked = await run_once(ctx)
+        assert picked is True
+        assert adapter.calls, "adapter.evolve was not called"
+
+        async with session_factory() as session:
+            row = (await session.execute(text("""
+                SELECT state, current_index, state_uri, last_error
+                  FROM batch_family_state
+                 WHERE batch_id = :bid AND family_key = :fam
+            """), {"bid": batch_id, "fam": family_key})).mappings().one()
+            assert row["state"] == "pending"
+            assert row["current_index"] == 1
+            assert row["state_uri"] == "uri://v2"
+            assert row["last_error"] is None
+    finally:
+        await _cleanup_minimal_batch(
+            session_factory,
             team_id=team_id,
             batch_id=batch_id,
             task_ids=task_ids,
-            family_key=family_key,
-            trial_ids=trial_ids,
         )
-        await session.execute(text("""
-            INSERT INTO batch_family_state (
-                batch_id, family_key, task_sequence, current_index,
-                state, state_uri, attempt_count
-            )
-            VALUES (
-                :bid, :fam, :seq, 0, 'adapting', 'uri://v1', 0
-            )
-        """), {
-            "bid": batch_id,
-            "fam": family_key,
-            "seq": task_ids,
-        })
-        await session.commit()
-
-    adapter = _CapturingAdapter(new_uri="uri://v2")
-    # Swap resolve_plugin so the "noop"-named adapter yields our capture,
-    # and any state backend request returns a stub.
-    from loom.family_run import registry as reg
-
-    def _fake_resolve(group: str, ref: PluginRef) -> Any:
-        if group == "loom.family.adapters":
-            return adapter
-        return reg.resolve_plugin(group, ref)
-
-    monkeypatch.setattr(
-        "loom_family_orchestrator.main_loop.resolve_plugin", _fake_resolve,
-    )
-
-    ctx = OrchestratorContext(
-        session_factory=session_factory,
-        gateway=object(),
-        object_store=None,
-        artifacts_bucket="artifacts",
-        state_backend_factory=(lambda spec: _NullBackend()),
-        settings_default_model="anthropic/claude-sonnet-4-6",
-        adapter_call_timeout_sec=10.0,
-        poll_sec=0.01,
-    )
-
-    picked = await run_once(ctx)
-    assert picked is True
-    assert adapter.calls, "adapter.evolve was not called"
-
-    async with session_factory() as session:
-        row = (await session.execute(text("""
-            SELECT state, current_index, state_uri, last_error
-              FROM batch_family_state
-             WHERE batch_id = :bid AND family_key = :fam
-        """), {"bid": batch_id, "fam": family_key})).mappings().one()
-        assert row["state"] == "pending"
-        assert row["current_index"] == 1
-        assert row["state_uri"] == "uri://v2"
-        assert row["last_error"] is None
-    await engine.dispose()
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -203,56 +243,64 @@ async def test_orchestrator_end_of_sequence_transitions_to_done(
     task_ids = [f"{family_key}/task1", f"{family_key}/task2"]
     trial_ids = [uuid4(), uuid4()]
 
-    async with session_factory() as session:
-        await _seed_minimal_batch(
-            session,
+    try:
+        async with session_factory() as session:
+            await _seed_minimal_batch(
+                session,
+                team_id=team_id,
+                batch_id=batch_id,
+                task_ids=task_ids,
+                family_key=family_key,
+                trial_ids=trial_ids,
+            )
+            await session.execute(text("""
+                INSERT INTO batch_family_state (
+                    batch_id, family_key, task_sequence, current_index,
+                    state, state_uri, attempt_count
+                )
+                VALUES (
+                    :bid, :fam, :seq, 1, 'adapting', 'uri://v1', 0
+                )
+            """), {
+                "bid": batch_id,
+                "fam": family_key,
+                "seq": task_ids,
+            })
+            await session.commit()
+
+        adapter = _CapturingAdapter(new_uri="uri://final")
+        from loom.family_run import registry as reg
+        monkeypatch.setattr(
+            "loom_family_orchestrator.main_loop.resolve_plugin",
+            lambda group, ref: adapter if group == "loom.family.adapters" else reg.resolve_plugin(group, ref),
+        )
+
+        ctx = OrchestratorContext(
+            session_factory=session_factory,
+            gateway=object(),
+            object_store=None,
+            artifacts_bucket="artifacts",
+            state_backend_factory=(lambda spec: _NullBackend()),
+            settings_default_model="anthropic/claude-sonnet-4-6",
+            adapter_call_timeout_sec=10.0,
+            poll_sec=0.01,
+        )
+
+        picked = await run_once(ctx)
+        assert picked is True
+
+        async with session_factory() as session:
+            row = (await session.execute(text("""
+                SELECT state, current_index FROM batch_family_state
+                 WHERE batch_id = :bid AND family_key = :fam
+            """), {"bid": batch_id, "fam": family_key})).mappings().one()
+            assert row["state"] == "done"
+            assert row["current_index"] == 2
+    finally:
+        await _cleanup_minimal_batch(
+            session_factory,
             team_id=team_id,
             batch_id=batch_id,
             task_ids=task_ids,
-            family_key=family_key,
-            trial_ids=trial_ids,
         )
-        await session.execute(text("""
-            INSERT INTO batch_family_state (
-                batch_id, family_key, task_sequence, current_index,
-                state, state_uri, attempt_count
-            )
-            VALUES (
-                :bid, :fam, :seq, 1, 'adapting', 'uri://v1', 0
-            )
-        """), {
-            "bid": batch_id,
-            "fam": family_key,
-            "seq": task_ids,
-        })
-        await session.commit()
-
-    adapter = _CapturingAdapter(new_uri="uri://final")
-    from loom.family_run import registry as reg
-    monkeypatch.setattr(
-        "loom_family_orchestrator.main_loop.resolve_plugin",
-        lambda group, ref: adapter if group == "loom.family.adapters" else reg.resolve_plugin(group, ref),
-    )
-
-    ctx = OrchestratorContext(
-        session_factory=session_factory,
-        gateway=object(),
-        object_store=None,
-        artifacts_bucket="artifacts",
-        state_backend_factory=(lambda spec: _NullBackend()),
-        settings_default_model="anthropic/claude-sonnet-4-6",
-        adapter_call_timeout_sec=10.0,
-        poll_sec=0.01,
-    )
-
-    picked = await run_once(ctx)
-    assert picked is True
-
-    async with session_factory() as session:
-        row = (await session.execute(text("""
-            SELECT state, current_index FROM batch_family_state
-             WHERE batch_id = :bid AND family_key = :fam
-        """), {"bid": batch_id, "fam": family_key})).mappings().one()
-        assert row["state"] == "done"
-        assert row["current_index"] == 2
-    await engine.dispose()
+        await engine.dispose()
