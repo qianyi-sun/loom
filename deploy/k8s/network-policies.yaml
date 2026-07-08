@@ -66,6 +66,9 @@ spec:
     - podSelector:
         matchLabels:
           app: loom-llm-gateway
+    - podSelector:
+        matchLabels:
+          app: loom-minio
     ports:
     - port: 9000
       protocol: TCP
@@ -81,6 +84,13 @@ spec:
     - port: 53
       protocol: UDP
     - port: 53
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-minio
+    ports:
+    - port: 9000
       protocol: TCP
 ---
 apiVersion: networking.k8s.io/v1
