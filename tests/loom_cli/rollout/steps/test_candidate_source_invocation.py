@@ -47,6 +47,14 @@ def _prepare_candidate_worktree(ev: EvidenceDirectory) -> Path:
     return worktree
 
 
+@pytest.fixture(autouse=True)
+def _control_plane_readiness_is_out_of_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._wait_for_control_plane",
+        lambda *_args, **_kwargs: None,
+    )
+
+
 def _assert_candidate_invocation(
     call: dict[str, Any],
     *,
