@@ -5309,3 +5309,39 @@ migrations (`batches.family_run_spec`, `trials.family_key`,
 `batch_family_state`), scheduler predicate, CP finalize hook, batch-
 submit seeder, and worker pre-start helper. The orchestrator service
 and `skill_patcher_llm` adapter ship in PR-2.
+
+### Orchestrator gateway credentials (#697)
+
+`skill_patcher_llm` (the reference LLM-driven adapter) evolves the
+shared-skill directory between trials by calling the LLM gateway.
+Because the orchestrator runs as a service account — not a real trial
+— it cannot mint a step-JWT, so it uses a team-scoped token instead.
+Provision two secrets on the target namespace (both keys live on
+`loom-secrets`):
+
+```
+kubectl -n <ns> patch secret loom-secrets --type=merge -p '{
+  "data": {
+    "family-orchestrator-team-id": "<b64-team-UUID>",
+    "family-orchestrator-token": "<b64-loom_team_...-token>"
+  }
+}'
+kubectl -n <ns> rollout restart deploy/loom-family-orchestrator
+```
+
+Both keys are marked `optional: true` on the Deployment so the
+orchestrator boots without them — it just logs
+`family_orchestrator_gateway_unconfigured` and refuses to call
+`SkillPatcherLLMAdapter.evolve` (non-LLM adapters still advance).
+
+Reuse an existing team with `llm:call` scope (e.g. the batch-runner
+service team) or create a dedicated `family-orchestrator` team via
+`loom admin teams create --name family-orchestrator` + `loom tokens
+issue --team family-orchestrator --scopes llm:call,batches:write`.
+
+For BYO provider routing (the operator wants the evolver to call
+their own upstream, not the platform default), the adapter forwards
+`provider_connection_id` from `family_run.adapter.params` to the
+gateway (both as `loom.provider_connection_id` in the body and the
+`x-loom-provider-connection-id` header). Callers set this on the
+batch's resolved family_run spec — no cluster-side change needed.
