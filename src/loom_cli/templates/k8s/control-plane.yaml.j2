@@ -13,7 +13,7 @@ spec:
     spec:
       containers:
         - name: control-plane
-          image: loom-control-plane:{{ image_tag }}
+          image: {% if container_registry %}{{ container_registry }}/{% endif %}loom-control-plane:{{ image_tag }}
           {{ env_macros.env_block("control-plane", schema) | indent(10) }}
             - name: LOOM_CP_ADMIN_SECRET_FILE
               value: "/var/run/loom/secrets/admin/secrets.toml"

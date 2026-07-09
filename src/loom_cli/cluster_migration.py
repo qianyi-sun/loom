@@ -54,6 +54,7 @@ def render_migration_manifest(
     image_tag: str,
     namespace: str = "loom",
     job_suffix: str = _DEFAULT_JOB_SUFFIX,
+    container_registry: str = "",
 ) -> str:
     """Render the migration Job manifest to a YAML string.
 
@@ -65,6 +66,10 @@ def render_migration_manifest(
             re-run against the same image tag doesn't collide with the
             previous Job (which sticks around for ``ttlSecondsAfterFinished``).
             Common choice: a UTC timestamp like ``20260702t172540z``.
+        container_registry: Optional registry prefix (no trailing slash)
+            applied to the loom-control-plane image reference. Empty
+            (default) keeps the historical unprefixed shape. Mirrors
+            ``ClusterConfig.container_registry``.
 
     Returns:
         YAML text ready to pipe to ``kubectl apply -f -``.
@@ -91,4 +96,5 @@ def render_migration_manifest(
         image_tag=_normalise_dns_component(image_tag),
         namespace=namespace,
         job_suffix=_normalise_dns_component(job_suffix),
+        container_registry=container_registry,
     )

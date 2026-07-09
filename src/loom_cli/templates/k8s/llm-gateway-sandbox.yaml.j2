@@ -40,7 +40,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: sandbox-gateway
-          image: loom-llm-gateway-sandbox:{{ image_tag }}
+          image: {% if container_registry %}{{ container_registry }}/{% endif %}loom-llm-gateway-sandbox:{{ image_tag }}
           args:
             - "--listen-addr=:8443"
             # The Go proxy resolves cluster DNS directly — no need

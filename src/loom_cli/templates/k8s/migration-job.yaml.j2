@@ -39,7 +39,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: migrate
-          image: loom-control-plane:{{ image_tag }}
+          image: {% if container_registry %}{{ container_registry }}/{% endif %}loom-control-plane:{{ image_tag }}
           imagePullPolicy: IfNotPresent
           command:
             - alembic

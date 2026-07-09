@@ -1287,3 +1287,84 @@ def test_cluster_audit_exempts_sandbox_hostport() -> None:
     from loom_cli.cluster_boundary import _HOSTPORT_ALLOWLIST
 
     assert "loom-llm-gateway-sandbox" in _HOSTPORT_ALLOWLIST
+
+
+# ──────────────────────────────────────────────────────────────────────
+# container_registry (#TBD) — optional prefix for locally-built loom-*
+# images so multi-node clusters can pull from an in-cluster registry
+# without a per-node side-channel `ctr images import` step.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_container_registry_default_leaves_images_unprefixed() -> None:
+    """The default (empty container_registry) must render the historical
+    unprefixed `loom-worker:tag` shape that kind's load-images path
+    depends on. Changing the default would silently break every kind
+    smoke test that relies on `kind load docker-image loom-worker:0.7`."""
+    docs = _load_docs(render_manifests(_DEFAULT_CFG))
+    workloads = [d for d in docs if d.get("kind") in ("Deployment", "StatefulSet")]
+    loom_images = [
+        d["spec"]["template"]["spec"]["containers"][0]["image"]
+        for d in workloads
+        if d["spec"]["template"]["spec"]["containers"][0]["image"].startswith("loom-")
+    ]
+    assert loom_images, "expected at least one loom-* image in default render"
+    for img in loom_images:
+        assert not img.startswith("192.168."), f"bare loom-* image expected, got {img!r}"
+        assert "/" not in img.split(":")[0], (
+            f"unprefixed image expected, got {img!r}"
+        )
+
+
+def test_container_registry_prefixes_all_locally_built_images() -> None:
+    """Setting container_registry prepends the registry host to every
+    locally-built loom-* image. Third-party images (minio, envoy, socat,
+    pgbouncer, exporter) stay unchanged — those come from public
+    registries and shouldn't be routed through the internal one."""
+    registry = "192.168.50.13:5000"
+    cfg = _default_cfg(container_registry=registry)
+    docs = _load_docs(render_manifests(cfg))
+    workloads = [d for d in docs if d.get("kind") in ("Deployment", "StatefulSet")]
+    prefixed = 0
+    for d in workloads:
+        img = d["spec"]["template"]["spec"]["containers"][0]["image"]
+        name = d["metadata"]["name"]
+        # Third-party images (postgres, minio, pgbouncer, envoy, socat)
+        # stay on their upstream registries — the prefix only applies to
+        # locally-built loom-* images. Detect "locally built" as an
+        # image whose repository begins with `loom-` when the registry
+        # is empty.
+        if img.startswith("loom-") or img.startswith(f"{registry}/loom-"):
+            assert img.startswith(f"{registry}/loom-"), (
+                f"{name}: expected registry prefix on locally-built image, got {img!r}"
+            )
+            prefixed += 1
+    assert prefixed >= 3, "expected at least three loom-* workloads to be prefixed"
+
+
+def test_container_registry_prefixes_migration_job() -> None:
+    """render-migration honors --container-registry too so operators
+    running Alembic upgrades on multi-node clusters don't have to
+    hand-edit the Job image reference."""
+    from loom_cli.cluster_migration import render_migration_manifest
+
+    manifest = render_migration_manifest(
+        image_tag="staging-abc123",
+        namespace="loom-staging",
+        job_suffix="test",
+        container_registry="192.168.50.13:5000",
+    )
+    doc = yaml.safe_load(manifest)
+    img = doc["spec"]["template"]["spec"]["containers"][0]["image"]
+    assert img == "192.168.50.13:5000/loom-control-plane:staging-abc123"
+
+
+def test_container_registry_load_from_toml(tmp_path: Path) -> None:
+    """cluster.toml load path accepts container_registry as a top-level
+    string field."""
+    from loom_cli.cluster_config import load_cluster_config
+
+    cfg_path = tmp_path / "cluster.toml"
+    cfg_path.write_text('container_registry = "192.168.50.13:5000"\n')
+    cfg = load_cluster_config(cfg_path)
+    assert cfg.container_registry == "192.168.50.13:5000"

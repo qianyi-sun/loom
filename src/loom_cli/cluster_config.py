@@ -128,6 +128,14 @@ if TYPE_CHECKING:
     @dataclass(frozen=True)
     class ClusterConfig:
         image_tag: str = "0.7"
+        # Optional container registry prefix applied to every locally-built
+        # `loom-*` image reference in the rendered manifest. Empty (default)
+        # keeps the historical shape — kind's in-cluster load-images path
+        # depends on unprefixed names. For multi-node k3s / production, set
+        # to the registry host+port (no trailing slash) and point each
+        # node's `/etc/rancher/k3s/registries.yaml` at the same endpoint so
+        # containerd can pull without side-channel image imports.
+        container_registry: str = ""
         runtime_environment: str = "production"
         env_state_profile: str = ""
         gb10_pool: _Gb10PoolConfig = field(default_factory=_Gb10PoolConfig)
