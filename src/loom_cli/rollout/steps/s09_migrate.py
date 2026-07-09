@@ -64,8 +64,11 @@ def _stateful_substrate_resource_id(
     pv_names = {
         f"{namespace}-postgres-data",
         f"{namespace}-minio-data",
+        f"{namespace}-worker-trajectories-data",
     }
     if kind == "PersistentVolume" and name in pv_names:
+        return f"{kind}/{name}"
+    if kind == "PersistentVolumeClaim" and name == "loom-worker-trajectories":
         return f"{kind}/{name}"
     if kind == "StatefulSet" and name in {"loom-postgres", "loom-minio"}:
         return f"{kind}/{name}"
@@ -80,13 +83,14 @@ def _write_stateful_substrate_manifest(
     *,
     namespace: str,
 ) -> list[str]:
-    """Write the DB/object-store substrate needed before migration.
+    """Write the storage and DB/object-store substrate needed before migration.
 
     A reconstructed kind cluster has namespace/secrets after step 03 but no
     standing Services or StatefulSets. Migration needs Postgres alive before
     full cluster-up starts application pods. Environment-state runs later,
     after cluster-up has recreated the Control Plane service in missing-kind
-    recovery.
+    recovery. Static worker trajectory storage is included when rendered so
+    reruns do not leave protected preflight with a partial critical PVC set.
     """
     try:
         docs = list(yaml.safe_load_all(rendered_manifest.read_text(encoding="utf-8")))
