@@ -27,6 +27,9 @@ spec:
     - podSelector:
         matchLabels:
           app: loom-pgbouncer
+    - podSelector:
+        matchLabels:
+          app: loom-family-orchestrator
     ports:
     - port: 5432
       protocol: TCP
@@ -69,6 +72,9 @@ spec:
     - podSelector:
         matchLabels:
           app: loom-minio
+    - podSelector:
+        matchLabels:
+          app: loom-family-orchestrator
     ports:
     - port: 9000
       protocol: TCP
@@ -165,6 +171,9 @@ spec:
     - podSelector:
         matchLabels:
           app: loom-service
+    - podSelector:
+        matchLabels:
+          app: loom-family-orchestrator
     ports:
     - port: 9100
       protocol: TCP
@@ -486,6 +495,9 @@ spec:
     - podSelector:
         matchLabels:
           app: loom-service
+    - podSelector:
+        matchLabels:
+          app: loom-family-orchestrator
     ports:
     - port: 6432
       protocol: TCP
@@ -511,6 +523,68 @@ spec:
           app: loom-pgbouncer
     ports:
     - port: 6432
+      protocol: TCP
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loom-family-orchestrator
+spec:
+  podSelector:
+    matchLabels:
+      app: loom-family-orchestrator
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector: {}
+    ports:
+    - port: 9090
+      protocol: TCP
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-postgres
+    - podSelector:
+        matchLabels:
+          cnpg.io/cluster: loom-postgres
+    ports:
+    - port: 5432
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-pgbouncer
+    ports:
+    - port: 6432
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-minio
+    ports:
+    - port: 9000
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-llm-gateway
+    ports:
+    - port: 9100
       protocol: TCP
   - to:
     - namespaceSelector:
