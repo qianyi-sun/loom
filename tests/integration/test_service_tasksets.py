@@ -8,6 +8,20 @@ from sqlalchemy import create_engine, text
 
 from tests.integration.taskset_fixtures import _manifest_bytes
 
+_BUNDLE_UPLOAD_MANIFEST = b"""
+apiVersion: loom.taskset/v1
+kind: UserTaskSet
+metadata:
+  name: bundle-api
+  display_name: Bundle API
+intents:
+  - evaluation
+source:
+  type: bundle-upload
+  locator: bundle.tar.gz
+  subset: tasks
+"""
+
 
 @pytest.mark.asyncio
 async def test_post_taskset_happy_path(tasksets_setup) -> None:
@@ -95,6 +109,47 @@ async def test_evaluation_without_verifier_returns_400(tasksets_setup) -> None:
         )
     assert resp.status_code == 400
     assert resp.json()["detail"] == "verifier_required_for_evaluation"
+
+
+@pytest.mark.asyncio
+async def test_bundle_upload_requires_bundle_part(tasksets_setup) -> None:
+    app, tokens, _teams = tasksets_setup
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/v1/tasksets",
+            headers={"Authorization": f"Bearer {tokens['team_a']}"},
+            files={
+                "manifest": (
+                    "manifest.yaml",
+                    _BUNDLE_UPLOAD_MANIFEST,
+                    "application/x-yaml",
+                ),
+            },
+        )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == (
+        "bundle file required when manifest source is bundle-upload"
+    )
+
+
+@pytest.mark.asyncio
+async def test_row_source_rejects_bundle_part(tasksets_setup) -> None:
+    app, tokens, _teams = tasksets_setup
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/v1/tasksets",
+            headers={"Authorization": f"Bearer {tokens['team_a']}"},
+            files={
+                "manifest": ("manifest.yaml", _manifest_bytes(), "application/x-yaml"),
+                "bundle": ("bundle.tar.gz", b"unused", "application/gzip"),
+            },
+        )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == (
+        "bundle file is only allowed when manifest source is bundle-upload"
+    )
 
 
 @pytest.mark.asyncio

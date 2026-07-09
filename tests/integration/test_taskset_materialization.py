@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import AsyncIterator
+import io
+import tarfile
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -149,6 +151,73 @@ verifier:
   type: script
   file: environment/Dockerfile
 """
+
+_MANIFEST_BUNDLE_UPLOAD = """
+apiVersion: loom.taskset/v1
+kind: UserTaskSet
+metadata:
+  name: bundle-upload-tasks
+  display_name: Bundle Upload Tasks
+intents:
+  - evaluation
+source:
+  type: bundle-upload
+  locator: bundle.tar.gz
+  subset: tasks
+limits:
+  max_instances: 1
+"""
+
+
+def _add_tar_file(tar: tarfile.TarFile, name: str, body: bytes) -> None:
+    info = tarfile.TarInfo(name)
+    info.size = len(body)
+    info.mode = 0o644
+    tar.addfile(info, io.BytesIO(body))
+
+
+def _bundle_tar_bytes() -> bytes:
+    task_toml = b"""
+version = "1"
+
+[metadata]
+id = "source-useful-frontier-5003/alpha"
+name = "Alpha Task"
+
+[environment]
+dockerfile = "environment/Dockerfile"
+
+[verifier]
+name = "script"
+
+[verifier.args]
+script_path = "verifier/check.sh"
+"""
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w:gz") as tar:
+        _add_tar_file(tar, "tasks/alpha/task.toml", task_toml)
+        _add_tar_file(tar, "tasks/alpha/instruction.md", b"Create answer.txt\n")
+        _add_tar_file(tar, "tasks/alpha/data/input.txt", b"per-task payload\n")
+        _add_tar_file(tar, "tasks/alpha/environment/Dockerfile", b"FROM alpine:3.20\n")
+        _add_tar_file(tar, "tasks/alpha/verifier/check.sh", b"#!/bin/sh\nexit 0\n")
+    return out.getvalue()
+
+
+def _unsafe_symlink_bundle_tar_bytes() -> bytes:
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w:gz") as tar:
+        info = tarfile.TarInfo("tasks/alpha/escape")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "../outside"
+        tar.addfile(info)
+    return out.getvalue()
+
+
+def _unsafe_traversal_bundle_tar_bytes() -> bytes:
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w:gz") as tar:
+        _add_tar_file(tar, "../outside.txt", b"escape\n")
+    return out.getvalue()
 
 
 @pytest.fixture(scope="module")
@@ -474,3 +543,101 @@ async def test_materialization_rejects_incompatible_task_bundle(
         )).scalar_one()
     assert rows == []
     assert job.failure_reason == "bundle_compatibility_error"
+
+
+@pytest.mark.asyncio
+async def test_materialization_e2e_bundle_upload_preserves_per_task_assets(
+    materialization_setup,
+) -> None:
+    app, tokens, teams = materialization_setup
+    settings = app.state.settings
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        post = await client.post(
+            "/api/v1/tasksets",
+            headers={"Authorization": f"Bearer {tokens['team_a']}"},
+            files={
+                "manifest": (
+                    "manifest.yaml",
+                    _MANIFEST_BUNDLE_UPLOAD.encode(),
+                    "application/x-yaml",
+                ),
+                "bundle": ("bundle.tar.gz", _bundle_tar_bytes(), "application/gzip"),
+            },
+        )
+        assert post.status_code == 202, post.text
+        task_set_id = post.json()["task_set_id"]
+        assert task_set_id == f"ts/{teams['team_a']}/bundle-upload-tasks"
+        await _run_materializer_once(app)
+        get_resp = await client.get(
+            f"/api/v1/tasksets/{task_set_id}",
+            headers={"Authorization": f"Bearer {tokens['team_a']}"},
+        )
+    assert get_resp.status_code == 200
+    body = get_resp.json()
+    assert body["status"] == "ready"
+    assert body["task_count"] == 1
+    assert body["evaluation_ready"] is True
+    assert body["materialization_job_state"] == "succeeded"
+
+    async with app.state.session_factory() as session:
+        row = (await session.execute(
+            select(Task).where(Task.task_set_id == task_set_id),
+        )).scalar_one()
+
+    assert row.id == (
+        f"{task_set_id}/tasks/source-useful-frontier-5003_alpha"
+    )
+    assert row.config["task"]["id"] == "source-useful-frontier-5003/alpha"
+    assert row.config["environment"]["os"] == "linux"
+    assert row.config["verifier"]["args"]["script_path"] == "verifier/check.sh"
+    data_key = (
+        f"tasksets/user/{teams['team_a']}/bundle-upload-tasks/"
+        "tasks/source-useful-frontier-5003_alpha/data/input.txt"
+    )
+    payload = app.state.minio_client.get_object(
+        Bucket=settings.artifacts_bucket,
+        Key=data_key,
+    )["Body"].read()
+    assert payload == b"per-task payload\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("archive_factory", [
+    _unsafe_symlink_bundle_tar_bytes,
+    _unsafe_traversal_bundle_tar_bytes,
+])
+async def test_materialization_rejects_bundle_upload_unsafe_archives(
+    materialization_setup,
+    archive_factory: Callable[[], bytes],
+) -> None:
+    app, tokens, _teams = materialization_setup
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        post = await client.post(
+            "/api/v1/tasksets",
+            headers={"Authorization": f"Bearer {tokens['team_a']}"},
+            files={
+                "manifest": (
+                    "manifest.yaml",
+                    _MANIFEST_BUNDLE_UPLOAD.encode(),
+                    "application/x-yaml",
+                ),
+                "bundle": (
+                    "bundle.tar.gz",
+                    archive_factory(),
+                    "application/gzip",
+                ),
+            },
+        )
+        assert post.status_code == 202, post.text
+        task_set_id = post.json()["task_set_id"]
+        await _run_materializer_once(app)
+        get_resp = await client.get(
+            f"/api/v1/tasksets/{task_set_id}",
+            headers={"Authorization": f"Bearer {tokens['team_a']}"},
+        )
+    body = get_resp.json()
+    assert body["status"] == "failed"
+    assert body["status_reason"] == "bundle_extract_unsafe"
+    assert body["materialization_job_state"] == "failed"

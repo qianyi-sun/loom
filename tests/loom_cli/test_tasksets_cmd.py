@@ -35,6 +35,20 @@ task_template:
     - artifacts: [out.txt]
 """
 
+_BUNDLE_UPLOAD_MANIFEST_YAML = """
+apiVersion: loom.taskset/v1
+kind: UserTaskSet
+metadata:
+  name: bundle-tasks
+  display_name: Bundle Tasks
+intents:
+  - evaluation
+source:
+  type: bundle-upload
+  locator: bundle.tar.gz
+  subset: tasks
+"""
+
 _SUBMIT_RESPONSE = {
     "task_set_id": "ts/team-uuid/sample-tasks",
     "status": "materializing",
@@ -136,6 +150,18 @@ def _write_bundle(tmp_path: Path, *, with_verifier: bool = False) -> Path:
     return bundle
 
 
+def _write_bundle_upload(tmp_path: Path, *, include_bundle: bool = True) -> Path:
+    bundle = tmp_path / "bundle-upload"
+    bundle.mkdir()
+    (bundle / "manifest.yaml").write_text(
+        _BUNDLE_UPLOAD_MANIFEST_YAML,
+        encoding="utf-8",
+    )
+    if include_bundle:
+        (bundle / "bundle.tar.gz").write_bytes(b"not a real tar for cli")
+    return bundle
+
+
 def test_submit_sends_manifest_only(mock_server: MockServer, tmp_path: Path) -> None:
     bundle = _write_bundle(tmp_path)
     mock_server.canned[("POST", "/api/v1/tasksets")] = httpx.Response(
@@ -160,6 +186,26 @@ def test_submit_sends_verifier_when_present(
     rc = main(["tasksets", "submit", str(bundle)])
     assert rc == 0
     assert b"verifier/test.py" in mock_server.requests[0].content
+
+
+def test_submit_sends_bundle_upload_part(
+    mock_server: MockServer, tmp_path: Path,
+) -> None:
+    bundle = _write_bundle_upload(tmp_path)
+    mock_server.canned[("POST", "/api/v1/tasksets")] = httpx.Response(
+        202, json={**_SUBMIT_RESPONSE, "task_set_id": "ts/team-uuid/bundle-tasks"},
+    )
+    rc = main(["tasksets", "submit", str(bundle)])
+    assert rc == 0
+    content = mock_server.requests[0].content
+    assert b'name="bundle"' in content
+    assert b"bundle.tar.gz" in content
+
+
+def test_submit_bundle_upload_requires_bundle_file(tmp_path: Path) -> None:
+    bundle = _write_bundle_upload(tmp_path, include_bundle=False)
+    rc = main(["tasksets", "submit", str(bundle)])
+    assert rc == 1
 
 
 def test_submit_missing_manifest_exits_1(tmp_path: Path) -> None:

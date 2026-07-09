@@ -379,7 +379,8 @@ validation. The on-disk `task.toml` uploaded to S3 is preserved verbatim so
 audit and repro remain intact; the row's `config` JSONB carries the
 Loom-`TaskConfig` form so the worker validates when it fetches the bundle.
 
-Mapping (see `src/loom_cli/terminal_bench_normalize.py`):
+Mapping (see `src/loom/terminal_bench_normalize.py`; the old
+`src/loom_cli/terminal_bench_normalize.py` path is a compatibility import):
 
 | Terminal-Bench field                     | Loom target                                  |
 |------------------------------------------|----------------------------------------------|

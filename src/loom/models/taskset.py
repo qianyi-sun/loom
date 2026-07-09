@@ -9,9 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 _API_VERSION = "loom.taskset/v1"
 _KIND = "UserTaskSet"
-_SOURCE_TYPES = frozenset({"hf", "git", "https", "jsonl-inline"})
+_SOURCE_TYPES = frozenset({"hf", "git", "https", "jsonl-inline", "bundle-upload"})
 _INTENTS = frozenset({"trajectory_generation", "evaluation"})
-_VERIFIER_TYPES = frozenset({"pytest", "script", "exact-match", "regex", "llm-judge"})
+_VERIFIER_TYPES = frozenset({"pytest", "script"})
 _SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$")
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 
@@ -26,6 +26,17 @@ def validate_bundle_relative_path(path: str) -> str:
     if any(part == ".." for part in parts):
         raise ValueError("bundle file path must not contain traversal segments")
     return path
+
+
+def validate_bundle_archive_path(path: str) -> str:
+    """Reject unsafe or unsupported uploaded TaskSet archive paths."""
+    value = validate_bundle_relative_path(path)
+    normalized = value.replace("\\", "/")
+    if normalized.endswith("/") or normalized in {".", ".."}:
+        raise ValueError("bundle archive path must name a file")
+    if not normalized.endswith((".tar", ".tar.gz", ".tgz")):
+        raise ValueError("bundle archive must be .tar, .tar.gz, or .tgz")
+    return value
 
 
 def bundle_object_key(*, prefix: str, relative_path: str) -> str:
@@ -44,7 +55,7 @@ class TaskSetMetadata(BaseModel):
 class TaskSetSource(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    type: Literal["hf", "git", "https", "jsonl-inline"]
+    type: Literal["hf", "git", "https", "jsonl-inline", "bundle-upload"]
     locator: str = Field(min_length=1)
     revision: str | None = None
     subset: str | None = None
@@ -54,7 +65,7 @@ class TaskSetSource(BaseModel):
 class TaskSetVerifier(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    type: Literal["pytest", "script", "exact-match", "regex", "llm-judge"]
+    type: Literal["pytest", "script"]
     file: str = Field(min_length=1)
 
     @field_validator("file")
@@ -94,8 +105,8 @@ class UserTaskSetManifest(BaseModel):
     metadata: TaskSetMetadata
     intents: list[Literal["trajectory_generation", "evaluation"]] | None = None
     source: TaskSetSource
-    instance_mapping: dict[str, str]
-    task_template: dict[str, Any]
+    instance_mapping: dict[str, str] = Field(default_factory=dict)
+    task_template: dict[str, Any] = Field(default_factory=dict)
     verifier: TaskSetVerifier | None = None
     transform: TaskSetTransform | None = None
     limits: TaskSetLimits | None = None
@@ -118,7 +129,20 @@ class UserTaskSetManifest(BaseModel):
             raise ValueError(f"unsupported intents: {sorted(unknown)}")
         if len(intents) != len(set(intents)):
             raise ValueError("duplicate intents are not allowed")
-        if "evaluation" in intents and self.verifier is None:
+        if self.source.type == "bundle-upload":
+            validate_bundle_archive_path(self.source.locator)
+            if self.transform is not None:
+                raise ValueError("transform_unsupported_for_bundle_upload")
+        elif not self.instance_mapping:
+            raise ValueError("instance_mapping_required")
+        elif not self.task_template:
+            raise ValueError("task_template_required")
+
+        if (
+            "evaluation" in intents
+            and self.verifier is None
+            and self.source.type != "bundle-upload"
+        ):
             raise ValueError("verifier_required_for_evaluation")
         return self
 
@@ -139,5 +163,6 @@ __all__ = [
     "UserTaskSetManifest",
     "bundle_object_key",
     "task_set_id_for",
+    "validate_bundle_archive_path",
     "validate_bundle_relative_path",
 ]
