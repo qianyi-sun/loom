@@ -86,6 +86,17 @@ def test_sha256_of_dir_differs_on_content_change(tmp_path: Path) -> None:
     assert h1 != h2
 
 
+def test_sha256_of_dir_includes_task_dotfiles(tmp_path: Path) -> None:
+    (tmp_path / "task.toml").write_text("[task]\nid='t'\n")
+    (tmp_path / ".loom-heredoc-run-1.sh").write_text("echo one\n")
+    h1 = sha256_of_dir(tmp_path)
+
+    (tmp_path / ".loom-heredoc-run-1.sh").write_text("echo two\n")
+    h2 = sha256_of_dir(tmp_path)
+
+    assert h1 != h2
+
+
 def test_download_files_from_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

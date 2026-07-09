@@ -50,6 +50,11 @@ lives at the upstream repo root (not in the bundle), as
 under test — the agent reads those copied skills at runtime and the score
 reflects skill quality. The adapter materializes the chosen
 `skills/<skill_method>/<family>/` into each converted bundle before checksum.
+The checksum covers every real file in the converted bundle, including
+dotfiles such as `.gitignore` or generated `.loom-heredoc-run-*.sh` scripts,
+because upstream repository copies may rely on those bytes at build or
+runtime. Do not exclude broad dotfile patterns from the publish/register hash
+contract.
 `skill_method` is sourced from the catalog entry's `params.skill_method`
 (default `human_authored`); additional methods (e.g.
 `b1-one-shot-claude-sonnet-4-6`) are added as sibling catalog rows sharing
