@@ -19,6 +19,15 @@ def test_web_dev_container_uses_lockfile_stable_bootstrap() -> None:
     assert "npm install" not in command_line
 
 
+def test_web_image_runtime_files_are_readable_by_unprivileged_nginx() -> None:
+    """The nginx entrypoint invokes scripts with `sh`, which requires read permission."""
+    dockerfile = (REPO_ROOT / "deploy" / "Dockerfile.web").read_text(encoding="utf-8")
+
+    assert "chmod 755 /docker-entrypoint.d/40-loom-frontend-config.sh" in dockerfile
+    assert "chmod 644 /etc/nginx/conf.d/default.conf" in dockerfile
+    assert "chmod +x /docker-entrypoint.d/40-loom-frontend-config.sh" not in dockerfile
+
+
 def test_loom_service_dev_container_uses_internal_minio_endpoint() -> None:
     """Downloads are service-proxied, so dev does not need public MinIO URLs."""
     compose = REPO_ROOT / "deploy" / "docker-compose.dev.yml"
