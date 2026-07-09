@@ -1,226 +1,268 @@
 # Loom
 
-Loom is a team platform for evaluating agents and LLM-powered systems on
-benchmark tasks. Researchers use it to launch many trials, watch progress,
-inspect failures, compare model/agent choices, and download reproducible
-artifacts.
+Loom is a team platform for running model and agent evaluations. It lets
+researchers submit batches, monitor trials, inspect failures, download
+trajectories and artifacts, and audit provider usage without operating the
+worker fleet directly.
 
-The important product boundary is simple:
+The current product boundary is:
 
-- **Loom runs the evaluation platform.** It owns teams, auth, benchmark
-  catalogs, job scheduling, sandbox execution, trajectories, metrics, and the
-  web/CLI surfaces.
-- **Users bring the inference API.** A team can connect a hosted provider such
-  as OpenAI, Anthropic, Google, Together, or Fireworks, or expose its own
-  OpenAI-compatible inference service from a GPU cluster.
-- **v1.0 does not host model inference.** The public/platform deployment does
-  not run vLLM or serve checkpoints for users. Any vLLM, Ollama, llama.cpp,
-  LM Studio, or hosted API endpoint is operated by the user/team and registered
-  as a provider connection.
+- **Loom runs the evaluation platform.** It owns users, teams, provider
+  connections, task catalogs, TaskSets, scheduling, sandbox execution,
+  trajectories, metrics, artifacts, usage accounting, and the web/CLI/API
+  surfaces.
+- **Users bring inference.** A team connects a hosted API such as OpenAI,
+  Anthropic, Google, Together, Fireworks, YibuAPI, or any OpenAI-compatible
+  endpoint, including a user-operated vLLM/Ollama/llama.cpp/LM Studio service.
+- **v1.0 does not host model checkpoints for users.** The platform routes model
+  calls through the Loom LLM Gateway, but model serving capacity remains owned
+  by the provider or user team.
 
-Staging/dev route: [https://yylx.world/dev](https://yylx.world/dev)
+Current shared staging route: [https://yylx.world/dev](https://yylx.world/dev)
 
-## What Loom Does
+Planned first production route: [https://yylx.world/prod](https://yylx.world/prod)
 
-Loom turns a model/agent evaluation into a tracked run:
+The `/prod` route is the target for the first `main`-based production release.
+Until the v1.0.0 release gates are complete, use `/dev` for shared staging
+validation and do not treat `/prod` as the production-ready entrypoint.
 
-1. A user picks a **provider/model**, **agent**, **benchmark**, and task subset
-   from the web app or CLI.
-2. Loom creates a batch and fans it out into trials.
+## Current Release Posture
+
+v1.0.0 is the first formal production release promoted from `dev` to `main`.
+It is not another staging smoke run. The active release work is proving that a
+normal scoped user can submit, monitor, debug, and download results through the
+public web/CLI/API surfaces without database access, SSH access, operator-only
+artifact links, or raw secret handling.
+
+The current staging baseline has already proven the user-brought TaskSet path:
+users can upload their own task bundles, submit runs, produce trajectories,
+observe gateway call evidence, run task-specific verification, and download
+artifacts through user-facing surfaces. Treat that as platform E2E evidence for
+private TaskSets, not as a broad official benchmark score-alignment claim.
+
+Before first prod, the remaining release gates are centered on:
+
+- production/staging environment isolation;
+- `/prod` and `/dev` frontend route plus API-base separation;
+- prod-first worker capacity behavior, including temporary staging leases and
+  staging drain under production pressure;
+- operator-free user E2E on the v1.0 native benchmark lanes;
+- provider sharing, audit, usage, and on-behalf visibility semantics;
+- rollout restartability and stale-running-state handling.
+
+## v1.0 Scope
+
+First-prod native benchmark support is intentionally narrow:
+
+| Surface | v1.0 commitment |
+|---|---|
+| Native benchmark: Terminal-Bench 2.0 | Supported through `terminal-bench-2` tasks and compatible agents. |
+| Native benchmark: SkillLearnBench | Supported through `skilllearnbench` tasks, catalog provisioning, and artifact-preserving validation. |
+| User-brought TaskSets | Supported as team-owned task collections that can be submitted, materialized, run, monitored, and downloaded through TaskSet APIs and CLI. |
+| Provider-backed model calls | Supported through team-owned or shared provider connections and the LLM Gateway. |
+| Usage/cost audit | Supported through gateway call rows, token accounting, rate-card diagnostics, and usage APIs. |
+
+Other benchmark adapters and local examples may exist in the repository, but
+they are not first-prod support commitments unless a v1.0 release gate names
+them explicitly. Official score parity for broader benchmark suites, full-scale
+stress coverage, self-service runtime serving, mixed OLDLAB/GB10 coverage, and
+expanded user surfaces are v1.1+ work.
+
+## Product Flow
+
+Every service-mode run follows the same shape:
+
+1. A user chooses a provider/model, agent, and task source from the web app or
+   CLI. The task source can be a native benchmark or an evaluation-ready
+   TaskSet.
+2. Loom creates a batch and expands it into trials.
 3. Workers claim trials, materialize task bundles, run agents in sandboxes, and
-   route all model calls through the Loom LLM Gateway.
+   route model calls through the LLM Gateway.
 4. Loom records event-sourced trajectories, ATIF metric documents, verifier
-   outcomes, token usage, and artifacts.
-5. Users inspect results in Monitor, Trial/Batch detail, Run Library, or through
-   the CLI/API.
+   outcomes, token usage, gateway diagnostics, and artifacts.
+5. Users inspect results in Monitor, trial/batch detail views, Run Library, the
+   CLI, or direct API calls, then download ATIF, trajectory, and artifact files
+   through the service API.
 
-Out of the box, Loom includes benchmark adapters across coding, math,
-reasoning, tool use, and agent tasks, plus CLI harnesses for common coding
-agents and an `oracle` baseline. The v1.0 supported set is listed below.
+The CLI-only `loom run` path still exists for local one-off experiments. It
+does not use team ownership, provider registration, Postgres, or MinIO/S3.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    User["Researcher\nBrowser or loom CLI"] --> Service["loom_service\npublic REST API + SPA"]
-    Service --> CP["Control Plane\nstate machine + DRF scheduling"]
-    CP --> Worker["Workers\nk8s or elastic Slurm"]
+    User["Researcher\nBrowser or loom CLI"] --> Service["loom_service\nREST API + SPA"]
+    Service --> Auth["Users / teams / API tokens"]
+    Service --> Provider["Provider connections\nowned or shared by teams"]
+    Service --> TaskSource["Native benchmarks\nand user TaskSets"]
+    Service --> CP["Control Plane\nbatches, trials, scheduling"]
+    CP --> Worker["Worker pool\nDocker, k8s, or Slurm-backed"]
     Worker --> Sandbox["Trial sandbox\nagent + task bundle + verifier"]
-    Sandbox --> Gateway["LLM Gateway\nprovider facade + usage/cost accounting"]
-    Gateway --> Hosted["Third-party inference API\nOpenAI / Anthropic / Google / Together / ..."]
-    Gateway --> SelfHosted["User-hosted inference API\nvLLM / Ollama / llama.cpp / LM Studio"]
-    CP --> Postgres[("Postgres\nruns, trials, teams, provider refs")]
-    Worker --> MinIO[("MinIO/S3\ntrajectories, ATIF, artifacts")]
+    Sandbox --> Gateway["LLM Gateway\nprovider facade + usage/cost audit"]
+    Gateway --> Hosted["Hosted provider APIs\nOpenAI / Anthropic / Google / YibuAPI / ..."]
+    Gateway --> SelfHosted["User-hosted OpenAI-compatible APIs\nvLLM / Ollama / llama.cpp / LM Studio"]
+    CP --> Postgres[("Postgres\nruns, trials, teams, provider refs, usage")]
+    Service --> Postgres
+    Worker --> MinIO[("MinIO/S3\nbundles, trajectories, ATIF, artifacts")]
     Service --> MinIO
 ```
 
-The Control Plane, Gateway, Service, SPA, and Workers are stateless. Postgres
-and MinIO/S3 are the durable state. The same `Trial.run()` orchestrator powers
-both laptop CLI mode and service mode, so local and service-mode runs emit the
-same trajectory and ATIF shapes.
+The service, control plane, gateway, SPA, and workers are stateless from a data
+ownership perspective. Postgres and MinIO/S3 are the durable stores. The same
+trial orchestration contract powers local CLI runs and service-mode worker
+runs, so trajectory and ATIF shapes stay consistent across modes.
 
 Deeper reading: [`docs/architecture/overview.md`](docs/architecture/overview.md).
 
-## v1.0 Status
+## Providers, Sharing, and Secrets
 
-v1.0 ships a curated subset of the built-in catalog. Unsupported rows stay
-visible for transparency but cannot be selected from New Batch; the platform
-labels them at the API and UI boundaries.
+Every real model-backed service run needs a provider connection owned by, or
+explicitly shared with, the team submitting the work.
 
-**Supported benchmarks (`Selectable`):**
-
-| Benchmark id | Task family |
-|---|---|
-| `humaneval`, `mbpp`, `livecodebench`, `swe-bench-verified`, `terminal-bench-2` | Code generation and software engineering |
-| `aime-24`, `aime-25`, `math-500` | Math |
-| `gpqa`, `mmlu-pro` | Reasoning |
-| `skillflow`, `skilllearnbench` | Agent / skill |
-
-**Visible but disabled:**
-
-| Reason | Benchmark ids |
-|---|---|
-| `Not in v1.0` (catalog transparency) | `aime-22`, `aime-23`, `bfcl`, `browsecomp`, `hendrycks-math`, `swe-bench`, `swe-bench-multimodal`, `tau2-bench` |
-| `Deferred` (needs dataset or auth) | `gaia` (Hugging Face token + published bundle) |
-| `Unsupported runtime` (needs UI sandbox) | `osworld`, `webarena` |
-
-The allowlist lives in `src/loom/benchmark_readiness.py:V1_SUPPORTED_BENCHMARK_IDS`
-so the CLI, API, and SPA agree. Out-of-tree benchmark adapters published via
-the `loom.benchmarks` entry-point (for example Terminal-Bench-2 in
-`packages/loom-benchmark-terminal-bench-2/`) are still selectable independently
-of this list.
-
-## Bring Your Own Inference API
-
-Every real model-backed Loom run needs a provider connection owned by, or
-explicitly shared with, the team submitting the work. Loom encrypts the
-provider API key, stores only secret references in the database, and uses the
-LLM Gateway server-side during runtime.
-
-Submission surface and inference source are independent choices. A user can
-submit from the hosted web app or CLI on any machine that can reach Loom, while
-the model itself can live behind a third-party API or on the user's own GPU
-cluster.
-
-**Option 1: Third-party hosted API.** OpenAI-compatible endpoints (OpenAI,
-Together, Fireworks, a self-hosted vLLM), or provider-native APIs (Anthropic,
-Google). The team registers provider type, base URL, API key (`env:` or
-browser secret field), optional allowed model ids, and optional rate-card
-namespace.
-
-Provider owners can share one connection with another team without cloning or
-revealing the API key. The target team can list/select/use the shared provider,
-but only the owner team or a platform admin can update, rotate, test, or delete
-it. Usage and cost views remain attributed to the consuming team/user; delegated
-submissions such as admin-on-behalf leave monitor visibility and owner actions
-with the represented user/team while attributing spend to the real acting user.
-
-**Option 2: User-hosted inference on the user's cluster.** The cluster runs an
-OpenAI-compatible HTTP service, usually vLLM. Loom only needs HTTPS reachability
-to the final `/v1` endpoint — via public HTTPS, a bastion TCP forward, an SSH
-reverse tunnel, VPN/Tailscale/WireGuard, or any stable URL that forwards to the
-live inference job. Loom does not need SSH access into the cluster for normal
-inference calls. Private endpoints or non-standard ports require an operator to
-allowlist the IP/CIDR + TCP port in the Loom cluster egress config first.
-
-Full setup workflows for both options — including the `loom inference deploy
-slurm` helper that generates a Slurm bundle for GPU-cluster vLLM checkpoints —
-live in [`docs/integrations/provider-onboarding.md`](docs/integrations/provider-onboarding.md).
-
-## Providers and Agents
-
-Two catalogs you pick from when creating a batch.
-
-**Provider connection types** (the `--type` value on `loom providers create`):
+Supported provider connection families include:
 
 | Type | Use for |
 |---|---|
-| `openai-compatible` | OpenAI, Together, Fireworks, vLLM, Ollama, LM Studio, any service exposing `/v1/chat/completions` |
-| `anthropic` | Anthropic API (native dialect) |
-| `google` | Google Gemini API |
-| `custom` | Escape hatch when none of the above fit; tokens-only cost accounting |
+| `openai-compatible` | OpenAI, Together, Fireworks, YibuAPI-compatible facades, vLLM, Ollama, LM Studio, or any service exposing `/v1/chat/completions`. |
+| `anthropic` | Anthropic native API. |
+| `google` | Google Gemini native API. |
+| `custom` | A fallback when no first-class dialect fits; usage accounting may be token-only or price-unknown. |
 
-`openai-compatible`, `anthropic`, and `google` route to native dialects in
-the LLM Gateway and get rate-card-based cost lookup. `custom` falls back to
-token totals only.
+Provider owners can share one connection with another team without copying or
+revealing the raw API key. The target team can list, select, and use the
+shared provider, while only the owner team or an admin can mutate it. Gateway
+usage and cost views distinguish the owning provider, consuming team/user, and
+delegated admin-on-behalf actor where applicable.
 
-**Agent catalog** (the `--agent` value on `loom eval batch create`):
+Secrets must enter through secret references such as `env:PROVIDER_API_KEY`,
+`file:/secure/path/provider-token`, or a browser secret field. Raw provider
+tokens should not appear in run metadata, logs, JSON evidence, Markdown,
+issues, PRs, or command argv evidence.
 
-- **Builtins:** `oracle` (ground-truth canary, no model), `litellm`
-  (multi-provider tool-loop; accepts any provider + api/local-server/hf
-  model source).
-- **CLI adapters from `loom-launcher`:** `claude-code` (Anthropic),
-  `codex` (OpenAI), `gemini-cli` (Google), `kimi-cli` (Moonshot),
-  `qwen-cli` (Alibaba), plus provider-agnostic `aider`, `openhands`,
-  `openhands-sdk`, `opencode`, `swe-agent`, `mini-swe-agent`,
-  `terminus_2`. CLI adapters install on demand into the trial
-  sandbox via a layered image; the build is cached per
-  `(task-image, agent)` pair.
+Provider setup: [`docs/integrations/provider-onboarding.md`](docs/integrations/provider-onboarding.md).
 
-The web app's New Batch dropdown is the same list. Provider/model
-compatibility is enforced at submit time — incompatible combos fail with a
-400 rather than blowing up on a worker. Sources of truth:
-`src/loom_service/agent_catalog.py` and
-`src/loom_service/routes/provider_connections.py`.
+Usage and rate cards: [`docs/architecture/cost-and-rate-cards.md`](docs/architecture/cost-and-rate-cards.md).
 
-## Choose Your Quickstart
+## TaskSets
 
-Pick the path that matches what you have, then follow the corresponding
-quickstart in [`docs/user-guide.md`](docs/user-guide.md):
+TaskSets are team-owned task collections brought by users. They are separate
+from native platform benchmarks and are not renamed as benchmarks internally.
 
-| You have… | Follow |
+The current TaskSet API supports:
+
+- submitting a manifest plus optional verifier, transform, and bundle archive;
+- polling materialization status and per-instance errors;
+- rebuilding or soft-deleting a TaskSet;
+- running a TaskSet through batch creation with `task_filter.task_set_id` or
+  CLI `--task-set`;
+- mixing native benchmark and TaskSet sources only through an explicit
+  `--task-filter` payload.
+
+Common CLI shape:
+
+```bash
+loom tasksets submit ./my-taskset/
+loom tasksets status <task-set-id>
+loom tasksets list
+
+loom eval batch create \
+  --task-set <task-set-id> \
+  --agent <agent> \
+  --provider <provider-connection> \
+  --model <model>
+```
+
+Full schema and API contract:
+[`docs/architecture/user-brought-tasksets.md`](docs/architecture/user-brought-tasksets.md).
+
+## Agents and Runtime
+
+Loom supports built-in harnesses and CLI-agent adapters. The exact selectable
+set depends on the deployed catalog, image build, and benchmark compatibility
+checks, but common families include:
+
+- `oracle`, for no-model canaries and ground-truth smoke;
+- `litellm`, for provider-backed tool-loop runs;
+- coding-agent CLI adapters from `loom-launcher`, including Codex, Claude Code,
+  Gemini CLI, OpenHands, OpenHands SDK, OpenCode, Aider, SWE-agent,
+  mini-SWE-agent, and Terminus-2.
+
+Provider/model/agent compatibility is enforced at submission time. Invalid
+combinations should fail as API validation errors instead of becoming worker
+surprises.
+
+Sources of truth:
+[`src/loom_service/agent_catalog.py`](src/loom_service/agent_catalog.py) and
+[`src/loom_service/routes/provider_connections.py`](src/loom_service/routes/provider_connections.py).
+
+## Quickstart Pointers
+
+Start with the user guide rather than copying commands from this README:
+[`docs/user-guide.md`](docs/user-guide.md).
+
+| Goal | Read |
 |---|---|
-| No stack at all, just a task + a model key, throwaway run | [Laptop-only `loom run`](docs/user-guide.md#quickstart-laptop-only-loom-run) |
-| No account; you want to run the full stack on your own machine | [Run Loom locally](docs/user-guide.md#quickstart-run-loom-locally) |
-| An account on a running Loom and prefer a terminal | [Submit from the CLI to a Loom server](docs/user-guide.md#quickstart-submit-from-the-cli-to-a-loom-server) |
-| The same account and want clicks | [Submit from the web app](docs/user-guide.md#quickstart-submit-from-the-web-app) |
+| Install the CLI or run a local throwaway trial | [`docs/user-guide.md`](docs/user-guide.md) |
+| Submit from CLI to shared staging | [`docs/user-guide.md#quickstart-submit-from-the-cli-to-a-loom-server`](docs/user-guide.md#quickstart-submit-from-the-cli-to-a-loom-server) |
+| Use the web app | [`docs/user-guide.md#quickstart-submit-from-the-web-app`](docs/user-guide.md#quickstart-submit-from-the-web-app) |
+| Register or test a provider | [`docs/integrations/provider-onboarding.md`](docs/integrations/provider-onboarding.md) |
+| Upload and run user TaskSets | [`docs/architecture/user-brought-tasksets.md`](docs/architecture/user-brought-tasksets.md) |
+| Inspect usage and cost | [`docs/architecture/cost-and-rate-cards.md`](docs/architecture/cost-and-rate-cards.md) |
 
-The web and CLI paths submit into a running service and persist
-trajectories/ATIF/usage server-side. `loom service up` runs that same service
-stack against local Docker + Postgres + MinIO. `loom run` is a one-shot
-in-process trial that writes `events.jsonl` + `atif.json` to a local directory
-and exits — no DB, no team, no provider registration.
+Current shared staging login should use:
 
-## Key Concepts
+```bash
+loom auth login --server https://yylx.world/dev --username <user> --password env:LOOM_PASSWORD
+```
 
-| Concept | Meaning |
-|---|---|
-| Team | Owns provider credentials, user-owned API tokens, submitted runs, cost attribution, and members. |
-| Provider connection | Team-scoped inference API configuration. It can point to a hosted provider or a user-hosted endpoint. |
-| Model | Concrete model id selected from a provider connection's cached model catalog. Refresh discovers models; preflight proves one cached model can generate. |
-| Agent | Harness that drives a model through a task, such as `litellm`, coding-agent CLIs, or `oracle`. |
-| Benchmark | Adapter that publishes tasks into Loom's catalog. |
-| Batch | A submitted run plan: task filter plus one or more agent/model combinations. |
-| Trial | One executable unit from a batch. |
-| Trajectory | Event-sourced JSONL record of execution, tool use, model calls, verifier checks, and finalization. |
-| ATIF | Structured metric document with rewards, token usage, verifier output, and platform outcome. |
+First production will use the same CLI shape with `https://yylx.world/prod`
+after the production release is promoted and validated.
+
+## Operations and Release
+
+Normal development targets `dev`. The `main` branch is reserved for production
+release promotion through an explicit release PR after v1.0 validation passes.
+
+Operationally, staging and production are separate environments with distinct
+routes, API bases, durable state, object storage, secrets, and desired worker
+state. Shared physical worker capacity is prod-first: production keeps maximum
+available capacity, staging borrows only the minimum needed for validation, and
+staging should stop accepting new work and drain when production needs the
+capacity.
+
+Primary runbooks:
+
+- First-prod release:
+  [`docs/runbooks/first-prod-release-runbook.md`](docs/runbooks/first-prod-release-runbook.md)
+- General operator path:
+  [`docs/runbooks/operator-runbook.md`](docs/runbooks/operator-runbook.md)
+- Remote worker capacity:
+  [`docs/runbooks/remote-worker-pool.md`](docs/runbooks/remote-worker-pool.md)
 
 ## Where to Read More
 
-- [`docs/index.md`](docs/index.md) — documentation map.
-- [`docs/user-guide.md`](docs/user-guide.md) — install, quickstarts, CLI and
-  web workflows, backends, model sources, reference, and troubleshooting.
-- [`docs/integrations/provider-onboarding.md`](docs/integrations/provider-onboarding.md) — hosted API and
-  self-hosted GPU-cluster provider setup, including the `loom inference deploy
-  slurm` helper.
-- [`docs/architecture/overview.md`](docs/architecture/overview.md) — component
+- [`docs/index.md`](docs/index.md) - documentation map.
+- [`docs/user-guide.md`](docs/user-guide.md) - install, quickstarts, CLI and
+  web workflows, providers, usage, downloads, and troubleshooting.
+- [`docs/architecture/overview.md`](docs/architecture/overview.md) - component
   map and execution model.
-- [`docs/architecture/service-mode.md`](docs/architecture/service-mode.md) —
+- [`docs/architecture/service-mode.md`](docs/architecture/service-mode.md) -
   service-mode details.
-- [`docs/runbooks/operator-runbook.md`](docs/runbooks/operator-runbook.md) — production deploy,
-  environment isolation, release gates, and operations.
-- [`docs/runbooks/remote-worker-pool.md`](docs/runbooks/remote-worker-pool.md) — attaching extra
-  Docker/Slurm worker capacity.
-- [`docs/integrations/authoring-a-task.md`](docs/integrations/authoring-a-task.md) — creating a new task
-  or benchmark adapter.
-- [`docs/contributing/loom-vs-harbor.md`](docs/contributing/loom-vs-harbor.md) — design tradeoffs and
-  gaps versus Harbor.
-- [`docs/contributing/contributor-quickstart.md`](docs/contributing/contributor-quickstart.md) — repo
-  layout, tests, and contribution workflow.
+- [`docs/architecture/user-brought-tasksets.md`](docs/architecture/user-brought-tasksets.md) -
+  TaskSet schema, API, CLI, materialization, and security model.
+- [`docs/integrations/provider-onboarding.md`](docs/integrations/provider-onboarding.md) -
+  hosted API and self-hosted GPU-cluster provider setup.
+- [`docs/integrations/authoring-a-task.md`](docs/integrations/authoring-a-task.md) -
+  creating a new task or benchmark adapter.
+- [`docs/contributing/contributor-quickstart.md`](docs/contributing/contributor-quickstart.md) -
+  repo layout, tests, and contribution workflow.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) - contribution workflow, branch
+  conventions, release flow, and maintainer-only repository hardening.
 
 ## License and Contributing
 
 Loom is licensed under Apache-2.0. The canonical development repository is
-[`qianyi-sun/loom`](https://github.com/qianyi-sun/loom). Contribution
-workflow, branch conventions, release flow, and maintainer-only repository
-hardening live in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+[`qianyi-sun/loom`](https://github.com/qianyi-sun/loom). Historical issue and
+PR references from before the public repo migration may still point at the
+archive repository; active development, issues, PRs, and release work use
+`qianyi-sun/loom`.
