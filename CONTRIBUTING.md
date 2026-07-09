@@ -9,11 +9,13 @@
 > Loom is public-readiness hardened and is operated as an issue-scoped
 > GitHub-flow project. Normal
 > changes land through PRs into `dev`; `main` remains reserved for
-> release promotion from `dev`. `repository-checks` remains the required
-> fast CI gate. It is an aggregator over parallel lint/static/test jobs, so
-> branch protection keeps one stable context while CI work fans out. Normal
-> `dev` PRs use GitHub auto-merge, so GitHub squash-merges once required
-> checks and required review state pass.
+> release promotion from `dev`. Every normal PR reports four stable validation
+> contexts: `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
+> `staging-smoke-gate`. The shared planner selects the applicable validation
+> work from changed paths, while labels can request additional validation.
+> Labels may add validation but cannot remove path-inferred validation. Normal
+> `dev` PRs use GitHub auto-merge only after every required gate is visible and
+> successful on the current head SHA and required review state passes.
 > External pull requests are accepted for issue-scoped work that follows
 > the templates below. Workflows that need publish or deployment secrets
 > must use protected GitHub Environments and must not expose secrets to
@@ -137,14 +139,21 @@ secrets.
 - Link to a GitHub issue with acceptance criteria
 - Keep one concern per PR
 - Use the PR template
-- Enable GitHub auto-merge on normal `dev` PRs after opening them.
-  GitHub squash-merges when `repository-checks` and any required review
-  state pass; do not hand-merge eligible `dev` PRs just because CI is
-  green.
-- Do not assume PR image builds run automatically. Add the `ci:images`
-  label when a PR needs multi-arch image evidence before merge; pushes to
-  `dev`/`main` still publish deployable images from the path-aware image
-  workflow.
+- The four stable gate contexts are `repository-checks`, `images-gate`,
+  `cluster-smoke-gate`, and `staging-smoke-gate`. The shared planner selects
+  their validation work from changed paths; labels request additional work but
+  cannot turn off path-inferred work.
+- Enable GitHub auto-merge on normal `dev` PRs only after every required gate
+  is visible and successful on the current head SHA. GitHub squash-merges when
+  the gates and required review state pass; do not hand-merge eligible `dev`
+  PRs just because CI is green.
+- Do not assume labels are the only way to select validation. For example,
+  relevant image paths select `images-gate` automatically; `ci:images` adds
+  multi-arch image validation when the changed paths do not already require it.
+  Pushes to `dev`/`main` still publish deployable images from the path-aware
+  image workflow.
+- Release-promotion PRs to `main` remain explicitly owner-managed and never
+  use the routine `dev` auto-merge path.
 - Human review is required only on branches or environments whose
   protection rules demand it, and for external PRs before enabling or
   approving auto-merge
@@ -193,9 +202,10 @@ have one place to audit them.
 - **Publish and deploy workflows use protected GitHub Environments.**
   Secrets for benchmark-bundle publish or infrastructure deploy live in
   protected Environments so they are not available to pull request code.
-- **Branch protection on `main` and `dev`** keeps `repository-checks`
-  required, blocks direct pushes, and enforces squash-only merges.
-- **Merge queue readiness**: `repository-checks` also runs on GitHub's
+- **Branch protection on `main` and `dev`** keeps `repository-checks`,
+  `images-gate`, `cluster-smoke-gate`, and `staging-smoke-gate` required,
+  blocks direct pushes, and enforces squash-only merges.
+- **Merge queue readiness**: all four stable gate contexts run on GitHub's
   `merge_group` event. Maintainers should prefer enabling GitHub merge queue
   over weakening strict required-check behavior when PR concurrency causes
   repeated behind-branch reruns.

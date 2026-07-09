@@ -31,6 +31,27 @@ def test_normal_dev_prs_use_auto_merge_after_required_ci() -> None:
     assert "I enabled GitHub auto-merge for this `dev` PR" in pr_template
 
 
+def test_governance_docs_define_path_inferred_validation_gates() -> None:
+    contributing = _read("CONTRIBUTING.md")
+    quickstart = _read("docs/contributing/contributor-quickstart.md")
+    pr_template = _read(".github/PULL_REQUEST_TEMPLATE.md")
+
+    for gate in (
+        "repository-checks",
+        "images-gate",
+        "cluster-smoke-gate",
+        "staging-smoke-gate",
+    ):
+        assert gate in contributing
+        assert gate in quickstart
+
+    assert (
+        "Labels may add validation but cannot remove path-inferred validation"
+        in contributing
+    )
+    assert "Do not enable auto-merge until every required gate is visible" in pr_template
+
+
 def test_release_promotion_template_requires_first_prod_evidence() -> None:
     contributing = _read("CONTRIBUTING.md")
     operator_runbook = _read("docs/runbooks/operator-runbook.md")

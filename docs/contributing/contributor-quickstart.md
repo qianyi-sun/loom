@@ -82,16 +82,20 @@ cd web && npm install && npm run dev
 
 ## Tests
 
-CI gates the fast tier on every PR and on `main` pushes. `dev` pushes skip the
-Python gate because the squash-merged PR already produced the required context.
-PRs that change only docs or repo metadata still report the required
-`repository-checks` status, but skip the heavy install/test/coverage steps.
-The required context is an aggregator: ruff/mypy/static checks, root tests, and
-sibling-package tests run in parallel jobs, then `repository-checks` combines
-their coverage artifacts, applies the 70% fast-tier gate, and writes the
-default fast-tier coverage summary. The mypy step uses a GitHub Actions cache
-for `.mypy_cache`; a restored cache is only a speed-up, not a replacement for
-running `uv run mypy`.
+Every PR and merge-group candidate reports four stable validation contexts:
+`repository-checks`, `images-gate`, `cluster-smoke-gate`, and
+`staging-smoke-gate`. The shared validation planner selects the applicable
+work automatically from changed paths. Labels may request additional work, but
+they cannot turn off validation inferred from paths. Docs-only PRs take a
+bounded fast path while the stable gate contexts still report.
+
+`repository-checks` is the fast-tier aggregator: ruff/mypy/static checks, root
+tests, and sibling-package tests run in parallel jobs, then it combines their
+coverage artifacts, applies the 70% fast-tier gate, and writes the default
+fast-tier coverage summary. The mypy step uses a GitHub Actions cache for
+`.mypy_cache`; a restored cache is only a speed-up, not a replacement for
+running `uv run mypy`. `dev` pushes skip the Python gate because the
+squash-merged PR already produced the required context.
 
 ```bash
 uv run ruff check src tests packages migrations
@@ -125,20 +129,21 @@ LOOM_RUN_DAYTONA_INTEGRATION=1 DAYTONA_API_KEY=... \
 
 The `slow` marker is applied at module level on the heaviest 9 test
 files (Docker driver lifecycle / exec / io / healthcheck /
-network-policy + full trial e2e + Daytona live). CI runs the fast
-tier on every PR and runs the Docker/testcontainers integration tier
-only on `ci:integration`-labeled PRs or manual workflow dispatch; see
-the historical archive issue (carinrc#7) for the slow-tier tuning work.
-Label-gated smoke workflows cancel superseded PR runs, so a new push to the
-same PR stops the older `cluster-smoke`, `staging-smoke`, or
-`cluster-deploy-spikes` run instead of building a queue of stale checks.
+network-policy + full trial e2e + Daytona live). CI selects integration for
+non-documentation changes and selects the Docker/testcontainers tier for its
+relevant runtime paths; `ci:integration` and `ci:integration-docker` add those
+tiers when paths do not already require them. The selected smoke gates cancel
+superseded PR runs, so a new push to the same PR stops the older
+`cluster-smoke`, `staging-smoke`, or `cluster-deploy-spikes` run instead of
+building a queue of stale checks.
 
-Image builds are intentionally separate from the required fast gate. Relevant
-pushes to `dev`/`main` still publish multi-arch images, but PR image validation
-is opt-in: add the `ci:images` label, or run `.github/workflows/images.yml`
-manually. The image workflow plans a path-aware matrix so web-only changes build
-only the web image, Dockerfile-only changes build the matching component, and
-shared Python/runtime changes rebuild the affected Python images.
+`images-gate` is separate from the fast tier. Relevant image paths select its
+PR validation automatically; `ci:images` adds validation when paths do not
+already require it, and `.github/workflows/images.yml` remains manually
+dispatchable. The image workflow plans a path-aware matrix so web-only changes
+build only the web image, Dockerfile-only changes build the matching component,
+and shared Python/runtime changes rebuild the affected Python images. Relevant
+pushes to `dev`/`main` still publish multi-arch images.
 
 ## Coverage gates
 
@@ -193,16 +198,19 @@ and must link the issue they advance. Maintainers mark actively owned
 issues with a `[WIP] ` title prefix, keep the project status current,
 and enable GitHub auto-merge for normal `dev` PRs.
 
-GitHub auto-merge squash-merges normal `dev` PRs after the required
-`repository-checks` gate and any required review state pass. Maintainers
-should not manually merge an eligible `dev` PR just because CI is green;
-release-promotion PRs to `main` remain explicitly managed by the release
-owner.
+GitHub auto-merge squash-merges normal `dev` PRs only after
+`repository-checks`, `images-gate`, `cluster-smoke-gate`, and
+`staging-smoke-gate` are visible and successful for the current head SHA, plus
+any required review state. Do not enable auto-merge before those required gates
+are visible on the current head SHA. Maintainers should not manually merge an
+eligible `dev` PR just because CI is green; release-promotion PRs to `main`
+remain explicitly managed by the release owner.
 
 Merge mechanics:
 - Squash-only (no rebase merge, no merge commits)
 - `required_linear_history: true`
-- `repository-checks` is the only required status check
+- `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
+  `staging-smoke-gate` are the required stable status checks
 - `allow_auto_merge: true`; enable auto-merge on normal `dev` PRs
 - `enforce_admins: true` on `dev` - admins go through the gate too
 

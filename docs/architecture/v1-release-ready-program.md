@@ -23,8 +23,8 @@ All of the following must be true at the same time:
 
 1. The v1.0 acceptance matrix has a single executable source of truth in
    GitHub issue #715, while #39 remains the release umbrella.
-2. Required `dev` merge checks cannot become green while a selected opt-in
-   validation is pending, skipped unexpectedly, cancelled, or failed.
+2. Required `dev` merge checks cannot become green while a path- or label-
+   selected validation is pending, skipped unexpectedly, cancelled, or failed.
 3. Production-facing GitHub Environments have branch restrictions and required
    approval rules appropriate to their secrets and deployment authority.
 4. The v1.0 workload trust contract is explicit and machine-enforced:
@@ -79,11 +79,18 @@ cycle, documentation update, CI labels, acceptance evidence, and rollback.
 Issue #700 is the first implementation workstream because every later PR relies
 on correct merge gating.
 
-The CI workflow will compute the validations required by the PR's changed paths
-and labels, execute those validations, and expose one final required aggregate
-that cannot succeed until every selected validation is successful. A selected
-job that is cancelled, skipped unexpectedly, or absent is a failure. Docs-only
-PRs keep a bounded fast path.
+Every PR and merge-group candidate reports four stable required contexts:
+`repository-checks`, `images-gate`, `cluster-smoke-gate`, and
+`staging-smoke-gate`. The shared planner computes the validation work required
+by changed paths and labels, and each gate enforces its selected result. A
+selected job that is cancelled, skipped unexpectedly, or absent is a failure.
+Labels may add validation but cannot remove path-inferred validation. Docs-only
+PRs keep a bounded fast path while the stable contexts still report.
+
+Normal `dev` auto-merge is enabled only after every required gate is visible
+and successful on the current head SHA, plus required review state. Promotion
+PRs from `dev` to `main` remain explicitly owner-managed and do not use the
+routine `dev` auto-merge path.
 
 The design covers at least:
 

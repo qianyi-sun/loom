@@ -16,8 +16,14 @@
 ## Target Branch
 
 - [ ] This PR targets `dev` for normal development.
-- [ ] I enabled GitHub auto-merge for this `dev` PR.
-- [ ] This PR targets `main` only for a production release promotion from `dev`.
+- [ ] Do not enable auto-merge until every required gate is visible and
+      successful on the current head SHA: `repository-checks`, `images-gate`,
+      `cluster-smoke-gate`, and `staging-smoke-gate`.
+- [ ] I enabled GitHub auto-merge for this `dev` PR after those required gates
+      were visible on the current head SHA.
+- [ ] This PR targets `main` only for a production release promotion from `dev`;
+      it remains explicitly owner-managed and does not use routine `dev`
+      auto-merge.
 
 ## Scope
 
@@ -31,6 +37,12 @@
 ## Verification
 
 - 
+
+## Validation Selection
+
+- Changed paths automatically select the minimum required validation work.
+- Labels may add validation but cannot remove path-inferred validation.
+- Record any manually dispatched additional validation above.
 
 ## Documentation
 
