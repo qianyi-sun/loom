@@ -9,6 +9,8 @@ frontend_route_path = "/prod"
 frontend_api_base_path = "/prod"
 trajectories_bucket = "loom-prod-trajectories"
 artifacts_bucket = "loom-prod-artifacts"
+persistent_storage_backend = "static-host-path"
+persistent_storage_host_path_root = "/data/loom-prod"
 
 # Trial execution capacity comes from Slurm-managed pools (`oldlab`,
 # `gb10-arm64`); the in-cluster loom-worker Deployment is omitted to

@@ -16,6 +16,11 @@ from loom_cli.rollout.evidence import StepDir
 from loom_cli.rollout.steps.base import BaseStep, RunResult, VerifyOutcome
 from loom_cli.rollout.steps.subprocess_util import run_captured
 
+INGRESS_NGINX_KIND_MANIFEST = (
+    "https://raw.githubusercontent.com/kubernetes/ingress-nginx/"
+    "controller-v1.10.1/deploy/static/provider/kind/deploy.yaml"
+)
+
 
 def _kind_config(ctx: RolloutContext) -> str:
     root = str(ctx.rollout_root)
@@ -63,6 +68,11 @@ def _cluster_names(stdout: str) -> set[str]:
     return {line.strip() for line in stdout.splitlines() if line.strip()}
 
 
+def _last_error(result: object, default: str) -> str:
+    stderr = str(getattr(result, "stderr", "") or "")
+    return stderr.strip().splitlines()[-1] if stderr.strip() else default
+
+
 class KindClusterStep(BaseStep):
     number = 3
     name = "kind-cluster"
@@ -99,7 +109,96 @@ class KindClusterStep(BaseStep):
                 "loom-admin-secret",
             ],
         )
-        return VerifyOutcome.MATCH if secrets.returncode == 0 else VerifyOutcome.MISMATCH
+        if secrets.returncode != 0:
+            return VerifyOutcome.MISMATCH
+        ingress_class = run_captured(["kubectl", "get", "ingressclass", "nginx"])
+        if ingress_class.returncode != 0:
+            return VerifyOutcome.MISMATCH
+        ingress_controller = run_captured(
+            [
+                "kubectl",
+                "-n",
+                "ingress-nginx",
+                "wait",
+                "--for=condition=Available",
+                "deployment/ingress-nginx-controller",
+                "--timeout=5s",
+            ],
+        )
+        return VerifyOutcome.MATCH if ingress_controller.returncode == 0 else VerifyOutcome.MISMATCH
+
+    def _ensure_ingress_nginx(self, step_dir: StepDir) -> tuple[RunResult | None, str]:
+        ingress_class = run_captured(
+            ["kubectl", "get", "ingressclass", "nginx"],
+            stdout_log=step_dir.artifact_path("ingressclass-get.stdout"),
+            stderr_log=step_dir.artifact_path("ingressclass-get.stderr"),
+        )
+        ingress_controller = run_captured(
+            [
+                "kubectl",
+                "-n",
+                "ingress-nginx",
+                "get",
+                "deployment",
+                "ingress-nginx-controller",
+            ],
+            stdout_log=step_dir.artifact_path("ingress-controller-get.stdout"),
+            stderr_log=step_dir.artifact_path("ingress-controller-get.stderr"),
+        )
+
+        installed = False
+        if ingress_class.returncode != 0 or ingress_controller.returncode != 0:
+            apply = run_captured(
+                ["kubectl", "apply", "-f", INGRESS_NGINX_KIND_MANIFEST],
+                stdout_log=step_dir.artifact_path("ingress-nginx-apply.stdout"),
+                stderr_log=step_dir.artifact_path("ingress-nginx-apply.stderr"),
+            )
+            if apply.returncode != 0:
+                return (
+                    RunResult(
+                        exit_code=apply.returncode,
+                        error=_last_error(apply, "kubectl apply ingress-nginx failed"),
+                    ),
+                    "failed",
+                )
+            installed = True
+
+        wait = run_captured(
+            [
+                "kubectl",
+                "-n",
+                "ingress-nginx",
+                "wait",
+                "--for=condition=Available",
+                "deployment/ingress-nginx-controller",
+                "--timeout=180s",
+            ],
+            stdout_log=step_dir.artifact_path("ingress-controller-wait.stdout"),
+            stderr_log=step_dir.artifact_path("ingress-controller-wait.stderr"),
+        )
+        if wait.returncode != 0:
+            return (
+                RunResult(
+                    exit_code=wait.returncode,
+                    error=_last_error(wait, "ingress-nginx controller not available"),
+                ),
+                "failed",
+            )
+
+        final_ingress_class = run_captured(
+            ["kubectl", "get", "ingressclass", "nginx"],
+            stdout_log=step_dir.artifact_path("ingressclass-final.stdout"),
+            stderr_log=step_dir.artifact_path("ingressclass-final.stderr"),
+        )
+        if final_ingress_class.returncode != 0:
+            return (
+                RunResult(
+                    exit_code=final_ingress_class.returncode,
+                    error=_last_error(final_ingress_class, "ingressclass nginx missing"),
+                ),
+                "failed",
+            )
+        return None, "installed" if installed else "reused"
 
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:
         try:
@@ -143,11 +242,7 @@ class KindClusterStep(BaseStep):
             if create.returncode != 0:
                 return RunResult(
                     exit_code=create.returncode,
-                    error=(
-                        create.stderr.strip().splitlines()[-1]
-                        if create.stderr.strip()
-                        else "kind create cluster failed"
-                    ),
+                    error=_last_error(create, "kind create cluster failed"),
                 )
             created = True
 
@@ -159,12 +254,12 @@ class KindClusterStep(BaseStep):
         if export.returncode != 0:
             return RunResult(
                 exit_code=export.returncode,
-                error=(
-                    export.stderr.strip().splitlines()[-1]
-                    if export.stderr.strip()
-                    else "kind export kubeconfig failed"
-                ),
+                error=_last_error(export, "kind export kubeconfig failed"),
             )
+
+        ingress_result, ingress_state = self._ensure_ingress_nginx(step_dir)
+        if ingress_result is not None:
+            return ingress_result
 
         namespace = run_captured(
             ["kubectl", "get", "namespace", ctx.namespace],
@@ -181,11 +276,7 @@ class KindClusterStep(BaseStep):
             if create_ns.returncode != 0:
                 return RunResult(
                     exit_code=create_ns.returncode,
-                    error=(
-                        create_ns.stderr.strip().splitlines()[-1]
-                        if create_ns.stderr.strip()
-                        else "kubectl create namespace failed"
-                    ),
+                    error=_last_error(create_ns, "kubectl create namespace failed"),
                 )
             namespace_created = True
 
@@ -197,16 +288,13 @@ class KindClusterStep(BaseStep):
         if apply_secrets.returncode != 0:
             return RunResult(
                 exit_code=apply_secrets.returncode,
-                error=(
-                    apply_secrets.stderr.strip().splitlines()[-1]
-                    if apply_secrets.stderr.strip()
-                    else "kubectl apply secrets failed"
-                ),
+                error=_last_error(apply_secrets, "kubectl apply secrets failed"),
             )
 
         summary = (
             f"{'created' if created else 'reused'} kind cluster "
             f"{ctx.cluster_name}; "
+            f"{ingress_state} ingress-nginx; "
             f"{'created' if namespace_created else 'reused'} namespace "
             f"{ctx.namespace}; restored k8s secrets from backup manifest"
         )
@@ -217,6 +305,7 @@ class KindClusterStep(BaseStep):
             artifacts={
                 "cluster_name": ctx.cluster_name,
                 "namespace": ctx.namespace,
+                "ingress_nginx": ingress_state,
                 "secrets_dir": str(secrets_dir),
             },
         )
