@@ -17,13 +17,13 @@ def _workflow_on(workflow: dict[str, Any]) -> dict[str, Any]:
     return workflow.get("on", workflow.get(True))
 
 
-def test_images_pr_builds_are_label_gated() -> None:
+def test_images_builds_use_planner_selection() -> None:
     workflow = _workflow(".github/workflows/images.yml")
-    on_config = _workflow_on(workflow)
+    jobs = workflow["jobs"]
 
-    assert "labeled" in on_config["pull_request"]["types"]
-    assert "ci:images" in workflow["jobs"]["plan"]["if"]
-    assert "ci:images" in workflow["jobs"]["build"]["if"]
+    assert "required" in jobs["plan"]["outputs"]
+    assert jobs["build"]["needs"] == "plan"
+    assert "needs.plan.outputs.required == 'true'" in jobs["build"]["if"]
 
 
 def test_images_workflow_uses_path_aware_matrix_plan() -> None:
@@ -41,6 +41,76 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     assert "web/index.html" in plan_script
     assert "deploy/Dockerfile.worker" in plan_script
     assert "migrations/" in plan_script
+
+
+def test_images_merge_groups_select_a_nonempty_matrix() -> None:
+    workflow = _workflow(".github/workflows/images.yml")
+    plan_script = "\n".join(
+        step.get("run", "")
+        for step in workflow["jobs"]["plan"]["steps"]
+        if "run" in step
+    )
+
+    assert 'if event in {"workflow_dispatch", "merge_group"}:' in plan_script
+    assert 'if event not in {"workflow_dispatch", "merge_group"}:' in plan_script
+
+
+def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
+    contracts = {
+        ".github/workflows/images.yml": (
+            "images-gate",
+            "images-gate",
+            {"build": "BUILD_RESULT"},
+        ),
+        ".github/workflows/cluster-smoke.yml": (
+            "cluster-smoke-gate",
+            "cluster-smoke-gate",
+            {"smoke": "SMOKE_RESULT"},
+        ),
+        ".github/workflows/staging-smoke.yml": (
+            "staging-smoke-gate",
+            "staging-smoke-gate",
+            {
+                "smoke": "SMOKE_RESULT",
+                "smoke-storage-aws-s3": "AWS_S3_RESULT",
+            },
+        ),
+    }
+
+    for workflow_path, (gate_id, gate_name, heavy_jobs) in contracts.items():
+        workflow = _workflow(workflow_path)
+        on_config = _workflow_on(workflow)
+        jobs = workflow["jobs"]
+
+        assert "merge_group" in on_config
+        assert "paths" not in on_config["pull_request"]
+        assert "plan" in jobs
+        assert "always()" in jobs[gate_id]["if"]
+        assert jobs[gate_id]["name"] == gate_name
+        assert set(jobs[gate_id]["needs"]) == {"plan", *heavy_jobs}
+
+        plan_script = "\n".join(
+            step.get("run", "") for step in jobs["plan"]["steps"] if "run" in step
+        )
+        assert "scripts/plan_ci_validations.py" in plan_script
+
+        gate_step = next(
+            step
+            for step in jobs[gate_id]["steps"]
+            if step.get("name", "").startswith("Enforce selected")
+        )
+        gate_env = gate_step["env"]
+        gate_script = gate_step["run"]
+        assert gate_env["PLAN_RESULT"] == "${{ needs.plan.result }}"
+        assert gate_env["REQUIRED"] == "${{ needs.plan.outputs.required }}"
+        assert '"$PLAN_RESULT"' in gate_script
+        assert '"$REQUIRED"' in gate_script
+
+        for job_id, result_env in heavy_jobs.items():
+            assert "plan" in jobs[job_id]["needs"]
+            assert "needs.plan.outputs.required == 'true'" in jobs[job_id]["if"]
+            assert gate_env[result_env] == f"${{{{ needs.{job_id}.result }}}}"
+            assert f'"${result_env}"' in gate_script
 
 
 def test_repository_checks_context_is_parallel_aggregator() -> None:
