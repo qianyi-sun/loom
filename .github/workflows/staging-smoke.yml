@@ -140,12 +140,14 @@ jobs:
 
       - name: Install ingress-nginx (so preflight's IngressClass check passes)
         # Kind doesn't ship with an ingress controller; preflight
-        # would fail without one. Install the standard ingress-nginx
-        # for kind. Wait for the controller pod + IngressClass to
-        # land before continuing.
+        # would fail without one. Install the pinned repo-local
+        # ingress-nginx manifest for kind so CI and live rollout do
+        # not depend on raw.githubusercontent.com availability.
+        # Wait for the controller pod + IngressClass to land before
+        # continuing.
         run: |
           kubectl --context kind-loom-staging apply -f \
-            https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/kind/deploy.yaml
+            deploy/k8s/ingress-nginx-kind.yaml
           # The kind manifest creates a Job + Deployment + IngressClass.
           # IngressClass appears almost immediately, but the controller
           # pod takes ~30s to become Ready.

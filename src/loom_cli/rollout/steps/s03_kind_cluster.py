@@ -16,10 +16,7 @@ from loom_cli.rollout.evidence import StepDir
 from loom_cli.rollout.steps.base import BaseStep, RunResult, VerifyOutcome
 from loom_cli.rollout.steps.subprocess_util import run_captured
 
-INGRESS_NGINX_KIND_MANIFEST = (
-    "https://raw.githubusercontent.com/kubernetes/ingress-nginx/"
-    "controller-v1.10.1/deploy/static/provider/kind/deploy.yaml"
-)
+INGRESS_NGINX_KIND_MANIFEST = Path("deploy/k8s/ingress-nginx-kind.yaml")
 
 
 def _kind_config(ctx: RolloutContext) -> str:
@@ -149,7 +146,7 @@ class KindClusterStep(BaseStep):
         installed = False
         if ingress_class.returncode != 0 or ingress_controller.returncode != 0:
             apply = run_captured(
-                ["kubectl", "apply", "-f", INGRESS_NGINX_KIND_MANIFEST],
+                ["kubectl", "apply", "-f", str(INGRESS_NGINX_KIND_MANIFEST)],
                 stdout_log=step_dir.artifact_path("ingress-nginx-apply.stdout"),
                 stderr_log=step_dir.artifact_path("ingress-nginx-apply.stderr"),
             )

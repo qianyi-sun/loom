@@ -1592,7 +1592,7 @@ desired state.
 | 00 | resolve-target | git rev-parse; validates image-tag ↔ sha7 |
 | 01 | worktree | `git worktree add` at target sha |
 | 02 | build-images | `docker build` × every rollout-critical image (#365) |
-| 03 | kind-cluster | Ensure the staging kind cluster, kubeconfig, ingress-nginx IngressClass/controller, namespace, and backup-manifest Kubernetes secrets exist before any image load or migration. Recreated kind clusters must bind the protected `/data/...` root and restore the cluster substrate needed for step 08 preflight, not only the kube API (#206). |
+| 03 | kind-cluster | Ensure the staging kind cluster, kubeconfig, repo-local pinned ingress-nginx IngressClass/controller (`deploy/k8s/ingress-nginx-kind.yaml`), namespace, and backup-manifest Kubernetes secrets exist before any image load or migration. Recreated kind clusters must bind the protected `/data/...` root and restore the cluster substrate needed for step 08 preflight, not only the kube API (#206). |
 | 04 | kind-load-images | candidate-source `loom cluster load-images` (#96) |
 | 05 | backup | candidate-source `loom cluster backup check --manifest <path> --min-remaining-hours <N>` (#363, #619 freshness buffer) |
 | 06 | audit | candidate-source `loom cluster audit` |

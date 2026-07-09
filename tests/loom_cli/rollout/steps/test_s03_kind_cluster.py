@@ -95,8 +95,9 @@ def test_creates_missing_kind_cluster_and_restores_namespace_secrets(
         "kubectl",
         "apply",
         "-f",
-        "https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/kind/deploy.yaml",
+        "deploy/k8s/ingress-nginx-kind.yaml",
     ] in calls
+    assert not any(str(part).startswith("https://") for call in calls for part in call)
     assert [
         "kubectl",
         "-n",
