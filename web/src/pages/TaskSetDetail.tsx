@@ -37,7 +37,7 @@ function statusVariant(status: string): StatusVariant {
 const ACTIVE_STATUSES = new Set(["materializing"]);
 
 function capabilityLabel(ts: TaskSetDetailResponse): string {
-  if (ts.evaluation_ready && ts.intents.includes("data_production")) {
+  if (ts.evaluation_ready && ts.intents.includes("trajectory_generation")) {
     return "both";
   }
   if (ts.evaluation_ready) return "evaluation-ready";

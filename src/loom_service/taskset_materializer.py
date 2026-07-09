@@ -14,9 +14,10 @@ from uuid import UUID
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from loom.db.schema import Task, TaskSet, TaskSetManifest, TaskSetMaterializationJob
+from loom.db.schema import Task, TaskSet, TaskSetManifest, TaskSetMaterializationJob, TeamQuota
 from loom.models.taskset import UserTaskSetManifest
 from loom.taskset.materialize import MaterializeOutput, materialize_task_set
+from loom.taskset.storage_bytes import team_storage_baseline_excluding_task_set
 from loom.taskset.transform_sandbox import TransformSandboxConfig
 
 logger = logging.getLogger(__name__)
@@ -148,6 +149,7 @@ async def _materialize_claimed_job(
     upstream_cache_root: Path,
     transform_config: TransformSandboxConfig,
     max_bundle_bytes: int | None = None,
+    max_team_storage_bytes: int | None = None,
 ) -> None:
     async with session_factory() as session:
         job = await session.get(TaskSetMaterializationJob, job_id)
@@ -179,6 +181,21 @@ async def _materialize_claimed_job(
             return
 
         manifest = UserTaskSetManifest.model_validate(manifest_row.manifest)
+        quota_row = (await session.execute(
+            select(TeamQuota).where(TeamQuota.team_id == task_set.owning_team_id),
+        )).scalar_one_or_none()
+        effective_max_team_storage = (
+            quota_row.taskset_max_storage_bytes
+            if quota_row is not None and quota_row.taskset_max_storage_bytes is not None
+            else max_team_storage_bytes
+        )
+        team_storage_baseline = await asyncio.to_thread(
+            team_storage_baseline_excluding_task_set,
+            minio_client,
+            bucket=artifacts_bucket,
+            team_id=str(task_set.owning_team_id),
+            slug=manifest.slug,
+        )
         output = await asyncio.to_thread(
             materialize_task_set,
             manifest=manifest,
@@ -192,6 +209,8 @@ async def _materialize_claimed_job(
             artifacts_bucket=artifacts_bucket,
             upstream_cache_root=upstream_cache_root,
             max_bundle_bytes=max_bundle_bytes,
+            team_storage_baseline=team_storage_baseline,
+            max_team_storage_bytes=effective_max_team_storage,
         )
 
         if output.task_rows and not output.retry_source:
@@ -220,6 +239,7 @@ async def run_once(
     claim_ttl_sec: int,
     transform_config: TransformSandboxConfig,
     max_bundle_bytes: int | None = None,
+    max_team_storage_bytes: int | None = None,
 ) -> None:
     async with session_factory() as session:
         await reclaim_stale_jobs(session, claim_ttl_sec=claim_ttl_sec)
@@ -241,6 +261,7 @@ async def run_once(
                 upstream_cache_root=upstream_cache_root,
                 transform_config=transform_config,
                 max_bundle_bytes=max_bundle_bytes,
+                max_team_storage_bytes=max_team_storage_bytes,
             )
         except Exception:
             logger.exception(
@@ -276,6 +297,7 @@ async def run_loop(
     claim_ttl_sec: int,
     transform_config: TransformSandboxConfig,
     max_bundle_bytes: int | None = None,
+    max_team_storage_bytes: int | None = None,
 ) -> None:
     upstream_cache_root.mkdir(parents=True, exist_ok=True)
     while True:
@@ -289,6 +311,7 @@ async def run_loop(
                 claim_ttl_sec=claim_ttl_sec,
                 transform_config=transform_config,
                 max_bundle_bytes=max_bundle_bytes,
+                max_team_storage_bytes=max_team_storage_bytes,
             )
         except asyncio.CancelledError:
             raise

@@ -522,7 +522,7 @@ agent/model runs -> verifier runs in trial sandbox -> score/reward persisted
 | More than 50% of rows skipped | TaskSet goes `failed` (`majority_skipped`). |
 | Verifier crash at evaluation time | Existing `verifier_error` path; data-production runs are unaffected. |
 | Bundle storage exceeds 5 GiB | Abort, `failed` (`size_exceeded`). |
-| Team over quota (50 TaskSets or 20 GiB) | API 429 at submit. |
+| Team over quota (50 TaskSets or 20 GiB) | API 429 at submit; materialization aborts with `failed` (`size_exceeded`) if generated task bundles would push final team storage over the cap. |
 | Delete | Soft-delete row; blobs retained 7 days for undo, GC purges thereafter; run history continues to reference the soft-deleted TaskSet. |
 
 Defaults (5 GiB / 50 TaskSets / 20 GiB / 500 instances) are

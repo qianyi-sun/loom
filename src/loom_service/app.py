@@ -193,6 +193,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                     memory_limit_mb=settings.taskset_materializer_transform_memory_limit_mb,
                 ),
                 max_bundle_bytes=settings.taskset_quota_max_bundle_bytes,
+                max_team_storage_bytes=settings.taskset_quota_max_storage_bytes_per_team,
             ),
             name="loom-svc-taskset-materializer",
         )
