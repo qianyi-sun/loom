@@ -236,7 +236,10 @@ public Ingress. When a staging deployment uses them, operators expose only the
 worker-facing Control Plane, Gateway, and MinIO endpoints on trusted LAN/VPN
 addresses with `scripts/ops/worker_service_tunnels.py` systemd units, keep the
 tunnel watchdog timer active, and verify those URLs from the worker hosts after
-every rollout.
+every rollout. Rollout steps that mutate CP-backed desired state must also
+wait for the private Control Plane tunnel's `/healthz` endpoint after
+`cluster-up`, because recreating the CP pod can make a managed port-forward
+restart a few seconds after Kubernetes convergence is otherwise complete.
 
 Docker-backed worker nodes must also run with an open-file limit high enough
 for concurrent sandbox/container cleanup. Compose-based dev and remote-worker

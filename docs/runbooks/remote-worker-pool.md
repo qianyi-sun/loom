@@ -114,6 +114,13 @@ scripts/ops/worker_service_tunnels.py install-systemd \
 This creates `loom-remote-worker-tunnel-subprocess-gateway.service` and keeps
 the normal `loom-remote-worker-tunnel-gateway.service` on `19100`.
 
+Rollout may recreate the Control Plane and Gateway pods during `cluster-up`.
+The tunnel units should restart automatically, but CP-backed rollout consumers
+must wait for `http://<control-node>:18081/healthz` before mutating desired
+state. The protected rollout `env-state` step records this as
+`control-plane-readiness.json`; a manual operator flow should perform the same
+health check before running `loom admin environment-state apply`.
+
 Render units for review:
 
 ```bash

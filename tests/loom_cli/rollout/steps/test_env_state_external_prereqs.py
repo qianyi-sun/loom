@@ -11,9 +11,12 @@ from typing import Any
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.evidence import EvidenceDirectory
 from loom_cli.rollout.steps.s10_env_state import (
+    ControlPlaneReadinessError,
     EnvStateStep,
+    _control_plane_health_url,
     _materialize_external_slurm_runner_prerequisites,
     _materialize_repo_dir,
+    _wait_for_control_plane,
 )
 from loom_cli.rollout.steps.subprocess_util import SubprocessResult
 
@@ -162,6 +165,9 @@ def test_env_state_materializes_external_prereqs_before_apply_check(
         order.append("materialize")
         return []
 
+    def fake_wait_cp(*_args, **_kwargs):
+        order.append("wait-cp")
+
     def fake_run(argv, **_kwargs):
         if "apply" in argv:
             order.append("apply")
@@ -182,12 +188,112 @@ def test_env_state_materializes_external_prereqs_before_apply_check(
         "loom_cli.rollout.steps.s10_env_state._materialize_external_slurm_runner_prerequisites",
         fake_materialize,
     )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._wait_for_control_plane",
+        fake_wait_cp,
+    )
     monkeypatch.setattr("loom_cli.rollout.steps.s10_env_state.run_captured", fake_run)
 
     result = EnvStateStep().run(ctx, step_dir)
 
     assert result.exit_code == 0
-    assert order == ["materialize", "apply", "check"]
+    assert order == ["materialize", "wait-cp", "apply", "check"]
+
+
+def test_env_state_stops_before_apply_when_control_plane_is_not_ready(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ctx = make_ctx(tmp_path, worker_token_source="file:/secure/path/worker-token")
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    worktree = ev.step_dir(1, "worktree").path / "src"
+    package_dir = worktree / "src" / "loom_cli"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__main__.py").write_text("raise SystemExit(0)\n")
+    step_dir = ev.step_dir(11, "env-state")
+    profile = tmp_path / "staging.toml"
+    profile.write_text('environment = "staging"\n', encoding="utf-8")
+    order: list[str] = []
+
+    def fake_materialize(*_args, **_kwargs):
+        order.append("materialize")
+        return []
+
+    def fake_wait_cp(*_args, **_kwargs):
+        order.append("wait-cp")
+        raise ControlPlaneReadinessError("control-plane did not become ready")
+
+    def fake_run(*_args, **_kwargs):
+        raise AssertionError("env-state apply/check should wait for CP first")
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._profile_path_for",
+        lambda ctx: str(profile),
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._materialize_external_slurm_runner_prerequisites",
+        fake_materialize,
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._wait_for_control_plane",
+        fake_wait_cp,
+    )
+    monkeypatch.setattr("loom_cli.rollout.steps.s10_env_state.run_captured", fake_run)
+
+    result = EnvStateStep().run(ctx, step_dir)
+
+    assert result.exit_code == 2
+    assert order == ["materialize", "wait-cp"]
+    assert "control-plane readiness failed" in str(result.error)
+    assert "# control-plane-readiness" in step_dir.stderr_path().read_text(
+        encoding="utf-8",
+    )
+
+
+def test_wait_for_control_plane_uses_root_healthz_and_records_evidence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ctx = make_ctx(tmp_path, cp_url="http://127.0.0.1:18081/admin/path?x=1")
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(11, "env-state")
+    seen: list[tuple[str, float]] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _size: int) -> bytes:
+            return b"ok\n"
+
+    def fake_urlopen(url: str, *, timeout: float):
+        seen.append((url, timeout))
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state.urllib.request.urlopen",
+        fake_urlopen,
+    )
+
+    _wait_for_control_plane(ctx, step_dir)
+
+    assert seen == [("http://127.0.0.1:18081/healthz", 2.0)]
+    assert _control_plane_health_url(ctx.cp_url) == "http://127.0.0.1:18081/healthz"
+    evidence = json.loads(
+        step_dir.artifact_path("control-plane-readiness.json").read_text(
+            encoding="utf-8",
+        )
+    )
+    assert evidence["ready"] is True
+    assert evidence["status"] == 200
+    assert evidence["health_url"] == "http://127.0.0.1:18081/healthz"
 
 
 def test_materialize_repo_dir_replaces_dirty_half_updated_checkout(

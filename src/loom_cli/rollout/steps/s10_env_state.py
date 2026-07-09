@@ -19,6 +19,8 @@ import shutil
 import socket
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -55,6 +57,14 @@ class ExternalSlurmPrereqMaterializationError(RuntimeError):
 
 class CatalogProvisioningError(RuntimeError):
     """Raised when rollout cannot safely run required catalog provisioning."""
+
+
+class ControlPlaneReadinessError(RuntimeError):
+    """Raised when the private control-plane URL does not become usable."""
+
+
+_CONTROL_PLANE_READY_TIMEOUT_SECONDS = 60.0
+_CONTROL_PLANE_READY_INTERVAL_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -585,6 +595,79 @@ def _replace_url_host_port(value: str, *, host: str, port: int) -> str:
         )
     )
     return replaced if has_scheme else replaced.removeprefix("http://")
+
+
+def _control_plane_health_url(cp_url: str) -> str:
+    parsed = urlsplit(cp_url)
+    if not parsed.scheme or not parsed.netloc:
+        raise ControlPlaneReadinessError(
+            f"control-plane URL must include scheme and host: {redact_text(cp_url)}",
+        )
+    return urlunsplit((parsed.scheme, parsed.netloc, "/healthz", "", ""))
+
+
+def _wait_for_control_plane(
+    ctx: RolloutContext,
+    step_dir: StepDir,
+    *,
+    timeout_seconds: float = _CONTROL_PLANE_READY_TIMEOUT_SECONDS,
+    interval_seconds: float = _CONTROL_PLANE_READY_INTERVAL_SECONDS,
+) -> None:
+    health_url = _control_plane_health_url(ctx.cp_url)
+    deadline = time.monotonic() + timeout_seconds
+    started = time.monotonic()
+    attempts = 0
+    last_error = ""
+    status: int | None = None
+    body_len = 0
+    while time.monotonic() < deadline:
+        attempts += 1
+        try:
+            with urllib.request.urlopen(health_url, timeout=2.0) as response:
+                status = int(response.status)
+                body = response.read(256)
+                body_len = len(body.strip())
+                if status == 200 and body_len > 0:
+                    step_dir.artifact_path("control-plane-readiness.json").write_text(
+                        json.dumps(
+                            {
+                                "attempts": attempts,
+                                "duration_seconds": round(time.monotonic() - started, 3),
+                                "health_url": redact_text(health_url),
+                                "ready": True,
+                                "status": status,
+                            },
+                            indent=2,
+                            sort_keys=True,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    return
+                last_error = f"HTTP {status} with empty health body"
+        except urllib.error.HTTPError as exc:
+            status = int(exc.code)
+            last_error = f"HTTP {exc.code}: {exc.reason}"
+        except OSError as exc:
+            last_error = str(exc)
+        time.sleep(interval_seconds)
+
+    evidence = {
+        "attempts": attempts,
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "health_url": redact_text(health_url),
+        "last_error": redact_text(last_error),
+        "ready": False,
+        "status": status,
+    }
+    step_dir.artifact_path("control-plane-readiness.json").write_text(
+        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    raise ControlPlaneReadinessError(
+        "control-plane did not become ready at "
+        f"{redact_text(health_url)} within {timeout_seconds:g}s: {redact_text(last_error)}",
+    )
 
 
 def _catalog_port_forward_evidence(
@@ -1166,6 +1249,32 @@ class EnvStateStep(BaseStep):
         except ExternalSlurmPrereqMaterializationError as exc:
             step_dir.stderr_path().write_text(str(exc) + "\n")
             return RunResult(exit_code=2, error=str(exc))
+        try:
+            _wait_for_control_plane(ctx, step_dir)
+        except ControlPlaneReadinessError as exc:
+            message = redact_text(str(exc), limit=200)
+            step_dir.stdout_path().write_text(
+                "# external-slurm-runner-prerequisites\n"
+                f"materialized {len(materialized)} external runner prerequisite set(s)\n"
+                "# control-plane-readiness\n",
+                encoding="utf-8",
+            )
+            step_dir.stderr_path().write_text(
+                f"# control-plane-readiness\n{message}\n",
+                encoding="utf-8",
+            )
+            return RunResult(
+                exit_code=2,
+                error=f"control-plane readiness failed: {message}",
+                artifacts={
+                    "control_plane_readiness": str(
+                        step_dir.artifact_path("control-plane-readiness.json")
+                    ),
+                    "environment_state_profile_materialization": str(
+                        step_dir.artifact_path("environment-state-profile-materialization.json")
+                    ),
+                },
+            )
         apply_ = run_captured(
             candidate_loom_argv(
                 "admin",

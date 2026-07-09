@@ -39,12 +39,28 @@ from loom_cli.rollout.steps.s12_release_gate import (
 from loom_cli.rollout.steps.subprocess_util import SubprocessResult
 
 
+@pytest.fixture(autouse=True)
+def _control_plane_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._wait_for_control_plane",
+        lambda *_args, **_kwargs: None,
+    )
+
+
 def _prepare_candidate_worktree(ev: EvidenceDirectory) -> Path:
     worktree = ev.step_dir(1, "worktree").path / "src"
     package_dir = worktree / "src" / "loom_cli"
     package_dir.mkdir(parents=True)
     (package_dir / "__main__.py").write_text("raise SystemExit(0)\n")
     return worktree
+
+
+@pytest.fixture(autouse=True)
+def _control_plane_readiness_is_out_of_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._wait_for_control_plane",
+        lambda *_args, **_kwargs: None,
+    )
 
 
 def _assert_candidate_invocation(
