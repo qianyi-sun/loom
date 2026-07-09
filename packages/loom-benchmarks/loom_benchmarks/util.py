@@ -241,16 +241,13 @@ def sha256_of_dir(directory: Path) -> str:
     content produce identical hashes; either content or relpath
     differing flips the digest.
 
-    Dotfiles / dotdirs are skipped so that transient HuggingFace
-    `.huggingface/` cache metadata (added by `snapshot_download` on
-    mirror-time re-verification) doesn't flip the digest vs. the
-    clean staging dir the publisher hashed."""
+    All bundle files are included, including dotfiles. Some benchmark
+    adapters copy upstream repositories into the task bundle, and files
+    such as `.gitignore` are real bundle content that must stay under
+    checksum coverage."""
     h = hashlib.sha256()
     for path in sorted(directory.rglob("*")):
         if path.is_dir():
-            continue
-        rel_parts = path.relative_to(directory).parts
-        if any(p.startswith(".") for p in rel_parts):
             continue
         rel = path.relative_to(directory).as_posix().encode("utf-8")
         h.update(b"\x00" + rel + b"\x00")

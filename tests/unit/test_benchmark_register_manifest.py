@@ -87,6 +87,7 @@ async def test_mirror_manifest_task_bundle_uploads_hf_files_to_internal_store(
     bundle = tmp_path / "repo" / "task-001"
     (bundle / "solution").mkdir(parents=True)
     (bundle / "task.toml").write_text("[task]\nid='fake-bench/task-001'\n")
+    (bundle / ".gitignore").write_text("*.pt\n")
     (bundle / "solution" / "solve.sh").write_text("echo ok\n")
     checksum = _bundle_checksum(bundle)
 
@@ -107,9 +108,18 @@ async def test_mirror_manifest_task_bundle_uploads_hf_files_to_internal_store(
         "s3://loom-benchmarks/fake-bench/"
         f"PRHW__loom-benchmark-fake/7908700/task-001/{checksum}/"
     )
-    assert result.uploaded == 2
+    assert result.uploaded == 3
     assert result.skipped == 0
-    assert result.bytes_uploaded == len("[task]\nid='fake-bench/task-001'\n") + len("echo ok\n")
+    assert result.bytes_uploaded == (
+        len("[task]\nid='fake-bench/task-001'\n") + len("*.pt\n") + len("echo ok\n")
+    )
+    assert store.objects[
+        (
+            "loom-benchmarks",
+            "fake-bench/PRHW__loom-benchmark-fake/7908700/"
+            f"task-001/{checksum}/.gitignore",
+        )
+    ] == b"*.pt\n"
     assert store.objects[
         (
             "loom-benchmarks",

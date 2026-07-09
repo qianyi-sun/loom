@@ -3759,6 +3759,11 @@ origin and may legitimately be `git` for SkillLearnBench, while the runtime HF
 mirror provenance used by the release gate comes from task tags such as
 `hf_repo_id`, `hf_revision`, `hf_path`, and `hf_checksum` plus the internal
 `s3://` source prefix.
+The manifest checksum covers every real file in the bundle, including
+dotfiles from upstream repository copies and generated Loom helper scripts.
+Do not bypass checksum failures by excluding broad dotfile patterns; if a
+client cache artifact appears inside a snapshot, fix that specific materializer
+boundary or republish the dataset with an explicit manifest contract.
 
 For staging or production promotion, generate a secret-safe HF
 mirror/token-boundary artifact with the first-class CLI and keep it with the

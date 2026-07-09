@@ -86,6 +86,19 @@ def test_bundle_checksum_differs_on_content_change(tmp_path: Path) -> None:
     assert digest1 != digest2
 
 
+def test_bundle_checksum_includes_task_dotfiles(tmp_path: Path) -> None:
+    bundle = tmp_path / "a"
+    bundle.mkdir()
+    (bundle / "task.toml").write_text("[task]\nid='t'\n")
+    (bundle / ".gitignore").write_text("*.pt\n")
+
+    digest1 = _bundle_checksum(bundle)
+    (bundle / ".gitignore").write_text("*.pt\n*.bin\n")
+    digest2 = _bundle_checksum(bundle)
+
+    assert digest1 != digest2
+
+
 def test_manifest_schema_version_is_int() -> None:
     """Operators (and the worker) fork on this; an accidental change
     to a string would silently break the manifest reader."""
