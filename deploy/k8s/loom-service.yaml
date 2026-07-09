@@ -5,188 +5,202 @@ metadata:
 spec:
   replicas: 2
   selector:
-    matchLabels: { app: loom-service }
+    matchLabels:
+      app: loom-service
   template:
     metadata:
-      labels: { app: loom-service }
+      labels:
+        app: loom-service
     spec:
       containers:
-        - name: loom-service
-          image: loom-service:0.7
-          env:
-            - name: LOOM_SVC_ARTIFACTS_BUCKET
-              value: "artifacts"
-            - name: LOOM_SVC_AUTH_CSRF_COOKIE_NAME
-              value: "loom_csrf"
-            - name: LOOM_SVC_AUTH_CSRF_HEADER_NAME
-              value: "X-Loom-CSRF"
-            - name: LOOM_SVC_AUTH_LOGIN_CHALLENGE_TTL_SEC
-              value: "900"
-            - name: LOOM_SVC_AUTH_RETURN_LOGIN_TOKEN
-              value: "False"
-            - name: LOOM_SVC_AUTH_SESSION_COOKIE_NAME
-              value: "loom_session"
-            - name: LOOM_SVC_AUTH_SESSION_TTL_SEC
-              value: "604800"
-            - name: LOOM_SVC_BATCH_BUDGET_ESTIMATE_INPUT_TOKENS_PER_CALL
-              value: "1000000"
-            - name: LOOM_SVC_BATCH_BUDGET_ESTIMATE_LLM_CALLS_PER_TRIAL
-              value: "1"
-            - name: LOOM_SVC_BATCH_BUDGET_ESTIMATE_OUTPUT_TOKENS_PER_CALL
-              value: "0"
-            - name: LOOM_SVC_BATCH_RUNNER_BATCH_SIZE
-              value: "50"
-            - name: LOOM_SVC_BATCH_RUNNER_CP_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: loom-secrets
-                  key: batch-runner-cp-token
-                  optional: true
-            - name: LOOM_SVC_BATCH_RUNNER_POLL_INTERVAL_SEC
-              value: "5"
-            - name: LOOM_SVC_BATCH_RUNNER_SUBMIT_RATE_PER_SEC
-              value: "100"
-            - name: LOOM_SVC_BIND_HOST
-              value: "0.0.0.0"
-            - name: LOOM_SVC_BIND_PORT
-              value: "8090"
-            - name: LOOM_SVC_CONTROL_PLANE_URL
-              value: "http://loom-control-plane:8080"
-            - name: LOOM_SVC_DB_URL
-              valueFrom:
-                secretKeyRef:
-                  name: loom-secrets
-                  key: svc-db-url
-            - name: LOOM_SVC_DB_URL_POOL
-              valueFrom:
-                secretKeyRef:
-                  name: loom-secrets
-                  key: svc-db-url-pool
-                  optional: true
-            - name: LOOM_SVC_DEV_RELOAD
-              value: "False"
-            - name: LOOM_SVC_GATEWAY_URL
-              value: "http://loom-llm-gateway:9100"
-            - name: LOOM_SVC_K8S_WORKER_ENABLED
-              value: "True"
-            - name: LOOM_SVC_LOCAL_SERVERS_JSON
-              value: "{}"
-            - name: LOOM_SVC_LOG_LEVEL
-              value: "info"
-            - name: LOOM_SVC_MINIO_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: loom-secrets
-                  key: minio-access-key
-            - name: LOOM_SVC_MINIO_ENDPOINT
-              value: "http://loom-minio:9000"
-            - name: LOOM_SVC_MINIO_REGION
-              value: "us-east-1"
-            - name: LOOM_SVC_MINIO_SECRET_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: loom-secrets
-                  key: minio-secret-key
-            - name: LOOM_SVC_PUBLIC_BASE_URL
-              value: "https://loom.example.com"
-            - name: LOOM_SVC_SIGNED_URL_EXPIRY_SEC
-              value: "3600"
-            - name: LOOM_SVC_STALE_RUNNING_TRIAL_GRACE_SEC
-              value: "900.0"
-            - name: LOOM_SVC_STALE_RUNNING_TRIAL_RECLAIM_ENABLED
-              value: "True"
-            - name: LOOM_SVC_STALE_RUNNING_TRIAL_SILENCE_SEC
-              value: "900.0"
-            - name: LOOM_SVC_STALE_RUNNING_TRIAL_TIMEOUT_MULTIPLIER
-              value: "3.0"
-            - name: LOOM_SVC_STORAGE_AUTH_KIND
-              value: "static_keys"
-            - name: LOOM_SVC_STORAGE_BACKEND
-              value: "minio"
-            - name: LOOM_SVC_TASKSET_GC_POLL_INTERVAL_SEC
-              value: "3600"
-            - name: LOOM_SVC_TASKSET_GC_RETENTION_DAYS
-              value: "7"
-            - name: LOOM_SVC_TASKSET_MANIFEST_MAX_BYTES
-              value: "1048576"
-            - name: LOOM_SVC_TASKSET_MATERIALIZER_BATCH_SIZE
-              value: "1"
-            - name: LOOM_SVC_TASKSET_MATERIALIZER_CLAIM_TTL_SEC
-              value: "600"
-            - name: LOOM_SVC_TASKSET_MATERIALIZER_POLL_INTERVAL_SEC
-              value: "5"
-            - name: LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_CPU_LIMIT_SEC
-              value: "10"
-            - name: LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_MEMORY_LIMIT_MB
-              value: "256"
-            - name: LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_NETWORK_ISOLATED
-              value: "False"
-            - name: LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_WALL_TIMEOUT_SEC
-              value: "30"
-            - name: LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORMS_ENABLED
-              value: "False"
-            - name: LOOM_SVC_TASKSET_MATERIALIZER_UPSTREAM_CACHE_ROOT
-              value: "/tmp/loom-taskset-upstream"
-            - name: LOOM_SVC_TASKSET_QUOTA_MAX_BUNDLE_BYTES
-              value: "5368709120"
-            - name: LOOM_SVC_TASKSET_QUOTA_MAX_COUNT_PER_TEAM
-              value: "50"
-            - name: LOOM_SVC_TASKSET_QUOTA_MAX_STORAGE_BYTES_PER_TEAM
-              value: "21474836480"
-            - name: LOOM_SVC_TEAM_QUOTA_MAX_ATTEMPTS_CEILING_DEFAULT
-              value: "3"
-            - name: LOOM_SVC_TEAM_REGISTRATION_OPEN
-              value: "False"
-            - name: LOOM_SVC_TRAJECTORIES_BUCKET
-              value: "trajectories"
-            - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_BACKOFF_BASE_SEC
-              value: "30.0"
-            - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_BACKOFF_JITTER
-              value: "0.2"
-            - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_BACKOFF_MAX_SEC
-              value: "600.0"
-            - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_BACKOFF_MULTIPLIER
-              value: "2.0"
-            - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_MAX_ATTEMPTS
-              value: "3"
-            - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_RETRY_ON
-              value: "[\"gateway_error\", \"provider_transport_disconnect\"]"
-            - name: LOOM_SVC_WORKER_HEARTBEAT_EXPIRY_SEC
-              value: "120"
-
-            - name: LOOM_SVC_ADMIN_SECRET_FILE
-              value: "/var/run/loom/secrets/admin/secrets.toml"
-            - name: LOOM_SECRET_STORE_MASTER_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: loom-secrets
-                  key: secret-store-master-key
-            - name: LOOM_ENV
-              value: "production"
-          volumeMounts:
-            - name: loom-admin-secret
-              mountPath: /var/run/loom/secrets/admin
-              readOnly: true
-          ports:
-            - containerPort: 8090
-          readinessProbe:
-            httpGet: { path: /api/v1/health, port: 8090 }
-            periodSeconds: 5
-          resources:
-            requests: { cpu: 200m, memory: 256Mi }
-            limits: { cpu: 1, memory: 1Gi }
-      volumes:
+      - name: loom-service
+        image: loom-service:0.7
+        env:
+        - name: LOOM_SVC_ARTIFACTS_BUCKET
+          value: artifacts
+        - name: LOOM_SVC_AUTH_CSRF_COOKIE_NAME
+          value: loom_csrf
+        - name: LOOM_SVC_AUTH_CSRF_HEADER_NAME
+          value: X-Loom-CSRF
+        - name: LOOM_SVC_AUTH_LOGIN_CHALLENGE_TTL_SEC
+          value: '900'
+        - name: LOOM_SVC_AUTH_RETURN_LOGIN_TOKEN
+          value: 'False'
+        - name: LOOM_SVC_AUTH_SESSION_COOKIE_NAME
+          value: loom_session
+        - name: LOOM_SVC_AUTH_SESSION_TTL_SEC
+          value: '604800'
+        - name: LOOM_SVC_BATCH_BUDGET_ESTIMATE_INPUT_TOKENS_PER_CALL
+          value: '1000000'
+        - name: LOOM_SVC_BATCH_BUDGET_ESTIMATE_LLM_CALLS_PER_TRIAL
+          value: '1'
+        - name: LOOM_SVC_BATCH_BUDGET_ESTIMATE_OUTPUT_TOKENS_PER_CALL
+          value: '0'
+        - name: LOOM_SVC_BATCH_RUNNER_BATCH_SIZE
+          value: '50'
+        - name: LOOM_SVC_BATCH_RUNNER_CP_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: batch-runner-cp-token
+              optional: true
+        - name: LOOM_SVC_BATCH_RUNNER_POLL_INTERVAL_SEC
+          value: '5'
+        - name: LOOM_SVC_BATCH_RUNNER_SUBMIT_RATE_PER_SEC
+          value: '100'
+        - name: LOOM_SVC_BIND_HOST
+          value: 0.0.0.0
+        - name: LOOM_SVC_BIND_PORT
+          value: '8090'
+        - name: LOOM_SVC_CONTROL_PLANE_URL
+          value: http://loom-control-plane:8080
+        - name: LOOM_SVC_DB_URL
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: svc-db-url
+        - name: LOOM_SVC_DB_URL_POOL
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: svc-db-url-pool
+              optional: true
+        - name: LOOM_SVC_DEV_RELOAD
+          value: 'False'
+        - name: LOOM_SVC_GATEWAY_URL
+          value: http://loom-llm-gateway:9100
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: huggingface-api-key
+              optional: true
+        - name: LOOM_SVC_K8S_WORKER_ENABLED
+          value: 'True'
+        - name: LOOM_SVC_LOCAL_SERVERS_JSON
+          value: '{}'
+        - name: LOOM_SVC_LOG_LEVEL
+          value: info
+        - name: LOOM_SVC_MINIO_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: minio-access-key
+        - name: LOOM_SVC_MINIO_ENDPOINT
+          value: http://loom-minio:9000
+        - name: LOOM_SVC_MINIO_REGION
+          value: us-east-1
+        - name: LOOM_SVC_MINIO_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: minio-secret-key
+        - name: LOOM_SVC_PUBLIC_BASE_URL
+          value: https://loom.example.com
+        - name: LOOM_SVC_SIGNED_URL_EXPIRY_SEC
+          value: '3600'
+        - name: LOOM_SVC_STALE_RUNNING_TRIAL_GRACE_SEC
+          value: '900.0'
+        - name: LOOM_SVC_STALE_RUNNING_TRIAL_RECLAIM_ENABLED
+          value: 'True'
+        - name: LOOM_SVC_STALE_RUNNING_TRIAL_SILENCE_SEC
+          value: '900.0'
+        - name: LOOM_SVC_STALE_RUNNING_TRIAL_TIMEOUT_MULTIPLIER
+          value: '3.0'
+        - name: LOOM_SVC_STORAGE_AUTH_KIND
+          value: static_keys
+        - name: LOOM_SVC_STORAGE_BACKEND
+          value: minio
+        - name: LOOM_SVC_TASKSET_GC_POLL_INTERVAL_SEC
+          value: '3600'
+        - name: LOOM_SVC_TASKSET_GC_RETENTION_DAYS
+          value: '7'
+        - name: LOOM_SVC_TASKSET_MANIFEST_MAX_BYTES
+          value: '1048576'
+        - name: LOOM_SVC_TASKSET_MATERIALIZER_BATCH_SIZE
+          value: '1'
+        - name: LOOM_SVC_TASKSET_MATERIALIZER_CLAIM_TTL_SEC
+          value: '600'
+        - name: LOOM_SVC_TASKSET_MATERIALIZER_POLL_INTERVAL_SEC
+          value: '5'
+        - name: LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_CPU_LIMIT_SEC
+          value: '10'
+        - name: LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_MEMORY_LIMIT_MB
+          value: '256'
+        - name: LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_NETWORK_ISOLATED
+          value: 'False'
+        - name: LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_WALL_TIMEOUT_SEC
+          value: '30'
+        - name: LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORMS_ENABLED
+          value: 'False'
+        - name: LOOM_SVC_TASKSET_MATERIALIZER_UPSTREAM_CACHE_ROOT
+          value: /tmp/loom-taskset-upstream
+        - name: LOOM_SVC_TASKSET_QUOTA_MAX_BUNDLE_BYTES
+          value: '5368709120'
+        - name: LOOM_SVC_TASKSET_QUOTA_MAX_COUNT_PER_TEAM
+          value: '50'
+        - name: LOOM_SVC_TASKSET_QUOTA_MAX_STORAGE_BYTES_PER_TEAM
+          value: '21474836480'
+        - name: LOOM_SVC_TEAM_QUOTA_MAX_ATTEMPTS_CEILING_DEFAULT
+          value: '3'
+        - name: LOOM_SVC_TEAM_REGISTRATION_OPEN
+          value: 'False'
+        - name: LOOM_SVC_TRAJECTORIES_BUCKET
+          value: trajectories
+        - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_BACKOFF_BASE_SEC
+          value: '30.0'
+        - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_BACKOFF_JITTER
+          value: '0.2'
+        - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_BACKOFF_MAX_SEC
+          value: '600.0'
+        - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_BACKOFF_MULTIPLIER
+          value: '2.0'
+        - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_MAX_ATTEMPTS
+          value: '3'
+        - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_RETRY_ON
+          value: '["gateway_error", "provider_transport_disconnect"]'
+        - name: LOOM_SVC_WORKER_HEARTBEAT_EXPIRY_SEC
+          value: '120'
+        - name: LOOM_SVC_ADMIN_SECRET_FILE
+          value: /var/run/loom/secrets/admin/secrets.toml
+        - name: LOOM_SECRET_STORE_MASTER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: secret-store-master-key
+        - name: LOOM_ENV
+          value: production
+        volumeMounts:
         - name: loom-admin-secret
-          secret:
-            secretName: loom-admin-secret
-            defaultMode: 0400
+          mountPath: /var/run/loom/secrets/admin
+          readOnly: true
+        ports:
+        - containerPort: 8090
+        readinessProbe:
+          httpGet:
+            path: /api/v1/health
+            port: 8090
+          periodSeconds: 5
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+          limits:
+            cpu: 1
+            memory: 1Gi
+      volumes:
+      - name: loom-admin-secret
+        secret:
+          secretName: loom-admin-secret
+          defaultMode: 256
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: loom-service
 spec:
-  selector: { app: loom-service }
+  selector:
+    app: loom-service
   ports:
-    - port: 8090
-      targetPort: 8090
+  - port: 8090
+    targetPort: 8090
