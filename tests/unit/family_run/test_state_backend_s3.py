@@ -113,3 +113,24 @@ def test_parse_uri_rejects_non_s3() -> None:
 def test_parse_uri_rejects_missing_key() -> None:
     with pytest.raises(ValueError):
         S3ArtifactsStateBackend._parse_uri("s3://only-bucket")
+
+
+def test_zero_arg_construction_matches_registry_call() -> None:
+    """The orchestrator's ``_build_state_backend`` uses ``resolve_plugin``
+    which calls ``cls()`` with no args and then pokes ``store`` +
+    ``bucket`` post-hoc. Regression for the live-smoke crash where
+    ``TypeError: __init__() missing 2 required positional arguments``
+    took down the family orchestrator's whole iteration loop.
+    """
+    backend = S3ArtifactsStateBackend()  # must not raise
+    assert backend.store is None
+    assert backend.bucket is None
+
+
+@pytest.mark.asyncio
+async def test_download_raises_if_store_missing(tmp_path: Path) -> None:
+    """Calling backend methods before store is set must raise, not silently
+    default to a wrong bucket."""
+    backend = S3ArtifactsStateBackend()
+    with pytest.raises(RuntimeError, match="store not configured"):
+        await backend.download("s3://b/k/x.tar.gz", tmp_path, {})
