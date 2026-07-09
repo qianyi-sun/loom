@@ -67,6 +67,17 @@ def test_creates_missing_kind_cluster_and_restores_namespace_secrets(
             "ingress-nginx-controller",
         ]:
             Result.returncode = 1
+        if list(argv) == [
+            "kubectl",
+            "-n",
+            "ingress-nginx",
+            "get",
+            "endpoints",
+            "ingress-nginx-controller-admission",
+            "-o",
+            "jsonpath={.subsets[0].addresses[0].ip}",
+        ]:
+            Result.stdout = "10.244.0.10"
         return Result()
 
     monkeypatch.setattr(
@@ -106,12 +117,31 @@ def test_creates_missing_kind_cluster_and_restores_namespace_secrets(
     assert not any(str(part).startswith("https://") for call in calls for part in call)
     assert [
         "kubectl",
+        "label",
+        "node",
+        "loom-staging-control-plane",
+        "ingress-ready=true",
+        "--overwrite",
+    ] in calls
+    assert [
+        "kubectl",
         "-n",
         "ingress-nginx",
         "wait",
-        "--for=condition=Available",
-        "deployment/ingress-nginx-controller",
+        "--for=condition=Ready",
+        "pod",
+        "--selector=app.kubernetes.io/component=controller,app.kubernetes.io/instance=ingress-nginx,app.kubernetes.io/name=ingress-nginx",
         "--timeout=180s",
+    ] in calls
+    assert [
+        "kubectl",
+        "-n",
+        "ingress-nginx",
+        "get",
+        "endpoints",
+        "ingress-nginx-controller-admission",
+        "-o",
+        "jsonpath={.subsets[0].addresses[0].ip}",
     ] in calls
     assert ["kubectl", "create", "namespace", "loom-staging"] in calls
     secret_apply_calls = [
@@ -124,6 +154,7 @@ def test_creates_missing_kind_cluster_and_restores_namespace_secrets(
     assert "--field-manager=loom-rollout-secret-restore" in secret_apply
     assert str(tmp_path / "backup" / "secrets") not in secret_apply
     rendered = step_dir.artifact_path("kind-cluster.yaml").read_text(encoding="utf-8")
+    assert 'node-labels: "ingress-ready=true"' in rendered
     assert "hostPort: 80" in rendered
     assert "hostPort: 443" in rendered
     assert f"hostPath: {tmp_path / 'loom-staging'}" in rendered
@@ -159,6 +190,17 @@ def test_existing_kind_cluster_skips_create_but_refreshes_and_restores(
             "loom-worker-trajectories",
         ]:
             Result.returncode = 1
+        if list(argv) == [
+            "kubectl",
+            "-n",
+            "ingress-nginx",
+            "get",
+            "endpoints",
+            "ingress-nginx-controller-admission",
+            "-o",
+            "jsonpath={.subsets[0].addresses[0].ip}",
+        ]:
+            Result.stdout = "10.244.0.10"
         return Result()
 
     monkeypatch.setattr(
@@ -179,6 +221,14 @@ def test_existing_kind_cluster_skips_create_but_refreshes_and_restores(
     assert result.exit_code == 0
     assert not any(call[:3] == ["kind", "create", "cluster"] for call in calls)
     assert ["kind", "export", "kubeconfig", "--name", "loom-staging"] in calls
+    assert [
+        "kubectl",
+        "label",
+        "node",
+        "loom-staging-control-plane",
+        "ingress-ready=true",
+        "--overwrite",
+    ] in calls
     secret_apply_calls = [
         call for call in calls if call[:4] == ["kubectl", "-n", "loom-staging", "apply"]
     ]
@@ -205,6 +255,17 @@ def test_bootstraps_worker_trajectories_static_storage_before_secret_restore(
             Result.stdout = "loom-staging\n"
         if list(argv) == ["kubectl", "get", "namespace", "loom-staging"]:
             Result.returncode = 0
+        if list(argv) == [
+            "kubectl",
+            "-n",
+            "ingress-nginx",
+            "get",
+            "endpoints",
+            "ingress-nginx-controller-admission",
+            "-o",
+            "jsonpath={.subsets[0].addresses[0].ip}",
+        ]:
+            Result.stdout = "10.244.0.12"
         return Result()
 
     monkeypatch.setattr(
@@ -349,3 +410,120 @@ def test_verify_fails_when_ingressclass_is_missing(
     step_dir = ev.step_dir(3, "kind-cluster")
 
     assert KindClusterStep().verify(ctx, step_dir).name == "MISMATCH"
+
+
+def test_verify_fails_when_ingress_ready_node_label_is_missing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        if list(argv) == ["kind", "get", "clusters"]:
+            Result.stdout = "loom-staging\n"
+        if list(argv) == [
+            "kubectl",
+            "-n",
+            "ingress-nginx",
+            "get",
+            "endpoints",
+            "ingress-nginx-controller-admission",
+            "-o",
+            "jsonpath={.subsets[0].addresses[0].ip}",
+        ]:
+            Result.stdout = "10.244.0.10"
+        return Result()
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s03_kind_cluster.run_captured",
+        fake_run,
+    )
+    ctx = make_ctx(
+        tmp_path,
+        namespace="loom-staging",
+        backup_manifest_path=_backup_manifest(tmp_path),
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(3, "kind-cluster")
+
+    assert KindClusterStep().verify(ctx, step_dir).name == "MISMATCH"
+    assert [
+        "kubectl",
+        "get",
+        "node",
+        "loom-staging-control-plane",
+        "-o",
+        "jsonpath={.metadata.labels.ingress-ready}",
+    ] in calls
+
+
+def test_verify_fails_when_ingress_admission_endpoint_is_missing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        if list(argv) == ["kind", "get", "clusters"]:
+            Result.stdout = "loom-staging\n"
+        if list(argv) == [
+            "kubectl",
+            "get",
+            "node",
+            "loom-staging-control-plane",
+            "-o",
+            "jsonpath={.metadata.labels.ingress-ready}",
+        ]:
+            Result.stdout = "true"
+        if list(argv) == [
+            "kubectl",
+            "-n",
+            "ingress-nginx",
+            "get",
+            "endpoints",
+            "ingress-nginx-controller-admission",
+            "-o",
+            "jsonpath={.subsets[0].addresses[0].ip}",
+        ]:
+            Result.stdout = ""
+        return Result()
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s03_kind_cluster.run_captured",
+        fake_run,
+    )
+    ctx = make_ctx(
+        tmp_path,
+        namespace="loom-staging",
+        backup_manifest_path=_backup_manifest(tmp_path),
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(3, "kind-cluster")
+
+    assert KindClusterStep().verify(ctx, step_dir).name == "MISMATCH"
+    assert [
+        "kubectl",
+        "-n",
+        "ingress-nginx",
+        "wait",
+        "--for=condition=Ready",
+        "pod",
+        "--selector=app.kubernetes.io/component=controller,app.kubernetes.io/instance=ingress-nginx,app.kubernetes.io/name=ingress-nginx",
+        "--timeout=5s",
+    ] in calls
