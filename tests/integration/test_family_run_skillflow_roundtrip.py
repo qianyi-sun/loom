@@ -29,6 +29,7 @@ Asserts:
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,43 @@ from loom.trajectory.storage import FakeObjectStore
 from loom_family_orchestrator.main_loop import OrchestratorContext, run_once
 
 # ─── Shared harness scaffolding ─────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+async def _cleanup_roundtrip_rows(
+    postgres_url: str,
+) -> AsyncIterator[None]:
+    yield
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            await session.execute(text("""
+                DELETE FROM batch_family_state
+                 WHERE family_key = 'family_rt'
+                    OR batch_id IN (
+                        SELECT id FROM batches WHERE name = 'rt-batch'
+                    )
+            """))
+            await session.execute(text("""
+                DELETE FROM trials
+                 WHERE family_key = 'family_rt'
+                    OR batch_id IN (
+                        SELECT id FROM batches WHERE name = 'rt-batch'
+                    )
+            """))
+            await session.execute(text("""
+                DELETE FROM batches WHERE name = 'rt-batch'
+            """))
+            await session.execute(text("""
+                DELETE FROM tasks WHERE id LIKE 'family_rt/%'
+            """))
+            await session.execute(text("""
+                DELETE FROM teams WHERE name LIKE 'test-team-rt-%'
+            """))
+            await session.commit()
+    finally:
+        await engine.dispose()
 
 
 @dataclass
