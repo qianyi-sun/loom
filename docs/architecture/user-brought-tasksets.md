@@ -3,9 +3,10 @@
 Status: partially implemented. TaskSet intake/list/status/materialization
 fixtures exist, and run creation now accepts team-visible TaskSets through
 `task_filter.task_set_id` / `task_filter.task_set_ids` and
-`loom eval batch create --task-set`. Materialization workers, full TaskSet
-management UI, and live staging validation are still tracked separately. This
-updates the earlier user-brought-benchmarks design by separating the
+`loom eval batch create --task-set`. Row-oriented manifests and uploaded
+bundle archives are supported by the materializer; full TaskSet management UI
+and live staging validation are still tracked separately. This updates the
+earlier user-brought-benchmarks design by separating the
 user-facing object from the platform benchmark catalog. It complements
 [`benchmark-adapter.md`](benchmark-adapter.md) for native platform benchmarks
 and [`sandbox-isolation.md`](sandbox-isolation.md) for verifier and transform
@@ -190,6 +191,7 @@ cannot leak across teams.
 ```
 benchmarks/system/<slug>/...                                  # unchanged
 tasksets/user/<owning_team_id>/<slug>/manifest.yaml
+tasksets/user/<owning_team_id>/<slug>/<source.locator>.tar.gz # bundle-upload source
 tasksets/user/<owning_team_id>/<slug>/verifier.{py,sh}         # optional
 tasksets/user/<owning_team_id>/<slug>/transform.py             # optional
 tasksets/user/<owning_team_id>/<slug>/tasks/<task_id>/...
@@ -210,10 +212,11 @@ metadata:
 
 intents:
   - trajectory_generation             # always allowed
-  - evaluation                        # requires verifier below
+  - evaluation                        # row sources require verifier below;
+                                      # bundle-upload uses per-task verifiers
 
 source:
-  type: hf                            # hf | git | https | jsonl-inline
+  type: hf                            # hf | git | https | jsonl-inline | bundle-upload
   locator: namespace/dataset
   revision: 1.2.3                     # optional
   subset: default                     # optional
@@ -236,8 +239,8 @@ task_template:                        # rendered per instance with {{ instance.*
   steps:
     - artifacts: [solution.py]
 
-verifier:                             # optional; required only for evaluation intent
-  type: pytest                        # pytest | script | exact-match | regex | llm-judge
+verifier:                             # optional; required for row-source evaluation
+  type: pytest                        # pytest | script
   file: verifier/test_solution.py     # path inside the upload bundle
 
 transform:                            # optional
@@ -256,11 +259,50 @@ change.
 Validation rules:
 
 - `trajectory_generation` is allowed with or without `verifier`.
-- `evaluation` requires `verifier`.
+- `evaluation` on row-oriented sources requires a manifest-level `pytest` or
+  `script` verifier.
+- `evaluation` on `bundle-upload` sources uses the verifier declared by each
+  uploaded task bundle and does not require a shared manifest-level verifier.
 - A manifest without `intents` defaults to `["trajectory_generation"]`.
 - A manifest with `verifier` but no explicit `evaluation` intent may be accepted
   as evaluation-ready, but the API response should make the inferred capability
   explicit.
+
+Bundle-upload TaskSets use the same top-level manifest shape, but the source
+locator points at a tar archive shipped in the same submit directory. The archive
+contains complete per-task directories and is safely unpacked by the
+materializer; absolute paths, traversal entries, symlinks, hardlinks, and device
+entries are rejected before any task row is created.
+
+```yaml
+apiVersion: loom.taskset/v1
+kind: UserTaskSet
+metadata:
+  name: source-useful-5003-slice
+  display_name: Source Useful 5003 Slice
+intents:
+  - evaluation
+source:
+  type: bundle-upload
+  locator: bundle.tar.gz
+  subset: tasks
+limits:
+  max_instances: 100
+```
+
+Expected archive layout:
+
+```
+bundle.tar.gz
+└── tasks/
+    ├── task-a/
+    │   ├── task.toml
+    │   ├── instruction.md
+    │   ├── environment/Dockerfile
+    │   └── verifier/...
+    └── task-b/
+        └── ...
+```
 
 ## Components
 
@@ -268,7 +310,7 @@ Validation rules:
 
 | Endpoint | Behavior |
 |---|---|
-| `POST /api/v1/tasksets` | multipart: `manifest.yaml` + optional `verifier.*` + optional `transform.py`. Validates, uploads blobs, inserts TaskSet rows, enqueues materialization. Returns 202 + `task_set_id`. |
+| `POST /api/v1/tasksets` | multipart: `manifest.yaml` + optional `verifier.*` + optional `transform.py`; `bundle-upload` manifests also require a `bundle` part matching `source.locator`. Validates, uploads blobs, inserts TaskSet rows, enqueues materialization. Returns 202 + `task_set_id`. |
 | `GET /api/v1/tasksets/{id}` | materialization status, capabilities, task count, and per-instance error summary. |
 | `POST /api/v1/tasksets/{id}/rebuild` | re-enqueues materialization; manifest re-fetched from storage. |
 | `DELETE /api/v1/tasksets/{id}` | soft-delete; blobs purged by GC after 7 days. |
@@ -296,7 +338,7 @@ task sources before `task_ids`, tag filters, and subset filters are applied.
 ### CLI
 
 ```
-loom tasksets submit ./my-taskset/        # directory with manifest.yaml, [verifier.*], [transform.py]
+loom tasksets submit ./my-taskset/        # manifest.yaml, [verifier.*], [transform.py], [bundle.tar.gz]
 loom tasksets status <id>
 loom tasksets rebuild <id>
 loom tasksets delete <id>
@@ -329,7 +371,8 @@ A background job-queue consumer:
 1. Load manifest from `task_set_manifests`.
 2. `fetch_upstream(source)` - reuses
    `packages/loom-benchmarks/loom_benchmarks/fetch.py` unchanged where
-   possible.
+   possible for row-oriented sources. For `bundle-upload`, fetch the uploaded
+   tar archive from the TaskSet prefix instead.
 3. Iterate rows up to `limits.max_instances`.
 4. For each row: optionally run `transform(row)` in a constrained subprocess
    (see Sandbox).
@@ -345,7 +388,9 @@ A background job-queue consumer:
    context path drift; it does not flatten or silently repair user bundles.
 8. Write the bundle (`task.toml`, `instruction.md`, optional
    `verifier/<name>`, declared artifacts) to object storage under the TaskSet
-   prefix.
+   prefix. For `bundle-upload`, preserve and upload the complete per-task
+   directory, including verifier/tests/data assets; the DB `config` stores a
+   validated Loom `TaskConfig`.
 9. Insert `tasks` rows linked to the TaskSet and owning team.
 10. On completion, update `task_sets.status` to `ready`, `partial`, or
    `failed`; set `evaluation_ready=true` only when verifier/scoring config is
@@ -384,7 +429,8 @@ Add a TaskSets surface instead of folding user uploads into the Benchmarks page:
   `deleted`) with a detail panel showing the first 50 per-instance errors.
 - Capability badge: `trajectory-only`, `evaluation-ready`, or `both`.
 - "Submit TaskSet" CTA: drag-and-drop directory upload, or paste a manifest
-  with separate file pickers for verifier and transform.
+  with separate file pickers for verifier, transform, and bundle archive when
+  `source.type=bundle-upload`.
 - Data-production run creation selects TaskSets.
 - Evaluation run creation selects native Benchmarks and clearly labeled
   evaluation-ready TaskSets.
@@ -408,18 +454,33 @@ API    -> validate manifest (pydantic, extra=forbid)
        -> 202 + task_set_id
 ```
 
+For `bundle-upload`, the multipart form is
+`manifest + bundle + [verifier] + [transform]`, although transform is not
+currently supported with uploaded bundle archives.
+
 ### Materialize (worker)
 
 ```
-load manifest -> fetch_upstream(source)
-foreach row up to limits.max_instances:
-    [if transform: row = sandboxed transform(row)]
-    render task.toml from task_template using row + instance_mapping
-    validate TaskConfig (extra=forbid)
-    write bundle to object storage
-    INSERT tasks row linked to task_set_id
+load manifest
+if source.type == bundle-upload:
+    fetch archive from tasksets/user/<team>/<slug>/<source.locator>
+    safely extract archive; reject traversal/link/device entries
+    foreach task.toml under source.subset or tasks/ up to limits.max_instances:
+        normalize Terminal-Bench-shaped task.toml when needed
+        validate TaskConfig (extra=forbid)
+        preflight task bundle compatibility
+        upload complete per-task directory to object storage
+        INSERT tasks row linked to task_set_id
+else:
+    fetch_upstream(source)
+    foreach row up to limits.max_instances:
+        [if transform: row = sandboxed transform(row)]
+        render task.toml from task_template using row + instance_mapping
+        validate TaskConfig (extra=forbid)
+        write bundle to object storage
+        INSERT tasks row linked to task_set_id
 UPDATE task_sets.status = ready | partial | failed
-UPDATE task_sets.evaluation_ready based on verifier validity
+UPDATE task_sets.evaluation_ready based on shared or per-task verifier validity
 ```
 
 ### Data-production run
@@ -448,7 +509,10 @@ agent/model runs -> verifier runs in trial sandbox -> score/reward persisted
 | Condition | Behavior |
 |---|---|
 | Manifest schema invalid | API 400 with field-level errors at intake. |
-| `evaluation` intent without verifier | API 400 with `verifier_required_for_evaluation`. |
+| `evaluation` intent without verifier on row-oriented sources | API 400 with `verifier_required_for_evaluation`. |
+| `bundle-upload` missing multipart bundle | API 400 with `bundle file required when manifest source is bundle-upload`. |
+| Unsafe uploaded archive entry | Materialization fails with `bundle_extract_unsafe`. |
+| Uploaded archive contains no task directories | Materialization fails with `bundle_no_tasks`. |
 | Source unreachable | 3 retries with exponential backoff, then `status=failed` (`source_unreachable`). |
 | `transform()` crash on a row | Capture stderr, skip instance, record error; first 50 errors retained on TaskSet detail. |
 | `transform()` exceeds resource limits | Killed, instance skipped with `transform_limit_exceeded`. |
@@ -490,8 +554,9 @@ table.
 - Manifest schema: positive cases per source type; negative cases per required
   field; `extra="forbid"` rejection.
 - Intent/capability validation: trajectory-only accepted without verifier;
-  evaluation rejected without verifier; verifier makes evaluation readiness
-  explicit.
+  row-source evaluation rejected without verifier; bundle-upload evaluation
+  accepted with per-task verifiers; verifier makes row-source evaluation
+  readiness explicit.
 - Template renderer: placeholder coverage and missing-field error messages.
 - Instance-mapping DSL: dotted paths, defaults, type coercion.
 - `visible_task_sets` helper: every (owning_team, visibility, viewer_team)
@@ -511,6 +576,9 @@ table.
   platform benchmarks without requiring user TaskSet setup.
 - One real fetch per source type (`hf`, `git`, `https`, `jsonl-inline`); the
   rest mocked.
+- Bundle-upload materialization preserves complete per-task assets, normalizes
+  Terminal-Bench-shaped `task.toml` into DB config, and rejects traversal/link
+  archive entries.
 - Cross-team isolation: team A cannot list, get, rebuild, delete, data-run, or
   evaluation-run team B's TaskSet.
 - TaskSet run selection: owned `task_set_id` succeeds, native

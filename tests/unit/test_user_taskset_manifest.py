@@ -47,6 +47,14 @@ def test_both_intents_with_verifier() -> None:
     assert manifest.intents == ["trajectory_generation", "evaluation"]
 
 
+def test_rejects_unregistered_manifest_verifier_type() -> None:
+    with pytest.raises(ValidationError):
+        UserTaskSetManifest.model_validate({
+            **_MINIMAL,
+            "verifier": {"type": "regex", "file": "verifier/pattern.txt"},
+        })
+
+
 def test_rejects_extra_top_level_field() -> None:
     with pytest.raises(ValidationError):
         UserTaskSetManifest.model_validate({**_MINIMAL, "extra": True})
@@ -62,6 +70,49 @@ def test_evaluation_without_verifier_rejected() -> None:
         UserTaskSetManifest.model_validate({
             **_MINIMAL,
             "intents": ["evaluation"],
+        })
+
+
+def test_bundle_upload_evaluation_uses_per_task_verifiers() -> None:
+    manifest = UserTaskSetManifest.model_validate({
+        "apiVersion": "loom.taskset/v1",
+        "kind": "UserTaskSet",
+        "metadata": {"name": "bundle-tasks", "display_name": "Bundle Tasks"},
+        "intents": ["evaluation"],
+        "source": {
+            "type": "bundle-upload",
+            "locator": "bundle.tar.gz",
+            "subset": "tasks",
+        },
+    })
+    assert manifest.source.type == "bundle-upload"
+    assert manifest.instance_mapping == {}
+    assert manifest.task_template == {}
+    assert manifest.verifier is None
+
+
+@pytest.mark.parametrize("bad_locator", [
+    "../bundle.tar.gz",
+    "/tmp/bundle.tar.gz",
+    "bundle.zip",
+])
+def test_bundle_upload_rejects_unsafe_or_unsupported_locator(bad_locator: str) -> None:
+    with pytest.raises(ValidationError):
+        UserTaskSetManifest.model_validate({
+            "apiVersion": "loom.taskset/v1",
+            "kind": "UserTaskSet",
+            "metadata": {"name": "bundle-tasks", "display_name": "Bundle Tasks"},
+            "source": {"type": "bundle-upload", "locator": bad_locator},
+        })
+
+
+def test_non_bundle_sources_require_row_mapping_and_template() -> None:
+    with pytest.raises(ValidationError, match="instance_mapping_required"):
+        UserTaskSetManifest.model_validate({
+            "apiVersion": "loom.taskset/v1",
+            "kind": "UserTaskSet",
+            "metadata": {"name": "row-tasks", "display_name": "Row Tasks"},
+            "source": {"type": "jsonl-inline", "locator": "{\"id\":\"1\"}"},
         })
 
 

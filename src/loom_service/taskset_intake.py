@@ -7,6 +7,7 @@ Jobs remain ``queued`` after successful POST until that worker ships.
 from __future__ import annotations
 
 import re
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -75,12 +76,17 @@ async def _read_upload(upload: UploadFile) -> bytes:
     return data
 
 
-async def _read_upload_with_size_cap(upload: UploadFile, *, max_bytes: int) -> bytes:
+async def _read_upload_with_size_cap(
+    upload: UploadFile,
+    *,
+    max_bytes: int,
+    too_large_detail: str = "manifest_too_large",
+) -> bytes:
     data = await upload.read()
     if not data:
         raise HTTPException(status_code=400, detail="empty upload part")
     if len(data) > max_bytes:
-        raise HTTPException(status_code=413, detail="manifest_too_large")
+        raise HTTPException(status_code=413, detail=too_large_detail)
     return data
 
 
@@ -130,6 +136,36 @@ def _upload_object(
     )
 
 
+async def _upload_file_object_with_size_cap(
+    client: Any,
+    *,
+    bucket: str,
+    key: str,
+    upload: UploadFile,
+    max_bytes: int,
+    content_type: str,
+) -> None:
+    total = 0
+    with tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024) as tmp:
+        while True:
+            chunk = await upload.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise HTTPException(status_code=413, detail="bundle_too_large")
+            tmp.write(chunk)
+        if total == 0:
+            raise HTTPException(status_code=400, detail="empty upload part")
+        tmp.seek(0)
+        client.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=tmp,
+            ContentType=content_type,
+        )
+
+
 async def check_taskset_count_quota(
     session: AsyncSession,
     *,
@@ -169,8 +205,10 @@ async def submit_task_set(
     manifest_upload: UploadFile,
     verifier_upload: UploadFile | None,
     transform_upload: UploadFile | None,
+    bundle_upload: UploadFile | None = None,
     taskset_quota_max_count: int = 50,
     manifest_max_bytes: int = 1_048_576,
+    bundle_max_bytes: int = 5_368_709_120,
 ) -> TaskSetIntakeResult:
     await check_taskset_count_quota(
         session, team_id=team_id, default_max_count=taskset_quota_max_count,
@@ -209,6 +247,24 @@ async def submit_task_set(
         transform_bytes = await _read_upload(transform_upload)
         transform_key = bundle_object_key(
             prefix=prefix, relative_path=manifest_model.transform.file,
+        )
+
+    bundle_key: str | None = None
+    if manifest_model.source.type == "bundle-upload":
+        if bundle_upload is None:
+            raise HTTPException(
+                status_code=400,
+                detail="bundle file required when manifest source is bundle-upload",
+            )
+        _reject_unsafe_filename(bundle_upload.filename or manifest_model.source.locator)
+        bundle_key = bundle_object_key(
+            prefix=prefix,
+            relative_path=manifest_model.source.locator,
+        )
+    elif bundle_upload is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="bundle file is only allowed when manifest source is bundle-upload",
         )
 
     manifest_key = f"{prefix}/manifest.yaml"
@@ -287,6 +343,15 @@ async def submit_task_set(
                 key=transform_key,
                 body=transform_bytes,
                 content_type="text/x-python",
+            )
+        if bundle_key is not None and bundle_upload is not None:
+            await _upload_file_object_with_size_cap(
+                minio_client,
+                bucket=artifacts_bucket,
+                key=bundle_key,
+                upload=bundle_upload,
+                max_bytes=bundle_max_bytes,
+                content_type="application/gzip",
             )
         await session.commit()
     except Exception:

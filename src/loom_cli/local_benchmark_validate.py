@@ -17,10 +17,10 @@ from loom.config.benchmarks import (
     normalize_source_subdir,
 )
 from loom.models.task import TaskConfig
-from loom_cli.benchmarks_sync import walk_task_tomls
-from loom_cli.terminal_bench_normalize import (
+from loom.terminal_bench_normalize import (
     normalize_terminal_bench_task_toml,
 )
+from loom_cli.benchmarks_sync import walk_task_tomls
 
 
 class LocalBenchmarkValidationError(Exception):

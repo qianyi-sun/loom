@@ -16,6 +16,7 @@ from typing import Any, cast
 import httpx
 import yaml  # type: ignore[import-untyped]
 
+from loom.models.taskset import validate_bundle_archive_path
 from loom_cli.server_client import (
     HttpStatusError,
     NotLoggedInError,
@@ -85,6 +86,20 @@ def _collect_submit_files(bundle_dir: Path) -> dict[str, tuple[str, bytes, str]]
     files: dict[str, tuple[str, bytes, str]] = {
         "manifest": ("manifest.yaml", manifest_bytes, "application/x-yaml"),
     }
+
+    source = parsed.get("source")
+    if isinstance(source, dict) and source.get("type") == "bundle-upload":
+        locator = source.get("locator")
+        if not isinstance(locator, str):
+            raise _IdNotFoundError("bundle-upload source must include locator")
+        try:
+            rel = validate_bundle_archive_path(locator).replace("\\", "/")
+        except ValueError as exc:
+            raise _IdNotFoundError(str(exc)) from exc
+        bundle_path = bundle_dir / rel
+        if not bundle_path.is_file():
+            raise _IdNotFoundError(f"bundle upload archive not found: {bundle_path}")
+        files["bundle"] = (rel, bundle_path.read_bytes(), "application/gzip")
 
     verifier = parsed.get("verifier")
     if verifier is not None:
@@ -245,7 +260,10 @@ def dispatch(argv: list[str]) -> int:
 
     p_submit = sub.add_parser(
         "submit",
-        help="Submit a TaskSet directory (manifest.yaml + optional verifier/transform).",
+        help=(
+            "Submit a TaskSet directory "
+            "(manifest.yaml + optional verifier/transform/bundle archive)."
+        ),
     )
     p_submit.add_argument(
         "directory",

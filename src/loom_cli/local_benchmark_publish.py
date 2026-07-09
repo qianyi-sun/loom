@@ -30,15 +30,15 @@ from loom.task_bundle_compat import (
     collect_task_dir_compatibility_issues,
     format_compatibility_issues,
 )
+from loom.terminal_bench_normalize import (
+    normalize_terminal_bench_task_toml,
+)
 from loom.trajectory.storage import ObjectStore
 from loom_benchmark_tool.db_url import normalize_db_url
 from loom_benchmark_tool.upload import upload_task_dir
 from loom_cli.local_benchmark_validate import (
     LocalBenchmarkValidationError,
     validate_local_benchmark,
-)
-from loom_cli.terminal_bench_normalize import (
-    normalize_terminal_bench_task_toml,
 )
 
 PUBLISH_IMPORTED_BY = "local-benchmark-publish"

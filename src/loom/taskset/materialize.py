@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
 import re
+import tarfile
 import tempfile
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -12,9 +15,15 @@ from typing import Any
 import tomli_w
 from pydantic import ValidationError
 
+from loom.driver.task_image import dockerfile_uses_runtime_arm64_fallback_base
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.task_checksum import task_checksum
-from loom.models.taskset import TaskSetVerifier, UserTaskSetManifest
+from loom.models.taskset import (
+    TaskSetVerifier,
+    UserTaskSetManifest,
+    bundle_object_key,
+    validate_bundle_relative_path,
+)
 from loom.task_bundle_compat import (
     CompatibilitySeverity,
     TaskBundleCompatibilityIssue,
@@ -29,6 +38,7 @@ from loom.taskset.transform_sandbox import (
     run_transform,
 )
 from loom.taskset.upstream_rows import UpstreamFetchError, iter_upstream_rows
+from loom.terminal_bench_normalize import normalize_terminal_bench_task_toml
 
 _NOOP_VERIFIER = b"#!/bin/sh\nexit 0\n"
 _UNSAFE_TASK_ID = re.compile(r"[^a-zA-Z0-9._-]+")
@@ -172,6 +182,10 @@ class _BundleSizeExceededError(Exception):
         super().__init__(f"bundle size {cumulative} exceeds limit {limit}")
 
 
+class _UnsafeBundleArchiveError(Exception):
+    """Raised when an uploaded TaskSet archive cannot be safely extracted."""
+
+
 def _upload_bundle_dir(
     client: Any,
     *,
@@ -200,6 +214,100 @@ def _upload_bundle_dir(
     return cumulative_bytes
 
 
+def _assert_safe_tar_member(member: tarfile.TarInfo) -> PurePosixPath:
+    name = member.name
+    if not name or "\\" in name:
+        raise _UnsafeBundleArchiveError("bundle archive contains an unsafe path")
+    if member.issym() or member.islnk():
+        raise _UnsafeBundleArchiveError("bundle archive must not contain links")
+    if member.isdev() or member.isfifo():
+        raise _UnsafeBundleArchiveError("bundle archive must not contain device entries")
+    path = PurePosixPath(name)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise _UnsafeBundleArchiveError("bundle archive contains an unsafe path")
+    if not (member.isdir() or member.isfile()):
+        raise _UnsafeBundleArchiveError("bundle archive contains an unsupported entry")
+    return path
+
+
+def _safe_extract_tar_bytes(
+    archive_bytes: bytes,
+    *,
+    destination: Path,
+    max_bundle_bytes: int | None = None,
+) -> None:
+    extracted = 0
+    destination_resolved = destination.resolve()
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:*") as tar:
+            for member in tar.getmembers():
+                rel = _assert_safe_tar_member(member)
+                target = destination / rel.as_posix()
+                try:
+                    target.resolve().relative_to(destination_resolved)
+                except ValueError as exc:
+                    raise _UnsafeBundleArchiveError(
+                        "bundle archive contains an unsafe path",
+                    ) from exc
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                extracted += member.size
+                if max_bundle_bytes is not None and extracted > max_bundle_bytes:
+                    raise _BundleSizeExceededError(extracted, max_bundle_bytes)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                src = tar.extractfile(member)
+                if src is None:
+                    raise _UnsafeBundleArchiveError(
+                        "bundle archive contains an unreadable file",
+                    )
+                with src, target.open("wb") as dst:
+                    while chunk := src.read(1024 * 1024):
+                        dst.write(chunk)
+    except tarfile.TarError as exc:
+        raise _UnsafeBundleArchiveError("bundle archive is not a readable tar file") from exc
+
+
+def _task_root_for_bundle_upload(
+    extracted_root: Path,
+    *,
+    subset: str | None,
+) -> Path:
+    if subset:
+        rel = validate_bundle_relative_path(subset).replace("\\", "/").strip("/")
+        task_root = extracted_root / rel
+        if not task_root.is_dir():
+            raise FileNotFoundError(f"bundle task root not found: {rel}")
+        return task_root
+    default_root = extracted_root / "tasks"
+    if default_root.is_dir():
+        return default_root
+    return extracted_root
+
+
+def _iter_bundle_task_tomls(task_root: Path) -> list[Path]:
+    return sorted(
+        path for path in task_root.rglob("task.toml")
+        if path.is_file() and not path.is_symlink()
+    )
+
+
+def _promote_cpu_arch_if_runtime_fallback(
+    raw_cfg: dict[str, Any], bundle_dir: Path,
+) -> None:
+    env = raw_cfg.get("environment")
+    if not isinstance(env, dict) or "cpu_arch" in env:
+        return
+    dockerfile_rel = env.get("dockerfile")
+    if not isinstance(dockerfile_rel, str):
+        return
+    dockerfile_path = bundle_dir / dockerfile_rel
+    if dockerfile_path.is_file() and dockerfile_uses_runtime_arm64_fallback_base(
+        dockerfile_path,
+    ):
+        env["cpu_arch"] = "any"
+
+
 def _compatibility_issue_error(
     *,
     row_index: int,
@@ -216,6 +324,200 @@ def _compatibility_issue_error(
         "hint": issue.hint,
         "evidence": json.dumps(issue.evidence, sort_keys=True, separators=(",", ":")),
     }
+
+
+def _materialize_bundle_upload(
+    *,
+    manifest: UserTaskSetManifest,
+    task_set_id: str,
+    owning_team_id: str,
+    has_evaluation: bool,
+    minio_client: Any,
+    artifacts_bucket: str,
+    max_instances: int,
+    max_bundle_bytes: int | None,
+) -> MaterializeOutput:
+    slug = manifest.slug
+    prefix = _storage_prefix(team_id=owning_team_id, slug=slug)
+    bundle_key = bundle_object_key(
+        prefix=prefix,
+        relative_path=manifest.source.locator,
+    )
+    bundle_uri = f"s3://{artifacts_bucket}/{bundle_key}"
+    try:
+        bundle_bytes = _fetch_blob_bytes(minio_client, bundle_uri)
+    except Exception as exc:
+        return MaterializeOutput(
+            status="failed",
+            status_reason="bundle_blob_missing",
+            job_failure_reason="bundle_blob_missing",
+            job_failure_message=str(exc),
+        )
+    if not bundle_bytes:
+        return MaterializeOutput(
+            status="failed",
+            status_reason="bundle_blob_missing",
+            job_failure_reason="bundle_blob_missing",
+            job_failure_message="bundle archive blob missing or empty",
+        )
+
+    errors: list[dict[str, str]] = []
+    drafts: list[TaskRowDraft] = []
+    skipped = 0
+    attempted = 0
+    cumulative_bytes = 0
+    seen_short_ids: set[str] = set()
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            extracted_root = Path(tmp) / "bundle"
+            extracted_root.mkdir(parents=True, exist_ok=True)
+            _safe_extract_tar_bytes(
+                bundle_bytes,
+                destination=extracted_root,
+                max_bundle_bytes=max_bundle_bytes,
+            )
+            try:
+                task_root = _task_root_for_bundle_upload(
+                    extracted_root,
+                    subset=manifest.source.subset,
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                return MaterializeOutput(
+                    status="failed",
+                    status_reason="bundle_no_tasks",
+                    job_failure_reason="bundle_no_tasks",
+                    job_failure_message=str(exc),
+                )
+            task_tomls = _iter_bundle_task_tomls(task_root)
+            if not task_tomls:
+                return MaterializeOutput(
+                    status="failed",
+                    status_reason="bundle_no_tasks",
+                    job_failure_reason="bundle_no_tasks",
+                    job_failure_message="bundle archive contains no task.toml files",
+                )
+
+            for task_toml in task_tomls:
+                if attempted >= max_instances:
+                    break
+                attempted += 1
+                row_index = attempted
+                bundle_dir = task_toml.parent
+                try:
+                    with task_toml.open("rb") as f:
+                        raw_cfg: dict[str, Any] = tomllib.load(f)
+                    raw_cfg = normalize_terminal_bench_task_toml(raw_cfg)
+                    _promote_cpu_arch_if_runtime_fallback(raw_cfg, bundle_dir)
+                    task_config = normalize_steps(TaskConfig.model_validate(raw_cfg))
+                    rendered_task_id = task_config.task.id
+                    short_id = _safe_task_segment(rendered_task_id)
+                    if short_id in seen_short_ids:
+                        skipped += 1
+                        errors.append({
+                            "row": str(row_index),
+                            "code": "duplicate_task_id",
+                            "message": (
+                                f"task id {rendered_task_id!r} collides after "
+                                "TaskSet id sanitization"
+                            ),
+                        })
+                        continue
+                    seen_short_ids.add(short_id)
+                    compatibility_issues = [
+                        issue
+                        for issue in collect_task_dir_compatibility_issues(bundle_dir)
+                        if issue.severity == CompatibilitySeverity.ERROR
+                    ]
+                    if compatibility_issues:
+                        skipped += 1
+                        errors.extend(
+                            _compatibility_issue_error(
+                                row_index=row_index,
+                                issue=issue,
+                            )
+                            for issue in compatibility_issues
+                        )
+                        continue
+                    checksum = task_checksum(bundle_dir)
+                    bundle_prefix = f"{prefix}/tasks/{short_id}"
+                    cumulative_bytes = _upload_bundle_dir(
+                        minio_client,
+                        bucket=artifacts_bucket,
+                        bundle_prefix=bundle_prefix,
+                        bundle_dir=bundle_dir,
+                        cumulative_bytes=cumulative_bytes,
+                        max_bundle_bytes=max_bundle_bytes,
+                    )
+                    db_id = _db_task_id(
+                        task_set_id=task_set_id,
+                        rendered_task_id=rendered_task_id,
+                    )
+                    drafts.append(
+                        TaskRowDraft(
+                            id=db_id,
+                            checksum=checksum,
+                            config=task_config.model_dump(mode="json"),
+                            source=f"s3://{artifacts_bucket}/{bundle_prefix}/",
+                        ),
+                    )
+                except (tomllib.TOMLDecodeError, ValidationError) as exc:
+                    skipped += 1
+                    errors.append({
+                        "row": str(row_index),
+                        "code": "task_config_invalid",
+                        "message": str(exc),
+                    })
+                except Exception as exc:
+                    skipped += 1
+                    errors.append({
+                        "row": str(row_index),
+                        "code": "materialize_error",
+                        "message": str(exc),
+                    })
+    except _UnsafeBundleArchiveError as exc:
+        return MaterializeOutput(
+            status="failed",
+            status_reason="bundle_extract_unsafe",
+            job_failure_reason="bundle_extract_unsafe",
+            job_failure_message=str(exc),
+        )
+    except _BundleSizeExceededError as exc:
+        return MaterializeOutput(
+            status="failed",
+            status_reason="size_exceeded",
+            job_failure_reason="size_exceeded",
+            job_failure_message=(
+                f"bundle size {exc.cumulative} bytes exceeds limit "
+                f"{exc.limit} bytes"
+            ),
+        )
+
+    materialized = len(drafts)
+    status, status_reason = compute_task_set_status(
+        materialized=materialized,
+        skipped=skipped,
+    )
+    if materialized == 0 and any(
+        error.get("code", "").startswith("TASK_COMPAT_")
+        for error in errors
+    ):
+        status_reason = "bundle_compatibility_error"
+    return MaterializeOutput(
+        task_rows=drafts,
+        task_count=materialized,
+        status=status,
+        status_reason=status_reason,
+        evaluation_ready=(
+            has_evaluation
+            and materialized > 0
+            and status in {"ready", "partial"}
+        ),
+        error_summary=cap_error_summary(errors),
+        job_failure_reason=(
+            status_reason if status == "failed" and status_reason else None
+        ),
+    )
 
 
 def materialize_task_set(
@@ -238,6 +540,18 @@ def materialize_task_set(
     has_evaluation = "evaluation" in intents
     max_instances = (manifest.limits.max_instances if manifest.limits else 500)
     manifest_timeout_s = manifest.limits.timeout_per_task_s if manifest.limits else None
+
+    if manifest.source.type == "bundle-upload":
+        return _materialize_bundle_upload(
+            manifest=manifest,
+            task_set_id=task_set_id,
+            owning_team_id=owning_team_id,
+            has_evaluation=has_evaluation,
+            minio_client=minio_client,
+            artifacts_bucket=artifacts_bucket,
+            max_instances=max_instances,
+            max_bundle_bytes=max_bundle_bytes,
+        )
 
     transform_bytes: bytes | None = None
     if manifest.transform is not None:

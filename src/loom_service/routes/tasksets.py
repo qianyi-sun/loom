@@ -118,6 +118,7 @@ async def create_task_set(
     manifest: Annotated[UploadFile, File()],
     verifier: Annotated[UploadFile | None, File()] = None,
     transform: Annotated[UploadFile | None, File()] = None,
+    bundle: Annotated[UploadFile | None, File()] = None,
 ) -> TaskSetSubmitResponse:
     session, ctx = sc
     require_scope(ctx, "submit")
@@ -132,8 +133,10 @@ async def create_task_set(
         manifest_upload=manifest,
         verifier_upload=verifier,
         transform_upload=transform,
+        bundle_upload=bundle,
         taskset_quota_max_count=settings.taskset_quota_max_count_per_team,
         manifest_max_bytes=settings.taskset_manifest_max_bytes,
+        bundle_max_bytes=settings.taskset_quota_max_bundle_bytes,
     )
     return TaskSetSubmitResponse.model_validate(intake_result_to_response(result))
 
