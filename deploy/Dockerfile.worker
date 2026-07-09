@@ -1,8 +1,14 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 # #199: transient PyPI ReadTimeouts during rollout builds — see
 # docs/runbooks/operator-runbook.md#rollout-build-resilience.
 ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
+# Pinned Harbor Terminus2 runtime for builtin terminus-2 agent (#744).
+ARG HARBOR_COMPAT_SHA=527d50deb63a5d279e8c20593c18a2cbc7f61f9e
 WORKDIR /app
+# git is required for pip install harbor@git+...
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends git && \
+    rm -rf /var/lib/apt/lists/*
 # Worker uses the Docker SDK for Python (the `docker` PyPI package
 # already in pyproject.toml deps) to talk to the host daemon over the
 # bind-mounted /var/run/docker.sock. No CLI binary needed in the image.
@@ -10,5 +16,7 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 COPY packages ./packages
 RUN pip install --no-cache-dir -e . && \
-    pip install --no-cache-dir -e ./packages/loom-launcher
+    pip install --no-cache-dir -e ./packages/loom-launcher && \
+    pip install --no-cache-dir \
+      "harbor @ git+https://github.com/harbor-framework/harbor.git@${HARBOR_COMPAT_SHA}"
 CMD ["python", "-m", "loom_worker"]

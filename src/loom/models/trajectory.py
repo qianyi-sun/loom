@@ -48,6 +48,14 @@ class EventKind(StrEnum):
     # Sys
     WORKER_LOST_CLAIM = "worker_lost_claim"
     WORKER_DRAIN_INTERRUPTED = "worker_drain_interrupted"
+    # Terminus-2 native runtime (#744)
+    TERMINUS2_RUNTIME_PROVENANCE = "terminus2_runtime_provenance"
+    TERMINUS2_TURN = "terminus2_turn"
+    TERMINUS2_COMMAND = "terminus2_command"
+    TERMINUS2_TERMINAL_OBSERVATION = "terminus2_terminal_observation"
+    TERMINUS2_PARSE_RETRY = "terminus2_parse_retry"
+    TERMINUS2_CONTEXT_BOUNDARY = "terminus2_context_boundary"
+    TERMINUS2_ARTIFACT_REF = "terminus2_artifact_ref"
 
 
 class _EventBase(BaseModel):
@@ -285,6 +293,85 @@ class WorkerDrainInterruptedEvent(_EventBase):
     drain_timeout_sec: float
 
 
+# Terminus-2 native runtime (#744) ────────────────────────────────────────────
+
+class Terminus2RuntimeProvenanceEvent(_EventBase):
+    kind: Literal[EventKind.TERMINUS2_RUNTIME_PROVENANCE] = (
+        EventKind.TERMINUS2_RUNTIME_PROVENANCE
+    )
+    loom_runtime_revision: str
+    harbor_compat_sha: str
+    parser_name: Literal["json", "xml"]
+    prompt_hash: str
+    template_hashes: dict[str, str]
+    terminal_image_digest: str | None = None
+    benchmark_provenance: dict[str, str] | None = None
+
+
+class Terminus2TurnEvent(_EventBase):
+    kind: Literal[EventKind.TERMINUS2_TURN] = EventKind.TERMINUS2_TURN
+    turn_id: str
+    turn_index: int = Field(ge=0)
+    gateway_request_id: str
+    parse_state: Literal["ok", "error", "retry"]
+    completion_state: Literal["continue", "pending_confirm", "complete"]
+    analysis: str = ""
+    plan: str = ""
+    raw_response_excerpt: str = ""
+
+
+class Terminus2CommandEvent(_EventBase):
+    kind: Literal[EventKind.TERMINUS2_COMMAND] = EventKind.TERMINUS2_COMMAND
+    turn_id: str
+    command_batch_id: str
+    command_id: str
+    index: int = Field(ge=0)
+    keystrokes: str
+    duration_sec: float = Field(ge=0)
+
+
+class Terminus2TerminalObservationEvent(_EventBase):
+    kind: Literal[EventKind.TERMINUS2_TERMINAL_OBSERVATION] = (
+        EventKind.TERMINUS2_TERMINAL_OBSERVATION
+    )
+    turn_id: str
+    command_batch_id: str
+    observation_id: str
+    text: str
+    capture_source: Literal["incremental", "timeout", "initial", "error_feedback"]
+    byte_len: int = Field(ge=0)
+    truncated: bool
+    completeness: Literal["full", "partial"]
+    content_hash: str
+    redaction_applied: bool
+    is_aggregate: bool
+
+
+class Terminus2ParseRetryEvent(_EventBase):
+    kind: Literal[EventKind.TERMINUS2_PARSE_RETRY] = EventKind.TERMINUS2_PARSE_RETRY
+    turn_id: str
+    attempt: int = Field(ge=1)
+    error_excerpt: str
+
+
+class Terminus2ContextBoundaryEvent(_EventBase):
+    kind: Literal[EventKind.TERMINUS2_CONTEXT_BOUNDARY] = (
+        EventKind.TERMINUS2_CONTEXT_BOUNDARY
+    )
+    turn_id: str
+    reason: str
+    tokens_before: int = Field(ge=0)
+
+
+class Terminus2ArtifactRefEvent(_EventBase):
+    kind: Literal[EventKind.TERMINUS2_ARTIFACT_REF] = EventKind.TERMINUS2_ARTIFACT_REF
+    artifact_kind: Literal["recording.cast", "terminus_2.pane"]
+    sandbox_path: str
+    content_hash: str
+    size_bytes: int = Field(ge=0)
+    share_policy: Literal["restricted", "shared"]
+
+
 TrajectoryEvent = Annotated[
     TrialStartEvent | TrialEndEvent | TrialErrorEvent | TrialCancelledEvent
     | StepStartEvent | StepEndEvent
@@ -293,6 +380,9 @@ TrajectoryEvent = Annotated[
     | LLMCallEvent | ToolUseEvent | AgentThoughtEvent | AgentRetryEvent
     | VerifierStartEvent | VerifierEndEvent | VerifierCheckEvent
     | NetworkPolicyChangeEvent
-    | WorkerLostClaimEvent | WorkerDrainInterruptedEvent,
+    | WorkerLostClaimEvent | WorkerDrainInterruptedEvent
+    | Terminus2RuntimeProvenanceEvent | Terminus2TurnEvent | Terminus2CommandEvent
+    | Terminus2TerminalObservationEvent | Terminus2ParseRetryEvent
+    | Terminus2ContextBoundaryEvent | Terminus2ArtifactRefEvent,
     Field(discriminator="kind"),
 ]

@@ -42,6 +42,7 @@ from loom.agent.base import AgentRuntime
 from loom.agent.gateway_client import LLMGatewayClient
 from loom.agent.http_gateway_client import HttpLLMGatewayClient
 from loom.agent.litellm import LiteLLMAgent
+from loom.agent.terminus2.runtime import LoomTerminus2Runtime
 from loom.agent.oracle import OracleAgent
 from loom.driver.docker import DockerDriver
 from loom.errors import AgentError, classify_failure_message
@@ -648,7 +649,7 @@ async def _resolve_layered_trial_image(
     or adapters that haven't declared an install_script yet)."""
     # Built-in agents (oracle, litellm) aren't in the launcher registry
     # and don't need an install step. Skip.
-    if agent_name in {"oracle", "litellm"}:
+    if agent_name in {"oracle", "litellm", "terminus-2"}:
         return task_image
     adapter_name = agent_name
     try:
@@ -1347,6 +1348,20 @@ def _default_agent_factory(
                 gateway=gateway,
                 team_id=str(team_id),
                 trial_id=trial_id,
+                provider_connection_id=provider_connection_id,
+            )
+        elif agent_name == "terminus-2":
+            if model is None:
+                raise AgentError(
+                    "terminus-2 agent requires task.agent.model to be set",
+                )
+            agent = LoomTerminus2Runtime(  # type: ignore[assignment]
+                model=model,
+                team_id=str(team_id),
+                trial_id=trial_id,
+                cp_client=cp_client,
+                gateway_url=gateway_url,
+                agent_gateway_url=agent_gateway_url,
                 provider_connection_id=provider_connection_id,
             )
         else:
