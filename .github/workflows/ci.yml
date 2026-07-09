@@ -76,7 +76,11 @@ jobs:
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
-            pull_request|merge_group)
+            pull_request)
+              git diff --name-only "$BASE_SHA...$HEAD_SHA" \
+                > /tmp/loom-changed-files.txt
+              ;;
+            merge_group)
               git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
                 > /tmp/loom-changed-files.txt
               ;;

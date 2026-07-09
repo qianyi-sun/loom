@@ -42,6 +42,24 @@ def test_coverage_summary_implies_integration() -> None:
     assert plan.integration is True
 
 
+def test_integration_label_selects_coverage_but_inferred_integration_does_not() -> None:
+    labeled_plan = plan_validations(
+        changed_paths=["docs/user-guide.md"],
+        labels={"ci:integration"},
+        event_name="pull_request",
+    )
+    inferred_plan = plan_validations(
+        changed_paths=["src/loom/config.py"],
+        labels=set(),
+        event_name="pull_request",
+    )
+
+    assert labeled_plan.integration is True
+    assert labeled_plan.coverage_summary is True
+    assert inferred_plan.integration is True
+    assert inferred_plan.coverage_summary is False
+
+
 def test_worker_driver_change_selects_all_runtime_gates() -> None:
     plan = plan_validations(
         changed_paths=["src/loom/driver/docker.py"],

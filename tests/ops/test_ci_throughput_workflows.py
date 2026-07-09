@@ -116,6 +116,25 @@ def test_ci_supports_merge_queue_merge_group_event() -> None:
     assert "checks_requested" in on_config["merge_group"]["types"]
 
 
+def test_ci_planner_uses_merge_base_for_pr_changed_paths_only() -> None:
+    workflow = _workflow(".github/workflows/ci.yml")
+    plan_script = next(
+        step["run"]
+        for step in workflow["jobs"]["workflow-plan"]["steps"]
+        if step.get("id") == "plan"
+    )
+
+    assert (
+        'pull_request)\n    git diff --name-only "$BASE_SHA...$HEAD_SHA"'
+        in plan_script
+    )
+    assert (
+        'merge_group)\n    git diff --name-only "$BASE_SHA" "$HEAD_SHA"'
+        in plan_script
+    )
+    assert "pull_request|merge_group)" not in plan_script
+
+
 def test_opt_in_pr_smokes_cancel_superseded_pr_runs() -> None:
     for workflow_path in (
         ".github/workflows/cluster-smoke.yml",

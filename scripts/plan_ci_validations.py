@@ -101,6 +101,8 @@ def plan_validations(
     for label in sorted(labels):
         if check := LABEL_TO_CHECK.get(label):
             select(check, f"label:{label}")
+        if label == "ci:integration":
+            select("coverage_summary", f"label:{label}")
 
     if any(path in PLANNER_PATHS for path in paths):
         for name in HEAVY_CHECKS:

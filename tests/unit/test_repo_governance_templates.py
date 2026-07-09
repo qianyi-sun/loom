@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from scripts.plan_ci_validations import plan_validations
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -77,13 +79,19 @@ def test_codeowners_points_at_current_maintainers_not_placeholder_teams() -> Non
 
 
 def test_ci_docs_only_fast_path_includes_repo_metadata_not_workflows() -> None:
-    ci = _read(".github/workflows/ci.yml")
-
     for metadata_path in (
         ".github/CODEOWNERS",
         ".github/PULL_REQUEST_TEMPLATE.md",
-        ".github/ISSUE_TEMPLATE/*",
+        ".github/ISSUE_TEMPLATE/bug.yml",
     ):
-        assert f"{metadata_path})" in ci
+        plan = plan_validations(
+            changed_paths=[metadata_path], labels=set(), event_name="pull_request"
+        )
+        assert plan.docs_only is True
 
-    assert ".github/workflows/*)" not in ci
+    workflow_plan = plan_validations(
+        changed_paths=[".github/workflows/ci.yml"],
+        labels=set(),
+        event_name="pull_request",
+    )
+    assert workflow_plan.docs_only is False
