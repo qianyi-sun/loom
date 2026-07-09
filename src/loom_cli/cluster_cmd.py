@@ -5272,8 +5272,8 @@ def dispatch(argv: list[str]) -> int:
         "rollout",
         help=(
             "One-command staging rollout driver with state-machine "
-            "resume (#340). Orchestrates 15 steps: resolve-target → "
-            "worktree → build → kind-load → backup → audit "
+            "resume (#340). Orchestrates 16 steps: resolve-target → "
+            "worktree → build → kind-cluster → kind-load → backup → audit "
             "→ render → preflight → migrate → env-state → gb10-prep "
             "→ cluster-up → production-defaults → release-gate → smoke, "
             "plus a summary."

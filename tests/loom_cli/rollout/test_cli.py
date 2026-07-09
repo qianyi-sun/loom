@@ -43,11 +43,15 @@ class TestRolloutCLIDryRun:
     ) -> None:
         monkeypatch.setattr(subprocess, "run", _FakeSubprocess())
 
-        rc = main([
-            "cluster", "rollout",
-            "--ref", "origin/dev",
-            "--dry-run",
-        ])
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "--ref",
+                "origin/dev",
+                "--dry-run",
+            ]
+        )
 
         assert rc == 2
         err = capsys.readouterr().err
@@ -63,15 +67,22 @@ class TestRolloutCLIDryRun:
     ) -> None:
         fake = _FakeSubprocess()
         monkeypatch.setattr(subprocess, "run", fake)
-        monkeypatch.setattr("loom_cli.rollout.cli.new_rollout_id", lambda *, image_tag: f"rid-{image_tag}")
+        monkeypatch.setattr(
+            "loom_cli.rollout.cli.new_rollout_id", lambda *, image_tag: f"rid-{image_tag}"
+        )
 
-        rc = main([
-            "cluster", "rollout",
-            "staging",
-            "--ref", "origin/dev",
-            "--rollout-root", str(tmp_path),
-            "--dry-run",
-        ])
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "staging",
+                "--ref",
+                "origin/dev",
+                "--rollout-root",
+                str(tmp_path),
+                "--dry-run",
+            ]
+        )
 
         assert rc == 0
         out = capsys.readouterr().out
@@ -104,16 +115,24 @@ class TestRolloutCLIDryRun:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(subprocess, "run", _FakeSubprocess())
-        monkeypatch.setattr("loom_cli.rollout.cli.new_rollout_id", lambda *, image_tag: f"rid-{image_tag}")
+        monkeypatch.setattr(
+            "loom_cli.rollout.cli.new_rollout_id", lambda *, image_tag: f"rid-{image_tag}"
+        )
 
-        rc = main([
-            "cluster", "rollout",
-            "staging",
-            "--ref", "origin/dev",
-            "--image-tag", "staging-manual",
-            "--rollout-root", str(tmp_path),
-            "--dry-run",
-        ])
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "staging",
+                "--ref",
+                "origin/dev",
+                "--image-tag",
+                "staging-manual",
+                "--rollout-root",
+                str(tmp_path),
+                "--dry-run",
+            ]
+        )
 
         assert rc == 0
         out = capsys.readouterr().out
@@ -128,13 +147,18 @@ class TestRolloutCLIDryRun:
     ) -> None:
         monkeypatch.setattr(subprocess, "run", _FakeSubprocess())
 
-        rc = main([
-            "cluster", "rollout",
-            "prod",
-            "--ref", "main",
-            "--rollout-root", str(tmp_path),
-            "--dry-run",
-        ])
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "prod",
+                "--ref",
+                "main",
+                "--rollout-root",
+                str(tmp_path),
+                "--dry-run",
+            ]
+        )
 
         assert rc == 2
         err = capsys.readouterr().err
@@ -155,32 +179,41 @@ class TestRolloutCLIDryRun:
 
         backup = tmp_path / "backup-manifest.json"
         backup.write_text("{}")
-        rc = main([
-            "cluster", "rollout",
-            "--ref", "origin/dev",
-            "--image-tag", "staging-aaaaaaa",
-            "--cluster-name", "loom-staging",
-            "--namespace", "loom-staging",
-            "--environment", "staging",
-            "--cp-url", "http://control-node.lan:18081",
-            "--cluster-config", str(cfg),
-            "--backup-manifest", str(backup),
-            "--rollout-root", str(tmp_path),
-            "--dry-run",
-        ])
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "--ref",
+                "origin/dev",
+                "--image-tag",
+                "staging-aaaaaaa",
+                "--cluster-name",
+                "loom-staging",
+                "--namespace",
+                "loom-staging",
+                "--environment",
+                "staging",
+                "--cp-url",
+                "http://control-node.lan:18081",
+                "--cluster-config",
+                str(cfg),
+                "--backup-manifest",
+                str(backup),
+                "--rollout-root",
+                str(tmp_path),
+                "--dry-run",
+            ]
+        )
         assert rc == 0
         out = capsys.readouterr().out
         assert "steps:\n" in out
-        step_lines = [
-            line.strip()
-            for line in out.splitlines()
-            if line.startswith("  ")
-        ]
+        step_lines = [line.strip() for line in out.splitlines() if line.startswith("  ")]
         assert step_lines == [
             "00 resolve-target",
             "01 worktree",
             "02 build-images",
-            "03 kind-load-images",
+            "03 kind-cluster",
+            "04 kind-load-images",
             "05 backup",
             "06 audit",
             "07 render",
@@ -208,21 +241,34 @@ class TestRolloutCLIDryRun:
 
         backup = tmp_path / "backup-manifest.json"
         backup.write_text("{}")
-        rc = main([
-            "cluster", "rollout",
-            "--ref", "origin/dev",
-            "--image-tag", "staging-aaaaaaa",
-            "--cluster-name", "loom-staging",
-            "--namespace", "loom-staging",
-            "--environment", "staging",
-            "--cp-url", "http://control-node.lan:18081",
-            "--cluster-config", str(cfg),
-            "--backup-manifest", str(backup),
-            "--rollout-root", str(tmp_path),
-            "--scope", "full-cluster",
-            "--exclude-oldlab",
-            "--dry-run",
-        ])
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "--ref",
+                "origin/dev",
+                "--image-tag",
+                "staging-aaaaaaa",
+                "--cluster-name",
+                "loom-staging",
+                "--namespace",
+                "loom-staging",
+                "--environment",
+                "staging",
+                "--cp-url",
+                "http://control-node.lan:18081",
+                "--cluster-config",
+                str(cfg),
+                "--backup-manifest",
+                str(backup),
+                "--rollout-root",
+                str(tmp_path),
+                "--scope",
+                "full-cluster",
+                "--exclude-oldlab",
+                "--dry-run",
+            ]
+        )
         # Dry-run doesn't trigger preflight — refusal must happen in the
         # real run path. This confirms dry-run itself is a safe read-only.
         assert rc == 0
@@ -240,19 +286,31 @@ class TestRolloutCLIDryRun:
 
         monkeypatch.setattr(subprocess, "run", _FakeSubprocess())
 
-        rc = main([
-            "cluster", "rollout",
-            "--ref", "origin/dev",
-            "--image-tag", "staging-aaaaaaa",
-            "--cluster-name", "loom-legacy-preprod",
-            "--namespace", "loom-legacy-preprod",
-            "--environment", "staging",
-            "--cp-url", "http://control-node.lan:18081",
-            "--cluster-config", str(cfg),
-            "--backup-manifest", str(backup),
-            "--rollout-root", "/data/loom-legacy-preprod",
-            "--dry-run",
-        ])
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "--ref",
+                "origin/dev",
+                "--image-tag",
+                "staging-aaaaaaa",
+                "--cluster-name",
+                "loom-legacy-preprod",
+                "--namespace",
+                "loom-legacy-preprod",
+                "--environment",
+                "staging",
+                "--cp-url",
+                "http://control-node.lan:18081",
+                "--cluster-config",
+                str(cfg),
+                "--backup-manifest",
+                str(backup),
+                "--rollout-root",
+                "/data/loom-legacy-preprod",
+                "--dry-run",
+            ]
+        )
 
         assert rc == 2
         err = capsys.readouterr().err
@@ -270,19 +328,32 @@ class TestRolloutCLIRealRun:
         raw_token = "raw-secret-token"
 
         with pytest.raises(SystemExit) as excinfo:
-            main([
-                "cluster", "rollout",
-                "--ref", "origin/dev",
-                "--image-tag", "staging-aaaaaaa",
-                "--cluster-name", "loom-staging",
-                "--namespace", "loom-staging",
-                "--environment", "staging",
-                "--cp-url", "http://control-node.lan:18081",
-                "--admin-token", raw_token,
-                "--cluster-config", "/tmp/cluster-config.toml",
-                "--backup-manifest", "/tmp/backup-manifest.json",
-                "--rollout-root", "/tmp/rollout-root",
-            ])
+            main(
+                [
+                    "cluster",
+                    "rollout",
+                    "--ref",
+                    "origin/dev",
+                    "--image-tag",
+                    "staging-aaaaaaa",
+                    "--cluster-name",
+                    "loom-staging",
+                    "--namespace",
+                    "loom-staging",
+                    "--environment",
+                    "staging",
+                    "--cp-url",
+                    "http://control-node.lan:18081",
+                    "--admin-token",
+                    raw_token,
+                    "--cluster-config",
+                    "/tmp/cluster-config.toml",
+                    "--backup-manifest",
+                    "/tmp/backup-manifest.json",
+                    "--rollout-root",
+                    "/tmp/rollout-root",
+                ]
+            )
 
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
@@ -295,19 +366,32 @@ class TestRolloutCLIRealRun:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         with pytest.raises(SystemExit) as excinfo:
-            main([
-                "cluster", "rollout",
-                "--ref", "origin/dev",
-                "--image-tag", "staging-aaaaaaa",
-                "--cluster-name", "loom-staging",
-                "--namespace", "loom-staging",
-                "--environment", "staging",
-                "--cp-url", "http://control-node.lan:18081",
-                "--admin-token", "-",
-                "--cluster-config", "/tmp/cluster-config.toml",
-                "--backup-manifest", "/tmp/backup-manifest.json",
-                "--rollout-root", "/tmp/rollout-root",
-            ])
+            main(
+                [
+                    "cluster",
+                    "rollout",
+                    "--ref",
+                    "origin/dev",
+                    "--image-tag",
+                    "staging-aaaaaaa",
+                    "--cluster-name",
+                    "loom-staging",
+                    "--namespace",
+                    "loom-staging",
+                    "--environment",
+                    "staging",
+                    "--cp-url",
+                    "http://control-node.lan:18081",
+                    "--admin-token",
+                    "-",
+                    "--cluster-config",
+                    "/tmp/cluster-config.toml",
+                    "--backup-manifest",
+                    "/tmp/backup-manifest.json",
+                    "--rollout-root",
+                    "/tmp/rollout-root",
+                ]
+            )
 
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
@@ -321,19 +405,32 @@ class TestRolloutCLIRealRun:
         raw_token = "raw-worker-secret"
 
         with pytest.raises(SystemExit) as excinfo:
-            main([
-                "cluster", "rollout",
-                "--ref", "origin/dev",
-                "--image-tag", "staging-aaaaaaa",
-                "--cluster-name", "loom-staging",
-                "--namespace", "loom-staging",
-                "--environment", "staging",
-                "--cp-url", "http://control-node.lan:18081",
-                "--worker-token", raw_token,
-                "--cluster-config", "/tmp/cluster-config.toml",
-                "--backup-manifest", "/tmp/backup-manifest.json",
-                "--rollout-root", "/tmp/rollout-root",
-            ])
+            main(
+                [
+                    "cluster",
+                    "rollout",
+                    "--ref",
+                    "origin/dev",
+                    "--image-tag",
+                    "staging-aaaaaaa",
+                    "--cluster-name",
+                    "loom-staging",
+                    "--namespace",
+                    "loom-staging",
+                    "--environment",
+                    "staging",
+                    "--cp-url",
+                    "http://control-node.lan:18081",
+                    "--worker-token",
+                    raw_token,
+                    "--cluster-config",
+                    "/tmp/cluster-config.toml",
+                    "--backup-manifest",
+                    "/tmp/backup-manifest.json",
+                    "--rollout-root",
+                    "/tmp/rollout-root",
+                ]
+            )
 
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
@@ -346,19 +443,32 @@ class TestRolloutCLIRealRun:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         with pytest.raises(SystemExit) as excinfo:
-            main([
-                "cluster", "rollout",
-                "--ref", "origin/dev",
-                "--image-tag", "staging-aaaaaaa",
-                "--cluster-name", "loom-staging",
-                "--namespace", "loom-staging",
-                "--environment", "staging",
-                "--cp-url", "http://control-node.lan:18081",
-                "--worker-token", "-",
-                "--cluster-config", "/tmp/cluster-config.toml",
-                "--backup-manifest", "/tmp/backup-manifest.json",
-                "--rollout-root", "/tmp/rollout-root",
-            ])
+            main(
+                [
+                    "cluster",
+                    "rollout",
+                    "--ref",
+                    "origin/dev",
+                    "--image-tag",
+                    "staging-aaaaaaa",
+                    "--cluster-name",
+                    "loom-staging",
+                    "--namespace",
+                    "loom-staging",
+                    "--environment",
+                    "staging",
+                    "--cp-url",
+                    "http://control-node.lan:18081",
+                    "--worker-token",
+                    "-",
+                    "--cluster-config",
+                    "/tmp/cluster-config.toml",
+                    "--backup-manifest",
+                    "/tmp/backup-manifest.json",
+                    "--rollout-root",
+                    "/tmp/rollout-root",
+                ]
+            )
 
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
@@ -372,19 +482,32 @@ class TestRolloutCLIRealRun:
         raw_token = "raw-service-secret"
 
         with pytest.raises(SystemExit) as excinfo:
-            main([
-                "cluster", "rollout",
-                "--ref", "origin/dev",
-                "--image-tag", "staging-aaaaaaa",
-                "--cluster-name", "loom-staging",
-                "--namespace", "loom-staging",
-                "--environment", "staging",
-                "--cp-url", "http://control-node.lan:18081",
-                "--service-token", raw_token,
-                "--cluster-config", "/tmp/cluster-config.toml",
-                "--backup-manifest", "/tmp/backup-manifest.json",
-                "--rollout-root", "/tmp/rollout-root",
-            ])
+            main(
+                [
+                    "cluster",
+                    "rollout",
+                    "--ref",
+                    "origin/dev",
+                    "--image-tag",
+                    "staging-aaaaaaa",
+                    "--cluster-name",
+                    "loom-staging",
+                    "--namespace",
+                    "loom-staging",
+                    "--environment",
+                    "staging",
+                    "--cp-url",
+                    "http://control-node.lan:18081",
+                    "--service-token",
+                    raw_token,
+                    "--cluster-config",
+                    "/tmp/cluster-config.toml",
+                    "--backup-manifest",
+                    "/tmp/backup-manifest.json",
+                    "--rollout-root",
+                    "/tmp/rollout-root",
+                ]
+            )
 
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
@@ -397,19 +520,32 @@ class TestRolloutCLIRealRun:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         with pytest.raises(SystemExit) as excinfo:
-            main([
-                "cluster", "rollout",
-                "--ref", "origin/dev",
-                "--image-tag", "staging-aaaaaaa",
-                "--cluster-name", "loom-staging",
-                "--namespace", "loom-staging",
-                "--environment", "staging",
-                "--cp-url", "http://control-node.lan:18081",
-                "--service-token", "-",
-                "--cluster-config", "/tmp/cluster-config.toml",
-                "--backup-manifest", "/tmp/backup-manifest.json",
-                "--rollout-root", "/tmp/rollout-root",
-            ])
+            main(
+                [
+                    "cluster",
+                    "rollout",
+                    "--ref",
+                    "origin/dev",
+                    "--image-tag",
+                    "staging-aaaaaaa",
+                    "--cluster-name",
+                    "loom-staging",
+                    "--namespace",
+                    "loom-staging",
+                    "--environment",
+                    "staging",
+                    "--cp-url",
+                    "http://control-node.lan:18081",
+                    "--service-token",
+                    "-",
+                    "--cluster-config",
+                    "/tmp/cluster-config.toml",
+                    "--backup-manifest",
+                    "/tmp/backup-manifest.json",
+                    "--rollout-root",
+                    "/tmp/rollout-root",
+                ]
+            )
 
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
@@ -423,19 +559,32 @@ class TestRolloutCLIRealRun:
         raw_token = "raw-smoke-secret"
 
         with pytest.raises(SystemExit) as excinfo:
-            main([
-                "cluster", "rollout",
-                "--ref", "origin/dev",
-                "--image-tag", "staging-aaaaaaa",
-                "--cluster-name", "loom-staging",
-                "--namespace", "loom-staging",
-                "--environment", "staging",
-                "--cp-url", "http://control-node.lan:18081",
-                "--smoke-api-token", raw_token,
-                "--cluster-config", "/tmp/cluster-config.toml",
-                "--backup-manifest", "/tmp/backup-manifest.json",
-                "--rollout-root", "/tmp/rollout-root",
-            ])
+            main(
+                [
+                    "cluster",
+                    "rollout",
+                    "--ref",
+                    "origin/dev",
+                    "--image-tag",
+                    "staging-aaaaaaa",
+                    "--cluster-name",
+                    "loom-staging",
+                    "--namespace",
+                    "loom-staging",
+                    "--environment",
+                    "staging",
+                    "--cp-url",
+                    "http://control-node.lan:18081",
+                    "--smoke-api-token",
+                    raw_token,
+                    "--cluster-config",
+                    "/tmp/cluster-config.toml",
+                    "--backup-manifest",
+                    "/tmp/backup-manifest.json",
+                    "--rollout-root",
+                    "/tmp/rollout-root",
+                ]
+            )
 
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
@@ -448,19 +597,32 @@ class TestRolloutCLIRealRun:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         with pytest.raises(SystemExit) as excinfo:
-            main([
-                "cluster", "rollout",
-                "--ref", "origin/dev",
-                "--image-tag", "staging-aaaaaaa",
-                "--cluster-name", "loom-staging",
-                "--namespace", "loom-staging",
-                "--environment", "staging",
-                "--cp-url", "http://control-node.lan:18081",
-                "--smoke-api-token", "-",
-                "--cluster-config", "/tmp/cluster-config.toml",
-                "--backup-manifest", "/tmp/backup-manifest.json",
-                "--rollout-root", "/tmp/rollout-root",
-            ])
+            main(
+                [
+                    "cluster",
+                    "rollout",
+                    "--ref",
+                    "origin/dev",
+                    "--image-tag",
+                    "staging-aaaaaaa",
+                    "--cluster-name",
+                    "loom-staging",
+                    "--namespace",
+                    "loom-staging",
+                    "--environment",
+                    "staging",
+                    "--cp-url",
+                    "http://control-node.lan:18081",
+                    "--smoke-api-token",
+                    "-",
+                    "--cluster-config",
+                    "/tmp/cluster-config.toml",
+                    "--backup-manifest",
+                    "/tmp/backup-manifest.json",
+                    "--rollout-root",
+                    "/tmp/rollout-root",
+                ]
+            )
 
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
@@ -487,18 +649,30 @@ class TestRolloutCLIRealRun:
 
         monkeypatch.setattr("loom_cli.rollout.cli.run_rollout", fake_run_rollout)
 
-        rc = main([
-            "cluster", "rollout",
-            "--ref", "origin/dev",
-            "--image-tag", "staging-aaaaaaa",
-            "--cluster-name", "loom-staging",
-            "--namespace", "loom-staging",
-            "--environment", "staging",
-            "--cp-url", "http://control-node.lan:18081",
-            "--cluster-config", str(cfg),
-            "--backup-manifest", str(backup),
-            "--rollout-root", str(tmp_path),
-        ])
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "--ref",
+                "origin/dev",
+                "--image-tag",
+                "staging-aaaaaaa",
+                "--cluster-name",
+                "loom-staging",
+                "--namespace",
+                "loom-staging",
+                "--environment",
+                "staging",
+                "--cp-url",
+                "http://control-node.lan:18081",
+                "--cluster-config",
+                str(cfg),
+                "--backup-manifest",
+                str(backup),
+                "--rollout-root",
+                str(tmp_path),
+            ]
+        )
 
         assert rc == 0
         assert captured["ctx"].cp_url == "http://control-node.lan:18081"
@@ -522,26 +696,46 @@ class TestRolloutCLIRealRun:
 
         monkeypatch.setattr("loom_cli.rollout.cli.run_rollout", fake_run_rollout)
 
-        rc = main([
-            "cluster", "rollout",
-            "--ref", "origin/dev",
-            "--image-tag", "staging-aaaaaaa",
-            "--cluster-name", "loom-staging",
-            "--namespace", "loom-staging",
-            "--environment", "staging",
-            "--cp-url", "http://control-node.lan:18081",
-            "--cluster-config", str(cfg),
-            "--backup-manifest", str(backup),
-            "--rollout-root", str(tmp_path),
-            "--smoke-submit-mode", "admin-on-behalf",
-            "--smoke-api-token", "file:/run/loom/smoke-token",
-            "--smoke-task-id", "loom-smoke/gb10-oracle-hello-world",
-            "--smoke-required-worker-pool", "gb10-arm64",
-            "--smoke-agent", "oracle",
-            "--smoke-on-behalf-username", "devansh",
-            "--smoke-on-behalf-team-id", "agentic-rl-team-id",
-            "--smoke-admin-actor", "codex-v1-release-gate",
-        ])
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "--ref",
+                "origin/dev",
+                "--image-tag",
+                "staging-aaaaaaa",
+                "--cluster-name",
+                "loom-staging",
+                "--namespace",
+                "loom-staging",
+                "--environment",
+                "staging",
+                "--cp-url",
+                "http://control-node.lan:18081",
+                "--cluster-config",
+                str(cfg),
+                "--backup-manifest",
+                str(backup),
+                "--rollout-root",
+                str(tmp_path),
+                "--smoke-submit-mode",
+                "admin-on-behalf",
+                "--smoke-api-token",
+                "file:/run/loom/smoke-token",
+                "--smoke-task-id",
+                "loom-smoke/gb10-oracle-hello-world",
+                "--smoke-required-worker-pool",
+                "gb10-arm64",
+                "--smoke-agent",
+                "oracle",
+                "--smoke-on-behalf-username",
+                "devansh",
+                "--smoke-on-behalf-team-id",
+                "agentic-rl-team-id",
+                "--smoke-admin-actor",
+                "codex-v1-release-gate",
+            ]
+        )
 
         assert rc == 0
         ctx = captured["ctx"]
@@ -575,25 +769,36 @@ class TestRolloutCLIRealRun:
 
         monkeypatch.setattr("loom_cli.rollout.cli.run_rollout", fake_run_rollout)
 
-        rc = main([
-            "cluster", "rollout",
-            "--ref", "origin/dev",
-            "--image-tag", "staging-aaaaaaa",
-            "--cluster-name", "loom-staging",
-            "--namespace", "loom-staging",
-            "--environment", "staging",
-            "--cp-url", "http://control-node.lan:18081",
-            "--cluster-config", str(cfg),
-            "--backup-manifest", str(backup),
-            "--backup-manifest-min-remaining-hours", "4",
-            "--rollout-root", str(tmp_path),
-        ])
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "--ref",
+                "origin/dev",
+                "--image-tag",
+                "staging-aaaaaaa",
+                "--cluster-name",
+                "loom-staging",
+                "--namespace",
+                "loom-staging",
+                "--environment",
+                "staging",
+                "--cp-url",
+                "http://control-node.lan:18081",
+                "--cluster-config",
+                str(cfg),
+                "--backup-manifest",
+                str(backup),
+                "--backup-manifest-min-remaining-hours",
+                "4",
+                "--rollout-root",
+                str(tmp_path),
+            ]
+        )
 
         assert rc == 0
         assert captured["ctx"].backup_manifest_min_remaining_hours == 4
-        assert captured["ctx"].to_inputs_dict()[
-            "backup_manifest_min_remaining_hours"
-        ] == 4
+        assert captured["ctx"].to_inputs_dict()["backup_manifest_min_remaining_hours"] == 4
 
     def test_passes_gb10_prep_concurrency_into_rollout_inputs(
         self,
@@ -609,14 +814,21 @@ class TestRolloutCLIRealRun:
 
         monkeypatch.setattr("loom_cli.rollout.cli.run_rollout", fake_run_rollout)
 
-        rc = main([
-            "cluster", "rollout",
-            "staging",
-            "--ref", "origin/dev",
-            "--image-tag", "staging-aaaaaaa",
-            "--rollout-root", str(tmp_path),
-            "--gb10-prep-concurrency", "7",
-        ])
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "staging",
+                "--ref",
+                "origin/dev",
+                "--image-tag",
+                "staging-aaaaaaa",
+                "--rollout-root",
+                str(tmp_path),
+                "--gb10-prep-concurrency",
+                "7",
+            ]
+        )
 
         assert rc == 0
         assert captured["ctx"].gb10_prep_concurrency == 7
@@ -640,26 +852,38 @@ class TestRolloutCLIRealRun:
 
         monkeypatch.setattr("loom_cli.rollout.cli.run_rollout", fake_run_rollout)
 
-        rc = main([
-            "cluster", "rollout",
-            "--ref", "origin/dev",
-            "--image-tag", "staging-aaaaaaa",
-            "--cluster-name", "loom-staging",
-            "--namespace", "loom-staging",
-            "--environment", "staging",
-            "--cp-url", "http://control-node.lan:18081",
-            "--admin-token", "file:/secure/path/admin-token",
-            "--expect-admin-token-fingerprint", "sha256:abc123def456 len=64",
-            "--cluster-config", str(cfg),
-            "--backup-manifest", str(backup),
-            "--rollout-root", str(tmp_path),
-        ])
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "--ref",
+                "origin/dev",
+                "--image-tag",
+                "staging-aaaaaaa",
+                "--cluster-name",
+                "loom-staging",
+                "--namespace",
+                "loom-staging",
+                "--environment",
+                "staging",
+                "--cp-url",
+                "http://control-node.lan:18081",
+                "--admin-token",
+                "file:/secure/path/admin-token",
+                "--expect-admin-token-fingerprint",
+                "sha256:abc123def456 len=64",
+                "--cluster-config",
+                str(cfg),
+                "--backup-manifest",
+                str(backup),
+                "--rollout-root",
+                str(tmp_path),
+            ]
+        )
 
         assert rc == 0
         assert captured["ctx"].admin_token_source == "file:/secure/path/admin-token"
-        assert captured["ctx"].expect_admin_token_fingerprint == (
-            "sha256:abc123def456 len=64"
-        )
+        assert captured["ctx"].expect_admin_token_fingerprint == ("sha256:abc123def456 len=64")
 
     def test_passes_worker_token_source_into_rollout_context(
         self,
@@ -679,19 +903,32 @@ class TestRolloutCLIRealRun:
 
         monkeypatch.setattr("loom_cli.rollout.cli.run_rollout", fake_run_rollout)
 
-        rc = main([
-            "cluster", "rollout",
-            "--ref", "origin/dev",
-            "--image-tag", "staging-aaaaaaa",
-            "--cluster-name", "loom-staging",
-            "--namespace", "loom-staging",
-            "--environment", "staging",
-            "--cp-url", "http://control-node.lan:18081",
-            "--worker-token", "file:/secure/path/worker-token",
-            "--cluster-config", str(cfg),
-            "--backup-manifest", str(backup),
-            "--rollout-root", str(tmp_path),
-        ])
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "--ref",
+                "origin/dev",
+                "--image-tag",
+                "staging-aaaaaaa",
+                "--cluster-name",
+                "loom-staging",
+                "--namespace",
+                "loom-staging",
+                "--environment",
+                "staging",
+                "--cp-url",
+                "http://control-node.lan:18081",
+                "--worker-token",
+                "file:/secure/path/worker-token",
+                "--cluster-config",
+                str(cfg),
+                "--backup-manifest",
+                str(backup),
+                "--rollout-root",
+                str(tmp_path),
+            ]
+        )
 
         assert rc == 0
         assert captured["ctx"].worker_token_source == "file:/secure/path/worker-token"
@@ -717,19 +954,32 @@ class TestRolloutCLIRealRun:
 
         monkeypatch.setattr("loom_cli.rollout.cli.run_rollout", fake_run_rollout)
 
-        rc = main([
-            "cluster", "rollout",
-            "--ref", "origin/dev",
-            "--image-tag", "staging-aaaaaaa",
-            "--cluster-name", "loom-staging",
-            "--namespace", "loom-staging",
-            "--environment", "staging",
-            "--cp-url", "http://control-node.lan:18081",
-            "--service-token", "file:/secure/path/service-token",
-            "--cluster-config", str(cfg),
-            "--backup-manifest", str(backup),
-            "--rollout-root", str(tmp_path),
-        ])
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "--ref",
+                "origin/dev",
+                "--image-tag",
+                "staging-aaaaaaa",
+                "--cluster-name",
+                "loom-staging",
+                "--namespace",
+                "loom-staging",
+                "--environment",
+                "staging",
+                "--cp-url",
+                "http://control-node.lan:18081",
+                "--service-token",
+                "file:/secure/path/service-token",
+                "--cluster-config",
+                str(cfg),
+                "--backup-manifest",
+                str(backup),
+                "--rollout-root",
+                str(tmp_path),
+            ]
+        )
 
         assert rc == 0
         assert captured["ctx"].service_token_source == "file:/secure/path/service-token"
@@ -751,24 +1001,26 @@ class TestRolloutCLIRealRun:
         evidence.ensure()
         old_sha = "948f6e8d17815b24e6df3af05e456658e8daa386"
         new_sha = "468c23f9ca1a9484eb0f522bb3f75f1b8ff2b56c"
-        evidence.write_inputs({
-            "image_tag": "staging-948f6e8",
-            "target_ref": "origin/dev",
-            "resolved_sha": old_sha,
-            "cluster_name": "loom-staging",
-            "namespace": "loom-staging",
-            "environment": "staging",
-            "cp_url": "http://control-node.lan:18081",
-            "admin_token_source": "env:LOOM_CP_ADMIN_TOKEN",
-            "expect_admin_token_fingerprint": None,
-            "worker_token_source": None,
-            "service_token_source": None,
-            "cluster_config_path": str(cfg),
-            "cluster_config_sha256": sha256_of_file(cfg),
-            "rollout_root": str(tmp_path),
-            "scope": "current-gb10",
-            "exclude_oldlab": False,
-        })
+        evidence.write_inputs(
+            {
+                "image_tag": "staging-948f6e8",
+                "target_ref": "origin/dev",
+                "resolved_sha": old_sha,
+                "cluster_name": "loom-staging",
+                "namespace": "loom-staging",
+                "environment": "staging",
+                "cp_url": "http://control-node.lan:18081",
+                "admin_token_source": "env:LOOM_CP_ADMIN_TOKEN",
+                "expect_admin_token_fingerprint": None,
+                "worker_token_source": None,
+                "service_token_source": None,
+                "cluster_config_path": str(cfg),
+                "cluster_config_sha256": sha256_of_file(cfg),
+                "rollout_root": str(tmp_path),
+                "scope": "current-gb10",
+                "exclude_oldlab": False,
+            }
+        )
         state = RolloutState.new(
             rollout_id=rollout_id,
             steps=[(13, "production-defaults")],
@@ -797,19 +1049,31 @@ class TestRolloutCLIRealRun:
 
         monkeypatch.setattr("loom_cli.rollout.cli.run_rollout", fake_run_rollout)
 
-        rc = main([
-            "cluster", "rollout",
-            "--ref", "origin/dev",
-            "--image-tag", "staging-948f6e8",
-            "--cluster-name", "loom-staging",
-            "--namespace", "loom-staging",
-            "--environment", "staging",
-            "--cp-url", "http://control-node.lan:18081",
-            "--cluster-config", str(cfg),
-            "--backup-manifest", str(backup),
-            "--rollout-root", str(tmp_path),
-            "--resume",
-        ])
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "--ref",
+                "origin/dev",
+                "--image-tag",
+                "staging-948f6e8",
+                "--cluster-name",
+                "loom-staging",
+                "--namespace",
+                "loom-staging",
+                "--environment",
+                "staging",
+                "--cp-url",
+                "http://control-node.lan:18081",
+                "--cluster-config",
+                str(cfg),
+                "--backup-manifest",
+                str(backup),
+                "--rollout-root",
+                str(tmp_path),
+                "--resume",
+            ]
+        )
 
         assert rc == 0
         assert captured["ctx"].target_ref == "origin/dev"
@@ -827,19 +1091,31 @@ class TestRolloutCLIRealRun:
 
         backup = tmp_path / "backup-manifest.json"
         backup.write_text("{}")
-        rc = main([
-            "cluster", "rollout",
-            "--ref", "origin/dev",
-            "--image-tag", "staging-aaaaaaa",
-            "--cluster-name", "loom-staging",
-            "--namespace", "loom-staging",
-            "--environment", "staging",
-            "--cp-url", "http://control-node.lan:18081",
-            "--cluster-config", str(tmp_path / "missing.toml"),
-            "--backup-manifest", str(backup),
-            "--rollout-root", str(tmp_path),
-            "--dry-run",
-        ])
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "--ref",
+                "origin/dev",
+                "--image-tag",
+                "staging-aaaaaaa",
+                "--cluster-name",
+                "loom-staging",
+                "--namespace",
+                "loom-staging",
+                "--environment",
+                "staging",
+                "--cp-url",
+                "http://control-node.lan:18081",
+                "--cluster-config",
+                str(tmp_path / "missing.toml"),
+                "--backup-manifest",
+                str(backup),
+                "--rollout-root",
+                str(tmp_path),
+                "--dry-run",
+            ]
+        )
         assert rc == 2
         err = capsys.readouterr().err
         assert "cluster-config" in err
