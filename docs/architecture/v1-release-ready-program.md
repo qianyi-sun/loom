@@ -87,11 +87,12 @@ selected job that is cancelled, skipped unexpectedly, or absent is a failure.
 Labels may add validation but cannot remove path-inferred validation. Docs-only
 PRs keep a bounded fast path while the stable contexts still report.
 
-The target normal `dev` auto-merge policy permits enablement only after every
-required gate is visible and successful on the current head SHA, plus required
-review state. Promotion PRs from `dev` to `main` remain explicitly
-owner-managed and do not use the routine `dev` auto-merge path. Task 6 provides
-the separate remote GitHub configuration and PR-context verification evidence.
+Codex enables squash auto-merge immediately after opening each normal `dev`
+PR. GitHub queues the merge until every required gate is visible and successful
+on the current head SHA and any applicable repository protection passes.
+Promotion PRs from `dev` to `main` remain explicitly owner-managed and do not
+use the routine `dev` auto-merge path. This is a Codex operational rule, not a
+contributor-specific review policy.
 
 The design covers at least:
 

@@ -20,15 +20,14 @@ def test_contributing_and_pr_template_accept_issue_scoped_external_prs() -> None
     assert "pull request code must not rely on protected secrets" in pr_template
 
 
-def test_normal_dev_prs_use_auto_merge_after_required_ci() -> None:
+def test_codex_normal_dev_prs_queue_auto_merge_immediately() -> None:
     contributing = _read("CONTRIBUTING.md")
     quickstart = _read("docs/contributing/contributor-quickstart.md")
     pr_template = _read(".github/PULL_REQUEST_TEMPLATE.md")
 
-    assert "Wait for CI green before merge" not in contributing
-    assert "Enable GitHub auto-merge on normal `dev` PRs" in contributing
-    assert "GitHub auto-merge squash-merges normal `dev` PRs" in quickstart
-    assert "I enabled GitHub auto-merge for this `dev` PR" in pr_template
+    assert "Codex\n> enables GitHub auto-merge with squash immediately" in contributing
+    assert "Codex turns on squash auto-merge immediately" in quickstart
+    assert "For this Codex-authored normal `dev` PR" in pr_template
 
 
 def test_governance_docs_define_path_inferred_validation_gates() -> None:
@@ -49,7 +48,7 @@ def test_governance_docs_define_path_inferred_validation_gates() -> None:
         "Labels may add validation but cannot remove path-inferred validation"
         in contributing
     )
-    assert "Do not enable auto-merge until every required gate is visible" in pr_template
+    assert "Codex enabled GitHub auto-merge" in pr_template
 
     for document in (contributing, quickstart):
         normalized_document = " ".join(document.split())
@@ -60,7 +59,7 @@ def test_governance_docs_define_path_inferred_validation_gates() -> None:
             or "managed by the release owner" in normalized_document
         )
 
-    assert "successful on the current head SHA" in pr_template
+    assert "succeed on the current head SHA" in pr_template
     assert "explicitly owner-managed" in pr_template
 
 

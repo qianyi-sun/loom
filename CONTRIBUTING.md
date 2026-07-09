@@ -13,10 +13,10 @@
 > contexts: `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
 > `staging-smoke-gate`. The shared planner selects the applicable validation
 > work from changed paths, while labels can request additional validation.
-> Labels may add validation but cannot remove path-inferred validation. Normal
-> `dev` PRs must not enable GitHub auto-merge until every required gate is
-> visible and successful on the current head SHA and required review state
-> passes.
+> Labels may add validation but cannot remove path-inferred validation. Codex
+> enables GitHub auto-merge with squash immediately after opening each normal
+> `dev` PR. This queues the merge; GitHub waits for every required gate on the
+> current head SHA and any applicable repository protection before merging.
 > External pull requests are accepted for issue-scoped work that follows
 > the templates below. Workflows that need publish or deployment secrets
 > must use protected GitHub Environments and must not expose secrets to
@@ -144,11 +144,10 @@ secrets.
   `cluster-smoke-gate`, and `staging-smoke-gate`. The shared planner selects
   their validation work from changed paths; labels request additional work but
   cannot turn off path-inferred work.
-- Enable GitHub auto-merge on normal `dev` PRs only under the target policy:
-  every required gate must be visible and successful on the current head SHA.
-  Do not hand-merge an eligible `dev` PR just because CI is green. Task 6
-  verifies the remote branch-protection configuration and PR status contexts;
-  this contributor policy is not proof that remote settings have been applied.
+- Codex enables GitHub auto-merge with squash immediately after opening a
+  normal `dev` PR. It remains queued until every required gate is visible and
+  successful on the current head SHA and any applicable repository protection
+  passes. Do not hand-merge an eligible `dev` PR just because CI is green.
 - Do not assume labels are the only way to select validation. For example,
   relevant image paths select `images-gate` automatically; `ci:images` adds
   multi-arch image validation when the changed paths do not already require it.
@@ -156,9 +155,10 @@ secrets.
   image workflow.
 - Release-promotion PRs to `main` remain explicitly owner-managed and never
   use the routine `dev` auto-merge path.
-- Human review is required only on branches or environments whose
-  protection rules demand it, and for external PRs before enabling or
-  approving auto-merge
+- This operational rule governs Codex-created PRs only; contributor-specific
+  review practices are managed independently. If repository or environment
+  protection requires review, GitHub enforces it while the auto-merge request
+  remains queued.
 - Squash merge is the only allowed merge method, keeping `dev` linear
 - Do not add credentials, private endpoints, local environment files, or
   generated run artifacts
