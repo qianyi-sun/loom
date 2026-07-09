@@ -51,6 +51,18 @@ def test_governance_docs_define_path_inferred_validation_gates() -> None:
     )
     assert "Do not enable auto-merge until every required gate is visible" in pr_template
 
+    for document in (contributing, quickstart):
+        normalized_document = " ".join(document.split())
+        assert "visible and successful on the current head SHA" in normalized_document
+        assert "release-promotion prs to `main`" in normalized_document.lower()
+        assert (
+            "owner-managed" in normalized_document
+            or "managed by the release owner" in normalized_document
+        )
+
+    assert "successful on the current head SHA" in pr_template
+    assert "explicitly owner-managed" in pr_template
+
 
 def test_release_promotion_template_requires_first_prod_evidence() -> None:
     contributing = _read("CONTRIBUTING.md")

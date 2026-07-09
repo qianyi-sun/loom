@@ -14,8 +14,9 @@
 > `staging-smoke-gate`. The shared planner selects the applicable validation
 > work from changed paths, while labels can request additional validation.
 > Labels may add validation but cannot remove path-inferred validation. Normal
-> `dev` PRs use GitHub auto-merge only after every required gate is visible and
-> successful on the current head SHA and required review state passes.
+> `dev` PRs must not enable GitHub auto-merge until every required gate is
+> visible and successful on the current head SHA and required review state
+> passes.
 > External pull requests are accepted for issue-scoped work that follows
 > the templates below. Workflows that need publish or deployment secrets
 > must use protected GitHub Environments and must not expose secrets to
@@ -143,10 +144,11 @@ secrets.
   `cluster-smoke-gate`, and `staging-smoke-gate`. The shared planner selects
   their validation work from changed paths; labels request additional work but
   cannot turn off path-inferred work.
-- Enable GitHub auto-merge on normal `dev` PRs only after every required gate
-  is visible and successful on the current head SHA. GitHub squash-merges when
-  the gates and required review state pass; do not hand-merge eligible `dev`
-  PRs just because CI is green.
+- Enable GitHub auto-merge on normal `dev` PRs only under the target policy:
+  every required gate must be visible and successful on the current head SHA.
+  Do not hand-merge an eligible `dev` PR just because CI is green. Task 6
+  verifies the remote branch-protection configuration and PR status contexts;
+  this contributor policy is not proof that remote settings have been applied.
 - Do not assume labels are the only way to select validation. For example,
   relevant image paths select `images-gate` automatically; `ci:images` adds
   multi-arch image validation when the changed paths do not already require it.
@@ -202,9 +204,11 @@ have one place to audit them.
 - **Publish and deploy workflows use protected GitHub Environments.**
   Secrets for benchmark-bundle publish or infrastructure deploy live in
   protected Environments so they are not available to pull request code.
-- **Branch protection on `main` and `dev`** keeps `repository-checks`,
-  `images-gate`, `cluster-smoke-gate`, and `staging-smoke-gate` required,
-  blocks direct pushes, and enforces squash-only merges.
+- **Target branch-protection policy for `main` and `dev`** must require
+  `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
+  `staging-smoke-gate`, block direct pushes, and enforce squash-only merges.
+  Task 6 verifies the remote GitHub settings and check contexts; this policy
+  description is not evidence that those settings are already applied.
 - **Merge queue readiness**: all four stable gate contexts run on GitHub's
   `merge_group` event. Maintainers should prefer enabling GitHub merge queue
   over weakening strict required-check behavior when PR concurrency causes

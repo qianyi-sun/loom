@@ -196,22 +196,25 @@ new issue before implementing. PRs use
 [`.github/PULL_REQUEST_TEMPLATE.md`](../../.github/PULL_REQUEST_TEMPLATE.md)
 and must link the issue they advance. Maintainers mark actively owned
 issues with a `[WIP] ` title prefix, keep the project status current,
-and enable GitHub auto-merge for normal `dev` PRs.
+and follow the target normal `dev` auto-merge policy.
 
-GitHub auto-merge squash-merges normal `dev` PRs only after
-`repository-checks`, `images-gate`, `cluster-smoke-gate`, and
-`staging-smoke-gate` are visible and successful for the current head SHA, plus
-any required review state. Do not enable auto-merge before those required gates
-are visible on the current head SHA. Maintainers should not manually merge an
+The target normal `dev` auto-merge policy requires `repository-checks`,
+`images-gate`, `cluster-smoke-gate`, and `staging-smoke-gate` to be visible and
+successful on the current head SHA, plus any required review state. Do not
+enable auto-merge before those gates meet that condition. Task 6 verifies the
+remote GitHub branch-protection configuration and observed PR contexts; this
+guide describes the target policy and is not proof it is applied. Once that
+policy is enforced, GitHub auto-merge squash-merges normal `dev` PRs only after
+the gates and review state pass. Maintainers should not manually merge an
 eligible `dev` PR just because CI is green; release-promotion PRs to `main`
-remain explicitly managed by the release owner.
+remain explicitly owner-managed by the release owner.
 
-Merge mechanics:
+Target branch-protection settings (pending Task 6 remote verification):
 - Squash-only (no rebase merge, no merge commits)
 - `required_linear_history: true`
 - `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
   `staging-smoke-gate` are the required stable status checks
-- `allow_auto_merge: true`; enable auto-merge on normal `dev` PRs
+- `allow_auto_merge: true`; permit auto-merge only under the policy above
 - `enforce_admins: true` on `dev` - admins go through the gate too
 
 Secrets and side-effect workflows:
