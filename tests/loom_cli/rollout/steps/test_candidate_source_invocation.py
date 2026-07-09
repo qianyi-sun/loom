@@ -82,6 +82,39 @@ spec:
     return rendered
 
 
+def _write_rendered_stateful_substrate(ev: EvidenceDirectory) -> Path:
+    rendered = ev.step_dir(7, "render").artifact_path("rendered.yaml")
+    rendered.write_text(
+        """
+apiVersion: v1
+kind: PersistentVolume
+metadata: { name: loom-staging-postgres-data }
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata: { name: loom-staging-minio-data }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: loom-postgres }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: loom-postgres }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: loom-minio }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: loom-minio }
+""",
+        encoding="utf-8",
+    )
+    return rendered
+
+
 def _docker_inspect_success(argv: list[str]) -> SubprocessResult:
     docs = []
     for image in argv[3:]:
@@ -207,6 +240,7 @@ def test_migrate_render_migration_resolves_loom_cli_without_global_executable(
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     worktree = _prepare_candidate_worktree(ev)
+    _write_rendered_stateful_substrate(ev)
     step_dir = ev.step_dir(9, "migrate")
     calls: list[dict[str, Any]] = []
 
