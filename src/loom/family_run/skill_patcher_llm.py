@@ -74,6 +74,7 @@ class _GatewayClient(Protocol):
         dialect: str,
         max_tokens: int,
         timeout_sec: float,
+        provider_connection_id: str | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -169,6 +170,16 @@ class SkillPatcherLLMAdapter:
             params.get("call_timeout_sec", _DEFAULT_CALL_TIMEOUT_SEC),
         )
         trajectory_uri = params.get("trajectory_uri")
+        # #672 blocker #695: BYO provider-connection routing for the
+        # evolver call. When the batch's resolved family_run adapter
+        # spec sets ``params.provider_connection_id``, forward it so
+        # the gateway routes via the operator's stored credential
+        # rather than the platform's default upstream. Non-BYO
+        # (platform-credentialed) callers omit the field and the
+        # gateway falls back to the legacy path.
+        provider_connection_id = params.get("provider_connection_id")
+        if provider_connection_id is not None:
+            provider_connection_id = str(provider_connection_id)
 
         scratch = Path(tempfile.mkdtemp(prefix=f"skill-evolve-{family.family_key}-"))
         try:
@@ -194,6 +205,7 @@ class SkillPatcherLLMAdapter:
                 dialect="family_evolver",
                 max_tokens=max_tokens,
                 timeout_sec=timeout_sec,
+                provider_connection_id=provider_connection_id,
             )
             raw = _extract_content(response)
             patch = _parse_patch(raw)
