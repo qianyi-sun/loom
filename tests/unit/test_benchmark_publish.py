@@ -162,13 +162,17 @@ def test_run_publish_includes_valid_task_config_in_manifest(
         def create_repo(self, **_kwargs: object) -> None:
             return None
 
-        def upload_folder(self, **kwargs: object) -> object:
+        def upload_large_folder(self, **kwargs: object) -> None:
             folder = Path(str(kwargs["folder_path"]))
             captured_manifest.update(
                 json.loads((folder / "manifest.json").read_text()),
             )
             captured_bundle_checksums["task-001"] = sha256_of_dir(folder / "task-001")
-            return SimpleNamespace(oid="fake-revision")
+
+        def list_repo_refs(self, **_kwargs: object) -> object:
+            return SimpleNamespace(
+                branches=[SimpleNamespace(name="main", target_commit="fake-revision")]
+            )
 
     monkeypatch.setitem(publish_cmd.REGISTRY, "fake-bench", FakeAdapter())
     monkeypatch.setattr(
@@ -249,8 +253,11 @@ def test_run_publish_rejects_unsafe_converted_dockerfile(
         def create_repo(self, **_kwargs: object) -> None:
             return None
 
-        def upload_folder(self, **_kwargs: object) -> object:
+        def upload_large_folder(self, **_kwargs: object) -> None:
             raise AssertionError("unsafe bundle should not upload")
+
+        def list_repo_refs(self, **_kwargs: object) -> object:
+            raise AssertionError("unsafe bundle should not resolve revision")
 
     monkeypatch.setitem(publish_cmd.REGISTRY, "fake-bench", FakeAdapter())
     monkeypatch.setattr(
@@ -320,12 +327,16 @@ def test_run_publish_filters_specific_instance_ids(
         def create_repo(self, **_kwargs: object) -> None:
             return None
 
-        def upload_folder(self, **kwargs: object) -> object:
+        def upload_large_folder(self, **kwargs: object) -> None:
             folder = Path(str(kwargs["folder_path"]))
             captured_manifest.update(
                 json.loads((folder / "manifest.json").read_text()),
             )
-            return SimpleNamespace(oid="fake-revision")
+
+        def list_repo_refs(self, **_kwargs: object) -> object:
+            return SimpleNamespace(
+                branches=[SimpleNamespace(name="main", target_commit="fake-revision")]
+            )
 
     monkeypatch.setitem(publish_cmd.REGISTRY, "fake-bench", FakeAdapter())
     monkeypatch.setattr(
