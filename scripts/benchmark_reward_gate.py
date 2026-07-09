@@ -337,6 +337,7 @@ def _canary_summary(
     hard_failures: list[str],
     scored_count: int,
     positive_count: int,
+    non_full_count: int,
 ) -> str:
     if hard_failures:
         return "; ".join(hard_failures)
@@ -344,7 +345,12 @@ def _canary_summary(
         return "blocked: no scored trials with numeric aggregate_reward"
     if positive_count == 0:
         return "blocked: no positive reward among scored trials"
-    return f"passed: {positive_count}/{scored_count} scored trials have reward > 0"
+    if non_full_count == 0:
+        return "blocked: all scored trials have full reward; score evidence is degenerate"
+    return (
+        f"passed: {positive_count}/{scored_count} scored trials have reward > 0; "
+        f"{non_full_count}/{scored_count} have reward < 1"
+    )
 
 
 def build_score_positive_canary_report(
@@ -358,14 +364,16 @@ def build_score_positive_canary_report(
 
     The gate is intentionally narrower than the full reward sweep: it accepts a
     representative canary batch only when at least one scored trial has reward
-    above zero. Platform success with all-zero scores stays blocked because it
-    does not prove the production runner/provider mix can solve any task.
+    above zero and at least one scored trial is below full reward. Platform
+    success with all-zero or all-full scores stays blocked because either
+    collapse is weak release evidence for a realistic task slice.
     """
     reward_distribution: dict[str, int] = {}
     failure_taxonomy: dict[str, int] = {}
     scored_trials: list[dict[str, Any]] = []
     unscored_trials: list[dict[str, Any]] = []
     positive_count = 0
+    non_full_count = 0
 
     for trial in trials:
         reward = trial.get("aggregate_reward")
@@ -381,6 +389,8 @@ def build_score_positive_canary_report(
                 taxonomy_key = "score_positive"
             else:
                 taxonomy_key = "score_zero"
+            if reward_f < 1.0:
+                non_full_count += 1
             failure_taxonomy[taxonomy_key] = failure_taxonomy.get(taxonomy_key, 0) + 1
             continue
 
@@ -403,8 +413,13 @@ def build_score_positive_canary_report(
         hard_failures=hard_failures,
         scored_count=scored_count,
         positive_count=positive_count,
+        non_full_count=non_full_count,
     )
-    raw_status = "pass" if not hard_failures and scored_count > 0 and positive_count > 0 else "fail"
+    raw_status = (
+        "pass"
+        if not hard_failures and scored_count > 0 and positive_count > 0 and non_full_count > 0
+        else "fail"
+    )
     override: dict[str, str] | None = None
     status = raw_status
     if raw_status == "fail" and override_issue and override_rationale:
@@ -422,6 +437,7 @@ def build_score_positive_canary_report(
         "trial_count": len(trials),
         "scored_trial_count": scored_count,
         "positive_reward_trial_count": positive_count,
+        "non_full_reward_trial_count": non_full_count,
         "reward_distribution": dict(sorted(reward_distribution.items())),
         "failure_taxonomy": dict(sorted(failure_taxonomy.items())),
         "scored_trials": scored_trials,
@@ -444,6 +460,7 @@ def render_score_positive_canary_markdown(report: dict[str, Any]) -> str:
         f"| trial_count | {report.get('trial_count', 0)} |",
         f"| scored_trials | {report.get('scored_trial_count', 0)} |",
         f"| positive_reward_trials | {report.get('positive_reward_trial_count', 0)} |",
+        f"| non_full_reward_trials | {report.get('non_full_reward_trial_count', 0)} |",
         "",
         "## Reward Distribution",
         "",
@@ -781,6 +798,8 @@ def _print_score_positive_canary_report(
         f"{report['scored_trial_count']} "
         "positive_reward_trials="
         f"{report['positive_reward_trial_count']} "
+        "non_full_reward_trials="
+        f"{report['non_full_reward_trial_count']} "
         "reward_distribution="
         f"{json.dumps(report['reward_distribution'], sort_keys=True)}"
     )
@@ -959,7 +978,7 @@ def build_parser() -> argparse.ArgumentParser:
         "score-positive-canary",
         help=(
             "Fail unless a terminal canary batch has at least one scored trial "
-            "with reward > 0."
+            "with reward > 0 and at least one scored trial with reward < 1."
         ),
     )
     canary.add_argument("--server-url", required=True)

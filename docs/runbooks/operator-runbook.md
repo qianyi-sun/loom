@@ -3932,9 +3932,11 @@ Before submitting any full production benchmark batch, run a small canary with
 the exact production agent/provider/model/runtime/worker-pool mix and a
 representative task-family subset. A canary that reaches the provider and
 records platform-succeeded trials still does not prove score viability if every
-scored trial has reward `0`. The score-positive gate is mandatory and blocks
-full production submission unless at least one scored canary trial has reward
-greater than `0`:
+scored trial has reward `0`, and it is also suspicious if every scored trial has
+full reward `1.0` on a realistic multi-task slice. The score-positive gate is
+mandatory and blocks full production submission unless at least one scored
+canary trial has reward greater than `0` and at least one scored trial has
+reward below `1.0`:
 
 ```bash
 python scripts/benchmark_reward_gate.py score-positive-canary \

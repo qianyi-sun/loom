@@ -604,6 +604,7 @@ manifest = {
             "batch_id": "batch-score-positive-canary",
             "scored_trial_count": 7,
             "positive_reward_trial_count": 1,
+            "non_full_reward_trial_count": 6,
         },
         "benchmark_score_alignment": {
             "status": "pass",
