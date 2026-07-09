@@ -1529,7 +1529,15 @@ rollout-owned `rollout-cluster-config.toml` artifact under the rollout
 evidence directory. This synthesized config copies the operator's source
 config and pins `image_tag` to the invocation's `--image-tag`, so stale
 long-lived config files cannot silently render or gate an older image. The
-operator's original `cluster-config.toml` is not modified.
+operator's original `cluster-config.toml` is not modified. Repo-relative GB10
+SSH path fields in the source config, including `[gb10_pool].ssh_config`,
+`ssh_identity_file`, and `ssh_certificate_file`, are rewritten to rollout-stable
+paths before the artifact is written. Repo-owned files resolve into the pinned
+candidate worktree; operator-owned absolute paths remain absolute. This keeps
+step 14 HF boundary evidence from resolving source-config-relative SSH paths
+against the rollout evidence directory. On `--resume`, the driver also migrates
+an existing rollout-local config if it still contains pre-fix relative GB10 SSH
+paths, so recovery does not depend on manually deleting stale artifacts.
 
 ### Evidence layout
 
