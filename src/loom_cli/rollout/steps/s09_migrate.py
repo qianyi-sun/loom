@@ -10,6 +10,10 @@ if pending, or hits AlreadyExists on completed Jobs cleaning up via TTL).
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
+from typing import Any
+
+import yaml  # type: ignore[import-untyped]
 
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
@@ -32,6 +36,91 @@ def _deterministic_job_suffix(ctx: RolloutContext) -> str:
         f"{ctx.image_tag}|{ctx.resolved_sha}|{ctx.cluster_config_sha256}".encode(),
     ).hexdigest()
     return h[:8]
+
+
+def _rendered_manifest_path(step_dir: StepDir) -> Path:
+    return step_dir.path.parent / "07-render" / "rendered.yaml"
+
+
+def _resource_name(doc: dict[Any, Any]) -> str | None:
+    metadata = doc.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    name = metadata.get("name")
+    return name if isinstance(name, str) else None
+
+
+def _stateful_substrate_resource_id(
+    doc: dict[Any, Any],
+    *,
+    namespace: str,
+) -> str | None:
+    kind = doc.get("kind")
+    if not isinstance(kind, str):
+        return None
+    name = _resource_name(doc)
+    if name is None:
+        return None
+    pv_names = {
+        f"{namespace}-postgres-data",
+        f"{namespace}-minio-data",
+    }
+    if kind == "PersistentVolume" and name in pv_names:
+        return f"{kind}/{name}"
+    if kind == "StatefulSet" and name in {"loom-postgres", "loom-minio"}:
+        return f"{kind}/{name}"
+    if kind == "Service" and name in {"loom-postgres", "loom-minio"}:
+        return f"{kind}/{name}"
+    return None
+
+
+def _write_stateful_substrate_manifest(
+    rendered_manifest: Path,
+    target: Path,
+    *,
+    namespace: str,
+) -> list[str]:
+    """Write the DB/object-store substrate needed before migration.
+
+    A reconstructed kind cluster has namespace/secrets after step 03 but no
+    standing Services or StatefulSets. Migration and environment-state need
+    Postgres and MinIO alive before full cluster-up starts application pods.
+    """
+    try:
+        docs = list(yaml.safe_load_all(rendered_manifest.read_text(encoding="utf-8")))
+    except OSError as exc:
+        raise RuntimeError(f"rendered manifest missing for stateful substrate: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise RuntimeError(f"rendered manifest is not valid YAML: {exc}") from exc
+
+    selected: list[dict[Any, Any]] = []
+    resource_ids: list[str] = []
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        resource_id = _stateful_substrate_resource_id(doc, namespace=namespace)
+        if resource_id is None:
+            continue
+        selected.append(doc)
+        resource_ids.append(resource_id)
+
+    required = {
+        "StatefulSet/loom-postgres",
+        "Service/loom-postgres",
+        "StatefulSet/loom-minio",
+        "Service/loom-minio",
+    }
+    missing = sorted(required - set(resource_ids))
+    if missing:
+        raise RuntimeError(
+            "rendered manifest lacks required stateful substrate resources: " + ", ".join(missing),
+        )
+
+    target.write_text(
+        yaml.safe_dump_all(selected, sort_keys=False),
+        encoding="utf-8",
+    )
+    return resource_ids
 
 
 class MigrateStep(BaseStep):
@@ -57,10 +146,14 @@ class MigrateStep(BaseStep):
         # Render the migration manifest.
         render = run_captured(
             candidate_loom_argv(
-                "cluster", "render-migration",
-                "--image-tag", ctx.image_tag,
-                "--namespace", ctx.namespace,
-                "--job-suffix", suffix,
+                "cluster",
+                "render-migration",
+                "--image-tag",
+                ctx.image_tag,
+                "--namespace",
+                ctx.namespace,
+                "--job-suffix",
+                suffix,
             ),
             cwd=cwd,
             env=env,
@@ -74,6 +167,54 @@ class MigrateStep(BaseStep):
         manifest = step_dir.artifact_path("migration.yaml")
         manifest.write_text(render.stdout)
 
+        substrate_manifest = step_dir.artifact_path("stateful-substrate.yaml")
+        try:
+            substrate_resources = _write_stateful_substrate_manifest(
+                _rendered_manifest_path(step_dir),
+                substrate_manifest,
+                namespace=ctx.namespace,
+            )
+        except RuntimeError as exc:
+            step_dir.stderr_path().write_text(str(exc) + "\n")
+            return RunResult(exit_code=2, error=str(exc))
+
+        apply_substrate = run_captured(
+            ["kubectl", "-n", ctx.namespace, "apply", "-f", str(substrate_manifest)],
+        )
+        if apply_substrate.returncode != 0:
+            step_dir.stderr_path().write_text(apply_substrate.stderr)
+            return RunResult(
+                exit_code=apply_substrate.returncode,
+                error=(
+                    "kubectl apply stateful substrate failed: "
+                    f"{apply_substrate.stderr.strip()[:200]}"
+                ),
+            )
+
+        wait_outputs: list[tuple[str, str]] = []
+        for statefulset in ("loom-postgres", "loom-minio"):
+            wait_statefulset = run_captured(
+                [
+                    "kubectl",
+                    "-n",
+                    ctx.namespace,
+                    "rollout",
+                    "status",
+                    f"statefulset/{statefulset}",
+                    "--timeout=300s",
+                ]
+            )
+            wait_outputs.append((statefulset, wait_statefulset.stdout))
+            if wait_statefulset.returncode != 0:
+                step_dir.stderr_path().write_text(wait_statefulset.stderr)
+                return RunResult(
+                    exit_code=wait_statefulset.returncode,
+                    error=(
+                        f"stateful substrate {statefulset} did not become ready: "
+                        f"{wait_statefulset.stderr.strip()[:200]}"
+                    ),
+                )
+
         # Apply.
         apply_ = run_captured(
             ["kubectl", "-n", ctx.namespace, "apply", "-f", str(manifest)],
@@ -86,32 +227,44 @@ class MigrateStep(BaseStep):
             )
 
         # Wait for the Job to complete or fail.
-        job_selector = (
-            f"app=loom-migration,loom.image-tag={ctx.image_tag}"
+        job_selector = f"app=loom-migration,loom.image-tag={ctx.image_tag}"
+        wait = run_captured(
+            [
+                "kubectl",
+                "-n",
+                ctx.namespace,
+                "wait",
+                "--for=condition=complete",
+                f"--selector={job_selector}",
+                "--timeout=600s",
+                "job",
+            ]
         )
-        wait = run_captured([
-            "kubectl", "-n", ctx.namespace,
-            "wait", "--for=condition=complete",
-            f"--selector={job_selector}",
-            "--timeout=600s",
-            "job",
-        ])
         step_dir.stdout_path().write_text(
-            f"# render-migration\n{render.stdout[:2000]}\n"
-            f"# kubectl apply\n{apply_.stdout}\n"
-            f"# kubectl wait\n{wait.stdout}\n"
+            "# stateful-substrate resources\n"
+            + "\n".join(substrate_resources)
+            + "\n# kubectl apply stateful substrate\n"
+            + apply_substrate.stdout
+            + "".join(
+                f"# kubectl rollout status statefulset/{name}\n{stdout}\n"
+                for name, stdout in wait_outputs
+            )
+            + f"# render-migration\n{render.stdout[:2000]}\n"
+            + f"# kubectl apply\n{apply_.stdout}\n"
+            + f"# kubectl wait\n{wait.stdout}\n"
         )
         if wait.returncode != 0:
             step_dir.stderr_path().write_text(wait.stderr)
             return RunResult(
                 exit_code=wait.returncode,
-                error=(
-                    f"migration Job did not complete: "
-                    f"{wait.stderr.strip()[:200]}"
-                ),
+                error=(f"migration Job did not complete: {wait.stderr.strip()[:200]}"),
             )
         return RunResult(
             exit_code=0,
             summary=f"migration Job complete (suffix={suffix})",
-            artifacts={"job_selector": job_selector, "suffix": suffix},
+            artifacts={
+                "job_selector": job_selector,
+                "suffix": suffix,
+                "stateful_substrate_manifest": str(substrate_manifest),
+            },
         )
