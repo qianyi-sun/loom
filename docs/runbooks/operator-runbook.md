@@ -1592,7 +1592,7 @@ desired state.
 | 00 | resolve-target | git rev-parse; validates image-tag ↔ sha7 |
 | 01 | worktree | `git worktree add` at target sha |
 | 02 | build-images | `docker build` × every rollout-critical image (#365) |
-| 03 | kind-cluster | Ensure the staging kind cluster, kubeconfig, namespace, and backup-manifest Kubernetes secrets exist before any image load or migration (#206) |
+| 03 | kind-cluster | Ensure the staging kind cluster, kubeconfig, ingress-nginx IngressClass/controller, namespace, and backup-manifest Kubernetes secrets exist before any image load or migration. Recreated kind clusters must bind the protected `/data/...` root and restore the cluster substrate needed for step 08 preflight, not only the kube API (#206). |
 | 04 | kind-load-images | candidate-source `loom cluster load-images` (#96) |
 | 05 | backup | candidate-source `loom cluster backup check --manifest <path> --min-remaining-hours <N>` (#363, #619 freshness buffer) |
 | 06 | audit | candidate-source `loom cluster audit` |
@@ -3449,6 +3449,10 @@ namespace = "loom-staging"
 persistent_storage_backend = "static-host-path"
 persistent_storage_host_path_root = "/data/loom-staging"
 ```
+
+The repo-owned staging and production profiles declare this boundary directly:
+`deploy/environments/staging.cluster.toml` uses `/data/loom-staging`, and
+`deploy/environments/production.cluster.toml` uses `/data/loom-prod`.
 
 For kind-backed protected environments, the kind control-plane node must also
 bind the host data root into the node. A static hostPath PV under `/data/...`

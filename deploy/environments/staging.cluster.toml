@@ -10,6 +10,8 @@ frontend_api_base_path = "/dev"
 trajectories_bucket = "loom-staging-trajectories"
 artifacts_bucket = "loom-staging-artifacts"
 env_state_profile = "../environment-state/staging.toml"
+persistent_storage_backend = "static-host-path"
+persistent_storage_host_path_root = "/data/loom-staging"
 
 # #547 item #2: shared trial-image cache. Workers on any node can pull
 # a layered image built on any other node, unlocking OLDLAB's paper

@@ -770,6 +770,23 @@ def test_render_profiles_set_backend_runtime_environment(
         assert _deployment_env_value(docs, deployment, "LOOM_ENV") == runtime_environment
 
 
+@pytest.mark.parametrize(
+    ("filename", "host_root"),
+    [
+        ("production.cluster.toml", "/data/loom-prod"),
+        ("staging.cluster.toml", "/data/loom-staging"),
+    ],
+)
+def test_protected_profiles_declare_static_host_path_storage(
+    filename: str,
+    host_root: str,
+) -> None:
+    cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / filename)
+
+    assert cfg.persistent_storage_backend == "static-host-path"
+    assert cfg.persistent_storage_host_path_root == host_root
+
+
 def test_staging_profile_declares_repo_owned_gb10_ssh_config() -> None:
     cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / "staging.cluster.toml")
     ssh_config = (_REPO_ROOT / "deploy" / "worker-pools" / "gb10" / "ssh_config").read_text(
