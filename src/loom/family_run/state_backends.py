@@ -32,6 +32,23 @@ class S3ArtifactsStateBackend:
     def _uri_for(self, key: str) -> str:
         return f"s3://{self.bucket}/{key}"
 
+    @staticmethod
+    def _parse_uri(state_uri: str) -> tuple[str, str]:
+        """Return ``(bucket, key)`` from an ``s3://`` URI.
+
+        Downloads/uploads MUST respect whichever bucket the incoming
+        ``state_uri`` names — the service seeds URIs against the
+        environment's artifacts bucket (e.g. ``loom-staging-artifacts``),
+        which is not necessarily the constructor default (#727).
+        """
+        if not state_uri.startswith("s3://"):
+            raise ValueError(f"expected s3:// URI, got {state_uri!r}")
+        rest = state_uri.removeprefix("s3://")
+        bucket, _, key = rest.partition("/")
+        if not bucket or not key:
+            raise ValueError(f"malformed s3:// URI: {state_uri!r}")
+        return bucket, key
+
     async def initialize(
         self,
         *,
@@ -52,8 +69,8 @@ class S3ArtifactsStateBackend:
         dst: Path,
         params: dict[str, Any],
     ) -> None:
-        key = state_uri.removeprefix(f"s3://{self.bucket}/")
-        data = await self.store.get_object(bucket=self.bucket, key=key)
+        bucket, key = self._parse_uri(state_uri)
+        data = await self.store.get_object(bucket=bucket, key=key)
         dst.mkdir(parents=True, exist_ok=True)
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
             tf.extractall(dst)
@@ -64,7 +81,7 @@ class S3ArtifactsStateBackend:
         src: Path,
         params: dict[str, Any],
     ) -> str:
-        prev_key = state_uri.removeprefix(f"s3://{self.bucket}/")
+        bucket, prev_key = self._parse_uri(state_uri)
         prefix = prev_key.rsplit("/", 1)[0] + "/"
         new_key = f"{prefix}state-{_ts()}.tar.gz"
         buf = io.BytesIO()
@@ -73,8 +90,8 @@ class S3ArtifactsStateBackend:
                 if path.is_file():
                     tf.add(path, arcname=path.relative_to(src).as_posix())
         buf.seek(0)
-        await self.store.put_object(bucket=self.bucket, key=new_key, body=buf.getvalue())
-        return self._uri_for(new_key)
+        await self.store.put_object(bucket=bucket, key=new_key, body=buf.getvalue())
+        return f"s3://{bucket}/{new_key}"
 
 
 def _ts() -> str:
