@@ -3806,7 +3806,9 @@ redacted/secret-safe references. The GB10 check uses the same
 `[gb10_pool].ssh_config`, `ssh_identity_file`, and optional
 `ssh_certificate_file` as rollout GB10 prep; failed SSH, failed container
 inspection, or zero inspected active worker containers are release-gate
-failures.
+failures. The remote worker probe is sent to `python3 -` over SSH stdin rather
+than embedded as a multiline `python3 -c` argument, so the check does not depend
+on remote shell quoting preserving Python source code.
 
 The generated artifact has this shape:
 

@@ -591,13 +591,13 @@ def collect_worker_boundary_from_gb10(
         argv.extend([
             target,
             "python3",
-            "-c",
-            _REMOTE_WORKER_ENV_SCRIPT,
+            "-",
             repo_path,
         ])
         proc = subprocess.run(
             argv,
             capture_output=True,
+            input=_REMOTE_WORKER_ENV_SCRIPT,
             text=True,
             check=False,
             timeout=timeout_sec,
