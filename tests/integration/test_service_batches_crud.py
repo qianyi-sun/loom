@@ -669,9 +669,7 @@ async def test_admin_submit_on_behalf_records_represented_user_owner_access_and_
 
     assert audit.status_code == 200, audit.text
     event = next(
-        item
-        for item in audit.json()["items"]
-        if item["action"] == "batch.submit_on_behalf"
+        item for item in audit.json()["items"] if item["action"] == "batch.submit_on_behalf"
     )
     assert event["actor"] == "release-operator"
     assert event["target_type"] == "batch"
@@ -2784,6 +2782,317 @@ async def test_get_batch_detail_includes_per_benchmark_rollup(
     assert mbpp["aggregate_reward"] == pytest.approx(0.5)
 
 
+async def test_get_batch_detail_includes_per_combination_summary(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+    now = datetime.now(UTC)
+    combinations = [
+        {
+            "agent_name": "opencode",
+            "agent_model": {"provider": "openai", "name": "glm5.1-thinking"},
+            "provider_model_id": "glm5.1-thinking",
+            "n_per_task": 2,
+            "label": "opencode / glm5.1-thinking",
+        },
+        {
+            "agent_name": "codex",
+            "agent_model": {"provider": "openai", "name": "qwen3.6-35b-a3b"},
+            "provider_model_id": "qwen3.6-35b-a3b",
+            "n_per_task": 2,
+        },
+        {
+            "agent_name": "oracle",
+            "agent_model": None,
+            "n_per_task": 2,
+            "label": "oracle / no model",
+        },
+    ]
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="multi combo summary",
+                task_filter={"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+                trial_config={},
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=6,
+                result_status="partial_failed",
+                combinations=combinations,
+            )
+        )
+        trial_rows: list[dict[str, object]] = []
+        for combination_idx, state, result in (
+            (0, "succeeded", {"aggregate_reward": 1.0}),
+            (0, "failed", {"aggregate_reward": 0.0}),
+            (1, "succeeded", {"aggregate_reward": 0.0}),
+            (1, "succeeded", {"notes": "scorer output missing reward"}),
+        ):
+            trial_id = uuid4()
+            trial_rows.append(
+                {
+                    "id": trial_id,
+                    "combination_idx": combination_idx,
+                    "state": state,
+                }
+            )
+            conn.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    batch_id=batch_id,
+                    team_id=team_id,
+                    task_id="local/mit-0",
+                    state=state,
+                    config={},
+                    requires_caps={},
+                    submitted_at=now,
+                    started_at=now,
+                    finished_at=now if state != "running" else None,
+                    combination_idx=combination_idx,
+                    result=result,
+                )
+            )
+        conn.execute(
+            insert(LlmCall),
+            [
+                {
+                    "id": uuid4(),
+                    "team_id": team_id,
+                    "trial_id": trial_rows[0]["id"],
+                    "step_id": "main",
+                    "model": "openai/glm5.1-thinking",
+                    "dialect": "openai",
+                    "input_tokens": 10,
+                    "output_tokens": 4,
+                    "provider_extras": {},
+                    "cost_usd": Decimal("0.010000"),
+                    "rate_card_hash": "facade:tokens-only:test",
+                },
+                {
+                    "id": uuid4(),
+                    "team_id": team_id,
+                    "trial_id": trial_rows[1]["id"],
+                    "step_id": "main",
+                    "model": "openai/glm5.1-thinking",
+                    "dialect": "openai",
+                    "input_tokens": 6,
+                    "output_tokens": 3,
+                    "provider_extras": {},
+                    "cost_usd": Decimal("0.020000"),
+                    "rate_card_hash": "facade:rate-card:missing:test",
+                },
+                {
+                    "id": uuid4(),
+                    "team_id": team_id,
+                    "trial_id": trial_rows[2]["id"],
+                    "step_id": "main",
+                    "model": "openai/qwen3.6-35b-a3b",
+                    "dialect": "openai",
+                    "input_tokens": 2,
+                    "output_tokens": 1,
+                    "provider_extras": {},
+                    "cost_usd": Decimal("0.030000"),
+                    "rate_card_hash": "failed-upstream",
+                },
+            ],
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        r = await ac.get(
+            f"/api/v1/batches/{batch_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["aggregate_reward"] == pytest.approx(1 / 3)
+
+    summary = body["combination_summary"]
+    assert [row["combination_idx"] for row in summary] == [0, 1, 2]
+
+    opencode = summary[0]
+    assert opencode["label"] == "opencode / glm5.1-thinking"
+    assert opencode["agent_name"] == "opencode"
+    assert opencode["provider_model_id"] == "glm5.1-thinking"
+    assert opencode["trial_count"] == 2
+    assert opencode["expected_trial_count"] == 2
+    assert opencode["scored_trial_count"] == 2
+    assert opencode["succeeded_count"] == 1
+    assert opencode["failed_count"] == 1
+    assert opencode["aggregate_reward"] == pytest.approx(0.5)
+    assert opencode["llm_calls_count"] == 2
+    assert opencode["total_prompt_tokens"] == 16
+    assert opencode["total_completion_tokens"] == 7
+
+    codex = summary[1]
+    assert codex["label"] == "codex / qwen3.6-35b-a3b"
+    assert codex["trial_count"] == 2
+    assert codex["expected_trial_count"] == 2
+    assert codex["scored_trial_count"] == 1
+    assert codex["succeeded_count"] == 2
+    assert codex["failed_count"] == 0
+    assert codex["aggregate_reward"] == 0
+    assert codex["llm_calls_count"] == 1
+    assert codex["total_prompt_tokens"] == 2
+    assert codex["total_completion_tokens"] == 1
+
+    oracle = summary[2]
+    assert oracle["label"] == "oracle / no model"
+    assert oracle["trial_count"] == 0
+    assert oracle["expected_trial_count"] == 2
+    assert oracle["scored_trial_count"] == 0
+    assert oracle["succeeded_count"] == 0
+    assert oracle["failed_count"] == 0
+    assert oracle["aggregate_reward"] is None
+    assert oracle["llm_calls_count"] == 0
+
+
+async def test_get_batch_detail_returns_empty_combination_summary_for_legacy_batch(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="legacy single combo",
+                task_filter={"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+                trial_config={
+                    "agent_name": "codex",
+                    "agent_model": {"provider": "openai", "name": "qwen"},
+                },
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=1,
+                result_status="succeeded",
+                combinations=[],
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=uuid4(),
+                batch_id=batch_id,
+                team_id=team_id,
+                task_id="local/mit-0",
+                state="succeeded",
+                config={},
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+                result={"aggregate_reward": 1.0},
+            )
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        r = await ac.get(
+            f"/api/v1/batches/{batch_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["combination_summary"] == []
+
+
+async def test_get_batch_detail_combination_expected_counts_honor_required_pools_and_fanout(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+    now = datetime.now(UTC)
+    combinations = [
+        {
+            "agent_name": "opencode",
+            "agent_model": {"provider": "openai", "name": "glm5.1-thinking"},
+            "provider_model_id": "glm5.1-thinking",
+            "n_per_task": 1,
+            "label": "opencode / glm5.1-thinking",
+        },
+        {
+            "agent_name": "codex",
+            "agent_model": {"provider": "openai", "name": "qwen3.6-35b-a3b"},
+            "provider_model_id": "qwen3.6-35b-a3b",
+            "n_per_task": 1,
+            "label": "codex / qwen3.6-35b-a3b",
+        },
+    ]
+    fanout_errors = [
+        {
+            "task_id": "local/mit-0",
+            "sample_idx": 0,
+            "combination_idx": 1,
+            "idempotency_key": f"{batch_id}::local/mit-0::1::0",
+            "status_code": 403,
+            "detail": "agent incompatible with task",
+            "created_at": now.isoformat(),
+        }
+    ]
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="multi combo expected counts",
+                task_filter={"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+                trial_config={},
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                # Original plan was 1 task * 2 combos + 1 coverage trial.
+                # One non-retryable fanout failure on combo 1 adjusts this to 2.
+                expected_trial_count=2,
+                result_status="partial_failed",
+                combinations=combinations,
+                required_worker_pools=["gb10-canary"],
+                fanout_errors=fanout_errors,
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=uuid4(),
+                batch_id=batch_id,
+                team_id=team_id,
+                task_id="local/mit-0",
+                state="succeeded",
+                config={},
+                requires_caps={},
+                submitted_at=now,
+                started_at=now,
+                finished_at=now,
+                sample_idx=0,
+                combination_idx=0,
+                result={"aggregate_reward": 1.0},
+            )
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        r = await ac.get(
+            f"/api/v1/batches/{batch_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200, r.text
+    summary = r.json()["combination_summary"]
+    assert [row["expected_trial_count"] for row in summary] == [2, 0]
+    assert [row["trial_count"] for row in summary] == [1, 0]
+
+
 async def test_get_batch_detail_exposes_fanout_failure(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
@@ -3891,6 +4200,22 @@ async def test_get_batch_detail_effective_rollup_uses_successful_rerun(
     sync_engine = create_engine(postgres_url)
     original_success_trial_id = uuid4()
     rerun_success_trial_id = uuid4()
+    combinations = [
+        {
+            "agent_name": "opencode",
+            "agent_model": {"provider": "openai", "name": "glm5.1-thinking"},
+            "provider_model_id": "glm5.1-thinking",
+            "n_per_task": 1,
+            "label": "opencode / glm5.1-thinking",
+        },
+        {
+            "agent_name": "codex",
+            "agent_model": {"provider": "openai", "name": "qwen3.6-35b-a3b"},
+            "provider_model_id": "qwen3.6-35b-a3b",
+            "n_per_task": 1,
+            "label": "codex / qwen3.6-35b-a3b",
+        },
+    ]
     with sync_engine.begin() as conn:
         conn.execute(
             insert(Batch).values(
@@ -3905,6 +4230,7 @@ async def test_get_batch_detail_effective_rollup_uses_successful_rerun(
                 n_per_task=2,
                 result_status="partial_failed",
                 finished_at=datetime.now(UTC),
+                combinations=combinations,
             )
         )
         conn.execute(
@@ -3933,8 +4259,8 @@ async def test_get_batch_detail_effective_rollup_uses_successful_rerun(
                 requires_caps={},
                 submitted_at=datetime.now(UTC),
                 batch_id=batch_id,
-                sample_idx=1,
-                combination_idx=0,
+                sample_idx=0,
+                combination_idx=1,
             )
         )
         conn.execute(
@@ -3950,11 +4276,12 @@ async def test_get_batch_detail_effective_rollup_uses_successful_rerun(
                 result_status="succeeded",
                 finished_at=datetime.now(UTC),
                 rerun_of_batch_id=batch_id,
+                combinations=combinations,
                 rerun_targets=[
                     {
                         "task_id": "local/mit-0",
-                        "sample_idx": 1,
-                        "combination_idx": 0,
+                        "sample_idx": 0,
+                        "combination_idx": 1,
                         "original_trial_id": str(failed_trial_id),
                         "failure_reason": "gateway_error",
                     }
@@ -3971,8 +4298,8 @@ async def test_get_batch_detail_effective_rollup_uses_successful_rerun(
                 requires_caps={},
                 submitted_at=datetime.now(UTC),
                 batch_id=rerun_batch_id,
-                sample_idx=1,
-                combination_idx=0,
+                sample_idx=0,
+                combination_idx=1,
                 result={"aggregate_reward": 0.8, "cost_usd": 0.02},
             )
         )
@@ -4038,6 +4365,26 @@ async def test_get_batch_detail_effective_rollup_uses_successful_rerun(
     assert body["effective_llm_calls_count"] == 2
     assert body["rerunnable_failed_count"] == 1
     assert body["rerun_batches"][0]["id"] == str(rerun_batch_id)
+    assert [row["combination_idx"] for row in body["combination_summary"]] == [0, 1]
+    assert [row["combination_idx"] for row in body["effective_combination_summary"]] == [
+        0,
+        1,
+    ]
+    original_combo = body["combination_summary"][1]
+    assert original_combo["expected_trial_count"] == 1
+    assert original_combo["trial_count"] == 1
+    assert original_combo["scored_trial_count"] == 0
+    assert original_combo["aggregate_reward"] is None
+    assert original_combo["llm_calls_count"] == 0
+
+    effective_combo = body["effective_combination_summary"][1]
+    assert effective_combo["expected_trial_count"] == 1
+    assert effective_combo["trial_count"] == 1
+    assert effective_combo["scored_trial_count"] == 1
+    assert effective_combo["aggregate_reward"] == pytest.approx(0.8)
+    assert effective_combo["llm_calls_count"] == 1
+    assert effective_combo["total_prompt_tokens"] == 11
+    assert effective_combo["total_completion_tokens"] == 4
 
 
 async def test_get_batch_not_found(

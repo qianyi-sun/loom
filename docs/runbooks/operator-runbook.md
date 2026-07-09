@@ -4246,6 +4246,15 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    returns `benchmark_summary`; verify the SPA Batch Detail page shows
    each benchmark's score, completed/expected trial count, and platform
    failure count instead of only one overall average.
+   For multi-agent/model batches, `GET /api/v1/batches/{id}` and
+   `GET /api/v1/run-library/batches/{id}` also return
+   `combination_summary`; verify the Run Library Batch Detail page shows
+   each requested combination's reward, actual/expected trial count,
+   scored-trial count, success/failure counts, LLM calls, and token totals.
+   `GET /api/v1/batches/{id}` also returns
+   `effective_combination_summary` when supplemental reruns replace failed
+   originals. Combinations with no materialized trials and combinations with
+   trials but no scored rewards must be visually distinguishable.
    For failed or partially failed work, verify
    `GET /api/v1/trials/{id}/diagnosis`,
    `GET /api/v1/batches/{id}/diagnosis`,
