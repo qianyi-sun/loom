@@ -93,6 +93,7 @@ def _worker_boundary() -> dict[str, object]:
             "env_file_missing_hosts": [],
             "env_file_hf_token_present_hosts": [],
             "hosts_with_container_hf_token_present": [],
+            "containers_checked": 2,
             "inspect_failed": [],
         }
     }
@@ -210,11 +211,18 @@ def test_worker_boundary_uses_host_repo_path_from_cluster_config(
 ) -> None:
     ssh_config = tmp_path / "ssh_config"
     ssh_config.write_text("Host trt-gb10-1\n  HostName 127.0.0.1\n", encoding="utf-8")
+    ssh_identity = tmp_path / "gb10_ed25519"
+    ssh_identity.write_text("fake identity\n", encoding="utf-8")
+    ssh_identity.chmod(0o600)
+    ssh_certificate = tmp_path / "gb10_ed25519-cert.pub"
+    ssh_certificate.write_text("fake cert\n", encoding="utf-8")
     cluster_config = tmp_path / "cluster.toml"
     cluster_config.write_text(
         f"""
 [gb10_pool]
 ssh_config = "{ssh_config.name}"
+ssh_identity_file = "{ssh_identity.name}"
+ssh_certificate_file = "{ssh_certificate.name}"
 hosts = [
   {{ ssh_target = "trt-gb10-1", repo_path = "/srv/loom-prod-worker" }},
 ]
@@ -248,7 +256,12 @@ hosts = [
     )
 
     assert evidence["summary"]["checked_hosts"] == 1
-    assert calls[0][-1] == "/srv/loom-prod-worker"
+    argv = calls[0]
+    assert argv[-1] == "/srv/loom-prod-worker"
+    assert argv[0:3] == ["ssh", "-F", str(ssh_config)]
+    assert ["-i", str(ssh_identity)] == argv[3:5]
+    assert ["-o", "IdentitiesOnly=yes"] == argv[5:7]
+    assert ["-o", f"CertificateFile={ssh_certificate}"] == argv[7:9]
 
 
 def test_hf_boundary_db_audit_branch_uses_readiness_audit_contract(

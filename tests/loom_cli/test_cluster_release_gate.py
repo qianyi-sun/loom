@@ -230,6 +230,15 @@ def _hf_boundary_evidence(**overrides: Any) -> dict[str, Any]:
             "hf_token_isolated": True,
             "direct_hf_egress_required": False,
             "materialized_from_internal_source": True,
+            "gb10_hf_token_check_summary": {
+                "checked_hosts": 15,
+                "ssh_failed_hosts": [],
+                "env_file_missing_hosts": [],
+                "env_file_hf_token_present_hosts": [],
+                "hosts_with_container_hf_token_present": [],
+                "containers_checked": 2,
+                "inspect_failed": [],
+            },
         },
         "secret_scan": {"raw_secret_values_present": False},
     }
@@ -1057,6 +1066,64 @@ def test_release_gate_accepts_secret_safe_hf_mirror_boundary_evidence() -> None:
     assert check.evidence["hf_provenance_retained"] is True
     assert check.evidence["worker_hf_token_present"] is False
     assert check.evidence["direct_hf_egress_required"] is False
+
+
+def test_release_gate_rejects_hf_boundary_when_gb10_checks_do_not_run() -> None:
+    manifest = _manifest()
+    manifest["catalog_provisioning"] = _catalog_manifest_section()
+    evidence = _hf_boundary_evidence(
+        worker_boundary={
+            "gb10_hf_token_check_summary": {
+                "checked_hosts": 15,
+                "ssh_failed_hosts": [
+                    "trt-gb10-1",
+                    "trt-gb10-2",
+                ],
+                "env_file_missing_hosts": [],
+                "env_file_hf_token_present_hosts": [],
+                "hosts_with_container_hf_token_present": [],
+                "containers_checked": 0,
+                "inspect_failed": [],
+            },
+        },
+    )
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=_FakeAppsV1(
+            {
+                "loom-service": _deployment(
+                    name="loom-service",
+                    image="loom-service:staging-abc123",
+                ),
+            }
+        ),
+        core_v1=_FakeCoreV1(
+            [
+                _ready_pod(
+                    name="loom-service-new",
+                    app="loom-service",
+                    image="loom-service:staging-abc123",
+                    image_id="docker-pullable://loom-service@sha256:" + "1" * 64,
+                ),
+            ]
+        ),
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+        hf_mirror_boundary_artifact=evidence,
+        hf_mirror_boundary_path="hf-mirror-boundary-staging-abc123.json",
+    )
+
+    assert not report.all_pass
+    check = next(check for check in report.checks if check.name == "hf-mirror-token-boundary")
+    assert check.outcome == "fail"
+    assert "GB10 HF token checks must inspect active workers" in check.detail
+    assert check.evidence["gb10_ssh_failed_hosts"] == [
+        "trt-gb10-1",
+        "trt-gb10-2",
+    ]
+    assert check.evidence["gb10_containers_checked"] == 0
 
 
 def test_release_gate_rejects_non_s3_or_secret_leaking_hf_boundary_evidence() -> None:

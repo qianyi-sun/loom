@@ -565,23 +565,38 @@ def collect_worker_boundary_from_gb10(
     if not ssh_config.is_absolute():
         ssh_config = cluster_config_path.parent / ssh_config
 
+    def _optional_pool_path(value: object) -> Path | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = cluster_config_path.parent / path
+        return path.resolve(strict=False)
+
+    ssh_identity = _optional_pool_path(getattr(pool, "ssh_identity_file", ""))
+    ssh_certificate = _optional_pool_path(getattr(pool, "ssh_certificate_file", ""))
+
     results: list[dict[str, Any]] = []
     for host in hosts:
         target = str(host.get("ssh_target") or "")
         if not target:
             continue
         repo_path = str(host.get("repo_path") or "/home/qianyi/loom-worker-build")
+        argv = ["ssh", "-F", str(ssh_config)]
+        if ssh_identity is not None:
+            argv.extend(["-i", str(ssh_identity), "-o", "IdentitiesOnly=yes"])
+        if ssh_certificate is not None:
+            argv.extend(["-o", f"CertificateFile={ssh_certificate}"])
+        argv.extend([
+            target,
+            "python3",
+            "-c",
+            _REMOTE_WORKER_ENV_SCRIPT,
+            repo_path,
+        ])
         proc = subprocess.run(
-            [
-                "ssh",
-                "-F",
-                str(ssh_config),
-                target,
-                "python3",
-                "-c",
-                _REMOTE_WORKER_ENV_SCRIPT,
-                repo_path,
-            ],
+            argv,
             capture_output=True,
             text=True,
             check=False,

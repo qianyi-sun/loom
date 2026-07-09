@@ -1110,6 +1110,11 @@ def _int_field(mapping: dict[str, Any], key: str) -> int | None:
         return None
 
 
+def _list_field(mapping: dict[str, Any], key: str) -> list[Any]:
+    value = mapping.get(key)
+    return list(value) if isinstance(value, list) else []
+
+
 def _secret_leak_paths(value: Any, *, path: str = "") -> list[str]:
     if isinstance(value, str):
         return [path or "$"] if _RAW_SECRET_RE.search(value) else []
@@ -1155,6 +1160,9 @@ def _hf_mirror_boundary_evidence(
     worker_boundary = artifact.get("worker_boundary")
     if not isinstance(worker_boundary, dict):
         worker_boundary = {}
+    gb10_summary = worker_boundary.get("gb10_hf_token_check_summary")
+    if not isinstance(gb10_summary, dict):
+        gb10_summary = {}
     secret_scan = artifact.get("secret_scan")
     if not isinstance(secret_scan, dict):
         secret_scan = {}
@@ -1202,6 +1210,19 @@ def _hf_mirror_boundary_evidence(
         "direct_hf_egress_required": direct_hf_egress_required,
         "materialized_from_internal_source": (
             worker_boundary.get("materialized_from_internal_source")
+        ),
+        "gb10_checked_hosts": _int_field(gb10_summary, "checked_hosts"),
+        "gb10_ssh_failed_hosts": _list_field(gb10_summary, "ssh_failed_hosts"),
+        "gb10_containers_checked": _int_field(gb10_summary, "containers_checked"),
+        "gb10_inspect_failed": _list_field(gb10_summary, "inspect_failed"),
+        "gb10_env_file_missing_hosts": _list_field(gb10_summary, "env_file_missing_hosts"),
+        "gb10_env_file_hf_token_present_hosts": _list_field(
+            gb10_summary,
+            "env_file_hf_token_present_hosts",
+        ),
+        "gb10_hosts_with_container_hf_token_present": _list_field(
+            gb10_summary,
+            "hosts_with_container_hf_token_present",
         ),
         "secret_safe": (
             not secret_leaks
@@ -1300,6 +1321,19 @@ def _hf_mirror_boundary_check(
         issues.append("HF provenance must retain upstream kind, locator, and revision")
     if evidence.get("worker_hf_token_present") is not False:
         issues.append("worker HF_TOKEN must be absent in canary evidence")
+    checked_hosts = evidence.get("gb10_checked_hosts")
+    containers_checked = evidence.get("gb10_containers_checked")
+    if (
+        not isinstance(checked_hosts, int)
+        or checked_hosts <= 0
+        or not isinstance(containers_checked, int)
+        or containers_checked <= 0
+    ):
+        issues.append("GB10 HF token checks must inspect active workers")
+    if evidence.get("gb10_ssh_failed_hosts"):
+        issues.append("GB10 HF token checks must reach every required host")
+    if evidence.get("gb10_inspect_failed"):
+        issues.append("GB10 HF token checks must inspect every worker container")
     if evidence.get("direct_hf_egress_required") is not False:
         issues.append("canary must not require direct worker HF egress")
     if evidence.get("materialized_from_internal_source") is not True:

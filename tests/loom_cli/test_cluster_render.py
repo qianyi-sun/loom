@@ -339,18 +339,22 @@ def test_worker_manifest_sets_subprocess_gateway_url_for_sandboxes() -> None:
     )
 
 
-def test_worker_manifest_injects_optional_hf_token_secret() -> None:
-    """Private/gated hf:// runtime materializers use huggingface_hub's
-    standard HF_TOKEN env, but public-only deployments must still boot
-    when the Secret key is absent.
+def test_hf_token_secret_is_injected_into_service_not_worker() -> None:
+    """HF mirror provisioning is a catalog/service boundary.
+
+    Workers must materialize SkillLearnBench from the internal object-store
+    mirror and must not receive the HF read token.
     """
     docs = _load_docs(render_manifests(_DEFAULT_CFG))
+    service = next(
+        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-service"
+    )
     worker = next(
         d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-worker"
     )
-    env = worker["spec"]["template"]["spec"]["containers"][0]["env"]
-    by_name = {entry["name"]: entry for entry in env}
-    assert by_name["HF_TOKEN"] == {
+    service_env = service["spec"]["template"]["spec"]["containers"][0]["env"]
+    service_by_name = {entry["name"]: entry for entry in service_env}
+    assert service_by_name["HF_TOKEN"] == {
         "name": "HF_TOKEN",
         "valueFrom": {
             "secretKeyRef": {
@@ -360,6 +364,9 @@ def test_worker_manifest_injects_optional_hf_token_secret() -> None:
             },
         },
     }
+    worker_env = worker["spec"]["template"]["spec"]["containers"][0]["env"]
+    worker_by_name = {entry["name"]: entry for entry in worker_env}
+    assert "HF_TOKEN" not in worker_by_name
 
 
 def test_worker_manifest_mounts_docker_registry_auth_config() -> None:

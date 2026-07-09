@@ -34,12 +34,6 @@ spec:
               value: "http://loom-llm-gateway:9100"
             - name: LOOM_WORKER_HEARTBEAT_INTERVAL_SEC
               value: "5.0"
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: loom-secrets
-                  key: huggingface-api-key
-                  optional: true
             - name: LOOM_WORKER_LOG_LEVEL
               value: "info"
             - name: LOOM_WORKER_METRICS_PORT

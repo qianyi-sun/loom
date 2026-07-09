@@ -354,11 +354,11 @@ python_type = "SecretStr"
 secret      = { key = "together-api-key" }
 
 [service_config.huggingface_api_key]
-used_by      = ["llm-gateway", "worker", "loom-service"]
+used_by      = ["llm-gateway", "loom-service"]
 python_type  = "SecretStr"
 secret       = { key = "huggingface-api-key" }
-env_override = { worker = "HF_TOKEN", "loom-service" = "HF_TOKEN" }
-description  = "Optional Hugging Face read token. Gateway uses it for HF model endpoints; worker + loom-service expose it as HF_TOKEN so `loom datasets register --mirror-to-object-store` and worker-side hf:// materialization can hit gated PRHW/loom-benchmark-* repos."
+env_override = { "loom-service" = "HF_TOKEN" }
+description  = "Optional Hugging Face read token. Gateway uses it for HF model endpoints; loom-service exposes it as HF_TOKEN for catalog mirror provisioning. Workers must materialize from internal object-store mirrors without HF_TOKEN."
 
 [service_config.rate_card_cache_ttl_sec]
 used_by     = ["llm-gateway"]
