@@ -4156,6 +4156,7 @@ def _render_migration(args: argparse.Namespace) -> int:
         image_tag=args.image_tag,
         namespace=args.namespace,
         job_suffix=job_suffix,
+        container_registry=args.container_registry,
     )
     sys.stdout.write(manifest)
     if not manifest.endswith("\n"):
@@ -5302,6 +5303,16 @@ def dispatch(argv: list[str]) -> int:
             "Uniqueness token appended to the Job name so a re-run "
             "against the same image tag doesn't collide. Defaults to a "
             "UTC timestamp."
+        ),
+    )
+    p_render_migration.add_argument(
+        "--container-registry",
+        default="",
+        help=(
+            "Optional registry prefix (no trailing slash) applied to the "
+            "loom-control-plane image reference. Match "
+            "cluster.toml's `container_registry` value on multi-node "
+            "clusters that pull from an internal registry."
         ),
     )
     p_render_migration.set_defaults(handler=_render_migration)

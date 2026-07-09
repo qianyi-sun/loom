@@ -22,7 +22,7 @@ spec:
         runAsUser: 101
       containers:
         - name: loom-web
-          image: loom-web:{{ image_tag }}
+          image: {% if container_registry %}{{ container_registry }}/{% endif %}loom-web:{{ image_tag }}
           env:
             - name: LOOM_FRONTEND_ENVIRONMENT
               value: "{{ frontend_environment }}"

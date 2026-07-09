@@ -20,7 +20,7 @@ spec:
       terminationGracePeriodSeconds: 300
       containers:
         - name: gateway
-          image: loom-llm-gateway:{{ image_tag }}
+          image: {% if container_registry %}{{ container_registry }}/{% endif %}loom-llm-gateway:{{ image_tag }}
           {{ env_macros.env_block("llm-gateway", schema) | indent(10) }}
             - name: LOOM_GW_ADMIN_SECRET_FILE
               value: "/var/run/loom/admin/secrets.toml"

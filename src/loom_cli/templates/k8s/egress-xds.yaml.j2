@@ -22,7 +22,7 @@ spec:
     spec:
       containers:
         - name: egress-xds
-          image: loom-egress-xds:{{ image_tag }}
+          image: {% if container_registry %}{{ container_registry }}/{% endif %}loom-egress-xds:{{ image_tag }}
           env:
             - name: LOOM_EGRESS_XDS_DB_URL
               valueFrom:

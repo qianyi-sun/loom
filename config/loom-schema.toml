@@ -1003,6 +1003,11 @@ python_type = "str"
 default     = "0.7"
 description = "Image tag applied to every loom-* image."
 
+[render_config.container_registry]
+python_type = "str"
+default     = ""
+description = "Optional container registry prefix applied to every locally-built loom-* image reference in the rendered manifest (no trailing slash). Empty (default) keeps the historical unprefixed shape that kind's in-cluster load-images path depends on. For multi-node k3s / production, set to the registry host+port (e.g. 192.168.50.13:5000) and point each node's /etc/rancher/k3s/registries.yaml at the same endpoint so containerd can pull without side-channel image imports."
+
 [render_config.runtime_environment]
 python_type = "str"
 default     = "production"

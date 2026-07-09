@@ -4,6 +4,8 @@
 
 # Object-store bucket used by loom-service for safe artifacts. Set per environment when deployments share an object-store endpoint.
 artifacts_bucket = "artifacts"
+# Optional container registry prefix applied to every locally-built loom-* image reference in the rendered manifest (no trailing slash). Empty (default) keeps the historical unprefixed shape that kind's in-cluster load-images path depends on. For multi-node k3s / production, set to the registry host+port (e.g. 192.168.50.13:5000) and point each node's /etc/rancher/k3s/registries.yaml at the same endpoint so containerd can pull without side-channel image imports.
+container_registry = ""
 # Optional environment-state TOML profile used by protected rollout steps. Relative paths resolve from the cluster-config file directory.
 env_state_profile = ""
 # Public path prefix prepended by the SPA API client before /api/v1. Must match frontend_route_path for protected prod/dev routes.
