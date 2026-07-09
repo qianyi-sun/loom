@@ -152,12 +152,19 @@ name = "script"
 script_path = "/workspace/verifier/run.sh"
 ```
 
-At runtime Loom creates `/loom/verifier/`, sets only
-`LOOM_VERIFIER_OUTPUT=/loom/verifier/output.json`, and runs the configured
-script in the agent sandbox. The script should derive task paths from its own
-location or from explicit paths such as `/workspace`; it must not require
-implicit variables such as `LOOM_TASK_DIR` or `LOOM_AGENT_OUTPUT` unless the
-script sets safe defaults itself.
+At runtime Loom creates `/loom/verifier/` and runs the configured script in the
+agent sandbox. Script verifiers receive these environment variables:
+
+- `LOOM_VERIFIER_OUTPUT=/loom/verifier/output.json`: the required JSON output
+  path.
+- `LOOM_TASK_DIR`: the task workspace from `TaskConfig.environment.workdir`
+  during normal trial execution, usually `/workspace`.
+- `LOOM_AGENT_OUTPUT`: set only when the first task step declares exactly one
+  plain file artifact such as `answer.txt`; the value is that artifact path
+  resolved under `LOOM_TASK_DIR`.
+
+Scripts should prefer these variables or explicit absolute paths. Do not infer
+the task workspace from the verifier script directory or process cwd.
 
 The script must write a `VerifierResult` JSON object to
 `$LOOM_VERIFIER_OUTPUT`:

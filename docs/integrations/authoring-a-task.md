@@ -151,13 +151,15 @@ python3 "$task_dir/verifier/check.py" \
   --output "$LOOM_VERIFIER_OUTPUT"
 ```
 
-`ScriptVerifier` guarantees `LOOM_VERIFIER_OUTPUT`; task bundles should derive
-their own task/artifact paths from the script location, `/workspace`, or safe
-defaults. A model's wrong answer should produce a scored verifier result such
-as `{"rewards":{"score":0.0},"checks":[...]}` so the trial succeeds as a
-platform run while recording model correctness separately. If a script verifier
-exits before writing valid JSON, Loom reports a verifier infrastructure failure
-and includes return code, stdout/stderr tails, truncation status, duration, the
+`ScriptVerifier` sets `LOOM_VERIFIER_OUTPUT`, `LOOM_TASK_DIR`, and, for
+single-file artifact steps, `LOOM_AGENT_OUTPUT`. `LOOM_TASK_DIR` is the task's
+configured sandbox workspace, usually `/workspace`; `LOOM_AGENT_OUTPUT` is the
+declared artifact path resolved under that workspace. A model's wrong answer
+should produce a scored verifier result such as
+`{"rewards":{"score":0.0},"checks":[...]}` so the trial succeeds as a platform
+run while recording model correctness separately. If a script verifier exits
+before writing valid JSON, Loom reports a verifier infrastructure failure and
+includes return code, stdout/stderr tails, truncation status, duration, the
 script path, and the expected output path in `VerifierResult.error.detail`.
 Individual `checks[].detail` fields may be objects or simpler JSON values such
 as strings when upstream verifier tooling emits legacy diagnostics.

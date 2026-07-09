@@ -11,8 +11,11 @@ from loom.verifier.script_verifier import ScriptVerifier
 
 def _ok_handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
     return ExecResult(
-        return_code=0, stdout=b"", stderr=b"",
-        truncated=False, duration_sec=0.01,
+        return_code=0,
+        stdout=b"",
+        stderr=b"",
+        truncated=False,
+        duration_sec=0.01,
     )
 
 
@@ -20,19 +23,21 @@ def _ok_handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
 async def fake_with_script_output() -> FakeDriver:
     fake = FakeDriver(exec_handler=_ok_handler)
     await fake.start(options=StartOptions())
-    fake.filesystem[PurePosixPath("/loom/verifier/output.json")] = json.dumps({
-        "rewards": {"score": 0.85},
-        "checks": [
-            {"name": "linter", "passed": True, "score": 1.0},
-            {
-                "name": "format",
-                "passed": False,
-                "score": 0.0,
-                "message": "bad indent",
-                "detail": {"exit_code": 1},
-            },
-        ],
-    }).encode()
+    fake.filesystem[PurePosixPath("/loom/verifier/output.json")] = json.dumps(
+        {
+            "rewards": {"score": 0.85},
+            "checks": [
+                {"name": "linter", "passed": True, "score": 1.0},
+                {
+                    "name": "format",
+                    "passed": False,
+                    "score": 0.0,
+                    "message": "bad indent",
+                    "detail": {"exit_code": 1},
+                },
+            ],
+        }
+    ).encode()
     return fake
 
 
@@ -55,7 +60,8 @@ async def test_script_verifier_missing_output_returns_error(tmp_path: Path):
     await fake.start(options=StartOptions())
     v = ScriptVerifier(script_path=PurePosixPath("/tests/check.sh"))
     result = await v.verify(
-        task=None, env=fake,  # type: ignore[arg-type]
+        task=None,
+        env=fake,  # type: ignore[arg-type]
         artifacts_dir=PurePosixPath("/x"),
         trajectory=None,  # type: ignore[arg-type]
     )
@@ -77,7 +83,8 @@ async def test_script_verifier_invalid_json_returns_parse_error():
     fake.filesystem[PurePosixPath("/loom/verifier/output.json")] = b"not json"
     v = ScriptVerifier(script_path=PurePosixPath("/tests/check.sh"))
     result = await v.verify(
-        task=None, env=fake,  # type: ignore[arg-type]
+        task=None,
+        env=fake,  # type: ignore[arg-type]
         artifacts_dir=PurePosixPath("/x"),
         trajectory=None,  # type: ignore[arg-type]
     )
@@ -122,6 +129,7 @@ async def test_script_verifier_missing_output_preserves_exec_diagnostics():
 
 # ---- #688: standard task-context env vars ----
 
+
 def _task_with_single_artifact(artifact: str):
     from loom.models.task import (
         AgentDefaults,
@@ -131,6 +139,7 @@ def _task_with_single_artifact(artifact: str):
         TaskMetadata,
         VerifierDefaults,
     )
+
     return TaskConfig(
         task=TaskMetadata(id="t/1", name="t 1"),
         environment=EnvironmentConfig(os="linux", docker_image="python:3.11-slim"),
@@ -146,8 +155,11 @@ async def test_script_verifier_exports_loom_task_dir():
     def _capture_handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
         captured_env.update(env or {})
         return ExecResult(
-            return_code=0, stdout=b"", stderr=b"",
-            truncated=False, duration_sec=0.01,
+            return_code=0,
+            stdout=b"",
+            stderr=b"",
+            truncated=False,
+            duration_sec=0.01,
         )
 
     fake = FakeDriver(exec_handler=_capture_handler)
@@ -174,8 +186,11 @@ async def test_script_verifier_exports_loom_agent_output_for_single_file_artifac
     def _capture_handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
         captured_env.update(env or {})
         return ExecResult(
-            return_code=0, stdout=b"", stderr=b"",
-            truncated=False, duration_sec=0.01,
+            return_code=0,
+            stdout=b"",
+            stderr=b"",
+            truncated=False,
+            duration_sec=0.01,
         )
 
     fake = FakeDriver(exec_handler=_capture_handler)
@@ -185,11 +200,42 @@ async def test_script_verifier_exports_loom_agent_output_for_single_file_artifac
     task = _task_with_single_artifact("final_answer.txt")
     v = ScriptVerifier(script_path=PurePosixPath("/workspace/verifier/run.sh"))
     await v.verify(
-        task=task, env=fake,
+        task=task,
+        env=fake,
         artifacts_dir=PurePosixPath("/workspace/artifacts"),
         trajectory=None,  # type: ignore[arg-type]
     )
     assert captured_env["LOOM_AGENT_OUTPUT"] == "/workspace/final_answer.txt"
+
+
+async def test_script_verifier_uses_task_workdir_when_artifacts_dir_is_workspace():
+    captured_env: dict[str, str] = {}
+
+    def _capture_handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        captured_env.update(env or {})
+        return ExecResult(
+            return_code=0,
+            stdout=b"",
+            stderr=b"",
+            truncated=False,
+            duration_sec=0.01,
+        )
+
+    fake = FakeDriver(exec_handler=_capture_handler)
+    await fake.start(options=StartOptions())
+    fake.filesystem[PurePosixPath("/loom/verifier/output.json")] = b'{"rewards": {}}'
+
+    task = _task_with_single_artifact("answer.txt")
+    v = ScriptVerifier(script_path=PurePosixPath("/workspace/verifier/run.sh"))
+    await v.verify(
+        task=task,
+        env=fake,
+        artifacts_dir=PurePosixPath("/workspace"),
+        trajectory=None,  # type: ignore[arg-type]
+    )
+
+    assert captured_env["LOOM_TASK_DIR"] == "/workspace"
+    assert captured_env["LOOM_AGENT_OUTPUT"] == "/workspace/answer.txt"
 
 
 async def test_script_verifier_skips_agent_output_for_glob_artifact():
@@ -198,8 +244,11 @@ async def test_script_verifier_skips_agent_output_for_glob_artifact():
     def _capture_handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
         captured_env.update(env or {})
         return ExecResult(
-            return_code=0, stdout=b"", stderr=b"",
-            truncated=False, duration_sec=0.01,
+            return_code=0,
+            stdout=b"",
+            stderr=b"",
+            truncated=False,
+            duration_sec=0.01,
         )
 
     fake = FakeDriver(exec_handler=_capture_handler)
@@ -209,7 +258,8 @@ async def test_script_verifier_skips_agent_output_for_glob_artifact():
     task = _task_with_single_artifact("outputs/*.json")
     v = ScriptVerifier(script_path=PurePosixPath("/workspace/verifier/run.sh"))
     await v.verify(
-        task=task, env=fake,
+        task=task,
+        env=fake,
         artifacts_dir=PurePosixPath("/workspace/artifacts"),
         trajectory=None,  # type: ignore[arg-type]
     )
