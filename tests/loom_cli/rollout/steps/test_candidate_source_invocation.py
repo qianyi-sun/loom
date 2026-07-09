@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -17,6 +18,7 @@ import pytest
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.evidence import EvidenceDirectory
 from loom_cli.rollout.steps.base import VerifyOutcome
+from loom_cli.rollout.steps.candidate_source import rollout_cluster_config
 from loom_cli.rollout.steps.s03_kind_load_images import KindLoadImagesStep
 from loom_cli.rollout.steps.s04_gb10_prep import (
     GB10Host,
@@ -37,6 +39,8 @@ from loom_cli.rollout.steps.s12_release_gate import (
     _is_gb10_convergence_failure,
 )
 from loom_cli.rollout.steps.subprocess_util import SubprocessResult
+
+_REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
 @pytest.fixture(autouse=True)
@@ -1422,6 +1426,61 @@ def test_rollout_cluster_config_is_stable_after_first_synthesis(
     assert cluster_up_config == rendered_config
     assert rendered_raw["image_tag"] == "staging-new"
     assert rendered_raw["namespace"] == "loom-staging"
+
+
+def test_rollout_cluster_config_rewrites_repo_relative_gb10_paths_to_candidate(
+    tmp_path: Path,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-new")
+    source_config = _REPO_ROOT / "deploy" / "environments" / "staging.cluster.toml"
+    ctx = replace(ctx, cluster_config_path=source_config)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    worktree = _prepare_candidate_worktree(ev)
+    candidate_ssh_config = worktree / "deploy" / "worker-pools" / "gb10" / "ssh_config"
+    candidate_ssh_config.parent.mkdir(parents=True)
+    candidate_ssh_config.write_text(
+        "Host trt-gb10-1\n  HostName 203.0.113.1\n",
+        encoding="utf-8",
+    )
+
+    rendered_config = rollout_cluster_config(ctx, ev.step_dir(14, "release-gate"))
+    rendered_raw = tomllib.loads(rendered_config.read_text(encoding="utf-8"))
+
+    assert Path(rendered_raw["gb10_pool"]["ssh_config"]) == candidate_ssh_config
+
+
+def test_rollout_cluster_config_migrates_existing_relative_gb10_paths_on_resume(
+    tmp_path: Path,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-new")
+    source_config = _REPO_ROOT / "deploy" / "environments" / "staging.cluster.toml"
+    ctx = replace(ctx, cluster_config_path=source_config)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    worktree = _prepare_candidate_worktree(ev)
+    candidate_ssh_config = worktree / "deploy" / "worker-pools" / "gb10" / "ssh_config"
+    candidate_ssh_config.parent.mkdir(parents=True)
+    candidate_ssh_config.write_text(
+        "Host trt-gb10-1\n  HostName 203.0.113.1\n",
+        encoding="utf-8",
+    )
+    existing_config = ev.path / "rollout-cluster-config.toml"
+    existing_config.write_text(
+        'image_tag = "staging-new"\n'
+        'namespace = "loom-staging"\n'
+        "\n"
+        "[gb10_pool]\n"
+        'ssh_config = "../worker-pools/gb10/ssh_config"\n',
+        encoding="utf-8",
+    )
+
+    rendered_config = rollout_cluster_config(ctx, ev.step_dir(14, "release-gate"))
+    rendered_raw = tomllib.loads(rendered_config.read_text(encoding="utf-8"))
+
+    assert rendered_config == existing_config
+    assert rendered_raw["namespace"] == "loom-staging"
+    assert Path(rendered_raw["gb10_pool"]["ssh_config"]) == candidate_ssh_config
 
 
 def test_gb10_prep_reads_hosts_from_cluster_config(tmp_path: Path) -> None:
