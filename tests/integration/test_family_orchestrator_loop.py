@@ -9,6 +9,7 @@ index bumped.
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -18,6 +19,56 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.family_run.spec import PluginRef, ResolvedFamilyRunSpec
 from loom_family_orchestrator.main_loop import OrchestratorContext, run_once
+
+
+@pytest.fixture(autouse=True)
+async def _cleanup_family_orchestrator_rows(
+    postgres_url: str,
+) -> AsyncIterator[None]:
+    yield
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                text("""
+                DELETE FROM batch_family_state
+                 WHERE family_key IN ('familyA', 'familyB')
+                    OR batch_id IN (
+                        SELECT id FROM batches WHERE name = 'test-batch'
+                    )
+            """)
+            )
+            await session.execute(
+                text("""
+                DELETE FROM trials
+                 WHERE family_key IN ('familyA', 'familyB')
+                    OR batch_id IN (
+                        SELECT id FROM batches WHERE name = 'test-batch'
+                    )
+            """)
+            )
+            await session.execute(
+                text("""
+                DELETE FROM batches WHERE name = 'test-batch'
+            """)
+            )
+            await session.execute(
+                text("""
+                DELETE FROM tasks
+                 WHERE id LIKE 'familyA/%' OR id LIKE 'familyB/%'
+            """)
+            )
+            await session.execute(
+                text("""
+                DELETE FROM teams
+                 WHERE name LIKE 'test-team-%'
+                   AND name NOT LIKE 'test-team-rt-%'
+            """)
+            )
+            await session.commit()
+    finally:
+        await engine.dispose()
 
 
 class _CapturingAdapter:
@@ -64,16 +115,23 @@ async def _seed_minimal_batch(
     Kept minimal on purpose: only the columns the orchestrator's
     queries touch plus foreign-key constraints must be satisfied.
     """
-    await session.execute(text("""
+    await session.execute(
+        text("""
         INSERT INTO teams (id, name)
         VALUES (:tid, :name)
-    """), {"tid": team_id, "name": f"test-team-{team_id.hex[:8]}"})
+    """),
+        {"tid": team_id, "name": f"test-team-{team_id.hex[:8]}"},
+    )
     for tid in task_ids:
-        await session.execute(text("""
+        await session.execute(
+            text("""
             INSERT INTO tasks (id, config, checksum)
             VALUES (:tid, '{}'::jsonb, 'sha256:test')
-        """), {"tid": tid})
-    await session.execute(text("""
+        """),
+            {"tid": tid},
+        )
+    await session.execute(
+        text("""
         INSERT INTO batches (
             id, team_id, name, task_filter, trial_config,
             state, created_by_token_prefix, family_run_spec
@@ -82,13 +140,16 @@ async def _seed_minimal_batch(
             :bid, :tid, 'test-batch', '{}'::jsonb, '{}'::jsonb,
             'running', 'test', (:spec)::jsonb
         )
-    """), {
-        "bid": batch_id,
-        "tid": team_id,
-        "spec": json.dumps(_spec().model_dump()),
-    })
+    """),
+        {
+            "bid": batch_id,
+            "tid": team_id,
+            "spec": json.dumps(_spec().model_dump()),
+        },
+    )
     for trial_id, task_id in zip(trial_ids, task_ids, strict=True):
-        await session.execute(text("""
+        await session.execute(
+            text("""
             INSERT INTO trials (
                 id, team_id, task_id, config, requires_caps,
                 state, submit_priority, batch_id, family_key,
@@ -99,14 +160,16 @@ async def _seed_minimal_batch(
                 'succeeded', 100, :bid, :fam,
                 :result, NOW(), 1
             )
-        """), {
-            "tid": trial_id,
-            "team": team_id,
-            "task": task_id,
-            "bid": batch_id,
-            "fam": family_key,
-            "result": json.dumps({"reward": 1.0}),
-        })
+        """),
+            {
+                "tid": trial_id,
+                "team": team_id,
+                "task": task_id,
+                "bid": batch_id,
+                "fam": family_key,
+                "result": json.dumps({"reward": 1.0}),
+            },
+        )
 
 
 async def _cleanup_minimal_batch(
@@ -165,7 +228,8 @@ async def test_orchestrator_iteration_transitions_adapting_to_pending(
                 family_key=family_key,
                 trial_ids=trial_ids,
             )
-            await session.execute(text("""
+            await session.execute(
+                text("""
                 INSERT INTO batch_family_state (
                     batch_id, family_key, task_sequence, current_index,
                     state, state_uri, attempt_count
@@ -173,11 +237,13 @@ async def test_orchestrator_iteration_transitions_adapting_to_pending(
                 VALUES (
                     :bid, :fam, :seq, 0, 'adapting', 'uri://v1', 0
                 )
-            """), {
-                "bid": batch_id,
-                "fam": family_key,
-                "seq": task_ids,
-            })
+            """),
+                {
+                    "bid": batch_id,
+                    "fam": family_key,
+                    "seq": task_ids,
+                },
+            )
             await session.commit()
 
         adapter = _CapturingAdapter(new_uri="uri://v2")
@@ -191,7 +257,8 @@ async def test_orchestrator_iteration_transitions_adapting_to_pending(
             return reg.resolve_plugin(group, ref)
 
         monkeypatch.setattr(
-            "loom_family_orchestrator.main_loop.resolve_plugin", _fake_resolve,
+            "loom_family_orchestrator.main_loop.resolve_plugin",
+            _fake_resolve,
         )
 
         ctx = OrchestratorContext(
@@ -210,11 +277,20 @@ async def test_orchestrator_iteration_transitions_adapting_to_pending(
         assert adapter.calls, "adapter.evolve was not called"
 
         async with session_factory() as session:
-            row = (await session.execute(text("""
+            row = (
+                (
+                    await session.execute(
+                        text("""
                 SELECT state, current_index, state_uri, last_error
                   FROM batch_family_state
                  WHERE batch_id = :bid AND family_key = :fam
-            """), {"bid": batch_id, "fam": family_key})).mappings().one()
+            """),
+                        {"bid": batch_id, "fam": family_key},
+                    )
+                )
+                .mappings()
+                .one()
+            )
             assert row["state"] == "pending"
             assert row["current_index"] == 1
             assert row["state_uri"] == "uri://v2"
@@ -253,7 +329,8 @@ async def test_orchestrator_end_of_sequence_transitions_to_done(
                 family_key=family_key,
                 trial_ids=trial_ids,
             )
-            await session.execute(text("""
+            await session.execute(
+                text("""
                 INSERT INTO batch_family_state (
                     batch_id, family_key, task_sequence, current_index,
                     state, state_uri, attempt_count
@@ -261,18 +338,23 @@ async def test_orchestrator_end_of_sequence_transitions_to_done(
                 VALUES (
                     :bid, :fam, :seq, 1, 'adapting', 'uri://v1', 0
                 )
-            """), {
-                "bid": batch_id,
-                "fam": family_key,
-                "seq": task_ids,
-            })
+            """),
+                {
+                    "bid": batch_id,
+                    "fam": family_key,
+                    "seq": task_ids,
+                },
+            )
             await session.commit()
 
         adapter = _CapturingAdapter(new_uri="uri://final")
         from loom.family_run import registry as reg
+
         monkeypatch.setattr(
             "loom_family_orchestrator.main_loop.resolve_plugin",
-            lambda group, ref: adapter if group == "loom.family.adapters" else reg.resolve_plugin(group, ref),
+            lambda group, ref: (
+                adapter if group == "loom.family.adapters" else reg.resolve_plugin(group, ref)
+            ),
         )
 
         ctx = OrchestratorContext(
@@ -290,10 +372,19 @@ async def test_orchestrator_end_of_sequence_transitions_to_done(
         assert picked is True
 
         async with session_factory() as session:
-            row = (await session.execute(text("""
+            row = (
+                (
+                    await session.execute(
+                        text("""
                 SELECT state, current_index FROM batch_family_state
                  WHERE batch_id = :bid AND family_key = :fam
-            """), {"bid": batch_id, "fam": family_key})).mappings().one()
+            """),
+                        {"bid": batch_id, "fam": family_key},
+                    )
+                )
+                .mappings()
+                .one()
+            )
             assert row["state"] == "done"
             assert row["current_index"] == 2
     finally:
