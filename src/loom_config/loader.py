@@ -75,6 +75,7 @@ class InfraSecretEntry:
     name: str
     description: str = ""
     generate: str | None = None
+    bootstrap: bool = True
 
 
 @dataclass(frozen=True)
@@ -196,6 +197,7 @@ def load_schema(path: Path) -> Schema:
             name=name,
             description=val.get("description", ""),
             generate=val.get("generate"),
+            bootstrap=bool(val.get("bootstrap", True)),
         )
         for name, val in infra_raw.items()
     }

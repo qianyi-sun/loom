@@ -39,3 +39,10 @@ def test_bootstrap_includes_infra_secrets() -> None:
     assert "--from-literal=postgres-user=loom" in line
     assert "--from-literal=postgres-password=loom" in line
     assert "--from-literal=secret-store-master-key=" in line
+
+
+def test_bootstrap_omits_optional_family_orchestrator_gateway_secrets() -> None:
+    schema = load_schema(Path("config/loom-schema.toml"))
+    line = render_bootstrap_command(schema, namespace="loom", smoke_defaults=False)
+    assert "--from-literal=family-orchestrator-team-id=" not in line
+    assert "--from-literal=family-orchestrator-token=" not in line
