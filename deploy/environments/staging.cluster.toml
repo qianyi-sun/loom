@@ -31,6 +31,12 @@ web = 1
 [k8s_worker]
 enabled = false
 
+[workload_contract]
+workload_trust_mode = "internal_trusted"
+taskset_transforms_enabled = false
+taskset_transform_network_isolated = false
+untrusted_workload_isolation = false
+
 [gb10_pool]
 ssh_config = "../worker-pools/gb10/ssh_config"
 ssh_identity_file = "/shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519"

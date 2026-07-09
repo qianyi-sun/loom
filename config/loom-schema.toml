@@ -662,6 +662,18 @@ used_by     = ["loom-service"]
 python_type = "bool"
 default     = false
 
+[service_config.untrusted_workload_isolation]
+used_by     = ["loom-service"]
+python_type = "bool"
+default     = false
+description = "Whether untrusted workload isolation is available. v1 permits only false."
+
+[service_config.workload_trust_mode]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "internal_trusted"
+description = "Workload trust mode. v1 permits only internal_trusted."
+
 [service_config.taskset_materializer_transform_wall_timeout_sec]
 used_by     = ["loom-service"]
 python_type = "int"
@@ -1106,6 +1118,11 @@ description = "Optional environment-state TOML profile used by protected rollout
 [render_config.worker_trajectory_storage_gi]
 python_type = "int"
 default     = 100
+
+[render_config.workload_contract]
+python_type = "table"
+description = "Canonical v1 workload-trust contract injected into loom-service."
+fields      = { workload_trust_mode = "internal_trusted", taskset_transforms_enabled = false, taskset_transform_network_isolated = false, untrusted_workload_isolation = false }
 
 [render_config.worker_capacity]
 python_type = "table"

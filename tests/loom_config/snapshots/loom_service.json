@@ -314,9 +314,19 @@
     "default": "['gateway_error', 'provider_transport_disconnect']",
     "required": false
   },
+  "untrusted_workload_isolation": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
   "worker_heartbeat_expiry_sec": {
     "annotation": "<class 'int'>",
     "default": "120",
+    "required": false
+  },
+  "workload_trust_mode": {
+    "annotation": "<class 'str'>",
+    "default": "'internal_trusted'",
     "required": false
   }
 }
