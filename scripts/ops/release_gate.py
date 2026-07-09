@@ -339,15 +339,24 @@ def _validate_score_positive_canary(check: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     scored = check.get("scored_trial_count")
     positive = check.get("positive_reward_trial_count")
+    non_full = check.get("non_full_reward_trial_count")
     if not isinstance(scored, int) or scored <= 0:
         errors.append("score_positive_canary.scored_trial_count must be an integer > 0")
     if not isinstance(positive, int) or positive <= 0:
         errors.append(
             "score_positive_canary.positive_reward_trial_count must be an integer > 0",
         )
+    if not isinstance(non_full, int) or non_full <= 0:
+        errors.append(
+            "score_positive_canary.non_full_reward_trial_count must be an integer > 0",
+        )
     if isinstance(scored, int) and isinstance(positive, int) and positive > scored:
         errors.append(
             "score_positive_canary.positive_reward_trial_count must be <= scored_trial_count",
+        )
+    if isinstance(scored, int) and isinstance(non_full, int) and non_full > scored:
+        errors.append(
+            "score_positive_canary.non_full_reward_trial_count must be <= scored_trial_count",
         )
     return errors
 

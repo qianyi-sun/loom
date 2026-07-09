@@ -180,6 +180,7 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
             "url": "https://github.com/qianyi-sun/loom/issues/445#issuecomment-score-positive",
             "batch_id": "batch-score-positive-canary",
             "positive_reward_trial_count": 1,
+            "non_full_reward_trial_count": 6,
             "scored_trial_count": 7,
         },
         "benchmark_score_alignment": {
@@ -589,6 +590,27 @@ def test_release_gate_rejects_missing_required_checks_and_secret_leaks(tmp_path:
     assert "forbidden evidence value" in result.stderr
     assert "public_api_spa_smoke.artifact_url" in result.stderr
     assert "provider_smoke.notes" in result.stderr
+
+
+def test_release_gate_rejects_all_full_reward_canary(tmp_path: Path) -> None:
+    manifest = _passing_evidence()
+    manifest["checks"]["score_positive_canary"]["positive_reward_trial_count"] = 7
+    manifest["checks"]["score_positive_canary"]["non_full_reward_trial_count"] = 0
+    manifest["checks"]["score_positive_canary"]["scored_trial_count"] = 7
+
+    result = _run_release_gate(
+        tmp_path,
+        manifest,
+        "validate",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "release-0123456789ab",
+    )
+
+    assert result.returncode == 1
+    assert "score_positive_canary.non_full_reward_trial_count" in result.stderr
+    assert "must be an integer > 0" in result.stderr
 
 
 def test_release_gate_rejects_frontend_route_api_mismatches(tmp_path: Path) -> None:

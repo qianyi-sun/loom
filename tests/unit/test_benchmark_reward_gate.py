@@ -302,6 +302,36 @@ def test_score_positive_canary_passes_with_one_positive_reward() -> None:
     assert report["reward_distribution"] == {"0.0": 1, "1.0": 1}
 
 
+def test_score_positive_canary_blocks_all_full_reward_batch() -> None:
+    gate = _load_module()
+
+    report = gate.build_score_positive_canary_report(
+        batch={"id": "batch-all-full", "state": "finished", "expected_trial_count": 2},
+        trials=[
+            {
+                "id": "trial-1",
+                "task_id": "source-useful/1",
+                "state": "succeeded",
+                "failure_reason": None,
+                "aggregate_reward": 1.0,
+            },
+            {
+                "id": "trial-2",
+                "task_id": "source-useful/2",
+                "state": "succeeded",
+                "failure_reason": None,
+                "aggregate_reward": 1,
+            },
+        ],
+    )
+
+    assert report["status"] == "fail"
+    assert report["positive_reward_trial_count"] == 2
+    assert report["non_full_reward_trial_count"] == 0
+    assert report["reward_distribution"] == {"1.0": 2}
+    assert "all scored trials have full reward" in report["summary"]
+
+
 def test_score_positive_canary_blocks_no_scored_trials() -> None:
     gate = _load_module()
 
