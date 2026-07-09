@@ -14,7 +14,7 @@ import signal
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from loom.storage_credentials import build_s3_client
+from loom.trajectory.storage import MinioObjectStore
 from loom_control_plane.config import ControlPlaneSettings
 from loom_family_orchestrator.gateway_client import OrchestratorGatewayClient
 from loom_family_orchestrator.main_loop import OrchestratorContext, run
@@ -37,12 +37,29 @@ async def _amain() -> None:
     )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-    object_store = build_s3_client(
+    # The state backend calls store.get_object(bucket=..., key=...)
+    # — the ObjectStore Protocol shape, not raw boto3. Wrap the boto3
+    # client in MinioObjectStore so the kwarg translation
+    # (bucket→Bucket, key→Key) actually happens; otherwise every
+    # download hits ``ParamValidationError: Unknown parameter in
+    # input: "bucket"``.
+    object_store = MinioObjectStore(
         endpoint_url=settings.minio_endpoint,
-        auth_kind=settings.storage_auth_kind,
         access_key=settings.minio_access_key.get_secret_value(),
         secret_key=settings.minio_secret_key.get_secret_value(),
         region=settings.minio_region,
+    )
+
+    # Which bucket the state backend seeds new empty prefixes into.
+    # Not hardcoded to "artifacts": staging seeds
+    # ``s3://loom-staging-artifacts/`` via LOOM_FAMILY_ARTIFACTS_BUCKET
+    # so the orchestrator's initialize() lands in the same place the
+    # service did at accept-time. Download/upload always parse the
+    # bucket from the incoming state_uri (see PR #728), so this only
+    # affects fresh initialize() calls; still, giving operators a knob
+    # keeps the two paths coherent.
+    artifacts_bucket = os.environ.get(
+        "LOOM_FAMILY_ARTIFACTS_BUCKET", "artifacts",
     )
 
     stop_event = asyncio.Event()
@@ -87,7 +104,7 @@ async def _amain() -> None:
         session_factory=session_factory,
         gateway=gateway_client,
         object_store=object_store,
-        artifacts_bucket="artifacts",
+        artifacts_bucket=artifacts_bucket,
         state_backend_factory=None,
         settings_default_model=settings.skill_evolver_default_model,
         adapter_call_timeout_sec=settings.family_adapter_call_timeout_sec,
