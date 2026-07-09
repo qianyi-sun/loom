@@ -9,7 +9,10 @@ tries to load images or apply jobs.
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
+
+import yaml  # type: ignore[import-untyped]
 
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
@@ -17,6 +20,17 @@ from loom_cli.rollout.steps.base import BaseStep, RunResult, VerifyOutcome
 from loom_cli.rollout.steps.subprocess_util import run_captured
 
 INGRESS_NGINX_KIND_MANIFEST = Path("deploy/k8s/ingress-nginx-kind.yaml")
+_LAST_APPLIED_ANNOTATION = "kubectl.kubernetes.io/last-applied-configuration"
+_RUNTIME_METADATA_KEYS = frozenset(
+    {
+        "creationTimestamp",
+        "generation",
+        "managedFields",
+        "resourceVersion",
+        "selfLink",
+        "uid",
+    },
+)
 
 
 def _kind_config(ctx: RolloutContext) -> str:
@@ -63,6 +77,39 @@ def _backup_secrets_dir(ctx: RolloutContext) -> Path:
 
 def _cluster_names(stdout: str) -> set[str]:
     return {line.strip() for line in stdout.splitlines() if line.strip()}
+
+
+def _write_sanitized_secret_restore_dir(source_dir: Path, target_dir: Path) -> int:
+    count = 0
+    for source in sorted([*source_dir.glob("*.yaml"), *source_dir.glob("*.yml")]):
+        docs: list[dict[str, object]] = []
+        for raw_doc in yaml.safe_load_all(source.read_text(encoding="utf-8")):
+            if raw_doc is None:
+                continue
+            if not isinstance(raw_doc, dict) or raw_doc.get("kind") != "Secret":
+                raise RuntimeError(
+                    f"backup secret restore file must contain Secret docs: {source}",
+                )
+            doc = dict(raw_doc)
+            metadata = dict(doc.get("metadata") or {})
+            for key in _RUNTIME_METADATA_KEYS:
+                metadata.pop(key, None)
+            annotations = dict(metadata.get("annotations") or {})
+            annotations.pop(_LAST_APPLIED_ANNOTATION, None)
+            if annotations:
+                metadata["annotations"] = annotations
+            else:
+                metadata.pop("annotations", None)
+            doc["metadata"] = metadata
+            docs.append(doc)
+        if not docs:
+            continue
+        (target_dir / source.name).write_text(
+            yaml.safe_dump_all(docs, sort_keys=False),
+            encoding="utf-8",
+        )
+        count += len(docs)
+    return count
 
 
 def _last_error(result: object, default: str) -> str:
@@ -277,11 +324,31 @@ class KindClusterStep(BaseStep):
                 )
             namespace_created = True
 
-        apply_secrets = run_captured(
-            ["kubectl", "-n", ctx.namespace, "apply", "-f", str(secrets_dir)],
-            stdout_log=step_dir.artifact_path("secrets-apply.stdout"),
-            stderr_log=step_dir.artifact_path("secrets-apply.stderr"),
-        )
+        with tempfile.TemporaryDirectory(prefix="loom-secret-restore-") as tmp:
+            sanitized_dir = Path(tmp)
+            try:
+                secret_count = _write_sanitized_secret_restore_dir(
+                    secrets_dir,
+                    sanitized_dir,
+                )
+            except RuntimeError as exc:
+                step_dir.stderr_path().write_text(str(exc) + "\n", encoding="utf-8")
+                return RunResult(exit_code=2, error=str(exc))
+            apply_secrets = run_captured(
+                [
+                    "kubectl",
+                    "-n",
+                    ctx.namespace,
+                    "apply",
+                    "--server-side",
+                    "--force-conflicts",
+                    "--field-manager=loom-rollout-secret-restore",
+                    "-f",
+                    str(sanitized_dir),
+                ],
+                stdout_log=step_dir.artifact_path("secrets-apply.stdout"),
+                stderr_log=step_dir.artifact_path("secrets-apply.stderr"),
+            )
         if apply_secrets.returncode != 0:
             return RunResult(
                 exit_code=apply_secrets.returncode,
@@ -293,7 +360,7 @@ class KindClusterStep(BaseStep):
             f"{ctx.cluster_name}; "
             f"{ingress_state} ingress-nginx; "
             f"{'created' if namespace_created else 'reused'} namespace "
-            f"{ctx.namespace}; restored k8s secrets from backup manifest"
+            f"{ctx.namespace}; restored {secret_count} k8s secrets from backup manifest"
         )
         step_dir.stdout_path().write_text(summary + "\n", encoding="utf-8")
         return RunResult(
@@ -303,6 +370,7 @@ class KindClusterStep(BaseStep):
                 "cluster_name": ctx.cluster_name,
                 "namespace": ctx.namespace,
                 "ingress_nginx": ingress_state,
+                "secret_count": str(secret_count),
                 "secrets_dir": str(secrets_dir),
             },
         )
