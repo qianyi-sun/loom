@@ -52,7 +52,9 @@ class _FakeCoreV1:
     drive the namespace check; `secrets` drives the secret check."""
 
     def __init__(
-        self, *, namespace_present: bool = True,
+        self,
+        *,
+        namespace_present: bool = True,
         namespace_labels: dict[str, str] | None = None,
         secrets: set[str] | None = None,
         secret_data: dict[str, str] | None = None,
@@ -127,7 +129,8 @@ class _FakeStorageV1:
     tuples; the fake builds the right annotation shape."""
 
     def __init__(
-        self, classes: list[_StorageClassSpec] | None = None,
+        self,
+        classes: list[_StorageClassSpec] | None = None,
     ) -> None:
         self.classes = classes or []
 
@@ -138,15 +141,14 @@ class _FakeStorageV1:
             is_default = item[1]
             provisioner = item[2] if len(item) > 2 else "example.com/csi"
             reclaim_policy = item[3] if len(item) > 3 else "Retain"
-            anns = (
-                {"storageclass.kubernetes.io/is-default-class": "true"}
-                if is_default else {}
+            anns = {"storageclass.kubernetes.io/is-default-class": "true"} if is_default else {}
+            items.append(
+                _Spec(
+                    metadata=_Spec(name=name, annotations=anns),
+                    provisioner=provisioner,
+                    reclaim_policy=reclaim_policy,
+                )
             )
-            items.append(_Spec(
-                metadata=_Spec(name=name, annotations=anns),
-                provisioner=provisioner,
-                reclaim_policy=reclaim_policy,
-            ))
         return _Spec(items=items)
 
 
@@ -263,10 +265,12 @@ def test_ingress_class_check_fail_when_no_classes() -> None:
 
 
 def test_default_storage_class_check_pass_when_default_marked() -> None:
-    storage = _FakeStorageV1(classes=[
-        ("standard", False),
-        ("ssd", True),
-    ])
+    storage = _FakeStorageV1(
+        classes=[
+            ("standard", False),
+            ("ssd", True),
+        ]
+    )
     check = _check_default_storage_class(storage)
     assert check.outcome == "pass"
     assert "ssd" in check.detail
@@ -297,9 +301,11 @@ def test_collect_preflight_flags_staging_local_path_delete_storage() -> None:
     report = collect_preflight(
         core,
         _FakeNetworkingV1(["nginx"]),
-        _FakeStorageV1([
-            ("standard", True, "rancher.io/local-path", "Delete"),
-        ]),
+        _FakeStorageV1(
+            [
+                ("standard", True, "rancher.io/local-path", "Delete"),
+            ]
+        ),
         "loom-staging",
         context=None,
         environment="staging",
@@ -409,9 +415,11 @@ def test_collect_preflight_passes_static_retain_pvs_despite_local_path_default(
     report = collect_preflight(
         core,
         _FakeNetworkingV1(["nginx"]),
-        _FakeStorageV1([
-            ("standard", True, "rancher.io/local-path", "Delete"),
-        ]),
+        _FakeStorageV1(
+            [
+                ("standard", True, "rancher.io/local-path", "Delete"),
+            ]
+        ),
         namespace,
         context=None,
         environment="staging",
@@ -445,9 +453,11 @@ def test_collect_preflight_passes_static_host_path_config_before_pvcs_exist(
     report = collect_preflight(
         core,
         _FakeNetworkingV1(["nginx"]),
-        _FakeStorageV1([
-            ("standard", True, "rancher.io/local-path", "Delete"),
-        ]),
+        _FakeStorageV1(
+            [
+                ("standard", True, "rancher.io/local-path", "Delete"),
+            ]
+        ),
         namespace,
         context=None,
         environment="staging",
@@ -459,6 +469,70 @@ def test_collect_preflight_passes_static_host_path_config_before_pvcs_exist(
     assert by_name["protected-storage-boundary"].outcome == "pass"
     assert "static-host-path" in by_name["protected-storage-boundary"].detail
     assert "/data/loom-staging" in by_name["protected-storage-boundary"].detail
+    assert not report.any_fail
+
+
+def test_collect_preflight_passes_partial_static_host_path_recovery_state(
+    tmp_path: Path,
+) -> None:
+    namespace = "loom-staging"
+    manifest = _write_recent_manifest(
+        tmp_path,
+        environment="staging",
+        namespace=namespace,
+    )
+    core = _FakeCoreV1(
+        secrets={"loom-secrets", "loom-admin-secret"},
+        persistent_volume_claims=[
+            _bound_pvc(
+                "data-loom-postgres-0",
+                "loom-staging-postgres-data",
+            ),
+            _bound_pvc(
+                "data-loom-minio-0",
+                "loom-staging-minio-data",
+            ),
+        ],
+        persistent_volumes=[
+            _host_path_pv(
+                name="loom-staging-postgres-data",
+                namespace=namespace,
+                claim_name="data-loom-postgres-0",
+                path="/data/loom-staging/postgres",
+            ),
+            _host_path_pv(
+                name="loom-staging-minio-data",
+                namespace=namespace,
+                claim_name="data-loom-minio-0",
+                path="/data/loom-staging/minio",
+            ),
+        ],
+    )
+    cfg = ClusterConfig(
+        namespace=namespace,
+        persistent_storage_backend="static-host-path",
+        persistent_storage_host_path_root="/data/loom-staging",
+    )
+
+    report = collect_preflight(
+        core,
+        _FakeNetworkingV1(["nginx"]),
+        _FakeStorageV1(
+            [
+                ("standard", True, "rancher.io/local-path", "Delete"),
+            ]
+        ),
+        namespace,
+        context=None,
+        environment="staging",
+        backup_manifest=manifest,
+        cluster_config=cfg,
+    )
+
+    by_name = {check.name: check for check in report.checks}
+    assert by_name["protected-storage-boundary"].outcome == "pass"
+    assert "loom-worker-trajectories" in by_name["protected-storage-boundary"].detail
+    assert "static-host-path" in by_name["protected-storage-boundary"].detail
     assert not report.any_fail
 
 
@@ -483,9 +557,11 @@ def test_collect_preflight_fails_kind_static_host_path_without_host_bind_mount(
     report = collect_preflight(
         core,
         _FakeNetworkingV1(["nginx"]),
-        _FakeStorageV1([
-            ("standard", True, "rancher.io/local-path", "Delete"),
-        ]),
+        _FakeStorageV1(
+            [
+                ("standard", True, "rancher.io/local-path", "Delete"),
+            ]
+        ),
         namespace,
         context="kind-loom-staging",
         environment="staging",
@@ -523,9 +599,11 @@ def test_collect_preflight_passes_kind_static_host_path_with_host_bind_mount(
     report = collect_preflight(
         core,
         _FakeNetworkingV1(["nginx"]),
-        _FakeStorageV1([
-            ("standard", True, "rancher.io/local-path", "Delete"),
-        ]),
+        _FakeStorageV1(
+            [
+                ("standard", True, "rancher.io/local-path", "Delete"),
+            ]
+        ),
         namespace,
         context="kind-loom-staging",
         environment="staging",
@@ -646,9 +724,11 @@ def test_collect_preflight_skips_namespace_scoped_checks_when_ns_missing() -> No
     diagnostics on their own."""
     core = _FakeCoreV1(namespace_present=False)
     report = collect_preflight(
-        core, _FakeNetworkingV1(["nginx"]),
+        core,
+        _FakeNetworkingV1(["nginx"]),
         _FakeStorageV1([("standard", True)]),
-        "missing-ns", context=None,
+        "missing-ns",
+        context=None,
     )
     names = [c.name for c in report.checks]
     # Always-on:
@@ -667,9 +747,11 @@ def test_collect_preflight_all_pass_happy_path() -> None:
         secrets={"loom-secrets", "loom-admin-secret"},
     )
     report = collect_preflight(
-        core, _FakeNetworkingV1(["nginx"]),
+        core,
+        _FakeNetworkingV1(["nginx"]),
         _FakeStorageV1([("standard", True)]),
-        "loom", context=None,
+        "loom",
+        context=None,
     )
     assert report.all_pass
     assert not report.any_fail
@@ -683,9 +765,11 @@ def test_collect_preflight_warn_does_not_set_any_fail() -> None:
         namespace_labels={"pod-security.kubernetes.io/enforce": "restricted"},
     )
     report = collect_preflight(
-        core, _FakeNetworkingV1(["nginx"]),
+        core,
+        _FakeNetworkingV1(["nginx"]),
         _FakeStorageV1([("standard", True)]),
-        "loom", context=None,
+        "loom",
+        context=None,
     )
     assert not report.any_fail
     # all_pass is False because PSS is warn (not pass).
@@ -699,10 +783,12 @@ def test_collect_preflight_warn_does_not_set_any_fail() -> None:
 
 def test_format_table_includes_remediation_indented() -> None:
     report = PreflightReport(
-        namespace="loom", context=None,
+        namespace="loom",
+        context=None,
         checks=[
             PreflightCheck(
-                name="secret-loom-secrets", outcome="fail",
+                name="secret-loom-secrets",
+                outcome="fail",
                 detail="Secret 'loom-secrets' missing in loom",
                 remediation="kubectl create secret generic loom-secrets ...",
             ),
@@ -715,10 +801,12 @@ def test_format_table_includes_remediation_indented() -> None:
 
 def test_format_table_omits_remediation_on_pass() -> None:
     report = PreflightReport(
-        namespace="loom", context=None,
+        namespace="loom",
+        context=None,
         checks=[
             PreflightCheck(
-                name="namespace-exists", outcome="pass",
+                name="namespace-exists",
+                outcome="pass",
                 detail="namespace 'loom' present",
                 # Even if remediation is set (shouldn't be), pass
                 # rows don't surface it.
@@ -732,10 +820,13 @@ def test_format_table_omits_remediation_on_pass() -> None:
 
 def test_format_json_is_stable_and_parseable() -> None:
     report = PreflightReport(
-        namespace="loom", context="prod",
+        namespace="loom",
+        context="prod",
         checks=[
             PreflightCheck(
-                name="namespace-exists", outcome="pass", detail="ok",
+                name="namespace-exists",
+                outcome="pass",
+                detail="ok",
             ),
         ],
     )
@@ -753,7 +844,11 @@ def test_format_json_is_stable_and_parseable() -> None:
 
 
 def _patch_clients(
-    monkeypatch: pytest.MonkeyPatch, *, core: Any, net: Any, storage: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    core: Any,
+    net: Any,
+    storage: Any,
     apps: Any | None = None,
 ) -> None:
     """Helper: wire fake clients into the CLI's lazy loader. `apps`
@@ -1004,19 +1099,28 @@ def test_cli_preflight_config_allows_static_host_path_before_pvcs_exist(
         monkeypatch,
         core=_FakeCoreV1(secrets={"loom-secrets", "loom-admin-secret"}),
         net=_FakeNetworkingV1(["nginx"]),
-        storage=_FakeStorageV1([
-            ("standard", True, "rancher.io/local-path", "Delete"),
-        ]),
+        storage=_FakeStorageV1(
+            [
+                ("standard", True, "rancher.io/local-path", "Delete"),
+            ]
+        ),
     )
 
-    rc = main([
-        "cluster", "preflight",
-        "--namespace", namespace,
-        "--environment", "staging",
-        "--backup-manifest", str(manifest),
-        "--config", str(cfg),
-        "--no-doctor",
-    ])
+    rc = main(
+        [
+            "cluster",
+            "preflight",
+            "--namespace",
+            namespace,
+            "--environment",
+            "staging",
+            "--backup-manifest",
+            str(manifest),
+            "--config",
+            str(cfg),
+            "--no-doctor",
+        ]
+    )
 
     assert rc == 0
 
@@ -1050,9 +1154,11 @@ def test_cli_preflight_threads_kind_node_mounts_for_static_host_path(
         monkeypatch,
         core=_FakeCoreV1(secrets={"loom-secrets", "loom-admin-secret"}),
         net=_FakeNetworkingV1(["nginx"]),
-        storage=_FakeStorageV1([
-            ("standard", True, "rancher.io/local-path", "Delete"),
-        ]),
+        storage=_FakeStorageV1(
+            [
+                ("standard", True, "rancher.io/local-path", "Delete"),
+            ]
+        ),
     )
     monkeypatch.setattr(
         "loom_cli.cluster_cmd._read_kind_node_mounts",
@@ -1076,15 +1182,23 @@ def test_cli_preflight_threads_kind_node_mounts_for_static_host_path(
 
     monkeypatch.setattr("loom_cli.cluster_cmd.collect_preflight", _collect_preflight)
 
-    rc = main([
-        "cluster", "preflight",
-        "--context", "kind-loom-staging",
-        "--namespace", namespace,
-        "--environment", "staging",
-        "--backup-manifest", str(manifest),
-        "--config", str(cfg),
-        "--no-doctor",
-    ])
+    rc = main(
+        [
+            "cluster",
+            "preflight",
+            "--context",
+            "kind-loom-staging",
+            "--namespace",
+            namespace,
+            "--environment",
+            "staging",
+            "--backup-manifest",
+            str(manifest),
+            "--config",
+            str(cfg),
+            "--no-doctor",
+        ]
+    )
 
     assert rc == 0
     assert captures["preflight_kwargs"]["kind_node_mounts"] == mounts
@@ -1119,9 +1233,11 @@ def test_cli_preflight_uses_current_kind_context_for_static_host_path(
         monkeypatch,
         core=_FakeCoreV1(secrets={"loom-secrets", "loom-admin-secret"}),
         net=_FakeNetworkingV1(["nginx"]),
-        storage=_FakeStorageV1([
-            ("standard", True, "rancher.io/local-path", "Delete"),
-        ]),
+        storage=_FakeStorageV1(
+            [
+                ("standard", True, "rancher.io/local-path", "Delete"),
+            ]
+        ),
     )
     monkeypatch.setattr(
         "loom_cli.cluster_cmd._effective_kube_context",
@@ -1149,14 +1265,21 @@ def test_cli_preflight_uses_current_kind_context_for_static_host_path(
 
     monkeypatch.setattr("loom_cli.cluster_cmd.collect_preflight", _collect_preflight)
 
-    rc = main([
-        "cluster", "preflight",
-        "--namespace", namespace,
-        "--environment", "staging",
-        "--backup-manifest", str(manifest),
-        "--config", str(cfg),
-        "--no-doctor",
-    ])
+    rc = main(
+        [
+            "cluster",
+            "preflight",
+            "--namespace",
+            namespace,
+            "--environment",
+            "staging",
+            "--backup-manifest",
+            str(manifest),
+            "--config",
+            str(cfg),
+            "--no-doctor",
+        ]
+    )
 
     assert rc == 0
     assert captures["preflight_kwargs"]["context"] == "kind-loom-staging"
@@ -1192,9 +1315,11 @@ def test_cli_up_threads_kind_node_mounts_for_static_host_path(
         monkeypatch,
         core=_FakeCoreV1(secrets={"loom-secrets", "loom-admin-secret"}),
         net=_FakeNetworkingV1(["nginx"]),
-        storage=_FakeStorageV1([
-            ("standard", True, "rancher.io/local-path", "Delete"),
-        ]),
+        storage=_FakeStorageV1(
+            [
+                ("standard", True, "rancher.io/local-path", "Delete"),
+            ]
+        ),
     )
     monkeypatch.setattr(
         "loom_cli.cluster_cmd._effective_kube_context",
@@ -1230,14 +1355,21 @@ def test_cli_up_threads_kind_node_mounts_for_static_host_path(
 
     monkeypatch.setattr("loom_cli.cluster_cmd.collect_preflight", _collect_preflight)
 
-    rc = main([
-        "cluster", "up",
-        "--namespace", namespace,
-        "--environment", "staging",
-        "--backup-manifest", str(manifest),
-        "--config", str(cfg),
-        "--no-wait",
-    ])
+    rc = main(
+        [
+            "cluster",
+            "up",
+            "--namespace",
+            namespace,
+            "--environment",
+            "staging",
+            "--backup-manifest",
+            str(manifest),
+            "--config",
+            str(cfg),
+            "--no-wait",
+        ]
+    )
 
     assert rc == 0
     assert captures["preflight_kwargs"]["context"] == "kind-loom-staging"

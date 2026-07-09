@@ -2299,6 +2299,7 @@ def _check_existing_critical_pvc_storage(
     *,
     namespace: str,
     environment: str,
+    cluster_config: ClusterConfig | None,
 ) -> PreflightCheck | None:
     try:
         pvc_result = core_v1.list_namespaced_persistent_volume_claim(
@@ -2329,13 +2330,15 @@ def _check_existing_critical_pvc_storage(
     }
     storage_classes_by_name = _storage_class_map(storage_classes)
     problems: list[str] = []
+    missing: list[str] = []
     ok_bindings: list[str] = []
 
     for pvc_name in _CRITICAL_STATE_PVCS:
         pvc = pvcs.get(pvc_name)
         if pvc is None:
-            problems.append(f"{pvc_name} is missing")
+            missing.append(pvc_name)
             continue
+        problem_count = len(problems)
         pvc_spec = getattr(pvc, "spec", None)
         pvc_status = getattr(pvc, "status", None)
         phase = str(getattr(pvc_status, "phase", "") or "")
@@ -2387,7 +2390,7 @@ def _check_existing_critical_pvc_storage(
             problems.append(
                 f"{pvc_name}->{volume_name} has no hostPath, local volume, or StorageClass to audit"
             )
-        if not problems or not any(pvc_name in problem for problem in problems):
+        if len(problems) == problem_count:
             ok_bindings.append(f"{pvc_name}->{volume_name}")
 
     if problems:
@@ -2397,6 +2400,39 @@ def _check_existing_critical_pvc_storage(
             detail=(
                 f"protected environment {environment!r} critical PVCs are "
                 "not on a durable Retain boundary: " + "; ".join(problems)
+            ),
+            remediation=(
+                "Move Postgres, MinIO, and worker trajectories to external "
+                "storage or explicit host-managed Retain PVs under /data "
+                "before treating this environment as preproduction durable."
+            ),
+        )
+    if missing:
+        configured_check = _check_configured_static_host_path_storage(
+            cluster_config=cluster_config,
+            environment=environment,
+        )
+        if configured_check is not None and configured_check.outcome == "pass":
+            return PreflightCheck(
+                name="protected-storage-boundary",
+                outcome="pass",
+                detail=(
+                    f"protected environment {environment!r} present critical PVCs "
+                    "are bound to audited Retain PVs: "
+                    + ", ".join(ok_bindings)
+                    + "; missing critical PVCs will be created from "
+                    "static-host-path config: " + ", ".join(missing)
+                ),
+            )
+        if configured_check is not None:
+            return configured_check
+        return PreflightCheck(
+            name="protected-storage-boundary",
+            outcome="fail",
+            detail=(
+                f"protected environment {environment!r} critical PVCs are "
+                "not on a durable Retain boundary: "
+                + "; ".join(f"{name} is missing" for name in missing)
             ),
             remediation=(
                 "Move Postgres, MinIO, and worker trajectories to external "
@@ -2592,6 +2628,7 @@ def _check_protected_storage_boundary(
         storage_classes,
         namespace=namespace,
         environment=environment,
+        cluster_config=cluster_config,
     )
     if existing_check is not None:
         return existing_check

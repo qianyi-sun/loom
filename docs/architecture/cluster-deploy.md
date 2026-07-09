@@ -45,7 +45,10 @@ for Postgres, MinIO, and worker trajectories, and binds the matching PVCs with
 --config cluster-config.toml` audits existing critical PVCs first; if none
 exist yet, it accepts the static-host-path render config for first apply. If
 critical PVCs already exist, the live PV bindings win and must be Retain, not
-local-path provisioned, and hostPath volumes must sit under `/data/`.
+local-path provisioned, and hostPath volumes must sit under `/data/`. A partial
+static recovery state is accepted only when every present critical PVC is safe
+and the same config declares the missing fixed PVCs that the next apply will
+recreate.
 The same `--config` also gives schema-doctor the target rendered Deployments:
 preflight validates live Secrets, but it checks env-var drift against the
 manifest that will be applied rather than stale pods from the previous rollout.

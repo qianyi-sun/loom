@@ -14,6 +14,7 @@ from pathlib import Path
 
 import yaml  # type: ignore[import-untyped]
 
+from loom_cli.cluster_config import load_cluster_config
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
 from loom_cli.rollout.steps.base import BaseStep, RunResult, VerifyOutcome
@@ -75,6 +76,102 @@ def _backup_secrets_dir(ctx: RolloutContext) -> Path:
     return secrets_dir
 
 
+def _static_host_path_root(ctx: RolloutContext) -> str | None:
+    try:
+        config = load_cluster_config(ctx.cluster_config_path)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"could not read cluster config {ctx.cluster_config_path}: {exc}",
+        ) from exc
+    backend = str(config.persistent_storage_backend)
+    if backend == "dynamic":
+        return None
+    if backend != "static-host-path":
+        raise RuntimeError(
+            "persistent_storage_backend must be 'dynamic' or 'static-host-path'; "
+            f"got {backend!r}",
+        )
+    if config.namespace != ctx.namespace:
+        raise RuntimeError(
+            "cluster config namespace does not match rollout namespace: "
+            f"{config.namespace!r} != {ctx.namespace!r}",
+        )
+    root = str(config.persistent_storage_host_path_root or "").strip().rstrip("/")
+    if not root:
+        raise RuntimeError(
+            "persistent_storage_host_path_root is required when "
+            "persistent_storage_backend = 'static-host-path'",
+        )
+    if not root.startswith("/") or root == "/":
+        raise RuntimeError(
+            "persistent_storage_host_path_root must be an absolute operator-managed "
+            "host path such as /data/loom-staging",
+        )
+    return root
+
+
+def _worker_trajectories_storage_docs(
+    ctx: RolloutContext,
+) -> list[dict[str, object]]:
+    root = _static_host_path_root(ctx)
+    if root is None:
+        return []
+    config = load_cluster_config(ctx.cluster_config_path)
+    storage_gi = int(config.worker_trajectory_storage_gi)
+    if storage_gi <= 0:
+        raise RuntimeError(
+            "worker_trajectory_storage_gi must be positive for static-host-path storage",
+        )
+    namespace = ctx.namespace
+    pv_name = f"{namespace}-worker-trajectories-data"
+    return [
+        {
+            "apiVersion": "v1",
+            "kind": "PersistentVolume",
+            "metadata": {"name": pv_name},
+            "spec": {
+                "capacity": {"storage": f"{storage_gi}Gi"},
+                "accessModes": ["ReadWriteOnce"],
+                "persistentVolumeReclaimPolicy": "Retain",
+                "storageClassName": "",
+                "hostPath": {
+                    "path": f"{root}/trajectories",
+                    "type": "DirectoryOrCreate",
+                },
+                "claimRef": {
+                    "namespace": namespace,
+                    "name": "loom-worker-trajectories",
+                },
+            },
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "PersistentVolumeClaim",
+            "metadata": {
+                "name": "loom-worker-trajectories",
+                "namespace": namespace,
+            },
+            "spec": {
+                "accessModes": ["ReadWriteOnce"],
+                "storageClassName": "",
+                "volumeName": pv_name,
+                "resources": {"requests": {"storage": f"{storage_gi}Gi"}},
+            },
+        },
+    ]
+
+
+def _write_worker_trajectories_storage_manifest(
+    ctx: RolloutContext,
+    path: Path,
+) -> bool:
+    docs = _worker_trajectories_storage_docs(ctx)
+    if not docs:
+        return False
+    path.write_text(yaml.safe_dump_all(docs, sort_keys=False), encoding="utf-8")
+    return True
+
+
 def _cluster_names(stdout: str) -> set[str]:
     return {line.strip() for line in stdout.splitlines() if line.strip()}
 
@@ -126,6 +223,8 @@ class KindClusterStep(BaseStep):
             "cluster_name": ctx.cluster_name,
             "namespace": ctx.namespace,
             "rollout_root": str(ctx.rollout_root),
+            "cluster_config_path": str(ctx.cluster_config_path),
+            "cluster_config_sha256": ctx.cluster_config_sha256,
             "backup_manifest_path": str(ctx.backup_manifest_path),
         }
 
@@ -169,7 +268,30 @@ class KindClusterStep(BaseStep):
                 "--timeout=5s",
             ],
         )
-        return VerifyOutcome.MATCH if ingress_controller.returncode == 0 else VerifyOutcome.MISMATCH
+        if ingress_controller.returncode != 0:
+            return VerifyOutcome.MISMATCH
+        try:
+            storage_docs = _worker_trajectories_storage_docs(ctx)
+        except RuntimeError:
+            return VerifyOutcome.UNKNOWN
+        if storage_docs:
+            pv_name = str(storage_docs[0]["metadata"]["name"])  # type: ignore[index]
+            pv = run_captured(["kubectl", "get", "pv", pv_name])
+            if pv.returncode != 0:
+                return VerifyOutcome.MISMATCH
+            pvc = run_captured(
+                [
+                    "kubectl",
+                    "-n",
+                    ctx.namespace,
+                    "get",
+                    "pvc",
+                    "loom-worker-trajectories",
+                ],
+            )
+            if pvc.returncode != 0:
+                return VerifyOutcome.MISMATCH
+        return VerifyOutcome.MATCH
 
     def _ensure_ingress_nginx(self, step_dir: StepDir) -> tuple[RunResult | None, str]:
         ingress_class = run_captured(
@@ -324,6 +446,39 @@ class KindClusterStep(BaseStep):
                 )
             namespace_created = True
 
+        storage_state = "skipped"
+        storage_manifest = step_dir.artifact_path("worker-trajectories-storage.yaml")
+        try:
+            should_apply_storage = _write_worker_trajectories_storage_manifest(
+                ctx,
+                storage_manifest,
+            )
+        except RuntimeError as exc:
+            step_dir.stderr_path().write_text(str(exc) + "\n", encoding="utf-8")
+            return RunResult(exit_code=2, error=str(exc))
+        if should_apply_storage:
+            apply_storage = run_captured(
+                [
+                    "kubectl",
+                    "-n",
+                    ctx.namespace,
+                    "apply",
+                    "-f",
+                    str(storage_manifest),
+                ],
+                stdout_log=step_dir.artifact_path("worker-trajectories-storage-apply.stdout"),
+                stderr_log=step_dir.artifact_path("worker-trajectories-storage-apply.stderr"),
+            )
+            if apply_storage.returncode != 0:
+                return RunResult(
+                    exit_code=apply_storage.returncode,
+                    error=_last_error(
+                        apply_storage,
+                        "kubectl apply worker trajectories storage failed",
+                    ),
+                )
+            storage_state = "applied"
+
         with tempfile.TemporaryDirectory(prefix="loom-secret-restore-") as tmp:
             sanitized_dir = Path(tmp)
             try:
@@ -360,7 +515,8 @@ class KindClusterStep(BaseStep):
             f"{ctx.cluster_name}; "
             f"{ingress_state} ingress-nginx; "
             f"{'created' if namespace_created else 'reused'} namespace "
-            f"{ctx.namespace}; restored {secret_count} k8s secrets from backup manifest"
+            f"{ctx.namespace}; {storage_state} worker trajectories storage; "
+            f"restored {secret_count} k8s secrets from backup manifest"
         )
         step_dir.stdout_path().write_text(summary + "\n", encoding="utf-8")
         return RunResult(
@@ -370,6 +526,8 @@ class KindClusterStep(BaseStep):
                 "cluster_name": ctx.cluster_name,
                 "namespace": ctx.namespace,
                 "ingress_nginx": ingress_state,
+                "worker_trajectories_storage": storage_state,
+                "worker_trajectories_storage_manifest": str(storage_manifest),
                 "secret_count": str(secret_count),
                 "secrets_dir": str(secrets_dir),
             },

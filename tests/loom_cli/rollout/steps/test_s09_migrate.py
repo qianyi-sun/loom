@@ -34,6 +34,11 @@ kind: PersistentVolume
 metadata:
   name: loom-staging-worker-trajectories-data
 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loom-worker-trajectories
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -74,7 +79,7 @@ def _prepare_candidate_worktree(ev: EvidenceDirectory) -> Path:
     return worktree
 
 
-def test_stateful_substrate_manifest_filters_only_db_and_object_store(
+def test_stateful_substrate_manifest_filters_only_static_storage_and_stateful_services(
     tmp_path: Path,
 ) -> None:
     rendered = tmp_path / "rendered.yaml"
@@ -90,6 +95,8 @@ def test_stateful_substrate_manifest_filters_only_db_and_object_store(
     assert resources == [
         "PersistentVolume/loom-staging-postgres-data",
         "PersistentVolume/loom-staging-minio-data",
+        "PersistentVolume/loom-staging-worker-trajectories-data",
+        "PersistentVolumeClaim/loom-worker-trajectories",
         "StatefulSet/loom-postgres",
         "Service/loom-postgres",
         "StatefulSet/loom-minio",
@@ -99,6 +106,8 @@ def test_stateful_substrate_manifest_filters_only_db_and_object_store(
     assert [(doc["kind"], doc["metadata"]["name"]) for doc in docs] == [
         ("PersistentVolume", "loom-staging-postgres-data"),
         ("PersistentVolume", "loom-staging-minio-data"),
+        ("PersistentVolume", "loom-staging-worker-trajectories-data"),
+        ("PersistentVolumeClaim", "loom-worker-trajectories"),
         ("StatefulSet", "loom-postgres"),
         ("Service", "loom-postgres"),
         ("StatefulSet", "loom-minio"),

@@ -1592,13 +1592,13 @@ desired state.
 | 00 | resolve-target | git rev-parse; validates image-tag ↔ sha7 |
 | 01 | worktree | `git worktree add` at target sha |
 | 02 | build-images | `docker build` × every rollout-critical image (#365) |
-| 03 | kind-cluster | Ensure the staging kind cluster, kubeconfig, repo-local pinned ingress-nginx IngressClass/controller (`deploy/k8s/ingress-nginx-kind.yaml`), namespace, and backup-manifest Kubernetes secrets exist before any image load or migration. Secret restore sanitizes runtime metadata/client-side apply annotations and uses server-side apply so reruns converge after partial restores. Recreated kind clusters must bind the protected `/data/...` root and restore the cluster substrate needed for step 08 preflight, not only the kube API (#206). |
+| 03 | kind-cluster | Ensure the staging kind cluster, kubeconfig, repo-local pinned ingress-nginx IngressClass/controller (`deploy/k8s/ingress-nginx-kind.yaml`), namespace, static worker trajectory Retain PV/PVC, and backup-manifest Kubernetes secrets exist before any image load or migration. Secret restore sanitizes runtime metadata/client-side apply annotations and uses server-side apply so reruns converge after partial restores. Recreated kind clusters must bind the protected `/data/...` root and restore the cluster substrate needed for step 08 preflight, not only the kube API (#206). |
 | 04 | kind-load-images | candidate-source `loom cluster load-images` (#96) |
 | 05 | backup | candidate-source `loom cluster backup check --manifest <path> --min-remaining-hours <N>` (#363, #619 freshness buffer) |
 | 06 | audit | candidate-source `loom cluster audit` |
 | 07 | render | candidate-source `loom cluster render` → `rendered.yaml` |
 | 08 | preflight | candidate-source `loom cluster preflight --backup-manifest <path>` using the same manifest verified by step 05 |
-| 09 | migrate | candidate-source `loom cluster render-migration`, apply the rendered Postgres/MinIO stateful substrate from step 07 and wait for those StatefulSets, then apply/wait for the migration Job (#332, #206). This keeps missing-kind recovery restartable without starting application Deployments before Alembic. |
+| 09 | migrate | candidate-source `loom cluster render-migration`, apply the rendered Postgres/MinIO stateful substrate plus static worker trajectory PV/PVC from step 07 and wait for those StatefulSets, then apply/wait for the migration Job (#332, #206). This keeps missing-kind recovery restartable without starting application Deployments before Alembic and without leaving protected preflight with a partial critical PVC set. |
 | 10 | cluster-up | candidate-source `loom cluster up --backup-manifest <path> --recover-sandbox-deadlines --sandbox-deadline-max-pods 4` using the same manifest verified by step 05 and preflighted by step 08. Running this immediately after migration recreates the Control Plane before env-state uses the CP API during missing-kind recovery (#203 fix for updated replicas, #206 bounded kind/containerd sandbox-deadline retry). |
 | 11 | env-state | candidate-source `loom admin environment-state apply`, then required profile `catalog_provisioning.command` via protected env/env-source inputs, then `loom admin environment-state check --admin-token <source> --expect-admin-token-fingerprint <fingerprint>` (#331 fix for stop-on-disable, #533 guard for scoped admin token drift, #543 catalog-owned GB10 smoke task provisioning). Pure GB10 node-status convergence drift is recorded and deferred because step 12 has not started node-agent apply yet; mixed drift still fails immediately. |
 | 12 | gb10-prep | SSH ×N hosts after desired-state apply: fetch, checkout, write env file, retire the legacy `loom-gb10-worker.service`, install/start node-agent, verify. The GB10 node-agent unit is `Type=oneshot`; successful prep is verified from `systemctl show` `Result=success` and `ExecMainStatus=0`, even though the unit is normally `inactive/dead` after completion. This step intentionally runs after step 11 so a host-local node-agent cannot apply a stale Control Plane desired-state row (#593). The staging GB10 desired-state profile keeps `LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS=7200` so early hosts in the 15-host prep stay online through release-gate and smoke. |
@@ -3552,7 +3552,10 @@ loom cluster up \
 For a new protected namespace, this `--config` path lets preflight accept the
 static Retain PV plan before the PVCs exist. For an existing namespace, live
 critical PVC/PV bindings are audited first and must already be on the durable
-boundary.
+boundary. If a restartable recovery has only created part of the static critical
+PVC set, preflight may continue only when every present critical PVC is already
+bound to an audited Retain PV and the target config declares the missing static
+host-path PVCs that `cluster up` or rollout substrate bootstrap will recreate.
 
 `loom cluster doctor` remains the live-cluster reconciliation command. During a
 rollout, use `loom cluster preflight --config ...` or `loom cluster up
