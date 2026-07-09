@@ -42,6 +42,7 @@ class LoomServiceSettings(BaseSettings):
     db_url_pool: PostgresDsn | None = None
     dev_reload: bool = False
     gateway_url: HttpUrl = cast(HttpUrl, "http://loom-llm-gateway:9100")
+    huggingface_api_key: SecretStr | None = Field(default=None, validation_alias="HF_TOKEN")
     k8s_worker_enabled: bool = True
     local_servers_json: str = "{}"
     log_level: LogLevel = "info"
