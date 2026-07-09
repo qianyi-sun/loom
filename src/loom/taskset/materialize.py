@@ -346,6 +346,8 @@ def _materialize_bundle_upload(
     artifacts_bucket: str,
     max_instances: int,
     max_bundle_bytes: int | None,
+    team_storage_baseline: int = 0,
+    max_team_storage_bytes: int | None = None,
 ) -> MaterializeOutput:
     slug = manifest.slug
     prefix = _storage_prefix(team_id=owning_team_id, slug=slug)
@@ -458,6 +460,8 @@ def _materialize_bundle_upload(
                         bundle_dir=bundle_dir,
                         cumulative_bytes=cumulative_bytes,
                         max_bundle_bytes=max_bundle_bytes,
+                        team_storage_baseline=team_storage_baseline,
+                        max_team_storage_bytes=max_team_storage_bytes,
                     )
                     db_id = _db_task_id(
                         task_set_id=task_set_id,
@@ -478,6 +482,8 @@ def _materialize_bundle_upload(
                         "code": "task_config_invalid",
                         "message": str(exc),
                     })
+                except _BundleSizeExceededError:
+                    raise
                 except Exception as exc:
                     skipped += 1
                     errors.append({
@@ -563,6 +569,8 @@ def materialize_task_set(
             artifacts_bucket=artifacts_bucket,
             max_instances=max_instances,
             max_bundle_bytes=max_bundle_bytes,
+            team_storage_baseline=team_storage_baseline,
+            max_team_storage_bytes=max_team_storage_bytes,
         )
 
     transform_bytes: bytes | None = None
@@ -727,6 +735,8 @@ def materialize_task_set(
                     "code": "task_config_invalid",
                     "message": str(exc.errors()),
                 })
+            except _BundleSizeExceededError:
+                raise
             except Exception as exc:
                 skipped += 1
                 errors.append({

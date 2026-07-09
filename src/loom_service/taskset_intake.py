@@ -138,17 +138,20 @@ def _upload_object(
     )
 
 
-async def _upload_file_object_with_size_cap(
-    client: Any,
-    *,
-    bucket: str,
-    key: str,
+@dataclass
+class _PreparedUpload:
+    file: Any
+    size_bytes: int
+
+
+async def _prepare_upload_with_size_cap(
     upload: UploadFile,
+    *,
     max_bytes: int,
-    content_type: str,
-) -> None:
+) -> _PreparedUpload:
     total = 0
-    with tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024) as tmp:
+    tmp = tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024)
+    try:
         while True:
             chunk = await upload.read(1024 * 1024)
             if not chunk:
@@ -160,12 +163,27 @@ async def _upload_file_object_with_size_cap(
         if total == 0:
             raise HTTPException(status_code=400, detail="empty upload part")
         tmp.seek(0)
-        client.put_object(
-            Bucket=bucket,
-            Key=key,
-            Body=tmp,
-            ContentType=content_type,
-        )
+        return _PreparedUpload(file=tmp, size_bytes=total)
+    except Exception:
+        tmp.close()
+        raise
+
+
+def _upload_prepared_object(
+    client: Any,
+    *,
+    bucket: str,
+    key: str,
+    upload: _PreparedUpload,
+    content_type: str,
+) -> None:
+    upload.file.seek(0)
+    client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=upload.file,
+        ContentType=content_type,
+    )
 
 
 async def check_taskset_storage_quota(
@@ -287,6 +305,7 @@ async def submit_task_set(
         )
 
     bundle_key: str | None = None
+    bundle_file: _PreparedUpload | None = None
     if manifest_model.source.type == "bundle-upload":
         if bundle_upload is None:
             raise HTTPException(
@@ -297,6 +316,10 @@ async def submit_task_set(
         bundle_key = bundle_object_key(
             prefix=prefix,
             relative_path=manifest_model.source.locator,
+        )
+        bundle_file = await _prepare_upload_with_size_cap(
+            bundle_upload,
+            max_bytes=bundle_max_bytes,
         )
     elif bundle_upload is not None:
         raise HTTPException(
@@ -314,14 +337,21 @@ async def submit_task_set(
         incoming_bytes += len(verifier_bytes)
     if transform_bytes is not None:
         incoming_bytes += len(transform_bytes)
-    await check_taskset_storage_quota(
-        session,
-        team_id=team_id,
-        minio_client=minio_client,
-        artifacts_bucket=artifacts_bucket,
-        default_max_storage_bytes=taskset_quota_max_storage_bytes,
-        incoming_bytes=incoming_bytes,
-    )
+    if bundle_file is not None:
+        incoming_bytes += bundle_file.size_bytes
+    try:
+        await check_taskset_storage_quota(
+            session,
+            team_id=team_id,
+            minio_client=minio_client,
+            artifacts_bucket=artifacts_bucket,
+            default_max_storage_bytes=taskset_quota_max_storage_bytes,
+            incoming_bytes=incoming_bytes,
+        )
+    except Exception:
+        if bundle_file is not None:
+            bundle_file.file.close()
+        raise
 
     normalized = normalize_intents(
         manifest_model,
@@ -395,19 +425,21 @@ async def submit_task_set(
                 body=transform_bytes,
                 content_type="text/x-python",
             )
-        if bundle_key is not None and bundle_upload is not None:
-            await _upload_file_object_with_size_cap(
+        if bundle_key is not None and bundle_file is not None:
+            _upload_prepared_object(
                 minio_client,
                 bucket=artifacts_bucket,
                 key=bundle_key,
-                upload=bundle_upload,
-                max_bytes=bundle_max_bytes,
+                upload=bundle_file,
                 content_type="application/gzip",
             )
         await session.commit()
     except Exception:
         await session.rollback()
         raise
+    finally:
+        if bundle_file is not None:
+            bundle_file.file.close()
     await session.refresh(job)
 
     return TaskSetIntakeResult(
