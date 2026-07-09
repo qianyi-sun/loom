@@ -264,6 +264,57 @@ hosts = [
     assert ["-o", f"CertificateFile={ssh_certificate}"] == argv[7:9]
 
 
+def test_worker_boundary_sends_multiline_probe_over_stdin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ssh_config = tmp_path / "ssh_config"
+    ssh_config.write_text("Host trt-gb10-1\n  HostName 127.0.0.1\n", encoding="utf-8")
+    cluster_config = tmp_path / "cluster.toml"
+    cluster_config.write_text(
+        f"""
+[gb10_pool]
+ssh_config = "{ssh_config.name}"
+hosts = [
+  {{ ssh_target = "trt-gb10-1", repo_path = "/srv/loom-staging-worker" }},
+]
+""",
+        encoding="utf-8",
+    )
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = json.dumps(
+            {
+                "env_file_exists": True,
+                "env_file_hf_token_present": False,
+                "env_file_key_count": 4,
+                "docker_ps_ok": True,
+                "containers": [],
+            }
+        )
+        stderr = ""
+
+    def fake_run(argv: list[str], **kwargs: object) -> FakeProc:
+        calls.append((list(argv), dict(kwargs)))
+        return FakeProc()
+
+    monkeypatch.setattr("loom_cli.hf_boundary_evidence.subprocess.run", fake_run)
+
+    evidence = collect_worker_boundary_from_gb10(
+        cluster_config_path=cluster_config,
+        timeout_sec=1,
+    )
+
+    assert evidence["summary"]["checked_hosts"] == 1
+    argv, kwargs = calls[0]
+    assert "-c" not in argv
+    assert argv[-4:] == ["trt-gb10-1", "python3", "-", "/srv/loom-staging-worker"]
+    assert kwargs["input"] == hf_boundary_evidence._REMOTE_WORKER_ENV_SCRIPT
+    assert "\n" not in " ".join(argv)
+
+
 def test_hf_boundary_db_audit_branch_uses_readiness_audit_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
