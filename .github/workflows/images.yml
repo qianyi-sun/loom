@@ -262,7 +262,9 @@ jobs:
           docker buildx inspect
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+        if: >-
+          github.event_name != 'pull_request' &&
+          github.event_name != 'merge_group'
         # Plain `docker login`, not docker/login-action.
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \
@@ -277,13 +279,16 @@ jobs:
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             echo "tag_args=--tag ${image}:pr-${{ github.event.number }}" >> "$GITHUB_OUTPUT"
             echo "push_flag=" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "merge_group" ]]; then
+            echo "tag_args=--tag ${image}:merge-group-${sha_short}" >> "$GITHUB_OUTPUT"
+            echo "push_flag=" >> "$GITHUB_OUTPUT"
           else
             branch="${{ github.ref_name }}"
             echo "tag_args=--tag ${image}:${sha_short} --tag ${image}:${branch}" >> "$GITHUB_OUTPUT"
             echo "push_flag=--push" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build (+ push on dev/main)
+      - name: Build (+ publish on push/manual)
         # `docker buildx build` with explicit platforms. The buildx
         # builder created above is the default; --platform triggers
         # the cross-arch build via QEMU emulation.

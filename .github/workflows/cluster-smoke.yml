@@ -29,9 +29,9 @@ on:
       - "src/loom_cli/templates/k8s/**"
       - ".github/workflows/cluster-smoke.yml"
   pull_request:
-    # Label gate (see `if:` on the job). We accept any PR event so a
-    # labelled-after-open PR triggers a run; the `if:` checks the
-    # label is actually present.
+    # The workflow starts for every PR event so its stable gate always
+    # reports. The planner selects the smoke from changed paths or the
+    # additive label, and a later label change retriggers the workflow.
     types: [labeled, opened, synchronize, reopened]
   merge_group:
     types: [checks_requested]

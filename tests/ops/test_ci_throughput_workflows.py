@@ -55,6 +55,34 @@ def test_images_merge_groups_select_a_nonempty_matrix() -> None:
     assert 'if event not in {"workflow_dispatch", "merge_group"}:' in plan_script
 
 
+def test_images_merge_groups_do_not_publish_or_use_queue_ref_tags() -> None:
+    workflow = _workflow(".github/workflows/images.yml")
+    build_steps = workflow["jobs"]["build"]["steps"]
+    login_step = next(
+        step for step in build_steps if step.get("name") == "Log in to GHCR"
+    )
+    ref_step = next(
+        step for step in build_steps if step.get("id") == "ref"
+    )
+
+    assert login_step["if"] == (
+        "github.event_name != 'pull_request' && github.event_name != 'merge_group'"
+    )
+    assert (
+        'if [[ "${{ github.event_name }}" == "pull_request" ]]; then\n'
+        '  echo "tag_args=--tag ${image}:pr-${{ github.event.number }}" >> "$GITHUB_OUTPUT"\n'
+        '  echo "push_flag=" >> "$GITHUB_OUTPUT"\n'
+        'elif [[ "${{ github.event_name }}" == "merge_group" ]]; then\n'
+        '  echo "tag_args=--tag ${image}:merge-group-${sha_short}" >> "$GITHUB_OUTPUT"\n'
+        '  echo "push_flag=" >> "$GITHUB_OUTPUT"\n'
+        "else\n"
+        '  branch="${{ github.ref_name }}"\n'
+        '  echo "tag_args=--tag ${image}:${sha_short} --tag ${image}:${branch}" >> "$GITHUB_OUTPUT"\n'
+        '  echo "push_flag=--push" >> "$GITHUB_OUTPUT"\n'
+        "fi"
+    ) in ref_step["run"]
+
+
 def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
     contracts = {
         ".github/workflows/images.yml": (
