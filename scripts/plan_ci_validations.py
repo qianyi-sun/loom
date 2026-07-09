@@ -101,7 +101,7 @@ def plan_validations(
     for label in sorted(labels):
         if check := LABEL_TO_CHECK.get(label):
             select(check, f"label:{label}")
-        if label == "ci:integration":
+        if event_name == "pull_request" and label == "ci:integration":
             select("coverage_summary", f"label:{label}")
 
     if any(path in PLANNER_PATHS for path in paths):
@@ -206,6 +206,12 @@ def plan_validations(
 
     if selected["coverage_summary"]:
         select("integration", "coverage-summary-requires-integration")
+
+    if any(
+        selected[name]
+        for name in ("integration", "integration_docker", "coverage_summary")
+    ):
+        docs_only = False
 
     return ValidationPlan(
         docs_only=docs_only,
