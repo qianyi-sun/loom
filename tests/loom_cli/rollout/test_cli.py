@@ -273,6 +273,61 @@ class TestRolloutCLIDryRun:
         # real run path. This confirms dry-run itself is a safe read-only.
         assert rc == 0
 
+    def test_real_rollout_refuses_missing_rollout_runner_dependencies(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cfg = tmp_path / "cluster-config.toml"
+        cfg.write_text("image_tag = 'x'\n")
+        backup = tmp_path / "backup-manifest.json"
+        backup.write_text("{}")
+        monkeypatch.setattr(subprocess, "run", _FakeSubprocess())
+        monkeypatch.setattr(
+            "loom_cli.rollout.cli._rollout_runner_dependency_error",
+            lambda: (
+                "rollout runner missing benchmark tooling; run "
+                "`uv sync --extra cluster --extra rollout`"
+            ),
+            raising=False,
+        )
+
+        def fail_run_rollout(*_args, **_kwargs):
+            raise AssertionError("rollout driver should not start")
+
+        monkeypatch.setattr("loom_cli.rollout.cli.run_rollout", fail_run_rollout)
+
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "--ref",
+                "origin/dev",
+                "--image-tag",
+                "staging-aaaaaaa",
+                "--cluster-name",
+                "loom-staging",
+                "--namespace",
+                "loom-staging",
+                "--environment",
+                "staging",
+                "--cp-url",
+                "http://control-node.lan:18081",
+                "--cluster-config",
+                str(cfg),
+                "--backup-manifest",
+                str(backup),
+                "--rollout-root",
+                str(tmp_path),
+            ]
+        )
+
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "rollout runner missing benchmark tooling" in err
+        assert "uv sync --extra cluster --extra rollout" in err
+
     def test_staging_refuses_non_staging_physical_targets(
         self,
         tmp_path: Path,

@@ -47,7 +47,7 @@ jobs:
         run: uv python install 3.11
 
       - name: Sync release gate dependencies
-        run: uv sync --extra cluster --extra dev --python 3.11
+        run: uv sync --extra cluster --extra rollout --extra dev --python 3.11
 
       - name: Decode release evidence manifest
         env:

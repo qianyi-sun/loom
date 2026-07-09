@@ -65,14 +65,14 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Sync python deps (with [cluster] extra)
+      - name: Sync python deps (with [cluster] and [rollout] extras)
         # Pin Python 3.11 to match what the loom Dockerfiles use
         # (python:3.11-slim). ubuntu-latest defaults to Python 3.12,
         # which can hit "no wheel for current platform" on pinned
         # transitive deps that haven't shipped 3.12 wheels.
         run: |
           uv python install 3.11
-          uv sync --extra cluster --python 3.11
+          uv sync --extra cluster --extra rollout --python 3.11
 
       - name: Build images (parallel)
         # Build all 5 loom images in parallel. Each gets the smoke

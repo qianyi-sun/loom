@@ -13,6 +13,7 @@ Thin shim that:
 from __future__ import annotations
 
 import argparse
+import importlib
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,12 @@ _STAGING_CLUSTER_NAME = "loom-staging"
 _STAGING_NAMESPACE = "loom-staging"
 _STAGING_DATA_ROOT = "/data/loom-staging"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+_ROLLOUT_RUNNER_REQUIRED_MODULES = (
+    "loom_benchmark_tool.register_cmd",
+    "loom_benchmarks.registry",
+    "loom_benchmarks.adapters.skilllearnbench",
+    "loom_benchmark_terminal_bench_2.adapter",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +96,26 @@ _ROLLOUT_PRESETS: dict[str, RolloutPreset] = {
     # Explicit selector is reserved now, but first-prod values are not ready.
     "prod": RolloutPreset(name="prod", configured=False),
 }
+
+
+def _rollout_runner_dependency_error() -> str | None:
+    missing: list[str] = []
+    for module in _ROLLOUT_RUNNER_REQUIRED_MODULES:
+        try:
+            importlib.import_module(module)
+        except ModuleNotFoundError as exc:
+            missing.append(f"{module} ({exc.name})")
+        except Exception as exc:
+            missing.append(f"{module} ({type(exc).__name__}: {exc})")
+    if not missing:
+        return None
+    return (
+        "rollout runner missing benchmark tooling required by catalog "
+        "provisioning: "
+        + ", ".join(missing)
+        + ". Run `uv sync --extra cluster --extra rollout --python 3.11` "
+        "in the rollout driver checkout, then rerun or resume."
+    )
 
 
 def _replayable_secret_source(source: str, *, flag_name: str) -> str:
@@ -750,6 +777,11 @@ def handle(args: argparse.Namespace) -> int:
                 f"  {step.number:02d} {step.name}\n"
             )
         return 0
+
+    dependency_error = _rollout_runner_dependency_error()
+    if dependency_error is not None:
+        sys.stderr.write(f"error: {dependency_error}\n")
+        return 2
 
     try:
         return run_rollout(ctx, steps, evidence)

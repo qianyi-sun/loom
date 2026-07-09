@@ -283,6 +283,8 @@ or library users do not pay for it:
 pip install "loom[cluster]"
 # or, in a uv-managed checkout:
 uv sync --extra cluster
+# staging/production rollout runners also need catalog benchmark tooling:
+uv sync --extra cluster --extra rollout
 ```
 
 ### Read-only status inspector
