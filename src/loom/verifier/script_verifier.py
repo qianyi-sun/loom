@@ -47,9 +47,10 @@ class ScriptVerifier:
         cmd = f"sh {self.script_path.as_posix()}"
         # Standard task-context env vars for verifier scripts:
         # - LOOM_TASK_DIR: where the bundle was materialized (DockerDriver
-        #   defaults to /workspace; other drivers may differ, but the
-        #   value here comes from the driver's workspace path via
-        #   `artifacts_dir.parent`).
+        #   defaults to /workspace; other drivers may differ). In normal
+        #   trial execution this comes from the task's configured workdir;
+        #   `artifacts_dir.parent` remains only a compatibility fallback
+        #   for direct verifier calls that do not provide a task.
         # - LOOM_AGENT_OUTPUT: if the task's first step declares exactly
         #   one artifact that is a bare file path (no glob metachars),
         #   resolve it against the workspace. Scripts that grade a single
@@ -59,7 +60,7 @@ class ScriptVerifier:
         #   verifier and don't need this variable set. See #688.
         # - LOOM_VERIFIER_OUTPUT: the path the script must write its
         #   result JSON to (unchanged; existing contract).
-        workspace = artifacts_dir.parent.as_posix()
+        workspace = _workspace_path(task, artifacts_dir=artifacts_dir)
         script_env = {
             "LOOM_TASK_DIR": workspace,
             "LOOM_VERIFIER_OUTPUT": _OUTPUT_PATH.as_posix(),
@@ -92,9 +93,7 @@ class ScriptVerifier:
                     **await _output_dir_post_mortem(env, _OUTPUT_PATH),
                 }
                 kind: Literal["exec_failure", "missing_output"] = (
-                    "exec_failure"
-                    if exec_result.return_code != 0
-                    else "missing_output"
+                    "exec_failure" if exec_result.return_code != 0 else "missing_output"
                 )
                 return VerifierResult(
                     rewards={},
@@ -142,8 +141,19 @@ def _agent_output_path(task: TaskConfig | None, *, workspace: str) -> str | None
     return f"{workspace.rstrip('/')}/{artifact.lstrip('/')}"
 
 
+def _workspace_path(
+    task: TaskConfig | None,
+    *,
+    artifacts_dir: PurePosixPath,
+) -> str:
+    if task is not None:
+        return task.environment.workdir.as_posix()
+    return artifacts_dir.parent.as_posix()
+
+
 async def _output_dir_post_mortem(
-    env: Driver, output_path: PurePosixPath,
+    env: Driver,
+    output_path: PurePosixPath,
 ) -> dict[str, object]:
     """Return a small dict describing the state of ``output_path.parent``.
 
