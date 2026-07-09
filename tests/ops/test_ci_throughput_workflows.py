@@ -47,17 +47,65 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
     jobs = workflow["jobs"]
 
-    assert jobs["repository-checks"]["name"] == "repository-checks"
-    assert set(jobs["repository-checks"]["needs"]) == {
+    assert jobs["fast-checks"]["name"] == "fast-checks"
+    assert set(jobs["fast-checks"]["needs"]) == {
         "workflow-plan",
         "lint-and-static",
         "tests-root",
         "tests-packages",
     }
+    assert jobs["integration"]["needs"] == "fast-checks"
+    assert jobs["integration-docker"]["needs"] == "fast-checks"
+    assert jobs["repository-checks"]["name"] == "repository-checks"
+    assert set(jobs["repository-checks"]["needs"]) == {
+        "workflow-plan",
+        "fast-checks",
+        "go-checks",
+        "integration",
+        "integration-docker",
+        "coverage-summary",
+    }
+    assert "always()" in jobs["repository-checks"]["if"]
     assert jobs["lint-and-static"]["needs"] == "workflow-plan"
     assert jobs["tests-root"]["needs"] == "workflow-plan"
     assert jobs["tests-packages"]["needs"] == "workflow-plan"
-    assert jobs["integration"]["needs"] == "repository-checks"
+
+    assert {
+        "docs_only",
+        "integration",
+        "integration_docker",
+        "images",
+        "cluster_smoke",
+        "staging_smoke",
+        "coverage_summary",
+    } <= set(jobs["workflow-plan"]["outputs"])
+
+    aggregate_step = next(
+        step
+        for step in jobs["repository-checks"]["steps"]
+        if step.get("name") == "Enforce selected validation results"
+    )
+    assert aggregate_step["env"] == {
+        "PLAN_RESULT": "${{ needs.workflow-plan.result }}",
+        "FAST_RESULT": "${{ needs.fast-checks.result }}",
+        "GO_RESULT": "${{ needs.go-checks.result }}",
+        "INTEGRATION_SELECTED": "${{ needs.workflow-plan.outputs.integration }}",
+        "INTEGRATION_RESULT": "${{ needs.integration.result }}",
+        "DOCKER_SELECTED": "${{ needs.workflow-plan.outputs.integration_docker }}",
+        "DOCKER_RESULT": "${{ needs.integration-docker.result }}",
+        "COVERAGE_SELECTED": "${{ needs.workflow-plan.outputs.coverage_summary }}",
+        "COVERAGE_RESULT": "${{ needs.coverage-summary.result }}",
+    }
+    aggregate_script = aggregate_step["run"]
+    for result_name in (
+        "PLAN_RESULT",
+        "FAST_RESULT",
+        "GO_RESULT",
+        "INTEGRATION_RESULT",
+        "DOCKER_RESULT",
+        "COVERAGE_RESULT",
+    ):
+        assert f'"${result_name}"' in aggregate_script
 
 
 def test_ci_supports_merge_queue_merge_group_event() -> None:
@@ -119,7 +167,7 @@ def test_repository_checks_writes_default_fast_coverage_summary() -> None:
     jobs = workflow["jobs"]
     coverage_step = next(
         step
-        for step in jobs["repository-checks"]["steps"]
+        for step in jobs["fast-checks"]["steps"]
         if step.get("name") == "Coverage gate + summary (fast tier)"
     )
 
@@ -131,15 +179,14 @@ def test_combined_coverage_summary_is_opt_in() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
     coverage_summary_if = workflow["jobs"]["coverage-summary"]["if"]
 
-    assert "ci:coverage-summary" in coverage_summary_if
-    assert "ci:integration" in coverage_summary_if
+    assert "needs.workflow-plan.outputs.coverage_summary == 'true'" in coverage_summary_if
 
 
 def test_repository_checks_uses_lightweight_coverage_tooling() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
-    repository_steps = workflow["jobs"]["repository-checks"]["steps"]
-    step_names = {step.get("name") for step in repository_steps}
-    run_blocks = "\n".join(step.get("run", "") for step in repository_steps)
+    fast_steps = workflow["jobs"]["fast-checks"]["steps"]
+    step_names = {step.get("name") for step in fast_steps}
+    run_blocks = "\n".join(step.get("run", "") for step in fast_steps)
 
     assert "Install uv" not in step_names
     assert "Set up Python 3.11" not in step_names

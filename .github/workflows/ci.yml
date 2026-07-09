@@ -24,8 +24,8 @@ on:
         type: boolean
         default: false
 
-# Cancel in-flight PR runs when a newer push arrives. Pushes to dev/main
-# still run the required fast gate to completion.
+# Cancel in-flight PR runs when a newer push arrives. Push runs are never
+# cancelled by this workflow.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -41,7 +41,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      docs_only: ${{ steps.docs_only.outputs.docs_only }}
+      docs_only: ${{ steps.plan.outputs.docs_only }}
+      integration: ${{ steps.plan.outputs.integration }}
+      integration_docker: ${{ steps.plan.outputs.integration_docker }}
+      images: ${{ steps.plan.outputs.images }}
+      cluster_smoke: ${{ steps.plan.outputs.cluster_smoke }}
+      staging_smoke: ${{ steps.plan.outputs.staging_smoke }}
+      coverage_summary: ${{ steps.plan.outputs.coverage_summary }}
     # Skip on push to dev: every squash-merge to dev carries the same
     # content the PR CI just validated, so re-running burns minutes
     # for no signal. Push to main still runs (release-branch safety
@@ -54,47 +60,64 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Detect docs-only PR
-        id: docs_only
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
+
+      - name: Plan required validations
+        id: plan
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          DISPATCH_INTEGRATION: ${{ inputs.integration }}
+          DISPATCH_INTEGRATION_DOCKER: ${{ inputs.integration_docker }}
         run: |
           set -euo pipefail
-          docs_only=false
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            docs_only=true
-            changed_files=$(git diff --name-only \
-              "${{ github.event.pull_request.base.sha }}" \
-              "${{ github.event.pull_request.head.sha }}")
-            if [[ -z "$changed_files" ]]; then
-              docs_only=false
-            else
-              while IFS= read -r path; do
-                case "$path" in
-                  .github/CODEOWNERS)
-                    ;;
-                  .github/PULL_REQUEST_TEMPLATE.md)
-                    ;;
-                  .github/ISSUE_TEMPLATE/*)
-                    ;;
-                  *.md|docs/*|.gitignore|LICENSE|.editorconfig)
-                    ;;
-                  *)
-                    docs_only=false
-                    break
-                    ;;
-                esac
-              done <<< "$changed_files"
-            fi
+          case "$EVENT_NAME" in
+            pull_request|merge_group)
+              git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
+                > /tmp/loom-changed-files.txt
+              ;;
+            push)
+              if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
+                git ls-tree -r --name-only "$HEAD_SHA" \
+                  > /tmp/loom-changed-files.txt
+              else
+                git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
+                  > /tmp/loom-changed-files.txt
+              fi
+              ;;
+            workflow_dispatch)
+              git show --pretty=format: --name-only "$HEAD_SHA" \
+                > /tmp/loom-changed-files.txt
+              if [[ "$DISPATCH_INTEGRATION" == "true" && \
+                    "$DISPATCH_INTEGRATION_DOCKER" == "true" ]]; then
+                PR_LABELS_JSON='["ci:integration","ci:integration-docker"]'
+              elif [[ "$DISPATCH_INTEGRATION" == "true" ]]; then
+                PR_LABELS_JSON='["ci:integration"]'
+              elif [[ "$DISPATCH_INTEGRATION_DOCKER" == "true" ]]; then
+                PR_LABELS_JSON='["ci:integration-docker"]'
+              fi
+              ;;
+            *)
+              echo "Unsupported event: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+          sort -u -o /tmp/loom-changed-files.txt /tmp/loom-changed-files.txt
+          if [[ -z "$PR_LABELS_JSON" || "$PR_LABELS_JSON" == "null" ]]; then
+            PR_LABELS_JSON='[]'
           fi
-          echo "docs_only=${docs_only}" >> "$GITHUB_OUTPUT"
-          {
-            echo "## repository-checks input"
-            echo ""
-            echo "docs_only=${docs_only}"
-          } >> "$GITHUB_STEP_SUMMARY"
+          uv run python scripts/plan_ci_validations.py \
+            --changed-files /tmp/loom-changed-files.txt \
+            --labels-json "$PR_LABELS_JSON" \
+            --event-name "$EVENT_NAME" \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Docs-only fast path
-        if: steps.docs_only.outputs.docs_only == 'true'
+        if: steps.plan.outputs.docs_only == 'true'
         run: echo "Only docs/repo metadata changed; heavy checks skipped."
 
   lint-and-static:
@@ -266,12 +289,10 @@ jobs:
           include-hidden-files: true
           if-no-files-found: warn
 
-  # Job name must stay `repository-checks` — the dev branch protection
-  # rule lists this exact context as a required status check. The heavy
-  # work runs in parallel jobs above; this aggregator keeps the protected
-  # context stable and owns the final fast-tier coverage gate.
-  repository-checks:
-    name: repository-checks
+  # The fast Python checks run in parallel above; this aggregator owns
+  # their result validation and the final fast-tier coverage gate.
+  fast-checks:
+    name: fast-checks
     runs-on: ubuntu-latest
     needs:
       - workflow-plan
@@ -284,6 +305,8 @@ jobs:
       (github.event_name != 'push' || github.ref != 'refs/heads/dev')
     outputs:
       docs_only: ${{ needs.workflow-plan.outputs.docs_only }}
+      integration: ${{ needs.workflow-plan.outputs.integration }}
+      integration_docker: ${{ needs.workflow-plan.outputs.integration_docker }}
     steps:
       - uses: actions/checkout@v5
 
@@ -379,10 +402,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
 
-  # Go binary checks (#78 Phase B). Separate from repository-checks
-  # because Go is its own toolchain — running it here keeps Python CI
-  # latency low and avoids cross-language contamination. Not required
-  # by branch protection; signal-only until Phase B lands in earnest.
+  # Go binary checks (#78 Phase B). This stays separate from fast-checks
+  # because Go is its own toolchain; the final repository-checks job waits
+  # for both toolchains without increasing Python CI latency.
   go-checks:
     name: go-checks
     runs-on: ubuntu-latest
@@ -410,16 +432,13 @@ jobs:
   # Excludes the `@pytest.mark.docker` tests (real DockerDriver,
   # network-policy, trial-e2e, subprocess-agent, gateway-with-litellm).
   # Issue #7: split into fast + docker tiers so the fast tier fits in
-  # ~10 min and the docker tier opts in.
+  # ~10 min and the planner selects each tier from paths or opt-in labels.
   integration:
     name: integration
     runs-on: ubuntu-latest
-    needs: repository-checks
+    needs: fast-checks
     timeout-minutes: 20
-    if: >-
-      (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'ci:integration')) ||
-      (github.event_name == 'workflow_dispatch' && inputs.integration)
+    if: needs.fast-checks.outputs.integration == 'true'
     steps:
       - uses: actions/checkout@v5
 
@@ -471,17 +490,14 @@ jobs:
 
   # Docker-heavy tier: real DockerDriver / network-policy / trial-e2e /
   # subprocess-agent / gateway-with-litellm. Cost ~15-25 min and
-  # spins up dozens of containers, so this is opt-in via the
-  # `ci:integration-docker` label or a workflow_dispatch input.
+  # spins up dozens of containers, so the planner limits it to relevant
+  # paths, the `ci:integration-docker` label, or a workflow_dispatch input.
   integration-docker:
     name: integration-docker
     runs-on: ubuntu-latest
-    needs: repository-checks
+    needs: fast-checks
     timeout-minutes: 40
-    if: >-
-      (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'ci:integration-docker')) ||
-      (github.event_name == 'workflow_dispatch' && inputs.integration_docker)
+    if: needs.fast-checks.outputs.integration_docker == 'true'
     steps:
       - uses: actions/checkout@v5
 
@@ -519,7 +535,7 @@ jobs:
             --durations=15
 
   # Optional PR-only combined coverage summary. The default fast-tier
-  # summary is written by repository-checks so ordinary PRs do not
+  # summary is written by fast-checks so ordinary PRs do not
   # start another runner only for summary text. Apply ci:integration
   # or ci:coverage-summary when combined coverage details are useful.
   # This used to post a PR comment via `gh pr comment`; step summary
@@ -527,14 +543,12 @@ jobs:
   coverage-summary:
     name: coverage-summary
     runs-on: ubuntu-latest
-    needs: [repository-checks, integration]
+    needs: [workflow-plan, fast-checks, integration]
     if: >-
       always() &&
-      github.event_name == 'pull_request' &&
-      (contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') ||
-       contains(github.event.pull_request.labels.*.name, 'ci:integration')) &&
-      needs.repository-checks.result == 'success' &&
-      needs.repository-checks.outputs.docs_only != 'true'
+      needs.workflow-plan.outputs.coverage_summary == 'true' &&
+      needs.fast-checks.result == 'success' &&
+      needs.fast-checks.outputs.docs_only != 'true'
     permissions:
       contents: read
     steps:
@@ -605,3 +619,54 @@ jobs:
             echo ""
             echo "Per-file XML attached as the \`coverage-xml-fast\` workflow artifact. Tracking #260."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Job name must stay `repository-checks` — the dev branch protection
+  # rule lists this exact context as a required status check. It is the
+  # final aggregate for every CI validation selected by workflow-plan.
+  repository-checks:
+    name: repository-checks
+    runs-on: ubuntu-latest
+    if: always() && (github.event_name != 'push' || github.ref != 'refs/heads/dev')
+    needs:
+      - workflow-plan
+      - fast-checks
+      - go-checks
+      - integration
+      - integration-docker
+      - coverage-summary
+    steps:
+      - name: Enforce selected validation results
+        env:
+          PLAN_RESULT: ${{ needs.workflow-plan.result }}
+          FAST_RESULT: ${{ needs.fast-checks.result }}
+          GO_RESULT: ${{ needs.go-checks.result }}
+          INTEGRATION_SELECTED: ${{ needs.workflow-plan.outputs.integration }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+          DOCKER_SELECTED: ${{ needs.workflow-plan.outputs.integration_docker }}
+          DOCKER_RESULT: ${{ needs.integration-docker.result }}
+          COVERAGE_SELECTED: ${{ needs.workflow-plan.outputs.coverage_summary }}
+          COVERAGE_RESULT: ${{ needs.coverage-summary.result }}
+        run: |
+          set -euo pipefail
+          require_success() {
+            local name="$1" result="$2"
+            if [[ "$result" != "success" ]]; then
+              echo "FAIL: ${name} result=${result}" >&2
+              exit 1
+            fi
+          }
+          require_selected() {
+            local selected="$1" name="$2" result="$3"
+            if [[ "$selected" == "true" ]]; then
+              require_success "$name" "$result"
+            elif [[ "$result" != "skipped" && "$result" != "success" ]]; then
+              echo "FAIL: unselected ${name} ended ${result}" >&2
+              exit 1
+            fi
+          }
+          require_success workflow-plan "$PLAN_RESULT"
+          require_success fast-checks "$FAST_RESULT"
+          require_success go-checks "$GO_RESULT"
+          require_selected "$INTEGRATION_SELECTED" integration "$INTEGRATION_RESULT"
+          require_selected "$DOCKER_SELECTED" integration-docker "$DOCKER_RESULT"
+          require_selected "$COVERAGE_SELECTED" coverage-summary "$COVERAGE_RESULT"
