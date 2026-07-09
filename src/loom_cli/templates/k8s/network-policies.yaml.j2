@@ -41,6 +41,7 @@ spec:
 {% if pgbouncer.enabled %}
         - podSelector: { matchLabels: { app: loom-pgbouncer } }
 {% endif %}
+        - podSelector: { matchLabels: { app: loom-family-orchestrator } }
       ports:
         - { port: 5432, protocol: TCP }
   egress:
@@ -160,6 +161,7 @@ spec:
         - podSelector: { matchLabels: { app: loom-worker } }
         - podSelector: { matchLabels: { app: loom-llm-gateway } }
         - podSelector: { matchLabels: { app: loom-minio } }
+        - podSelector: { matchLabels: { app: loom-family-orchestrator } }
       ports:
         - { port: 9000, protocol: TCP }
   egress:
@@ -237,6 +239,7 @@ spec:
     - from:
         - podSelector: { matchLabels: { app: loom-worker } }
         - podSelector: { matchLabels: { app: loom-service } }
+        - podSelector: { matchLabels: { app: loom-family-orchestrator } }
       ports:
         - { port: 9100, protocol: TCP }
   egress:
@@ -545,6 +548,7 @@ spec:
         - podSelector: { matchLabels: { app: loom-control-plane } }
         - podSelector: { matchLabels: { app: loom-llm-gateway } }
         - podSelector: { matchLabels: { app: loom-service } }
+        - podSelector: { matchLabels: { app: loom-family-orchestrator } }
       ports:
         - { port: 6432, protocol: TCP }
     # Prometheus scrape from any namespace pod (metrics on 9127).
@@ -577,3 +581,52 @@ spec:
         - { port: 53, protocol: UDP }
         - { port: 53, protocol: TCP }
 {% endif %}
+
+---
+# #672 family-runs: the orchestrator Deployment reaches Postgres (or
+# pgBouncer) for family_state reads, MinIO for state snapshots, and
+# the llm-gateway for skill_patcher_llm adapter LLM calls. Prometheus
+# scrape on 9090 from any namespace pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loom-family-orchestrator
+spec:
+  podSelector:
+    matchLabels: { app: loom-family-orchestrator }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - { port: 9090, protocol: TCP }
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app: loom-postgres } }
+        # CNPG-managed Postgres pods (topology.multi_node=true) — #642
+        - podSelector: { matchLabels: { cnpg.io/cluster: loom-postgres } }
+      ports:
+        - { port: 5432, protocol: TCP }
+{% if pgbouncer.enabled %}
+    - to:
+        - podSelector: { matchLabels: { app: loom-pgbouncer } }
+      ports:
+        - { port: 6432, protocol: TCP }
+{% endif %}
+    - to:
+        - podSelector: { matchLabels: { app: loom-minio } }
+      ports:
+        - { port: 9000, protocol: TCP }
+    - to:
+        - podSelector: { matchLabels: { app: loom-llm-gateway } }
+      ports:
+        - { port: 9100, protocol: TCP }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
