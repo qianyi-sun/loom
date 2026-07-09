@@ -5341,6 +5341,12 @@ kubectl -n <ns> patch secret loom-secrets --type=merge -p '{
 kubectl -n <ns> rollout restart deploy/loom-family-orchestrator
 ```
 
+The keys are schema-owned so `loom cluster preflight` does not report
+them as orphan secrets, but `loom cluster bootstrap-secrets` intentionally
+does not emit placeholder values for them. Leave them absent until the
+operator is ready to enable an LLM-backed family adapter, then patch the
+real team id/token as above.
+
 Both keys are marked `optional: true` on the Deployment so the
 orchestrator boots without them — it just logs
 `family_orchestrator_gateway_unconfigured` and refuses to call

@@ -189,7 +189,7 @@ entry needs it on day one.
 | `src/loom_cli/cluster_config.py` | Replaced with a generic loader walking `render_config`. Unknown TOML keys raise as today | yes |
 | `config/cluster-config.example.toml` | Generated from `render_config` defaults + descriptions, committed so operators have a copy-paste starting point | yes |
 | `loom cluster doctor` | New CLI. Walks the schema against a target cluster: every required Secret key exists in `loom-secrets`, every rendered env var is present in each running pod's env block, and no orphan settings exist. "Rendered env var" means required, defaulted, secret-backed, or explicitly injected by the Kubernetes template; optional runtime-derived settings can stay unset without producing `missing_env`. Exit 1 on any violation. Wired into `loom cluster preflight` | new code |
-| `loom cluster bootstrap-secrets` | New CLI. Walks `secret` entries, emits one `kubectl create secret generic loom-secrets --from-literal=...` line. `--rotate` runs each entry's `generate:` command and substitutes the new value | new code |
+| `loom cluster bootstrap-secrets` | New CLI. Walks `secret` entries and bootstrappable `infra_secrets`, emits one `kubectl create secret generic loom-secrets --from-literal=...` line. `--rotate` runs each entry's `generate:` command and substitutes the new value. Optional schema-owned infra secrets can set `bootstrap = false` so doctor owns live keys without creating placeholder credentials on fresh clusters. | new code |
 
 ## Codegen rules (`_generated.py`)
 

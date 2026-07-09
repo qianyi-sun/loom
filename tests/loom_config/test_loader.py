@@ -52,6 +52,13 @@ default     = "0.7"
 [render_config.provider_egress_allowlist]
 python_type = "str_list"
 default     = []
+
+[infra_secrets.required-infra]
+description = "required infra key"
+
+[infra_secrets.optional-infra]
+description = "owned but not bootstrapped"
+bootstrap   = false
 """,
         encoding="utf-8",
     )
@@ -68,6 +75,8 @@ def test_loads_valid_schema(tmp_path: Path) -> None:
     ]
     assert "image_tag" in schema.render_config
     assert schema.render_config["provider_egress_allowlist"].default == []
+    assert schema.infra_secrets["required-infra"].bootstrap is True
+    assert schema.infra_secrets["optional-infra"].bootstrap is False
 
 
 def test_service_config_for_filters_by_used_by(tmp_path: Path) -> None:

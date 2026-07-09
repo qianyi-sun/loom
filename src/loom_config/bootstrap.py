@@ -73,7 +73,11 @@ def _all_secret_keys(schema: Schema) -> set[str]:
             continue
         for svc in e.used_by:
             keys.add(e.secret_key_for(svc))
-    keys.update(schema.infra_secrets)
+    keys.update(
+        key
+        for key, entry in schema.infra_secrets.items()
+        if entry.bootstrap
+    )
     return keys
 
 
