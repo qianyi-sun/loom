@@ -881,3 +881,4 @@ jobs:
           else
             [[ "$SMOKE_RESULT" == "skipped" || "$SMOKE_RESULT" == "success" ]] || exit 1
             [[ "$AWS_S3_RESULT" == "skipped" || "$AWS_S3_RESULT" == "success" ]] || exit 1
+          fi

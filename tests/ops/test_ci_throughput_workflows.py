@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,32 @@ def test_images_merge_groups_do_not_publish_or_use_queue_ref_tags() -> None:
         '  echo "push_flag=--push" >> "$GITHUB_OUTPUT"\n'
         "fi"
     ) in ref_step["run"]
+
+
+def test_stable_gate_scripts_have_valid_bash_syntax() -> None:
+    invalid_gates: dict[str, str] = {}
+    for workflow_path, gate_id in (
+        (".github/workflows/images.yml", "images-gate"),
+        (".github/workflows/cluster-smoke.yml", "cluster-smoke-gate"),
+        (".github/workflows/staging-smoke.yml", "staging-smoke-gate"),
+    ):
+        workflow = _workflow(workflow_path)
+        gate_step = next(
+            step
+            for step in workflow["jobs"][gate_id]["steps"]
+            if step.get("name", "").startswith("Enforce selected")
+        )
+        result = subprocess.run(
+            ["bash", "-n"],
+            input=gate_step["run"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode:
+            invalid_gates[gate_id] = result.stderr
+
+    assert not invalid_gates, invalid_gates
 
 
 def test_optional_validation_workflows_have_stable_gate_contexts() -> None:

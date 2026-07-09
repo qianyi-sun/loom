@@ -279,3 +279,4 @@ jobs:
             [[ "$SMOKE_RESULT" == "success" ]] || exit 1
           else
             [[ "$SMOKE_RESULT" == "skipped" || "$SMOKE_RESULT" == "success" ]] || exit 1
+          fi
