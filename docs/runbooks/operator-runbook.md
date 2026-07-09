@@ -1276,9 +1276,9 @@ that drops the env vars breaks CI before the rollout does.
 ## One-command rollout driver (#340)
 
 `loom cluster rollout` orchestrates the full staging rollout: resolve
-target ref → worktree → build → kind-load → backup → audit → render →
-preflight → migrate → env-state → GB10 prep → cluster up → production
-defaults → release-gate → smoke → summary. Every step writes evidence
+target ref → worktree → build → kind-cluster → kind-load → backup → audit →
+render → preflight → migrate → env-state → GB10 prep → cluster up →
+production defaults → release-gate → smoke → summary. Every step writes evidence
 into a per-rollout directory tree; a re-run of the same command safely
 resumes from the interrupted step. The driver also records its process owner in
 `state.json`; a second invocation refuses while the previous driver is still
@@ -1592,7 +1592,8 @@ desired state.
 | 00 | resolve-target | git rev-parse; validates image-tag ↔ sha7 |
 | 01 | worktree | `git worktree add` at target sha |
 | 02 | build-images | `docker build` × every rollout-critical image (#365) |
-| 03 | kind-load-images | candidate-source `loom cluster load-images` (#96) |
+| 03 | kind-cluster | Ensure the staging kind cluster, kubeconfig, namespace, and backup-manifest Kubernetes secrets exist before any image load or migration (#206) |
+| 04 | kind-load-images | candidate-source `loom cluster load-images` (#96) |
 | 05 | backup | candidate-source `loom cluster backup check --manifest <path> --min-remaining-hours <N>` (#363, #619 freshness buffer) |
 | 06 | audit | candidate-source `loom cluster audit` |
 | 07 | render | candidate-source `loom cluster render` → `rendered.yaml` |

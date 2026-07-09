@@ -10,6 +10,7 @@ from loom_cli.rollout.steps.base import Step
 from loom_cli.rollout.steps.s00_resolve_target import ResolveTargetStep
 from loom_cli.rollout.steps.s01_worktree import WorktreeStep
 from loom_cli.rollout.steps.s02_build_images import BuildImagesStep
+from loom_cli.rollout.steps.s03_kind_cluster import KindClusterStep
 from loom_cli.rollout.steps.s03_kind_load_images import KindLoadImagesStep
 from loom_cli.rollout.steps.s04_gb10_prep import GB10PrepStep
 from loom_cli.rollout.steps.s05_backup import BackupStep
@@ -26,15 +27,16 @@ from loom_cli.rollout.steps.s99_summary import SummaryStep
 
 
 def default_step_sequence() -> list[Step]:
-    """Return the standard 15-step + summary rollout sequence.
+    """Return the standard 16-step + summary rollout sequence.
 
     The order is significant: dependencies flow left-to-right (worktree
-    is required by build; build by kind-load; render by migrate; etc.).
+    is required by build; kind-cluster by kind-load; render by migrate; etc.).
     """
     return [
         ResolveTargetStep(),
         WorktreeStep(),
         BuildImagesStep(),
+        KindClusterStep(),
         KindLoadImagesStep(),
         BackupStep(),
         AuditStep(),

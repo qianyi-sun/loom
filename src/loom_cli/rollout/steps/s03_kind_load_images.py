@@ -43,7 +43,7 @@ def _loom_cluster_load_images_argv(
 
 
 class KindLoadImagesStep(BaseStep):
-    number = 3
+    number = 4
     name = "kind-load-images"
 
     def _inputs_fingerprint(self, ctx: RolloutContext) -> dict[str, object]:

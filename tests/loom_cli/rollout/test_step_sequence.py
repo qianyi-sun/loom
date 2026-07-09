@@ -49,6 +49,7 @@ class TestDefaultStepSequence:
             "resolve-target",
             "worktree",
             "build-images",
+            "kind-cluster",
             "kind-load-images",
             "gb10-prep",
             "backup",
@@ -65,6 +66,12 @@ class TestDefaultStepSequence:
         }
         got = {s.name for s in default_step_sequence()}
         assert got == expected, f"unexpected step names: {got ^ expected}"
+
+    def test_missing_kind_cluster_recovery_runs_before_image_load(self) -> None:
+        names = [s.name for s in default_step_sequence()]
+
+        assert names.index("kind-cluster") < names.index("kind-load-images")
+        assert names.index("kind-load-images") < names.index("migrate")
 
     def test_gb10_prep_runs_after_desired_state_apply(self) -> None:
         """GB10 node-agent must not apply a stale release target.
