@@ -307,9 +307,27 @@ def _extract_content(response: dict[str, Any]) -> str:
         ) from exc
 
 
+def _strip_markdown_fences(raw: str) -> str:
+    """Strip ```json ... ``` (or bare ```) fences the LLM may wrap around
+    the patch JSON. Anthropic Claude Haiku 4.5, for one, defaults to
+    fenced output when the caller doesn't force JSON mode — dropping
+    the fences here is safer than teaching every dialect's prompt to
+    say "no fences please" and hoping the model obeys.
+    """
+    text = raw.strip()
+    if not text.startswith("```"):
+        return text
+    # First line is ``` or ```json (or ```yaml etc.); drop it.
+    _, _, rest = text.partition("\n")
+    # Last line is closing ``` — drop it.
+    body, _, _ = rest.rpartition("```")
+    return body.strip()
+
+
 def _parse_patch(raw: str) -> SkillPatch:
+    cleaned = _strip_markdown_fences(raw)
     try:
-        payload = json.loads(raw)
+        payload = json.loads(cleaned)
     except json.JSONDecodeError as exc:
         raise PatchValidationError(
             f"evolver returned non-JSON: {exc}: {raw[:200]!r}",
