@@ -83,7 +83,7 @@ Attach these to the release issue or release PR:
   `loom providers test`, `loom providers models`, `loom eval batch create`,
   `loom eval batch show`, `loom eval trial show`, and
   `loom eval trial download`.
-- Benchmark catalog provisioning evidence from `loom cluster rollout` step 10
+- Benchmark catalog provisioning evidence from `loom cluster rollout` step 11
   (`catalog-provisioning.json`, redacted stdout/stderr logs) showing the
   committed staging profile's HF registration path,
   `loom datasets register <benchmark>` against the published HF manifest with
@@ -126,7 +126,7 @@ Attach these to the release issue or release PR:
   `ENV_CONFIG_VERSION` variables supplied. This must converge worker-pool
   autoscaler policies, GB10 desired state, and any external Slurm autoscaler
   supervisor before Monitor/resource-pool screenshots are used as evidence.
-  Protected rollout step 10 also materializes the candidate profile to
+  Protected rollout step 11 also materializes the candidate profile to
   `/data/loom-staging/environment-state/staging.toml` and records
   source/target sha256 plus mode evidence, so rerun/resume does not depend on a
   stale physical profile copy. For staging, the rendered

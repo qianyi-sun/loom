@@ -1323,7 +1323,7 @@ per node policy has a theoretical ceiling of 150 slots:
 ```
 
 The staging environment-state profile opts into rollout-owned materialization
-for these external runner prerequisites. During `loom cluster rollout`, step 10
+for these external runner prerequisites. During `loom cluster rollout`, step 11
 first syncs the candidate environment-state profile into the rollout root,
 then copies the latest matching staging GB10 env file template when the target
 `env_file` is missing, rewrites only release keys plus the active worker token

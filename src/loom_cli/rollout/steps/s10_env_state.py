@@ -1,4 +1,4 @@
-"""Step 10 — environment-state apply + desired-state check (#340, #593).
+"""Step 11 — environment-state apply + desired-state check (#340, #593).
 
 Applies the release environment-state profile (from cluster-config's
 declared path) and records an immediate check. Pure GB10 node-status drift is
@@ -1104,7 +1104,7 @@ def _materialize_external_slurm_runner_prerequisites(
 
 
 class EnvStateStep(BaseStep):
-    number = 10
+    number = 11
     name = "env-state"
 
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:

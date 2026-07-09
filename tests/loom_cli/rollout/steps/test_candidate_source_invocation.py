@@ -283,7 +283,7 @@ def test_env_state_resolves_loom_cli_without_global_executable(
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     worktree = _prepare_candidate_worktree(ev)
-    step_dir = ev.step_dir(10, "env-state")
+    step_dir = ev.step_dir(11, "env-state")
     profile = tmp_path / "staging.toml"
     profile.write_text('environment = "staging"\n')
     calls: list[dict[str, Any]] = []
@@ -336,7 +336,7 @@ def test_env_state_passes_pinned_admin_token_source_and_fingerprint(
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     _prepare_candidate_worktree(ev)
-    step_dir = ev.step_dir(10, "env-state")
+    step_dir = ev.step_dir(11, "env-state")
     profile = tmp_path / "staging.toml"
     profile.write_text('environment = "staging"\n')
     calls: list[list[str]] = []
@@ -380,7 +380,7 @@ def test_env_state_passes_worker_token_source_to_check_only(
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     _prepare_candidate_worktree(ev)
-    step_dir = ev.step_dir(10, "env-state")
+    step_dir = ev.step_dir(11, "env-state")
     profile = tmp_path / "staging.toml"
     profile.write_text('environment = "staging"\n')
     calls: list[list[str]] = []
@@ -422,7 +422,7 @@ def test_env_state_materializes_current_profile_under_rollout_root(
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     _prepare_candidate_worktree(ev)
-    step_dir = ev.step_dir(10, "env-state")
+    step_dir = ev.step_dir(11, "env-state")
     source_profile = tmp_path / "candidate" / "deploy" / "environment-state" / "staging.toml"
     source_profile.parent.mkdir(parents=True)
     source_profile.write_text(
@@ -485,7 +485,7 @@ def test_env_state_runs_catalog_provisioning_between_apply_and_check(
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     worktree = _prepare_candidate_worktree(ev)
-    step_dir = ev.step_dir(10, "env-state")
+    step_dir = ev.step_dir(11, "env-state")
     profile = tmp_path / "staging.toml"
     profile.write_text(
         f"""
@@ -617,7 +617,7 @@ def test_env_state_catalog_provisioning_forwards_cluster_local_db_and_minio(
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     worktree = _prepare_candidate_worktree(ev)
-    step_dir = ev.step_dir(10, "env-state")
+    step_dir = ev.step_dir(11, "env-state")
     profile = tmp_path / "staging.toml"
     profile.write_text(
         f"""
@@ -757,7 +757,7 @@ def test_env_state_fails_before_mutation_when_catalog_required_env_missing(
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     _prepare_candidate_worktree(ev)
-    step_dir = ev.step_dir(10, "env-state")
+    step_dir = ev.step_dir(11, "env-state")
     profile = tmp_path / "staging.toml"
     profile.write_text(
         """
@@ -797,7 +797,7 @@ def test_env_state_defers_gb10_node_status_drift_to_release_gate(
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     _prepare_candidate_worktree(ev)
-    step_dir = ev.step_dir(10, "env-state")
+    step_dir = ev.step_dir(11, "env-state")
     profile = tmp_path / "staging.toml"
     profile.write_text('environment = "staging"\n')
     calls: list[list[str]] = []
@@ -1255,7 +1255,7 @@ def test_cluster_up_runs_loom_cli_from_candidate_worktree(
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
     worktree = _prepare_candidate_worktree(ev)
-    step_dir = ev.step_dir(12, "cluster-up")
+    step_dir = ev.step_dir(10, "cluster-up")
     seen: dict[str, Any] = {}
 
     def fake_run(argv, **kwargs):
@@ -1342,7 +1342,7 @@ def test_rollout_cluster_commands_use_config_with_context_image_tag(
     rendered_config = Path(
         render_call["argv"][render_call["argv"].index("--config") + 1],
     )
-    cluster_up_argv = list(ClusterUpStep().argv(ctx, ev.step_dir(12, "cluster-up")))
+    cluster_up_argv = list(ClusterUpStep().argv(ctx, ev.step_dir(10, "cluster-up")))
     cluster_up_config = Path(cluster_up_argv[cluster_up_argv.index("--config") + 1])
     manifest_argv = list(
         ReleaseGateStep().release_manifest_argv(ctx, ev.step_dir(14, "release-gate")),
@@ -1399,7 +1399,7 @@ def test_rollout_cluster_config_is_stable_after_first_synthesis(
         'image_tag = "staging-old"\nnamespace = "changed-after-render"\n',
     )
 
-    cluster_up_argv = list(ClusterUpStep().argv(ctx, ev.step_dir(12, "cluster-up")))
+    cluster_up_argv = list(ClusterUpStep().argv(ctx, ev.step_dir(10, "cluster-up")))
     cluster_up_config = Path(cluster_up_argv[cluster_up_argv.index("--config") + 1])
     rendered_raw = tomllib.loads(cluster_up_config.read_text())
 
@@ -1517,7 +1517,7 @@ trt-gb10-1 = "active"
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
 
-    result = GB10PrepStep().run(ctx, ev.step_dir(11, "gb10-prep"))
+    result = GB10PrepStep().run(ctx, ev.step_dir(12, "gb10-prep"))
 
     assert result.exit_code == 1
     assert result.error is not None
@@ -1539,7 +1539,7 @@ def test_gb10_prep_requires_platform_dev_identity_file(
     )
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(11, "gb10-prep")
+    step_dir = ev.step_dir(12, "gb10-prep")
 
     result = GB10PrepStep().run(ctx, step_dir)
 
@@ -1568,7 +1568,7 @@ def test_gb10_prep_rejects_group_readable_identity_file(
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
 
-    result = GB10PrepStep().run(ctx, ev.step_dir(11, "gb10-prep"))
+    result = GB10PrepStep().run(ctx, ev.step_dir(12, "gb10-prep"))
 
     assert result.exit_code == 1
     assert result.error is not None
@@ -1604,7 +1604,7 @@ def test_gb10_prep_verify_treats_missing_target_env_as_retryable_mismatch(
 
     monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
 
-    outcome = GB10PrepStep().verify(ctx, ev.step_dir(11, "gb10-prep"))
+    outcome = GB10PrepStep().verify(ctx, ev.step_dir(12, "gb10-prep"))
 
     assert outcome is VerifyOutcome.MISMATCH
 
@@ -1637,7 +1637,7 @@ def test_gb10_prep_verify_keeps_ssh_auth_failure_unknown(
 
     monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
 
-    outcome = GB10PrepStep().verify(ctx, ev.step_dir(11, "gb10-prep"))
+    outcome = GB10PrepStep().verify(ctx, ev.step_dir(12, "gb10-prep"))
 
     assert outcome is VerifyOutcome.UNKNOWN
 
@@ -1690,7 +1690,7 @@ def test_gb10_prep_verify_checks_checkout_env_version_and_node_agent(
 
     monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
 
-    outcome = GB10PrepStep().verify(ctx, ev.step_dir(11, "gb10-prep"))
+    outcome = GB10PrepStep().verify(ctx, ev.step_dir(12, "gb10-prep"))
 
     assert outcome is VerifyOutcome.MISMATCH
     assert calls == [
@@ -1751,7 +1751,7 @@ def test_gb10_prep_verify_accepts_successful_oneshot_node_agent(
 
     monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
 
-    outcome = GB10PrepStep().verify(ctx, ev.step_dir(11, "gb10-prep"))
+    outcome = GB10PrepStep().verify(ctx, ev.step_dir(12, "gb10-prep"))
 
     assert outcome is VerifyOutcome.MATCH
     assert any("systemctl --user show" in call for call in calls)
@@ -1811,7 +1811,7 @@ def test_gb10_prep_verify_retries_when_legacy_worker_unit_is_enabled(
         )
 
     monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
-    step_dir = ev.step_dir(11, "gb10-prep")
+    step_dir = ev.step_dir(12, "gb10-prep")
 
     outcome = GB10PrepStep().verify(ctx, step_dir)
 
@@ -1856,7 +1856,7 @@ def test_gb10_prep_clones_preserves_env_and_starts_node_agent(
 
     monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
 
-    result = GB10PrepStep().run(ctx, ev.step_dir(11, "gb10-prep"))
+    result = GB10PrepStep().run(ctx, ev.step_dir(12, "gb10-prep"))
 
     assert result.exit_code == 0
     assert any(
@@ -1916,11 +1916,11 @@ def test_gb10_prep_runs_hosts_with_bounded_parallelism(
 
     step = GB10PrepStep()
     step.host_concurrency = 2
-    result = step.run(ctx, ev.step_dir(11, "gb10-prep"))
+    result = step.run(ctx, ev.step_dir(12, "gb10-prep"))
 
     assert result.exit_code == 0
     assert max_active == 2
-    stdout = ev.step_dir(11, "gb10-prep").stdout_path().read_text()
+    stdout = ev.step_dir(12, "gb10-prep").stdout_path().read_text()
     assert "started=3 succeeded=3 failed=0 retried=0 concurrency=2" in stdout
 
 
@@ -1970,14 +1970,14 @@ def test_gb10_prep_slow_failing_host_does_not_block_other_hosts(
     step = GB10PrepStep()
     step.host_concurrency = 2
     step.max_retries = 1
-    result = step.run(ctx, ev.step_dir(11, "gb10-prep"))
+    result = step.run(ctx, ev.step_dir(12, "gb10-prep"))
 
     assert result.exit_code == 1
     assert "trt-gb10-1" in str(result.error)
     assert progressed_while_host1_active
-    assert (ev.step_dir(11, "gb10-prep").path / "host-trt-gb10-2" / "prep.log").is_file()
-    assert (ev.step_dir(11, "gb10-prep").path / "host-trt-gb10-3" / "prep.log").is_file()
-    stdout = ev.step_dir(11, "gb10-prep").stdout_path().read_text()
+    assert (ev.step_dir(12, "gb10-prep").path / "host-trt-gb10-2" / "prep.log").is_file()
+    assert (ev.step_dir(12, "gb10-prep").path / "host-trt-gb10-3" / "prep.log").is_file()
+    stdout = ev.step_dir(12, "gb10-prep").stdout_path().read_text()
     assert "started=3 succeeded=2 failed=1 retried=0 concurrency=2" in stdout
 
 
@@ -2015,11 +2015,11 @@ def test_gb10_prep_retry_count_is_per_host_and_reported(
     step = GB10PrepStep()
     step.host_concurrency = 2
     step.backoff_sec = 0
-    result = step.run(ctx, ev.step_dir(11, "gb10-prep"))
+    result = step.run(ctx, ev.step_dir(12, "gb10-prep"))
 
     assert result.exit_code == 0
     assert attempts == {"trt-gb10-1": 2, "trt-gb10-2": 1}
-    stdout = ev.step_dir(11, "gb10-prep").stdout_path().read_text()
+    stdout = ev.step_dir(12, "gb10-prep").stdout_path().read_text()
     assert "started=2 succeeded=2 failed=0 retried=1 concurrency=2" in stdout
 
 

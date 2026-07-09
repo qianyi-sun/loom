@@ -73,16 +73,18 @@ class TestDefaultStepSequence:
         assert names.index("kind-cluster") < names.index("kind-load-images")
         assert names.index("kind-load-images") < names.index("migrate")
 
-    def test_gb10_prep_runs_after_desired_state_apply(self) -> None:
+    def test_cluster_up_runs_after_migration_before_desired_state_apply(self) -> None:
         """GB10 node-agent must not apply a stale release target.
 
-        GB10 prep can start the host-local node-agent. The control plane
-        desired state must therefore be updated before prep starts, and
-        prep must still run before cluster convergence and release-gate.
+        Missing-kind recovery has no standing Control Plane after migration, so
+        cluster-up must recreate platform services before env-state uses the CP
+        API. GB10 prep can start the host-local node-agent, so desired state
+        must still be updated before prep starts.
         """
         names = [s.name for s in default_step_sequence()]
+        assert names.index("migrate") < names.index("cluster-up")
+        assert names.index("cluster-up") < names.index("env-state")
         assert names.index("env-state") < names.index("gb10-prep")
-        assert names.index("gb10-prep") < names.index("cluster-up")
         assert names.index("gb10-prep") < names.index("release-gate")
 
     def test_release_gate_step_uses_env_state_and_gb10_status_artifacts(

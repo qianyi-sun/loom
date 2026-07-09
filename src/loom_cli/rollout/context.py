@@ -88,7 +88,7 @@ class RolloutContext:
             Refused when scope=full-cluster per the #340 acceptance criteria
             (you can't claim full-cluster acceptance while excluding a pool).
         gb10_prep_concurrency: Optional bounded host-level concurrency for
-            rollout step 11. ``None`` uses the step's conservative default.
+            rollout step 12. ``None`` uses the step's conservative default.
         resume: Whether this invocation is a resume of a prior run.
     """
 

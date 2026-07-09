@@ -92,7 +92,7 @@ def test_materializes_external_slurm_env_file_without_secret_evidence(
     )
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
-    step_dir = ev.step_dir(10, "env-state")
+    step_dir = ev.step_dir(11, "env-state")
 
     def fake_repo_materializer(*, repo_dir: Path, **_: Any) -> dict[str, Any]:
         repo_dir.mkdir(parents=True, exist_ok=True)
@@ -153,7 +153,7 @@ def test_env_state_materializes_external_prereqs_before_apply_check(
     package_dir = worktree / "src" / "loom_cli"
     package_dir.mkdir(parents=True)
     (package_dir / "__main__.py").write_text("raise SystemExit(0)\n")
-    step_dir = ev.step_dir(10, "env-state")
+    step_dir = ev.step_dir(11, "env-state")
     profile = tmp_path / "staging.toml"
     profile.write_text('environment = "staging"\n', encoding="utf-8")
     order: list[str] = []
