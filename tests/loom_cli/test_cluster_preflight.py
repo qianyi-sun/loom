@@ -23,6 +23,7 @@ from loom_cli.cluster_cmd import (
     _check_namespace_exists,
     _check_pss_enforce,
     _check_required_secrets,
+    _check_workload_trust_contract,
     _format_preflight_json,
     _format_preflight_table,
     collect_preflight,
@@ -45,6 +46,14 @@ class _Spec:
     def __init__(self, **kwargs: Any) -> None:
         for k, v in kwargs.items():
             setattr(self, k, v)
+
+
+_VALID_WORKLOAD_CONTRACT = {
+    "workload_trust_mode": "internal_trusted",
+    "taskset_transforms_enabled": False,
+    "taskset_transform_network_isolated": False,
+    "untrusted_workload_isolation": False,
+}
 
 
 class _FakeCoreV1:
@@ -357,6 +366,7 @@ def test_collect_preflight_passes_protected_storage_with_recent_manifest(
         context=None,
         environment="staging",
         backup_manifest=manifest,
+        workload_contract_profile=_VALID_WORKLOAD_CONTRACT,
     )
 
     by_name = {check.name: check for check in report.checks}
@@ -424,6 +434,7 @@ def test_collect_preflight_passes_static_retain_pvs_despite_local_path_default(
         context=None,
         environment="staging",
         backup_manifest=manifest,
+        workload_contract_profile=_VALID_WORKLOAD_CONTRACT,
     )
 
     by_name = {check.name: check for check in report.checks}
@@ -463,6 +474,7 @@ def test_collect_preflight_passes_static_host_path_config_before_pvcs_exist(
         environment="staging",
         backup_manifest=manifest,
         cluster_config=cfg,
+        workload_contract_profile=_VALID_WORKLOAD_CONTRACT,
     )
 
     by_name = {check.name: check for check in report.checks}
@@ -527,6 +539,7 @@ def test_collect_preflight_passes_partial_static_host_path_recovery_state(
         environment="staging",
         backup_manifest=manifest,
         cluster_config=cfg,
+        workload_contract_profile=_VALID_WORKLOAD_CONTRACT,
     )
 
     by_name = {check.name: check for check in report.checks}
@@ -567,6 +580,7 @@ def test_collect_preflight_fails_kind_static_host_path_without_host_bind_mount(
         environment="staging",
         backup_manifest=manifest,
         cluster_config=cfg,
+        workload_contract_profile=_VALID_WORKLOAD_CONTRACT,
         kind_node_mounts=[
             {"Type": "volume", "Source": "kind-var", "Destination": "/var"},
         ],
@@ -609,6 +623,7 @@ def test_collect_preflight_passes_kind_static_host_path_with_host_bind_mount(
         environment="staging",
         backup_manifest=manifest,
         cluster_config=cfg,
+        workload_contract_profile=_VALID_WORKLOAD_CONTRACT,
         kind_node_mounts=[
             {
                 "Type": "bind",
@@ -774,6 +789,139 @@ def test_collect_preflight_warn_does_not_set_any_fail() -> None:
     assert not report.any_fail
     # all_pass is False because PSS is warn (not pass).
     assert not report.all_pass
+
+
+@pytest.mark.parametrize("environment", ["staging", "production"])
+def test_protected_preflight_accepts_the_exact_v1_workload_contract(
+    environment: str,
+) -> None:
+    check = _check_workload_trust_contract(
+        environment=environment,
+        workload_contract_profile=_VALID_WORKLOAD_CONTRACT,
+    )
+
+    assert check.name == "workload-trust-contract"
+    assert check.outcome == "pass"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("workload_trust_mode", "untrusted_isolated"),
+        ("taskset_transforms_enabled", True),
+        ("taskset_transform_network_isolated", True),
+        ("untrusted_workload_isolation", True),
+    ],
+)
+def test_protected_preflight_rejects_each_non_v1_workload_contract_field(
+    field: str,
+    value: object,
+) -> None:
+    profile = {**_VALID_WORKLOAD_CONTRACT, field: value}
+
+    check = _check_workload_trust_contract(
+        environment="staging",
+        workload_contract_profile=profile,
+    )
+
+    assert check.name == "workload-trust-contract"
+    assert check.outcome == "fail"
+    assert field in check.detail
+    assert check.remediation is not None
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        None,
+        {
+            key: value
+            for key, value in _VALID_WORKLOAD_CONTRACT.items()
+            if key != "untrusted_workload_isolation"
+        },
+        "not-a-workload-contract-table",
+    ],
+)
+def test_protected_preflight_fails_closed_for_missing_or_malformed_workload_contract(
+    profile: object,
+) -> None:
+    check = _check_workload_trust_contract(
+        environment="production",
+        workload_contract_profile=profile,
+    )
+
+    assert check.name == "workload-trust-contract"
+    assert check.outcome == "fail"
+    assert check.remediation is not None
+
+
+def test_protected_preflight_does_not_echo_unknown_workload_contract_field_name() -> None:
+    raw_field = "hf_abcdefghijklmnopqrstuvwxyz1234567890"
+    check = _check_workload_trust_contract(
+        environment="staging",
+        workload_contract_profile={**_VALID_WORKLOAD_CONTRACT, raw_field: False},
+    )
+
+    assert check.outcome == "fail"
+    assert raw_field not in check.detail
+
+
+def test_development_preflight_does_not_enforce_protected_workload_contract() -> None:
+    report = collect_preflight(
+        _FakeCoreV1(secrets={"loom-secrets", "loom-admin-secret"}),
+        _FakeNetworkingV1(["nginx"]),
+        _FakeStorageV1([("standard", True)]),
+        "loom-development",
+        context=None,
+        environment="development",
+        workload_contract_profile=None,
+    )
+
+    assert "workload-trust-contract" not in {check.name for check in report.checks}
+
+
+@pytest.mark.parametrize(
+    "workload_contract_toml",
+    [
+        "",
+        'workload_contract = "not-a-profile-table"\n',
+        "[workload_contract\n",
+    ],
+)
+def test_cli_protected_preflight_reports_missing_or_malformed_workload_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    workload_contract_toml: str,
+) -> None:
+    config_path = tmp_path / "staging.cluster.toml"
+    config_path.write_text(
+        'namespace = "loom-staging"\n' + workload_contract_toml,
+        encoding="utf-8",
+    )
+    _patch_clients(
+        monkeypatch,
+        core=_FakeCoreV1(secrets={"loom-secrets", "loom-admin-secret"}),
+        net=_FakeNetworkingV1(["nginx"]),
+        storage=_FakeStorageV1([("standard", True)]),
+    )
+
+    rc = main(
+        [
+            "cluster",
+            "preflight",
+            "--namespace",
+            "loom-staging",
+            "--environment",
+            "staging",
+            "--config",
+            str(config_path),
+            "--no-doctor",
+        ]
+    )
+
+    assert rc == 1
+    assert "workload-trust-contract" in capsys.readouterr().out
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1092,7 +1240,12 @@ def test_cli_preflight_config_allows_static_host_path_before_pvcs_exist(
     cfg.write_text(
         'namespace = "loom-staging"\n'
         'persistent_storage_backend = "static-host-path"\n'
-        'persistent_storage_host_path_root = "/data/loom-staging"\n',
+        'persistent_storage_host_path_root = "/data/loom-staging"\n'
+        "[workload_contract]\n"
+        'workload_trust_mode = "internal_trusted"\n'
+        "taskset_transforms_enabled = false\n"
+        "taskset_transform_network_isolated = false\n"
+        "untrusted_workload_isolation = false\n",
         encoding="utf-8",
     )
     _patch_clients(
@@ -1139,7 +1292,12 @@ def test_cli_preflight_threads_kind_node_mounts_for_static_host_path(
     cfg.write_text(
         'namespace = "loom-staging"\n'
         'persistent_storage_backend = "static-host-path"\n'
-        'persistent_storage_host_path_root = "/data/loom-staging"\n',
+        'persistent_storage_host_path_root = "/data/loom-staging"\n'
+        "[workload_contract]\n"
+        'workload_trust_mode = "internal_trusted"\n'
+        "taskset_transforms_enabled = false\n"
+        "taskset_transform_network_isolated = false\n"
+        "untrusted_workload_isolation = false\n",
         encoding="utf-8",
     )
     mounts = [
@@ -1218,7 +1376,12 @@ def test_cli_preflight_uses_current_kind_context_for_static_host_path(
     cfg.write_text(
         'namespace = "loom-staging"\n'
         'persistent_storage_backend = "static-host-path"\n'
-        'persistent_storage_host_path_root = "/data/loom-staging"\n',
+        'persistent_storage_host_path_root = "/data/loom-staging"\n'
+        "[workload_contract]\n"
+        'workload_trust_mode = "internal_trusted"\n'
+        "taskset_transforms_enabled = false\n"
+        "taskset_transform_network_isolated = false\n"
+        "untrusted_workload_isolation = false\n",
         encoding="utf-8",
     )
     mounts = [
@@ -1300,7 +1463,12 @@ def test_cli_up_threads_kind_node_mounts_for_static_host_path(
     cfg.write_text(
         'namespace = "loom-staging"\n'
         'persistent_storage_backend = "static-host-path"\n'
-        'persistent_storage_host_path_root = "/data/loom-staging"\n',
+        'persistent_storage_host_path_root = "/data/loom-staging"\n'
+        "[workload_contract]\n"
+        'workload_trust_mode = "internal_trusted"\n'
+        "taskset_transforms_enabled = false\n"
+        "taskset_transform_network_isolated = false\n"
+        "untrusted_workload_isolation = false\n",
         encoding="utf-8",
     )
     mounts = [
@@ -1376,6 +1544,88 @@ def test_cli_up_threads_kind_node_mounts_for_static_host_path(
     assert captures["preflight_kwargs"]["kind_node_mounts"] == mounts
 
 
+def test_cli_up_skip_preflight_cannot_bypass_protected_workload_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "staging.cluster.toml"
+    config_path.write_text('namespace = "loom-staging"\n', encoding="utf-8")
+    applied: list[str] = []
+    _patch_clients(
+        monkeypatch,
+        core=_FakeCoreV1(secrets={"loom-secrets", "loom-admin-secret"}),
+        net=_FakeNetworkingV1(["nginx"]),
+        storage=_FakeStorageV1([("standard", True)]),
+    )
+    monkeypatch.setenv("LOOM_ROLLOUT_LOCK_DIR", str(tmp_path / "rollout-locks"))
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd.apply_manifests",
+        lambda *_args, **_kwargs: (
+            applied.append("called")
+            or _Spec(returncode=0, summary_lines=[], stderr="")
+        ),
+    )
+
+    rc = main(
+        [
+            "cluster",
+            "up",
+            "--namespace",
+            "loom-staging",
+            "--environment",
+            "staging",
+            "--config",
+            str(config_path),
+            "--skip-preflight",
+            "--no-wait",
+        ]
+    )
+
+    assert rc == 1
+    assert applied == []
+    assert "workload-trust-contract preflight failed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("skip_args", [[], ["--skip-preflight"]])
+def test_cli_up_protected_malformed_workload_contract_is_a_named_preflight_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    skip_args: list[str],
+) -> None:
+    config_path = tmp_path / "staging.cluster.toml"
+    config_path.write_text(
+        'namespace = "loom-staging"\n[workload_contract\n',
+        encoding="utf-8",
+    )
+    _patch_clients(
+        monkeypatch,
+        core=_FakeCoreV1(secrets={"loom-secrets", "loom-admin-secret"}),
+        net=_FakeNetworkingV1(["nginx"]),
+        storage=_FakeStorageV1([("standard", True)]),
+    )
+    monkeypatch.setenv("LOOM_ROLLOUT_LOCK_DIR", str(tmp_path / "rollout-locks"))
+
+    rc = main(
+        [
+            "cluster",
+            "up",
+            "--namespace",
+            "loom-staging",
+            "--environment",
+            "staging",
+            "--config",
+            str(config_path),
+            "--no-wait",
+            *skip_args,
+        ]
+    )
+
+    assert rc == 1
+    assert "workload-trust-contract preflight failed" in capsys.readouterr().err
+
+
 def test_cli_preflight_warn_alone_returns_0(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1397,6 +1647,7 @@ def test_cli_preflight_warn_alone_returns_0(
 
 def test_cli_preflight_namespace_flag_used(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     captured: dict[str, str] = {}
 
@@ -1411,5 +1662,24 @@ def test_cli_preflight_namespace_flag_used(
         net=_FakeNetworkingV1(["nginx"]),
         storage=_FakeStorageV1([("standard", True)]),
     )
-    main(["cluster", "preflight", "--namespace", "loom-stage"])
+    config_path = tmp_path / "stage.cluster.toml"
+    config_path.write_text(
+        'namespace = "loom-stage"\n'
+        "[workload_contract]\n"
+        'workload_trust_mode = "internal_trusted"\n'
+        "taskset_transforms_enabled = false\n"
+        "taskset_transform_network_isolated = false\n"
+        "untrusted_workload_isolation = false\n",
+        encoding="utf-8",
+    )
+    main(
+        [
+            "cluster",
+            "preflight",
+            "--namespace",
+            "loom-stage",
+            "--config",
+            str(config_path),
+        ]
+    )
     assert captured["ns"] == "loom-stage"

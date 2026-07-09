@@ -6,6 +6,8 @@ import json
 from collections import Counter
 from pathlib import Path
 
+import pytest
+
 from loom_cli.__main__ import main
 from loom_cli.cluster_cmd import render_manifests
 from loom_cli.cluster_config import load_cluster_config
@@ -60,7 +62,12 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
     config_path.write_text(
         'image_tag = "staging-abc123"\n'
         'namespace = "loom-staging"\n'
-        'ingress_host = "staging.example.com"\n',
+        'ingress_host = "staging.example.com"\n'
+        "[workload_contract]\n"
+        'workload_trust_mode = "internal_trusted"\n'
+        "taskset_transforms_enabled = false\n"
+        "taskset_transform_network_isolated = false\n"
+        "untrusted_workload_isolation = false\n",
         encoding="utf-8",
     )
     environment_state_path = tmp_path / "staging.toml"
@@ -119,6 +126,12 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
         "generated_at": "2026-07-01T00:00:00Z",
     }
     assert manifest["tooling"]["loom_cli_version"] == "test-version"
+    assert manifest["workload_contract"] == {
+        "workload_trust_mode": "internal_trusted",
+        "taskset_transforms_enabled": False,
+        "taskset_transform_network_isolated": False,
+        "untrusted_workload_isolation": False,
+    }
     assert manifest["cluster_config"]["path"] == str(config_path)
     assert (
         manifest["cluster_config"]["sha256"]
@@ -215,7 +228,12 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
 def test_cluster_release_manifest_cli_writes_manifest(tmp_path: Path) -> None:
     config_path = tmp_path / "cluster-config.toml"
     config_path.write_text(
-        'image_tag = "staging-def456"\nnamespace = "loom-staging"\n',
+        'image_tag = "staging-def456"\nnamespace = "loom-staging"\n'
+        "[workload_contract]\n"
+        'workload_trust_mode = "internal_trusted"\n'
+        "taskset_transforms_enabled = false\n"
+        "taskset_transform_network_isolated = false\n"
+        "untrusted_workload_isolation = false\n",
         encoding="utf-8",
     )
     output_path = tmp_path / "release-manifest-staging-def456.json"
@@ -251,7 +269,12 @@ def test_cluster_release_manifest_cli_accepts_expected_image_identities(
 ) -> None:
     config_path = tmp_path / "cluster-config.toml"
     config_path.write_text(
-        'image_tag = "staging-def456"\nnamespace = "loom-staging"\n',
+        'image_tag = "staging-def456"\nnamespace = "loom-staging"\n'
+        "[workload_contract]\n"
+        'workload_trust_mode = "internal_trusted"\n'
+        "taskset_transforms_enabled = false\n"
+        "taskset_transform_network_isolated = false\n"
+        "untrusted_workload_isolation = false\n",
         encoding="utf-8",
     )
     identities_path = tmp_path / "image-identities.json"
@@ -292,3 +315,34 @@ def test_cluster_release_manifest_cli_accepts_expected_image_identities(
     assert manifest["rendered_manifest"]["deployment_image_identities"][
         "loom-service"
     ]["loom-service"]["repo_digest"] == "loom-service@sha256:" + "3" * 64
+
+
+def test_build_protected_release_manifest_rejects_non_v1_workload_contract(
+    tmp_path: Path,
+) -> None:
+    raw_mode = "hf_abcdefghijklmnopqrstuvwxyz1234567890"
+    config_path = tmp_path / "staging.cluster.toml"
+    config_path.write_text(
+        'namespace = "loom-staging"\n'
+        "[workload_contract]\n"
+        f'workload_trust_mode = "{raw_mode}"\n'
+        "taskset_transforms_enabled = false\n"
+        "taskset_transform_network_isolated = false\n"
+        "untrusted_workload_isolation = false\n",
+        encoding="utf-8",
+    )
+    config = load_cluster_config(config_path)
+
+    with pytest.raises(ValueError) as exc_info:
+        build_release_manifest(
+            config=config,
+            config_path=config_path,
+            rendered_manifests=render_manifests(config),
+            environment="staging",
+            image_tag="staging-abc123",
+            git_sha="a" * 40,
+            generated_at="2026-07-01T00:00:00Z",
+            loom_cli_version="test-version",
+        )
+
+    assert raw_mode not in str(exc_info.value)

@@ -17,6 +17,12 @@ from loom.security.redaction import is_sensitive_environment_key, redact_text
 from loom_cli import __version__ as _loom_cli_version
 from loom_cli.cluster_cmd import _rendered_deployment_images
 from loom_cli.cluster_config import ClusterConfig
+from loom_cli.cluster_workload_trust import (
+    PROTECTED_WORKLOAD_TRUST_ENVIRONMENTS,
+    workload_contract_from_cluster_config,
+    workload_contract_from_mapping,
+    workload_contract_profile_from_file,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_ALEMBIC_INI = _REPO_ROOT / "migrations" / "alembic.ini"
@@ -228,6 +234,17 @@ def build_release_manifest(
         if config_path is not None
         else render_release_manifest_json(config.to_render_context()).encode("utf-8")
     )
+    if environment in PROTECTED_WORKLOAD_TRUST_ENVIRONMENTS:
+        workload_contract = workload_contract_from_mapping(
+            workload_contract_profile_from_file(config_path)
+        )
+        violations = workload_contract.v1_violations()
+        if violations:
+            raise ValueError(
+                "protected release workload contract violates v1: " + "; ".join(violations)
+            )
+    else:
+        workload_contract = workload_contract_from_cluster_config(config)
     return {
         "schema_version": 1,
         "release": {
@@ -239,6 +256,7 @@ def build_release_manifest(
         "tooling": {
             "loom_cli_version": loom_cli_version,
         },
+        "workload_contract": workload_contract.as_manifest(),
         "cluster_config": {
             "path": str(config_path) if config_path is not None else None,
             "sha256": _sha256_bytes(config_bytes),

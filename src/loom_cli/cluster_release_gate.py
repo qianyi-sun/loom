@@ -18,11 +18,16 @@ from loom_cli.cluster_sandbox_deadline import (
     diagnostic_summaries,
     sandbox_deadline_diagnostics_for_deployment,
 )
+from loom_cli.cluster_workload_trust import (
+    workload_contract_environment,
+    workload_contract_from_mapping,
+)
 from loom_cli.gb10_release_gate import gb10_release_target_mismatches
 
 _Outcome = Literal["pass", "fail"]
 _HF_MIRROR_BOUNDARY_ENVIRONMENTS = frozenset({"staging", "production"})
 _HF_MIRROR_BENCHMARK_ID = "skilllearnbench"
+_SAFE_WORKLOAD_CONTRACT_ENV_VALUES = frozenset({"internal_trusted", "True", "False"})
 _RAW_SECRET_RE = re.compile(
     r"(?i)\b(?:HF_TOKEN|TOKEN|SECRET|API_KEY|ACCESS_KEY|SECRET_KEY)\s*[:=]\s*"
     r"(?!<redacted>|redacted|false|none|null|absent|isolated)[^\s,\"']{8,}"
@@ -100,6 +105,111 @@ def _container_image_by_name(pod_spec: Any) -> dict[str, str]:
         if name and image:
             images[str(name)] = str(image)
     return images
+
+
+def _container_env_by_name(container: Any) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for entry in _get_field(container, "env", []) or []:
+        name = _get_field(entry, "name")
+        value = _get_field(entry, "value")
+        if name and isinstance(value, str):
+            values[str(name)] = value
+    return values
+
+
+def _safe_workload_contract_actual(value: str | None) -> str | None:
+    if value is None or value in _SAFE_WORKLOAD_CONTRACT_ENV_VALUES:
+        return value
+    return "[REDACTED]"
+
+
+def _workload_contract_check(
+    *,
+    manifest: dict[str, Any],
+    apps_v1: Any,
+    namespace: str,
+) -> ReleaseGateCheck:
+    """Require manifest and live loom-service trust contracts to agree exactly."""
+    try:
+        contract = workload_contract_from_mapping(manifest.get("workload_contract"))
+    except ValueError as exc:
+        return ReleaseGateCheck(
+            name="workload-trust-contract",
+            outcome="fail",
+            detail=f"release manifest has invalid workload contract: {exc}",
+            remediation=(
+                "Rebuild the release manifest from a protected profile with the exact "
+                "v1 workload contract."
+            ),
+        )
+
+    violations = contract.v1_violations()
+    if violations:
+        return ReleaseGateCheck(
+            name="workload-trust-contract",
+            outcome="fail",
+            detail="release manifest violates the v1 workload trust contract",
+            evidence={"candidate_valid": False, "violations": violations},
+            remediation=(
+                "Use internal_trusted with all workload capability flags false, then "
+                "rebuild and apply the candidate."
+            ),
+        )
+
+    expected = workload_contract_environment(contract)
+    actual: dict[str, str | None] = {name: None for name in expected}
+    try:
+        deployment = apps_v1.read_namespaced_deployment(
+            name="loom-service",
+            namespace=namespace,
+        )
+    except Exception as exc:
+        return ReleaseGateCheck(
+            name="workload-trust-contract",
+            outcome="fail",
+            detail="could not inspect the live loom-service Deployment workload contract",
+            evidence={"expected": expected, "actual": actual, "error": _exception_note(exc)},
+            remediation="restore Deployment read access, then rerun the release gate",
+        )
+
+    containers = _get_field(
+        _get_field(_get_field(deployment, "spec"), "template"),
+        "spec",
+    )
+    loom_service = next(
+        (
+            container
+            for container in _get_field(containers, "containers", []) or []
+            if _get_field(container, "name") == "loom-service"
+        ),
+        None,
+    )
+    if loom_service is not None:
+        live_env = _container_env_by_name(loom_service)
+        actual.update(
+            {
+                name: _safe_workload_contract_actual(live_env.get(name))
+                for name in expected
+            }
+        )
+
+    if actual == expected:
+        return ReleaseGateCheck(
+            name="workload-trust-contract",
+            outcome="pass",
+            detail="live loom-service workload contract matches release manifest",
+            evidence={"expected": expected, "actual": actual},
+        )
+    return ReleaseGateCheck(
+        name="workload-trust-contract",
+        outcome="fail",
+        detail="live loom-service workload contract does not match release manifest",
+        evidence={"expected": expected, "actual": actual},
+        remediation=(
+            "Apply the candidate loom-service Deployment and wait for the exact v1 "
+            "workload contract environment values before accepting release."
+        ),
+    )
 
 
 def _container_status_by_name(pod: Any) -> dict[str, Any]:
@@ -1408,6 +1518,13 @@ def collect_release_gate_report(
             manifest=manifest,
             apps_v1=apps_v1,
             core_v1=core_v1,
+            namespace=namespace,
+        )
+    )
+    checks.append(
+        _workload_contract_check(
+            manifest=manifest,
+            apps_v1=apps_v1,
             namespace=namespace,
         )
     )

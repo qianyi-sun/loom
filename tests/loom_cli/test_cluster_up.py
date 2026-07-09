@@ -1009,7 +1009,16 @@ def test_cli_up_namespace_flag_threads_through(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captures = _patch_full_up_path(monkeypatch)
-    main(["cluster", "up", "--namespace", "loom-stage"])
+    main(
+        [
+            "cluster",
+            "up",
+            "--namespace",
+            "loom-stage",
+            "--environment",
+            "development",
+        ]
+    )
     assert captures["apply_ns"] == "loom-stage"
 
 
@@ -1019,6 +1028,16 @@ def test_cli_up_backup_guard_flags_thread_to_preflight(
 ) -> None:
     manifest = tmp_path / "backup-manifest.json"
     manifest.write_text("{}", encoding="utf-8")
+    config = tmp_path / "staging.cluster.toml"
+    config.write_text(
+        'namespace = "loom-staging"\n'
+        "[workload_contract]\n"
+        'workload_trust_mode = "internal_trusted"\n'
+        "taskset_transforms_enabled = false\n"
+        "taskset_transform_network_isolated = false\n"
+        "untrusted_workload_isolation = false\n",
+        encoding="utf-8",
+    )
     captures = _patch_full_up_path(monkeypatch)
 
     rc = main(
@@ -1029,6 +1048,8 @@ def test_cli_up_backup_guard_flags_thread_to_preflight(
             "loom-staging",
             "--environment",
             "staging",
+            "--config",
+            str(config),
             "--backup-manifest",
             str(manifest),
             "--backup-max-age-hours",

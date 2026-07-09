@@ -62,6 +62,11 @@ from loom_cli.cluster_sandbox_deadline import (
     sandbox_deadline_diagnostics_for_deployment,
     status_has_sandbox_deadline_failures,
 )
+from loom_cli.cluster_workload_trust import (
+    PROTECTED_WORKLOAD_TRUST_ENVIRONMENTS,
+    workload_contract_from_mapping,
+    workload_contract_profile_from_file,
+)
 from loom_cli.minio_storage_preflight import (
     DEFAULT_BUCKETS,
     DEFAULT_STOP_FREE_PERCENT,
@@ -2715,6 +2720,65 @@ def _check_backup_manifest(
     )
 
 
+def _check_workload_trust_contract(
+    *,
+    environment: str,
+    workload_contract_profile: object,
+) -> PreflightCheck:
+    """Fail closed when a protected profile is not the v1 trust tuple."""
+    try:
+        contract = workload_contract_from_mapping(workload_contract_profile)
+    except ValueError as exc:
+        return PreflightCheck(
+            name="workload-trust-contract",
+            outcome="fail",
+            detail=(
+                f"protected environment {environment!r} has invalid "
+                f"workload contract: {exc}"
+            ),
+            remediation=(
+                "Declare the exact v1 [workload_contract] tuple: "
+                "internal_trusted with all three capability flags set to false."
+            ),
+        )
+
+    violations = contract.v1_violations()
+    if violations:
+        return PreflightCheck(
+            name="workload-trust-contract",
+            outcome="fail",
+            detail=(
+                f"protected environment {environment!r} violates the v1 "
+                "workload trust contract: " + "; ".join(violations)
+            ),
+            remediation=(
+                "Set workload_trust_mode=internal_trusted and all workload "
+                "capability flags to false before applying this protected release."
+            ),
+        )
+    return PreflightCheck(
+        name="workload-trust-contract",
+        outcome="pass",
+        detail=(
+            f"protected environment {environment!r} declares the exact v1 "
+            "internal_trusted workload contract"
+        ),
+    )
+
+
+def _protected_workload_trust_contract_check(
+    *,
+    environment: str,
+    workload_contract_profile: object,
+) -> PreflightCheck | None:
+    if environment not in PROTECTED_WORKLOAD_TRUST_ENVIRONMENTS:
+        return None
+    return _check_workload_trust_contract(
+        environment=environment,
+        workload_contract_profile=workload_contract_profile,
+    )
+
+
 def _check_pss_enforce(
     core_v1: Any,
     namespace: str,
@@ -2773,6 +2837,7 @@ def collect_preflight(
     backup_manifest: Path | None = None,
     backup_max_age_hours: int = DEFAULT_BACKUP_MAX_AGE_HOURS,
     cluster_config: ClusterConfig | None = None,
+    workload_contract_profile: object = None,
     kind_node_mounts: list[dict[str, Any]] | None = None,
 ) -> PreflightReport:
     """Pure-collection function — every API client passed in so tests
@@ -2788,6 +2853,12 @@ def collect_preflight(
     checks.append(_check_ingress_class_installed(networking_v1))
     checks.append(_check_default_storage_class(storage_v1))
     env_name = infer_environment(environment=environment, namespace=namespace)
+    workload_contract_check = _protected_workload_trust_contract_check(
+        environment=env_name,
+        workload_contract_profile=workload_contract_profile,
+    )
+    if workload_contract_check is not None:
+        checks.append(workload_contract_check)
     if env_name in {"staging", "production"}:
         checks.append(
             _check_protected_storage_boundary(
@@ -2931,6 +3002,26 @@ def _preflight(args: argparse.Namespace) -> int:
         return 2
     try:
         cfg_path = Path(args.config).resolve() if args.config else None
+        workload_contract_profile = workload_contract_profile_from_file(cfg_path)
+        environment = infer_environment(
+            environment=args.environment,
+            namespace=args.namespace,
+        )
+        workload_contract_check = _protected_workload_trust_contract_check(
+            environment=environment,
+            workload_contract_profile=workload_contract_profile,
+        )
+        if workload_contract_check is not None and workload_contract_check.outcome == "fail":
+            report = PreflightReport(
+                namespace=args.namespace,
+                context=args.context,
+                checks=[workload_contract_check],
+            )
+            if args.format == "json":
+                sys.stdout.write(_format_preflight_json(report))
+            else:
+                sys.stdout.write(_format_preflight_table(report))
+            return 1
         cluster_config = load_cluster_config(cfg_path)
     except (FileNotFoundError, ValueError) as exc:
         sys.stderr.write(f"error: config invalid: {exc}\n")
@@ -2950,6 +3041,7 @@ def _preflight(args: argparse.Namespace) -> int:
             ),
             backup_max_age_hours=args.backup_max_age_hours,
             cluster_config=cluster_config,
+            workload_contract_profile=workload_contract_profile,
             kind_node_mounts=kind_node_mounts,
         )
     except Exception as exc:
@@ -3613,6 +3705,34 @@ def recover_sandbox_deadline_pods(
 
 def _up(args: argparse.Namespace) -> int:
     try:
+        cfg_path = Path(args.config).resolve() if args.config else None
+        workload_contract_profile = workload_contract_profile_from_file(cfg_path)
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"error: preflight config invalid: {exc}\n")
+        return 2
+    environment = infer_environment(
+        environment=args.environment,
+        namespace=args.namespace,
+    )
+    workload_contract_check = _protected_workload_trust_contract_check(
+        environment=environment,
+        workload_contract_profile=workload_contract_profile,
+    )
+    if workload_contract_check is not None and workload_contract_check.outcome == "fail":
+        sys.stderr.write(
+            "error: workload-trust-contract preflight failed — refusing to apply.\n"
+        )
+        sys.stderr.write(
+            _format_preflight_table(
+                PreflightReport(
+                    namespace=args.namespace,
+                    context=args.context,
+                    checks=[workload_contract_check],
+                )
+            )
+        )
+        return 1
+    try:
         command = [
             "loom",
             "cluster",
@@ -3664,6 +3784,7 @@ def _up_impl(args: argparse.Namespace) -> int:
 
     try:
         cfg_path = Path(args.config).resolve() if args.config else None
+        workload_contract_profile = workload_contract_profile_from_file(cfg_path)
         config = load_cluster_config(cfg_path)
     except (FileNotFoundError, ValueError) as exc:
         sys.stderr.write(f"error: render failed: {exc}\n")
@@ -3692,6 +3813,7 @@ def _up_impl(args: argparse.Namespace) -> int:
                 ),
                 backup_max_age_hours=args.backup_max_age_hours,
                 cluster_config=config,
+                workload_contract_profile=workload_contract_profile,
                 kind_node_mounts=kind_node_mounts,
             )
             _append_target_schema_doctor_check(
