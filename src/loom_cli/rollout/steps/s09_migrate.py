@@ -83,8 +83,10 @@ def _write_stateful_substrate_manifest(
     """Write the DB/object-store substrate needed before migration.
 
     A reconstructed kind cluster has namespace/secrets after step 03 but no
-    standing Services or StatefulSets. Migration and environment-state need
-    Postgres and MinIO alive before full cluster-up starts application pods.
+    standing Services or StatefulSets. Migration needs Postgres alive before
+    full cluster-up starts application pods. Environment-state runs later,
+    after cluster-up has recreated the Control Plane service in missing-kind
+    recovery.
     """
     try:
         docs = list(yaml.safe_load_all(rendered_manifest.read_text(encoding="utf-8")))

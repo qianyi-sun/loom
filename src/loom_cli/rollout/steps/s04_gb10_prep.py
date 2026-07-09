@@ -1,4 +1,4 @@
-"""Step 11 — GB10 SSH prep (#340, #593).
+"""Step 12 — GB10 SSH prep (#340, #593).
 
 For each GB10 host in cluster-config, SSH in and prepare:
 
@@ -192,7 +192,7 @@ def _no_gb10_hosts_error(ctx: RolloutContext) -> str | None:
     return (
         "current-gb10 rollout declares GB10 desired state, but the cluster "
         "config has no [gb10_pool] hosts; add the actual release-managed "
-        "GB10 hosts so rollout step 11 can deliver runner state before "
+        "GB10 hosts so rollout step 12 can deliver runner state before "
         "release-gate"
     )
 
@@ -443,7 +443,7 @@ def _gb10_prep_concurrency(
 
 
 class GB10PrepStep(BaseStep):
-    number = 11
+    number = 12
     name = "gb10-prep"
 
     #: Number of retries per host on transient SSH failure.

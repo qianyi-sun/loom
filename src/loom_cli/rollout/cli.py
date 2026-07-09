@@ -564,7 +564,7 @@ def build_parser(p: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         help=(
-            "Optional bounded host-level concurrency for rollout step 11 "
+            "Optional bounded host-level concurrency for rollout step 12 "
             "gb10-prep. Each host still runs its internal command sequence "
             "serially."
         ),
