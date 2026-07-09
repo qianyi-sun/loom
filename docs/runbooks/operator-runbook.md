@@ -317,10 +317,16 @@ continues.
 ## At-a-glance: deploy a fresh cluster
 
 The fastest path uses the `loom cluster` CLI (shipped via #76). Install
-the optional `cluster` extra and point at your kubeconfig context:
+the optional `cluster` extra and point at your kubeconfig context. For
+staging/production rollout runners, use `uv sync --extra cluster --extra
+rollout`; the `rollout` extra installs the in-repo benchmark sibling packages
+(`packages/loom-benchmarks` and `packages/loom-benchmark-terminal-bench-2`)
+needed by catalog provisioning:
 
 ```bash
-pip install "loom[cluster]"   # or `uv sync --extra cluster`
+pip install "loom[cluster]"   # local/manual cluster tooling only
+# rollout runner:
+uv sync --extra cluster --extra rollout
 export KUBECONFIG=~/.kube/config   # standard kubectl config
 
 # 1. Configure
@@ -1501,10 +1507,13 @@ Optional flags:
 The one-command driver resolves `--ref` once, creates
 `01-worktree/src` at that exact SHA, and uses that candidate checkout for
 rollout-owned Loom subcommands whose output becomes release evidence.
-Steps that delegate to `loom ...` run `python -m loom_cli` with
-`01-worktree/src/src` first on `PYTHONPATH`, so child subprocesses do not
-depend on a globally installed `loom` executable or an operator wrapper's
-ambient `PATH`.
+Steps that delegate to `loom ...` run `python -m loom_cli` from the rollout
+runner venv with `01-worktree/src/src` first on `PYTHONPATH`, so child
+subprocesses do not depend on a globally installed `loom` executable or an
+operator wrapper's ambient `PATH`. The runner venv must be synced with
+`--extra rollout`; otherwise catalog provisioning can import candidate
+`loom_cli` while still missing benchmark sibling packages such as
+`loom_benchmarks` and their dependencies.
 
 If the candidate checkout does not contain importable Loom CLI source at
 `01-worktree/src/src/loom_cli/__main__.py`, these steps fail instead of

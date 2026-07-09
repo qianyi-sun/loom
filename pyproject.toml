@@ -58,6 +58,14 @@ modal = [
 cluster = [
   "kubernetes>=28.1,<32.0",
 ]
+# Production/staging rollout runner tooling. These are first-party sibling
+# packages used by catalog provisioning and benchmark release gates; keep this
+# extra on every clean rollout driver so candidate commands do not depend on
+# developer-local editable installs.
+rollout = [
+  "loom-benchmarks",
+  "loom-benchmark-terminal-bench-2",
+]
 # `loom run --model hf:<id>` / `--model file:<path>` launches vLLM as a
 # managed subprocess. Optional because vLLM has GPU requirements + heavy
 # CUDA wheels that most users don't need.
@@ -135,6 +143,10 @@ required-environments = [
   "sys_platform == 'darwin'",
   "sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
+
+[tool.uv.sources]
+loom-benchmarks = { path = "packages/loom-benchmarks", editable = true }
+loom-benchmark-terminal-bench-2 = { path = "packages/loom-benchmark-terminal-bench-2", editable = true }
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "RUF"]
