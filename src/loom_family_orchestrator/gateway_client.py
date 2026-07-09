@@ -67,30 +67,45 @@ class OrchestratorGatewayClient:
         dialect: str,
         max_tokens: int,
         timeout_sec: float,
+        provider_connection_id: str | None = None,
     ) -> dict[str, Any]:
         """POST /v1/chat/completions with the orchestrator attribution
         block. Raises :class:`httpx.HTTPStatusError` on non-2xx so the
         adapter's failure policy sees a plain exception.
+
+        When ``provider_connection_id`` is set, the request is routed
+        via the caller's BYO provider connection (#178). The gateway's
+        ``/v1/chat/completions`` route consumes it from
+        ``loom.provider_connection_id`` in the body (see
+        ``loom_llm_gateway/routes/chat.py``). We ALSO forward it as the
+        ``x-loom-provider-connection-id`` header so requests remain
+        routable when future gateway paths adopt the facade-style
+        header-only auth (#672 blocker #695).
         """
         # Synthetic trial_id per call: the row still needs a UUID so
         # the LlmCall FK to trials.id is unique, but there is no real
         # trial. Downstream dashboards ignore rows whose trial_id
         # doesn't join a trial row — the audit intent is preserved
         # via ``dialect=family_evolver``.
+        loom_block: dict[str, Any] = {
+            "team_id": self.team_id,
+            "trial_id": str(uuid4()),
+            "step_id": "family_evolver",
+            "dialect": dialect,
+        }
+        if provider_connection_id:
+            loom_block["provider_connection_id"] = provider_connection_id
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "max_tokens": max_tokens,
-            "loom": {
-                "team_id": self.team_id,
-                "trial_id": str(uuid4()),
-                "step_id": "family_evolver",
-                "dialect": dialect,
-            },
+            "loom": loom_block,
         }
         headers: dict[str, str] = {"content-type": "application/json"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
+        if provider_connection_id:
+            headers["x-loom-provider-connection-id"] = provider_connection_id
         client = self._http()
         resp = await client.post(
             "/v1/chat/completions",

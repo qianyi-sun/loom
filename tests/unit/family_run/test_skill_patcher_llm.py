@@ -84,6 +84,7 @@ class _FakeGateway:
         dialect: str,
         max_tokens: int,
         timeout_sec: float,
+        provider_connection_id: str | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
             {
@@ -92,6 +93,7 @@ class _FakeGateway:
                 "dialect": dialect,
                 "max_tokens": max_tokens,
                 "timeout_sec": timeout_sec,
+                "provider_connection_id": provider_connection_id,
             },
         )
         return self.response
@@ -255,6 +257,57 @@ async def test_evolve_applies_add_modify_delete_patch(tmp_path):
     assert (dst / "brand_new.md").read_text() == "brand new\n"
     assert (dst / "existing.md").read_text() == "v2\n"
     assert not (dst / "old.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_evolve_forwards_provider_connection_id_from_params(tmp_path):
+    """#672 blocker #695: when ``params['provider_connection_id']`` is
+    set on the batch's adapter spec, the adapter MUST hand it to the
+    gateway client so the evolver call is routed via the caller's BYO
+    upstream credential."""
+    backend = _FakeBackend(root=tmp_path / "state")
+    seed_uri = await backend.initialize(
+        batch_id=uuid4(), family_key="family_a", params={},
+    )
+    gateway = _FakeGateway(response=_fake_response({
+        "add": [], "modify": [], "delete": [],
+    }))
+    adapter = SkillPatcherLLMAdapter()
+    await adapter.evolve(
+        trial=_Trial(),
+        family=_Family(),
+        state_uri=seed_uri,
+        backend=backend,
+        params={
+            "gateway": gateway,
+            "provider_connection_id": "78964dda-638b-4ca1-ae19-6355d35e826c",
+        },
+    )
+    assert gateway.calls[0]["provider_connection_id"] == (
+        "78964dda-638b-4ca1-ae19-6355d35e826c"
+    )
+
+
+@pytest.mark.asyncio
+async def test_evolve_omits_provider_connection_id_when_absent(tmp_path):
+    """Default path: no BYO connection ⇒ pass ``None`` through so the
+    gateway falls back to the platform-credentialed legacy route."""
+    backend = _FakeBackend(root=tmp_path / "state")
+    seed_uri = await backend.initialize(
+        batch_id=uuid4(), family_key="family_a", params={},
+    )
+    gateway = _FakeGateway(response=_fake_response({
+        "add": [], "modify": [], "delete": [],
+    }))
+    adapter = SkillPatcherLLMAdapter()
+    await adapter.evolve(
+        trial=_Trial(),
+        family=_Family(),
+        state_uri=seed_uri,
+        backend=backend,
+        params={"gateway": gateway},
+    )
+    assert gateway.calls[0]["provider_connection_id"] is None
 
 
 @pytest.mark.asyncio
