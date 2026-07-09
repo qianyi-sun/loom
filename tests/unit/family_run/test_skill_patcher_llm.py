@@ -520,6 +520,30 @@ async def test_evolve_step_cap_truncates_trajectory(tmp_path):
 # ─── evolve rejection paths ────────────────────────────────────────
 
 
+def test_parse_patch_strips_markdown_json_fence() -> None:
+    """Live smoke on staging: Claude Haiku 4.5 wraps the patch JSON in
+    a ``json ... ``` fence by default. Regression so the parser
+    tolerates fenced output instead of crashing every family_evolver
+    round trip.
+    """
+    raw = "```json\n{\n  \"add\": [],\n  \"modify\": [],\n  \"delete\": []\n}\n```"
+    patch = _parse_patch(raw)
+    assert list(patch.add) == []
+    assert list(patch.modify) == []
+    assert list(patch.delete) == []
+
+
+def test_parse_patch_strips_bare_triple_backticks_fence() -> None:
+    raw = "```\n{\n  \"add\": [],\n  \"modify\": [],\n  \"delete\": []\n}\n```"
+    patch = _parse_patch(raw)
+    assert list(patch.add) == []
+
+
+def test_parse_patch_still_rejects_true_junk() -> None:
+    with pytest.raises(PatchValidationError, match="non-JSON"):
+        _parse_patch("not JSON at all {{{")
+
+
 @pytest.mark.asyncio
 async def test_evolve_rejects_malformed_json(tmp_path):
     backend = _FakeBackend(root=tmp_path / "state")
