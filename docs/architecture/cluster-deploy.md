@@ -607,10 +607,13 @@ prefix. Pre-start task bundle materialization is also bounded by
 expires, the worker writes a redacted setup failure back to the control plane
 instead of leaving the trial indefinitely `claimed`.
 
-Private or gated `hf://` benchmark sources use the standard `HF_TOKEN`
-environment variable read by `huggingface_hub`. The default k8s render wires
-`HF_TOKEN` from the optional `loom-secrets/huggingface-api-key` key, so public
-deployments without gated HF sources continue to boot without that key.
+Private or gated benchmark catalog mirroring uses the standard `HF_TOKEN`
+environment variable read by `huggingface_hub` in the catalog/service context.
+The default k8s render wires `HF_TOKEN` from the optional
+`loom-secrets/huggingface-api-key` key into `loom-service`, not `loom-worker`.
+Staging and production workers must materialize benchmark bundles from internal
+object-store sources; release-gate HF boundary evidence fails if worker
+containers or GB10 worker `.env` files contain `HF_TOKEN`.
 
 Use the CPU/memory formula as an upper-bound planning heuristic, not as
 the default:

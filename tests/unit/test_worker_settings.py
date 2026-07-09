@@ -141,21 +141,17 @@ def test_token_is_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.token.get_secret_value() == "supersecret"
 
 
-def test_hf_token_override_is_secret(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The worker exposes the standard HF_TOKEN env for
-    huggingface_hub while still treating it as a SecretStr in settings.
-    """
-    hf_token = "hf_abcdefghijklmnopqrstuvwxyz1234567890"
+def test_worker_settings_do_not_accept_hf_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HF_TOKEN belongs to catalog/service provisioning, not workers."""
     monkeypatch.setenv("LOOM_WORKER_CONTROL_PLANE_URL", "http://cp:8080")
     monkeypatch.setenv("LOOM_WORKER_GATEWAY_URL", "http://gw:9100")
     monkeypatch.setenv("LOOM_WORKER_TOKEN", "loom_w_test")
     monkeypatch.setenv("LOOM_WORKER_MINIO_ENDPOINT", "http://m:9000")
     monkeypatch.setenv("LOOM_WORKER_MINIO_ACCESS_KEY", "x")
     monkeypatch.setenv("LOOM_WORKER_MINIO_SECRET_KEY", "y")
-    monkeypatch.setenv("HF_TOKEN", hf_token)
+    monkeypatch.setenv("HF_TOKEN", "hf_abcdefghijklmnopqrstuvwxyz1234567890")
 
     s = WorkerSettings(_env_file=None)
 
-    assert s.huggingface_api_key is not None
-    assert s.huggingface_api_key.get_secret_value() == hf_token
-    assert hf_token not in repr(s)
+    assert "huggingface_api_key" not in WorkerSettings.model_fields
+    assert "hf_abcdefghijklmnopqrstuvwxyz1234567890" not in repr(s)

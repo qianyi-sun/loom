@@ -3785,7 +3785,11 @@ task-level runtime mirror provenance from the target DB, finds a succeeded
 SkillLearnBench GB10 canary unless `--canary-batch-id` is supplied, and checks
 GB10 worker `.env` files plus worker container env keys for `HF_TOKEN`
 presence. It records only counts, paths, prefixes, batch ids, booleans, and
-redacted/secret-safe references.
+redacted/secret-safe references. The GB10 check uses the same
+`[gb10_pool].ssh_config`, `ssh_identity_file`, and optional
+`ssh_certificate_file` as rollout GB10 prep; failed SSH, failed container
+inspection, or zero inspected active worker containers are release-gate
+failures.
 
 The generated artifact has this shape:
 
@@ -3815,7 +3819,15 @@ The generated artifact has this shape:
     "hf_token_present": false,
     "hf_token_isolated": true,
     "direct_hf_egress_required": false,
-    "materialized_from_internal_source": true
+    "materialized_from_internal_source": true,
+    "gb10_hf_token_check_summary": {
+      "checked_hosts": 15,
+      "ssh_failed_hosts": [],
+      "env_file_hf_token_present_hosts": [],
+      "hosts_with_container_hf_token_present": [],
+      "containers_checked": 15,
+      "inspect_failed": []
+    }
   },
   "secret_scan": {"raw_secret_values_present": false}
 }
@@ -3826,24 +3838,24 @@ Pass the artifact to `loom cluster release-gate` with
 The release gate fails staging/production when the release manifest records the
 SkillLearnBench HF catalog gate but this artifact is missing, has non-`s3://`
 runtime sources, lacks HF provenance, reports worker `HF_TOKEN` presence,
-requires direct worker HF egress, or contains raw secret-looking values. This
-repo-side check does not replace live staging validation; it makes the
-required evidence acceptance-testable and production-promotion-blocking.
+has missing/failed GB10 token inspection, requires direct worker HF egress, or
+contains raw secret-looking values. This repo-side check does not replace live
+staging validation; it makes the required evidence acceptance-testable and
+production-promotion-blocking.
 
-Runtime workers also support private/gated `hf://` sources as a compatibility
-path. `loom cluster render` injects the optional `loom-secrets` key
-`huggingface-api-key` into the worker Deployment as the standard `HF_TOKEN`
-environment variable used by `huggingface_hub`. Public-only deployments can
-omit this Secret key because the reference is optional. To rotate the read
-token, update only `loom-secrets/huggingface-api-key`, then roll any pods that
-need to read it:
+`loom cluster render` injects the optional `loom-secrets` key
+`huggingface-api-key` into `loom-service` as `HF_TOKEN` for gated catalog mirror
+provisioning. It must not inject that token into worker Deployments or remote
+worker env files. To rotate the read token, update only
+`loom-secrets/huggingface-api-key`, then roll the pods that are allowed to read
+it:
 
 ```bash
 HF_READ_TOKEN="$(security find-generic-password -w -s loom-hf-read-token)"
 kubectl -n loom patch secret loom-secrets --type merge \
   --patch "{\"stringData\":{\"huggingface-api-key\":\"${HF_READ_TOKEN}\"}}"
 unset HF_READ_TOKEN
-kubectl -n loom rollout restart deploy/loom-worker deploy/loom-llm-gateway
+kubectl -n loom rollout restart deploy/loom-service deploy/loom-llm-gateway
 ```
 
 Keep raw HF tokens out of issue comments, command-line transcripts, committed

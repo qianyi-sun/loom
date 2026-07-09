@@ -5073,8 +5073,9 @@ def dispatch(argv: list[str]) -> int:
         help=(
             "Secret-safe JSON artifact proving SkillLearnBench uses mirrored "
             "internal s3:// runtime sources, retains HF provenance, and does "
-            "not require worker HF_TOKEN egress. Required for staging/production "
-            "when the release manifest records the HF catalog gate."
+            "not expose HF_TOKEN in GB10 worker env files or containers. "
+            "Required for staging/production when the release manifest records "
+            "the HF catalog gate."
         ),
     )
     p_release_gate.add_argument(

@@ -64,11 +64,6 @@
     "default": "None",
     "required": false
   },
-  "huggingface_api_key": {
-    "annotation": "pydantic.types.SecretStr | None",
-    "default": "None",
-    "required": false
-  },
   "idle_exit_after_seconds": {
     "annotation": "float | None",
     "default": "None",
