@@ -21,6 +21,11 @@ from loom_cli.rollout.steps.base import BaseStep, RunResult, VerifyOutcome
 from loom_cli.rollout.steps.subprocess_util import run_captured
 
 INGRESS_NGINX_KIND_MANIFEST = Path("deploy/k8s/ingress-nginx-kind.yaml")
+INGRESS_NGINX_CONTROLLER_SELECTOR = (
+    "app.kubernetes.io/component=controller,"
+    "app.kubernetes.io/instance=ingress-nginx,"
+    "app.kubernetes.io/name=ingress-nginx"
+)
 _LAST_APPLIED_ANNOTATION = "kubectl.kubernetes.io/last-applied-configuration"
 _RUNTIME_METADATA_KEYS = frozenset(
     {
@@ -41,6 +46,12 @@ def _kind_config(ctx: RolloutContext) -> str:
         "apiVersion: kind.x-k8s.io/v1alpha4\n"
         "nodes:\n"
         "  - role: control-plane\n"
+        "    kubeadmConfigPatches:\n"
+        "      - |\n"
+        "        kind: InitConfiguration\n"
+        "        nodeRegistration:\n"
+        "          kubeletExtraArgs:\n"
+        '            node-labels: "ingress-ready=true"\n'
         "    extraPortMappings:\n"
         "      - containerPort: 80\n"
         "        hostPort: 80\n"
@@ -176,6 +187,10 @@ def _cluster_names(stdout: str) -> set[str]:
     return {line.strip() for line in stdout.splitlines() if line.strip()}
 
 
+def _control_plane_node_name(ctx: RolloutContext) -> str:
+    return f"{ctx.cluster_name}-control-plane"
+
+
 def _write_sanitized_secret_restore_dir(source_dir: Path, target_dir: Path) -> int:
     count = 0
     for source in sorted([*source_dir.glob("*.yaml"), *source_dir.glob("*.yml")]):
@@ -225,6 +240,7 @@ class KindClusterStep(BaseStep):
             "rollout_root": str(ctx.rollout_root),
             "cluster_config_path": str(ctx.cluster_config_path),
             "cluster_config_sha256": ctx.cluster_config_sha256,
+            "ingress_nginx_recovery_contract": "node-label-and-admission-endpoint-v1",
             "backup_manifest_path": str(ctx.backup_manifest_path),
         }
 
@@ -240,6 +256,21 @@ class KindClusterStep(BaseStep):
             return VerifyOutcome.MISMATCH
         namespace = run_captured(["kubectl", "get", "namespace", ctx.namespace])
         if namespace.returncode != 0:
+            return VerifyOutcome.MISMATCH
+        ingress_node_label = run_captured(
+            [
+                "kubectl",
+                "get",
+                "node",
+                _control_plane_node_name(ctx),
+                "-o",
+                "jsonpath={.metadata.labels.ingress-ready}",
+            ],
+        )
+        if (
+            ingress_node_label.returncode != 0
+            or ingress_node_label.stdout.strip() != "true"
+        ):
             return VerifyOutcome.MISMATCH
         secrets = run_captured(
             [
@@ -263,12 +294,27 @@ class KindClusterStep(BaseStep):
                 "-n",
                 "ingress-nginx",
                 "wait",
-                "--for=condition=Available",
-                "deployment/ingress-nginx-controller",
+                "--for=condition=Ready",
+                "pod",
+                f"--selector={INGRESS_NGINX_CONTROLLER_SELECTOR}",
                 "--timeout=5s",
             ],
         )
         if ingress_controller.returncode != 0:
+            return VerifyOutcome.MISMATCH
+        admission_endpoint = run_captured(
+            [
+                "kubectl",
+                "-n",
+                "ingress-nginx",
+                "get",
+                "endpoints",
+                "ingress-nginx-controller-admission",
+                "-o",
+                "jsonpath={.subsets[0].addresses[0].ip}",
+            ],
+        )
+        if admission_endpoint.returncode != 0 or not admission_endpoint.stdout.strip():
             return VerifyOutcome.MISMATCH
         try:
             storage_docs = _worker_trajectories_storage_docs(ctx)
@@ -292,6 +338,30 @@ class KindClusterStep(BaseStep):
             if pvc.returncode != 0:
                 return VerifyOutcome.MISMATCH
         return VerifyOutcome.MATCH
+
+    def _ensure_ingress_ready_node(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+    ) -> RunResult | None:
+        label = run_captured(
+            [
+                "kubectl",
+                "label",
+                "node",
+                _control_plane_node_name(ctx),
+                "ingress-ready=true",
+                "--overwrite",
+            ],
+            stdout_log=step_dir.artifact_path("ingress-node-label.stdout"),
+            stderr_log=step_dir.artifact_path("ingress-node-label.stderr"),
+        )
+        if label.returncode != 0:
+            return RunResult(
+                exit_code=label.returncode,
+                error=_last_error(label, "kubectl label ingress-ready node failed"),
+            )
+        return None
 
     def _ensure_ingress_nginx(self, step_dir: StepDir) -> tuple[RunResult | None, str]:
         ingress_class = run_captured(
@@ -329,24 +399,51 @@ class KindClusterStep(BaseStep):
                 )
             installed = True
 
-        wait = run_captured(
+        wait_pod = run_captured(
             [
                 "kubectl",
                 "-n",
                 "ingress-nginx",
                 "wait",
-                "--for=condition=Available",
-                "deployment/ingress-nginx-controller",
+                "--for=condition=Ready",
+                "pod",
+                f"--selector={INGRESS_NGINX_CONTROLLER_SELECTOR}",
                 "--timeout=180s",
             ],
-            stdout_log=step_dir.artifact_path("ingress-controller-wait.stdout"),
-            stderr_log=step_dir.artifact_path("ingress-controller-wait.stderr"),
+            stdout_log=step_dir.artifact_path("ingress-controller-pod-wait.stdout"),
+            stderr_log=step_dir.artifact_path("ingress-controller-pod-wait.stderr"),
         )
-        if wait.returncode != 0:
+        if wait_pod.returncode != 0:
             return (
                 RunResult(
-                    exit_code=wait.returncode,
-                    error=_last_error(wait, "ingress-nginx controller not available"),
+                    exit_code=wait_pod.returncode,
+                    error=_last_error(wait_pod, "ingress-nginx controller pod not ready"),
+                ),
+                "failed",
+            )
+
+        admission_endpoint = run_captured(
+            [
+                "kubectl",
+                "-n",
+                "ingress-nginx",
+                "get",
+                "endpoints",
+                "ingress-nginx-controller-admission",
+                "-o",
+                "jsonpath={.subsets[0].addresses[0].ip}",
+            ],
+            stdout_log=step_dir.artifact_path("ingress-admission-endpoint.stdout"),
+            stderr_log=step_dir.artifact_path("ingress-admission-endpoint.stderr"),
+        )
+        if admission_endpoint.returncode != 0 or not admission_endpoint.stdout.strip():
+            return (
+                RunResult(
+                    exit_code=admission_endpoint.returncode or 1,
+                    error=_last_error(
+                        admission_endpoint,
+                        "ingress-nginx admission endpoint missing",
+                    ),
                 ),
                 "failed",
             )
@@ -422,6 +519,10 @@ class KindClusterStep(BaseStep):
                 exit_code=export.returncode,
                 error=_last_error(export, "kind export kubeconfig failed"),
             )
+
+        label_result = self._ensure_ingress_ready_node(ctx, step_dir)
+        if label_result is not None:
+            return label_result
 
         ingress_result, ingress_state = self._ensure_ingress_nginx(step_dir)
         if ingress_result is not None:

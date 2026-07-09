@@ -52,6 +52,11 @@ recreate.
 The same `--config` also gives schema-doctor the target rendered Deployments:
 preflight validates live Secrets, but it checks env-var drift against the
 manifest that will be applied rather than stale pods from the previous rollout.
+For kind-backed staging, the ingress substrate is part of the same protected
+rerun boundary: rollout recovery labels the control-plane node
+`ingress-ready=true`, waits for the pinned ingress-nginx controller pod to be
+Ready, and verifies the validating admission Service has an endpoint before any
+step applies Loom Ingress resources.
 
 The SPA (`loom-web`) ships in the manifest set with `replicas: 0`; operators scale up when SPA work resumes.
 
