@@ -18,6 +18,20 @@ The current product boundary is:
   calls through the Loom LLM Gateway, but model serving capacity remains owned
   by the provider or user team.
 
+## Why Loom
+
+Loom is built for the point where evaluation stops being a local script and
+becomes shared production work. A team can upload private TaskSets, run many
+agent/model trials concurrently, monitor progress, inspect failures, and
+download trajectories and artifacts without touching worker machines,
+databases, or object storage directly.
+
+The platform centralizes the operational pieces around that workflow:
+queue-backed fanout, sandboxed execution, provider-token isolation,
+shared-provider audit, usage and cost accounting, verifier evidence, and
+reproducible result exports. That lets researchers focus on tasks, agents, and
+models while Loom keeps the execution trail and operational boundary explicit.
+
 Current shared staging route: [https://yylx.world/dev](https://yylx.world/dev)
 
 Planned first production route: [https://yylx.world/prod](https://yylx.world/prod)
