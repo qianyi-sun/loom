@@ -5,6 +5,7 @@ import { Link, useParams } from "react-router-dom";
 import {
   api,
   type ArtifactGroup,
+  type CombinationSummary,
   type RunLibraryArtifact,
   type RunLibraryBatchDetail,
 } from "../api/client";
@@ -112,6 +113,32 @@ function comboText(batch: RunLibraryBatchDetail): string {
   )}`;
 }
 
+function comboScoreText(combo: CombinationSummary): string {
+  if (combo.trial_count === 0) return "No trials materialized";
+  if (combo.scored_trial_count === 0) return "Trials exist but no scored reward";
+  return combo.aggregate_reward != null ? combo.aggregate_reward.toFixed(3) : "--";
+}
+
+function comboTrialText(combo: CombinationSummary): string {
+  const expected = combo.expected_trial_count;
+  const trialText =
+    expected != null
+      ? `${combo.trial_count}/${expected} trials`
+      : `${combo.trial_count} trials`;
+  return `${trialText} · ${combo.scored_trial_count} scored`;
+}
+
+function comboOutcomeText(combo: CombinationSummary): string {
+  return `${combo.succeeded_count} succeeded · ${combo.failed_count} failed`;
+}
+
+function comboUsageText(combo: CombinationSummary): string {
+  const totalTokens = combo.total_tokens ?? (
+    (combo.total_prompt_tokens ?? 0) + (combo.total_completion_tokens ?? 0)
+  );
+  return `${totalTokens} tokens · ${combo.llm_calls_count ?? 0} calls`;
+}
+
 function ArtifactRow({
   artifact,
   onReuse,
@@ -207,6 +234,79 @@ function ArtifactRow({
   );
 }
 
+function CombinationSummarySection({
+  rows,
+}: {
+  rows: CombinationSummary[];
+}): JSX.Element | null {
+  if (rows.length === 0) return null;
+  return (
+    <Card>
+      <Card.Header
+        title="Combination results"
+        description="Reward and usage grouped by requested agent/model combination."
+      />
+      <Card.Body>
+        <div className="overflow-x-auto">
+          <table
+            className="min-w-full divide-y divide-slate-200 text-left text-sm"
+            aria-label="Combination results"
+          >
+            <thead className="text-xs uppercase tracking-wider text-slate-500">
+              <tr>
+                <th scope="col" className="px-3 py-2 font-semibold">
+                  Combination
+                </th>
+                <th scope="col" className="px-3 py-2 font-semibold">
+                  Score
+                </th>
+                <th scope="col" className="px-3 py-2 font-semibold">
+                  Trials
+                </th>
+                <th scope="col" className="px-3 py-2 font-semibold">
+                  Outcomes
+                </th>
+                <th scope="col" className="px-3 py-2 font-semibold">
+                  Usage
+                </th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 text-slate-700">
+              {rows.map((combo) => (
+                <tr key={combo.combination_idx}>
+                  <td className="max-w-xs px-3 py-3 align-top">
+                    <div className="font-semibold text-slate-900">
+                      {combo.label}
+                    </div>
+                    <div className="mt-1 text-xs text-slate-500">
+                      #{combo.combination_idx}
+                      {combo.provider_model_id
+                        ? ` · ${combo.provider_model_id}`
+                        : ""}
+                    </div>
+                  </td>
+                  <td className="px-3 py-3 align-top font-mono text-slate-900">
+                    {comboScoreText(combo)}
+                  </td>
+                  <td className="px-3 py-3 align-top">
+                    {comboTrialText(combo)}
+                  </td>
+                  <td className="px-3 py-3 align-top">
+                    {comboOutcomeText(combo)}
+                  </td>
+                  <td className="px-3 py-3 align-top">
+                    {comboUsageText(combo)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card.Body>
+    </Card>
+  );
+}
+
 export default function RunLibraryBatchDetail(): JSX.Element {
   const { batchId } = useParams<{ batchId: string }>();
   const [providerConnectionId, setProviderConnectionId] = useState("");
@@ -266,6 +366,11 @@ export default function RunLibraryBatchDetail(): JSX.Element {
     batch.debug_evidence ?? diagnosticsQuery.data?.debug_evidence ?? null;
   const hasDiagnostics = Boolean(diagnosis || debugEvidence);
   const artifactInventoryTruncated = batch.artifact_inventory_truncated === true;
+  const effectiveCombinationSummary = batch.effective_combination_summary ?? [];
+  const combinationSummary =
+    effectiveCombinationSummary.length > 0
+      ? effectiveCombinationSummary
+      : (batch.combination_summary ?? []);
   const rewardZeroPlatformSuccess =
     batch.aggregate_reward === 0 &&
     (batch.trial_summary.failed ?? 0) === 0 &&
@@ -435,6 +540,8 @@ export default function RunLibraryBatchDetail(): JSX.Element {
           {clone.isError ? <ErrorState error={clone.error} /> : null}
         </Card.Body>
       </Card>
+
+      <CombinationSummarySection rows={combinationSummary} />
 
       {!hasDiagnostics ? (
         <div className="space-y-2">

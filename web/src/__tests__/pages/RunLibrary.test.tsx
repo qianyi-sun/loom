@@ -39,6 +39,7 @@ const sharedBatch = {
   finished_at: "2026-06-22T20:03:00Z",
   trial_summary: { succeeded: 1 },
   aggregate_reward: 1,
+  combination_summary: [],
   total_prompt_tokens: 1000,
   total_completion_tokens: 200,
   total_tokens: 1200,
@@ -682,6 +683,188 @@ describe("RunLibraryBatchDetail", () => {
     expect(warning).toHaveTextContent(
       "gateway_error, provider_transport_disconnect",
     );
+  });
+
+  it("renders per-combination reward states for multi-agent batches", async () => {
+    mockRunLibrary({
+      detailOverride: {
+        ...detailBatch,
+        combinations: [
+          {
+            agent_name: "opencode",
+            agent_model: { provider: "openai", name: "glm5.1-thinking" },
+            provider_model_id: "glm5.1-thinking",
+            n_per_task: 1,
+            label: "opencode / glm5.1-thinking",
+          },
+          {
+            agent_name: "codex",
+            agent_model: { provider: "openai", name: "qwen3.6-35b-a3b" },
+            provider_model_id: "qwen3.6-35b-a3b",
+            n_per_task: 1,
+          },
+          {
+            agent_name: "oracle",
+            agent_model: null,
+            n_per_task: 1,
+            label: "oracle / no model",
+          },
+        ],
+        combination_summary: [
+          {
+            combination_idx: 0,
+            label: "opencode / glm5.1-thinking",
+            agent_name: "opencode",
+            agent_model: { provider: "openai", name: "glm5.1-thinking" },
+            provider_connection_id: null,
+            provider_model_id: "glm5.1-thinking",
+            n_per_task: 1,
+            expected_trial_count: 2,
+            trial_count: 2,
+            completed_trial_count: 2,
+            scored_trial_count: 2,
+            succeeded_count: 1,
+            failed_count: 1,
+            aggregate_reward: 0.5,
+            llm_calls_count: 2,
+            total_prompt_tokens: 16,
+            total_completion_tokens: 7,
+            total_tokens: 23,
+          },
+          {
+            combination_idx: 1,
+            label: "codex / qwen3.6-35b-a3b",
+            agent_name: "codex",
+            agent_model: { provider: "openai", name: "qwen3.6-35b-a3b" },
+            provider_connection_id: null,
+            provider_model_id: "qwen3.6-35b-a3b",
+            n_per_task: 1,
+            expected_trial_count: 2,
+            trial_count: 2,
+            completed_trial_count: 2,
+            scored_trial_count: 0,
+            succeeded_count: 1,
+            failed_count: 0,
+            aggregate_reward: null,
+            llm_calls_count: 1,
+            total_prompt_tokens: 3,
+            total_completion_tokens: 2,
+            total_tokens: 5,
+          },
+          {
+            combination_idx: 2,
+            label: "oracle / no model",
+            agent_name: "oracle",
+            agent_model: null,
+            provider_connection_id: null,
+            provider_model_id: null,
+            n_per_task: 1,
+            expected_trial_count: 2,
+            trial_count: 0,
+            completed_trial_count: 0,
+            scored_trial_count: 0,
+            succeeded_count: 0,
+            failed_count: 0,
+            aggregate_reward: null,
+            llm_calls_count: 0,
+            total_prompt_tokens: 0,
+            total_completion_tokens: 0,
+            total_tokens: 0,
+          },
+        ],
+      },
+    });
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/library/batches/:batchId" element={<RunLibraryBatchDetail />} />
+      </Routes>,
+      { route: "/library/batches/batch-alpha" },
+    );
+
+    expect(await screen.findByText("Combination results")).toBeInTheDocument();
+    expect(screen.getByText("opencode / glm5.1-thinking")).toBeInTheDocument();
+    expect(screen.getByText("codex / qwen3.6-35b-a3b")).toBeInTheDocument();
+    expect(screen.getByText("oracle / no model")).toBeInTheDocument();
+    expect(screen.getByText("0.500")).toBeInTheDocument();
+    expect(screen.getByText("2/2 trials · 2 scored")).toBeInTheDocument();
+    expect(screen.getByText("1 succeeded · 1 failed")).toBeInTheDocument();
+    expect(screen.getByText("23 tokens · 2 calls")).toBeInTheDocument();
+    expect(screen.getByText("Trials exist but no scored reward")).toBeInTheDocument();
+    expect(screen.getByText("No trials materialized")).toBeInTheDocument();
+    expect(screen.getByText("0/2 trials · 0 scored")).toBeInTheDocument();
+  });
+
+  it("prefers effective per-combination results when supplemental reruns exist", async () => {
+    mockRunLibrary({
+      detailOverride: {
+        ...detailBatch,
+        combinations: [
+          {
+            agent_name: "codex",
+            agent_model: { provider: "openai", name: "qwen3.6-35b-a3b" },
+            provider_model_id: "qwen3.6-35b-a3b",
+            n_per_task: 1,
+          },
+        ],
+        combination_summary: [
+          {
+            combination_idx: 0,
+            label: "codex / qwen3.6-35b-a3b",
+            agent_name: "codex",
+            agent_model: { provider: "openai", name: "qwen3.6-35b-a3b" },
+            provider_connection_id: null,
+            provider_model_id: "qwen3.6-35b-a3b",
+            n_per_task: 1,
+            expected_trial_count: 1,
+            trial_count: 1,
+            completed_trial_count: 1,
+            scored_trial_count: 0,
+            succeeded_count: 0,
+            failed_count: 1,
+            aggregate_reward: null,
+            llm_calls_count: 1,
+            total_prompt_tokens: 3,
+            total_completion_tokens: 1,
+            total_tokens: 4,
+          },
+        ],
+        effective_combination_summary: [
+          {
+            combination_idx: 0,
+            label: "codex / qwen3.6-35b-a3b",
+            agent_name: "codex",
+            agent_model: { provider: "openai", name: "qwen3.6-35b-a3b" },
+            provider_connection_id: null,
+            provider_model_id: "qwen3.6-35b-a3b",
+            n_per_task: 1,
+            expected_trial_count: 1,
+            trial_count: 1,
+            completed_trial_count: 1,
+            scored_trial_count: 1,
+            succeeded_count: 1,
+            failed_count: 0,
+            aggregate_reward: 0.75,
+            llm_calls_count: 1,
+            total_prompt_tokens: 8,
+            total_completion_tokens: 2,
+            total_tokens: 10,
+          },
+        ],
+      },
+    });
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/library/batches/:batchId" element={<RunLibraryBatchDetail />} />
+      </Routes>,
+      { route: "/library/batches/batch-alpha" },
+    );
+
+    expect(await screen.findByText("Combination results")).toBeInTheDocument();
+    expect(screen.getByText("0.750")).toBeInTheDocument();
+    expect(screen.getByText("1 succeeded · 0 failed")).toBeInTheDocument();
+    expect(screen.queryByText("Trials exist but no scored reward")).not.toBeInTheDocument();
   });
 
   it("distinguishes reward zero score failure from platform failure", async () => {

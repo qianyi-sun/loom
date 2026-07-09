@@ -130,7 +130,14 @@ includes `diagnosis` and `debug_evidence`; diagnosis shows the human-readable
 summary, primary cause, impact, reason clusters, and next actions first, while
 the exact redacted debug JSON remains collapsed. Reward `0` with verifier
 output is shown as a platform-successful score failure, not a platform failure
-or automatic supplemental rerun candidate.
+or automatic supplemental rerun candidate. When a batch was submitted with
+multiple agent/model combinations, Run Library detail also shows a Combination
+results table from `combination_summary`, including each combination's reward,
+actual/expected trial count, scored-trial count, success/failure counts, LLM
+calls, and token totals. The table distinguishes combinations with no
+materialized trials from combinations that have trials but no scored reward,
+and uses `effective_combination_summary` when shared supplemental reruns have
+replaced failed originals.
 
 Existing Batch Detail and Trial Detail pages also show owner team, visibility,
 share status, and provenance when those fields are present, so cloned/reused

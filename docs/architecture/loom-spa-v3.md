@@ -1041,6 +1041,13 @@ has no production users.
   than one benchmark. The overall `aggregate_reward` remains a global
   summary; multi-benchmark runs surface each benchmark's score,
   completed/expected trial count, and platform failure count.
+  Multi-agent/model batches also receive `combination_summary`,
+  grouped by `Trial.combination_idx`, so the SPA can compare each
+  requested agent/model combination's actual/expected trial count,
+  scored count, success/failure counts, average reward, and LLM
+  usage. `GET /api/v1/batches/{id}` also returns
+  `effective_combination_summary`, using the same supplemental-rerun
+  replacement rules as `effective_aggregate_reward`.
 - Two-status chips everywhere (lifecycle + outcome on Batch;
   lifecycle-only on Trial since the state encodes outcome).
 - Smart paste parser implementation + 15-format test coverage.

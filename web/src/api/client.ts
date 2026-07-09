@@ -188,6 +188,30 @@ export interface Combination {
   provider_model_id?: string | null;
 }
 
+export interface CombinationSummary {
+  combination_idx: number;
+  label: string;
+  agent_name: string;
+  agent_model?: { provider: string; name: string } | null;
+  provider_connection_id?: string | null;
+  provider_model_id?: string | null;
+  n_per_task?: number;
+  expected_trial_count?: number | null;
+  trial_count: number;
+  completed_trial_count?: number;
+  scored_trial_count: number;
+  succeeded_count: number;
+  failed_count: number;
+  aggregate_reward: number | null;
+  total_prompt_tokens?: number;
+  total_completion_tokens?: number;
+  total_tokens?: number;
+  llm_calls_count?: number;
+  estimated_cost_usd?: number | null;
+  cost_currency?: string | null;
+  cost_status?: string | null;
+}
+
 /** Plan 28 PR-3: structured task_filter discriminated by subset_kind.
  * Series/tags PR-2 added `benchmark_ids` (multi-select union, takes
  * precedence over singular `benchmark_id`) and `tag_filters`
@@ -544,6 +568,8 @@ export interface RunLibraryBatch {
   trial_config: Record<string, unknown>;
   backend: string;
   combinations: Combination[];
+  combination_summary?: CombinationSummary[];
+  effective_combination_summary?: CombinationSummary[];
   provider_connection_id: string | null;
   provider_model_id?: string | null;
   state: string;

@@ -22,9 +22,11 @@ from loom_service.auth_guards import (
     require_submitting_user,
     require_team_or_admin,
 )
+from loom_service.combination_summary import combination_summary_for_batch
 from loom_service.debug_evidence import build_batch_debug_evidence
 from loom_service.dependencies import SessionAndCtx
 from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
+from loom_service.failure_taxonomy import is_replaceable_by_successful_supplemental
 from loom_service.monitor_filters import apply_batch_monitor_filters
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
@@ -102,6 +104,8 @@ class _RunLibraryTrialProjection:
     failure_message: str | None
     result: dict[str, Any] | None
     started_at: datetime | None
+    sample_idx: int
+    combination_idx: int
     provider_connection_id: UUID | None
     provider_model_id: str | None
     worker_id: UUID | None
@@ -779,6 +783,15 @@ async def _batch_trial_projections(
     session: Any,
     batch_id: UUID,
 ) -> list[_RunLibraryTrialProjection]:
+    return await _batch_trial_projections_for_batch_ids(session, [batch_id])
+
+
+async def _batch_trial_projections_for_batch_ids(
+    session: Any,
+    batch_ids: Sequence[UUID],
+) -> list[_RunLibraryTrialProjection]:
+    if not batch_ids:
+        return []
     rows = (
         await session.execute(
             select(
@@ -792,10 +805,14 @@ async def _batch_trial_projections(
                 Trial.failure_message,
                 Trial.result,
                 Trial.started_at,
+                Trial.sample_idx,
+                Trial.combination_idx,
                 Trial.provider_connection_id,
                 Trial.provider_model_id,
                 Trial.worker_id,
-            ).where(Trial.batch_id == batch_id),
+            )
+            .where(Trial.batch_id.in_(list(batch_ids)))
+            .order_by(Trial.submitted_at.asc(), Trial.id.asc()),
         )
     ).all()
     return [
@@ -810,11 +827,54 @@ async def _batch_trial_projections(
             failure_message=row.failure_message,
             result=row.result,
             started_at=row.started_at,
+            sample_idx=row.sample_idx,
+            combination_idx=row.combination_idx,
             provider_connection_id=row.provider_connection_id,
             provider_model_id=row.provider_model_id,
             worker_id=row.worker_id,
         )
         for row in rows
+    ]
+
+
+def _trial_key(trial: Any) -> tuple[str, int, int]:
+    return (
+        str(trial.task_id),
+        int(getattr(trial, "sample_idx", 0) or 0),
+        int(getattr(trial, "combination_idx", 0) or 0),
+    )
+
+
+def _effective_trials(
+    original_trials: Sequence[Any],
+    rerun_trials: Sequence[Any],
+) -> list[Any]:
+    original_by_key = {_trial_key(trial): trial for trial in original_trials}
+    effective = dict(original_by_key)
+    for trial in rerun_trials:
+        if str(trial.state) != "succeeded":
+            continue
+        key = _trial_key(trial)
+        original = original_by_key.get(key)
+        if original is None or not is_replaceable_by_successful_supplemental(original):
+            continue
+        effective[key] = trial
+    return list(effective.values())
+
+
+async def _visible_rerun_batch_ids(session: Any, batch_id: UUID) -> list[UUID]:
+    return [
+        row.id
+        for row in (
+            await session.execute(
+                select(Batch.id).where(
+                    Batch.rerun_of_batch_id == batch_id,
+                    Batch.visibility == "org",
+                    Batch.share_status == "shared",
+                    Batch.state.in_(_ORG_VISIBLE_BATCH_STATES),
+                ),
+            )
+        ).all()
     ]
 
 
@@ -879,15 +939,41 @@ async def _serialize_batch(
     include_debug: bool = False,
 ) -> dict[str, Any]:
     trials = await _batch_trial_projections(session, batch.id)
-    typed_by_trial, artifact_summary, artifact_summary_truncated = (
-        await _batch_detail_artifact_preview(session, batch.id, trials)
-    )
+    (
+        typed_by_trial,
+        artifact_summary,
+        artifact_summary_truncated,
+    ) = await _batch_detail_artifact_preview(session, batch.id, trials)
     reward, cost = _trial_rollup(trials)
+    combination_summary = await combination_summary_for_batch(
+        session,
+        combinations=batch.combinations,
+        trials=trials,
+        expected_trial_count=batch.expected_trial_count,
+        required_worker_pool_count=len(batch.required_worker_pools or []),
+        fanout_errors=batch.fanout_errors,
+    )
+    visible_rerun_batch_ids = await _visible_rerun_batch_ids(session, batch.id)
+    rerun_trials = await _batch_trial_projections_for_batch_ids(
+        session,
+        visible_rerun_batch_ids,
+    )
+    effective_trials = _effective_trials(trials, rerun_trials)
+    effective_combination_summary = await combination_summary_for_batch(
+        session,
+        combinations=batch.combinations,
+        trials=effective_trials,
+        expected_trial_count=batch.expected_trial_count,
+        required_worker_pool_count=len(batch.required_worker_pools or []),
+        fanout_errors=batch.fanout_errors,
+    )
     out = {
         **_serialize_batch_base(batch, owner_team),
         "trial_summary": _trial_summary(trials),
         "aggregate_reward": reward,
         "total_cost_usd": cost,
+        "combination_summary": combination_summary,
+        "effective_combination_summary": effective_combination_summary,
         "artifact_summary": artifact_summary,
         "artifact_summary_truncated": artifact_summary_truncated,
     }
@@ -1194,8 +1280,8 @@ async def list_run_library_batches(
     if not artifact_filtering:
         batch_ids = [batch.id for batch, _team in rows]
         trial_rollups = await _batch_list_trial_rollups(session, batch_ids)
-        artifact_summaries, truncated_artifact_summaries = await (
-            _batch_list_artifact_summaries(session, batch_ids)
+        artifact_summaries, truncated_artifact_summaries = await _batch_list_artifact_summaries(
+            session, batch_ids
         )
         for batch, team in rows:
             item = _serialize_batch_list_item(
@@ -1487,21 +1573,26 @@ def _retry_default_snapshot_mismatch(
     source_backoff = source_retry.get("backoff") or {}
     source_norm = {
         "max_attempts": source_retry.get(
-            "max_attempts", current["max_attempts"],
+            "max_attempts",
+            current["max_attempts"],
         ),
         "retry_on": sorted(source_retry.get("retry_on", current["retry_on"])),
         "backoff": {
             "base_sec": source_backoff.get(
-                "base_sec", current["backoff"]["base_sec"],
+                "base_sec",
+                current["backoff"]["base_sec"],
             ),
             "max_sec": source_backoff.get(
-                "max_sec", current["backoff"]["max_sec"],
+                "max_sec",
+                current["backoff"]["max_sec"],
             ),
             "multiplier": source_backoff.get(
-                "multiplier", current["backoff"]["multiplier"],
+                "multiplier",
+                current["backoff"]["multiplier"],
             ),
             "jitter": source_backoff.get(
-                "jitter", current["backoff"]["jitter"],
+                "jitter",
+                current["backoff"]["jitter"],
             ),
         },
     }
@@ -1528,10 +1619,7 @@ async def clone_run_library_batch_config(
     if source.provider_connection_id is not None and payload.provider_connection_id is None:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "choose a provider_connection_id owned by or shared with "
-                "your team"
-            ),
+            detail=("choose a provider_connection_id owned by or shared with your team"),
         )
     if payload.provider_connection_id is not None:
         await validate_provider_connection(
@@ -1559,9 +1647,7 @@ async def clone_run_library_batch_config(
         created_by_token_prefix=token_prefix,
         submitted_by_user_id=ctx.user_id,
         usage_attributed_user_id=ctx.user_id,
-        usage_attributed_actor=(
-            f"user:{ctx.user_id}" if ctx.user_id is not None else None
-        ),
+        usage_attributed_actor=(f"user:{ctx.user_id}" if ctx.user_id is not None else None),
         expected_trial_count=source.expected_trial_count,
         n_per_task=source.n_per_task,
         backend=source.backend,
@@ -1574,7 +1660,8 @@ async def clone_run_library_batch_config(
     await session.commit()
     await session.refresh(clone)
     mismatch = _retry_default_snapshot_mismatch(
-        clone.trial_config, request.app.state.settings,
+        clone.trial_config,
+        request.app.state.settings,
     )
     return {
         "batch_id": str(clone.id),
@@ -1728,9 +1815,7 @@ async def reuse_run_library_artifact(
         created_by_token_prefix=token_prefix,
         submitted_by_user_id=ctx.user_id,
         usage_attributed_user_id=ctx.user_id,
-        usage_attributed_actor=(
-            f"user:{ctx.user_id}" if ctx.user_id is not None else None
-        ),
+        usage_attributed_actor=(f"user:{ctx.user_id}" if ctx.user_id is not None else None),
         expected_trial_count=batch.expected_trial_count if batch else 1,
         n_per_task=batch.n_per_task if batch else 1,
         backend=batch.backend if batch else "docker",

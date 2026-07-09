@@ -884,6 +884,29 @@ export interface components {
       provider_connection_id?: string | null;
       provider_model_id?: string | null;
     };
+    CombinationSummary: {
+      combination_idx: number;
+      label: string;
+      agent_name: string;
+      agent_model?: { provider: string; name: string } | null;
+      provider_connection_id?: string | null;
+      provider_model_id?: string | null;
+      n_per_task?: number;
+      expected_trial_count?: number | null;
+      trial_count: number;
+      completed_trial_count?: number;
+      scored_trial_count: number;
+      succeeded_count: number;
+      failed_count: number;
+      aggregate_reward: number | null;
+      total_prompt_tokens?: number;
+      total_completion_tokens?: number;
+      total_tokens?: number;
+      llm_calls_count?: number;
+      estimated_cost_usd?: number | null;
+      cost_currency?: string | null;
+      cost_status?: components["schemas"]["UsageCostStatus"];
+    };
     BatchList: {
       items: components["schemas"]["Batch"][];
       next_cursor: string | null;
@@ -944,6 +967,8 @@ export interface components {
       trial_summary: Record<string, number>;
       aggregate_reward: number | null;
       benchmark_summary: components["schemas"]["BenchmarkSummary"][];
+      combination_summary: components["schemas"]["CombinationSummary"][];
+      effective_combination_summary: components["schemas"]["CombinationSummary"][];
       rerun_batches: {
         id: string;
         name: string;

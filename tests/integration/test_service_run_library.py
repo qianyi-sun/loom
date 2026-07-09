@@ -6,13 +6,14 @@ import hashlib
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 import boto3
 import httpx
 import pytest
 from botocore.config import Config
-from sqlalchemy import create_engine, delete, insert, select
+from sqlalchemy import create_engine, delete, insert, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from testcontainers.minio import MinioContainer
@@ -21,6 +22,7 @@ from loom.db.schema import (
     Artifact,
     ArtifactLineageEdge,
     Batch,
+    LlmCall,
     ProviderConnection,
     Task,
     Team,
@@ -457,6 +459,7 @@ async def run_library_setup(
         with sl() as s:
             s.execute(delete(ArtifactLineageEdge))
             s.execute(delete(Artifact))
+            s.execute(delete(LlmCall))
             s.execute(delete(Trial))
             s.execute(delete(Batch))
             s.execute(delete(ProviderConnection))
@@ -632,9 +635,7 @@ async def test_run_library_batch_list_caps_artifact_summary_per_batch(
         )
 
     assert all_teams.status_code == 200, all_teams.text
-    shared = next(
-        item for item in all_teams.json()["items"] if item["id"] == str(batch_shared)
-    )
+    shared = next(item for item in all_teams.json()["items"] if item["id"] == str(batch_shared))
     assert shared["artifact_summary_truncated"] is True
     assert sum(shared["artifact_summary"].values()) <= 3
 
@@ -931,6 +932,229 @@ async def test_typed_registry_filters_detail_inventory_and_metadata_export(
     assert [item["id"] for item in lines] == [str(safe_artifact_id)]
     assert str(blocked_artifact_id) not in exported.text
     assert "sk-test-should-not-leak" not in exported.text
+
+
+async def test_run_library_batch_detail_includes_combination_summary(
+    run_library_setup: dict[str, object],
+) -> None:
+    app = run_library_setup["app"]
+    raw_b = run_library_setup["raw_b"]
+    team_a = run_library_setup["team_a"]
+    batch_shared = run_library_setup["batch_shared"]
+    trial_shared = run_library_setup["trial_shared"]
+    task_id = run_library_setup["task_id"]
+    postgres_url = run_library_setup["postgres_url"]
+    now = datetime.now(UTC)
+    combo_failed_trial = uuid4()
+    rerun_batch_id = uuid4()
+    rerun_success_trial = uuid4()
+    combinations = [
+        {
+            "agent_name": "opencode",
+            "agent_model": {
+                "provider": "openai",
+                "name": "glm5.1-thinking",
+            },
+            "provider_model_id": "glm5.1-thinking",
+            "n_per_task": 1,
+            "label": "opencode / glm5.1-thinking",
+        },
+        {
+            "agent_name": "codex",
+            "agent_model": {
+                "provider": "openai",
+                "name": "qwen3.6-35b-a3b",
+            },
+            "provider_model_id": "qwen3.6-35b-a3b",
+            "n_per_task": 1,
+        },
+        {
+            "agent_name": "oracle",
+            "agent_model": None,
+            "n_per_task": 1,
+            "label": "oracle / no model",
+        },
+    ]
+
+    sync_engine = create_engine(str(postgres_url))
+    with sync_engine.begin() as conn:
+        conn.execute(
+            update(Batch)
+            .where(Batch.id == batch_shared)
+            .values(
+                expected_trial_count=3,
+                combinations=combinations,
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=combo_failed_trial,
+                task_id=task_id,
+                team_id=team_a,
+                batch_id=batch_shared,
+                state="failed",
+                failure_reason="gateway_error",
+                config={},
+                requires_caps={},
+                submitted_at=now,
+                started_at=now,
+                finished_at=now,
+                sample_idx=0,
+                combination_idx=1,
+                result=None,
+                visibility="org",
+                share_status="shared",
+            )
+        )
+        conn.execute(
+            insert(Batch).values(
+                id=rerun_batch_id,
+                team_id=team_a,
+                name="shared alpha run failed-case rerun",
+                task_filter={"task_ids": [task_id], "subset_kind": "explicit"},
+                trial_config={},
+                state="finished",
+                result_status="succeeded",
+                created_at=now,
+                finished_at=now,
+                created_by_token_prefix="test:web",
+                expected_trial_count=1,
+                backend="docker",
+                combinations=combinations,
+                visibility="org",
+                share_status="shared",
+                rerun_of_batch_id=batch_shared,
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=rerun_success_trial,
+                task_id=task_id,
+                team_id=team_a,
+                batch_id=rerun_batch_id,
+                state="succeeded",
+                config={},
+                requires_caps={},
+                submitted_at=now,
+                started_at=now,
+                finished_at=now,
+                sample_idx=0,
+                combination_idx=1,
+                result={"aggregate_reward": 0.75},
+                visibility="org",
+                share_status="shared",
+            )
+        )
+        conn.execute(
+            insert(LlmCall),
+            [
+                {
+                    "id": uuid4(),
+                    "team_id": team_a,
+                    "trial_id": trial_shared,
+                    "step_id": "main",
+                    "model": "openai/glm5.1-thinking",
+                    "dialect": "openai",
+                    "input_tokens": 4,
+                    "output_tokens": 2,
+                    "provider_extras": {},
+                    "cost_usd": Decimal("0.010000"),
+                    "rate_card_hash": "facade:tokens-only:test",
+                },
+                {
+                    "id": uuid4(),
+                    "team_id": team_a,
+                    "trial_id": combo_failed_trial,
+                    "step_id": "main",
+                    "model": "openai/qwen3.6-35b-a3b",
+                    "dialect": "openai",
+                    "input_tokens": 3,
+                    "output_tokens": 1,
+                    "provider_extras": {},
+                    "cost_usd": Decimal("0.000000"),
+                    "rate_card_hash": "facade:rate-card:missing:test",
+                },
+                {
+                    "id": uuid4(),
+                    "team_id": team_a,
+                    "trial_id": rerun_success_trial,
+                    "step_id": "main",
+                    "model": "openai/qwen3.6-35b-a3b",
+                    "dialect": "openai",
+                    "input_tokens": 8,
+                    "output_tokens": 2,
+                    "provider_extras": {},
+                    "cost_usd": Decimal("0.010000"),
+                    "rate_card_hash": "facade:tokens-only:test",
+                },
+            ],
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        detail = await ac.get(
+            f"/api/v1/run-library/batches/{batch_shared}",
+            headers={"Authorization": f"Bearer {raw_b}"},
+        )
+
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    summary = body["combination_summary"]
+    assert [row["combination_idx"] for row in summary] == [0, 1, 2]
+    assert (
+        summary[0]
+        | {
+            "label": "opencode / glm5.1-thinking",
+            "trial_count": 1,
+            "expected_trial_count": 1,
+            "scored_trial_count": 1,
+            "succeeded_count": 1,
+            "failed_count": 0,
+            "aggregate_reward": 1.0,
+            "llm_calls_count": 1,
+            "total_prompt_tokens": 4,
+            "total_completion_tokens": 2,
+        }
+        == summary[0]
+    )
+    assert (
+        summary[1]
+        | {
+            "label": "codex / qwen3.6-35b-a3b",
+            "trial_count": 1,
+            "expected_trial_count": 1,
+            "scored_trial_count": 0,
+            "failed_count": 1,
+            "aggregate_reward": None,
+            "llm_calls_count": 1,
+            "total_prompt_tokens": 3,
+            "total_completion_tokens": 1,
+        }
+        == summary[1]
+    )
+    assert (
+        summary[2]
+        | {
+            "label": "oracle / no model",
+            "trial_count": 0,
+            "expected_trial_count": 1,
+            "scored_trial_count": 0,
+            "aggregate_reward": None,
+            "llm_calls_count": 0,
+        }
+        == summary[2]
+    )
+    effective = body["effective_combination_summary"]
+    assert effective[1]["trial_count"] == 1
+    assert effective[1]["expected_trial_count"] == 1
+    assert effective[1]["scored_trial_count"] == 1
+    assert effective[1]["succeeded_count"] == 1
+    assert effective[1]["failed_count"] == 0
+    assert effective[1]["aggregate_reward"] == pytest.approx(0.75)
+    assert effective[1]["llm_calls_count"] == 1
+    assert effective[1]["total_prompt_tokens"] == 8
+    assert effective[1]["total_completion_tokens"] == 2
 
 
 async def test_run_library_batch_detail_default_does_not_materialize_llm_calls(
@@ -1297,21 +1521,22 @@ async def test_clone_config_surfaces_retry_default_mismatch(
             "max_attempts": 7,
             "retry_on": ["worker_crash", "agent_timeout"],
             "backoff": {
-                "base_sec": 5.0, "max_sec": 60.0,
-                "multiplier": 3.0, "jitter": 0.5,
+                "base_sec": 5.0,
+                "max_sec": 60.0,
+                "multiplier": 3.0,
+                "jitter": 0.5,
             },
         }
         s.execute(
-            Batch.__table__.update()
-            .where(Batch.id == batch_shared)
-            .values(trial_config=patched),
+            Batch.__table__.update().where(Batch.id == batch_shared).values(trial_config=patched),
         )
         s.commit()
     sync_engine.dispose()
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         cloned = await ac.post(
             f"/api/v1/run-library/batches/{batch_shared}/clone-config",
@@ -1328,12 +1553,15 @@ async def test_clone_config_surfaces_retry_default_mismatch(
     assert mismatch["source"]["max_attempts"] == 7
     assert mismatch["source"]["retry_on"] == ["agent_timeout", "worker_crash"]
     assert mismatch["source"]["backoff"] == {
-        "base_sec": 5.0, "max_sec": 60.0,
-        "multiplier": 3.0, "jitter": 0.5,
+        "base_sec": 5.0,
+        "max_sec": 60.0,
+        "multiplier": 3.0,
+        "jitter": 0.5,
     }
     assert mismatch["current"]["max_attempts"] == 3
     assert mismatch["current"]["retry_on"] == [
-        "gateway_error", "provider_transport_disconnect",
+        "gateway_error",
+        "provider_transport_disconnect",
     ]
 
 

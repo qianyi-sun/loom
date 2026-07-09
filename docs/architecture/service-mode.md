@@ -584,8 +584,17 @@ Core pages include:
   grouped server-side from trial task ids to task benchmark ids and
   benchmark display names, so the SPA can show per-benchmark score,
   expected/completed trial counts, and platform failures without
-  parsing task ids. Batch detail also renders the Debug evidence card from the
-  same `debug_evidence` object exposed to API and CLI callers.
+  parsing task ids. Multi-agent/model batch detail responses include
+  `combination_summary`, grouped server-side from `Trial.combination_idx`,
+  preserving requested combinations that have no materialized trials. The
+  Run Library batch detail renders this as a comparison table with reward,
+  actual/expected trial count, scored-trial count, success/failure counts, and
+  LLM usage for each combination. `GET /api/v1/batches/{id}` also exposes
+  `effective_combination_summary` after successful supplemental rerun
+  replacement; Run Library detail uses the effective version when shared
+  supplemental reruns are available. Batch detail also renders the Debug
+  evidence card from the same `debug_evidence` object exposed to API and CLI
+  callers.
 - **NewBatch** — textarea JSON parse for `task_filter` +
   `trial_config` with local validation
 - **Tasks** — cluster task catalog

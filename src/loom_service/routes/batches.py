@@ -65,6 +65,7 @@ from loom_service.auth_guards import (
     require_team_or_admin,
 )
 from loom_service.batch_identity import build_batch_identity
+from loom_service.combination_summary import combination_summary_for_batch
 from loom_service.debug_evidence import build_batch_debug_evidence
 from loom_service.dependencies import AdminSessionAndCtx, SessionAndCtx
 from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
@@ -141,6 +142,7 @@ def _build_service_state_backend(request: Request) -> Any:
         region=settings.minio_region,
     )
     return S3ArtifactsStateBackend(store=store, bucket=settings.artifacts_bucket)
+
 
 _RERUNNABLE_FAILURE_REASONS: frozenset[str] = frozenset(
     {
@@ -337,18 +339,13 @@ async def _resolve_on_behalf_submitter(
         )
     represented_user_id = payload.represented_user_id
     represented_username = (
-        payload.represented_username.strip()
-        if payload.represented_username is not None
-        else None
+        payload.represented_username.strip() if payload.represented_username is not None else None
     )
     if bool(represented_user_id) == bool(represented_username):
         _reject_submission(
             reason="invalid_input",
             status_code=400,
-            detail=(
-                "set exactly one of represented_user_id or "
-                "represented_username"
-            ),
+            detail=("set exactly one of represented_user_id or represented_username"),
         )
 
     team = (
@@ -558,9 +555,7 @@ async def _estimate_pre_run_budget_for_payload(
         estimate = await estimate_pre_run_batch_budget(
             session,
             provider_connection=(
-                provider_connections_by_id.get(conn_id)
-                if conn_id is not None
-                else None
+                provider_connections_by_id.get(conn_id) if conn_id is not None else None
             ),
             provider_model_id=model_id,
             expected_trial_count=combo_expected,
@@ -569,63 +564,58 @@ async def _estimate_pre_run_budget_for_payload(
             budget_policy=budget_policy,
         )
         estimates.append(estimate)
-        items.append({
-            "combination_idx": i,
-            "label": combo.label or _derive_combination_label(combo),
-            "provider_connection_id": str(conn_id) if conn_id else None,
-            "provider_model_id": model_id,
-            "expected_trial_count": combo_expected,
-            "pre_run_estimated_cost_usd": (
-                estimate.pre_run_estimated_cost_usd
-            ),
-            "cost_estimate_source": estimate.cost_estimate_source,
-            "cost_estimate_confidence": estimate.cost_estimate_confidence,
-            "unpriced_reason": estimate.unpriced_reason,
-            "pre_run_estimated_llm_calls_count": (
-                estimate.pre_run_estimated_llm_calls_count
-            ),
-            "pre_run_estimated_prompt_tokens": (
-                estimate.pre_run_estimated_prompt_tokens
-            ),
-            "pre_run_estimated_completion_tokens": (
-                estimate.pre_run_estimated_completion_tokens
-            ),
-        })
+        items.append(
+            {
+                "combination_idx": i,
+                "label": combo.label or _derive_combination_label(combo),
+                "provider_connection_id": str(conn_id) if conn_id else None,
+                "provider_model_id": model_id,
+                "expected_trial_count": combo_expected,
+                "pre_run_estimated_cost_usd": (estimate.pre_run_estimated_cost_usd),
+                "cost_estimate_source": estimate.cost_estimate_source,
+                "cost_estimate_confidence": estimate.cost_estimate_confidence,
+                "unpriced_reason": estimate.unpriced_reason,
+                "pre_run_estimated_llm_calls_count": (estimate.pre_run_estimated_llm_calls_count),
+                "pre_run_estimated_prompt_tokens": (estimate.pre_run_estimated_prompt_tokens),
+                "pre_run_estimated_completion_tokens": (
+                    estimate.pre_run_estimated_completion_tokens
+                ),
+            }
+        )
 
     costs = [estimate.pre_run_estimated_cost_usd for estimate in estimates]
-    total_cost = sum(cast(float, cost) for cost in costs) if all(
-        cost is not None for cost in costs
-    ) else None
+    total_cost = (
+        sum(cast(float, cost) for cost in costs)
+        if all(cost is not None for cost in costs)
+        else None
+    )
     aggregate = PreRunBudgetEstimate(
         budget_usd=estimates[0].budget_usd if estimates else budget_usd,
         budget_policy=budget_policy,
         pre_run_estimated_cost_usd=total_cost,
-        cost_estimate_source=_merge_budget_source({
-            estimate.cost_estimate_source for estimate in estimates
-        }),
-        cost_estimate_confidence=_merge_budget_confidence({
-            estimate.cost_estimate_confidence for estimate in estimates
-        }),
+        cost_estimate_source=_merge_budget_source(
+            {estimate.cost_estimate_source for estimate in estimates}
+        ),
+        cost_estimate_confidence=_merge_budget_confidence(
+            {estimate.cost_estimate_confidence for estimate in estimates}
+        ),
         pre_run_estimated_llm_calls_count=sum(
-            estimate.pre_run_estimated_llm_calls_count
-            for estimate in estimates
+            estimate.pre_run_estimated_llm_calls_count for estimate in estimates
         ),
         pre_run_estimated_prompt_tokens=sum(
-            estimate.pre_run_estimated_prompt_tokens
-            for estimate in estimates
+            estimate.pre_run_estimated_prompt_tokens for estimate in estimates
         ),
         pre_run_estimated_completion_tokens=sum(
-            estimate.pre_run_estimated_completion_tokens
-            for estimate in estimates
+            estimate.pre_run_estimated_completion_tokens for estimate in estimates
         ),
-        unpriced_reason=(
-            None if total_cost is not None else "one_or_more_combinations_unpriced"
-        ),
+        unpriced_reason=(None if total_cost is not None else "one_or_more_combinations_unpriced"),
     )
-    return aggregate, [{
-        "reason": "combination_budget_estimate",
-        "items": items,
-    }]
+    return aggregate, [
+        {
+            "reason": "combination_budget_estimate",
+            "items": items,
+        }
+    ]
 
 
 def _agents_in_batch(
@@ -788,7 +778,9 @@ async def _create_batch_record(
     usage_attributed_actor: str | None,
 ) -> dict[str, Any]:
     submission_team_id = await _resolve_submission_team_id(
-        s, ctx, payload.team_id,
+        s,
+        ctx,
+        payload.team_id,
     )
     await _reject_if_team_paused(s, submission_team_id)
 
@@ -966,13 +958,17 @@ async def _create_batch_record(
     provider_connections_by_id: dict[UUID, ProviderConnection] = {}
     if provider_connection_ids:
         provider_rows = (
-            await s.execute(
-                select(ProviderConnection).where(
-                    ProviderConnection.id.in_(list(provider_connection_ids)),
-                    ProviderConnection.deleted_at.is_(None),
-                ),
+            (
+                await s.execute(
+                    select(ProviderConnection).where(
+                        ProviderConnection.id.in_(list(provider_connection_ids)),
+                        ProviderConnection.deleted_at.is_(None),
+                    ),
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         provider_connections_by_id = {row.id: row for row in provider_rows}
 
     task_result = await resolve_task_filter_with_diagnostics(
@@ -1126,15 +1122,11 @@ async def _create_batch_record(
         budget_usd=payload.budget_usd if budget_policy != "none" else None,
         budget_policy=budget_policy,
         budget_confirmed_at=(
-            datetime.now(UTC)
-            if budget_policy == "soft" and payload.budget_confirmed
-            else None
+            datetime.now(UTC) if budget_policy == "soft" and payload.budget_confirmed else None
         ),
         pre_run_estimated_cost_usd=budget_estimate.pre_run_estimated_cost_usd,
         pre_run_cost_estimate_source=budget_estimate.cost_estimate_source,
-        pre_run_cost_estimate_confidence=(
-            budget_estimate.cost_estimate_confidence
-        ),
+        pre_run_cost_estimate_confidence=(budget_estimate.cost_estimate_confidence),
         budget_diagnostics=budget_diagnostics,
     )
     s.add(b)
@@ -1153,12 +1145,16 @@ async def _create_batch_record(
     # trial_config carries a fully-formed override — mixing benchmark
     # defaults across tasks would silently pick one arbitrary benchmark
     # and apply it to foreign tasks.
-    task_rows = (await s.execute(
-        select(Task).where(Task.id.in_(list(valid_task_ids))),
-    )).scalars().all()
-    distinct_benchmarks = {
-        t.benchmark_id for t in task_rows if t.benchmark_id is not None
-    }
+    task_rows = (
+        (
+            await s.execute(
+                select(Task).where(Task.id.in_(list(valid_task_ids))),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    distinct_benchmarks = {t.benchmark_id for t in task_rows if t.benchmark_id is not None}
     catalog_default = None
     if len(distinct_benchmarks) == 1:
         catalog_default = _catalog_family_run_defaults(
@@ -1223,9 +1219,7 @@ async def create_batch(
         payload,
         submitted_by_user_id=ctx.user_id,
         usage_attributed_user_id=ctx.user_id,
-        usage_attributed_actor=(
-            f"user:{ctx.user_id}" if ctx.user_id is not None else None
-        ),
+        usage_attributed_actor=(f"user:{ctx.user_id}" if ctx.user_id is not None else None),
     )
     await s.commit()
     return response
@@ -1420,9 +1414,8 @@ def _priced_call_filter() -> Any:
 
 
 def _price_unknown_call_filter() -> Any:
-    return (
-        LlmCall.rate_card_hash.like("facade:rate-card:missing%")
-        | _cost_meta_filter(COST_META_SOURCE_KEY, "unpriced")
+    return LlmCall.rate_card_hash.like("facade:rate-card:missing%") | _cost_meta_filter(
+        COST_META_SOURCE_KEY, "unpriced"
     )
 
 
@@ -1958,6 +1951,14 @@ async def get_batch(
         s,
         original_trials,
     )
+    combination_summary = await combination_summary_for_batch(
+        s,
+        combinations=b.combinations,
+        trials=original_trials,
+        expected_trial_count=b.expected_trial_count,
+        required_worker_pool_count=len(b.required_worker_pools or []),
+        fanout_errors=b.fanout_errors,
+    )
 
     rerun_batches = (
         (
@@ -1986,6 +1987,14 @@ async def get_batch(
     effective_summary = _summary_from_trials(effective_trials)
     effective_reward = _rollup_from_trials(effective_trials)
     effective_usage = await _usage_totals_for_trials(s, effective_trials)
+    effective_combination_summary = await combination_summary_for_batch(
+        s,
+        combinations=b.combinations,
+        trials=effective_trials,
+        expected_trial_count=b.expected_trial_count,
+        required_worker_pool_count=len(b.required_worker_pools or []),
+        fanout_errors=b.fanout_errors,
+    )
     effective_llm_call_counts = await _llm_call_counts_for_trials(
         s,
         effective_trials,
@@ -2049,6 +2058,8 @@ async def get_batch(
         "price_snapshots": price_snapshots,
         "effective_price_snapshots": effective_price_snapshots,
         "benchmark_summary": benchmark_summary,
+        "combination_summary": combination_summary,
+        "effective_combination_summary": effective_combination_summary,
     }
     if include_debug:
         llm_calls = await _llm_calls_for_trials(s, original_trials)
@@ -2321,9 +2332,7 @@ async def rerun_failed_batch(
         created_by_token_prefix=token_prefix,
         submitted_by_user_id=ctx.user_id,
         usage_attributed_user_id=ctx.user_id,
-        usage_attributed_actor=(
-            f"user:{ctx.user_id}" if ctx.user_id is not None else None
-        ),
+        usage_attributed_actor=(f"user:{ctx.user_id}" if ctx.user_id is not None else None),
         expected_trial_count=len(targets),
         n_per_task=1,
         backend=b.backend,
