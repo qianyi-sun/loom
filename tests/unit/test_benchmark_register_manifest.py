@@ -341,3 +341,102 @@ async def test_run_register_mirror_writes_internal_source_and_hf_provenance(
     assert result["registered"] == 1
     assert result["mirrored"] == 1
     assert result["mirror_uploaded"] == 1
+
+
+@pytest.mark.asyncio
+async def test_download_hf_bundle_snapshot_batches_tasks_and_sleeps(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from loom_benchmark_tool.register_cmd import _download_hf_bundle_snapshot
+
+    calls: list[list[str]] = []
+
+    def fake_snapshot_download(
+        *,
+        repo_id: str,
+        revision: str,
+        repo_type: str,
+        allow_patterns: list[str],
+        token: str | None,
+    ) -> str:
+        calls.append(list(allow_patterns))
+        return str(tmp_path / "snapshot")
+
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download",
+        fake_snapshot_download,
+    )
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(secs: float) -> None:
+        sleeps.append(secs)
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    tasks = [{"hf_path": f"task-{i:03d}/"} for i in range(5)]
+    result = await _download_hf_bundle_snapshot(
+        repo_id="PRHW/loom-benchmark-fake",
+        revision="main",
+        hf_token=None,
+        tasks=tasks,
+        chunk_size=2,
+        chunk_sleep_secs=7.5,
+    )
+
+    assert result == tmp_path / "snapshot"
+    # 5 tasks split into batches of 2 → three batches (2, 2, 1).
+    assert [len(batch) for batch in calls] == [2, 2, 1]
+    assert calls[0] == ["task-000/*", "task-001/*"]
+    assert calls[1] == ["task-002/*", "task-003/*"]
+    assert calls[2] == ["task-004/*"]
+    # Two sleeps between three batches; no trailing sleep after the last batch.
+    assert sleeps == [7.5, 7.5]
+
+
+@pytest.mark.asyncio
+async def test_download_hf_bundle_snapshot_single_shot_when_chunk_size_none(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from loom_benchmark_tool.register_cmd import _download_hf_bundle_snapshot
+
+    calls: list[list[str]] = []
+
+    def fake_snapshot_download(
+        *,
+        repo_id: str,
+        revision: str,
+        repo_type: str,
+        allow_patterns: list[str],
+        token: str | None,
+    ) -> str:
+        calls.append(list(allow_patterns))
+        return str(tmp_path / "snapshot")
+
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download",
+        fake_snapshot_download,
+    )
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(secs: float) -> None:
+        sleeps.append(secs)
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    tasks = [{"hf_path": f"task-{i:03d}/"} for i in range(3)]
+    await _download_hf_bundle_snapshot(
+        repo_id="PRHW/loom-benchmark-fake",
+        revision="main",
+        hf_token=None,
+        tasks=tasks,
+        chunk_size=None,
+    )
+
+    # Single-shot: one call with all patterns, no sleeps.
+    assert len(calls) == 1
+    assert calls[0] == ["task-000/*", "task-001/*", "task-002/*"]
+    assert sleeps == []
