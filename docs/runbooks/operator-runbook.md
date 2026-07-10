@@ -4873,11 +4873,11 @@ checklist:
 - **`staging-smoke`** (kind, label-gated `staging-smoke`) — builds
   REAL images, applies them, waits for every pod to reach Ready,
   probes `/healthz` + `/metrics` on every component. Closes the
-  cold-start regression gap (~15-20 min). Its real AWS S3 storage
-  subjob runs only when `ci-aws` provides `LOOM_SVC_MINIO_ACCESS_KEY`,
-  `LOOM_SVC_MINIO_SECRET_KEY`, `LOOM_SVC_MINIO_REGION`, and
-  `LOOM_CI_S3_BUCKET`; otherwise it exits successfully after listing
-  the missing variable names only.
+  cold-start regression gap (~15-20 min). This required PR gate is
+  credential-free: it never enters `ci-aws` and does not claim real AWS S3
+  coverage. Record real-AWS validation only from a separately protected,
+  trusted post-merge/release run; a missing or skipped cloud run is not AWS
+  evidence.
 - **`scripts/staging_smoke_gate.py`** — covers public health, logged-out SPA
   reachability, two-team non-admin user-owned API-token auth, provider/model
   discovery, runnable benchmark catalog presence, sampled ready benchmark bundle objects,

@@ -114,6 +114,7 @@ def test_codeowners_is_narrow_ci_and_release_trust_root() -> None:
         "/scripts/validate_environment_isolation.py",
         "/tests/ops/test_plan_ci_validations.py",
         "/tests/ops/test_ci_throughput_workflows.py",
+        "/tests/ops/test_ci_secret_isolation.py",
         "/pyproject.toml",
         "/scripts/ops/release_gate.py",
         "/scripts/ops/release_identity.py",

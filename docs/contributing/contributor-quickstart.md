@@ -150,7 +150,15 @@ dispatchable. Manual runs report `images-gate-manual`, not the protected
 workflows. The image workflow plans a path-aware matrix so web-only changes
 build only the web image, Dockerfile-only changes build the matching component,
 and shared Python/runtime changes rebuild the affected Python images. Relevant
-pushes to `dev`/`main` still publish multi-arch images.
+pull requests, merge groups, and manual dispatches have read-only permissions,
+do not log in to GHCR, and cannot write the publication cache. Manual dispatch
+is build-only. Only trusted pushes to `dev` or `main` receive job-scoped
+`packages: write` authority and publish multi-arch images.
+
+`staging-smoke-gate` proves the credential-free kind deployment smoke only. It
+never enters `ci-aws`, and a missing or skipped real-AWS run is not represented
+as cloud validation. Real AWS evidence belongs to a separately protected,
+trusted post-merge/release workflow rather than the required PR context.
 
 ## Coverage gates
 

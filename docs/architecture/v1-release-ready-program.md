@@ -97,6 +97,15 @@ cannot satisfy the protected PR contexts. Pull-request `edited` events rerun
 the planner so a base retarget cannot reuse a plan computed against the old
 base.
 
+The image lane separates validation from publication. Pull requests, merge
+groups, and manual dispatches use read-only permissions, never log in to GHCR,
+and cannot write the publication cache; manual dispatch is build-only. Only a
+trusted push to `dev` or `main` receives job-scoped `packages: write` authority.
+The required `staging-smoke-gate` is likewise credential-free and depends only
+on the kind smoke. Real AWS validation belongs to a separately protected,
+trusted post-merge/release lane and a skipped cloud run cannot count as cloud
+evidence.
+
 Codex enables squash auto-merge immediately after opening each normal `dev`
 PR. GitHub queues the merge until every required gate is visible and successful
 on the current head SHA and any applicable repository protection passes.

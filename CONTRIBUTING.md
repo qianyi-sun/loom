@@ -157,8 +157,14 @@ secrets.
 - Do not assume labels are the only way to select validation. For example,
   relevant image paths select `images-gate` automatically; `ci:images` adds
   multi-arch image validation when the changed paths do not already require it.
-  Pushes to `dev`/`main` still publish deployable images from the path-aware
-  image workflow.
+  Pull requests, merge groups, and manual dispatches build with a read-only
+  token, do not log in to GHCR, and cannot write the shared publication cache.
+  Manual dispatch is build-only. Only a trusted push to `dev` or `main` enters
+  the job that has `packages: write` and publishes deployable images.
+- `staging-smoke-gate` is a credential-free kind validation lane. It does not
+  request the `ci-aws` environment and does not treat a skipped real-AWS check
+  as successful cloud evidence. Real AWS validation is a separate trusted,
+  post-merge/release activity and cannot satisfy this protected PR context.
 - Release-promotion PRs to `main` remain explicitly owner-managed and never
   use the routine `dev` auto-merge path.
 - This operational rule governs Codex-created PRs only; contributor-specific

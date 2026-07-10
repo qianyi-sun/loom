@@ -307,11 +307,13 @@ In order, after this design lands:
 3. **`bootstrap-storage-lifecycle` reads the new schema.** Falls
    back to env vars for the static-keys case so existing
    deployments keep working.
-4. **Staging-smoke variant against real AWS S3 in a CI account.**
-   Tests the `irsa` + `static_keys` paths end-to-end when the CI
-   environment supplies the required AWS S3 static-key, region, and
-   bucket variables; otherwise the real-S3 subjob skips cleanly after
-   listing only the missing variable names.
+4. **Trusted post-merge smoke against real AWS S3 in a CI account.**
+   Keep this out of the pull-request `staging-smoke-gate`: PR code must not
+   receive AWS credentials, and missing configuration must not become green
+   cloud evidence. The trusted workflow should use short-lived identity,
+   protected refs/environment policy, isolated per-run resources (or safe
+   serialization and restoration), and fail closed when AWS validation is
+   required.
 5. **GCS lifecycle renderer.** Lands when the first GCS deployment
    asks for it; not blocking on the rest.
 6. **Operator-runbook per-shape sections.** One subsection per
