@@ -30,9 +30,16 @@ def postgres_url_at_0064() -> Iterator[str]:
             "postgresql+psycopg2://",
             "postgresql+psycopg://",
         )
-        os.environ["LOOM_DB_URL"] = postgres_url
-        command.upgrade(_cfg(postgres_url), "0064")
-        yield postgres_url
+        previous_db_url = os.environ.get("LOOM_DB_URL")
+        try:
+            os.environ["LOOM_DB_URL"] = postgres_url
+            command.upgrade(_cfg(postgres_url), "0064")
+            yield postgres_url
+        finally:
+            if previous_db_url is None:
+                os.environ.pop("LOOM_DB_URL", None)
+            else:
+                os.environ["LOOM_DB_URL"] = previous_db_url
 
 
 def test_upgrade_reserves_the_fixed_canary_team_and_quota(
@@ -77,10 +84,12 @@ def test_upgrade_rejects_any_preexisting_canary_identity(
             "postgresql+psycopg2://",
             "postgresql+psycopg://",
         )
-        cfg = _cfg(postgres_url)
-        command.upgrade(cfg, "0064")
+        previous_db_url = os.environ.get("LOOM_DB_URL")
         engine = create_engine(postgres_url)
         try:
+            os.environ["LOOM_DB_URL"] = postgres_url
+            cfg = _cfg(postgres_url)
+            command.upgrade(cfg, "0064")
             with engine.begin() as conn:
                 conn.execute(
                     text(
@@ -96,3 +105,7 @@ def test_upgrade_rejects_any_preexisting_canary_identity(
                 command.upgrade(cfg, "head")
         finally:
             engine.dispose()
+            if previous_db_url is None:
+                os.environ.pop("LOOM_DB_URL", None)
+            else:
+                os.environ["LOOM_DB_URL"] = previous_db_url
