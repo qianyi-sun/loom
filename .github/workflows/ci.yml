@@ -6,7 +6,7 @@ on:
   pull_request:
     # `labeled` is included so adding the `ci:integration` label to an
     # existing PR re-triggers CI and runs the gated `integration` job.
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened, labeled, edited]
   merge_group:
     # Required if dev later enables GitHub merge queue: queued merge groups
     # need to emit the same required `repository-checks` context as PRs.
@@ -624,11 +624,11 @@ jobs:
             echo "Per-file XML attached as the \`coverage-xml-fast\` workflow artifact. Tracking #260."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Job name must stay `repository-checks` — the dev branch protection
-  # rule lists this exact context as a required status check. It is the
-  # final aggregate for every CI validation selected by workflow-plan.
+  # PR, merge-group, and push runs must report `repository-checks` because
+  # dev branch protection requires that exact context. Manual runs use a
+  # distinct name so they cannot satisfy the protected context.
   repository-checks:
-    name: repository-checks
+    name: ${{ github.event_name == 'workflow_dispatch' && 'repository-checks-manual' || 'repository-checks' }}
     runs-on: ubuntu-latest
     if: always() && (github.event_name != 'push' || github.ref != 'refs/heads/dev')
     needs:
@@ -644,6 +644,7 @@ jobs:
           PLAN_RESULT: ${{ needs.workflow-plan.result }}
           FAST_RESULT: ${{ needs.fast-checks.result }}
           GO_RESULT: ${{ needs.go-checks.result }}
+          DOCS_ONLY: ${{ needs.workflow-plan.outputs.docs_only }}
           INTEGRATION_SELECTED: ${{ needs.workflow-plan.outputs.integration }}
           INTEGRATION_RESULT: ${{ needs.integration.result }}
           DOCKER_SELECTED: ${{ needs.workflow-plan.outputs.integration_docker }}
@@ -652,6 +653,13 @@ jobs:
           COVERAGE_RESULT: ${{ needs.coverage-summary.result }}
         run: |
           set -euo pipefail
+          require_boolean() {
+            local name="$1" value="$2"
+            case "$value" in
+              true|false) ;;
+              *) echo "FAIL: invalid planner boolean ${name}=${value@Q}" >&2; exit 1 ;;
+            esac
+          }
           require_success() {
             local name="$1" result="$2"
             if [[ "$result" != "success" ]]; then
@@ -668,6 +676,10 @@ jobs:
               exit 1
             fi
           }
+          require_boolean docs_only "$DOCS_ONLY"
+          require_boolean integration "$INTEGRATION_SELECTED"
+          require_boolean integration_docker "$DOCKER_SELECTED"
+          require_boolean coverage_summary "$COVERAGE_SELECTED"
           require_success workflow-plan "$PLAN_RESULT"
           require_success fast-checks "$FAST_RESULT"
           require_success go-checks "$GO_RESULT"

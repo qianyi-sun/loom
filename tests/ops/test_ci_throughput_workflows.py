@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -16,6 +17,30 @@ def _workflow(path: str) -> dict[str, Any]:
 def _workflow_on(workflow: dict[str, Any]) -> dict[str, Any]:
     # PyYAML treats unquoted GitHub Actions key `on` as YAML 1.1 bool.
     return workflow.get("on", workflow.get(True))
+
+
+GATE_CONTRACTS = {
+    ".github/workflows/ci.yml": ("repository-checks", "repository-checks"),
+    ".github/workflows/images.yml": ("images-gate", "images-gate"),
+    ".github/workflows/cluster-smoke.yml": (
+        "cluster-smoke-gate",
+        "cluster-smoke-gate",
+    ),
+    ".github/workflows/staging-smoke.yml": (
+        "staging-smoke-gate",
+        "staging-smoke-gate",
+    ),
+}
+
+
+def _gate_script(workflow_path: str, gate_id: str) -> str:
+    workflow = _workflow(workflow_path)
+    gate_step = next(
+        step
+        for step in workflow["jobs"][gate_id]["steps"]
+        if step.get("name", "").startswith("Enforce selected")
+    )
+    return gate_step["run"]
 
 
 def test_images_builds_use_planner_selection() -> None:
@@ -86,20 +111,10 @@ def test_images_merge_groups_do_not_publish_or_use_queue_ref_tags() -> None:
 
 def test_stable_gate_scripts_have_valid_bash_syntax() -> None:
     invalid_gates: dict[str, str] = {}
-    for workflow_path, gate_id in (
-        (".github/workflows/images.yml", "images-gate"),
-        (".github/workflows/cluster-smoke.yml", "cluster-smoke-gate"),
-        (".github/workflows/staging-smoke.yml", "staging-smoke-gate"),
-    ):
-        workflow = _workflow(workflow_path)
-        gate_step = next(
-            step
-            for step in workflow["jobs"][gate_id]["steps"]
-            if step.get("name", "").startswith("Enforce selected")
-        )
+    for workflow_path, (gate_id, _) in GATE_CONTRACTS.items():
         result = subprocess.run(
             ["bash", "-n"],
-            input=gate_step["run"],
+            input=_gate_script(workflow_path, gate_id),
             text=True,
             capture_output=True,
             check=False,
@@ -108,6 +123,179 @@ def test_stable_gate_scripts_have_valid_bash_syntax() -> None:
             invalid_gates[gate_id] = result.stderr
 
     assert not invalid_gates, invalid_gates
+
+
+def test_protected_workflows_rerun_when_pull_request_base_is_edited() -> None:
+    for workflow_path in GATE_CONTRACTS:
+        workflow = _workflow(workflow_path)
+        pull_request = _workflow_on(workflow)["pull_request"]
+
+        assert "edited" in pull_request["types"], workflow_path
+
+
+def test_manual_aggregate_contexts_have_distinct_event_specific_names() -> None:
+    for workflow_path, (gate_id, protected_name) in GATE_CONTRACTS.items():
+        workflow = _workflow(workflow_path)
+        gate_name = workflow["jobs"][gate_id]["name"]
+
+        assert "github.event_name == 'workflow_dispatch'" in gate_name
+        assert f"'{protected_name}-manual'" in gate_name
+        assert f"'{protected_name}'" in gate_name
+
+
+@pytest.mark.parametrize("required", ["", "invalid"])
+@pytest.mark.parametrize(
+    ("workflow_path", "gate_id", "result_env"),
+    [
+        (
+            ".github/workflows/images.yml",
+            "images-gate",
+            {"BUILD_RESULT": "skipped"},
+        ),
+        (
+            ".github/workflows/cluster-smoke.yml",
+            "cluster-smoke-gate",
+            {"SMOKE_RESULT": "skipped"},
+        ),
+        (
+            ".github/workflows/staging-smoke.yml",
+            "staging-smoke-gate",
+            {"SMOKE_RESULT": "skipped", "AWS_S3_RESULT": "skipped"},
+        ),
+    ],
+)
+def test_optional_gate_scripts_fail_closed_for_invalid_required(
+    workflow_path: str,
+    gate_id: str,
+    result_env: dict[str, str],
+    required: str,
+) -> None:
+    result = subprocess.run(
+        ["bash"],
+        input=_gate_script(workflow_path, gate_id),
+        text=True,
+        capture_output=True,
+        env={"PLAN_RESULT": "success", "REQUIRED": required, **result_env},
+        check=False,
+    )
+
+    assert result.returncode != 0, (workflow_path, required, result.stdout)
+    assert "FAIL: invalid planner boolean required=" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("required", "heavy_result"),
+    [("true", "success"), ("false", "skipped"), ("false", "success")],
+)
+@pytest.mark.parametrize(
+    ("workflow_path", "gate_id", "result_names"),
+    [
+        (".github/workflows/images.yml", "images-gate", ["BUILD_RESULT"]),
+        (
+            ".github/workflows/cluster-smoke.yml",
+            "cluster-smoke-gate",
+            ["SMOKE_RESULT"],
+        ),
+        (
+            ".github/workflows/staging-smoke.yml",
+            "staging-smoke-gate",
+            ["SMOKE_RESULT", "AWS_S3_RESULT"],
+        ),
+    ],
+)
+def test_optional_gate_scripts_preserve_result_semantics(
+    workflow_path: str,
+    gate_id: str,
+    result_names: list[str],
+    required: str,
+    heavy_result: str,
+) -> None:
+    result = subprocess.run(
+        ["bash"],
+        input=_gate_script(workflow_path, gate_id),
+        text=True,
+        capture_output=True,
+        env={
+            "PLAN_RESULT": "success",
+            "REQUIRED": required,
+            **dict.fromkeys(result_names, heavy_result),
+        },
+        check=False,
+    )
+
+    assert result.returncode == 0, (workflow_path, required, result.stderr)
+
+
+@pytest.mark.parametrize("planner_value", ["", "invalid"])
+@pytest.mark.parametrize(
+    "planner_name",
+    [
+        "DOCS_ONLY",
+        "INTEGRATION_SELECTED",
+        "DOCKER_SELECTED",
+        "COVERAGE_SELECTED",
+    ],
+)
+def test_repository_checks_fails_closed_for_invalid_planner_booleans(
+    planner_name: str,
+    planner_value: str,
+) -> None:
+    env = {
+        "PLAN_RESULT": "success",
+        "FAST_RESULT": "success",
+        "GO_RESULT": "success",
+        "DOCS_ONLY": "false",
+        "INTEGRATION_SELECTED": "false",
+        "INTEGRATION_RESULT": "skipped",
+        "DOCKER_SELECTED": "false",
+        "DOCKER_RESULT": "skipped",
+        "COVERAGE_SELECTED": "false",
+        "COVERAGE_RESULT": "skipped",
+    }
+    env[planner_name] = planner_value
+
+    result = subprocess.run(
+        ["bash"],
+        input=_gate_script(".github/workflows/ci.yml", "repository-checks"),
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode != 0, (planner_name, planner_value, result.stdout)
+    assert "FAIL: invalid planner boolean" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("selected", "validation_result"),
+    [("true", "success"), ("false", "skipped"), ("false", "success")],
+)
+def test_repository_checks_preserves_result_semantics(
+    selected: str,
+    validation_result: str,
+) -> None:
+    result = subprocess.run(
+        ["bash"],
+        input=_gate_script(".github/workflows/ci.yml", "repository-checks"),
+        text=True,
+        capture_output=True,
+        env={
+            "PLAN_RESULT": "success",
+            "FAST_RESULT": "success",
+            "GO_RESULT": "success",
+            "DOCS_ONLY": "false",
+            "INTEGRATION_SELECTED": selected,
+            "INTEGRATION_RESULT": validation_result,
+            "DOCKER_SELECTED": selected,
+            "DOCKER_RESULT": validation_result,
+            "COVERAGE_SELECTED": selected,
+            "COVERAGE_RESULT": validation_result,
+        },
+        check=False,
+    )
+
+    assert result.returncode == 0, (selected, validation_result, result.stderr)
 
 
 def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
@@ -141,7 +329,7 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
         assert "paths" not in on_config["pull_request"]
         assert "plan" in jobs
         assert "always()" in jobs[gate_id]["if"]
-        assert jobs[gate_id]["name"] == gate_name
+        assert gate_name in jobs[gate_id]["name"]
         assert set(jobs[gate_id]["needs"]) == {"plan", *heavy_jobs}
 
         plan_script = "\n".join(
@@ -181,7 +369,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     }
     assert jobs["integration"]["needs"] == "fast-checks"
     assert jobs["integration-docker"]["needs"] == "fast-checks"
-    assert jobs["repository-checks"]["name"] == "repository-checks"
+    assert "repository-checks" in jobs["repository-checks"]["name"]
     assert set(jobs["repository-checks"]["needs"]) == {
         "workflow-plan",
         "fast-checks",
@@ -214,6 +402,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "PLAN_RESULT": "${{ needs.workflow-plan.result }}",
         "FAST_RESULT": "${{ needs.fast-checks.result }}",
         "GO_RESULT": "${{ needs.go-checks.result }}",
+        "DOCS_ONLY": "${{ needs.workflow-plan.outputs.docs_only }}",
         "INTEGRATION_SELECTED": "${{ needs.workflow-plan.outputs.integration }}",
         "INTEGRATION_RESULT": "${{ needs.integration.result }}",
         "DOCKER_SELECTED": "${{ needs.workflow-plan.outputs.integration_docker }}",

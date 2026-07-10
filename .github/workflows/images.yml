@@ -24,7 +24,7 @@ on:
   pull_request:
     # The workflow always reports its stable gate. The shared planner selects
     # image builds from changed paths or the additive `ci:images` label.
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened, labeled, edited]
   merge_group:
     types: [checks_requested]
   push:
@@ -309,7 +309,7 @@ jobs:
           ACTIONS_RUNTIME_TOKEN: ${{ env.ACTIONS_RUNTIME_TOKEN }}
 
   images-gate:
-    name: images-gate
+    name: ${{ github.event_name == 'workflow_dispatch' && 'images-gate-manual' || 'images-gate' }}
     runs-on: ubuntu-latest
     if: always()
     needs: [plan, build]
@@ -322,6 +322,10 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$PLAN_RESULT" == "success" ]] || exit 1
+          case "$REQUIRED" in
+            true|false) ;;
+            *) echo "FAIL: invalid planner boolean required=${REQUIRED@Q}" >&2; exit 1 ;;
+          esac
           if [[ "$REQUIRED" == "true" ]]; then
             [[ "$BUILD_RESULT" == "success" ]] || exit 1
           else

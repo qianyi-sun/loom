@@ -24,7 +24,7 @@ name: staging-smoke
 on:
   workflow_dispatch:
   pull_request:
-    types: [labeled, opened, synchronize, reopened]
+    types: [labeled, opened, synchronize, reopened, edited]
   merge_group:
     types: [checks_requested]
 
@@ -861,7 +861,7 @@ jobs:
           " || true
 
   staging-smoke-gate:
-    name: staging-smoke-gate
+    name: ${{ github.event_name == 'workflow_dispatch' && 'staging-smoke-gate-manual' || 'staging-smoke-gate' }}
     runs-on: ubuntu-latest
     if: always()
     needs: [plan, smoke, smoke-storage-aws-s3]
@@ -875,6 +875,10 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$PLAN_RESULT" == "success" ]] || exit 1
+          case "$REQUIRED" in
+            true|false) ;;
+            *) echo "FAIL: invalid planner boolean required=${REQUIRED@Q}" >&2; exit 1 ;;
+          esac
           if [[ "$REQUIRED" == "true" ]]; then
             [[ "$SMOKE_RESULT" == "success" ]] || exit 1
             [[ "$AWS_S3_RESULT" == "success" ]] || exit 1
