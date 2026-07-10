@@ -1,4 +1,4 @@
-module github.com/carinrc/loom
+module github.com/qianyi-sun/loom
 
 go 1.23.4
 
