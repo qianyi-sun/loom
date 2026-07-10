@@ -10,7 +10,8 @@ earlier user-brought-benchmarks design by separating the
 user-facing object from the platform benchmark catalog. It complements
 [`benchmark-adapter.md`](benchmark-adapter.md) for native platform benchmarks
 and [`sandbox-isolation.md`](sandbox-isolation.md) for verifier and transform
-trust boundaries.
+trust boundaries. The release-level rule is recorded in
+[`adr/v1-workload-trust-contract.md`](adr/v1-workload-trust-contract.md).
 
 ## Goal
 

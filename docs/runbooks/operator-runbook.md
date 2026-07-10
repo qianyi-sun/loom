@@ -1291,6 +1291,25 @@ resumes from the interrupted step. The driver also records its process owner in
 alive, and takes over a stale `running` state after the previous driver process
 has exited.
 
+### Protected workload-trust contract (#755)
+
+For a staging or production rollout, the profile must declare exactly
+`internal_trusted` with `taskset_transforms_enabled=false`,
+`taskset_transform_network_isolated=false`, and
+`untrusted_workload_isolation=false`. Protected preflight records the
+`workload-trust-contract` check. `--skip-preflight` does not bypass the
+contract: `loom cluster up` revalidates it before it can obtain the protected
+rollout lease or apply resources.
+
+The rollout release manifest carries only the structural four-field contract.
+The release gate then checks that it matches the live `loom-service`
+environment. Evidence may report structural failures but must not emit raw
+invalid profile, manifest, or live env values; use the normal redacted evidence
+forms instead. A transform canary is not a valid v1 smoke: transform manifests
+must fail with `transform_unavailable_in_internal_trusted` before fetch or run.
+For the decision and post-v1 boundary, see
+[`v1-workload-trust-contract.md`](../architecture/adr/v1-workload-trust-contract.md).
+
 ### Invocation
 
 ```bash

@@ -7,6 +7,10 @@ they don't get rewritten; supersede with a new ADR if needed.
 
 ## Records
 
+- **[v1-workload-trust-contract.md](v1-workload-trust-contract.md)** — v1's
+  machine-enforced `internal_trusted` contract; TaskSet transforms fail closed
+  and post-v1 #758 owns untrusted arbitrary-code isolation.
+
 - **[typed-artifacts-lineage-sharing.md](typed-artifacts-lineage-sharing.md)**
   — typed artifact base schema, lineage, clone/reuse, retention, redaction,
   and Run Library sharing policy. Post-v1 planning baseline.
