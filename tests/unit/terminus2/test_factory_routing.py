@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from loom.agent.terminus2.runtime import LoomTerminus2Runtime
 from loom.agent.gateway_client import FakeLLMGatewayClient
+from loom.agent.terminus2.runtime import LoomTerminus2Runtime
 from loom.models.types import ModelSpec
 from loom_worker.main_loop import _default_agent_factory
 

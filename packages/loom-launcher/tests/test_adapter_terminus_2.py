@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from loom_launcher import get_adapter
-from loom_launcher import terminus_2_runner
+from loom_launcher import get_adapter, terminus_2_runner
 
 
 def test_terminus_2_no_longer_registered_as_adapter() -> None:

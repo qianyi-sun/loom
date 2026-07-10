@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from pydantic import TypeAdapter
 
 from loom.agent.terminus2.checkpoint_bridge import HarborCheckpointBridge
 from loom.models.trajectory import EventKind, TrajectoryEvent
 from loom.models.types import ModelSpec
 from loom.trajectory.storage import FakeObjectStore
 from loom.trajectory.writer import TrajectoryWriter
-from pydantic import TypeAdapter
 
 _adapter: TypeAdapter[TrajectoryEvent] = TypeAdapter(TrajectoryEvent)
 

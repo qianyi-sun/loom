@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import shlex
 import tempfile
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
@@ -19,7 +18,6 @@ if TYPE_CHECKING:
         EnvironmentResourceCapabilities,
     )
     from harbor.models.environment_type import EnvironmentType
-    from harbor.models.task.config import EnvironmentConfig
     from harbor.models.trial.paths import TrialPaths
 
 
@@ -53,7 +51,6 @@ class LoomHarborEnvironment:
         )
         from harbor.models.environment_type import EnvironmentType
         from harbor.models.task.config import EnvironmentConfig, TaskOS
-        from harbor.models.trial.paths import TrialPaths as HarborTrialPaths
 
         driver_ref = driver
         workdir_ref = workdir

@@ -9,6 +9,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import UUID, uuid4
 
+from loom.agent.terminus2.provenance import (
+    HARBOR_COMPAT_SHA,
+    LOOM_BRIDGE_REVISION,
+    harbor_template_hashes,
+)
 from loom.models.trajectory import (
     LLMCallEvent,
     Terminus2ArtifactRefEvent,
@@ -20,13 +25,6 @@ from loom.models.trajectory import (
 from loom.models.types import ModelSpec
 from loom.security.redaction import redact_text
 from loom.trajectory.writer import TrajectoryWriter
-
-from loom.agent.terminus2.provenance import (
-    HARBOR_COMPAT_SHA,
-    HARBOR_RUNTIME_VERSION,
-    LOOM_BRIDGE_REVISION,
-    harbor_template_hashes,
-)
 
 
 class HarborCheckpointBridge:

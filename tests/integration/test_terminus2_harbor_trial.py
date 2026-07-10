@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 import pytest
+from pydantic import TypeAdapter
 
 from loom.agent.terminus2.runtime import LoomTerminus2Runtime
 from loom.driver.fake import FakeDriver
@@ -14,7 +15,6 @@ from loom.models.trajectory import EventKind, TrajectoryEvent
 from loom.models.types import ModelSpec
 from loom.trajectory.storage import FakeObjectStore
 from loom.trajectory.writer import TrajectoryWriter
-from pydantic import TypeAdapter
 
 _adapter: TypeAdapter[TrajectoryEvent] = TypeAdapter(TrajectoryEvent)
 

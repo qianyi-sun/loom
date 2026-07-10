@@ -42,8 +42,8 @@ from loom.agent.base import AgentRuntime
 from loom.agent.gateway_client import LLMGatewayClient
 from loom.agent.http_gateway_client import HttpLLMGatewayClient
 from loom.agent.litellm import LiteLLMAgent
-from loom.agent.terminus2.runtime import LoomTerminus2Runtime
 from loom.agent.oracle import OracleAgent
+from loom.agent.terminus2.runtime import LoomTerminus2Runtime
 from loom.driver.docker import DockerDriver
 from loom.errors import AgentError, classify_failure_message
 from loom.models.result import FailureReason

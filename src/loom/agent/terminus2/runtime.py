@@ -113,7 +113,7 @@ class LoomTerminus2Runtime:
         step_id: str,
     ) -> None:
         del mcp, skills_dir
-        Terminus2, AgentContext = _import_terminus2()
+        terminus2_cls, agent_context_cls = _import_terminus2()
 
         step_token = await self.cp_client.mint_step_token(
             team_id=UUID(self.team_id),
@@ -143,7 +143,7 @@ class LoomTerminus2Runtime:
             step_id=step_id,
         )
 
-        agent = Terminus2(
+        agent = terminus2_cls(
             logs_dir=logs_root,
             model_name=_harbor_model_name(self.model),
             max_turns=self.max_turns,
@@ -153,7 +153,7 @@ class LoomTerminus2Runtime:
             enable_summarize=False,
             llm_kwargs={"api_key": step_token},
         )
-        context = AgentContext()
+        context = agent_context_cls()
         trajectory_path = logs_root / "trajectory.json"
         completeness = "full"
         poll_stop = asyncio.Event()
