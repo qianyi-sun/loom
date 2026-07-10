@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from scripts.plan_ci_validations import plan_validations
+from scripts.plan_ci_validations import HEAVY_CHECKS, plan_validations
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -102,17 +102,40 @@ def test_issue_templates_use_current_loom_language() -> None:
     assert "vX.Y.Z` tag exists on the merged `main` commit" in template_text
 
 
-def test_codeowners_points_at_current_maintainers_not_placeholder_teams() -> None:
-    codeowners = _read(".github/CODEOWNERS")
+def test_codeowners_is_narrow_ci_and_release_trust_root() -> None:
+    owners = "@qianyi-sun @Hongjian-Gu"
+    entries = {
+        line.strip()
+        for line in _read(".github/CODEOWNERS").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    authority_paths = {
+        "/.github/",
+        "/scripts/plan_ci_validations.py",
+        "/scripts/check_install_scripts_pinned.py",
+        "/scripts/validate_environment_isolation.py",
+        "/tests/ops/test_plan_ci_validations.py",
+        "/tests/ops/test_ci_throughput_workflows.py",
+        "/pyproject.toml",
+        "/scripts/ops/release_gate.py",
+        "/scripts/ops/verify_production_release_gate.sh",
+        "/scripts/ops/deploy_environment.sh",
+        "/CONTRIBUTING.md",
+        "/SECURITY.md",
+        "/LICENSE",
+    }
 
-    assert "* @qianyi-sun @Hongjian-Gu" in codeowners
-    assert "/.github/ @qianyi-sun @Hongjian-Gu" in codeowners
-    assert "/deploy/ @qianyi-sun @Hongjian-Gu" in codeowners
+    assert f"* {owners}" not in entries
+    for broad_path in ("/src/", "/packages/", "/web/", "/deploy/", "/docs/"):
+        assert not any(
+            entry == f"{broad_path} {owners}" or entry.startswith(f"{broad_path} ")
+            for entry in entries
+        )
+    assert entries == {f"{path} {owners}" for path in authority_paths}
 
 
 def test_ci_docs_only_fast_path_includes_repo_metadata_not_workflows() -> None:
     for metadata_path in (
-        ".github/CODEOWNERS",
         ".github/PULL_REQUEST_TEMPLATE.md",
         ".github/ISSUE_TEMPLATE/bug.yml",
     ):
@@ -120,6 +143,12 @@ def test_ci_docs_only_fast_path_includes_repo_metadata_not_workflows() -> None:
             changed_paths=[metadata_path], labels=set(), event_name="pull_request"
         )
         assert plan.docs_only is True
+
+    codeowners_plan = plan_validations(
+        changed_paths=[".github/CODEOWNERS"], labels=set(), event_name="pull_request"
+    )
+    assert codeowners_plan.docs_only is False
+    assert codeowners_plan.selected_heavy_checks() == set(HEAVY_CHECKS)
 
     workflow_plan = plan_validations(
         changed_paths=[".github/workflows/ci.yml"],

@@ -32,7 +32,7 @@ on:
     # The workflow starts for every PR event so its stable gate always
     # reports. The planner selects the smoke from changed paths or the
     # additive label, and a later label change retriggers the workflow.
-    types: [labeled, opened, synchronize, reopened]
+    types: [labeled, opened, synchronize, reopened, edited]
   merge_group:
     types: [checks_requested]
 
@@ -262,7 +262,7 @@ jobs:
         run: kind delete cluster --name loom-smoke
 
   cluster-smoke-gate:
-    name: cluster-smoke-gate
+    name: ${{ github.event_name == 'workflow_dispatch' && 'cluster-smoke-gate-manual' || 'cluster-smoke-gate' }}
     runs-on: ubuntu-latest
     if: always()
     needs: [plan, smoke]
@@ -275,6 +275,10 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$PLAN_RESULT" == "success" ]] || exit 1
+          case "$REQUIRED" in
+            true|false) ;;
+            *) echo "FAIL: invalid planner boolean required=${REQUIRED@Q}" >&2; exit 1 ;;
+          esac
           if [[ "$REQUIRED" == "true" ]]; then
             [[ "$SMOKE_RESULT" == "success" ]] || exit 1
           else

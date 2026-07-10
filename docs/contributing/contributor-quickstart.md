@@ -87,7 +87,10 @@ Every PR and merge-group candidate reports four stable validation contexts:
 `staging-smoke-gate`. The shared validation planner selects the applicable
 work automatically from changed paths. Labels may request additional work, but
 they cannot turn off validation inferred from paths. Docs-only PRs take a
-bounded fast path while the stable gate contexts still report.
+bounded location-and-format fast path while the stable gate contexts still
+report. Runtime Markdown outside that boundary, executable files in `docs/`,
+and unknown non-document paths do not take the fast path; unknown runtime paths
+select all heavy lanes until they gain an explicit owner.
 
 `repository-checks` is the fast-tier aggregator: ruff/mypy/static checks, root
 tests, and sibling-package tests run in parallel jobs, then it combines their
@@ -130,8 +133,10 @@ LOOM_RUN_DAYTONA_INTEGRATION=1 DAYTONA_API_KEY=... \
 The `slow` marker is applied at module level on the heaviest 9 test
 files (Docker driver lifecycle / exec / io / healthcheck /
 network-policy + full trial e2e + Daytona live). CI selects integration for
-non-documentation changes and selects the Docker/testcontainers tier for its
-relevant runtime paths; `ci:integration` and `ci:integration-docker` add those
+non-documentation changes. Until the component/test ownership manifest lands,
+every change under `tests/integration/` selects the Docker tier so a
+Docker-marked test cannot be edited without running it; relevant runtime paths
+also select that tier. `ci:integration` and `ci:integration-docker` add those
 tiers when paths do not already require them. The selected smoke gates cancel
 superseded PR runs, so a new push to the same PR stops the older
 `cluster-smoke`, `staging-smoke`, or `cluster-deploy-spikes` run instead of
@@ -140,7 +145,9 @@ building a queue of stale checks.
 `images-gate` is separate from the fast tier. Relevant image paths select its
 PR validation automatically; `ci:images` adds validation when paths do not
 already require it, and `.github/workflows/images.yml` remains manually
-dispatchable. The image workflow plans a path-aware matrix so web-only changes
+dispatchable. Manual runs report `images-gate-manual`, not the protected
+`images-gate` context; the same `*-manual` rule applies to all four protected
+workflows. The image workflow plans a path-aware matrix so web-only changes
 build only the web image, Dockerfile-only changes build the matching component,
 and shared Python/runtime changes rebuild the affected Python images. Relevant
 pushes to `dev`/`main` still publish multi-arch images.
@@ -215,6 +222,8 @@ Current `dev` branch-protection settings (verified by Task 6):
 - `allow_auto_merge: true`; Codex enables it immediately after opening normal
   `dev` PRs, and GitHub holds the merge until the policy above passes
 - `enforce_admins: true` on `dev` - admins go through the gate too
+- no repository-wide approval count; only CI/release trust-root paths declared
+  in CODEOWNERS require owner review, so routine code stays zero-review
 
 Secrets and side-effect workflows:
 - Pull request workflows use read-only `GITHUB_TOKEN` permissions and

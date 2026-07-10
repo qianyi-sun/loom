@@ -24,11 +24,28 @@ LABEL_TO_CHECK = {
 }
 
 DOC_METADATA_PATHS = {
-    ".github/CODEOWNERS",
     ".github/PULL_REQUEST_TEMPLATE.md",
-    ".gitignore",
     ".editorconfig",
+    ".gitignore",
+    "CONTRIBUTING.md",
     "LICENSE",
+    "README.md",
+    "SECURITY.md",
+}
+
+DOCS_STATIC_SUFFIXES = {
+    ".csv",
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".json",
+    ".jsonl",
+    ".md",
+    ".mdx",
+    ".png",
+    ".rst",
+    ".svg",
+    ".txt",
 }
 
 PLANNER_PATHS = {
@@ -40,6 +57,7 @@ PLANNER_PATHS = {
 @dataclass(frozen=True)
 class ValidationPlan:
     docs_only: bool
+    unowned_runtime: bool
     integration: bool
     integration_docker: bool
     images: bool
@@ -56,6 +74,7 @@ class ValidationPlan:
             name: str(bool(getattr(self, name))).lower()
             for name in (
                 "docs_only",
+                "unowned_runtime",
                 *HEAVY_CHECKS,
                 "coverage_summary",
             )
@@ -68,10 +87,12 @@ class ValidationPlan:
 
 def _is_documentation_path(path: str) -> bool:
     return (
-        path.endswith(".md")
-        or path.startswith("docs/")
+        path in DOC_METADATA_PATHS
         or path.startswith(".github/ISSUE_TEMPLATE/")
-        or path in DOC_METADATA_PATHS
+        or (
+            path.startswith("docs/")
+            and Path(path).suffix in DOCS_STATIC_SUFFIXES
+        )
     )
 
 
@@ -87,6 +108,7 @@ def plan_validations(
 ) -> ValidationPlan:
     paths = tuple(dict.fromkeys(path.strip() for path in changed_paths if path.strip()))
     docs_only = bool(paths) and all(_is_documentation_path(path) for path in paths)
+    unowned_runtime = False
     selected = {name: False for name in (*HEAVY_CHECKS, "coverage_summary")}
     reasons: dict[str, list[str]] = {name: [] for name in selected}
 
@@ -128,8 +150,7 @@ def plan_validations(
         "src/loom_worker/",
         "src/loom/sandbox",
         "packages/loom-launcher/",
-        "tests/integration/test_docker",
-        "tests/integration/test_trial_e2e",
+        "tests/integration/",
     )
     image_exact = {
         ".dockerignore",
@@ -180,6 +201,7 @@ def plan_validations(
         "src/loom_worker/",
         "src/loom_family_orchestrator/",
         "src/loom_cli/templates/k8s/",
+        "migrations/",
         "packages/",
         "web/",
     )
@@ -187,22 +209,34 @@ def plan_validations(
     for path in paths:
         if _is_documentation_path(path):
             continue
+        matched_owner = path in PLANNER_PATHS
         if _matches(path, exact=integration_exact, prefixes=integration_prefixes):
             select("integration", f"path:{path}")
+            matched_owner = True
         else:
             select("integration", f"non-doc-path:{path}")
         if _matches(path, exact=docker_exact, prefixes=docker_prefixes):
             select("integration_docker", f"path:{path}")
-        if _matches(
+            matched_owner = True
+        image_match = _matches(
             path,
             exact=image_exact,
             prefixes=image_prefixes,
-        ) and not path.startswith("src/loom_cli/templates/k8s/"):
+        ) and not path.startswith("src/loom_cli/templates/k8s/")
+        if image_match:
             select("images", f"path:{path}")
+            matched_owner = True
         if _matches(path, exact=cluster_exact, prefixes=cluster_prefixes):
             select("cluster_smoke", f"path:{path}")
+            matched_owner = True
         if _matches(path, exact=staging_exact, prefixes=staging_prefixes):
             select("staging_smoke", f"path:{path}")
+            matched_owner = True
+        if not matched_owner:
+            unowned_runtime = True
+            reason = f"unowned-runtime-path:{path}"
+            for name in HEAVY_CHECKS:
+                select(name, reason)
 
     if selected["coverage_summary"]:
         select("integration", "coverage-summary-requires-integration")
@@ -215,6 +249,7 @@ def plan_validations(
 
     return ValidationPlan(
         docs_only=docs_only,
+        unowned_runtime=unowned_runtime,
         integration=selected["integration"],
         integration_docker=selected["integration_docker"],
         images=selected["images"],
