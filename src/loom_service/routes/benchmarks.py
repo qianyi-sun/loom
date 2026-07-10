@@ -24,7 +24,8 @@ from loom.benchmark_readiness import (
     build_readiness_item,
     readiness_display_fields,
 )
-from loom.db.schema import Benchmark, Task
+from loom.db.schema import Benchmark, BenchmarkAlias, Task
+from loom_service.benchmark_profiles import resolve_benchmark_selectors
 from loom_service.dependencies import SessionAndCtx
 
 router = APIRouter()
@@ -60,10 +61,20 @@ def _readiness_for_benchmark(
     )
 
 
-def _bench_row(b: Benchmark, readiness: BenchmarkReadinessItem) -> dict[str, Any]:
+def _bench_row(
+    b: Benchmark,
+    readiness: BenchmarkReadinessItem,
+    *,
+    aliases: list[str],
+    public_selector: str,
+) -> dict[str, Any]:
     readiness_fields = readiness_display_fields(readiness)
     return {
-        "id": b.id,
+        "id": public_selector,
+        "aliases": aliases,
+        "physical_profile": b.id,
+        "profile_provenance": dict(b.profile_provenance or {}),
+        "execution_state": b.execution_state,
         "display_name": b.display_name,
         "upstream_kind": b.upstream_kind,
         "upstream_locator": b.upstream_locator,
@@ -85,10 +96,33 @@ def _bench_row(b: Benchmark, readiness: BenchmarkReadinessItem) -> dict[str, Any
     }
 
 
-def _visible_benchmarks_statement() -> Select[tuple[Benchmark]]:
-    return select(Benchmark).where(
+def _visible_benchmarks_statement(*, include_historical: bool) -> Select[tuple[Benchmark]]:
+    stmt = select(Benchmark).where(
         ~Benchmark.id.in_(_HIDDEN_FROM_V1_CATALOG_BENCHMARK_IDS),
     )
+    if not include_historical:
+        stmt = stmt.where(Benchmark.execution_state == "runnable")
+    return stmt
+
+
+async def _aliases_by_profile(
+    session: AsyncSession,
+    profile_ids: list[str],
+) -> dict[str, list[str]]:
+    aliases: dict[str, list[str]] = defaultdict(list)
+    if not profile_ids:
+        return aliases
+    for alias, benchmark_id in (
+        await session.execute(
+            select(BenchmarkAlias.alias, BenchmarkAlias.benchmark_id).where(
+                BenchmarkAlias.benchmark_id.in_(profile_ids),
+            ),
+        )
+    ).all():
+        aliases[str(benchmark_id)].append(str(alias))
+    for items in aliases.values():
+        items.sort()
+    return aliases
 
 
 async def _benchmark_rows_with_readiness(
@@ -150,15 +184,22 @@ async def list_benchmarks(
     # `?include_empty=true` to see every registered benchmark (e.g.
     # admin tools that drive imports).
     include_empty: Annotated[bool, Query()] = False,
+    include_historical: Annotated[bool, Query()] = False,
 ) -> dict[str, Any]:
     s, _ctx = sc
-    stmt = _visible_benchmarks_statement().order_by(Benchmark.display_name)
+    stmt = _visible_benchmarks_statement(
+        include_historical=include_historical,
+    ).order_by(Benchmark.display_name)
     if cursor:
         stmt = stmt.where(Benchmark.display_name > cursor)
     benchmarks = list((await s.scalars(stmt)).all())
     rows = await _benchmark_rows_with_readiness(
         s,
         benchmarks,
+    )
+    aliases_by_profile = await _aliases_by_profile(
+        s,
+        [benchmark.id for benchmark, _readiness in rows],
     )
     if not include_empty:
         rows = [row for row in rows if row[1].readiness_state == "runnable"]
@@ -169,7 +210,17 @@ async def list_benchmarks(
     else:
         next_cursor = None
     return {
-        "items": [_bench_row(b, readiness) for b, readiness in rows],
+        "items": [
+            _bench_row(
+                benchmark,
+                readiness,
+                aliases=aliases_by_profile.get(benchmark.id, []),
+                public_selector=(
+                    aliases_by_profile.get(benchmark.id, [benchmark.id])[0]
+                ),
+            )
+            for benchmark, readiness in rows
+        ],
         "next_cursor": next_cursor,
     }
 
@@ -185,8 +236,15 @@ async def get_benchmark(
             status_code=404,
             detail="benchmark not found",
         )
+    resolved = await resolve_benchmark_selectors(
+        s,
+        [benchmark_id],
+        require_runnable=False,
+    )
     b = (
-        await s.execute(select(Benchmark).where(Benchmark.id == benchmark_id))
+        await s.execute(
+            select(Benchmark).where(Benchmark.id == resolved.physical_ids[0]),
+        )
     ).scalar_one_or_none()
     if b is None:
         raise HTTPException(
@@ -197,7 +255,13 @@ async def get_benchmark(
         s,
         [b],
     )
-    return _bench_row(rows[0][0], rows[0][1])
+    aliases_by_profile = await _aliases_by_profile(s, [b.id])
+    return _bench_row(
+        rows[0][0],
+        rows[0][1],
+        aliases=aliases_by_profile.get(b.id, []),
+        public_selector=(benchmark_id if benchmark_id in aliases_by_profile.get(b.id, []) else b.id),
+    )
 
 
 @router.get("/benchmarks/{benchmark_id}/tags")
@@ -219,9 +283,15 @@ async def list_benchmark_tags(
     # 404 if the benchmark itself doesn't exist so the SPA can
     # distinguish "no tags here" (empty list, 200) from "wrong id"
     # (404).
+    resolved = await resolve_benchmark_selectors(
+        s,
+        [benchmark_id],
+        require_runnable=False,
+    )
+    physical_profile = resolved.physical_ids[0]
     exists = (
         await s.execute(
-            select(Benchmark.id).where(Benchmark.id == benchmark_id),
+            select(Benchmark.id).where(Benchmark.id == physical_profile),
         )
     ).scalar_one_or_none()
     if exists is None:
@@ -238,7 +308,7 @@ async def list_benchmark_tags(
                 "GROUP BY kv.key "
                 "ORDER BY kv.key",
             ),
-            {"bid": benchmark_id},
+            {"bid": physical_profile},
         )
     ).all()
     return {

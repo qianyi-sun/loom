@@ -921,6 +921,7 @@ def _serialize_batch_base(batch: Batch, owner_team: Team) -> dict[str, Any]:
         "visibility": batch.visibility,
         "share_status": batch.share_status,
         "source_provenance": batch.source_provenance,
+        "resolved_task_ids": batch.resolved_task_ids,
         "expected_trial_count": batch.expected_trial_count,
         "created_by_token_prefix": batch.created_by_token_prefix,
         "created_at": batch.created_at.isoformat(),

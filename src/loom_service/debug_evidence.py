@@ -1138,6 +1138,8 @@ def build_batch_debug_evidence(
         "failure": _failure_for_batch(batch),
         "task_selection": {
             "task_filter": batch.task_filter,
+            "resolved_task_ids": batch.resolved_task_ids,
+            "source_provenance": batch.source_provenance,
             "expected_trial_count": batch.expected_trial_count,
             "n_per_task": batch.n_per_task,
             "fanout_errors": batch.fanout_errors,

@@ -27,7 +27,7 @@ Filter shape (`task_filter`):
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loom.benchmark_readiness import CURRENTLY_UNSUPPORTED_BENCHMARK_IDS
 from loom.db.schema import Task, TaskSet
 from loom.db.task_set_visibility import visible_task_sets
+from loom_service.benchmark_profiles import resolve_benchmark_selectors
 
 # Recognized task_filter keys. Anything else is rejected so a typo
 # (`liscense` instead of `license`) doesn't silently match nothing.
@@ -65,6 +66,7 @@ SUBSET_KINDS: frozenset[str] = frozenset(
 @dataclass(frozen=True)
 class TaskFilterResult:
     task_ids: list[str]
+    benchmark_selection_provenance: list[dict[str, str]] = field(default_factory=list)
 
 
 async def resolve_task_filter(
@@ -72,12 +74,14 @@ async def resolve_task_filter(
     task_filter: Mapping[str, Any],
     *,
     team_id: UUID | None = None,
+    require_runnable: bool = True,
 ) -> list[str]:
     return (
         await resolve_task_filter_with_diagnostics(
             session,
             task_filter,
             team_id=team_id,
+            require_runnable=require_runnable,
         )
     ).task_ids
 
@@ -146,6 +150,7 @@ async def resolve_task_filter_with_diagnostics(
     task_filter: Mapping[str, Any],
     *,
     team_id: UUID | None = None,
+    require_runnable: bool = True,
 ) -> TaskFilterResult:
     """Materialize a task_filter into a list of Task.id strings.
 
@@ -212,6 +217,7 @@ async def resolve_task_filter_with_diagnostics(
         stmt = stmt.where(Task.id.in_(ids))
     source_selector_seen = False
     source_clauses: list[Any] = []
+    benchmark_selection_provenance: list[dict[str, str]] = []
     benchmark_ids_raw = task_filter.get("benchmark_ids")
     if benchmark_ids_raw is not None:
         source_selector_seen = True
@@ -223,10 +229,28 @@ async def resolve_task_filter_with_diagnostics(
                 detail="task_filter.benchmark_ids must be a list of strings",
             )
         if benchmark_ids_raw:
-            source_clauses.append(Task.benchmark_id.in_(list(benchmark_ids_raw)))
+            resolved = await resolve_benchmark_selectors(
+                session,
+                list(benchmark_ids_raw),
+                require_runnable=require_runnable,
+            )
+            source_clauses.append(Task.benchmark_id.in_(resolved.physical_ids))
+            benchmark_selection_provenance = list(resolved.provenance)
     elif "benchmark_id" in task_filter:
         source_selector_seen = True
-        source_clauses.append(Task.benchmark_id == task_filter["benchmark_id"])
+        benchmark_id_raw = task_filter["benchmark_id"]
+        if not isinstance(benchmark_id_raw, str):
+            raise HTTPException(
+                status_code=400,
+                detail="task_filter.benchmark_id must be a string",
+            )
+        resolved = await resolve_benchmark_selectors(
+            session,
+            [benchmark_id_raw],
+            require_runnable=require_runnable,
+        )
+        source_clauses.append(Task.benchmark_id.in_(resolved.physical_ids))
+        benchmark_selection_provenance = list(resolved.provenance)
     if task_set_ids is not None:
         source_selector_seen = True
         if task_set_ids:
@@ -266,6 +290,7 @@ async def resolve_task_filter_with_diagnostics(
     if subset_kind == "all":
         return TaskFilterResult(
             task_ids=candidates,
+            benchmark_selection_provenance=benchmark_selection_provenance,
         )
     if subset_kind == "explicit":
         # Explicit mode REQUIRES `task_ids` to be supplied AND the
@@ -276,6 +301,7 @@ async def resolve_task_filter_with_diagnostics(
         # route layer checks for empty-result).
         return TaskFilterResult(
             task_ids=candidates,
+            benchmark_selection_provenance=benchmark_selection_provenance,
         )
 
     n_raw = task_filter.get("n")
@@ -296,11 +322,13 @@ async def resolve_task_filter_with_diagnostics(
         selected = candidates[:n]
         return TaskFilterResult(
             task_ids=selected,
+            benchmark_selection_provenance=benchmark_selection_provenance,
         )
     if subset_kind == "last_n":
         selected = candidates[-n:] if n <= len(candidates) else candidates
         return TaskFilterResult(
             task_ids=selected,
+            benchmark_selection_provenance=benchmark_selection_provenance,
         )
     # random_n
     seed_raw = task_filter.get("seed")
@@ -325,4 +353,5 @@ async def resolve_task_filter_with_diagnostics(
         selected = sorted(rng.sample(candidates, n))
     return TaskFilterResult(
         task_ids=selected,
+        benchmark_selection_provenance=benchmark_selection_provenance,
     )

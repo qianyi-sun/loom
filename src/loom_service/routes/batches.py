@@ -738,6 +738,7 @@ def _serialize(
         "visibility": b.visibility,
         "share_status": b.share_status,
         "source_provenance": b.source_provenance,
+        "resolved_task_ids": b.resolved_task_ids,
         "submitted_by_user": (
             {
                 "id": str(submitted_by_user.id),
@@ -1090,7 +1091,7 @@ async def _create_batch_record(
     explicit_name = payload.name.strip() if payload.name else ""
     explicit_description = payload.description.strip() if payload.description else ""
     generated_identity = build_batch_identity(
-        task_filter=payload.task_filter,
+        task_filter=dict(payload.task_filter),
         trial_config=trial_config,
         combinations=combinations_jsonb or payload.combinations,
         n_per_task=payload.n_per_task,
@@ -1105,7 +1106,9 @@ async def _create_batch_record(
         team_id=submission_team_id,
         name=batch_name,
         description=batch_description,
-        task_filter=payload.task_filter,
+        task_filter=dict(payload.task_filter),
+        resolved_task_ids=list(task_result.task_ids),
+        source_provenance=list(task_result.benchmark_selection_provenance),
         trial_config=trial_config,
         state="submitted",
         created_by_token_prefix=token_prefix,
