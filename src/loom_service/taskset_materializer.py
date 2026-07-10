@@ -307,28 +307,31 @@ async def publish_if_current(
             error_summary=output.error_summary,
         )
 
-    state = "succeeded" if output.task_count > 0 else "failed"
-    if output.job_failure_reason and output.task_count == 0:
+    has_publishable_rows = bool(output.task_rows)
+    state = "succeeded" if has_publishable_rows else "failed"
+    if output.job_failure_reason and not has_publishable_rows:
         state = "failed"
 
     # This transaction is the publication point: staged objects are not
     # reachable until the Task rows below commit.
+    job_values: dict[str, Any] = {
+        "state": state,
+        "finished_at": now,
+        "updated_at": now,
+        "failure_reason": output.job_failure_reason,
+        "failure_message": output.job_failure_message,
+        "error_summary": output.error_summary,
+    }
+    if has_publishable_rows:
+        job_values["published_materialization_generation"] = lease.lease_epoch
     await _update_job_for_lease(
         session,
         lease=lease,
         states=("running",),
-        values={
-            "state": state,
-            "finished_at": now,
-            "updated_at": now,
-            "failure_reason": output.job_failure_reason,
-            "failure_message": output.job_failure_message,
-            "error_summary": output.error_summary,
-            "published_materialization_generation": lease.lease_epoch,
-        },
+        values=job_values,
     )
-    await session.execute(delete(Task).where(Task.task_set_id == task_set_id))
-    if output.task_rows:
+    if has_publishable_rows:
+        await session.execute(delete(Task).where(Task.task_set_id == task_set_id))
         for row in output.task_rows:
             session.add(
                 Task(
@@ -340,6 +343,15 @@ async def publish_if_current(
                     benchmark_id=None,
                 ),
             )
+    else:
+        has_previous_publication = (await session.execute(
+            select(Task.id)
+            .where(Task.task_set_id == task_set_id)
+            .limit(1),
+        )).scalar_one_or_none() is not None
+        if has_previous_publication:
+            await session.commit()
+            return
     result = await session.execute(
         update(TaskSet)
         .where(
@@ -367,18 +379,24 @@ async def _fail_lease(
     lease: MaterializationLease,
     failure_reason: str,
     failure_message: str,
+    claim_ttl_sec: int,
 ) -> None:
     """Mark an owned job failed without allowing a stale fallback write."""
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(seconds=claim_ttl_sec)
     task_set_id = (await session.execute(
-        select(TaskSetMaterializationJob.task_set_id).where(
+        select(TaskSetMaterializationJob.task_set_id)
+        .where(
             *_lease_conditions(lease),
             TaskSetMaterializationJob.state.in_(("claimed", "running")),
-        ),
+            TaskSetMaterializationJob.lease_heartbeat_at.is_not(None),
+            TaskSetMaterializationJob.lease_heartbeat_at >= cutoff,
+        )
+        .with_for_update(),
     )).scalar_one_or_none()
     if task_set_id is None:
         await session.rollback()
         raise LeaseLost()
-    now = datetime.now(UTC)
     await _update_job_for_lease(
         session,
         lease=lease,
@@ -468,6 +486,7 @@ async def _materialize_claimed_job(
                 lease=lease,
                 failure_reason="missing_task_set",
                 failure_message="task set or manifest row missing",
+                claim_ttl_sec=claim_ttl_sec,
             )
             return
         manifest = UserTaskSetManifest.model_validate(manifest_row.manifest)
@@ -507,7 +526,8 @@ async def _materialize_claimed_job(
             manifest=manifest,
             task_set_id=task_set_id,
             owning_team_id=owning_team_id,
-            output_generation=f"{lease.job_id}/{lease.lease_epoch}",
+            materialization_job_id=lease.job_id,
+            materialization_epoch=lease.lease_epoch,
             intents=intents,
             verifier_blob_uri=verifier_blob_uri,
             transform_blob_uri=transform_blob_uri,
@@ -581,6 +601,7 @@ async def run_once(
                         lease=lease,
                         failure_reason="internal_error",
                         failure_message="materialization worker crashed",
+                        claim_ttl_sec=claim_ttl_sec,
                     )
                 except LeaseLost:
                     logger.info("taskset_materializer lease lost job_id=%s", lease.job_id)

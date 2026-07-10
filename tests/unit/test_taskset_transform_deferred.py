@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock, patch
+from uuid import UUID
 
 import pytest
 
@@ -35,6 +37,8 @@ _V1_INTERNAL_TRUSTED = WorkloadTrustContract(
     untrusted_workload_isolation=False,
 )
 
+_CANONICAL_JOB_ID = UUID("12345678-1234-5678-1234-567812345678")
+
 
 def _legacy_gates_on() -> TransformSandboxConfig:
     return TransformSandboxConfig(
@@ -61,7 +65,8 @@ def test_v1_contract_rejects_transform_before_blob_fetch_or_runner() -> None:
             manifest=manifest,
             task_set_id="ts/team/tasks",
             owning_team_id="team",
-            output_generation="unit-test/1",
+            materialization_job_id=_CANONICAL_JOB_ID,
+            materialization_epoch=1,
             intents=["trajectory_generation"],
             verifier_blob_uri=None,
             transform_blob_uri="s3://artifacts/x/transform.py",
@@ -79,6 +84,37 @@ def test_v1_contract_rejects_transform_before_blob_fetch_or_runner() -> None:
     assert minio.mock_calls == []
     fetch_blob.assert_not_called()
     run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("output_job_id", "output_lease_epoch"),
+    [
+        ("not-a-uuid", 1),
+        ("../owner-token", 1),
+        (_CANONICAL_JOB_ID, True),
+        (_CANONICAL_JOB_ID, -1),
+        (_CANONICAL_JOB_ID, "1"),
+    ],
+)
+def test_materialize_rejects_noncanonical_generation_boundary(
+    output_job_id: Any,
+    output_lease_epoch: Any,
+) -> None:
+    manifest = UserTaskSetManifest.model_validate(_MANIFEST)
+
+    with pytest.raises(ValueError):
+        materialize_task_set(
+            manifest=manifest,
+            task_set_id="ts/team/tasks",
+            owning_team_id="team",
+            materialization_job_id=output_job_id,
+            materialization_epoch=output_lease_epoch,
+            intents=["trajectory_generation"],
+            verifier_blob_uri=None,
+            minio_client=MagicMock(),
+            artifacts_bucket="artifacts",
+            upstream_cache_root=__import__("pathlib").Path("/tmp/loom-test"),
+        )
 
 
 def test_service_startup_rejects_invalid_v1_workload_trust_tuple() -> None:

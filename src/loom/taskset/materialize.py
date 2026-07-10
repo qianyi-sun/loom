@@ -11,6 +11,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
+from uuid import UUID
 
 import tomli_w
 from pydantic import ValidationError
@@ -76,6 +77,23 @@ def _parse_s3_uri(uri: str) -> tuple[str, str]:
 
 def _storage_prefix(*, team_id: str, slug: str) -> str:
     return f"tasksets/user/{team_id}/{slug}"
+
+
+def _materialization_tasks_prefix(
+    *,
+    storage_prefix: str,
+    materialization_job_id: UUID,
+    materialization_epoch: int,
+) -> str:
+    """Return the one canonical generated-output prefix for a lease."""
+    if not isinstance(materialization_job_id, UUID):
+        raise ValueError("materialization_job_id must be a UUID")
+    if type(materialization_epoch) is not int or materialization_epoch < 0:
+        raise ValueError("materialization_epoch must be a nonnegative integer")
+    return (
+        f"{storage_prefix}/materializations/{materialization_job_id}/"
+        f"{materialization_epoch}/tasks"
+    )
 
 
 def _safe_task_segment(task_id: str) -> str:
@@ -340,7 +358,8 @@ def _materialize_bundle_upload(
     manifest: UserTaskSetManifest,
     task_set_id: str,
     owning_team_id: str,
-    output_generation: str,
+    materialization_job_id: UUID,
+    materialization_epoch: int,
     has_evaluation: bool,
     minio_client: Any,
     artifacts_bucket: str,
@@ -351,7 +370,11 @@ def _materialize_bundle_upload(
 ) -> MaterializeOutput:
     slug = manifest.slug
     prefix = _storage_prefix(team_id=owning_team_id, slug=slug)
-    generated_tasks_prefix = f"{prefix}/materializations/{output_generation}/tasks"
+    generated_tasks_prefix = _materialization_tasks_prefix(
+        storage_prefix=prefix,
+        materialization_job_id=materialization_job_id,
+        materialization_epoch=materialization_epoch,
+    )
     bundle_key = bundle_object_key(
         prefix=prefix,
         relative_path=manifest.source.locator,
@@ -542,7 +565,8 @@ def materialize_task_set(
     manifest: UserTaskSetManifest,
     task_set_id: str,
     owning_team_id: str,
-    output_generation: str,
+    materialization_job_id: UUID,
+    materialization_epoch: int,
     intents: list[str],
     verifier_blob_uri: str | None,
     transform_blob_uri: str | None = None,
@@ -557,7 +581,11 @@ def materialize_task_set(
     """Materialize one TaskSet synchronously. Caller owns DB writes."""
     slug = manifest.slug
     prefix = _storage_prefix(team_id=owning_team_id, slug=slug)
-    generated_tasks_prefix = f"{prefix}/materializations/{output_generation}/tasks"
+    generated_tasks_prefix = _materialization_tasks_prefix(
+        storage_prefix=prefix,
+        materialization_job_id=materialization_job_id,
+        materialization_epoch=materialization_epoch,
+    )
     has_evaluation = "evaluation" in intents
     max_instances = (manifest.limits.max_instances if manifest.limits else 500)
 
@@ -577,7 +605,8 @@ def materialize_task_set(
             manifest=manifest,
             task_set_id=task_set_id,
             owning_team_id=owning_team_id,
-            output_generation=output_generation,
+            materialization_job_id=materialization_job_id,
+            materialization_epoch=materialization_epoch,
             has_evaluation=has_evaluation,
             minio_client=minio_client,
             artifacts_bucket=artifacts_bucket,

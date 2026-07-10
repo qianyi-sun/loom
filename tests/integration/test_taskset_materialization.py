@@ -795,6 +795,7 @@ async def test_materialization_staged_loser_cannot_publish_over_winner(
                 lease=lease_a,
                 failure_reason="stale_owner_crashed",
                 failure_message="A resumed after B published",
+                claim_ttl_sec=60,
             )
 
     async with app.state.session_factory() as session:
@@ -914,6 +915,143 @@ async def test_materialization_db_failure_after_staging_keeps_published_generati
         Bucket=app.state.settings.artifacts_bucket,
         Prefix=f"tasksets/user/{teams['team_a']}/inline-tasks/tasks/",
     ).get("Contents", []) == []
+
+
+@pytest.mark.asyncio
+async def test_empty_terminal_failure_keeps_prior_published_generation(
+    materialization_setup,
+) -> None:
+    app, tokens, teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    old_source = (
+        f"s3://{app.state.settings.artifacts_bucket}/tasksets/user/{teams['team_a']}/"
+        "inline-tasks/materializations/previous-job/7/tasks/old/"
+    )
+
+    async with app.state.session_factory() as session:
+        task_set = await session.get(TaskSet, task_set_id)
+        job = (await session.execute(
+            select(TaskSetMaterializationJob).where(
+                TaskSetMaterializationJob.task_set_id == task_set_id,
+            ),
+        )).scalar_one()
+        assert task_set is not None
+        task_set.status = "ready"
+        task_set.status_reason = "published_generation"
+        task_set.task_count = 1
+        task_set.evaluation_ready = True
+        job.lease_epoch = 7
+        job.published_materialization_generation = 7
+        session.add(
+            Task(
+                id=f"{task_set_id}/tasks/old",
+                checksum="old-checksum",
+                config={"task": {"id": "old"}},
+                source=old_source,
+                task_set_id=task_set_id,
+                benchmark_id=None,
+            ),
+        )
+        await session.commit()
+
+    async with app.state.session_factory() as session:
+        claimed = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by="empty-failure-owner",
+        )
+    lease = claimed[0]
+    assert lease.lease_epoch == 8
+    async with app.state.session_factory() as session:
+        await taskset_materializer._start_job(session, lease=lease)
+        await taskset_materializer.publish_if_current(
+            session,
+            lease=lease,
+            task_set_id=task_set_id,
+            output=MaterializeOutput(
+                status="failed",
+                status_reason="transform_unavailable_in_internal_trusted",
+                job_failure_reason="transform_unavailable_in_internal_trusted",
+            ),
+            claim_ttl_sec=60,
+        )
+
+    async with app.state.session_factory() as session:
+        rows = tuple(sorted(
+            (row.id, row.source)
+            for row in (await session.execute(
+                select(Task).where(Task.task_set_id == task_set_id),
+            )).scalars().all()
+        ))
+        task_set_after = await session.get(TaskSet, task_set_id)
+        job_after = await session.get(TaskSetMaterializationJob, lease.id)
+    assert task_set_after is not None
+    assert job_after is not None
+    assert rows == ((f"{task_set_id}/tasks/old", old_source),)
+    assert (
+        task_set_after.status,
+        task_set_after.status_reason,
+        task_set_after.task_count,
+        task_set_after.evaluation_ready,
+    ) == ("ready", "published_generation", 1, True)
+    assert job_after.state == "failed"
+    assert job_after.failure_reason == "transform_unavailable_in_internal_trusted"
+    assert job_after.published_materialization_generation == 7
+
+
+@pytest.mark.asyncio
+async def test_expired_lease_cannot_fail_before_reclaim(
+    materialization_setup,
+) -> None:
+    app, tokens, _teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+
+    async with app.state.session_factory() as session:
+        claimed = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by="expired-crash-owner",
+        )
+    lease = claimed[0]
+    async with app.state.session_factory() as session:
+        await taskset_materializer._start_job(session, lease=lease)
+        stale_at = datetime.now(UTC) - timedelta(minutes=5)
+        await session.execute(
+            update(TaskSetMaterializationJob)
+            .where(TaskSetMaterializationJob.id == lease.id)
+            .values(lease_heartbeat_at=stale_at),
+        )
+        await session.commit()
+
+    async with app.state.session_factory() as session:
+        with pytest.raises(taskset_materializer.LeaseLost):
+            await taskset_materializer._fail_lease(
+                session,
+                lease=lease,
+                failure_reason="internal_error",
+                failure_message="materialization worker crashed",
+                claim_ttl_sec=60,
+            )
+
+    async with app.state.session_factory() as session:
+        job_after = await session.get(TaskSetMaterializationJob, lease.id)
+        task_set_after = await session.get(TaskSet, task_set_id)
+    assert job_after is not None
+    assert task_set_after is not None
+    assert (
+        job_after.state,
+        job_after.lease_epoch,
+        job_after.claimed_by,
+        job_after.failure_reason,
+        job_after.failure_message,
+        job_after.finished_at,
+    ) == ("running", lease.lease_epoch, lease.claimed_by, None, None, None)
+    assert (
+        task_set_after.status,
+        task_set_after.status_reason,
+        task_set_after.task_count,
+        task_set_after.evaluation_ready,
+    ) == ("materializing", None, 0, False)
 
 
 @pytest.mark.asyncio
