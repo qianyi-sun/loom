@@ -74,6 +74,9 @@ def test_taskset_fence_canary_uses_task_7_deployment_runner() -> None:
     assert "--task-set-id \"$TASK_SET_ID\"" in canary_section
     assert "--expected-task-checksum \"$EXPECTED_TASK_CHECKSUM\"" in canary_section
     assert "candidate-bound JSON" in normalized_canary_section
+    assert "durable one-use authorization" in normalized_canary_section
+    assert "fixed staging Kubernetes context" in normalized_canary_section
+    assert "atomically published without replacement" in normalized_canary_section
 
     for prohibited_action in [
         "killing a driver or pod",

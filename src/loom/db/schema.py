@@ -656,6 +656,61 @@ class TaskSetMaterializationJob(Base):
     )
 
 
+class TaskSetFenceCanaryAuthorization(Base):
+    """One deployment-created, one-use authority for the #756 canary."""
+
+    __tablename__ = "task_set_fence_canary_authorizations"
+    __table_args__ = (
+        CheckConstraint(
+            "candidate_sha ~ '^[0-9a-f]{40}$'",
+            name="task_set_fence_canary_authorizations_candidate_sha_check",
+        ),
+        CheckConstraint(
+            "image_tag ~ '^staging-[0-9a-f]{7}$'",
+            name="task_set_fence_canary_authorizations_image_tag_check",
+        ),
+        CheckConstraint(
+            "expected_task_checksum ~ '^[0-9a-f]{64}$'",
+            name="task_set_fence_canary_authorizations_checksum_check",
+        ),
+        CheckConstraint(
+            "octet_length(nonce_digest) = 32",
+            name="task_set_fence_canary_authorizations_nonce_digest_check",
+        ),
+        CheckConstraint(
+            "(consumed_at IS NULL AND consumed_lease_epoch IS NULL) OR "
+            "(consumed_at IS NOT NULL AND consumed_lease_epoch > 0)",
+            name="task_set_fence_canary_authorizations_consumption_check",
+        ),
+        UniqueConstraint(
+            "materialization_job_id",
+            name="task_set_fence_canary_authorizations_job_uidx",
+        ),
+    )
+
+    task_set_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("task_sets.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    materialization_job_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("task_set_materialization_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    candidate_sha: Mapped[str] = mapped_column(String(40), nullable=False)
+    image_tag: Mapped[str] = mapped_column(String(64), nullable=False)
+    expected_task_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    nonce_digest: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    consumed_lease_epoch: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
 class TaskSetGenerationGcCursor(Base):
     """Scheduling-only progress for bounded live-generation reconciliation."""
     __tablename__ = "task_set_generation_gc_cursors"

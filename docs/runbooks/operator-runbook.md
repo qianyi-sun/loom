@@ -1330,6 +1330,15 @@ completed rollout's `inputs.json`, rejects any non-staging/prod/mismatched
 candidate, and writes exactly one immutable JSON record at the rollout-owned
 `canaries/taskset-lease-fencing/evidence.json` path.
 
+The launcher pins the fixed staging Kubernetes context and selects a Ready
+`loom-service` Pod only when its service-container digest, template image, and
+converged Deployment generation match the completed candidate release
+manifest. It rechecks that exact Pod identity around both internal operations;
+mixed revisions, stale rollout evidence, a changed pod, or a non-ready target
+fail closed. Evidence is written through the validated rollout directory as a
+private fsynced temporary file, atomically published without replacement, and
+directory-fsynced; a partial private temporary file is discarded on retry.
+
 Before collection, provision the same new high-entropy capability in both
 operator-managed deployment locations: the protected staging
 `loom-secrets` key `taskset-fence-canary-token` (mounted only into
@@ -1340,11 +1349,17 @@ not match; never pass, print, or attach this value.
 
 Use a normal user/team session to submit a fresh, one-task disposable bundle.
 Before submission, independently record that bundle's expected 64-hex task
-checksum as `EXPECTED_TASK_CHECKSUM`. The runner refuses anything except the
-initial unclaimed/unmaterialized job: no pre-existing, rebuilt, claimed,
-published, deleted, or arbitrary TaskSet can be targeted. Stream API responses
-through a whitelist if retaining submission/status context; never save a full
-Task response because it includes a storage `source` field.
+checksum as `EXPECTED_TASK_CHECKSUM`. Inside the selected service Pod, the
+deployment runner first creates a durable one-use authorization bound to the
+candidate, TaskSet, exact initial job, checksum, and a per-launch high-entropy
+nonce retained only as a digest. It locks and consumes that authorization in
+the same transaction as the exact job claim. A fresh ordinary user TaskSet has
+no such record and cannot be materialized by the runner; pre-existing,
+rebuilt, claimed, published, deleted, mismatched, or replayed TaskSets also
+fail closed. If a post-stage check fails, the current lease is relinquished
+through the normal fenced transition rather than remaining running. Stream API
+responses through a whitelist if retaining submission/status context; never
+save a full Task response because it includes a storage `source` field.
 
 ```bash
 CANARY_DIR="$ROLLOUT_DIR/canaries/taskset-lease-fencing"

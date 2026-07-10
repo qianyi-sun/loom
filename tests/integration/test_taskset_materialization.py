@@ -29,6 +29,7 @@ from testcontainers.minio import MinioContainer
 from loom.db.schema import (
     Task,
     TaskSet,
+    TaskSetFenceCanaryAuthorization,
     TaskSetGenerationGcCursor,
     TaskSetManifest,
     TaskSetMaterializationJob,
@@ -322,6 +323,7 @@ async def materialization_setup(
         await engine.dispose()
         with sl() as s:
             s.execute(delete(Task).where(Task.task_set_id.is_not(None)))
+            s.execute(delete(TaskSetFenceCanaryAuthorization))
             s.execute(delete(TaskSetGenerationGcCursor))
             s.execute(delete(TaskSetMaterializationJob))
             s.execute(delete(TaskSetManifest))
@@ -1693,6 +1695,267 @@ async def test_materialization_can_stage_a_current_lease_before_publication(
 
 
 @pytest.mark.asyncio
+async def test_deployment_fence_canary_requires_a_durable_one_use_authorization(
+    materialization_setup,
+) -> None:
+    """A fresh ordinary TaskSet is never a canary merely because it matches a checksum."""
+    from loom_cli.taskset_fence_canary import (
+        TaskSetFenceCanaryContract,
+        TaskSetFenceCanaryRuntimeError,
+        _claim_authorized_disposable_job,
+        register_deployment_fence_authorization,
+    )
+
+    app, tokens, _teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    contract = TaskSetFenceCanaryContract.from_mapping({
+        "candidate_sha": "a" * 40,
+        "image_tag": "staging-aaaaaaa",
+        "task_set_id": task_set_id,
+        "expected_task_checksum": "c" * 64,
+        "authorization_token": "deployment-only-capability",
+        "nonce": "n" * 43,
+    })
+
+    with pytest.raises(TaskSetFenceCanaryRuntimeError) as missing_authorization:
+        await _claim_authorized_disposable_job(
+            app.state.session_factory,
+            contract=contract,
+            owner="canary-owner-a",
+        )
+    assert str(missing_authorization.value) == "canary authorization was not available"
+
+    await register_deployment_fence_authorization(
+        app.state.session_factory,
+        contract=contract,
+        configured_token="deployment-only-capability",
+    )
+    lease = await _claim_authorized_disposable_job(
+        app.state.session_factory,
+        contract=contract,
+        owner="canary-owner-a",
+    )
+    assert lease.claimed_by == "canary-owner-a"
+
+    with pytest.raises(TaskSetFenceCanaryRuntimeError) as consumed_authorization:
+        await _claim_authorized_disposable_job(
+            app.state.session_factory,
+            contract=contract,
+            owner="canary-owner-b",
+        )
+    assert str(consumed_authorization.value) == "canary authorization was not available"
+
+    async with app.state.session_factory() as session:
+        authorization = await session.get(TaskSetFenceCanaryAuthorization, task_set_id)
+        job = (await session.execute(
+            select(TaskSetMaterializationJob).where(
+                TaskSetMaterializationJob.task_set_id == task_set_id,
+            ),
+        )).scalar_one()
+    assert authorization is not None
+    assert authorization.consumed_at is not None
+    assert authorization.materialization_job_id == lease.job_id
+    assert authorization.consumed_lease_epoch == lease.lease_epoch
+    assert job.state == "claimed"
+
+
+@pytest.mark.asyncio
+async def test_deployment_fence_canary_rejects_bound_contract_mismatch_without_claiming(
+    materialization_setup,
+) -> None:
+    """A durable authorization cannot be replayed for another candidate or nonce."""
+    from loom_cli.taskset_fence_canary import (
+        TaskSetFenceCanaryContract,
+        TaskSetFenceCanaryRuntimeError,
+        _claim_authorized_disposable_job,
+        register_deployment_fence_authorization,
+    )
+
+    app, tokens, _teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    contract = TaskSetFenceCanaryContract.from_mapping({
+        "candidate_sha": "a" * 40,
+        "image_tag": "staging-aaaaaaa",
+        "task_set_id": task_set_id,
+        "expected_task_checksum": "c" * 64,
+        "authorization_token": "deployment-only-capability",
+        "nonce": "n" * 43,
+    })
+    await register_deployment_fence_authorization(
+        app.state.session_factory,
+        contract=contract,
+        configured_token="deployment-only-capability",
+    )
+    mismatched_contract = TaskSetFenceCanaryContract.from_mapping({
+        "candidate_sha": "d" * 40,
+        "image_tag": "staging-ddddddd",
+        "task_set_id": task_set_id,
+        "expected_task_checksum": "c" * 64,
+        "authorization_token": "deployment-only-capability",
+        "nonce": "n" * 43,
+    })
+
+    with pytest.raises(TaskSetFenceCanaryRuntimeError) as exc_info:
+        await _claim_authorized_disposable_job(
+            app.state.session_factory,
+            contract=mismatched_contract,
+            owner="canary-owner-a",
+        )
+    assert str(exc_info.value) == "canary authorization was not available"
+
+    async with app.state.session_factory() as session:
+        authorization = await session.get(TaskSetFenceCanaryAuthorization, task_set_id)
+        job = (await session.execute(
+            select(TaskSetMaterializationJob).where(
+                TaskSetMaterializationJob.task_set_id == task_set_id,
+            ),
+        )).scalar_one()
+    assert authorization is not None
+    assert authorization.consumed_at is None
+    assert job.state == "queued"
+    assert job.claimed_by is None
+
+
+@pytest.mark.asyncio
+async def test_deployment_fence_canary_rechecks_a_deleted_task_set_at_claim(
+    materialization_setup,
+) -> None:
+    """Deletion after authorization cannot race into a canary materialization claim."""
+    from loom_cli.taskset_fence_canary import (
+        TaskSetFenceCanaryContract,
+        TaskSetFenceCanaryRuntimeError,
+        _claim_authorized_disposable_job,
+        register_deployment_fence_authorization,
+    )
+
+    app, tokens, teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    contract = TaskSetFenceCanaryContract.from_mapping({
+        "candidate_sha": "a" * 40,
+        "image_tag": "staging-aaaaaaa",
+        "task_set_id": task_set_id,
+        "expected_task_checksum": "c" * 64,
+        "authorization_token": "deployment-only-capability",
+        "nonce": "n" * 43,
+    })
+    await register_deployment_fence_authorization(
+        app.state.session_factory,
+        contract=contract,
+        configured_token="deployment-only-capability",
+    )
+    async with app.state.session_factory() as session:
+        await delete_task_set(
+            session,
+            team_id=teams["team_a"],
+            task_set_id=task_set_id,
+        )
+
+    with pytest.raises(TaskSetFenceCanaryRuntimeError) as exc_info:
+        await _claim_authorized_disposable_job(
+            app.state.session_factory,
+            contract=contract,
+            owner="canary-owner-a",
+        )
+    assert str(exc_info.value) == "canary authorization was not available"
+
+    async with app.state.session_factory() as session:
+        job = (await session.execute(
+            select(TaskSetMaterializationJob).where(
+                TaskSetMaterializationJob.task_set_id == task_set_id,
+            ),
+        )).scalar_one()
+        authorization = await session.get(TaskSetFenceCanaryAuthorization, task_set_id)
+    assert job.state == "cancelled"
+    assert job.claimed_by is None
+    assert authorization is not None
+    assert authorization.consumed_at is None
+
+
+@pytest.mark.asyncio
+async def test_deployment_fence_canary_relinquishes_a_post_stage_mismatch(
+    materialization_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mismatched staged output cannot leave the consumed canary job running."""
+    from loom_cli.taskset_fence_canary import (
+        TaskSetFenceCanaryContract,
+        TaskSetFenceCanaryRuntimeError,
+        register_deployment_fence_authorization,
+        run_deployment_fence_canary,
+    )
+
+    app, tokens, _teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    settings = app.state.settings
+    contract = TaskSetFenceCanaryContract.from_mapping({
+        "candidate_sha": "a" * 40,
+        "image_tag": "staging-aaaaaaa",
+        "task_set_id": task_set_id,
+        "expected_task_checksum": "c" * 64,
+        "authorization_token": "deployment-only-capability",
+        "nonce": "n" * 43,
+    })
+    await register_deployment_fence_authorization(
+        app.state.session_factory,
+        contract=contract,
+        configured_token="deployment-only-capability",
+    )
+
+    def stage_wrong_checksum(**_kwargs: object) -> MaterializeOutput:
+        return MaterializeOutput(
+            task_rows=[TaskRowDraft(
+                id=f"{task_set_id}/tasks/mismatch",
+                checksum="d" * 64,
+                config={},
+                source="s3://private-bucket/canary-mismatch",
+            )],
+            task_count=1,
+            status="ready",
+            evaluation_ready=True,
+        )
+
+    monkeypatch.setattr(taskset_materializer, "materialize_task_set", stage_wrong_checksum)
+    monkeypatch.setattr(taskset_materializer, "team_taskset_storage_bytes", lambda *_a, **_k: 0)
+
+    with pytest.raises(TaskSetFenceCanaryRuntimeError) as exc_info:
+        await run_deployment_fence_canary(
+            contract,
+            configured_token="deployment-only-capability",
+            session_factory=app.state.session_factory,
+            minio_client=app.state.minio_client,
+            artifacts_bucket=settings.artifacts_bucket,
+            upstream_cache_root=settings.taskset_materializer_upstream_cache_root,
+            transform_config=TransformSandboxConfig(
+                enabled=settings.taskset_materializer_transforms_enabled,
+                network_isolated=settings.taskset_materializer_transform_network_isolated,
+                workload_contract=settings.workload_contract,
+                wall_timeout_sec=settings.taskset_materializer_transform_wall_timeout_sec,
+                cpu_limit_sec=settings.taskset_materializer_transform_cpu_limit_sec,
+                memory_limit_mb=settings.taskset_materializer_transform_memory_limit_mb,
+            ),
+            max_bundle_bytes=settings.taskset_quota_max_bundle_bytes,
+            max_team_storage_bytes=settings.taskset_quota_max_storage_bytes_per_team,
+            claim_ttl_sec=settings.taskset_materializer_claim_ttl_sec,
+            owner_factory=iter(("canary-owner-a", "canary-owner-b")).__next__,
+        )
+    assert str(exc_info.value) == "canary staged output did not match contract"
+
+    async with app.state.session_factory() as session:
+        job = (await session.execute(
+            select(TaskSetMaterializationJob).where(
+                TaskSetMaterializationJob.task_set_id == task_set_id,
+            ),
+        )).scalar_one()
+        authorization = await session.get(TaskSetFenceCanaryAuthorization, task_set_id)
+    assert job.state == "queued"
+    assert job.claimed_by is None
+    assert job.lease_heartbeat_at is None
+    assert job.started_at is None
+    assert authorization is not None
+    assert authorization.consumed_at is not None
+
+
+@pytest.mark.asyncio
 async def test_deployment_fence_canary_uses_normal_primitives_and_redacts_evidence(
     materialization_setup,
     monkeypatch: pytest.MonkeyPatch,
@@ -1744,14 +2007,23 @@ async def test_deployment_fence_canary_uses_normal_primitives_and_redacts_eviden
     monkeypatch.setattr(app.state.minio_client, "delete_object", reject_delete)
     monkeypatch.setattr(app.state.minio_client, "delete_objects", reject_delete)
 
+    contract = TaskSetFenceCanaryContract.from_mapping({
+        "candidate_sha": "a" * 40,
+        "image_tag": "staging-aaaaaaa",
+        "task_set_id": task_set_id,
+        "expected_task_checksum": "c" * 64,
+        "authorization_token": "deployment-only-capability",
+        "nonce": "n" * 43,
+    })
+    from loom_cli.taskset_fence_canary import register_deployment_fence_authorization
+
+    await register_deployment_fence_authorization(
+        app.state.session_factory,
+        contract=contract,
+        configured_token="deployment-only-capability",
+    )
     evidence = await run_deployment_fence_canary(
-        TaskSetFenceCanaryContract.from_mapping({
-            "candidate_sha": "a" * 40,
-            "image_tag": "staging-aaaaaaa",
-            "task_set_id": task_set_id,
-            "expected_task_checksum": "c" * 64,
-            "authorization_token": "deployment-only-capability",
-        }),
+        contract,
         configured_token="deployment-only-capability",
         session_factory=app.state.session_factory,
         minio_client=app.state.minio_client,
@@ -1823,8 +2095,9 @@ async def test_deployment_fence_canary_rejects_noninitial_task_sets(
 ) -> None:
     """An authorization capability cannot turn an existing TaskSet into a canary."""
     from loom_cli.taskset_fence_canary import (
+        TaskSetFenceCanaryContract,
         TaskSetFenceCanaryRuntimeError,
-        _require_disposable_queued_job,
+        register_deployment_fence_authorization,
     )
 
     app, tokens, _teams = materialization_setup
@@ -1838,9 +2111,17 @@ async def test_deployment_fence_canary_rejects_noninitial_task_sets(
         await session.commit()
 
     with pytest.raises(TaskSetFenceCanaryRuntimeError) as exc_info:
-        await _require_disposable_queued_job(
+        await register_deployment_fence_authorization(
             app.state.session_factory,
-            task_set_id=task_set_id,
+            contract=TaskSetFenceCanaryContract.from_mapping({
+                "candidate_sha": "a" * 40,
+                "image_tag": "staging-aaaaaaa",
+                "task_set_id": task_set_id,
+                "expected_task_checksum": "c" * 64,
+                "authorization_token": "deployment-only-capability",
+                "nonce": "n" * 43,
+            }),
+            configured_token="deployment-only-capability",
         )
     assert str(exc_info.value) == "canary task set is not disposable"
 
