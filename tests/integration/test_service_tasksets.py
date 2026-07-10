@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import create_engine, text
 
+from loom_service.taskset_intake import get_latest_job
 from tests.integration.taskset_fixtures import _manifest_bytes
 
 _BUNDLE_UPLOAD_MANIFEST = b"""
@@ -242,6 +246,55 @@ async def test_get_delete_rebuild(tasksets_setup) -> None:
         assert get_resp.status_code == 200
         assert get_resp.json()["materialization_job_state"] == "queued"
         assert get_resp.json()["error_summary"] == []
+
+        not_leased_fence = get_resp.json()["materialization_fence"]
+        assert not_leased_fence == {
+            "lease_epoch": 0,
+            "lease_heartbeat_at": None,
+            "lease_heartbeat_state": "not_leased",
+            "owner_fingerprint": None,
+            "published_generation": 0,
+        }
+
+        raw_owner = "taskset-detail-raw-owner-must-not-leak"
+        heartbeat_at = datetime.now(UTC)
+        async with app.state.session_factory() as session:
+            job = await get_latest_job(session, task_set_id)
+            assert job is not None
+            job.state = "running"
+            job.claimed_by = raw_owner
+            job.lease_epoch = 7
+            job.lease_heartbeat_at = heartbeat_at
+            job.published_materialization_generation = 7
+            await session.commit()
+
+        fresh_resp = await client.get(f"/api/v1/tasksets/{task_set_id}", headers=headers)
+        assert fresh_resp.status_code == 200
+        fresh_body = fresh_resp.json()
+        assert fresh_body["materialization_fence"] == {
+            "lease_epoch": 7,
+            "lease_heartbeat_at": heartbeat_at.isoformat().replace("+00:00", "Z"),
+            "lease_heartbeat_state": "fresh",
+            "owner_fingerprint": (
+                "sha256:" + hashlib.sha256(raw_owner.encode()).hexdigest()[:12]
+            ),
+            "published_generation": 7,
+        }
+        assert raw_owner not in fresh_resp.text
+        assert "claimed_by" not in fresh_body
+        assert "claim_ttl_sec" not in fresh_body
+
+        async with app.state.session_factory() as session:
+            job = await get_latest_job(session, task_set_id)
+            assert job is not None
+            job.lease_heartbeat_at = datetime.now(UTC) - timedelta(
+                seconds=app.state.settings.taskset_materializer_claim_ttl_sec + 1,
+            )
+            await session.commit()
+
+        stale_resp = await client.get(f"/api/v1/tasksets/{task_set_id}", headers=headers)
+        assert stale_resp.status_code == 200
+        assert stale_resp.json()["materialization_fence"]["lease_heartbeat_state"] == "stale"
 
         rebuild = await client.post(
             f"/api/v1/tasksets/{task_set_id}/rebuild",

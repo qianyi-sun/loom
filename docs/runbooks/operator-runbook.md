@@ -1311,6 +1311,74 @@ complete root is removed only after the configured soft-delete retention delay;
 investigate materializer/job state instead of shortening that retention or
 performing object/DB surgery.
 
+### Disposable TaskSet lease-fencing canary (#756)
+
+Collect this staging-only canary only after the normal candidate rollout has
+completed. It proves the materializer's cooperative two-owner fencing path on
+a fresh, disposable bundle; it is not a release-gate schema change and it
+does not persist candidate identity in a TaskSet row. Task 7 owns the dated,
+candidate-bound JSON/Markdown artifact produced after merge.
+
+Use a normal user/team session and a one-task disposable bundle with a known
+task id. Capture the existing rollout's 40-character candidate SHA and image
+tag, then submit the bundle through the ordinary CLI. Stream API responses
+through a whitelist before writing any evidence; never save a full Task
+response because it includes a storage `source` field.
+
+```bash
+CANARY_DIR="$ROLLOUT_DIR/canaries/taskset-lease-fencing"
+mkdir -p "$CANARY_DIR"
+
+loom tasksets submit "$DISPOSABLE_BUNDLE_DIR" --format json \
+  | jq '{task_set_id, materialization_job_id}' \
+  > "$CANARY_DIR/submission.json"
+
+TASK_SET_ID="$(jq -r '.task_set_id' "$CANARY_DIR/submission.json")"
+loom tasksets status "$TASK_SET_ID" --format json \
+  | jq '{task_set_id, status, task_count, materialization_fence}' \
+  > "$CANARY_DIR/status-a-staged.json"
+```
+
+The normal cooperative runner records the second owner only after the first
+owner has staged. It must use the deployed claim/reclaim/publish path; the
+deterministic integration test is the timing contract for that handoff. After
+the winner publishes, collect the second safe status snapshot and the selected
+task checksum through the normal authenticated API, filtering before the file
+is written:
+
+```bash
+loom tasksets status "$TASK_SET_ID" --format json \
+  | jq '{task_set_id, status, task_count, materialization_fence}' \
+  > "$CANARY_DIR/status-b-published.json"
+
+curl --fail-with-body --silent --show-error \
+  -H "Authorization: Bearer $LOOM_API_TOKEN" \
+  "$LOOM_SERVER_URL/api/v1/tasks/$DISPOSABLE_TASK_ID" \
+  | jq '{id, checksum}' \
+  > "$CANARY_DIR/published-task.json"
+```
+
+The Task 7 artifact combines the rollout candidate SHA/image tag, submission
+job id with both observed lease epochs, only the two owner fingerprints,
+published generation, task count and checksum, the observed stale-CAS
+`LeaseLost` outcome, loser-GC eligibility (not a GC execution), and the
+collection timestamps. Validate the final JSON/Markdown before attachment:
+
+- It contains no raw `claimed_by`, token, cookie, authorization header, host or
+  PID, source URI, object key/prefix, signed URL, manifest, credential, or raw
+  error payload.
+- The winner's published generation equals its lease epoch, the selected task
+  checksum is from the normal task API, and the loser was fenced before
+  publication.
+- The canary itself performs no GC or deletion. Eligibility is evidence for
+  the existing bounded reconciler, not permission to run it during collection.
+
+Do **not** manufacture the handoff by killing a driver or pod, using `SIGSTOP`,
+editing rows with manual SQL, mutating the object store, injecting a failure,
+or deleting a prefix. If the normal cooperative path cannot be observed without
+one of those actions, stop the collection and record it as unavailable rather
+than claiming the canary passed.
+
 ### Protected workload-trust contract (#755)
 
 For a staging or production rollout, the profile must declare exactly
@@ -4577,7 +4645,7 @@ the service-mode agent layer. The accepted evidence is one of:
 Capture the API/CLI evidence:
 
 ```bash
-loom tasksets status "$DNS_TASKSET_SLUG_OR_ID" --json \
+loom tasksets status "$DNS_TASKSET_SLUG_OR_ID" --format json \
   | tee "$COMPAT_GATE_DIR/canaries/dns-taskset-status.json"
 
 loom eval trial show "$DNS_COMPAT_TRIAL_ID" --format json \

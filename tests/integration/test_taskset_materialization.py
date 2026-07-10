@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import json
 import tarfile
 import threading
 from collections.abc import AsyncIterator, Callable
@@ -1592,6 +1593,186 @@ async def test_materialization_staged_loser_cannot_publish_over_winner(
         winner_task_set_after.evaluation_ready,
         winner_job_after.published_materialization_generation,
     ) == winner_snapshot
+
+
+@pytest.mark.asyncio
+async def test_materialization_cooperative_two_owner_canary_records_safe_evidence(
+    materialization_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise the staging-canary handoff without a kill, GC, or external state."""
+    app, tokens, teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    owner_a = "cooperative-canary-owner-a-raw"
+    owner_b = "cooperative-canary-owner-b-raw"
+    claim_ttl_sec = 60
+
+    class CanaryClock:
+        current = datetime(2030, 1, 1, tzinfo=UTC)
+
+        @classmethod
+        def now(cls, _timezone: object) -> datetime:
+            return cls.current
+
+    destructive_object_operations: list[str] = []
+
+    def reject_destructive_object_operation(*_args: object, **_kwargs: object) -> None:
+        destructive_object_operations.append("attempted")
+        raise AssertionError("the cooperative canary must not delete objects")
+
+    monkeypatch.setattr(taskset_materializer, "datetime", CanaryClock)
+    monkeypatch.setattr(
+        app.state.minio_client,
+        "delete_object",
+        reject_destructive_object_operation,
+    )
+    monkeypatch.setattr(
+        app.state.minio_client,
+        "delete_objects",
+        reject_destructive_object_operation,
+    )
+
+    async with app.state.session_factory() as session:
+        claimed_by_a = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by=owner_a,
+        )
+    assert len(claimed_by_a) == 1
+    lease_a = claimed_by_a[0]
+    async with app.state.session_factory() as session:
+        await taskset_materializer._start_job(session, lease=lease_a)
+
+    a_staged = asyncio.Event()
+    allow_a_resume = asyncio.Event()
+
+    async def stage_then_resume_as_a() -> tuple[MaterializeOutput, datetime]:
+        output = _stage_output_for_lease(
+            app,
+            team_id=teams["team_a"],
+            slug="inline-tasks",
+            lease=lease_a,
+            task_set_id=task_set_id,
+            task_name="cooperative-loser-a",
+        )
+        a_staged.set()
+        await asyncio.wait_for(allow_a_resume.wait(), timeout=1)
+        async with app.state.session_factory() as session:
+            with pytest.raises(taskset_materializer.LeaseLost):
+                await taskset_materializer.publish_if_current(
+                    session,
+                    lease=lease_a,
+                    task_set_id=task_set_id,
+                    output=output,
+                    claim_ttl_sec=claim_ttl_sec,
+                )
+        return output, CanaryClock.current
+
+    owner_a_task = asyncio.create_task(stage_then_resume_as_a())
+    await asyncio.wait_for(a_staged.wait(), timeout=1)
+
+    # Advance only the test clock. Reclaim itself is the production CAS path;
+    # no row is directly edited and no driver, pod, or object is killed.
+    CanaryClock.current += timedelta(seconds=claim_ttl_sec + 1)
+    async with app.state.session_factory() as session:
+        assert await taskset_materializer.reclaim_stale_jobs(
+            session,
+            claim_ttl_sec=claim_ttl_sec,
+        ) == 1
+
+    # The reclaimer applies the normal retry delay before B can claim.
+    CanaryClock.current += timedelta(seconds=31)
+    async with app.state.session_factory() as session:
+        claimed_by_b = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by=owner_b,
+        )
+    assert len(claimed_by_b) == 1
+    lease_b = claimed_by_b[0]
+    assert lease_b.id == lease_a.id
+    assert lease_b.lease_epoch > lease_a.lease_epoch
+
+    async with app.state.session_factory() as session:
+        await taskset_materializer._start_job(session, lease=lease_b)
+    output_b = _stage_output_for_lease(
+        app,
+        team_id=teams["team_a"],
+        slug="inline-tasks",
+        lease=lease_b,
+        task_set_id=task_set_id,
+        task_name="cooperative-winner-b",
+    )
+    async with app.state.session_factory() as session:
+        await taskset_materializer.publish_if_current(
+            session,
+            lease=lease_b,
+            task_set_id=task_set_id,
+            output=output_b,
+            claim_ttl_sec=claim_ttl_sec,
+        )
+    b_published_at = CanaryClock.current
+
+    allow_a_resume.set()
+    output_a, a_lost_at = await asyncio.wait_for(owner_a_task, timeout=1)
+
+    async with app.state.session_factory() as session:
+        winner_job = await session.get(TaskSetMaterializationJob, lease_b.id)
+        winner_rows = (await session.execute(
+            select(Task).where(Task.task_set_id == task_set_id),
+        )).scalars().all()
+    assert winner_job is not None
+    assert winner_job.published_materialization_generation == lease_b.lease_epoch
+    assert [(row.id, row.checksum) for row in winner_rows] == [
+        (output_b.task_rows[0].id, output_b.task_rows[0].checksum),
+    ]
+
+    loser_prefix = (
+        f"tasksets/user/{teams['team_a']}/inline-tasks/materializations/"
+        f"{lease_a.job_id}/{lease_a.lease_epoch}/"
+    )
+    assert _object_keys(app, prefix=loser_prefix)
+    assert output_a.task_rows[0].source != output_b.task_rows[0].source
+    assert destructive_object_operations == []
+
+    def fingerprint(owner: str) -> str:
+        return f"sha256:{hashlib.sha256(owner.encode()).hexdigest()[:12]}"
+
+    evidence = {
+        "candidate_sha": "<candidate-sha>",
+        "image_tag": "<candidate-image-tag>",
+        "task_set_id": task_set_id,
+        "winner": {
+            "job_id": str(lease_b.job_id),
+            "lease_epoch": lease_b.lease_epoch,
+            "owner_fingerprint": fingerprint(owner_b),
+            "published_generation": winner_job.published_materialization_generation,
+            "outcome": "published",
+        },
+        "loser": {
+            "job_id": str(lease_a.job_id),
+            "lease_epoch": lease_a.lease_epoch,
+            "owner_fingerprint": fingerprint(owner_a),
+            "outcome": "fenced_before_publish",
+            "gc_eligible": True,
+        },
+        "published_task": {
+            "id": output_b.task_rows[0].id,
+            "checksum": output_b.task_rows[0].checksum,
+            "task_count": len(winner_rows),
+        },
+        "stale_cas_outcome": "LeaseLost",
+        "timestamps": {
+            "a_staged_at": "2030-01-01T00:00:00Z",
+            "b_published_at": b_published_at.isoformat().replace("+00:00", "Z"),
+            "a_lease_lost_at": a_lost_at.isoformat().replace("+00:00", "Z"),
+        },
+    }
+    encoded_evidence = json.dumps(evidence, sort_keys=True)
+    assert evidence["winner"]["published_generation"] == lease_b.lease_epoch
+    assert evidence["loser"]["gc_eligible"] is True
+    for forbidden in (owner_a, owner_b, "claimed_by", "s3://", "source"):
+        assert forbidden not in encoded_evidence
 
 
 @pytest.mark.asyncio

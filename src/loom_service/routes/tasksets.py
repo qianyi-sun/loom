@@ -12,8 +12,9 @@ Cross-team access returns 404. Native ``/api/v1/benchmarks`` is unchanged.
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Annotated, Any
+import hashlib
+from datetime import UTC, datetime, timedelta
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
@@ -21,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from loom.auth import AuthContext
-from loom.db.schema import TaskSet, TaskSetManifest
+from loom.db.schema import TaskSet, TaskSetManifest, TaskSetMaterializationJob
 from loom.db.task_set_visibility import visible_task_sets
 from loom.models.taskset import UserTaskSetManifest
 from loom.taskset.intents import normalize_intents
@@ -76,6 +77,52 @@ class TaskSetDetailResponse(BaseModel):
     task_count: int
     error_summary: list[Any] = Field(default_factory=list)
     materialization_job_state: str | None = None
+    materialization_fence: MaterializationFenceResponse | None = None
+
+
+class MaterializationFenceResponse(BaseModel):
+    """Secret-safe lease status for the most recent materialization job."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lease_epoch: int
+    lease_heartbeat_at: datetime | None
+    lease_heartbeat_state: Literal["fresh", "stale", "not_leased"]
+    owner_fingerprint: str | None
+    published_generation: int
+
+
+def _owner_fingerprint(owner: str | None) -> str | None:
+    if owner is None:
+        return None
+    digest = hashlib.sha256(owner.encode("utf-8")).hexdigest()[:12]
+    return f"sha256:{digest}"
+
+
+def _materialization_fence(
+    job: TaskSetMaterializationJob | None,
+    *,
+    claim_ttl_sec: int,
+) -> MaterializationFenceResponse | None:
+    if job is None:
+        return None
+    heartbeat_state = "not_leased"
+    if (
+        job.state in {"claimed", "running"}
+        and job.claimed_by is not None
+        and job.lease_heartbeat_at is not None
+    ):
+        cutoff = datetime.now(UTC) - timedelta(seconds=claim_ttl_sec)
+        heartbeat_state = (
+            "stale" if job.lease_heartbeat_at < cutoff else "fresh"
+        )
+    return MaterializationFenceResponse(
+        lease_epoch=job.lease_epoch,
+        lease_heartbeat_at=job.lease_heartbeat_at,
+        lease_heartbeat_state=heartbeat_state,
+        owner_fingerprint=_owner_fingerprint(job.claimed_by),
+        published_generation=job.published_materialization_generation,
+    )
 
 
 class TaskSetListItem(BaseModel):
@@ -166,7 +213,11 @@ async def list_task_sets(sc: SessionAndCtx) -> TaskSetListResponse:
 
 
 @router.get("/tasksets/{task_set_id:path}", response_model=TaskSetDetailResponse)
-async def get_task_set(task_set_id: str, sc: SessionAndCtx) -> TaskSetDetailResponse:
+async def get_task_set(
+    task_set_id: str,
+    request: Request,
+    sc: SessionAndCtx,
+) -> TaskSetDetailResponse:
     session, ctx = sc
     require_scope(ctx, "read:own")
     team_id = _team_id_for_read(ctx)
@@ -202,6 +253,10 @@ async def get_task_set(task_set_id: str, sc: SessionAndCtx) -> TaskSetDetailResp
         task_count=task_set.task_count,
         error_summary=list(job.error_summary) if job is not None else [],
         materialization_job_state=job.state if job is not None else None,
+        materialization_fence=_materialization_fence(
+            job,
+            claim_ttl_sec=request.app.state.settings.taskset_materializer_claim_ttl_sec,
+        ),
     )
 
 
