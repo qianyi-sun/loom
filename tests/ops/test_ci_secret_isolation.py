@@ -156,6 +156,24 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
     assert "environment" not in jobs["publish"]
 
 
+def test_images_secret_and_cache_authority_is_exact() -> None:
+    workflow = _workflow(".github/workflows/images.yml")
+    secret_references = [
+        value
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+        for value in step.get("env", {}).values()
+        if isinstance(value, str) and "secrets." in value
+    ]
+
+    assert secret_references == ["${{ secrets.GITHUB_TOKEN }}"]
+    for job in workflow["jobs"].values():
+        assert job.get("continue-on-error") is not True
+        for step in job.get("steps", []):
+            assert not str(step.get("uses", "")).startswith("actions/cache@")
+            assert step.get("continue-on-error") is not True
+
+
 @pytest.mark.parametrize(
     "workflow_path",
     [".github/workflows/images.yml", ".github/workflows/staging-smoke.yml"],
@@ -171,6 +189,11 @@ def test_untrusted_workflows_disable_setup_uv_cache_writes(workflow_path: str) -
 
     assert setup_steps
     assert all(step.get("with", {}).get("enable-cache") is False for step in setup_steps)
+    for job in workflow["jobs"].values():
+        assert job.get("continue-on-error") is not True
+        for step in job.get("steps", []):
+            assert not str(step.get("uses", "")).startswith("actions/cache@")
+            assert step.get("continue-on-error") is not True
 
 
 def test_staging_pr_gate_is_credential_free_and_does_not_depend_on_real_aws() -> None:
