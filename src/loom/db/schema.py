@@ -588,6 +588,14 @@ class TaskSetMaterializationJob(Base):
             "enqueued_at",
             postgresql_where=text("state = 'queued'"),
         ),
+        Index(
+            "task_set_materialization_jobs_active_heartbeat_idx",
+            "lease_heartbeat_at",
+            postgresql_where=text(
+                "state IN ('claimed', 'running') "
+                "AND lease_heartbeat_at IS NOT NULL",
+            ),
+        ),
     )
     id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
@@ -618,6 +626,15 @@ class TaskSetMaterializationJob(Base):
     )
     claimed_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True,
+    )
+    lease_epoch: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0"),
+    )
+    lease_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    published_materialization_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0"),
     )
     started_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True,

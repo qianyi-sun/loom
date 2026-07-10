@@ -38,6 +38,16 @@ def postgres_url_at_0052() -> Iterator[str]:
         yield url
 
 
+@pytest.fixture(scope="module")
+def postgres_url_at_0061() -> Iterator[str]:
+    with PostgresContainer("postgres:16") as pg:
+        url = pg.get_connection_url().replace(
+            "postgresql+psycopg2://", "postgresql+psycopg://",
+        )
+        _alembic(url, "upgrade", "0061")
+        yield url
+
+
 def _insert_task_set(conn, *, team_id: str, slug: str) -> str:
     task_set_id = f"ts/{team_id}/{slug}"
     conn.execute(
@@ -130,3 +140,137 @@ def test_cascade_on_task_set_delete(postgres_url_at_0052: str) -> None:
     engine.dispose()
     assert remaining == 0
     _alembic(postgres_url_at_0052, "downgrade", "0052")
+
+
+def test_upgrade_persists_lease_fencing_state(
+    postgres_url_at_0061: str,
+) -> None:
+    """Revision 0062 fences active legacy materialization jobs by heartbeat."""
+    team_id = str(uuid4())
+    engine = create_engine(postgres_url_at_0061)
+    with engine.begin() as conn:
+        claimed_task_set_id = _insert_task_set(
+            conn,
+            team_id=team_id,
+            slug="legacy-claimed",
+        )
+        running_task_set_id = _insert_task_set(
+            conn,
+            team_id=team_id,
+            slug="legacy-running",
+        )
+        conn.execute(
+            text(
+                "INSERT INTO task_set_materialization_jobs "
+                "(task_set_id, owning_team_id, state, claimed_at) "
+                "VALUES (:ts, :team, 'claimed', "
+                "TIMESTAMPTZ '2026-07-10 12:00:00+00')",
+            ),
+            {"ts": claimed_task_set_id, "team": team_id},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO task_set_materialization_jobs "
+                "(task_set_id, owning_team_id, state, claimed_at) "
+                "VALUES (:ts, :team, 'running', "
+                "TIMESTAMPTZ '2026-07-10 12:05:00+00')",
+            ),
+            {"ts": running_task_set_id, "team": team_id},
+        )
+    engine.dispose()
+
+    _alembic(postgres_url_at_0061, "upgrade", "0062")
+
+    engine = create_engine(postgres_url_at_0061)
+    with engine.begin() as conn:
+        columns = {
+            row.column_name: row.is_nullable
+            for row in conn.execute(
+                text(
+                    "SELECT column_name, is_nullable "
+                    "FROM information_schema.columns "
+                    "WHERE table_schema = 'public' "
+                    "AND table_name = 'task_set_materialization_jobs' "
+                    "AND column_name IN ("
+                    "'lease_epoch', 'lease_heartbeat_at', "
+                    "'published_materialization_generation'"
+                    ")",
+                ),
+            )
+        }
+        assert columns == {
+            "lease_epoch": "NO",
+            "lease_heartbeat_at": "YES",
+            "published_materialization_generation": "NO",
+        }
+
+        legacy_rows = conn.execute(
+            text(
+                "SELECT state, lease_heartbeat_at = claimed_at, "
+                "lease_epoch, published_materialization_generation "
+                "FROM task_set_materialization_jobs "
+                "WHERE task_set_id IN (:claimed, :running) "
+                "ORDER BY state",
+            ),
+            {"claimed": claimed_task_set_id, "running": running_task_set_id},
+        ).all()
+        assert legacy_rows == [
+            ("claimed", True, 0, 0),
+            ("running", True, 0, 0),
+        ]
+
+        default_task_set_id = _insert_task_set(
+            conn,
+            team_id=team_id,
+            slug="defaults",
+        )
+        default_values = conn.execute(
+            text(
+                "INSERT INTO task_set_materialization_jobs "
+                "(task_set_id, owning_team_id, state) "
+                "VALUES (:ts, :team, 'queued') "
+                "RETURNING lease_epoch, published_materialization_generation",
+            ),
+            {"ts": default_task_set_id, "team": team_id},
+        ).one()
+        assert default_values == (0, 0)
+
+        heartbeat_index_predicate = conn.execute(
+            text(
+                "SELECT pg_get_expr(indexes.indpred, indexes.indrelid) "
+                "FROM pg_index AS indexes "
+                "JOIN pg_class AS classes ON classes.oid = indexes.indexrelid "
+                "WHERE classes.relname = "
+                "'task_set_materialization_jobs_active_heartbeat_idx'",
+            ),
+        ).scalar_one()
+        assert "claimed" in heartbeat_index_predicate
+        assert "running" in heartbeat_index_predicate
+        assert "lease_heartbeat_at IS NOT NULL" in heartbeat_index_predicate
+    engine.dispose()
+
+    _alembic(postgres_url_at_0061, "downgrade", "0061")
+    engine = create_engine(postgres_url_at_0061)
+    with engine.begin() as conn:
+        remaining_columns = set(conn.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public' "
+                "AND table_name = 'task_set_materialization_jobs'",
+            ),
+        ).scalars())
+        remaining_indexes = set(conn.execute(
+            text(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE schemaname = 'public' "
+                "AND tablename = 'task_set_materialization_jobs'",
+            ),
+        ).scalars())
+    engine.dispose()
+    assert {"claimed_at", "task_set_id"}.issubset(remaining_columns)
+    assert not {
+        "lease_epoch",
+        "lease_heartbeat_at",
+        "published_materialization_generation",
+    } & remaining_columns
+    assert "task_set_materialization_jobs_active_heartbeat_idx" not in remaining_indexes
