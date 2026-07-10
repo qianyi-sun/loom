@@ -51,11 +51,13 @@ preliminary/caveated rather than canonical #222 acceptance.
    Loom's number is a single run; per-task stochasticity can shift the headline
    by a few pp. A re-run pair would tighten the confidence interval.
 2. **Agent scaffold mismatch**: Anthropic used Terminus-2, Loom used
-   claude-code. The new `terminus-2` adapter (PR #249, just merged) makes a
-   proper apples-to-apples comparison runnable. Recommend re-running this batch
-   with `--agent terminus-2 --model claude-haiku-4-5` once the worker rolls an
-   image with the new install_script — that re-run is the canonical Layer-3
-   evidence for #222.
+   claude-code. Harbor-embedded `terminus-2` makes a proper apples-to-apples
+   comparison runnable once staging GB10 workers roll a worker image built from
+   `deploy/Dockerfile.worker` with pinned Harbor `@527d50d`.
+   Recommend re-running this batch with
+   `--agent terminus-2 --model claude-haiku-4-5` after that rollout — that
+   re-run is the canonical Layer-3 evidence for #222. See
+   [`architecture/terminus2-runtime.md`](../../architecture/terminus2-runtime.md).
 3. **System-failure rate is 14%** (12/86). The 12 `state=failed` rows are
    recorded in `per-task-results.json` with their `failure_reason`; two of them
    are reward-positive `trajectory_flush_failed` rows. This is why the
@@ -68,7 +70,8 @@ preliminary/caveated rather than canonical #222 acceptance.
 
 ## Related
 
-- #248 / #249 ship the `terminus-2` adapter that closes the agent-scaffold caveat above.
+- The Harbor-embedded `terminus-2` builtin closes the agent-scaffold caveat
+  above (superseding the earlier launcher adapter path).
 - `docs/score-alignment/layer-3.md` records this result as
   preliminary/caveated evidence; the Terminus-2 re-run remains the canonical
   Layer-3 acceptance path for #222.

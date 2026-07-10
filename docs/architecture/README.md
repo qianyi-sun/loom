@@ -31,6 +31,9 @@ there.
 - **[agent-adapter.md](agent-adapter.md)** — `loom-launcher` framework;
   shipped CLI adapters; `SubprocessAgent`; per-trial install + content-
   addressed image cache; how to add an agent.
+- **[terminus2-runtime.md](terminus2-runtime.md)** — Harbor-embedded
+  `terminus-2` builtin: worker image pin, typed trajectory events, gateway
+  ledger, staging acceptance, TB2 export status.
 - **[verifier-protocol.md](verifier-protocol.md)** — typed `VerifierResult`;
   the five shipped verifiers (pytest, script, structured, llm_judge,
   composite); how to add one.

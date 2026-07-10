@@ -91,6 +91,22 @@ adapters compose one of them:
 | `poll_local_http` | HTTP `/events?since=N` (curl in-sandbox) | reserved for server-mode adapters |
 | `tail_pty` | ANSI terminal output (parsed) | qwen-cli, kimi-cli |
 
+## Builtin worker runtimes
+
+Some agents do not go through `loom-launcher` or `SubprocessAgent`. They are
+implemented directly in the worker and listed in `src/loom_service/agent_catalog.py`
+under `_BUILTIN`:
+
+| Slug | Execution | Capture | Notes |
+|---|---|---|---|
+| `oracle` | `builtin-oracle` | none | Runs `solution/solve.sh`; no model |
+| `litellm` | `builtin-litellm` | `gateway-llm-calls` | Single-shot Gateway completion |
+| `terminus-2` | `builtin-terminus2-harbor` | `typed_events+harbor_artifacts` | Pinned Harbor `Terminus2` in-process; typed `terminus2_*` events + `.loom/agent/` artifacts |
+
+`terminus-2` is installed via `deploy/Dockerfile.worker`, not per-trial
+`install_script`. See [`terminus2-runtime.md`](terminus2-runtime.md) for the
+bridge, gateway ledger, staging smoke, and export status.
+
 ## Shipped adapters
 
 `packages/loom-launcher/loom_launcher/adapters/` (11 production +

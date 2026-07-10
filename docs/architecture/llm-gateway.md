@@ -155,7 +155,11 @@ redacted full request/response bodies into `provider_logs/`.
 Versioned training handoff profiles such as
 `--mode raw-harbor-tb2-v1` reconstruct SFT rows from those provider logs
 plus reward/metrics joins; the Loom event stream remains an audit spine rather
-than the SFT source of truth.
+than the SFT source of truth for that profile. For `terminus-2` trials, typed
+`terminus2_*` events and Harbor checkpoint artifacts are the intended source
+for a future `raw-harbor-tb2-v2` export; until that mode ships in the delivery
+API, use `raw-harbor-tb2-v1` or the typed trajectory download for debugging.
+See [`terminus2-runtime.md`](terminus2-runtime.md).
 
 Codex subprocess alignment runs use a separate adapter-specific path
 because Codex constructs its own Responses request. The worker converts
