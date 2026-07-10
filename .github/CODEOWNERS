@@ -1,4 +1,5 @@
 # Human-reviewed governance, CI, and release authority.
+# Disposable trust-root review probe; this branch must never be merged.
 /.github/ @qianyi-sun @Hongjian-Gu
 /CONTRIBUTING.md @qianyi-sun @Hongjian-Gu
 /SECURITY.md @qianyi-sun @Hongjian-Gu
