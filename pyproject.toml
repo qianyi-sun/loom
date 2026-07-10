@@ -202,6 +202,12 @@ ignore_missing_imports = true
 module = ["datasets", "datasets.*"]
 ignore_missing_imports = true
 
+# harbor is pinned in the worker image (deploy/Dockerfile.worker) but not a
+# dev dependency; no py.typed / stubs. Suppress at the import boundary.
+[[tool.mypy.overrides]]
+module = ["harbor", "harbor.*"]
+ignore_missing_imports = true
+
 # loom_egress_xds (#190) imports Envoy protobuf bindings + grpc.
 # envoy-data-plane and xds-protos ship .py protobuf classes with no
 # stubs / py.typed; grpcio similarly. Suppressing missing-import at

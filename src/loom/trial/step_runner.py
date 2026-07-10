@@ -156,7 +156,7 @@ async def run_step(
     try:
         collection = await collector.collect(
             env=ctx.driver,
-            patterns=list(step.artifacts),
+            patterns=_artifact_patterns(ctx, step),
             required_patterns=list(step.required_artifacts),
         )
         artifacts_uri = collection.prefix
@@ -217,6 +217,15 @@ class _SeqCounter:
         v = self._n
         self._n += 1
         return v
+
+
+def _artifact_patterns(ctx: TrialContext, step: StepConfig) -> list[str]:
+    patterns = list(step.artifacts)
+    if ctx.agent.name == "terminus-2":
+        loom_agent = ".loom/agent/**"
+        if loom_agent not in patterns:
+            patterns.append(loom_agent)
+    return patterns
 
 
 def _resolve_instruction(ctx: TrialContext, step: StepConfig) -> str:

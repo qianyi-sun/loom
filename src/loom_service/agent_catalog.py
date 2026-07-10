@@ -185,6 +185,27 @@ _BUILTIN: tuple[AgentEntry, ...] = (
             model_name_template="{provider}/{model_id}",
         ),
     ),
+    AgentEntry(
+        name="terminus-2",
+        needs_model=True,
+        kind="builtin",
+        description=(
+            "Harbor Terminus-2 embedded in the worker pool (#744). Runs pinned "
+            "harbor.agents.terminus_2 in-process, bridges Driver exec to Harbor "
+            "tmux, routes LLM via Gateway step JWT, and persists typed "
+            "terminus2_* trajectory events for TB2-compatible export."
+        ),
+        supported_providers=("*",),
+        supported_model_sources=("api",),
+        runtime_contract=_ready_builtin_contract(
+            execution="builtin-terminus2-harbor",
+            capture="typed_events+harbor_artifacts",
+            endpoint_dialect="openai_chat",
+            api_key_env="LOOM_STEP_TOKEN",
+            base_url_env="LOOM_GATEWAY_URL",
+            model_name_template="openai/{model_id}",
+        ),
+    ),
 )
 # Note: `claude-code-inbox` was a separate catalog entry for the v0.7
 # "in-box" runtime that required `@anthropic-ai/claude-code` pre-baked
@@ -211,10 +232,7 @@ _ADAPTER_OVERRIDES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "opencode": (("*",), ("api", "local-server", "hf")),
     "swe-agent": (("*",), ("api", "local-server", "hf")),
     "mini-swe-agent": (("*",), ("api", "local-server", "hf")),
-    # Upstream Terminus from terminal-bench, wrapped by a tiny CLI
-    # in loom_launcher.terminus_2_runner. LiteLLM-backed so it can call
-    # any provider via the gateway's openai-compatible facade.
-    "terminus-2": (("*",), ("api",)),
+    # terminus-2 is a builtin Harbor-embedded runtime (#744); not a launcher adapter.
     # "hello" is a canary that doesn't actually need an LLM in practice,
     # but adapters self-declare needs_model — keep permissive.
     "hello": (("*",), ("api", "local-server", "hf")),
@@ -238,7 +256,7 @@ _ADAPTER_CAPTURE: dict[str, str] = {
     "openhands-sdk": "stdout_jsonl",
     "qwen-cli": "pty",
     "swe-agent": "log_file",
-    "terminus-2": "stdout_jsonl",
+    # terminus-2: builtin Harbor-embedded runtime — see _BUILTIN.
 }
 
 
@@ -259,10 +277,6 @@ _ADAPTER_REQUIRED_PYTHON_MODULES: dict[str, tuple[str, ...]] = {
     "openhands": ("loom_launcher.openhands_sdk_runner", "openhands.sdk"),
     "openhands-sdk": ("loom_launcher.openhands_sdk_runner", "openhands.sdk"),
     "swe-agent": ("sweagent.run.run_single",),
-    "terminus-2": (
-        "loom_launcher.terminus_2_runner",
-        "terminal_bench.agents.terminus",
-    ),
 }
 
 
@@ -278,7 +292,6 @@ _ADAPTER_REQUIRED_PACKAGES: dict[str, tuple[str, ...]] = {
     "openhands-sdk": ("openhands-sdk",),
     "qwen-cli": ("@qwen-code/qwen-code",),
     "swe-agent": ("git+https://github.com/SWE-agent/SWE-agent",),
-    "terminus-2": ("terminal-bench",),
 }
 
 
@@ -295,7 +308,6 @@ _ADAPTER_RUNTIME_READY: dict[str, bool] = {
     "openhands-sdk": True,
     "qwen-cli": True,
     "swe-agent": True,
-    "terminus-2": True,
 }
 
 
@@ -374,6 +386,7 @@ def list_agents() -> list[AgentEntry]:
     `loom-launcher` (rare, but possible) still gets the builtins.
     """
     entries: list[AgentEntry] = list(_BUILTIN)
+    builtin_names = {e.name for e in _BUILTIN}
     try:
         # Importing `loom_launcher` runs its adapters package, which
         # self-registers every shipped adapter into the registry.
@@ -382,6 +395,8 @@ def list_agents() -> list[AgentEntry]:
     except ImportError:
         return entries
     for adapter in all_adapters():
+        if adapter.name in builtin_names:
+            continue
         providers, sources = _ADAPTER_OVERRIDES.get(
             adapter.name,
             _DEFAULT_ADAPTER_SUPPORT,

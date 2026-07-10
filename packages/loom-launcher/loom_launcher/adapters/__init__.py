@@ -18,7 +18,7 @@ from loom_launcher.adapters import (
     openhands_sdk,  # noqa: F401 — self-registers
     qwen_cli,  # noqa: F401 — self-registers
     swe_agent,  # noqa: F401 — self-registers
-    terminus_2,  # noqa: F401 — self-registers
+    # terminus-2: native builtin runtime (#744); adapter registration removed.
 )
 
 __all__: list[str] = []

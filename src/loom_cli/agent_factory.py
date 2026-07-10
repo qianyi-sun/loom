@@ -15,6 +15,7 @@ from loom.agent.base import AgentRuntime
 from loom.agent.gateway_client import LLMGatewayClient
 from loom.agent.litellm import LiteLLMAgent
 from loom.agent.oracle import OracleAgent
+from loom.agent.terminus2.runtime import LoomTerminus2Runtime
 from loom.errors import AgentError
 from loom.models.types import ModelSpec
 from loom_worker.trial_runner import AgentFactory
@@ -71,6 +72,18 @@ def build_agent_factory(
                 gateway=gateway,
                 team_id=str(team_id),
                 trial_id=trial_id,
+            )
+        elif agent_name == "terminus-2":
+            if model is None:
+                raise AgentError(
+                    "terminus-2 agent requires task.agent.model to be set",
+                )
+            agent = LoomTerminus2Runtime(  # type: ignore[assignment]
+                model=model,
+                team_id=str(team_id),
+                trial_id=trial_id,
+                cp_client=_NoopCPClient(),
+                gateway_url="http://localhost/openai/v1",
             )
         else:
             from loom_launcher import get_adapter
