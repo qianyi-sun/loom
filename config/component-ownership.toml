@@ -1,0 +1,473 @@
+schema_version = 1
+ci_lanes = [
+  "cluster-smoke",
+  "frontend",
+  "go-checks",
+  "integration",
+  "integration-docker",
+  "system-smoke",
+  "tests-packages",
+  "tests-root",
+]
+smoke_owners = [
+  "agent-runtime-conformance",
+  "egress-conformance",
+  "family-orchestrator-conformance",
+  "frontend-smoke",
+  "gb10-catalog-smoke",
+  "sandbox-network-conformance",
+  "staging-smoke",
+  "task-fixture-conformance",
+  "tb2-fixture-conformance",
+  "worker-runtime-conformance",
+]
+scan_owners = [
+  "images",
+  "runtime-payload-scan",
+]
+attestation_owners = [
+  "release-provenance",
+  "runtime-payload-provenance",
+]
+
+# Phase one makes this file the typed ownership authority. Workflow, rollout,
+# and release consumers migrate in later slices; the validator already rejects
+# any Dockerfile or test that is missing or ambiguously owned here.
+
+[[components]]
+id = "agent-sandbox"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.agent-sandbox"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "deploy/Dockerfile.agent-sandbox",
+  "deploy/agent-sandbox/**",
+  "packages/loom-launcher/**",
+]
+smoke_owner = "agent-runtime-conformance"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-agent-sandbox"
+runtime_policy = "conformance"
+
+[[components]]
+id = "control-plane"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.control-plane"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "README.md",
+  "deploy/Dockerfile.control-plane",
+  "migrations/**",
+  "pyproject.toml",
+  "src/**",
+]
+smoke_owner = "staging-smoke"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-control-plane"
+runtime_policy = "start"
+
+[[components]]
+id = "egress-xds"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.egress-xds"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "deploy/Dockerfile.egress-xds",
+  "src/loom_egress_xds/**",
+]
+smoke_owner = "egress-conformance"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-egress-xds"
+runtime_policy = "start"
+
+[[components]]
+id = "family-orchestrator"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.family-orchestrator"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "README.md",
+  "deploy/Dockerfile.family-orchestrator",
+  "migrations/**",
+  "pyproject.toml",
+  "src/**",
+]
+smoke_owner = "family-orchestrator-conformance"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-family-orchestrator"
+runtime_policy = "start"
+
+[[components]]
+id = "llm-gateway"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.gateway"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "README.md",
+  "deploy/Dockerfile.gateway",
+  "migrations/**",
+  "pyproject.toml",
+  "src/**",
+]
+smoke_owner = "staging-smoke"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-llm-gateway"
+runtime_policy = "start"
+
+[[components]]
+id = "llm-gateway-sandbox"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.gateway-sandbox"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "cmd/loom-llm-gateway-sandbox/**",
+  "deploy/Dockerfile.gateway-sandbox",
+  "go.mod",
+  "go.sum",
+]
+smoke_owner = "sandbox-network-conformance"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-llm-gateway-sandbox"
+runtime_policy = "conformance"
+
+[[components]]
+id = "service"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.service"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "README.md",
+  "deploy/Dockerfile.service",
+  "migrations/**",
+  "packages/**",
+  "pyproject.toml",
+  "src/**",
+]
+smoke_owner = "staging-smoke"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-service"
+runtime_policy = "start"
+
+[[components]]
+id = "web"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.web"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "deploy/Dockerfile.web",
+  "deploy/nginx-spa.conf",
+  "deploy/web-runtime-config.sh",
+  "web/**",
+]
+smoke_owner = "frontend-smoke"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-web"
+runtime_policy = "start"
+
+[[components]]
+id = "worker"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.worker"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "README.md",
+  "deploy/Dockerfile.worker",
+  "packages/**",
+  "pyproject.toml",
+  "src/**",
+]
+smoke_owner = "worker-runtime-conformance"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-worker"
+runtime_policy = "start"
+
+[[components]]
+id = "gb10-smoke-task"
+kind = "runtime-payload-image"
+dockerfile = "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/environment/Dockerfile"
+build_context = "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world"
+source_paths = ["deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/**"]
+smoke_owner = "gb10-catalog-smoke"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "tb2-subset-blind-maze-explorer-5x5"
+kind = "runtime-payload-image"
+dockerfile = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/blind-maze-explorer-5x5/Dockerfile"
+build_context = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/blind-maze-explorer-5x5"
+source_paths = ["packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/blind-maze-explorer-5x5/**"]
+smoke_owner = "tb2-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "tb2-subset-chess-best-move"
+kind = "runtime-payload-image"
+dockerfile = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/chess-best-move/Dockerfile"
+build_context = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/chess-best-move"
+source_paths = ["packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/chess-best-move/**"]
+smoke_owner = "tb2-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "tb2-subset-csv-to-parquet"
+kind = "runtime-payload-image"
+dockerfile = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/csv-to-parquet/Dockerfile"
+build_context = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/csv-to-parquet"
+source_paths = ["packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/csv-to-parquet/**"]
+smoke_owner = "tb2-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "tb2-subset-fix-git"
+kind = "runtime-payload-image"
+dockerfile = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/fix-git/Dockerfile"
+build_context = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/fix-git"
+source_paths = ["packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/fix-git/**"]
+smoke_owner = "tb2-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "tb2-subset-form-filling"
+kind = "runtime-payload-image"
+dockerfile = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/form-filling/Dockerfile"
+build_context = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/form-filling"
+source_paths = ["packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/form-filling/**"]
+smoke_owner = "tb2-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "tb2-subset-grid-pattern-transform"
+kind = "runtime-payload-image"
+dockerfile = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/grid-pattern-transform/Dockerfile"
+build_context = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/grid-pattern-transform"
+source_paths = ["packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/grid-pattern-transform/**"]
+smoke_owner = "tb2-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "tb2-subset-hello-world"
+kind = "runtime-payload-image"
+dockerfile = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/hello-world/Dockerfile"
+build_context = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/hello-world"
+source_paths = ["packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/hello-world/**"]
+smoke_owner = "tb2-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "tb2-subset-hf-model-inference"
+kind = "runtime-payload-image"
+dockerfile = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/hf-model-inference/Dockerfile"
+build_context = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/hf-model-inference"
+source_paths = ["packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/hf-model-inference/**"]
+smoke_owner = "tb2-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "tb2-subset-openssl-selfsigned-cert"
+kind = "runtime-payload-image"
+dockerfile = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/openssl-selfsigned-cert/Dockerfile"
+build_context = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/openssl-selfsigned-cert"
+source_paths = ["packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/openssl-selfsigned-cert/**"]
+smoke_owner = "tb2-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "tb2-subset-password-recovery"
+kind = "runtime-payload-image"
+dockerfile = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/password-recovery/Dockerfile"
+build_context = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/password-recovery"
+source_paths = ["packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/password-recovery/**"]
+smoke_owner = "tb2-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "tb2-task-chess-best-move"
+kind = "runtime-payload-image"
+dockerfile = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-task-chess-best-move/Dockerfile"
+build_context = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-task-chess-best-move"
+source_paths = ["packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-task-chess-best-move/**"]
+smoke_owner = "tb2-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "tb2-task-hello-world"
+kind = "runtime-payload-image"
+dockerfile = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-task-hello-world/Dockerfile"
+build_context = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-task-hello-world"
+source_paths = ["packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-task-hello-world/**"]
+smoke_owner = "tb2-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "tb2-task-multiservice"
+kind = "runtime-payload-image"
+dockerfile = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-task-multiservice/Dockerfile"
+build_context = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-task-multiservice"
+source_paths = ["packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-task-multiservice/**"]
+smoke_owner = "tb2-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "unit-hello-world-task"
+kind = "runtime-payload-image"
+dockerfile = "tests/fixtures/tasks/hello-world/environment/Dockerfile"
+build_context = "tests/fixtures/tasks/hello-world"
+source_paths = ["tests/fixtures/tasks/hello-world/**"]
+smoke_owner = "task-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[test_suites]]
+id = "python-root-fast"
+language = "python"
+lane = "tests-root"
+include_paths = [
+  "tests/*.py",
+  "tests/contract/**/*.py",
+  "tests/loom_cli/**/*.py",
+  "tests/loom_config/**/*.py",
+  "tests/loom_egress_xds/**/*.py",
+  "tests/ops/**/*.py",
+  "tests/property/**/*.py",
+  "tests/unit/**/*.py",
+]
+
+[[test_suites]]
+id = "python-integration-fast"
+language = "python"
+lane = "integration"
+include_paths = ["tests/integration/**/*.py"]
+exclude_paths = [
+  "tests/integration/test_docker_driver_exec.py",
+  "tests/integration/test_docker_driver_exec_streaming.py",
+  "tests/integration/test_docker_driver_healthcheck.py",
+  "tests/integration/test_docker_driver_io.py",
+  "tests/integration/test_docker_driver_lifecycle.py",
+  "tests/integration/test_docker_network_policy.py",
+  "tests/integration/test_egress_xds_envoy.py",
+  "tests/integration/test_gateway_with_litellm_agent.py",
+  "tests/integration/test_sandbox_network_docker.py",
+  "tests/integration/test_subprocess_agent_e2e.py",
+  "tests/integration/test_trial_e2e_docker.py",
+  "tests/integration/test_trial_inprocess_e2e.py",
+  "tests/integration/test_verify_cmd_humaneval.py",
+]
+
+[[test_suites]]
+id = "python-integration-docker"
+language = "python"
+lane = "integration-docker"
+include_paths = [
+  "tests/integration/test_docker_driver_exec.py",
+  "tests/integration/test_docker_driver_exec_streaming.py",
+  "tests/integration/test_docker_driver_healthcheck.py",
+  "tests/integration/test_docker_driver_io.py",
+  "tests/integration/test_docker_driver_lifecycle.py",
+  "tests/integration/test_docker_network_policy.py",
+  "tests/integration/test_egress_xds_envoy.py",
+  "tests/integration/test_gateway_with_litellm_agent.py",
+  "tests/integration/test_sandbox_network_docker.py",
+  "tests/integration/test_subprocess_agent_e2e.py",
+  "tests/integration/test_trial_e2e_docker.py",
+  "tests/integration/test_trial_inprocess_e2e.py",
+  "tests/integration/test_verify_cmd_humaneval.py",
+]
+
+[[test_suites]]
+id = "python-cluster-smoke"
+language = "python"
+lane = "cluster-smoke"
+include_paths = ["tests/cluster/**/*.py"]
+
+[[test_suites]]
+id = "python-system-smoke"
+language = "python"
+lane = "system-smoke"
+include_paths = ["tests/system/**/*.py"]
+
+[[test_suites]]
+id = "python-task-runtime-payload"
+language = "python"
+runtime_payload = true
+include_paths = ["tests/fixtures/**/*.py"]
+
+[[test_suites]]
+id = "python-catalog-runtime-payload"
+language = "python"
+runtime_payload = true
+include_paths = ["deploy/catalog/**/tests/**/*.py"]
+
+[[test_suites]]
+id = "python-package-fast"
+language = "python"
+lane = "tests-packages"
+include_paths = ["packages/*/tests/**/*.py"]
+exclude_paths = ["packages/loom-benchmark-terminal-bench-2/tests/fixtures/**/*.py"]
+
+[[test_suites]]
+id = "python-tb2-runtime-payload"
+language = "python"
+runtime_payload = true
+include_paths = ["packages/loom-benchmark-terminal-bench-2/tests/fixtures/**/*.py"]
+
+[[test_suites]]
+id = "go-gateway-sandbox"
+language = "go"
+lane = "go-checks"
+include_paths = ["cmd/**/*_test.go"]
+
+[[test_suites]]
+id = "web-unit"
+language = "web"
+lane = "frontend"
+include_paths = [
+  "web/**/*.test.ts",
+  "web/**/*.test.tsx",
+]

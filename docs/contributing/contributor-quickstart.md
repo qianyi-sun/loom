@@ -133,12 +133,26 @@ LOOM_RUN_DAYTONA_INTEGRATION=1 DAYTONA_API_KEY=... \
 The `slow` marker is applied at module level on the heaviest 9 test
 files (Docker driver lifecycle / exec / io / healthcheck /
 network-policy + full trial e2e + Daytona live). CI selects integration for
-non-documentation changes. Until the component/test ownership manifest lands,
-every change under `tests/integration/` selects the Docker tier so a
-Docker-marked test cannot be edited without running it; relevant runtime paths
-also select that tier. `ci:integration` and `ci:integration-docker` add those
-tiers when paths do not already require them. The selected smoke gates cancel
-superseded PR runs, so a new push to the same PR stops the older
+non-documentation changes. The phase-one ownership authority at
+`config/component-ownership.toml` inventories every tracked Dockerfile and
+Python, Go, or web test path. It also declares the allowed CI lanes and
+component smoke, scan, and attestation owners. Validate the whole inventory or
+query one path with:
+
+```bash
+python3 scripts/component_ownership.py validate
+python3 scripts/component_ownership.py query tests/integration/test_trial_e2e_docker.py
+```
+
+The validator fails for missing or ambiguous ownership, stale patterns,
+undeclared owner names, and a `pytest.mark.docker` module outside the Docker
+tier. Planner, workflow, rollout, staging-start, and release consumers still
+use their existing checked-in mappings until the remaining #788 migration
+slices make the manifest their generated input. During that transition, every
+change under `tests/integration/` continues to select the Docker tier;
+relevant runtime paths do too. `ci:integration` and `ci:integration-docker`
+add those tiers when paths do not already require them. The selected smoke
+gates cancel superseded PR runs, so a new push to the same PR stops the older
 `cluster-smoke`, `staging-smoke`, or `cluster-deploy-spikes` run instead of
 building a queue of stale checks.
 
