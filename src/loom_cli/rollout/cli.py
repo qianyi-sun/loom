@@ -27,6 +27,16 @@ from loom_cli.rollout.steps.s00_resolve_target import resolve_ref_to_sha
 _STAGING_CLUSTER_NAME = "loom-staging"
 _STAGING_NAMESPACE = "loom-staging"
 _STAGING_DATA_ROOT = "/data/loom-staging"
+_PRODUCTION_CLUSTER_NAME = "loom-production"
+_PRODUCTION_NAMESPACE = "loom-production"
+_PROTECTED_PHYSICAL_TARGET_ENVIRONMENTS = {
+    _STAGING_CLUSTER_NAME: "staging",
+    _PRODUCTION_CLUSTER_NAME: "production",
+}
+_PROTECTED_TARGET_MISMATCH_ERROR = (
+    "protected rollout target mismatch: protected physical identity conflicts "
+    "with the declared environment"
+)
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _ROLLOUT_RUNNER_REQUIRED_MODULES = (
     "loom_benchmark_tool.register_cmd",
@@ -165,40 +175,45 @@ def _replayable_smoke_api_token_source(source: str) -> str:
 
 
 def _validate_physical_environment_target(args: argparse.Namespace) -> str | None:
-    """Return a rollout-target error when logical env and physical target diverge."""
+    """Reject a logical environment that conflicts with physical target identity."""
     environment = str(args.environment).strip().lower()
     cluster_name = str(args.cluster_name).strip()
     namespace = str(args.namespace).strip()
     rollout_root = str(args.rollout_root).strip().rstrip("/")
 
-    if environment != "staging":
-        return None
-    mismatches: list[str] = []
-    if cluster_name != _STAGING_CLUSTER_NAME:
-        mismatches.append(
-            f"--cluster-name must be {_STAGING_CLUSTER_NAME!r}, got {cluster_name!r}",
-        )
-    if namespace != _STAGING_NAMESPACE:
-        mismatches.append(
-            f"--namespace must be {_STAGING_NAMESPACE!r}, got {namespace!r}",
-        )
-    if rollout_root.startswith("/data/") and not (
+    cluster_environment = _PROTECTED_PHYSICAL_TARGET_ENVIRONMENTS.get(
+        cluster_name,
+    )
+    namespace_environment = _PROTECTED_PHYSICAL_TARGET_ENVIRONMENTS.get(
+        namespace,
+    )
+    physical_environments = {
+        value
+        for value in (cluster_environment, namespace_environment)
+        if value is not None
+    }
+    if len(physical_environments) > 1:
+        return _PROTECTED_TARGET_MISMATCH_ERROR
+    physical_environment = next(iter(physical_environments), None)
+    if physical_environment is not None and environment != physical_environment:
+        return _PROTECTED_TARGET_MISMATCH_ERROR
+
+    protected_targets = {
+        "staging": (_STAGING_CLUSTER_NAME, _STAGING_NAMESPACE),
+        "production": (_PRODUCTION_CLUSTER_NAME, _PRODUCTION_NAMESPACE),
+    }
+    expected_target = protected_targets.get(environment)
+    if expected_target is not None:
+        if (cluster_name, namespace) != expected_target:
+            return _PROTECTED_TARGET_MISMATCH_ERROR
+        args.environment = environment
+
+    if environment == "staging" and rollout_root.startswith("/data/") and not (
         rollout_root == _STAGING_DATA_ROOT
         or rollout_root.startswith(f"{_STAGING_DATA_ROOT}/")
     ):
-        mismatches.append(
-            f"--rollout-root under /data must be {_STAGING_DATA_ROOT!r} "
-            f"or a child path, got {rollout_root!r}",
-        )
-    if not mismatches:
-        return None
-
-    return (
-        "staging rollout must use physical staging resources: "
-        "cluster 'loom-staging', namespace 'loom-staging', and "
-        "rollout root '/data/loom-staging'. "
-        + "; ".join(mismatches)
-    )
+        return _PROTECTED_TARGET_MISMATCH_ERROR
+    return None
 
 
 def _selector(args: argparse.Namespace) -> str | None:

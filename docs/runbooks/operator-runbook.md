@@ -1311,6 +1311,9 @@ A protected namespace is authoritative: `--environment` must match it or the
 command fails before it can obtain a rollout lease or apply resources, including
 with `--skip-preflight`. Explicit environments remain valid for non-protected
 custom namespaces.
+Manual rollout validates protected cluster and namespace identity before
+evidence or Kind work, so neither a dry-run plan nor the driver can downgrade
+or swap a protected physical target.
 For the decision and post-v1 boundary, see
 [`v1-workload-trust-contract.md`](../architecture/adr/v1-workload-trust-contract.md).
 

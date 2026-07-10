@@ -29,6 +29,7 @@ from typing import Any, cast
 
 from loom_cli.cluster_backup_guard import (
     DEFAULT_BACKUP_MAX_AGE_HOURS,
+    PROTECTED_ENVIRONMENTS,
     infer_environment,
     is_protected_environment,
     validate_backup_manifest,
@@ -4163,15 +4164,19 @@ def delete_namespace_resource(
 def _guard_protected_destructive_down(args: argparse.Namespace) -> int | None:
     if not (args.with_volumes or args.delete_namespace):
         return None
-    if not is_protected_environment(
-        environment=args.environment,
-        namespace=args.namespace,
-    ):
+    try:
+        environment = infer_environment(
+            environment=args.environment,
+            namespace=args.namespace,
+        )
+    except ValueError:
+        sys.stderr.write(
+            "error: protected-target-environment conflict — "
+            "refusing destructive operation.\n",
+        )
+        return 1
+    if environment not in PROTECTED_ENVIRONMENTS:
         return None
-    environment = infer_environment(
-        environment=args.environment,
-        namespace=args.namespace,
-    )
     manifest = Path(args.backup_manifest).resolve() if args.backup_manifest else None
     problems = validate_backup_manifest(
         manifest,

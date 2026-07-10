@@ -25,6 +25,7 @@ def test_v1_workload_trust_adr_records_the_only_accepted_tuple() -> None:
         "before any transform blob, source blob, verifier blob, or subprocess is fetched or run",
         "raw invalid profile, manifest, or live env values",
         "A staging or production namespace is authoritative protected-target evidence.",
+        "Manual rollout validates protected cluster and namespace identity before evidence or Kind work.",
         "#758 owns any later untrusted arbitrary-code execution design and implementation.",
     ]:
         assert fragment in normalized
@@ -49,9 +50,17 @@ def test_v1_workload_trust_docs_preserve_the_fail_closed_release_boundary() -> N
         operator_runbook,
     )
     assert "protected namespace is authoritative" in _normalized(operator_runbook)
+    assert (
+        "manual rollout validates protected cluster and namespace identity before evidence or kind work"
+        in _normalized(operator_runbook).lower()
+    )
     assert "workload profile" in first_prod_runbook
     assert "transform_unavailable_in_internal_trusted" in first_prod_runbook
     assert "protected namespace is authoritative" in _normalized(first_prod_runbook)
+    assert (
+        "manual rollout validates protected cluster and namespace identity before evidence or kind work"
+        in _normalized(first_prod_runbook).lower()
+    )
 
 
 def test_v1_workload_trust_docs_are_discoverable_from_architecture_and_release_indexes() -> None:
