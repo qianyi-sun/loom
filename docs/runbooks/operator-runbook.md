@@ -1313,17 +1313,28 @@ performing object/DB surgery.
 
 ### Disposable TaskSet lease-fencing canary (#756)
 
-Collect this staging-only canary only after the normal candidate rollout has
-completed. It proves the materializer's cooperative two-owner fencing path on
-a fresh, disposable bundle; it is not a release-gate schema change and it
-does not persist candidate identity in a TaskSet row. Task 7 owns the dated,
-candidate-bound JSON/Markdown artifact produced after merge.
+The candidate-bound staging canary remains required, but it is not a runnable
+staging procedure yet. Task 6 provides fixture-only support, not a deployed
+staging runner: its cooperative integration test relies on test-local timing
+and barriers around private materializer calls. Task 6 tests are not staging
+proof and do not authorize an operator to create a handoff. It is not a
+release-gate schema change and does not persist candidate identity in a
+TaskSet row. Task 7 owns the dated, candidate-bound JSON/Markdown artifact
+produced after merge.
 
-Use a normal user/team session and a one-task disposable bundle with a known
-task id. Capture the existing rollout's 40-character candidate SHA and image
-tag, then submit the bundle through the ordinary CLI. Stream API responses
-through a whitelist before writing any evidence; never save a full Task
-response because it includes a storage `source` field.
+Task 7 must first implement and independently verify a deployment-side,
+authorization-restricted cooperative runner using normal materializer
+claim/reclaim/publish primitives before any candidate staging handoff can be
+collected. Until then, record the canary as unavailable; do not try to turn
+the Task 6 fixture into an operator procedure or use direct materializer calls
+to force a handoff.
+
+After Task 7 has supplied and independently verified that runner, use a normal
+user/team session and a one-task disposable bundle with a known task id.
+Capture the existing rollout's 40-character candidate SHA and image tag, then
+submit the bundle through the ordinary CLI. Stream API responses through a
+whitelist before writing any evidence; never save a full Task response because
+it includes a storage `source` field.
 
 ```bash
 CANARY_DIR="$ROLLOUT_DIR/canaries/taskset-lease-fencing"
@@ -1339,12 +1350,12 @@ loom tasksets status "$TASK_SET_ID" --format json \
   > "$CANARY_DIR/status-a-staged.json"
 ```
 
-The normal cooperative runner records the second owner only after the first
-owner has staged. It must use the deployed claim/reclaim/publish path; the
-deterministic integration test is the timing contract for that handoff. After
-the winner publishes, collect the second safe status snapshot and the selected
-task checksum through the normal authenticated API, filtering before the file
-is written:
+When Task 7 makes the runner available, it must record the second owner only
+after the first owner has staged and use the deployed claim/reclaim/publish
+path. The Task 6 deterministic integration test is fixture support only, not
+the timing contract for an operator handoff. After the winner publishes,
+collect the second safe status snapshot and the selected task checksum through
+the normal authenticated API, filtering before the file is written:
 
 ```bash
 loom tasksets status "$TASK_SET_ID" --format json \
