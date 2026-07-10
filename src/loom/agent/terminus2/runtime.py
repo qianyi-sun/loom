@@ -28,7 +28,7 @@ from loom.request_params import sanitize_request_extras
 from loom.trajectory.writer import TrajectoryWriter
 
 
-def _import_terminus2():
+def _import_terminus2() -> tuple[type, type]:
     try:
         from harbor.agents.terminus_2.terminus_2 import Terminus2
         from harbor.models.agent.context import AgentContext

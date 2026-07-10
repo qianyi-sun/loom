@@ -55,7 +55,7 @@ class LoomHarborEnvironment:
         driver_ref = driver
         workdir_ref = workdir
 
-        class _LoomHarborEnvironment(BaseEnvironment):
+        class _LoomHarborEnvironment(BaseEnvironment):  # type: ignore[misc]
             @staticmethod
             def type() -> EnvironmentType:
                 return EnvironmentType.DOCKER

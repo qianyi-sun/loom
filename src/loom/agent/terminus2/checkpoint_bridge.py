@@ -170,7 +170,7 @@ class HarborCheckpointBridge:
                 turn_index=max(0, int(step.get("step_id", 1)) - 2),
                 gateway_request_id=gateway_request_id,
                 parse_state="ok",
-                completion_state=completion_state,  # type: ignore[arg-type]
+                completion_state=completion_state,
                 analysis="",
                 plan="",
                 raw_response_excerpt=str(step.get("message") or "")[:2000],
@@ -209,7 +209,7 @@ class HarborCheckpointBridge:
                     capture_source="incremental",
                     byte_len=len(redacted.encode("utf-8")),
                     truncated=False,
-                    completeness=completeness,  # type: ignore[arg-type]
+                    completeness=completeness,
                     content_hash=hashlib.sha256(redacted.encode()).hexdigest(),
                     redaction_applied=redacted != obs_text,
                     is_aggregate=len(commands) > 1,
@@ -238,7 +238,7 @@ class HarborCheckpointBridge:
                     trial_id=self._trial_id,
                     step_id=self._step_id,
                     seq=self._next_seq(),
-                    artifact_kind=kind,  # type: ignore[arg-type]
+                    artifact_kind=kind,
                     sandbox_path=(
                         sandbox_path.as_posix()
                         if sandbox_path is not None
