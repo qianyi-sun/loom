@@ -91,6 +91,7 @@ def fetch_upstream(
                 cmd += ["--branch", src.revision]
             cmd += [src.locator, str(repo_dir)]
             subprocess.run(cmd, check=True)
+        _materialize_git_lfs_pointers(repo_dir)
     elif src.kind == "https-tarball":
         resp = httpx.get(src.locator, timeout=120.0, follow_redirects=True)
         resp.raise_for_status()
@@ -103,3 +104,58 @@ def fetch_upstream(
         raise ValueError(f"unknown UpstreamSource.kind: {src.kind}")
     sentinel.write_text("ok")
     return target
+
+
+_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
+
+
+def _materialize_git_lfs_pointers(repo_dir: Path) -> None:
+    """Replace git-lfs pointer files under `repo_dir` with their real blobs.
+
+    Git's default `clone` does not fetch LFS blobs — a repo that uses LFS
+    for large binary assets (skillflow / skillflow-iterative ship .pptx /
+    .xlsx / .pdf / .tsv via LFS) ends up with 130-byte pointer files
+    on disk instead of the real content. Downstream `publish` then
+    uploads those pointers to HuggingFace, which rejects the commit with
+    "LFS pointer pointed to a file that does not exist" because the
+    pointed-at blobs were never uploaded.
+
+    Detect LFS pointers post-clone by their spec-v1 header and delegate
+    to `git-lfs pull`. Skip cleanly if either git-lfs isn't installed
+    or the repo has no LFS content — both cases print a short warning
+    and leave the clone as-is (existing behavior for adapters that never
+    triggered this path). See #331.
+    """
+    has_pointer = False
+    for path in repo_dir.rglob("*"):
+        if not path.is_file() or path.stat().st_size > 4096:
+            continue
+        try:
+            if path.read_bytes(
+            ).startswith(_LFS_POINTER_PREFIX):
+                has_pointer = True
+                break
+        except OSError:
+            continue
+    if not has_pointer:
+        return
+    try:
+        subprocess.run(
+            ["git", "lfs", "install", "--local"],
+            cwd=repo_dir, check=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # git-lfs binary not installed on the host, or `git-lfs install`
+        # rejected the local repo. Fall back to leaving the pointers in
+        # place; downstream will surface a clearer LFS-specific error
+        # message than we could produce here.
+        import warnings
+        warnings.warn(
+            f"fetch_upstream: {repo_dir} contains git-lfs pointer files "
+            "but `git lfs install` failed (is git-lfs installed?). "
+            "Downstream publish/import may fail with LFS-related errors.",
+            stacklevel=3,
+        )
+        return
+    subprocess.run(["git", "lfs", "pull"], cwd=repo_dir, check=True)
