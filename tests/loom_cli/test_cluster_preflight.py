@@ -880,6 +880,35 @@ def test_development_preflight_does_not_enforce_protected_workload_contract() ->
     assert "workload-trust-contract" not in {check.name for check in report.checks}
 
 
+@pytest.mark.parametrize("namespace", ["loom-staging", "loom-production"])
+def test_cli_preflight_rejects_protected_namespace_environment_downgrade_before_kube_read(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    namespace: str,
+) -> None:
+    def _unexpected_kube_read(_: str | None) -> object:
+        pytest.fail("protected namespace disagreement must fail before Kubernetes reads")
+
+    monkeypatch.setattr("loom_cli.cluster_cmd._load_clients", _unexpected_kube_read)
+
+    rc = main(
+        [
+            "cluster",
+            "preflight",
+            "--namespace",
+            namespace,
+            "--environment",
+            "development",
+            "--no-doctor",
+        ]
+    )
+
+    assert rc == 1
+    output = capsys.readouterr().out
+    assert "protected-target-environment" in output
+    assert "development" not in output
+
+
 @pytest.mark.parametrize(
     "workload_contract_toml",
     [

@@ -346,3 +346,33 @@ def test_build_protected_release_manifest_rejects_non_v1_workload_contract(
         )
 
     assert raw_mode not in str(exc_info.value)
+
+
+def test_build_release_manifest_rejects_protected_namespace_environment_downgrade(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "staging.cluster.toml"
+    config_path.write_text(
+        'namespace = "loom-staging"\n'
+        "[workload_contract]\n"
+        'workload_trust_mode = "internal_trusted"\n'
+        "taskset_transforms_enabled = false\n"
+        "taskset_transform_network_isolated = false\n"
+        "untrusted_workload_isolation = false\n",
+        encoding="utf-8",
+    )
+    config = load_cluster_config(config_path)
+
+    with pytest.raises(ValueError) as exc_info:
+        build_release_manifest(
+            config=config,
+            config_path=config_path,
+            rendered_manifests=render_manifests(config),
+            environment="development",
+            image_tag="staging-abc123",
+            git_sha="a" * 40,
+            generated_at="2026-07-01T00:00:00Z",
+            loom_cli_version="test-version",
+        )
+
+    assert "development" not in str(exc_info.value)

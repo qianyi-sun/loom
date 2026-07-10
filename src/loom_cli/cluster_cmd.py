@@ -2989,7 +2989,48 @@ def _append_target_schema_doctor_check(
         _append_schema_doctor_check(report, doctor_report)
 
 
+def _protected_target_environment_failure_check() -> PreflightCheck:
+    return PreflightCheck(
+        name="protected-target-environment",
+        outcome="fail",
+        detail=(
+            "explicit environment conflicts with an authoritative protected namespace"
+        ),
+        remediation=(
+            "Use the protected namespace's matching environment or a "
+            "non-protected namespace."
+        ),
+    )
+
+
+def _resolve_target_environment(
+    *,
+    environment: str | None,
+    namespace: str,
+) -> tuple[str | None, PreflightCheck | None]:
+    try:
+        return infer_environment(environment=environment, namespace=namespace), None
+    except ValueError:
+        return None, _protected_target_environment_failure_check()
+
+
 def _preflight(args: argparse.Namespace) -> int:
+    environment, target_environment_failure = _resolve_target_environment(
+        environment=args.environment,
+        namespace=args.namespace,
+    )
+    if target_environment_failure is not None:
+        report = PreflightReport(
+            namespace=args.namespace,
+            context=args.context,
+            checks=[target_environment_failure],
+        )
+        if args.format == "json":
+            sys.stdout.write(_format_preflight_json(report))
+        else:
+            sys.stdout.write(_format_preflight_table(report))
+        return 1
+    assert environment is not None
     try:
         _apps_v1, net_v1, core_v1, storage_v1 = _load_clients(args.context)
     except RuntimeError as exc:
@@ -3003,10 +3044,6 @@ def _preflight(args: argparse.Namespace) -> int:
     try:
         cfg_path = Path(args.config).resolve() if args.config else None
         workload_contract_profile = workload_contract_profile_from_file(cfg_path)
-        environment = infer_environment(
-            environment=args.environment,
-            namespace=args.namespace,
-        )
         workload_contract_check = _protected_workload_trust_contract_check(
             environment=environment,
             workload_contract_profile=workload_contract_profile,
@@ -3710,10 +3747,25 @@ def _up(args: argparse.Namespace) -> int:
     except (OSError, ValueError) as exc:
         sys.stderr.write(f"error: preflight config invalid: {exc}\n")
         return 2
-    environment = infer_environment(
+    environment, target_environment_failure = _resolve_target_environment(
         environment=args.environment,
         namespace=args.namespace,
     )
+    if target_environment_failure is not None:
+        sys.stderr.write(
+            "error: protected-target-environment preflight failed — refusing to apply.\n"
+        )
+        sys.stderr.write(
+            _format_preflight_table(
+                PreflightReport(
+                    namespace=args.namespace,
+                    context=args.context,
+                    checks=[target_environment_failure],
+                )
+            )
+        )
+        return 1
+    assert environment is not None
     workload_contract_check = _protected_workload_trust_contract_check(
         environment=environment,
         workload_contract_profile=workload_contract_profile,

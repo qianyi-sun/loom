@@ -15,6 +15,7 @@ from alembic.script import ScriptDirectory
 
 from loom.security.redaction import is_sensitive_environment_key, redact_text
 from loom_cli import __version__ as _loom_cli_version
+from loom_cli.cluster_backup_guard import infer_environment
 from loom_cli.cluster_cmd import _rendered_deployment_images
 from loom_cli.cluster_config import ClusterConfig
 from loom_cli.cluster_workload_trust import (
@@ -227,6 +228,10 @@ def build_release_manifest(
     alembic_ini: Path = _DEFAULT_ALEMBIC_INI,
     expected_image_identities: dict[str, dict[str, dict[str, str]]] | None = None,
 ) -> dict[str, Any]:
+    environment = infer_environment(
+        environment=environment,
+        namespace=config.namespace,
+    )
     release_env_config_version = env_config_version or image_tag
     release_git_sha = git_sha or _git_head_sha()
     config_bytes = (

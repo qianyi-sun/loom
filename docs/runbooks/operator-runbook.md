@@ -1307,6 +1307,10 @@ environment. Evidence may report structural failures but must not emit raw
 invalid profile, manifest, or live env values; use the normal redacted evidence
 forms instead. A transform canary is not a valid v1 smoke: transform manifests
 must fail with `transform_unavailable_in_internal_trusted` before fetch or run.
+A protected namespace is authoritative: `--environment` must match it or the
+command fails before it can obtain a rollout lease or apply resources, including
+with `--skip-preflight`. Explicit environments remain valid for non-protected
+custom namespaces.
 For the decision and post-v1 boundary, see
 [`v1-workload-trust-contract.md`](../architecture/adr/v1-workload-trust-contract.md).
 

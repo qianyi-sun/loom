@@ -34,6 +34,9 @@ isolation, and untrusted-workload isolation are all `false`. The release
 manifest records this structural tuple; the release gate requires it to match
 the live `loom-service` environment. A `--skip-preflight` invocation cannot
 bypass the protected check before `cluster up` leases or applies resources.
+A protected namespace is authoritative: `--environment` must match it, or the
+command fails before a rollout lease, apply, or release manifest is accepted.
+Explicit environments remain valid for non-protected custom namespaces.
 
 Do not use a transform submission as a release canary. In v1 it must fail with
 `transform_unavailable_in_internal_trusted` before blob fetch or runner start.

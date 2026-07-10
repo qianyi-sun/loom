@@ -43,6 +43,10 @@ outcome.
 Staging and production are protected environments. Their profile tuple is
 checked during protected preflight and checked again before `cluster up` can
 lease or apply resources, including when an operator passes `--skip-preflight`.
+A staging or production namespace is authoritative protected-target evidence.
+An explicit environment that conflicts with that namespace fails before a
+rollout lease, apply, or release manifest can be accepted; explicit
+environments remain valid for non-protected/custom namespaces.
 The release manifest records the structural four-field contract, and the
 release gate requires the manifest and the live `loom-service` environment to
 converge on the same tuple.
