@@ -44,7 +44,27 @@ class TerminalBench2Adapter:
     # tasks. `src/loom_cli/builtin.py:load_builtin_entries` surfaces this on
     # `loom datasets list` so users see real metadata instead of `-`. Bump
     # when the pin moves; `test_upstream_pin.py` will force co-review.
-    task_count = 86
+    task_count = 84
+
+    # Instances whose upstream Dockerfile structurally cannot pass Loom's
+    # task-bundle compatibility validator. Filtered out at `list_instances`
+    # so `publish` never even attempts to convert them. See #760 for
+    # detailed rationale on each entry.
+    #
+    # broken-networking: the whole point is to break DNS/apt for the agent
+    # to diagnose; ships `RUN echo "hosts: ..." > /etc/nsswitch.conf` at
+    # build time. Fails TASK_COMPAT_DNS_MUTATION and can't be rewritten
+    # without gutting the task's purpose (network-broken environment).
+    #
+    # extract-safely: writes to /app before creating /app parent (via
+    # `dd if=/dev/urandom of=/app/system_logs.dat` at Dockerfile build).
+    # Fails TASK_COMPAT_APP_PARENT_MISSING. Would need upstream to move
+    # the /app writes into a runtime setup phase instead of the image
+    # build; not something we can fix at the adapter layer.
+    _UNSUPPORTED_INSTANCES = frozenset({
+        "broken-networking",
+        "extract-safely",
+    })
 
     def list_instances(
         self, *, source_dir: Path, split: str,
@@ -54,6 +74,8 @@ class TerminalBench2Adapter:
             return
         for child in sorted(tasks_root.iterdir()):
             if not child.is_dir():
+                continue
+            if child.name in self._UNSUPPORTED_INSTANCES:
                 continue
             task_yaml = child / "task.yaml"
             if not task_yaml.is_file():
