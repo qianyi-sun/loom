@@ -18,6 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import Team, TeamMembership, TeamQuota, Token, User
+from loom.system_identities import TASKSET_FENCE_CANARY_TEAM_ID
 from loom_service.admin_audit import require_admin_actor, write_admin_audit_event
 from loom_service.auth_guards import (
     require_team_or_admin,
@@ -26,6 +27,12 @@ from loom_service.dependencies import AdminSessionAndCtx, SessionAndCtx
 from loom_service.metrics import TEAM_EMERGENCY_ACTIONS_TOTAL
 
 router = APIRouter()
+
+
+def _require_mutable_team(team_id: UUID) -> None:
+    """Keep deployment-owned identities outside tenant administration."""
+    if team_id == TASKSET_FENCE_CANARY_TEAM_ID:
+        raise HTTPException(status_code=403, detail="team is deployment-only")
 
 
 class _TeamControlRequest(BaseModel):
@@ -155,6 +162,7 @@ async def _set_team_control(
     action: str,
     payload: _TeamControlRequest | None,
 ) -> dict[str, Any]:
+    _require_mutable_team(team_id)
     team = await _load_team(session, team_id)
     now = datetime.now(UTC)
     reason = payload.reason if payload else None
@@ -269,6 +277,7 @@ async def update_admin_team(
 ) -> dict[str, Any]:
     session, _ctx = sc
     actor = require_admin_actor(x_loom_admin_actor)
+    _require_mutable_team(team_id)
     team = await _load_team(session, team_id)
     if await _team_name_exists(session, name=payload.name, exclude_team_id=team_id):
         raise HTTPException(status_code=409, detail="team name already exists")

@@ -5496,6 +5496,12 @@ def dispatch(argv: list[str]) -> int:
     )
     p_render_migration.set_defaults(handler=_render_migration)
 
+    from loom_cli.cluster_taskset_fence_canary import (
+        add_subparser as _add_taskset_fence_canary_subparser,
+    )
+
+    _add_taskset_fence_canary_subparser(sub)
+
     p_rollout = sub.add_parser(
         "rollout",
         help=(

@@ -176,6 +176,89 @@ async def test_list_tasks(tasks_setup: tuple[FastAPI, str]) -> None:
     assert items[0]["id"] == "humaneval/HumanEval/0"
 
 
+async def test_private_taskset_source_is_visible_only_to_its_owning_team(
+    tasks_setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    """Catalog metadata stays browseable while foreign storage locations do not."""
+    app, owning_raw = tasks_setup
+    foreign_team_id = uuid4()
+    foreign_raw = f"loom_team_{uuid4().hex}"
+    task_set_id = f"ts/{foreign_team_id}/private-source"
+    task_id = f"{task_set_id}/tasks/row-1"
+    private_source = "s3://loom-artifacts/tasksets/user/foreign/private-source/task.toml"
+    sync_engine = create_engine(postgres_url)
+    try:
+        with sync_engine.begin() as session:
+            session.execute(
+                insert(Team).values(id=foreign_team_id, name=f"t-{foreign_team_id}"),
+            )
+            session.execute(
+                insert(Token).values(
+                    token_hash=hashlib.sha256(foreign_raw.encode()).digest(),
+                    type="team",
+                    scopes=["read:own"],
+                    team_id=foreign_team_id,
+                    issued_at=datetime.now(UTC),
+                ),
+            )
+            session.execute(
+                insert(TaskSet).values(
+                    id=task_set_id,
+                    owning_team_id=foreign_team_id,
+                    slug="private-source",
+                    display_name="Private source TaskSet",
+                    status="ready",
+                    intents=["trajectory_generation"],
+                    evaluation_ready=False,
+                    task_count=1,
+                    manifest_blob_uri="s3://loom-artifacts/private-source/manifest.yaml",
+                ),
+            )
+            session.execute(
+                insert(Task).values(
+                    id=task_id,
+                    task_set_id=task_set_id,
+                    checksum="p" * 64,
+                    config=_valid_task_config(task_id),
+                    source=private_source,
+                    license="MIT",
+                ),
+            )
+    finally:
+        sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as client:
+        foreign_catalog = await client.get(
+            "/api/v1/tasks",
+            headers={"Authorization": f"Bearer {owning_raw}"},
+        )
+        foreign_detail = await client.get(
+            f"/api/v1/tasks/{task_id}",
+            headers={"Authorization": f"Bearer {owning_raw}"},
+        )
+        own_catalog = await client.get(
+            "/api/v1/tasks",
+            headers={"Authorization": f"Bearer {foreign_raw}"},
+        )
+
+    assert foreign_catalog.status_code == 200, foreign_catalog.text
+    foreign_item = next(item for item in foreign_catalog.json()["items"] if item["id"] == task_id)
+    assert foreign_item["source"] is None
+    assert foreign_detail.status_code == 200, foreign_detail.text
+    assert foreign_detail.json()["source"] is None
+    assert own_catalog.status_code == 200, own_catalog.text
+    own_item = next(item for item in own_catalog.json()["items"] if item["id"] == task_id)
+    assert own_item["source"] == private_source
+    assert (
+        next(item for item in own_catalog.json()["items"] if item["id"] == "local/hand-written")[
+            "source"
+        ]
+        == "local"
+    )
+
+
 async def test_list_surfaces_name_description_agent_verifier_step_count(
     tasks_setup: tuple[FastAPI, str],
 ) -> None:

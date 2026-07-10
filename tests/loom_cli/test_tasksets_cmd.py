@@ -81,6 +81,13 @@ _STATUS_RESPONSE = {
     "status_reason": None,
     "error_summary": [],
     "materialization_job_state": "queued",
+    "materialization_fence": {
+        "lease_epoch": 4,
+        "lease_heartbeat_at": "2026-07-10T00:00:00Z",
+        "lease_heartbeat_state": "fresh",
+        "owner_fingerprint": "sha256:0123456789ab",
+        "published_generation": 4,
+    },
 }
 
 
@@ -225,18 +232,47 @@ def test_list_json(mock_server: MockServer, capsys: pytest.CaptureFixture[str]) 
     assert len(out["items"]) == 1
 
 
-def test_status_by_slug(mock_server: MockServer) -> None:
+def test_status_by_slug_prints_only_safe_fence_fields(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", "/api/v1/tasksets")] = httpx.Response(
+        200, json=_LIST_RESPONSE,
+    )
+    raw_owner = "cli-raw-owner-must-not-print"
+    mock_server.canned[("GET", "/api/v1/tasksets/ts/team-uuid/sample-tasks")] = (
+        httpx.Response(200, json={**_STATUS_RESPONSE, "claimed_by": raw_owner})
+    )
+    rc = main(["tasksets", "status", "sample-tasks"])
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "fence_lease_epoch:           4" in output
+    assert "fence_lease_heartbeat_at:    2026-07-10T00:00:00Z" in output
+    assert "fence_lease_heartbeat_state: fresh" in output
+    assert "fence_owner_fingerprint:     sha256:0123456789ab" in output
+    assert "fence_published_generation:  4" in output
+    assert raw_owner not in output
+    assert "claimed_by" not in output
+    methods_paths = [(r.method, r.url.path) for r in mock_server.requests]
+    assert ("GET", "/api/v1/tasksets") in methods_paths
+    assert ("GET", "/api/v1/tasksets/ts/team-uuid/sample-tasks") in methods_paths
+
+
+def test_status_json_preserves_safe_api_body(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     mock_server.canned[("GET", "/api/v1/tasksets")] = httpx.Response(
         200, json=_LIST_RESPONSE,
     )
     mock_server.canned[("GET", "/api/v1/tasksets/ts/team-uuid/sample-tasks")] = (
         httpx.Response(200, json=_STATUS_RESPONSE)
     )
-    rc = main(["tasksets", "status", "sample-tasks"])
+
+    rc = main(["tasksets", "status", "sample-tasks", "--format", "json"])
+
     assert rc == 0
-    methods_paths = [(r.method, r.url.path) for r in mock_server.requests]
-    assert ("GET", "/api/v1/tasksets") in methods_paths
-    assert ("GET", "/api/v1/tasksets/ts/team-uuid/sample-tasks") in methods_paths
+    assert json.loads(capsys.readouterr().out) == _STATUS_RESPONSE
 
 
 def test_rebuild_by_full_id(mock_server: MockServer) -> None:

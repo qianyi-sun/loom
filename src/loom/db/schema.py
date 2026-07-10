@@ -588,6 +588,14 @@ class TaskSetMaterializationJob(Base):
             "enqueued_at",
             postgresql_where=text("state = 'queued'"),
         ),
+        Index(
+            "task_set_materialization_jobs_active_heartbeat_idx",
+            "lease_heartbeat_at",
+            postgresql_where=text(
+                "state IN ('claimed', 'running') "
+                "AND lease_heartbeat_at IS NOT NULL",
+            ),
+        ),
     )
     id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
@@ -619,6 +627,15 @@ class TaskSetMaterializationJob(Base):
     claimed_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True,
     )
+    lease_epoch: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0"),
+    )
+    lease_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    published_materialization_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0"),
+    )
     started_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True,
     )
@@ -636,6 +653,83 @@ class TaskSetMaterializationJob(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+
+class TaskSetFenceCanaryAuthorization(Base):
+    """One deployment-created, one-use authority for the #756 canary."""
+
+    __tablename__ = "task_set_fence_canary_authorizations"
+    __table_args__ = (
+        CheckConstraint(
+            "candidate_sha ~ '^[0-9a-f]{40}$'",
+            name="task_set_fence_canary_authorizations_candidate_sha_check",
+        ),
+        CheckConstraint(
+            "image_tag ~ '^staging(-[a-z0-9][a-z0-9_-]*)?-[0-9a-f]{7}$'",
+            name="task_set_fence_canary_authorizations_image_tag_check",
+        ),
+        CheckConstraint(
+            "expected_task_checksum ~ '^[0-9a-f]{64}$'",
+            name="task_set_fence_canary_authorizations_checksum_check",
+        ),
+        CheckConstraint(
+            "octet_length(nonce_digest) = 32",
+            name="task_set_fence_canary_authorizations_nonce_digest_check",
+        ),
+        CheckConstraint(
+            "(consumed_at IS NULL AND consumed_lease_epoch IS NULL) OR "
+            "(consumed_at IS NOT NULL AND consumed_lease_epoch > 0)",
+            name="task_set_fence_canary_authorizations_consumption_check",
+        ),
+        UniqueConstraint(
+            "materialization_job_id",
+            name="task_set_fence_canary_authorizations_job_uidx",
+        ),
+    )
+
+    task_set_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("task_sets.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    materialization_job_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("task_set_materialization_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    candidate_sha: Mapped[str] = mapped_column(String(40), nullable=False)
+    image_tag: Mapped[str] = mapped_column(String(64), nullable=False)
+    expected_task_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    nonce_digest: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    consumed_lease_epoch: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class TaskSetGenerationGcCursor(Base):
+    """Scheduling-only progress for bounded live-generation reconciliation."""
+    __tablename__ = "task_set_generation_gc_cursors"
+    __table_args__ = (
+        CheckConstraint(
+            "name = 'live-generation-gc'",
+            name="task_set_generation_gc_cursors_name_check",
+        ),
+        CheckConstraint(
+            "next_sweep >= 0",
+            name="task_set_generation_gc_cursors_next_sweep_nonneg_check",
+        ),
+    )
+
+    name: Mapped[str] = mapped_column(Text, primary_key=True)
+    next_sweep: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        server_default=text("0"),
     )
 
 

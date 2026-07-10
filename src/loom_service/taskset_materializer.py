@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-import os
-import socket
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -17,14 +18,36 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from loom.db.schema import Task, TaskSet, TaskSetManifest, TaskSetMaterializationJob, TeamQuota
 from loom.models.taskset import UserTaskSetManifest
 from loom.taskset.materialize import MaterializeOutput, materialize_task_set
-from loom.taskset.storage_bytes import team_storage_baseline_excluding_task_set
+from loom.taskset.storage_bytes import team_taskset_storage_bytes
 from loom.taskset.transform_sandbox import TransformSandboxConfig
 
 logger = logging.getLogger(__name__)
 
-_CLAIMED_BY = f"{socket.gethostname()}:{os.getpid()}"
-_ACTIVE_JOB_STATES = frozenset({"queued", "claimed", "running"})
+# A random process-local token avoids storing or exposing host, process, or user
+# information in the durable lease owner column.
+_CLAIMED_BY = f"taskset-materializer-{uuid4()}"
 _RETRY_BACKOFF_SEC = (30, 120, 300)
+
+
+@dataclass(frozen=True)
+class MaterializationLease:
+    """Immutable fencing token for one materialization-job owner."""
+
+    job_id: UUID
+    lease_epoch: int
+    claimed_by: str
+
+    @property
+    def id(self) -> UUID:
+        """Compatibility alias for callers that only need the job identifier."""
+        return self.job_id
+
+
+class LeaseLost(RuntimeError):  # noqa: N818 - task contract names this result LeaseLost
+    """Raised when a materializer no longer owns its durable lease."""
+
+    def __init__(self) -> None:
+        super().__init__("TaskSet materialization lease lost")
 
 
 def _retry_delay_sec(attempt_count: int) -> int:
@@ -32,27 +55,70 @@ def _retry_delay_sec(attempt_count: int) -> int:
     return _RETRY_BACKOFF_SEC[idx]
 
 
+def _lease_for_job(job: TaskSetMaterializationJob) -> MaterializationLease:
+    if job.claimed_by is None:
+        raise LeaseLost()
+    return MaterializationLease(
+        job_id=job.id,
+        lease_epoch=job.lease_epoch,
+        claimed_by=job.claimed_by,
+    )
+
+
+def _lease_conditions(lease: MaterializationLease) -> tuple[Any, ...]:
+    return (
+        TaskSetMaterializationJob.id == lease.job_id,
+        TaskSetMaterializationJob.lease_epoch == lease.lease_epoch,
+        TaskSetMaterializationJob.claimed_by == lease.claimed_by,
+    )
+
+
+async def _update_job_for_lease(
+    session: AsyncSession,
+    *,
+    lease: MaterializationLease,
+    states: tuple[str, ...],
+    values: Mapping[str, Any],
+) -> None:
+    """Apply one job transition only while ``lease`` remains the owner."""
+    result = await session.execute(
+        update(TaskSetMaterializationJob)
+        .where(
+            *_lease_conditions(lease),
+            TaskSetMaterializationJob.state.in_(states),
+        )
+        .values(**dict(values))
+        .returning(TaskSetMaterializationJob.id),
+    )
+    if len(result.scalars().all()) != 1:
+        await session.rollback()
+        raise LeaseLost()
+
+
 async def reclaim_stale_jobs(
     session: AsyncSession,
     *,
     claim_ttl_sec: int,
 ) -> int:
-    """Return stuck claimed/running jobs to queued with backoff."""
-    cutoff = datetime.now(UTC) - timedelta(seconds=claim_ttl_sec)
+    """Revoke stale active leases and return their jobs to the queue."""
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(seconds=claim_ttl_sec)
     result = await session.execute(
         update(TaskSetMaterializationJob)
         .where(
             TaskSetMaterializationJob.state.in_(("claimed", "running")),
-            TaskSetMaterializationJob.claimed_at.is_not(None),
-            TaskSetMaterializationJob.claimed_at < cutoff,
+            TaskSetMaterializationJob.lease_heartbeat_at.is_not(None),
+            TaskSetMaterializationJob.lease_heartbeat_at < cutoff,
         )
         .values(
             state="queued",
             claimed_at=None,
             claimed_by=None,
+            lease_epoch=TaskSetMaterializationJob.lease_epoch + 1,
+            lease_heartbeat_at=None,
             started_at=None,
-            next_attempt_at=datetime.now(UTC) + timedelta(seconds=30),
-            updated_at=datetime.now(UTC),
+            next_attempt_at=now + timedelta(seconds=30),
+            updated_at=now,
         )
         .returning(TaskSetMaterializationJob.id),
     )
@@ -62,15 +128,48 @@ async def reclaim_stale_jobs(
     return reclaimed
 
 
+async def relinquish_if_current(
+    session: AsyncSession,
+    *,
+    lease: MaterializationLease,
+) -> None:
+    """Cooperatively revoke one current lease without touching staged output.
+
+    This is an internal materializer transition, not an API or user-command
+    control.  The increment makes any delayed owner fail the same CAS checks
+    used after a stale-heartbeat reclaim, while the cleared ``next_attempt_at``
+    lets an authorized deployment canary claim the queued job immediately.
+    """
+    now = datetime.now(UTC)
+    await _update_job_for_lease(
+        session,
+        lease=lease,
+        states=("claimed", "running"),
+        values={
+            "state": "queued",
+            "claimed_at": None,
+            "claimed_by": None,
+            "lease_epoch": TaskSetMaterializationJob.lease_epoch + 1,
+            "lease_heartbeat_at": None,
+            "started_at": None,
+            "next_attempt_at": None,
+            "updated_at": now,
+        },
+    )
+    await session.commit()
+
+
 async def _claim_jobs(
     session: AsyncSession,
     *,
     batch_size: int,
     claimed_by: str,
-) -> list[TaskSetMaterializationJob]:
+    job_id: UUID | None = None,
+) -> list[MaterializationLease]:
+    """Claim available jobs and return immutable owner fencing tokens."""
     now = datetime.now(UTC)
-    jobs = (await session.execute(
-        select(TaskSetMaterializationJob)
+    query = (
+        select(TaskSetMaterializationJob.id)
         .where(
             TaskSetMaterializationJob.state == "queued",
             (TaskSetMaterializationJob.next_attempt_at.is_(None))
@@ -78,43 +177,163 @@ async def _claim_jobs(
         )
         .order_by(TaskSetMaterializationJob.enqueued_at)
         .with_for_update(skip_locked=True)
-        .limit(batch_size),
-    )).scalars().all()
-    for job in jobs:
-        job.state = "claimed"
-        job.claimed_at = now
-        job.claimed_by = claimed_by
-        job.attempt_count += 1
-        job.updated_at = now
-    if jobs:
+        .limit(batch_size)
+    )
+    if job_id is not None:
+        query = query.where(TaskSetMaterializationJob.id == job_id)
+    job_ids = (await session.execute(query)).scalars().all()
+    leases: list[MaterializationLease] = []
+    for job_id in job_ids:
+        claimed = (await session.execute(
+            update(TaskSetMaterializationJob)
+            .where(
+                TaskSetMaterializationJob.id == job_id,
+                TaskSetMaterializationJob.state == "queued",
+            )
+            .values(
+                state="claimed",
+                claimed_at=now,
+                claimed_by=claimed_by,
+                lease_epoch=TaskSetMaterializationJob.lease_epoch + 1,
+                lease_heartbeat_at=now,
+                attempt_count=TaskSetMaterializationJob.attempt_count + 1,
+                updated_at=now,
+            )
+            .returning(
+                TaskSetMaterializationJob.id,
+                TaskSetMaterializationJob.lease_epoch,
+            ),
+        )).one_or_none()
+        if claimed is not None:
+            leases.append(
+                MaterializationLease(
+                    job_id=claimed.id,
+                    lease_epoch=claimed.lease_epoch,
+                    claimed_by=claimed_by,
+                ),
+            )
+    if leases:
         await session.commit()
-    return list(jobs)
+    return leases
 
 
-async def _finalize_job(
+async def _heartbeat_lease(
     session: AsyncSession,
     *,
-    job: TaskSetMaterializationJob,
-    task_set: TaskSet,
-    output: MaterializeOutput,
+    lease: MaterializationLease,
 ) -> None:
     now = datetime.now(UTC)
-    if output.retry_source and job.attempt_count < job.max_attempts:
-        job.state = "queued"
-        job.claimed_at = None
-        job.claimed_by = None
-        job.started_at = None
-        job.next_attempt_at = now + timedelta(seconds=_retry_delay_sec(job.attempt_count))
-        job.failure_reason = output.job_failure_reason
-        job.failure_message = output.job_failure_message
-        job.updated_at = now
-        task_set.status = "materializing"
-        task_set.status_reason = output.status_reason
-        task_set.updated_at = now
+    await _update_job_for_lease(
+        session,
+        lease=lease,
+        states=("claimed", "running"),
+        values={
+            "claimed_at": now,
+            "lease_heartbeat_at": now,
+            "updated_at": now,
+        },
+    )
+    await session.commit()
+
+
+async def _start_job(
+    session: AsyncSession,
+    *,
+    lease: MaterializationLease,
+) -> None:
+    now = datetime.now(UTC)
+    await _update_job_for_lease(
+        session,
+        lease=lease,
+        states=("claimed",),
+        values={
+            "state": "running",
+            "started_at": now,
+            "claimed_at": now,
+            "lease_heartbeat_at": now,
+            "updated_at": now,
+        },
+    )
+    await session.commit()
+
+
+async def publish_if_current(
+    session: AsyncSession,
+    *,
+    lease: MaterializationLease,
+    task_set_id: str,
+    output: MaterializeOutput,
+    claim_ttl_sec: int,
+) -> None:
+    """Atomically expose staged output only from a fresh current lease."""
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(seconds=claim_ttl_sec)
+    job = (await session.execute(
+        select(TaskSetMaterializationJob)
+        .where(
+            *_lease_conditions(lease),
+            TaskSetMaterializationJob.state == "running",
+            TaskSetMaterializationJob.lease_heartbeat_at.is_not(None),
+            TaskSetMaterializationJob.lease_heartbeat_at >= cutoff,
+        )
+        .with_for_update(),
+    )).scalar_one_or_none()
+    if job is None or job.task_set_id != task_set_id:
+        await session.rollback()
+        raise LeaseLost()
+
+    # Preserve Task 2's job-then-TaskSet lock order.
+    task_set = (await session.execute(
+        select(TaskSet)
+        .where(
+            TaskSet.id == task_set_id,
+            TaskSet.soft_deleted_at.is_(None),
+        )
+        .with_for_update(),
+    )).scalar_one_or_none()
+    if task_set is None:
+        await session.rollback()
+        raise LeaseLost()
+
+    attempt_count = job.attempt_count
+    max_attempts = job.max_attempts
+    if output.retry_source and attempt_count < max_attempts:
+        await _update_job_for_lease(
+            session,
+            lease=lease,
+            states=("running",),
+            values={
+                "state": "queued",
+                "claimed_at": None,
+                "claimed_by": None,
+                "lease_heartbeat_at": None,
+                "started_at": None,
+                "next_attempt_at": now + timedelta(seconds=_retry_delay_sec(attempt_count)),
+                "failure_reason": output.job_failure_reason,
+                "failure_message": output.job_failure_message,
+                "updated_at": now,
+            },
+        )
+        result = await session.execute(
+            update(TaskSet)
+            .where(
+                TaskSet.id == task_set_id,
+                TaskSet.soft_deleted_at.is_(None),
+            )
+            .values(
+                status="materializing",
+                status_reason=output.status_reason,
+                updated_at=now,
+            )
+            .returning(TaskSet.id),
+        )
+        if len(result.scalars().all()) != 1:
+            await session.rollback()
+            raise LeaseLost()
         await session.commit()
         return
 
-    if output.retry_source and job.attempt_count >= job.max_attempts:
+    if output.retry_source:
         output = MaterializeOutput(
             status="failed",
             status_reason="source_unreachable",
@@ -123,21 +342,251 @@ async def _finalize_job(
             error_summary=output.error_summary,
         )
 
-    job.state = "succeeded" if output.task_count > 0 else "failed"
-    if output.job_failure_reason and output.task_count == 0:
-        job.state = "failed"
-    job.finished_at = now
-    job.updated_at = now
-    job.failure_reason = output.job_failure_reason
-    job.failure_message = output.job_failure_message
-    job.error_summary = output.error_summary
+    has_publishable_rows = bool(output.task_rows)
+    state = "succeeded" if has_publishable_rows else "failed"
+    if output.job_failure_reason and not has_publishable_rows:
+        state = "failed"
 
-    task_set.status = output.status
-    task_set.status_reason = output.status_reason
-    task_set.task_count = output.task_count
-    task_set.evaluation_ready = output.evaluation_ready
-    task_set.updated_at = now
+    # This transaction is the publication point: staged objects are not
+    # reachable until the Task rows below commit.
+    job_values: dict[str, Any] = {
+        "state": state,
+        "finished_at": now,
+        "updated_at": now,
+        "failure_reason": output.job_failure_reason,
+        "failure_message": output.job_failure_message,
+        "error_summary": output.error_summary,
+    }
+    if has_publishable_rows:
+        job_values["published_materialization_generation"] = lease.lease_epoch
+    await _update_job_for_lease(
+        session,
+        lease=lease,
+        states=("running",),
+        values=job_values,
+    )
+    if has_publishable_rows:
+        await session.execute(delete(Task).where(Task.task_set_id == task_set_id))
+        for row in output.task_rows:
+            session.add(
+                Task(
+                    id=row.id,
+                    checksum=row.checksum,
+                    config=row.config,
+                    source=row.source,
+                    task_set_id=task_set_id,
+                    benchmark_id=None,
+                ),
+            )
+    else:
+        has_previous_publication = (await session.execute(
+            select(Task.id)
+            .where(Task.task_set_id == task_set_id)
+            .limit(1),
+        )).scalar_one_or_none() is not None
+        if has_previous_publication:
+            await session.commit()
+            return
+    result = await session.execute(
+        update(TaskSet)
+        .where(
+            TaskSet.id == task_set_id,
+            TaskSet.soft_deleted_at.is_(None),
+        )
+        .values(
+            status=output.status,
+            status_reason=output.status_reason,
+            task_count=output.task_count,
+            evaluation_ready=output.evaluation_ready,
+            updated_at=now,
+        )
+        .returning(TaskSet.id),
+    )
+    if len(result.scalars().all()) != 1:
+        await session.rollback()
+        raise LeaseLost()
     await session.commit()
+
+
+async def _fail_lease(
+    session: AsyncSession,
+    *,
+    lease: MaterializationLease,
+    failure_reason: str,
+    failure_message: str,
+    claim_ttl_sec: int,
+) -> None:
+    """Mark an owned job failed without allowing a stale fallback write."""
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(seconds=claim_ttl_sec)
+    task_set_id = (await session.execute(
+        select(TaskSetMaterializationJob.task_set_id)
+        .where(
+            *_lease_conditions(lease),
+            TaskSetMaterializationJob.state.in_(("claimed", "running")),
+            TaskSetMaterializationJob.lease_heartbeat_at.is_not(None),
+            TaskSetMaterializationJob.lease_heartbeat_at >= cutoff,
+        )
+        .with_for_update(),
+    )).scalar_one_or_none()
+    if task_set_id is None:
+        await session.rollback()
+        raise LeaseLost()
+    await _update_job_for_lease(
+        session,
+        lease=lease,
+        states=("claimed", "running"),
+        values={
+            "state": "failed",
+            "failure_reason": failure_reason,
+            "failure_message": failure_message,
+            "finished_at": now,
+            "updated_at": now,
+        },
+    )
+    result = await session.execute(
+        update(TaskSet)
+        .where(TaskSet.id == task_set_id)
+        .values(
+            status="failed",
+            status_reason=failure_reason,
+            updated_at=now,
+        )
+        .returning(TaskSet.id),
+    )
+    if len(result.scalars().all()) != 1:
+        await session.rollback()
+        raise LeaseLost()
+    await session.commit()
+
+
+async def _heartbeat_loop(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    lease: MaterializationLease,
+    claim_ttl_sec: int,
+) -> None:
+    interval_sec = min(max(claim_ttl_sec / 3, 0.1), 30.0)
+    while True:
+        await asyncio.sleep(interval_sec)
+        async with session_factory() as session:
+            await _heartbeat_lease(session, lease=lease)
+
+
+async def _stop_heartbeat(heartbeat_task: asyncio.Task[None]) -> None:
+    if heartbeat_task.done():
+        await heartbeat_task
+        return
+    heartbeat_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await heartbeat_task
+
+
+async def stage_claimed_job(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    job_id: UUID,
+    minio_client: Any,
+    artifacts_bucket: str,
+    upstream_cache_root: Path,
+    transform_config: TransformSandboxConfig,
+    max_bundle_bytes: int | None = None,
+    max_team_storage_bytes: int | None = None,
+    claim_ttl_sec: int = 300,
+    lease: MaterializationLease | None = None,
+) -> tuple[MaterializationLease, str, MaterializeOutput] | None:
+    """Stage a current lease with the worker's ordinary materialization path.
+
+    Normal workers publish the returned output immediately.  The only other
+    caller is the deployment-only fence canary, which voluntarily relinquishes
+    its lease before any publication attempt; this function itself has no
+    pause, failure, deletion, or externally exposed control.
+    """
+    if lease is None:
+        async with session_factory() as session:
+            job = await session.get(TaskSetMaterializationJob, job_id)
+            if job is None or job.state != "claimed":
+                return None
+            lease = _lease_for_job(job)
+
+    async with session_factory() as session:
+        await _start_job(session, lease=lease)
+        task_set_id = (await session.execute(
+            select(TaskSetMaterializationJob.task_set_id).where(
+                *_lease_conditions(lease),
+                TaskSetMaterializationJob.state == "running",
+            ),
+        )).scalar_one_or_none()
+        if task_set_id is None:
+            await session.rollback()
+            raise LeaseLost()
+        task_set = await session.get(TaskSet, task_set_id)
+        manifest_row = await session.get(TaskSetManifest, task_set_id)
+        if task_set is None or manifest_row is None:
+            await _fail_lease(
+                session,
+                lease=lease,
+                failure_reason="missing_task_set",
+                failure_message="task set or manifest row missing",
+                claim_ttl_sec=claim_ttl_sec,
+            )
+            return None
+        manifest = UserTaskSetManifest.model_validate(manifest_row.manifest)
+        quota_row = (await session.execute(
+            select(TeamQuota).where(TeamQuota.team_id == task_set.owning_team_id),
+        )).scalar_one_or_none()
+        effective_max_team_storage = (
+            quota_row.taskset_max_storage_bytes
+            if quota_row is not None and quota_row.taskset_max_storage_bytes is not None
+            else max_team_storage_bytes
+        )
+
+        owning_team_id = str(task_set.owning_team_id)
+        intents = list(task_set.intents)
+        verifier_blob_uri = manifest_row.verifier_blob_uri
+        transform_blob_uri = manifest_row.transform_blob_uri
+
+    heartbeat_task = asyncio.create_task(
+        _heartbeat_loop(
+            session_factory,
+            lease=lease,
+            claim_ttl_sec=claim_ttl_sec,
+        ),
+    )
+    try:
+        # Existing generated output remains referenced until publication. Count
+        # the full team total so staging reserves the required rebuild headroom
+        # without treating durable TaskSet inputs as replaceable bytes.
+        team_storage_baseline = await asyncio.to_thread(
+            team_taskset_storage_bytes,
+            minio_client,
+            bucket=artifacts_bucket,
+            team_id=owning_team_id,
+        )
+        output = await asyncio.to_thread(
+            materialize_task_set,
+            manifest=manifest,
+            task_set_id=task_set_id,
+            owning_team_id=owning_team_id,
+            materialization_job_id=lease.job_id,
+            materialization_epoch=lease.lease_epoch,
+            intents=intents,
+            verifier_blob_uri=verifier_blob_uri,
+            transform_blob_uri=transform_blob_uri,
+            transform_config=transform_config,
+            minio_client=minio_client,
+            artifacts_bucket=artifacts_bucket,
+            upstream_cache_root=upstream_cache_root,
+            max_bundle_bytes=max_bundle_bytes,
+            team_storage_baseline=team_storage_baseline,
+            max_team_storage_bytes=effective_max_team_storage,
+        )
+    except BaseException:
+        await _stop_heartbeat(heartbeat_task)
+        raise
+    await _stop_heartbeat(heartbeat_task)
+
+    return lease, task_set_id, output
 
 
 async def _materialize_claimed_job(
@@ -150,83 +599,33 @@ async def _materialize_claimed_job(
     transform_config: TransformSandboxConfig,
     max_bundle_bytes: int | None = None,
     max_team_storage_bytes: int | None = None,
+    claim_ttl_sec: int = 300,
+    lease: MaterializationLease | None = None,
 ) -> None:
+    """Stage then publish a claimed job for the ordinary worker loop."""
+    staged = await stage_claimed_job(
+        session_factory,
+        job_id=job_id,
+        minio_client=minio_client,
+        artifacts_bucket=artifacts_bucket,
+        upstream_cache_root=upstream_cache_root,
+        transform_config=transform_config,
+        max_bundle_bytes=max_bundle_bytes,
+        max_team_storage_bytes=max_team_storage_bytes,
+        claim_ttl_sec=claim_ttl_sec,
+        lease=lease,
+    )
+    if staged is None:
+        return
+    current_lease, task_set_id, output = staged
     async with session_factory() as session:
-        job = await session.get(TaskSetMaterializationJob, job_id)
-        if job is None or job.state != "claimed":
-            return
-        task_set = await session.get(TaskSet, job.task_set_id)
-        manifest_row = await session.get(TaskSetManifest, job.task_set_id)
-        if task_set is None or manifest_row is None:
-            job.state = "failed"
-            job.failure_reason = "missing_task_set"
-            job.failure_message = "task set or manifest row missing"
-            job.finished_at = datetime.now(UTC)
-            await session.commit()
-            return
-
-        job.state = "running"
-        job.started_at = datetime.now(UTC)
-        job.updated_at = datetime.now(UTC)
-        await session.execute(
-            delete(Task).where(Task.task_set_id == job.task_set_id),
+        await publish_if_current(
+            session,
+            lease=current_lease,
+            task_set_id=task_set_id,
+            output=output,
+            claim_ttl_sec=claim_ttl_sec,
         )
-        await session.commit()
-
-    async with session_factory() as session:
-        job = await session.get(TaskSetMaterializationJob, job_id)
-        task_set = await session.get(TaskSet, job.task_set_id) if job else None
-        manifest_row = await session.get(TaskSetManifest, job.task_set_id) if job else None
-        if job is None or task_set is None or manifest_row is None:
-            return
-
-        manifest = UserTaskSetManifest.model_validate(manifest_row.manifest)
-        quota_row = (await session.execute(
-            select(TeamQuota).where(TeamQuota.team_id == task_set.owning_team_id),
-        )).scalar_one_or_none()
-        effective_max_team_storage = (
-            quota_row.taskset_max_storage_bytes
-            if quota_row is not None and quota_row.taskset_max_storage_bytes is not None
-            else max_team_storage_bytes
-        )
-        team_storage_baseline = await asyncio.to_thread(
-            team_storage_baseline_excluding_task_set,
-            minio_client,
-            bucket=artifacts_bucket,
-            team_id=str(task_set.owning_team_id),
-            slug=manifest.slug,
-        )
-        output = await asyncio.to_thread(
-            materialize_task_set,
-            manifest=manifest,
-            task_set_id=task_set.id,
-            owning_team_id=str(task_set.owning_team_id),
-            intents=list(task_set.intents),
-            verifier_blob_uri=manifest_row.verifier_blob_uri,
-            transform_blob_uri=manifest_row.transform_blob_uri,
-            transform_config=transform_config,
-            minio_client=minio_client,
-            artifacts_bucket=artifacts_bucket,
-            upstream_cache_root=upstream_cache_root,
-            max_bundle_bytes=max_bundle_bytes,
-            team_storage_baseline=team_storage_baseline,
-            max_team_storage_bytes=effective_max_team_storage,
-        )
-
-        if output.task_rows and not output.retry_source:
-            for row in output.task_rows:
-                session.add(
-                    Task(
-                        id=row.id,
-                        checksum=row.checksum,
-                        config=row.config,
-                        source=row.source,
-                        task_set_id=task_set.id,
-                        benchmark_id=None,
-                    ),
-                )
-
-        await _finalize_job(session, job=job, task_set=task_set, output=output)
 
 
 async def run_once(
@@ -245,45 +644,41 @@ async def run_once(
         await reclaim_stale_jobs(session, claim_ttl_sec=claim_ttl_sec)
 
     async with session_factory() as session:
-        jobs = await _claim_jobs(
+        leases = await _claim_jobs(
             session,
             batch_size=batch_size,
             claimed_by=_CLAIMED_BY,
         )
 
-    for job in jobs:
+    for lease in leases:
         try:
             await _materialize_claimed_job(
                 session_factory,
-                job_id=job.id,
+                job_id=lease.job_id,
+                lease=lease,
                 minio_client=minio_client,
                 artifacts_bucket=artifacts_bucket,
                 upstream_cache_root=upstream_cache_root,
                 transform_config=transform_config,
                 max_bundle_bytes=max_bundle_bytes,
                 max_team_storage_bytes=max_team_storage_bytes,
+                claim_ttl_sec=claim_ttl_sec,
             )
+        except LeaseLost:
+            logger.info("taskset_materializer lease lost job_id=%s", lease.job_id)
         except Exception:
-            logger.exception(
-                "taskset_materializer failed job_id=%s task_set_id=%s",
-                job.id,
-                job.task_set_id,
-            )
+            logger.exception("taskset_materializer failed job_id=%s", lease.job_id)
             async with session_factory() as session:
-                db_job = await session.get(TaskSetMaterializationJob, job.id)
-                task_set = await session.get(TaskSet, job.task_set_id)
-                if db_job is not None:
-                    now = datetime.now(UTC)
-                    db_job.state = "failed"
-                    db_job.failure_reason = "internal_error"
-                    db_job.failure_message = "materialization worker crashed"
-                    db_job.finished_at = now
-                    db_job.updated_at = now
-                    if task_set is not None:
-                        task_set.status = "failed"
-                        task_set.status_reason = "internal_error"
-                        task_set.updated_at = now
-                    await session.commit()
+                try:
+                    await _fail_lease(
+                        session,
+                        lease=lease,
+                        failure_reason="internal_error",
+                        failure_message="materialization worker crashed",
+                        claim_ttl_sec=claim_ttl_sec,
+                    )
+                except LeaseLost:
+                    logger.info("taskset_materializer lease lost job_id=%s", lease.job_id)
 
 
 async def run_loop(

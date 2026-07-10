@@ -1291,6 +1291,134 @@ resumes from the interrupted step. The driver also records its process owner in
 alive, and takes over a stale `running` state after the previous driver process
 has exited.
 
+### TaskSet materialization recovery
+
+TaskSet materialization publishes a generation only when its lease-fenced
+transaction replaces the current `Task` rows. For a stalled rebuild, inspect the
+materializer job/lease state and heartbeat together with the current
+`Task.source` generation; those sources remain the authoritative publication
+pointer while another generation stages.
+
+Do not manually purge `tasksets/user/<team>/<slug>/` or delete an object-store
+prefix to clear a stalled TaskSet. The TaskSet GC poll loop runs a bounded live
+generation reconciler alongside retained soft-delete root cleanup. It retries
+only stale, unreferenced `materializations/<job-id>/<epoch>/` prefixes and
+leaves durable inputs, legacy paths, active lease epochs, and current Task
+sources intact. A durable database cursor advances only after each completed
+bounded sweep, so clean older TaskSets or jobs do not indefinitely delay a
+later abandoned generation and a restart repeats rather than skips a page. A
+complete root is removed only after the configured soft-delete retention delay;
+investigate materializer/job state instead of shortening that retention or
+performing object/DB surgery.
+
+### Disposable TaskSet lease-fencing canary (#756)
+
+Task 6 tests are not staging proof: they remain deterministic fixture support
+for the fenced materializer. Task 7 supplies the deployment-side,
+authorization-restricted cooperative runner. It runs only through
+`loom cluster taskset-fence-canary`; it adds no HTTP route, normal-user CLI
+command, worker mode, generic pause, or failure-injection control. It is not a
+release-gate schema change and does not persist candidate identity in a TaskSet
+row.
+
+Do not collect this canary until the runner is merged, its PR CI is green, the
+candidate staging rollout is complete, the candidate SHA/image tag is fixed,
+and Task 7 integration has explicitly reached staging collection. The command
+accepts no candidate SHA/image tag, owner, storage prefix, output path, or
+authorization-token argument. It derives candidate identity only from the
+completed rollout's `inputs.json`, rejects any non-staging/prod/mismatched
+candidate, and writes exactly one immutable JSON record at the rollout-owned
+`canaries/taskset-lease-fencing/evidence.json` path.
+
+If a failed candidate rollout needs a separate retry evidence directory, use a
+staging tag such as `staging-rerun-<sha7>`. The deployment canary accepts that
+form only when the final seven hexadecimal characters match the fixed candidate
+SHA; a retry label never permits a different candidate or image identity.
+
+The launcher pins the fixed staging Kubernetes context and selects a Ready
+`loom-service` Pod only when its service-container digest, template image, and
+converged Deployment generation match the completed candidate release
+manifest. It rechecks that exact Pod identity around both internal operations;
+mixed revisions, stale rollout evidence, a changed pod, or a non-ready target
+fail closed. Evidence is written through the validated rollout directory as a
+private fsynced temporary file, atomically published without replacement, and
+directory-fsynced; a partial private temporary file is discarded on retry.
+
+Before collection, provision the same new high-entropy capability in both
+operator-managed deployment locations: the protected staging
+`loom-secrets` key `taskset-fence-canary-token` (mounted only into
+`loom-service` as `LOOM_SVC_TASKSET_FENCE_CANARY_TOKEN`) and the fixed
+platform-dev file source used by the rollout command. Keep the file private to
+the rollout identity. The runner fails closed if either side is absent or does
+not match; never pass, print, or attach this value.
+
+Inside the selected service Pod, the deployment runner creates a fresh
+one-task disposable bundle under the fixed `loom-system-taskset-fence-canary`
+system Team through normal TaskSet intake. Migration `0065` reserves this Team
+only when neither its fixed UUID nor name exists; any pre-existing identity
+fails the upgrade rather than being adopted. The runner matches both the UUID
+and name, takes the Team row lock, and fails closed if it is absent, disabled,
+or altered. Neither registration, an administrator invite, nor administrator
+Team mutation controls can alter or add a human to this identity. A database
+downgrade restores the `0064` image-tag constraint and
+removes this Team only while the identity is pristine and has no dependent
+rows; any existing canary/reference/alteration makes the downgrade fail closed
+rather than cascade or reuse deployment data. If legacy cleanup has already
+removed the deployment-owned identity, the downgrade only restores the `0064`
+constraint and a later upgrade recreates it. The runner calculates
+the normal materializer checksum, creates the TaskSet/job, and writes its
+durable one-use authorization bound to the candidate, exact initial job,
+checksum, and a service-generated high-entropy nonce retained only as a digest
+in one database transaction. Only then does it return safe TaskSet/checksum
+metadata to the launcher for the later runner exec. The external command never
+accepts a TaskSet id or checksum, so a fresh ordinary user TaskSet cannot be
+selected, authorized, or consumed by this flow. The later runner only locks and
+consumes that pre-existing record. A pre-existing, rebuilt, claimed, published,
+deleted, mismatched, or replayed canary TaskSet fails closed. If a post-stage
+check fails, the current lease is relinquished through the normal fenced
+transition rather than remaining running. If the runner exits before consuming
+its authorization, it retires that exact TaskSet; an authenticated later
+prepare also retires any earlier unconsumed system canary before allocating its
+successor, so repeated killed-driver handoffs cannot consume the Team quota.
+Stream API responses through a whitelist if retaining submission/status
+context; never save a full Task response because it includes a storage
+`source` field. The public catalog returns private TaskSet source locations
+only to the owning Team; foreign catalog/detail reads retain non-sensitive
+metadata but redact `source`.
+
+```bash
+loom cluster taskset-fence-canary \
+  --rollout-dir "$ROLLOUT_DIR"
+```
+
+The runner cooperatively stages A, relinquishes only A's current lease through
+the normal fenced transition, claims/stages/publishes B, then resumes A's
+normal publication CAS and requires `LeaseLost`. It writes the candidate-bound
+JSON evidence only after the winning generation, expected checksum, and stale
+CAS result all match. The artifact contains candidate SHA/image tag, job/epoch
+pairs, opaque owner fingerprints, published generation, task count/checksum,
+stale-CAS outcome, loser-GC eligibility (not GC execution), and timestamps.
+Validate the final JSON before attachment:
+
+- It contains no raw `claimed_by`, token, cookie, authorization header, host or
+  PID, source URI, object key/prefix, signed URL, manifest, credential, or raw
+  error payload.
+- The winner's published generation equals its lease epoch, the selected task
+  checksum is from the normal task API, and the loser was fenced before
+  publication.
+- The canary never performs object deletion or runs GC. On a runner exit it
+  soft-deletes only its own authorization-bound system TaskSet, and the next
+  authenticated prepare retires any earlier unconsumed system canary. This
+  frees the active TaskSet quota while retaining the root for the normal
+  delayed GC policy. Eligibility is evidence for the existing bounded
+  reconciler, not permission to run it during collection.
+
+Do **not** manufacture the handoff by killing a driver or pod, using `SIGSTOP`,
+editing rows with manual SQL, mutating the object store, injecting a failure,
+or deleting a prefix. If the normal cooperative path cannot be observed without
+one of those actions, stop the collection and record it as unavailable rather
+than claiming the canary passed.
+
 ### Protected workload-trust contract (#755)
 
 For a staging or production rollout, the profile must declare exactly
@@ -4557,7 +4685,7 @@ the service-mode agent layer. The accepted evidence is one of:
 Capture the API/CLI evidence:
 
 ```bash
-loom tasksets status "$DNS_TASKSET_SLUG_OR_ID" --json \
+loom tasksets status "$DNS_TASKSET_SLUG_OR_ID" --format json \
   | tee "$COMPAT_GATE_DIR/canaries/dns-taskset-status.json"
 
 loom eval trial show "$DNS_COMPAT_TRIAL_ID" --format json \

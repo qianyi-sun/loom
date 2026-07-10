@@ -23,6 +23,10 @@ from loom.db.schema import (
     User,
     UserSession,
 )
+from loom.system_identities import (
+    TASKSET_FENCE_CANARY_TEAM_ID,
+    TASKSET_FENCE_CANARY_TEAM_NAME,
+)
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -93,9 +97,16 @@ async def invite_app(
             s.execute(delete(UserSession))
             s.execute(delete(LoginChallenge))
             s.execute(delete(TeamMembership))
-            s.execute(delete(TeamQuota))
+            s.execute(
+                delete(TeamQuota).where(
+                    TeamQuota.team_id != TASKSET_FENCE_CANARY_TEAM_ID,
+                )
+            )
             s.execute(delete(User))
-            s.execute(delete(Team))
+            s.execute(
+                delete(Team).where(
+                    Team.id != TASKSET_FENCE_CANARY_TEAM_ID),
+            )
             s.commit()
         sync_engine.dispose()
 
@@ -174,6 +185,41 @@ async def test_owner_creates_lists_and_revokes_invite_without_revealing_code(
     assert revoked.status_code == 200, revoked.text
     assert revoked.json()["status"] == "revoked"
     assert after_revoke.json()["items"][0]["status"] == "revoked"
+
+
+async def test_admin_cannot_invite_users_to_the_system_canary_team(
+    invite_app: tuple[FastAPI, UUID, UUID, UUID],
+) -> None:
+    """The deployment-owned Team cannot acquire a human member via admin invite."""
+    app, _team_a, _team_b, _owner_id = invite_app
+    async with app.state.session_factory() as session:
+        system_team = await session.get(Team, TASKSET_FENCE_CANARY_TEAM_ID)
+        if system_team is None:
+            system_team = Team(
+                id=TASKSET_FENCE_CANARY_TEAM_ID,
+                name=TASKSET_FENCE_CANARY_TEAM_NAME,
+            )
+            session.add(system_team)
+            await session.flush()
+            session.add(TeamQuota(team_id=system_team.id))
+            await session.commit()
+    assert system_team is not None
+    assert system_team.name == TASKSET_FENCE_CANARY_TEAM_NAME
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            "/api/v1/invites",
+            headers=_admin_headers(),
+            json={
+                "email": "canary-member@example.com",
+                "team_id": str(TASKSET_FENCE_CANARY_TEAM_ID),
+                "role": "member",
+                "expires_in_days": 7,
+            },
+        )
+
+    assert response.status_code == 403, response.text
 
 
 async def test_resend_rotates_invite_code_and_old_code_fails(

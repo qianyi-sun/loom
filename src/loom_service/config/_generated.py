@@ -59,6 +59,7 @@ class LoomServiceSettings(BaseSettings):
     stale_running_trial_timeout_multiplier: float = 3.0
     storage_auth_kind: str = "static_keys"
     storage_backend: str = "minio"
+    taskset_fence_canary_token: SecretStr | None = None
     taskset_gc_poll_interval_sec: int = 3600
     taskset_gc_retention_days: int = 7
     taskset_manifest_max_bytes: int = 1048576

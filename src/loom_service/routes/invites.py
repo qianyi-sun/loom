@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import AuthContext
 from loom.db.schema import Team, TeamInvite, TeamMembership, User
+from loom.system_identities import TASKSET_FENCE_CANARY_TEAM_ID
 from loom_service.admin_audit import require_admin_actor, write_admin_audit_event
 from loom_service.auth_guards import is_admin, require_scope
 from loom_service.dependencies import SessionAndCtx
@@ -249,6 +250,8 @@ async def create_invite(
     )).scalar_one_or_none()
     if team is None:
         raise HTTPException(status_code=404, detail="team not found")
+    if team.id == TASKSET_FENCE_CANARY_TEAM_ID:
+        raise HTTPException(status_code=403, detail="team is deployment-only")
 
     actor = await _actor_for_team_management(
         session,

@@ -391,15 +391,56 @@ A background job-queue consumer:
    `evidence`) and no runnable task row is inserted. The platform reports
    issues such as DNS/NSS mutation before agent setup or Dockerfile/build
    context path drift; it does not flatten or silently repair user bundles.
-8. Write the bundle (`task.toml`, `instruction.md`, optional
-   `verifier/<name>`, declared artifacts) to object storage under the TaskSet
-   prefix. For `bundle-upload`, preserve and upload the complete per-task
-   directory, including verifier/tests/data assets; the DB `config` stores a
-   validated Loom `TaskConfig`.
-9. Insert `tasks` rows linked to the TaskSet and owning team.
+8. Stage generated bundles (`task.toml`, `instruction.md`, optional
+   `verifier/<name>`, declared artifacts) under
+   `tasksets/user/<team>/<slug>/materializations/<job-id>/<lease-epoch>/tasks/`.
+   For `bundle-upload`, preserve and upload the complete per-task directory,
+   including verifier/tests/data assets; the DB `config` stores a validated Loom
+   `TaskConfig`.
+9. In one lease-fenced transaction, replace the current `tasks` rows linked to
+   the TaskSet and owning team. Those `Task.source` values are the publication
+   pointer for a generation; an uploaded object key or a job audit field is not
+   a published result. The catalog and task-detail API return this private
+   source only to the owning Team; a non-owning Team may see non-sensitive task
+   metadata but receives `source: null` for a TaskSet-backed task.
 10. On completion, update `task_sets.status` to `ready`, `partial`, or
-   `failed`; set `evaluation_ready=true` only when verifier/scoring config is
-   valid and at least one task materialized.
+    `failed`; set `evaluation_ready=true` only when verifier/scoring config is
+    valid and at least one task materialized.
+
+### Generation storage and cleanup
+
+Stable intake inputs stay directly below
+`tasksets/user/<team>/<slug>/`: the manifest, verifier/transform blobs, and an
+uploaded bundle archive are durable inputs. Generated task bundles are staged
+separately by the canonical `(job UUID, lease epoch)` generation namespace.
+This lets a replacement generation coexist with the generation still referenced
+by current `Task.source` rows until a lease-fenced publication commits.
+
+The materializer charges a staged rebuild against physical bytes for the whole
+team TaskSet prefix. It therefore includes stable inputs, the published
+generation, and any abandoned partial generation until cleanup completes;
+rebuilds need temporary coexistence headroom and do not subtract their own root
+or bypass quota.
+
+Two cleanup contracts remain deliberately separate:
+
+- The live bounded reconciler selects only non-deleted TaskSets and their
+  materialization jobs from the database. It can delete only an exact
+  DB-derived `materializations/<job-id>/<epoch>/` prefix after preserving the
+  current active epoch and every generation referenced by a current
+  `Task.source`. Unknown jobs, malformed/future epochs, legacy `tasks/`, and
+  all stable inputs are never live-GC targets.
+  A singleton durable database cursor selects the next bounded TaskSet and job
+  windows, so clean leading rows cannot starve a later abandoned generation.
+  It advances with a compare-and-swap only after a complete sweep; a crash or
+  restart before that update repeats the same safe page rather than skipping a
+  page. The cursor stores scheduling progress only, never a bucket, prefix, or
+  deletion target.
+- Retention-delayed soft-delete GC is the only path that removes an entire
+  TaskSet root. After `soft_deleted_at + retention`, it deletes the
+  delimiter-terminated `<root>/` and then hard-deletes the TaskSet rows. It is
+  allowed to remove durable inputs and unknown/legacy objects because the
+  TaskSet has already completed its user-visible deletion retention window.
 
 ### Sandbox
 
@@ -468,15 +509,16 @@ if source.type == bundle-upload:
         normalize Terminal-Bench-shaped task.toml when needed
         validate TaskConfig (extra=forbid)
         preflight task bundle compatibility
-        upload complete per-task directory to object storage
-        INSERT tasks row linked to task_set_id
+        stage complete per-task directory beneath materializations/<job>/<epoch>/tasks/
+        prepare Task row linked to task_set_id
 else:
     fetch_upstream(source)
     foreach row up to limits.max_instances:
         render task.toml from task_template using row + instance_mapping
         validate TaskConfig (extra=forbid)
-        write bundle to object storage
-        INSERT tasks row linked to task_set_id
+        stage bundle beneath materializations/<job>/<epoch>/tasks/
+        prepare Task row linked to task_set_id
+lease-fenced transaction -> replace current Task rows and publish their sources
 UPDATE task_sets.status = ready | partial | failed
 UPDATE task_sets.evaluation_ready based on shared or per-task verifier validity
 ```
@@ -519,8 +561,9 @@ agent/model runs -> verifier runs in trial sandbox -> score/reward persisted
 | More than 50% of rows skipped | TaskSet goes `failed` (`majority_skipped`). |
 | Verifier crash at evaluation time | Existing `verifier_error` path; data-production runs are unaffected. |
 | Bundle storage exceeds 5 GiB | Abort, `failed` (`size_exceeded`). |
-| Team over quota (50 TaskSets or 20 GiB) | API 429 at submit; materialization aborts with `failed` (`size_exceeded`) if generated task bundles would push final team storage over the cap. |
-| Delete | Soft-delete row; blobs retained 7 days for undo, GC purges thereafter; run history continues to reference the soft-deleted TaskSet. |
+| Team over quota (50 TaskSets or 20 GiB) | API 429 at submit; materialization aborts with `failed` (`size_exceeded`) before an over-limit put. Rebuild accounting includes the full team TaskSet total, including prior generated bytes and stable inputs. |
+| Stalled or stale generation | Current Task sources and an active job epoch remain protected. A bounded reconciler later removes only unreferenced DB-derived generation prefixes; it never removes the TaskSet root or durable inputs. |
+| Delete | Soft-delete row; blobs retained 7 days for undo, then delimiter-safe root GC purges the complete root. Run history continues to reference the soft-deleted TaskSet. |
 
 Defaults (5 GiB / 50 TaskSets / 20 GiB / 500 instances) are
 operator-configurable via `config/tasksets.toml`; defaults aim for "reasonable
@@ -561,6 +604,8 @@ table.
 - Namespace enforcement: TaskSet id must use `ts/<team_id>/<slug>`, slug path
   traversal rejected, and owner team must be present.
 - Quota and size enforcement at the helper layer.
+- Canonical generation-prefix validation, bounded live-GC deletion, current
+  Task-source/active-lease protection, and delimiter-safe soft-delete root GC.
 
 ### Integration (testcontainers Postgres + MinIO + worker)
 
@@ -586,6 +631,9 @@ table.
   `partial` with the expected skip count.
 - Soft-delete + GC: 7-day timer respected; delete during GC window is
   reversible; afterwards is not.
+- Rebuilds preserve the old current generation until a lease-fenced winner
+  publishes, and live cleanup never widens from a database generation prefix to
+  stable inputs, legacy paths, malformed epochs, or another TaskSet root.
 
 ### Security
 

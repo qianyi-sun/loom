@@ -11,6 +11,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
+from uuid import UUID
 
 import tomli_w
 from pydantic import ValidationError
@@ -31,6 +32,7 @@ from loom.task_bundle_compat import (
 )
 from loom.taskset.instance_mapping import MappingError, resolve_mapping
 from loom.taskset.status import cap_error_summary, compute_task_set_status
+from loom.taskset.storage_bytes import generated_tasks_prefix, taskset_root
 from loom.taskset.template_render import render_task_template
 from loom.taskset.transform_sandbox import (
     TransformSandboxConfig,
@@ -72,10 +74,6 @@ def _parse_s3_uri(uri: str) -> tuple[str, str]:
     if not bucket or not key:
         raise ValueError(f"invalid s3 uri: {uri!r}")
     return bucket, key
-
-
-def _storage_prefix(*, team_id: str, slug: str) -> str:
-    return f"tasksets/user/{team_id}/{slug}"
 
 
 def _safe_task_segment(task_id: str) -> str:
@@ -340,6 +338,8 @@ def _materialize_bundle_upload(
     manifest: UserTaskSetManifest,
     task_set_id: str,
     owning_team_id: str,
+    materialization_job_id: UUID,
+    materialization_epoch: int,
     has_evaluation: bool,
     minio_client: Any,
     artifacts_bucket: str,
@@ -349,9 +349,15 @@ def _materialize_bundle_upload(
     max_team_storage_bytes: int | None = None,
 ) -> MaterializeOutput:
     slug = manifest.slug
-    prefix = _storage_prefix(team_id=owning_team_id, slug=slug)
+    storage_prefix = taskset_root(team_id=owning_team_id, slug=slug).removesuffix("/")
+    output_tasks_prefix = generated_tasks_prefix(
+        team_id=owning_team_id,
+        slug=slug,
+        job_id=materialization_job_id,
+        epoch=materialization_epoch,
+    )
     bundle_key = bundle_object_key(
-        prefix=prefix,
+        prefix=storage_prefix,
         relative_path=manifest.source.locator,
     )
     bundle_uri = f"s3://{artifacts_bucket}/{bundle_key}"
@@ -451,7 +457,7 @@ def _materialize_bundle_upload(
                         )
                         continue
                     checksum = task_checksum(bundle_dir)
-                    bundle_prefix = f"{prefix}/tasks/{short_id}"
+                    bundle_prefix = f"{output_tasks_prefix}{short_id}"
                     cumulative_bytes = _upload_bundle_dir(
                         minio_client,
                         bucket=artifacts_bucket,
@@ -540,6 +546,8 @@ def materialize_task_set(
     manifest: UserTaskSetManifest,
     task_set_id: str,
     owning_team_id: str,
+    materialization_job_id: UUID,
+    materialization_epoch: int,
     intents: list[str],
     verifier_blob_uri: str | None,
     transform_blob_uri: str | None = None,
@@ -553,7 +561,12 @@ def materialize_task_set(
 ) -> MaterializeOutput:
     """Materialize one TaskSet synchronously. Caller owns DB writes."""
     slug = manifest.slug
-    prefix = _storage_prefix(team_id=owning_team_id, slug=slug)
+    output_tasks_prefix = generated_tasks_prefix(
+        team_id=owning_team_id,
+        slug=slug,
+        job_id=materialization_job_id,
+        epoch=materialization_epoch,
+    )
     has_evaluation = "evaluation" in intents
     max_instances = (manifest.limits.max_instances if manifest.limits else 500)
 
@@ -573,6 +586,8 @@ def materialize_task_set(
             manifest=manifest,
             task_set_id=task_set_id,
             owning_team_id=owning_team_id,
+            materialization_job_id=materialization_job_id,
+            materialization_epoch=materialization_epoch,
             has_evaluation=has_evaluation,
             minio_client=minio_client,
             artifacts_bucket=artifacts_bucket,
@@ -666,7 +681,7 @@ def materialize_task_set(
                         )
                         continue
                     checksum = task_checksum(bundle_dir)
-                    bundle_prefix = f"{prefix}/tasks/{short_id}"
+                    bundle_prefix = f"{output_tasks_prefix}{short_id}"
                     cumulative_bytes = _upload_bundle_dir(
                         minio_client,
                         bucket=artifacts_bucket,

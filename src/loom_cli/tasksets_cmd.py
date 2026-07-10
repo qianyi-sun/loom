@@ -143,6 +143,13 @@ def _print_status_summary(body: dict[str, Any]) -> None:
     print(f"eval_ready:    {body['evaluation_ready']}")
     if body.get("materialization_job_state"):
         print(f"job_state:     {body['materialization_job_state']}")
+    fence = body.get("materialization_fence")
+    if isinstance(fence, dict):
+        print(f"fence_lease_epoch:           {fence.get('lease_epoch')}")
+        print(f"fence_lease_heartbeat_at:    {fence.get('lease_heartbeat_at')}")
+        print(f"fence_lease_heartbeat_state: {fence.get('lease_heartbeat_state')}")
+        print(f"fence_owner_fingerprint:     {fence.get('owner_fingerprint')}")
+        print(f"fence_published_generation:  {fence.get('published_generation')}")
     errors = body.get("error_summary") or []
     if errors:
         print(f"errors:        {len(errors)} (first 50 retained on server)")

@@ -53,6 +53,33 @@ def test_macro_emits_per_service_secret_key() -> None:
     assert by_name2["LOOM_GW_DB_URL"]["valueFrom"]["secretKeyRef"]["key"] == "gw-db-url"
 
 
+def test_macro_mounts_optional_deployment_fence_capability_only_in_service() -> None:
+    schema = load_schema(Path("config/loom-schema.toml"))
+    out = _render(
+        "{% import '_env.j2' as e %}{{ e.env_block('loom-service', schema) }}",
+        schema,
+    )
+    by_name = {entry["name"]: entry for entry in yaml.safe_load(out)["env"]}
+    assert by_name["LOOM_SVC_TASKSET_FENCE_CANARY_TOKEN"] == {
+        "name": "LOOM_SVC_TASKSET_FENCE_CANARY_TOKEN",
+        "valueFrom": {
+            "secretKeyRef": {
+                "name": "loom-secrets",
+                "key": "taskset-fence-canary-token",
+                "optional": True,
+            },
+        },
+    }
+    control_plane = _render(
+        "{% import '_env.j2' as e %}{{ e.env_block('control-plane', schema) }}",
+        schema,
+    )
+    control_plane_names = {
+        entry["name"] for entry in yaml.safe_load(control_plane)["env"]
+    }
+    assert "LOOM_CP_TASKSET_FENCE_CANARY_TOKEN" not in control_plane_names
+
+
 def test_macro_emits_literal_value_as_string() -> None:
     """Critical: k8s rejects unquoted ints for `value:`."""
     schema = load_schema(Path("config/loom-schema.toml"))

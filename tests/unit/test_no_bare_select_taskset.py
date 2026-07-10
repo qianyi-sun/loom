@@ -10,6 +10,9 @@ SRC_ROOT = REPO_ROOT / "src"
 
 ALLOWLIST = {
     SRC_ROOT / "loom" / "db" / "task_set_visibility.py",
+    # The internal materializer holds a job lease before taking a TaskSet lock;
+    # it is not a user-visible read path.
+    SRC_ROOT / "loom_service" / "taskset_materializer.py",
     SRC_ROOT / "loom_service" / "taskset_gc.py",
 }
 
