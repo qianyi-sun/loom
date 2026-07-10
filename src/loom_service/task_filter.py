@@ -39,7 +39,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loom.benchmark_readiness import CURRENTLY_UNSUPPORTED_BENCHMARK_IDS
 from loom.db.schema import Task, TaskSet
 from loom.db.task_set_visibility import visible_task_sets
-from loom_service.benchmark_profiles import resolve_benchmark_selectors
+from loom_service.benchmark_profiles import (
+    reject_historical_benchmark_profiles,
+    resolve_benchmark_selectors,
+)
 
 # Recognized task_filter keys. Anything else is rejected so a typo
 # (`liscense` instead of `license`) doesn't silently match nothing.
@@ -191,7 +194,7 @@ async def resolve_task_filter_with_diagnostics(
     # is a dict like `{"verified": ["true"]}` applied as a JSONB
     # containment predicate per key — `AND` across keys, `OR` within
     # each key's value list.
-    stmt = select(Task.id).order_by(
+    stmt = select(Task.id, Task.benchmark_id).order_by(
         Task.id.asc(),
     )
     visible_task_set_ids = visible_task_sets(team_id=team_id).with_only_columns(
@@ -285,7 +288,17 @@ async def resolve_task_filter_with_diagnostics(
                 for v in tag_values
             ]
             stmt = stmt.where(or_(*value_clauses))
-    candidates = [str(task_id) for task_id in (await session.scalars(stmt)).all()]
+    candidate_rows = (await session.execute(stmt)).all()
+    if require_runnable:
+        await reject_historical_benchmark_profiles(
+            session,
+            [
+                str(benchmark_id)
+                for _task_id, benchmark_id in candidate_rows
+                if benchmark_id is not None
+            ],
+        )
+    candidates = [str(task_id) for task_id, _benchmark_id in candidate_rows]
 
     if subset_kind == "all":
         return TaskFilterResult(

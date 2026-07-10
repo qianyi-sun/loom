@@ -35,8 +35,10 @@ from loom_service.config import LoomServiceSettings
 PUBLIC_ALIAS = "terminal-bench-2"
 ACTIVE_PROFILE = "terminal-bench-2@tb2.1-r6"
 NEXT_PROFILE = "terminal-bench-2@tb2.2-r7"
+HISTORICAL_PROFILE = "terminal-bench-2@tb2.0-91e10457"
 ACTIVE_TASK_ID = f"{ACTIVE_PROFILE}/chess-best-move"
 NEXT_TASK_ID = f"{NEXT_PROFILE}/chess-best-move"
+HISTORICAL_TASK_ID = f"{HISTORICAL_PROFILE}/legacy-chess-best-move"
 
 
 def _valid_task_config(task_id: str) -> dict[str, object]:
@@ -54,7 +56,7 @@ def _valid_task_config(task_id: str) -> dict[str, object]:
 async def profile_batch_setup(
     monkeypatch: pytest.MonkeyPatch,
     postgres_url: str,
-) -> AsyncIterator[tuple[FastAPI, str, async_sessionmaker[AsyncSession]]]:
+) -> AsyncIterator[tuple[FastAPI, str, UUID, async_sessionmaker[AsyncSession]]]:
     for key, value in {
         "LOOM_SVC_DB_URL": postgres_url,
         "LOOM_SVC_MINIO_ENDPOINT": "http://minio:9000",
@@ -114,7 +116,11 @@ async def profile_batch_setup(
                 status="active",
             ),
         )
-        for benchmark_id in (ACTIVE_PROFILE, NEXT_PROFILE):
+        for benchmark_id, execution_state in (
+            (ACTIVE_PROFILE, "runnable"),
+            (NEXT_PROFILE, "runnable"),
+            (HISTORICAL_PROFILE, "historical"),
+        ):
             sync.execute(
                 insert(Benchmark).values(
                     id=benchmark_id,
@@ -125,12 +131,13 @@ async def profile_batch_setup(
                     license_spdx="MIT",
                     license_url="https://example.test/license",
                     splits=["test"],
-                    execution_state="runnable",
+                    execution_state=execution_state,
                 ),
             )
         for task_id, benchmark_id in (
             (ACTIVE_TASK_ID, ACTIVE_PROFILE),
             (NEXT_TASK_ID, NEXT_PROFILE),
+            (HISTORICAL_TASK_ID, HISTORICAL_PROFILE),
         ):
             sync.execute(
                 insert(Task).values(
@@ -147,7 +154,7 @@ async def profile_batch_setup(
     sync_engine.dispose()
 
     try:
-        yield app, raw_token, session_factory
+        yield app, raw_token, team_id, session_factory
     finally:
         await app.state.http_client.aclose()
         await engine.dispose()
@@ -156,9 +163,17 @@ async def profile_batch_setup(
             sync.execute(delete(Trial))
             sync.execute(delete(Batch))
             sync.execute(delete(Token))
-            sync.execute(delete(Task).where(Task.id.in_([ACTIVE_TASK_ID, NEXT_TASK_ID])))
+            sync.execute(
+                delete(Task).where(
+                    Task.id.in_([ACTIVE_TASK_ID, NEXT_TASK_ID, HISTORICAL_TASK_ID]),
+                ),
+            )
             sync.execute(delete(BenchmarkAlias).where(BenchmarkAlias.alias == PUBLIC_ALIAS))
-            sync.execute(delete(Benchmark).where(Benchmark.id.in_([ACTIVE_PROFILE, NEXT_PROFILE])))
+            sync.execute(
+                delete(Benchmark).where(
+                    Benchmark.id.in_([ACTIVE_PROFILE, NEXT_PROFILE, HISTORICAL_PROFILE]),
+                ),
+            )
             sync.execute(delete(Worker).where(Worker.hostname == "tb21-fixture-worker"))
             sync.execute(delete(TeamMembership).where(TeamMembership.team_id == team_id))
             sync.execute(delete(User).where(User.id == user_id))
@@ -195,9 +210,9 @@ async def repoint_alias(
 
 
 async def test_batch_keeps_submission_time_tasks_after_alias_move(
-    profile_batch_setup: tuple[FastAPI, str, async_sessionmaker[AsyncSession]],
+    profile_batch_setup: tuple[FastAPI, str, UUID, async_sessionmaker[AsyncSession]],
 ) -> None:
-    app, raw_token, session_factory = profile_batch_setup
+    app, raw_token, _team_id, session_factory = profile_batch_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport,
@@ -232,3 +247,61 @@ async def test_batch_keeps_submission_time_tasks_after_alias_move(
         )
 
     assert [item["task_id"] for item in submitted] == [ACTIVE_TASK_ID]
+
+
+async def test_http_submission_exposes_machine_readable_retired_code(
+    profile_batch_setup: tuple[FastAPI, str, UUID, async_sessionmaker[AsyncSession]],
+) -> None:
+    app, raw_token, _team_id, _session_factory = profile_batch_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://service") as client:
+        response = await client.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw_token}"},
+            json={
+                "name": "Retired TB2 profile",
+                "task_filter": {"benchmark_id": HISTORICAL_PROFILE},
+                "trial_config": {"agent": {"name": "oracle"}},
+            },
+        )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["reason"] == "benchmark_retired"
+
+
+async def test_legacy_null_snapshot_runner_resolves_historical_profile(
+    profile_batch_setup: tuple[FastAPI, str, UUID, async_sessionmaker[AsyncSession]],
+) -> None:
+    _app, _raw_token, team_id, session_factory = profile_batch_setup
+    async with session_factory() as session:
+        batch = Batch(
+            team_id=team_id,
+            name="legacy historical TB2 batch",
+            task_filter={"benchmark_id": HISTORICAL_PROFILE},
+            trial_config={"agent": {"name": "oracle"}},
+            state="submitted",
+            created_by_token_prefix="legacy",
+            expected_trial_count=1,
+            resolved_task_ids=None,
+        )
+        session.add(batch)
+        await session.commit()
+
+    submitted: list[dict[str, object]] = []
+
+    def control_plane(request: httpx.Request) -> httpx.Response:
+        submitted.append(json.loads(request.content.decode()))
+        return httpx.Response(201)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(control_plane),
+        base_url="http://cp",
+    ) as control_plane_client:
+        await run_once(
+            session_factory=session_factory,
+            http_client=control_plane_client,
+            batch_size=10,
+            submit_rate_per_sec=100,
+        )
+
+    assert [item["task_id"] for item in submitted] == [HISTORICAL_TASK_ID]

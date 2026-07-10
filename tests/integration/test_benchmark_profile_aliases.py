@@ -12,12 +12,14 @@ from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import Benchmark, BenchmarkAlias, Task
 from loom_service.benchmark_profiles import resolve_benchmark_selectors
+from loom_service.routes.benchmarks import get_benchmark, list_benchmarks
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
 
 PUBLIC_ALIAS = "terminal-bench-2"
 ACTIVE_PROFILE = "terminal-bench-2@tb2.1-r6"
 HISTORICAL_PROFILE = "terminal-bench-2@tb2.0-91e10457"
 ACTIVE_TASK_ID = f"{ACTIVE_PROFILE}/chess-best-move"
+HISTORICAL_TASK_ID = f"{HISTORICAL_PROFILE}/legacy-chess-best-move"
 
 
 def _valid_task_config(task_id: str) -> dict[str, object]:
@@ -63,6 +65,16 @@ async def session(postgres_url: str) -> AsyncIterator[AsyncSession]:
                 benchmark_id=ACTIVE_PROFILE,
             ),
         )
+        sync.execute(
+            insert(Task).values(
+                id=HISTORICAL_TASK_ID,
+                checksum="x" * 64,
+                config=_valid_task_config(HISTORICAL_TASK_ID),
+                source="fixture://tb2/legacy-chess-best-move",
+                license="MIT",
+                benchmark_id=HISTORICAL_PROFILE,
+            ),
+        )
         sync.commit()
     sync_engine.dispose()
 
@@ -75,7 +87,9 @@ async def session(postgres_url: str) -> AsyncIterator[AsyncSession]:
         await engine.dispose()
         sync_engine = create_engine(postgres_url)
         with sessionmaker(sync_engine)() as sync:
-            sync.execute(delete(Task).where(Task.id == ACTIVE_TASK_ID))
+            sync.execute(
+                delete(Task).where(Task.id.in_([ACTIVE_TASK_ID, HISTORICAL_TASK_ID])),
+            )
             sync.execute(
                 delete(BenchmarkAlias).where(BenchmarkAlias.alias == PUBLIC_ALIAS),
             )
@@ -127,3 +141,38 @@ async def test_archived_profile_is_not_a_new_submission(
         )
 
     assert exc_info.value.status_code == 409
+
+
+async def test_explicit_historical_task_id_is_not_a_new_submission(
+    session: AsyncSession,
+) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        await resolve_task_filter_with_diagnostics(
+            session,
+            {"subset_kind": "explicit", "task_ids": [HISTORICAL_TASK_ID]},
+        )
+
+    assert exc_info.value.status_code == 409
+
+
+async def test_unscoped_filter_rejects_historical_candidate_for_new_submission(
+    session: AsyncSession,
+) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        await resolve_task_filter_with_diagnostics(session, {})
+
+    assert exc_info.value.status_code == 409
+
+
+async def test_catalog_hides_historical_profiles_but_direct_read_remains_available(
+    session: AsyncSession,
+) -> None:
+    await seed_alias(session, PUBLIC_ALIAS, ACTIVE_PROFILE)
+
+    catalog = await list_benchmarks((session, None), include_empty=True)
+    historical = await get_benchmark(HISTORICAL_PROFILE, (session, None))
+
+    assert [item["id"] for item in catalog["items"]] == [PUBLIC_ALIAS]
+    assert catalog["items"][0]["physical_profile"] == ACTIVE_PROFILE
+    assert historical["physical_profile"] == HISTORICAL_PROFILE
+    assert historical["execution_state"] == "historical"
