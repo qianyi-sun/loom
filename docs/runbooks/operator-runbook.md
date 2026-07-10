@@ -1291,6 +1291,23 @@ resumes from the interrupted step. The driver also records its process owner in
 alive, and takes over a stale `running` state after the previous driver process
 has exited.
 
+### TaskSet materialization recovery
+
+TaskSet materialization publishes a generation only when its lease-fenced
+transaction replaces the current `Task` rows. For a stalled rebuild, inspect the
+materializer job/lease state and heartbeat together with the current
+`Task.source` generation; those sources remain the authoritative publication
+pointer while another generation stages.
+
+Do not manually purge `tasksets/user/<team>/<slug>/` or delete an object-store
+prefix to clear a stalled TaskSet. The TaskSet GC poll loop runs a bounded live
+generation reconciler alongside retained soft-delete root cleanup. It retries
+only stale, unreferenced `materializations/<job-id>/<epoch>/` prefixes and
+leaves durable inputs, legacy paths, active lease epochs, and current Task
+sources intact. A complete root is removed only after the configured
+soft-delete retention delay; investigate materializer/job state instead of
+shortening that retention or performing object/DB surgery.
+
 ### Protected workload-trust contract (#755)
 
 For a staging or production rollout, the profile must declare exactly

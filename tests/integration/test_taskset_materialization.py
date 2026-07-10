@@ -36,10 +36,15 @@ from loom.db.schema import (
     User,
 )
 from loom.taskset.materialize import MaterializeOutput, TaskRowDraft
+from loom.taskset.storage_bytes import team_taskset_storage_bytes
 from loom.taskset.transform_sandbox import TransformSandboxConfig
 from loom_service import taskset_materializer
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from loom_service.taskset_gc import (
+    purge_abandoned_materialization_generations,
+    purge_expired_task_sets,
+)
 from loom_service.taskset_intake import delete_task_set, get_latest_job, rebuild_task_set
 from loom_service.taskset_materializer import run_once
 
@@ -399,6 +404,307 @@ def _stage_output_for_lease(
         status="ready",
         evaluation_ready=True,
     )
+
+
+def _object_keys(app: FastAPI, *, prefix: str) -> set[str]:
+    return {
+        item["Key"]
+        for item in app.state.minio_client.list_objects_v2(
+            Bucket=app.state.settings.artifacts_bucket,
+            Prefix=prefix,
+        ).get("Contents", [])
+    }
+
+
+@pytest.mark.asyncio
+async def test_live_generation_gc_deletes_only_unreferenced_db_generation(
+    materialization_setup,
+) -> None:
+    app, tokens, teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+
+    async with app.state.session_factory() as session:
+        claimed_by_a = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by="generation-gc-owner-a",
+        )
+    lease_a = claimed_by_a[0]
+    async with app.state.session_factory() as session:
+        await taskset_materializer._start_job(session, lease=lease_a)
+    output_a = _stage_output_for_lease(
+        app,
+        team_id=teams["team_a"],
+        slug="inline-tasks",
+        lease=lease_a,
+        task_set_id=task_set_id,
+        task_name="loser",
+    )
+
+    async with app.state.session_factory() as session:
+        await session.execute(
+            update(TaskSetMaterializationJob)
+            .where(TaskSetMaterializationJob.id == lease_a.id)
+            .values(lease_heartbeat_at=datetime.now(UTC) - timedelta(minutes=5)),
+        )
+        await session.commit()
+        assert await taskset_materializer.reclaim_stale_jobs(
+            session,
+            claim_ttl_sec=60,
+        ) == 1
+        await session.execute(
+            update(TaskSetMaterializationJob)
+            .where(TaskSetMaterializationJob.id == lease_a.id)
+            .values(next_attempt_at=datetime.now(UTC) - timedelta(seconds=1)),
+        )
+        await session.commit()
+        claimed_by_b = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by="generation-gc-owner-b",
+        )
+    lease_b = claimed_by_b[0]
+    async with app.state.session_factory() as session:
+        await taskset_materializer._start_job(session, lease=lease_b)
+    output_b = _stage_output_for_lease(
+        app,
+        team_id=teams["team_a"],
+        slug="inline-tasks",
+        lease=lease_b,
+        task_set_id=task_set_id,
+        task_name="winner",
+    )
+    async with app.state.session_factory() as session:
+        await taskset_materializer.publish_if_current(
+            session,
+            lease=lease_b,
+            task_set_id=task_set_id,
+            output=output_b,
+            claim_ttl_sec=60,
+        )
+        session.add(
+            Task(
+                id=f"{task_set_id}/tasks/foreign-source",
+                checksum="foreign-source",
+                config={"task": {"id": "foreign-source"}},
+                source="s3://foreign-bucket/attacker-controlled-prefix/",
+                task_set_id=task_set_id,
+                benchmark_id=None,
+            ),
+        )
+        await session.commit()
+
+    root = f"tasksets/user/{teams['team_a']}/inline-tasks/"
+    loser_prefix = (
+        f"{root}materializations/{lease_a.job_id}/{lease_a.lease_epoch}/"
+    )
+    winner_prefix = (
+        f"{root}materializations/{lease_b.job_id}/{lease_b.lease_epoch}/"
+    )
+    stable_key = f"{root}manifest.yaml"
+    legacy_key = f"{root}tasks/legacy/task.toml"
+    unknown_key = f"{root}materializations/not-a-uuid/0/tasks/unknown/task.toml"
+    malformed_key = f"{root}materializations/{lease_b.job_id}/01/tasks/bad/task.toml"
+    future_key = (
+        f"{root}materializations/{lease_b.job_id}/{lease_b.lease_epoch + 1}/"
+        "tasks/future/task.toml"
+    )
+    for key in (stable_key, legacy_key, unknown_key, malformed_key, future_key):
+        app.state.minio_client.put_object(
+            Bucket=app.state.settings.artifacts_bucket,
+            Key=key,
+            Body=b"must-survive",
+        )
+
+    async with app.state.session_factory() as session:
+        result = await purge_abandoned_materialization_generations(
+            session,
+            minio_client=app.state.minio_client,
+            artifacts_bucket=app.state.settings.artifacts_bucket,
+            object_delete_budget=10,
+        )
+
+    assert result.deleted_objects == 1
+    assert _object_keys(app, prefix=loser_prefix) == set()
+    assert _object_keys(app, prefix=winner_prefix)
+    for key in (stable_key, legacy_key, unknown_key, malformed_key, future_key):
+        assert key in _object_keys(app, prefix=key)
+    assert output_a.task_rows[0].source != output_b.task_rows[0].source
+
+
+@pytest.mark.asyncio
+async def test_live_generation_gc_preserves_active_epoch_and_resumes_at_budget(
+    materialization_setup,
+) -> None:
+    app, tokens, teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    async with app.state.session_factory() as session:
+        claimed = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by="generation-gc-active-owner",
+        )
+    lease = claimed[0]
+    async with app.state.session_factory() as session:
+        await taskset_materializer._start_job(session, lease=lease)
+    _stage_output_for_lease(
+        app,
+        team_id=teams["team_a"],
+        slug="inline-tasks",
+        lease=lease,
+        task_set_id=task_set_id,
+        task_name="active",
+    )
+    generation_prefix = (
+        f"tasksets/user/{teams['team_a']}/inline-tasks/materializations/"
+        f"{lease.job_id}/{lease.lease_epoch}/"
+    )
+    for name in ("one", "two"):
+        app.state.minio_client.put_object(
+            Bucket=app.state.settings.artifacts_bucket,
+            Key=f"{generation_prefix}tasks/active/{name}.txt",
+            Body=name.encode(),
+        )
+
+    async with app.state.session_factory() as session:
+        active_result = await purge_abandoned_materialization_generations(
+            session,
+            minio_client=app.state.minio_client,
+            artifacts_bucket=app.state.settings.artifacts_bucket,
+            object_delete_budget=2,
+        )
+    assert active_result.deleted_objects == 0
+    assert len(_object_keys(app, prefix=generation_prefix)) == 3
+
+    async with app.state.session_factory() as session:
+        await taskset_materializer._fail_lease(
+            session,
+            lease=lease,
+            failure_reason="test_terminal_failure",
+            failure_message="make the staged generation collectable",
+            claim_ttl_sec=60,
+        )
+    async with app.state.session_factory() as session:
+        first_pass = await purge_abandoned_materialization_generations(
+            session,
+            minio_client=app.state.minio_client,
+            artifacts_bucket=app.state.settings.artifacts_bucket,
+            object_delete_budget=2,
+        )
+    assert first_pass.deleted_objects == 2
+    assert first_pass.partial is True
+    assert len(_object_keys(app, prefix=generation_prefix)) == 1
+
+    async with app.state.session_factory() as session:
+        second_pass = await purge_abandoned_materialization_generations(
+            session,
+            minio_client=app.state.minio_client,
+            artifacts_bucket=app.state.settings.artifacts_bucket,
+            object_delete_budget=2,
+        )
+    assert second_pass.deleted_objects == 1
+    assert second_pass.partial is False
+    assert _object_keys(app, prefix=generation_prefix) == set()
+
+
+@pytest.mark.asyncio
+async def test_soft_delete_gc_uses_taskset_root_delimiter(materialization_setup) -> None:
+    app, _tokens, teams = materialization_setup
+    deleted_at = datetime.now(UTC) - timedelta(days=8)
+    alpha_id = f"ts/{teams['team_a']}/alpha"
+    alpha_next_id = f"ts/{teams['team_a']}/alpha-next"
+    async with app.state.session_factory() as session:
+        session.add_all([
+            TaskSet(
+                id=alpha_id,
+                owning_team_id=teams["team_a"],
+                slug="alpha",
+                display_name="Alpha",
+                visibility="private",
+                status="deleted",
+                intents=["trajectory_generation"],
+                manifest_blob_uri="s3://artifacts/alpha/manifest.yaml",
+                soft_deleted_at=deleted_at,
+            ),
+            TaskSet(
+                id=alpha_next_id,
+                owning_team_id=teams["team_a"],
+                slug="alpha-next",
+                display_name="Alpha Next",
+                visibility="private",
+                status="ready",
+                intents=["trajectory_generation"],
+                manifest_blob_uri="s3://artifacts/alpha-next/manifest.yaml",
+            ),
+        ])
+        await session.commit()
+
+    alpha_key = f"tasksets/user/{teams['team_a']}/alpha/manifest.yaml"
+    alpha_next_key = f"tasksets/user/{teams['team_a']}/alpha-next/manifest.yaml"
+    for key in (alpha_key, alpha_next_key):
+        app.state.minio_client.put_object(
+            Bucket=app.state.settings.artifacts_bucket,
+            Key=key,
+            Body=b"root-gc",
+        )
+
+    async with app.state.session_factory() as session:
+        assert await purge_expired_task_sets(
+            session,
+            minio_client=app.state.minio_client,
+            artifacts_bucket=app.state.settings.artifacts_bucket,
+            retention_days=7,
+        ) == 1
+
+    assert alpha_key not in _object_keys(app, prefix=alpha_key)
+    assert alpha_next_key in _object_keys(app, prefix=alpha_next_key)
+
+
+@pytest.mark.asyncio
+async def test_rebuild_quota_counts_existing_taskset_root_bytes(
+    materialization_setup,
+) -> None:
+    app, tokens, teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    await _run_materializer_once(app)
+
+    async with app.state.session_factory() as session:
+        published_rows = tuple(sorted(
+            (row.id, row.source)
+            for row in (await session.execute(
+                select(Task).where(Task.task_set_id == task_set_id),
+            )).scalars().all()
+        ))
+        published_bytes = team_taskset_storage_bytes(
+            app.state.minio_client,
+            bucket=app.state.settings.artifacts_bucket,
+            team_id=teams["team_a"],
+        )
+        quota = await session.get(TeamQuota, teams["team_a"])
+        assert published_rows
+        assert published_bytes > 0
+        assert quota is not None
+        quota.taskset_max_storage_bytes = published_bytes
+        await rebuild_task_set(
+            session,
+            team_id=teams["team_a"],
+            task_set_id=task_set_id,
+        )
+
+    await _run_materializer_once(app)
+
+    async with app.state.session_factory() as session:
+        rows_after = tuple(sorted(
+            (row.id, row.source)
+            for row in (await session.execute(
+                select(Task).where(Task.task_set_id == task_set_id),
+            )).scalars().all()
+        ))
+        latest_job = await get_latest_job(session, task_set_id)
+    assert latest_job is not None
+    assert rows_after == published_rows
+    assert latest_job.state == "failed"
+    assert latest_job.failure_reason == "size_exceeded"
 
 
 @pytest.mark.asyncio
@@ -1215,6 +1521,43 @@ async def test_materialization_db_failure_after_staging_keeps_published_generati
         Bucket=app.state.settings.artifacts_bucket,
         Prefix=f"tasksets/user/{teams['team_a']}/inline-tasks/tasks/",
     ).get("Contents", []) == []
+
+    staged_prefix = (
+        f"tasksets/user/{teams['team_a']}/inline-tasks/materializations/"
+        f"{lease.job_id}/{lease.lease_epoch}/"
+    )
+    async with app.state.session_factory() as session:
+        active_gc = await purge_abandoned_materialization_generations(
+            session,
+            minio_client=app.state.minio_client,
+            artifacts_bucket=app.state.settings.artifacts_bucket,
+        )
+    assert active_gc.deleted_objects == 0
+    assert _object_keys(app, prefix=staged_prefix)
+
+    async with app.state.session_factory() as session:
+        await taskset_materializer._fail_lease(
+            session,
+            lease=lease,
+            failure_reason="db_error_terminalized",
+            failure_message="the forced database error left staged output",
+            claim_ttl_sec=60,
+        )
+    async with app.state.session_factory() as session:
+        terminal_gc = await purge_abandoned_materialization_generations(
+            session,
+            minio_client=app.state.minio_client,
+            artifacts_bucket=app.state.settings.artifacts_bucket,
+        )
+        rows_after_gc = tuple(sorted(
+            (row.id, row.source)
+            for row in (await session.execute(
+                select(Task).where(Task.task_set_id == task_set_id),
+            )).scalars().all()
+        ))
+    assert terminal_gc.deleted_objects == 1
+    assert _object_keys(app, prefix=staged_prefix) == set()
+    assert rows_after_gc == rows_after_failure
 
 
 @pytest.mark.asyncio

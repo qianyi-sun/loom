@@ -2,8 +2,64 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from uuid import UUID
+
+_TASKSET_SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$")
+
+
+def _validated_taskset_slug(slug: str) -> str:
+    if not isinstance(slug, str) or not _TASKSET_SLUG_RE.fullmatch(slug):
+        raise ValueError("task set slug must use the canonical lowercase slug grammar")
+    return slug
+
+
+def _canonical_job_id(job_id: UUID) -> UUID:
+    if not isinstance(job_id, UUID):
+        raise ValueError("materialization job id must be a UUID")
+    return job_id
+
+
+def _canonical_epoch(epoch: int) -> int:
+    if type(epoch) is not int or epoch < 0:
+        raise ValueError("materialization epoch must be a nonnegative integer")
+    return epoch
+
+
+def taskset_root(*, team_id: UUID | str, slug: str) -> str:
+    """Return the canonical, delimiter-terminated TaskSet root."""
+    return f"tasksets/user/{team_id}/{_validated_taskset_slug(slug)}/"
+
+
+def generation_root(*, team_id: UUID | str, slug: str) -> str:
+    """Return the canonical, delimiter-terminated generated-output root."""
+    return f"{taskset_root(team_id=team_id, slug=slug)}materializations/"
+
+
+def generation_prefix(
+    *,
+    team_id: UUID | str,
+    slug: str,
+    job_id: UUID,
+    epoch: int,
+) -> str:
+    """Return one exact, DB-derived staged-generation prefix."""
+    return (
+        f"{generation_root(team_id=team_id, slug=slug)}{_canonical_job_id(job_id)}/"
+        f"{_canonical_epoch(epoch)}/"
+    )
+
+
+def generated_tasks_prefix(
+    *,
+    team_id: UUID | str,
+    slug: str,
+    job_id: UUID,
+    epoch: int,
+) -> str:
+    """Return the canonical generated task-data prefix for one lease."""
+    return f"{generation_prefix(team_id=team_id, slug=slug, job_id=job_id, epoch=epoch)}tasks/"
 
 
 def prefix_storage_bytes(

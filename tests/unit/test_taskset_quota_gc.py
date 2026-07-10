@@ -372,6 +372,101 @@ class TestTeamStorageBytes:
         assert baseline == 1000
 
 
+class TestMaterializationGenerationPrefixes:
+    """Canonical prefix construction for fenced generated output."""
+
+    def test_generation_prefixes_are_delimited_and_canonical(self) -> None:
+        from loom.taskset.storage_bytes import (
+            generated_tasks_prefix,
+            generation_prefix,
+            generation_root,
+            taskset_root,
+        )
+
+        team_id = str(uuid4())
+        job_id = uuid4()
+        root = taskset_root(team_id=team_id, slug="alpha")
+
+        assert root == f"tasksets/user/{team_id}/alpha/"
+        assert generation_root(team_id=team_id, slug="alpha") == (
+            f"{root}materializations/"
+        )
+        assert generation_prefix(
+            team_id=team_id,
+            slug="alpha",
+            job_id=job_id,
+            epoch=7,
+        ) == f"{root}materializations/{job_id}/7/"
+        assert generated_tasks_prefix(
+            team_id=team_id,
+            slug="alpha",
+            job_id=job_id,
+            epoch=7,
+        ) == f"{root}materializations/{job_id}/7/tasks/"
+
+    @pytest.mark.parametrize(
+        ("slug", "job_id", "epoch"),
+        [
+            ("Alpha", uuid4(), 0),
+            ("alpha/next", uuid4(), 0),
+            ("alpha", "not-a-uuid", 0),
+            ("alpha", uuid4(), -1),
+            ("alpha", uuid4(), True),
+        ],
+    )
+    def test_generation_prefix_rejects_noncanonical_delete_inputs(
+        self,
+        slug: str,
+        job_id: object,
+        epoch: object,
+    ) -> None:
+        from loom.taskset.storage_bytes import generation_prefix
+
+        with pytest.raises(ValueError):
+            generation_prefix(
+                team_id=str(uuid4()),
+                slug=slug,
+                job_id=job_id,
+                epoch=epoch,
+            )
+
+
+class TestBoundedPrefixDeletion:
+    """S3 deletion reports errors and respects the per-sweep budget."""
+
+    def test_delete_prefix_counts_errors_without_claiming_success(self) -> None:
+        from loom_service.taskset_gc import _delete_s3_prefix
+
+        client = MagicMock()
+        client.get_paginator.return_value.paginate.return_value = [{
+            "Contents": [
+                {"Key": "prefix/one"},
+                {"Key": "prefix/two"},
+                {"Key": "prefix/three"},
+            ],
+        }]
+        client.delete_objects.return_value = {
+            "Deleted": [{"Key": "prefix/one"}],
+            "Errors": [{"Key": "prefix/two", "Code": "AccessDenied"}],
+        }
+
+        result = _delete_s3_prefix(
+            client,
+            bucket="artifacts",
+            prefix="prefix/",
+            max_objects=2,
+        )
+
+        assert result.attempted_objects == 2
+        assert result.deleted_objects == 1
+        assert result.error_objects == 1
+        assert result.partial is True
+        client.delete_objects.assert_called_once_with(
+            Bucket="artifacts",
+            Delete={"Objects": [{"Key": "prefix/one"}, {"Key": "prefix/two"}]},
+        )
+
+
 class TestStorageQuotaCheckLogic:
     """Tests for team storage quota enforcement at submit."""
 

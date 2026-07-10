@@ -638,13 +638,13 @@ description = "Maximum bytes a single TaskSet bundle may occupy (5 GiB). Materia
 used_by     = ["loom-service"]
 python_type = "int"
 default     = 7
-description = "Days after soft_deleted_at before GC purges TaskSet blobs and hard-deletes the row."
+description = "Days after soft_deleted_at before GC removes the complete TaskSet root and hard-deletes the row; it does not control live generation cleanup."
 
 [service_config.taskset_gc_poll_interval_sec]
 used_by     = ["loom-service"]
 python_type = "int"
 default     = 3600
-description = "Poll interval in seconds for the TaskSet garbage collection background loop."
+description = "Poll interval in seconds for both bounded live-generation reconciliation and retention-delayed TaskSet root GC."
 
 [service_config.taskset_manifest_max_bytes]
 used_by     = ["loom-service"]
