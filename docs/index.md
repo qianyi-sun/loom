@@ -67,6 +67,8 @@ Quickest entry points:
   (component map, modes, data flow)
 - **[architecture/service-mode.md](architecture/service-mode.md)** —
   Control Plane + Worker + LLM Gateway + Postgres + MinIO
+- **[architecture/terminus2-runtime.md](architecture/terminus2-runtime.md)** —
+  Harbor-embedded `terminus-2` agent: events, worker image, staging smoke
 - **[architecture/cli-mode.md](architecture/cli-mode.md)** — the `loom` CLI
   as a stateless wrapper around `Trial.run()`
 - **[architecture/adr/](architecture/adr/README.md)** — architecture

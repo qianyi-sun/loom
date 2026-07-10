@@ -4,6 +4,9 @@ Loom embeds pinned Harbor `Terminus2` in the worker image (`deploy/Dockerfile.wo
 Conformance against Harbor `v0.18.0@527d50d` is validated by running the real agent in
 worker integration tests when Harbor is installed (`pytest.importorskip("harbor")`).
 
+Operator and contributor architecture notes:
+[`docs/architecture/terminus2-runtime.md`](../../../docs/architecture/terminus2-runtime.md).
+
 To exercise Harbor-backed paths locally:
 
 ```bash
