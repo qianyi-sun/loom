@@ -542,6 +542,306 @@ async def test_materialization_reclaims_only_stale_lease_heartbeats(
 
 
 @pytest.mark.asyncio
+async def test_materialization_heartbeats_while_blocked_in_threaded_work(
+    materialization_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, tokens, _teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    loop = asyncio.get_running_loop()
+    materialization_started = asyncio.Event()
+    enough_heartbeats = asyncio.Event()
+    release_materialization = threading.Event()
+    heartbeat_count = 0
+
+    def blocking_materialize(**_kwargs: object) -> MaterializeOutput:
+        loop.call_soon_threadsafe(materialization_started.set)
+        assert release_materialization.wait(timeout=5)
+        return MaterializeOutput(
+            task_rows=[
+                TaskRowDraft(
+                    id=f"{task_set_id}/tasks/heartbeat-owner",
+                    checksum="heartbeat-checksum",
+                    config={"task": {"id": "heartbeat-owner"}},
+                    source="s3://staged/heartbeat-owner/",
+                ),
+            ],
+            task_count=1,
+            status="ready",
+            evaluation_ready=True,
+        )
+
+    original_heartbeat = taskset_materializer._heartbeat_lease
+
+    async def observe_heartbeat(*args: object, **kwargs: object) -> None:
+        nonlocal heartbeat_count
+        await original_heartbeat(*args, **kwargs)
+        heartbeat_count += 1
+        if heartbeat_count == 4:
+            enough_heartbeats.set()
+
+    monkeypatch.setattr(taskset_materializer, "materialize_task_set", blocking_materialize)
+    monkeypatch.setattr(taskset_materializer, "_heartbeat_lease", observe_heartbeat)
+
+    async with app.state.session_factory() as session:
+        claimed = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by="blocking-heartbeat-owner",
+        )
+    assert len(claimed) == 1
+    lease = claimed[0]
+
+    owner_task = asyncio.create_task(
+        taskset_materializer._materialize_claimed_job(
+            app.state.session_factory,
+            job_id=lease.id,
+            lease=lease,
+            minio_client=app.state.minio_client,
+            artifacts_bucket=app.state.settings.artifacts_bucket,
+            upstream_cache_root=app.state.settings.taskset_materializer_upstream_cache_root,
+            transform_config=TransformSandboxConfig(enabled=False, network_isolated=False),
+            claim_ttl_sec=1,
+        ),
+    )
+    try:
+        await asyncio.wait_for(materialization_started.wait(), timeout=5)
+        # Four periodic heartbeats require the owner to outlive the one-second
+        # test TTL while the blocking ``to_thread`` materialization is still live.
+        await asyncio.wait_for(enough_heartbeats.wait(), timeout=5)
+        async with app.state.session_factory() as session:
+            assert await taskset_materializer.reclaim_stale_jobs(
+                session,
+                claim_ttl_sec=1,
+            ) == 0
+            job_while_blocked = await session.get(TaskSetMaterializationJob, lease.id)
+        assert job_while_blocked is not None
+        assert job_while_blocked.state == "running"
+        assert job_while_blocked.lease_epoch == lease.lease_epoch
+    finally:
+        release_materialization.set()
+        owner_result = (await asyncio.wait_for(
+            asyncio.gather(owner_task, return_exceptions=True),
+            timeout=5,
+        ))[0]
+
+    assert owner_result is None
+    async with app.state.session_factory() as session:
+        job_after = await session.get(TaskSetMaterializationJob, lease.id)
+        rows_after = (await session.execute(
+            select(Task).where(Task.task_set_id == task_set_id),
+        )).scalars().all()
+    assert job_after is not None
+    assert job_after.state == "succeeded"
+    assert [row.id for row in rows_after] == [f"{task_set_id}/tasks/heartbeat-owner"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_materializer_cannot_publish_after_blocking_work_resumes(
+    materialization_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, tokens, teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    loop = asyncio.get_running_loop()
+    materialization_started = asyncio.Event()
+    release_materialization = threading.Event()
+
+    def blocking_materialize(**_kwargs: object) -> MaterializeOutput:
+        loop.call_soon_threadsafe(materialization_started.set)
+        assert release_materialization.wait(timeout=5)
+        return MaterializeOutput(
+            task_rows=[
+                TaskRowDraft(
+                    id=f"{task_set_id}/tasks/cancelled-owner",
+                    checksum="cancelled-checksum",
+                    config={"task": {"id": "cancelled-owner"}},
+                    source="s3://staged/cancelled-owner/",
+                ),
+            ],
+            task_count=1,
+            status="ready",
+            evaluation_ready=True,
+        )
+
+    monkeypatch.setattr(taskset_materializer, "materialize_task_set", blocking_materialize)
+    async with app.state.session_factory() as session:
+        claimed = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by="cancellation-owner",
+        )
+    assert len(claimed) == 1
+    lease = claimed[0]
+
+    owner_task = asyncio.create_task(
+        taskset_materializer._materialize_claimed_job(
+            app.state.session_factory,
+            job_id=lease.id,
+            lease=lease,
+            minio_client=app.state.minio_client,
+            artifacts_bucket=app.state.settings.artifacts_bucket,
+            upstream_cache_root=app.state.settings.taskset_materializer_upstream_cache_root,
+            transform_config=TransformSandboxConfig(enabled=False, network_isolated=False),
+        ),
+    )
+    try:
+        await asyncio.wait_for(materialization_started.wait(), timeout=5)
+        async with app.state.session_factory() as session:
+            await delete_task_set(
+                session,
+                team_id=teams["team_a"],
+                task_set_id=task_set_id,
+            )
+            cancelled_job = await session.get(TaskSetMaterializationJob, lease.id)
+            cancelled_task_set = await session.get(TaskSet, task_set_id)
+        assert cancelled_job is not None
+        assert cancelled_task_set is not None
+        cancelled_job_snapshot = (
+            cancelled_job.state,
+            cancelled_job.lease_epoch,
+            cancelled_job.claimed_by,
+            cancelled_job.finished_at,
+        )
+        cancelled_task_set_snapshot = (
+            cancelled_task_set.status,
+            cancelled_task_set.soft_deleted_at,
+            cancelled_task_set.task_count,
+            cancelled_task_set.evaluation_ready,
+        )
+    finally:
+        release_materialization.set()
+        owner_result = (await asyncio.wait_for(
+            asyncio.gather(owner_task, return_exceptions=True),
+            timeout=5,
+        ))[0]
+
+    assert isinstance(owner_result, taskset_materializer.LeaseLost)
+    async with app.state.session_factory() as session:
+        job_after = await session.get(TaskSetMaterializationJob, lease.id)
+        task_set_after = await session.get(TaskSet, task_set_id)
+        rows_after = (await session.execute(
+            select(Task).where(Task.task_set_id == task_set_id),
+        )).scalars().all()
+    assert job_after is not None
+    assert task_set_after is not None
+    assert (
+        job_after.state,
+        job_after.lease_epoch,
+        job_after.claimed_by,
+        job_after.finished_at,
+    ) == cancelled_job_snapshot
+    assert (
+        task_set_after.status,
+        task_set_after.soft_deleted_at,
+        task_set_after.task_count,
+        task_set_after.evaluation_ready,
+    ) == cancelled_task_set_snapshot
+    assert rows_after == []
+
+
+@pytest.mark.asyncio
+async def test_crash_after_staged_upload_leaves_only_orphaned_generation_output(
+    materialization_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, tokens, teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    loop = asyncio.get_running_loop()
+    upload_completed = asyncio.Event()
+    materialization_finished = asyncio.Event()
+    release_materialization = threading.Event()
+
+    async with app.state.session_factory() as session:
+        claimed = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by="crash-after-upload-owner",
+        )
+    assert len(claimed) == 1
+    lease = claimed[0]
+    output_key = (
+        f"tasksets/user/{teams['team_a']}/inline-tasks/materializations/"
+        f"{lease.job_id}/{lease.lease_epoch}/tasks/crash-after-upload/task.toml"
+    )
+
+    def stage_then_block(**_kwargs: object) -> MaterializeOutput:
+        app.state.minio_client.put_object(
+            Bucket=app.state.settings.artifacts_bucket,
+            Key=output_key,
+            Body=b"version = '1'\n",
+        )
+        loop.call_soon_threadsafe(upload_completed.set)
+        try:
+            assert release_materialization.wait(timeout=5)
+        finally:
+            loop.call_soon_threadsafe(materialization_finished.set)
+        return MaterializeOutput(
+            task_rows=[
+                TaskRowDraft(
+                    id=f"{task_set_id}/tasks/crash-after-upload",
+                    checksum="crash-after-upload-checksum",
+                    config={"task": {"id": "crash-after-upload"}},
+                    source=(
+                        f"s3://{app.state.settings.artifacts_bucket}/"
+                        f"{output_key.rsplit('/', 1)[0]}/"
+                    ),
+                ),
+            ],
+            task_count=1,
+            status="ready",
+            evaluation_ready=True,
+        )
+
+    monkeypatch.setattr(taskset_materializer, "materialize_task_set", stage_then_block)
+    owner_task = asyncio.create_task(
+        taskset_materializer._materialize_claimed_job(
+            app.state.session_factory,
+            job_id=lease.id,
+            lease=lease,
+            minio_client=app.state.minio_client,
+            artifacts_bucket=app.state.settings.artifacts_bucket,
+            upstream_cache_root=app.state.settings.taskset_materializer_upstream_cache_root,
+            transform_config=TransformSandboxConfig(enabled=False, network_isolated=False),
+        ),
+    )
+    try:
+        await asyncio.wait_for(upload_completed.wait(), timeout=5)
+        owner_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(owner_task, timeout=5)
+    finally:
+        release_materialization.set()
+        if upload_completed.is_set():
+            await asyncio.wait_for(materialization_finished.wait(), timeout=5)
+
+    async with app.state.session_factory() as session:
+        job_after = await session.get(TaskSetMaterializationJob, lease.id)
+        task_set_after = await session.get(TaskSet, task_set_id)
+        rows_after = (await session.execute(
+            select(Task).where(Task.task_set_id == task_set_id),
+        )).scalars().all()
+    assert job_after is not None
+    assert task_set_after is not None
+    assert (
+        job_after.state,
+        job_after.lease_epoch,
+        job_after.claimed_by,
+        job_after.published_materialization_generation,
+    ) == ("running", lease.lease_epoch, lease.claimed_by, 0)
+    assert (
+        task_set_after.status,
+        task_set_after.task_count,
+        task_set_after.evaluation_ready,
+    ) == ("materializing", 0, False)
+    assert rows_after == []
+    assert app.state.minio_client.get_object(
+        Bucket=app.state.settings.artifacts_bucket,
+        Key=output_key,
+    )["Body"].read() == b"version = '1'\n"
+
+
+@pytest.mark.asyncio
 async def test_materialization_stale_owner_cannot_overwrite_reclaimed_winner(
     materialization_setup,
     monkeypatch: pytest.MonkeyPatch,
