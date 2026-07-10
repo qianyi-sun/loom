@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -83,7 +82,6 @@ class LoomTerminus2Runtime:
     trial_id: UUID
     cp_client: Any
     gateway_url: str
-    agent_gateway_url: str | None = None
     name: str = "terminus-2"
     mode: Literal["out-of-box", "in-box"] = "in-box"
     version: str = LOOM_BRIDGE_REVISION
@@ -121,7 +119,7 @@ class LoomTerminus2Runtime:
             step_id=step_id,
             ttl_sec=self.step_token_ttl_sec,
         )
-        api_base = _openai_gateway_base(self.agent_gateway_url or self.gateway_url)
+        api_base = _openai_gateway_base(self.gateway_url)
 
         logs_root = Path(tempfile.mkdtemp(prefix=f"loom-terminus2-{self.trial_id}-"))
         trial_paths = make_trial_paths(logs_root)
@@ -176,11 +174,6 @@ class LoomTerminus2Runtime:
 
         poll_task = asyncio.create_task(_poll_checkpoints())
 
-        prior_api_key = os.environ.get("OPENAI_API_KEY")
-        prior_base = os.environ.get("OPENAI_BASE_URL")
-        os.environ["OPENAI_API_KEY"] = step_token
-        os.environ["OPENAI_BASE_URL"] = api_base
-
         try:
             await agent.setup(harbor_env)
             await agent.run(instruction, harbor_env, context)
@@ -208,14 +201,6 @@ class LoomTerminus2Runtime:
                 env, logs_root, self.workdir,
             )
             await bridge.emit_artifact_refs(logs_root, sandbox_paths=sandbox_paths)
-            if prior_api_key is None:
-                os.environ.pop("OPENAI_API_KEY", None)
-            else:
-                os.environ["OPENAI_API_KEY"] = prior_api_key
-            if prior_base is None:
-                os.environ.pop("OPENAI_BASE_URL", None)
-            else:
-                os.environ["OPENAI_BASE_URL"] = prior_base
 
         if not trajectory_path.is_file():
             raise AgentError(

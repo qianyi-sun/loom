@@ -242,7 +242,7 @@ async def _run_one_agent_smoke(
                 team_id,
                 trial_id,
                 cp_client=_StepTokenClient(),
-                gateway_url=gateway_url,
+                worker_gateway_url=gateway_url,
             ),
             verifier_factory=lambda: _PassVerifier(),
             object_store=FakeObjectStore(),
