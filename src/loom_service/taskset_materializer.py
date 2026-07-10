@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from loom.db.schema import Task, TaskSet, TaskSetManifest, TaskSetMaterializationJob, TeamQuota
 from loom.models.taskset import UserTaskSetManifest
 from loom.taskset.materialize import MaterializeOutput, materialize_task_set
-from loom.taskset.storage_bytes import team_storage_baseline_excluding_task_set
+from loom.taskset.storage_bytes import team_taskset_storage_bytes
 from loom.taskset.transform_sandbox import TransformSandboxConfig
 
 logger = logging.getLogger(__name__)
@@ -222,58 +222,46 @@ async def _start_job(
     await session.commit()
 
 
-async def _lease_attempt_count(
-    session: AsyncSession,
-    *,
-    lease: MaterializationLease,
-) -> tuple[int, int]:
-    row = (await session.execute(
-        select(
-            TaskSetMaterializationJob.attempt_count,
-            TaskSetMaterializationJob.max_attempts,
-        ).where(
-            *_lease_conditions(lease),
-            TaskSetMaterializationJob.state == "running",
-        ),
-    )).one_or_none()
-    if row is None:
-        await session.rollback()
-        raise LeaseLost()
-    return row.attempt_count, row.max_attempts
-
-
-async def _set_task_set_materializing(
-    session: AsyncSession,
-    *,
-    task_set_id: str,
-    status_reason: str | None,
-    now: datetime,
-) -> None:
-    result = await session.execute(
-        update(TaskSet)
-        .where(TaskSet.id == task_set_id)
-        .values(
-            status="materializing",
-            status_reason=status_reason,
-            updated_at=now,
-        )
-        .returning(TaskSet.id),
-    )
-    if len(result.scalars().all()) != 1:
-        await session.rollback()
-        raise LeaseLost()
-
-
-async def _finalize_job(
+async def publish_if_current(
     session: AsyncSession,
     *,
     lease: MaterializationLease,
     task_set_id: str,
     output: MaterializeOutput,
+    claim_ttl_sec: int,
 ) -> None:
-    """Publish a materialization result only from the current lease owner."""
+    """Atomically expose staged output only from a fresh current lease."""
     now = datetime.now(UTC)
-    attempt_count, max_attempts = await _lease_attempt_count(session, lease=lease)
+    cutoff = now - timedelta(seconds=claim_ttl_sec)
+    job = (await session.execute(
+        select(TaskSetMaterializationJob)
+        .where(
+            *_lease_conditions(lease),
+            TaskSetMaterializationJob.state == "running",
+            TaskSetMaterializationJob.lease_heartbeat_at.is_not(None),
+            TaskSetMaterializationJob.lease_heartbeat_at >= cutoff,
+        )
+        .with_for_update(),
+    )).scalar_one_or_none()
+    if job is None or job.task_set_id != task_set_id:
+        await session.rollback()
+        raise LeaseLost()
+
+    # Preserve Task 2's job-then-TaskSet lock order.
+    task_set = (await session.execute(
+        select(TaskSet)
+        .where(
+            TaskSet.id == task_set_id,
+            TaskSet.soft_deleted_at.is_(None),
+        )
+        .with_for_update(),
+    )).scalar_one_or_none()
+    if task_set is None:
+        await session.rollback()
+        raise LeaseLost()
+
+    attempt_count = job.attempt_count
+    max_attempts = job.max_attempts
     if output.retry_source and attempt_count < max_attempts:
         await _update_job_for_lease(
             session,
@@ -291,12 +279,22 @@ async def _finalize_job(
                 "updated_at": now,
             },
         )
-        await _set_task_set_materializing(
-            session,
-            task_set_id=task_set_id,
-            status_reason=output.status_reason,
-            now=now,
+        result = await session.execute(
+            update(TaskSet)
+            .where(
+                TaskSet.id == task_set_id,
+                TaskSet.soft_deleted_at.is_(None),
+            )
+            .values(
+                status="materializing",
+                status_reason=output.status_reason,
+                updated_at=now,
+            )
+            .returning(TaskSet.id),
         )
+        if len(result.scalars().all()) != 1:
+            await session.rollback()
+            raise LeaseLost()
         await session.commit()
         return
 
@@ -312,6 +310,9 @@ async def _finalize_job(
     state = "succeeded" if output.task_count > 0 else "failed"
     if output.job_failure_reason and output.task_count == 0:
         state = "failed"
+
+    # This transaction is the publication point: staged objects are not
+    # reachable until the Task rows below commit.
     await _update_job_for_lease(
         session,
         lease=lease,
@@ -323,12 +324,9 @@ async def _finalize_job(
             "failure_reason": output.job_failure_reason,
             "failure_message": output.job_failure_message,
             "error_summary": output.error_summary,
+            "published_materialization_generation": lease.lease_epoch,
         },
     )
-
-    # This transaction has already established the winner with the lease CAS.
-    # Do not delete existing rows before that check; a stale owner must never
-    # clear another generation's Task rows.
     await session.execute(delete(Task).where(Task.task_set_id == task_set_id))
     if output.task_rows:
         for row in output.task_rows:
@@ -344,7 +342,10 @@ async def _finalize_job(
             )
     result = await session.execute(
         update(TaskSet)
-        .where(TaskSet.id == task_set_id)
+        .where(
+            TaskSet.id == task_set_id,
+            TaskSet.soft_deleted_at.is_(None),
+        )
         .values(
             status=output.status,
             status_reason=output.status_reason,
@@ -492,18 +493,21 @@ async def _materialize_claimed_job(
         ),
     )
     try:
+        # Existing generated output remains referenced until publication. Count
+        # the full team total so staging reserves the required rebuild headroom
+        # without treating durable TaskSet inputs as replaceable bytes.
         team_storage_baseline = await asyncio.to_thread(
-            team_storage_baseline_excluding_task_set,
+            team_taskset_storage_bytes,
             minio_client,
             bucket=artifacts_bucket,
             team_id=owning_team_id,
-            slug=manifest.slug,
         )
         output = await asyncio.to_thread(
             materialize_task_set,
             manifest=manifest,
             task_set_id=task_set_id,
             owning_team_id=owning_team_id,
+            output_generation=f"{lease.job_id}/{lease.lease_epoch}",
             intents=intents,
             verifier_blob_uri=verifier_blob_uri,
             transform_blob_uri=transform_blob_uri,
@@ -521,11 +525,12 @@ async def _materialize_claimed_job(
     await _stop_heartbeat(heartbeat_task)
 
     async with session_factory() as session:
-        await _finalize_job(
+        await publish_if_current(
             session,
             lease=lease,
             task_set_id=task_set_id,
             output=output,
+            claim_ttl_sec=claim_ttl_sec,
         )
 
 

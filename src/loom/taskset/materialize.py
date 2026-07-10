@@ -340,6 +340,7 @@ def _materialize_bundle_upload(
     manifest: UserTaskSetManifest,
     task_set_id: str,
     owning_team_id: str,
+    output_generation: str,
     has_evaluation: bool,
     minio_client: Any,
     artifacts_bucket: str,
@@ -350,6 +351,7 @@ def _materialize_bundle_upload(
 ) -> MaterializeOutput:
     slug = manifest.slug
     prefix = _storage_prefix(team_id=owning_team_id, slug=slug)
+    generated_tasks_prefix = f"{prefix}/materializations/{output_generation}/tasks"
     bundle_key = bundle_object_key(
         prefix=prefix,
         relative_path=manifest.source.locator,
@@ -451,7 +453,7 @@ def _materialize_bundle_upload(
                         )
                         continue
                     checksum = task_checksum(bundle_dir)
-                    bundle_prefix = f"{prefix}/tasks/{short_id}"
+                    bundle_prefix = f"{generated_tasks_prefix}/{short_id}"
                     cumulative_bytes = _upload_bundle_dir(
                         minio_client,
                         bucket=artifacts_bucket,
@@ -540,6 +542,7 @@ def materialize_task_set(
     manifest: UserTaskSetManifest,
     task_set_id: str,
     owning_team_id: str,
+    output_generation: str,
     intents: list[str],
     verifier_blob_uri: str | None,
     transform_blob_uri: str | None = None,
@@ -554,6 +557,7 @@ def materialize_task_set(
     """Materialize one TaskSet synchronously. Caller owns DB writes."""
     slug = manifest.slug
     prefix = _storage_prefix(team_id=owning_team_id, slug=slug)
+    generated_tasks_prefix = f"{prefix}/materializations/{output_generation}/tasks"
     has_evaluation = "evaluation" in intents
     max_instances = (manifest.limits.max_instances if manifest.limits else 500)
 
@@ -573,6 +577,7 @@ def materialize_task_set(
             manifest=manifest,
             task_set_id=task_set_id,
             owning_team_id=owning_team_id,
+            output_generation=output_generation,
             has_evaluation=has_evaluation,
             minio_client=minio_client,
             artifacts_bucket=artifacts_bucket,
@@ -666,7 +671,7 @@ def materialize_task_set(
                         )
                         continue
                     checksum = task_checksum(bundle_dir)
-                    bundle_prefix = f"{prefix}/tasks/{short_id}"
+                    bundle_prefix = f"{generated_tasks_prefix}/{short_id}"
                     cumulative_bytes = _upload_bundle_dir(
                         minio_client,
                         bucket=artifacts_bucket,

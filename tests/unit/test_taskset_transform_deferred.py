@@ -61,6 +61,7 @@ def test_v1_contract_rejects_transform_before_blob_fetch_or_runner() -> None:
             manifest=manifest,
             task_set_id="ts/team/tasks",
             owning_team_id="team",
+            output_generation="unit-test/1",
             intents=["trajectory_generation"],
             verifier_blob_uri=None,
             transform_blob_uri="s3://artifacts/x/transform.py",

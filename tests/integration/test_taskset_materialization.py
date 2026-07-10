@@ -20,6 +20,7 @@ from botocore.config import Config
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import create_engine, delete, event, insert, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from testcontainers.minio import MinioContainer
@@ -34,7 +35,7 @@ from loom.db.schema import (
     Token,
     User,
 )
-from loom.taskset.materialize import MaterializeOutput
+from loom.taskset.materialize import MaterializeOutput, TaskRowDraft
 from loom.taskset.transform_sandbox import TransformSandboxConfig
 from loom_service import taskset_materializer
 from loom_service.app import create_app
@@ -366,6 +367,40 @@ async def _submit_inline_task_set(
     return response.json()["task_set_id"]
 
 
+def _stage_output_for_lease(
+    app: FastAPI,
+    *,
+    team_id: UUID,
+    slug: str,
+    lease: taskset_materializer.MaterializationLease,
+    task_set_id: str,
+    task_name: str,
+) -> MaterializeOutput:
+    """Write a disposable generated object and return its staged Task row."""
+    output_prefix = (
+        f"tasksets/user/{team_id}/{slug}/materializations/"
+        f"{lease.job_id}/{lease.lease_epoch}/tasks/{task_name}"
+    )
+    app.state.minio_client.put_object(
+        Bucket=app.state.settings.artifacts_bucket,
+        Key=f"{output_prefix}/task.toml",
+        Body=b"version = '1'\n",
+    )
+    return MaterializeOutput(
+        task_rows=[
+            TaskRowDraft(
+                id=f"{task_set_id}/tasks/{task_name}",
+                checksum=f"checksum-{task_name}",
+                config={"task": {"id": task_name}},
+                source=f"s3://{app.state.settings.artifacts_bucket}/{output_prefix}/",
+            ),
+        ],
+        task_count=1,
+        status="ready",
+        evaluation_ready=True,
+    )
+
+
 @pytest.mark.asyncio
 async def test_delete_locks_active_job_before_task_set_and_revokes_lease(
     materialization_setup,
@@ -644,6 +679,241 @@ async def test_materialization_stale_owner_cannot_overwrite_reclaimed_winner(
     ) == winner_snapshot
     lease_lost = getattr(taskset_materializer, "LeaseLost", RuntimeError)
     assert isinstance(owner_a_result, lease_lost)
+
+
+@pytest.mark.asyncio
+async def test_materialization_staged_loser_cannot_publish_over_winner(
+    materialization_setup,
+) -> None:
+    app, tokens, teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    owner_a = "test-owner-a"
+    owner_b = "test-owner-b"
+
+    async with app.state.session_factory() as session:
+        claimed_by_a = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by=owner_a,
+        )
+    lease_a = claimed_by_a[0]
+    async with app.state.session_factory() as session:
+        await taskset_materializer._start_job(session, lease=lease_a)
+    output_a = _stage_output_for_lease(
+        app,
+        team_id=teams["team_a"],
+        slug="inline-tasks",
+        lease=lease_a,
+        task_set_id=task_set_id,
+        task_name="stale-owner-a",
+    )
+
+    async with app.state.session_factory() as session:
+        await session.execute(
+            update(TaskSetMaterializationJob)
+            .where(TaskSetMaterializationJob.id == lease_a.id)
+            .values(lease_heartbeat_at=datetime.now(UTC) - timedelta(minutes=5)),
+        )
+        await session.commit()
+        assert await taskset_materializer.reclaim_stale_jobs(
+            session,
+            claim_ttl_sec=60,
+        ) == 1
+        await session.execute(
+            update(TaskSetMaterializationJob)
+            .where(TaskSetMaterializationJob.id == lease_a.id)
+            .values(next_attempt_at=datetime.now(UTC) - timedelta(seconds=1)),
+        )
+        await session.commit()
+        claimed_by_b = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by=owner_b,
+        )
+    lease_b = claimed_by_b[0]
+    async with app.state.session_factory() as session:
+        await taskset_materializer._start_job(session, lease=lease_b)
+    output_b = _stage_output_for_lease(
+        app,
+        team_id=teams["team_a"],
+        slug="inline-tasks",
+        lease=lease_b,
+        task_set_id=task_set_id,
+        task_name="winner-b",
+    )
+
+    async with app.state.session_factory() as session:
+        await taskset_materializer.publish_if_current(
+            session,
+            lease=lease_b,
+            task_set_id=task_set_id,
+            output=output_b,
+            claim_ttl_sec=60,
+        )
+
+    async with app.state.session_factory() as session:
+        winner_rows_before = tuple(sorted(
+            (row.id, row.source)
+            for row in (await session.execute(
+                select(Task).where(Task.task_set_id == task_set_id),
+            )).scalars().all()
+        ))
+        winner_task_set_before = await session.get(TaskSet, task_set_id)
+        winner_job_before = await session.get(TaskSetMaterializationJob, lease_b.id)
+    assert winner_task_set_before is not None
+    assert winner_job_before is not None
+    winner_snapshot = (
+        winner_rows_before,
+        winner_task_set_before.status,
+        winner_task_set_before.task_count,
+        winner_task_set_before.evaluation_ready,
+        winner_job_before.published_materialization_generation,
+    )
+    assert winner_rows_before == (
+        (f"{task_set_id}/tasks/winner-b", output_b.task_rows[0].source),
+    )
+    assert f"/materializations/{lease_b.job_id}/{lease_b.lease_epoch}/tasks/" in (
+        output_b.task_rows[0].source
+    )
+    assert winner_job_before.published_materialization_generation == lease_b.lease_epoch
+
+    async with app.state.session_factory() as session:
+        with pytest.raises(taskset_materializer.LeaseLost):
+            await taskset_materializer.publish_if_current(
+                session,
+                lease=lease_a,
+                task_set_id=task_set_id,
+                output=output_a,
+                claim_ttl_sec=60,
+            )
+
+    # The stale executor's crash path must be the same strict no-op.
+    async with app.state.session_factory() as session:
+        with pytest.raises(taskset_materializer.LeaseLost):
+            await taskset_materializer._fail_lease(
+                session,
+                lease=lease_a,
+                failure_reason="stale_owner_crashed",
+                failure_message="A resumed after B published",
+            )
+
+    async with app.state.session_factory() as session:
+        winner_rows_after = tuple(sorted(
+            (row.id, row.source)
+            for row in (await session.execute(
+                select(Task).where(Task.task_set_id == task_set_id),
+            )).scalars().all()
+        ))
+        winner_task_set_after = await session.get(TaskSet, task_set_id)
+        winner_job_after = await session.get(TaskSetMaterializationJob, lease_b.id)
+    assert winner_task_set_after is not None
+    assert winner_job_after is not None
+    assert (
+        winner_rows_after,
+        winner_task_set_after.status,
+        winner_task_set_after.task_count,
+        winner_task_set_after.evaluation_ready,
+        winner_job_after.published_materialization_generation,
+    ) == winner_snapshot
+
+
+@pytest.mark.asyncio
+async def test_materialization_db_failure_after_staging_keeps_published_generation(
+    materialization_setup,
+) -> None:
+    app, tokens, teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    old_source = (
+        f"s3://{app.state.settings.artifacts_bucket}/tasksets/user/{teams['team_a']}/"
+        "inline-tasks/materializations/original-job/0/tasks/old/"
+    )
+
+    async with app.state.session_factory() as session:
+        task_set = await session.get(TaskSet, task_set_id)
+        job = (await session.execute(
+            select(TaskSetMaterializationJob).where(
+                TaskSetMaterializationJob.task_set_id == task_set_id,
+            ),
+        )).scalar_one()
+        assert task_set is not None
+        task_set.status = "ready"
+        task_set.task_count = 1
+        task_set.evaluation_ready = True
+        job.published_materialization_generation = 0
+        session.add(
+            Task(
+                id=f"{task_set_id}/tasks/old",
+                checksum="old-checksum",
+                config={"task": {"id": "old"}},
+                source=old_source,
+                task_set_id=task_set_id,
+                benchmark_id=None,
+            ),
+        )
+        await session.commit()
+
+    async with app.state.session_factory() as session:
+        claimed = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by="db-error-owner",
+        )
+    lease = claimed[0]
+    async with app.state.session_factory() as session:
+        await taskset_materializer._start_job(session, lease=lease)
+    staged_output = _stage_output_for_lease(
+        app,
+        team_id=teams["team_a"],
+        slug="inline-tasks",
+        lease=lease,
+        task_set_id=task_set_id,
+        task_name="new",
+    )
+    duplicate_output = MaterializeOutput(
+        task_rows=staged_output.task_rows * 2,
+        task_count=2,
+        status="ready",
+        evaluation_ready=True,
+    )
+
+    async with app.state.session_factory() as session:
+        with pytest.raises(IntegrityError):
+            await taskset_materializer.publish_if_current(
+                session,
+                lease=lease,
+                task_set_id=task_set_id,
+                output=duplicate_output,
+                claim_ttl_sec=60,
+            )
+
+    async with app.state.session_factory() as session:
+        rows_after_failure = tuple(sorted(
+            (row.id, row.source)
+            for row in (await session.execute(
+                select(Task).where(Task.task_set_id == task_set_id),
+            )).scalars().all()
+        ))
+        task_set_after_failure = await session.get(TaskSet, task_set_id)
+        job_after_failure = await session.get(TaskSetMaterializationJob, lease.id)
+    assert task_set_after_failure is not None
+    assert job_after_failure is not None
+    assert rows_after_failure == ((f"{task_set_id}/tasks/old", old_source),)
+    assert task_set_after_failure.status == "ready"
+    assert task_set_after_failure.task_count == 1
+    assert task_set_after_failure.evaluation_ready is True
+    assert job_after_failure.state == "running"
+    assert job_after_failure.published_materialization_generation == 0
+    assert app.state.minio_client.get_object(
+        Bucket=app.state.settings.artifacts_bucket,
+        Key=(
+            f"tasksets/user/{teams['team_a']}/inline-tasks/materializations/"
+            f"{lease.job_id}/{lease.lease_epoch}/tasks/new/task.toml"
+        ),
+    )["Body"].read() == b"version = '1'\n"
+    assert app.state.minio_client.list_objects_v2(
+        Bucket=app.state.settings.artifacts_bucket,
+        Prefix=f"tasksets/user/{teams['team_a']}/inline-tasks/tasks/",
+    ).get("Contents", []) == []
 
 
 @pytest.mark.asyncio
@@ -947,6 +1217,7 @@ async def test_materialization_e2e_bundle_upload_preserves_per_task_assets(
 ) -> None:
     app, tokens, teams = materialization_setup
     settings = app.state.settings
+    bundle_archive = _bundle_tar_bytes()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         post = await client.post(
@@ -958,7 +1229,7 @@ async def test_materialization_e2e_bundle_upload_preserves_per_task_assets(
                     _MANIFEST_BUNDLE_UPLOAD.encode(),
                     "application/x-yaml",
                 ),
-                "bundle": ("bundle.tar.gz", _bundle_tar_bytes(), "application/gzip"),
+                "bundle": ("bundle.tar.gz", bundle_archive, "application/gzip"),
             },
         )
         assert post.status_code == 202, post.text
@@ -980,6 +1251,11 @@ async def test_materialization_e2e_bundle_upload_preserves_per_task_assets(
         row = (await session.execute(
             select(Task).where(Task.task_set_id == task_set_id),
         )).scalar_one()
+        job = (await session.execute(
+            select(TaskSetMaterializationJob).where(
+                TaskSetMaterializationJob.task_set_id == task_set_id,
+            ),
+        )).scalar_one()
 
     assert row.id == (
         f"{task_set_id}/tasks/source-useful-frontier-5003_alpha"
@@ -987,10 +1263,25 @@ async def test_materialization_e2e_bundle_upload_preserves_per_task_assets(
     assert row.config["task"]["id"] == "source-useful-frontier-5003/alpha"
     assert row.config["environment"]["os"] == "linux"
     assert row.config["verifier"]["args"]["script_path"] == "verifier/check.sh"
-    data_key = (
-        f"tasksets/user/{teams['team_a']}/bundle-upload-tasks/"
-        "tasks/source-useful-frontier-5003_alpha/data/input.txt"
+    output_prefix = (
+        f"tasksets/user/{teams['team_a']}/bundle-upload-tasks/materializations/"
+        f"{job.id}/{job.published_materialization_generation}/tasks/"
+        "source-useful-frontier-5003_alpha"
     )
+    assert row.source == f"s3://{settings.artifacts_bucket}/{output_prefix}/"
+    data_key = f"{output_prefix}/data/input.txt"
+    assert app.state.minio_client.get_object(
+        Bucket=settings.artifacts_bucket,
+        Key=f"tasksets/user/{teams['team_a']}/bundle-upload-tasks/manifest.yaml",
+    )["Body"].read()
+    assert app.state.minio_client.get_object(
+        Bucket=settings.artifacts_bucket,
+        Key=f"tasksets/user/{teams['team_a']}/bundle-upload-tasks/bundle.tar.gz",
+    )["Body"].read() == bundle_archive
+    assert app.state.minio_client.list_objects_v2(
+        Bucket=settings.artifacts_bucket,
+        Prefix=f"tasksets/user/{teams['team_a']}/bundle-upload-tasks/tasks/",
+    ).get("Contents", []) == []
     payload = app.state.minio_client.get_object(
         Bucket=settings.artifacts_bucket,
         Key=data_key,
