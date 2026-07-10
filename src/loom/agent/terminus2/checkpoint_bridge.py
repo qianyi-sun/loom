@@ -6,16 +6,19 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
+from loom.agent.terminus2.gateway_ledger import (
+    CheckpointBridgeError,
+    GatewayCallLedger,
+)
 from loom.agent.terminus2.provenance import (
     HARBOR_COMPAT_SHA,
     LOOM_BRIDGE_REVISION,
     harbor_template_hashes,
 )
 from loom.models.trajectory import (
-    LLMCallEvent,
     Terminus2ArtifactRefEvent,
     Terminus2CommandEvent,
     Terminus2RuntimeProvenanceEvent,
@@ -24,7 +27,12 @@ from loom.models.trajectory import (
 )
 from loom.models.types import ModelSpec
 from loom.security.redaction import redact_text
+from loom.trajectory.llm_call_events import llm_call_row_to_event
 from loom.trajectory.writer import TrajectoryWriter
+
+
+class _CpClient(Protocol):
+    async def get_trial_llm_calls(self, trial_id: UUID) -> list[dict[str, Any]]: ...
 
 
 class HarborCheckpointBridge:
@@ -37,11 +45,17 @@ class HarborCheckpointBridge:
         trial_id: UUID,
         step_id: str,
         model: ModelSpec,
+        cp_client: _CpClient | None = None,
     ) -> None:
         self._trajectory = trajectory
         self._trial_id = trial_id
         self._step_id = step_id
         self._model = model
+        self._cp_client = cp_client
+        self._gateway_ledger = GatewayCallLedger(
+            trial_id=trial_id,
+            step_id=step_id,
+        )
         self._seq = 0
         self._seen_step_ids: set[int] = set()
         self._provenance_emitted = False
@@ -79,6 +93,8 @@ class HarborCheckpointBridge:
     ) -> int:
         if not path.is_file():
             return 0
+        if self._cp_client is not None:
+            await self._gateway_ledger.refresh(self._cp_client)
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
@@ -105,10 +121,21 @@ class HarborCheckpointBridge:
         *,
         completeness: str,
     ) -> None:
+        metrics = step.get("metrics") or {}
+        if not metrics:
+            raise CheckpointBridgeError(
+                f"Harbor agent step {step.get('step_id')} missing metrics",
+            )
+        if self._cp_client is None:
+            raise CheckpointBridgeError(
+                "cp_client is required to bridge Harbor agent steps with "
+                "real gateway_request_id joins",
+            )
+
+        llm_row = self._gateway_ledger.resolve_for_metrics(metrics)
+        gateway_request_id = str(llm_row["id"])
         turn_id = str(uuid4())
         batch_id = str(uuid4())
-        gateway_request_id = f"harbor-step-{step.get('step_id')}"
-        metrics = step.get("metrics") or {}
         tool_calls = step.get("tool_calls") or []
         observation = step.get("observation") or {}
         obs_results = observation.get("results") or []
@@ -126,39 +153,13 @@ class HarborCheckpointBridge:
         )
         completion_state = "complete" if is_complete else "continue"
 
-        if metrics:
-            from loom.models.trajectory import ChatMessage
-
-            await self._trajectory.append(
-                LLMCallEvent(
-                    emitted_at=datetime.now(UTC),
-                    trial_id=self._trial_id,
-                    step_id=self._step_id,
-                    seq=self._next_seq(),
-                    model=self._model,
-                    rate_card_hash="harbor-bridge",
-                    system_prompt=None,
-                    messages=[ChatMessage(role="user", content="")],
-                    tools=None,
-                    tool_choice=None,
-                    response=ChatMessage(
-                        role="assistant",
-                        content=str(step.get("message") or ""),
-                    ),
-                    finish_reason="stop",
-                    input_tokens=int(metrics.get("input_tokens") or 0),
-                    cached_input_tokens=int(metrics.get("cached_input_tokens") or 0),
-                    cache_write_tokens=0,
-                    output_tokens=int(metrics.get("output_tokens") or 0),
-                    thinking_tokens=0,
-                    provider_extras={},
-                    cost_usd_snapshot=float(metrics.get("cost_usd") or 0.0),
-                    duration_sec=0.0,
-                    streamed=False,
-                    time_to_first_token_sec=None,
-                    gateway_request_id=gateway_request_id,
-                ),
-            )
+        await self._trajectory.append(
+            llm_call_row_to_event(
+                llm_row,
+                trial_id=self._trial_id,
+                seq=self._next_seq(),
+            ),
+        )
 
         await self._trajectory.append(
             Terminus2TurnEvent(
@@ -194,8 +195,14 @@ class HarborCheckpointBridge:
                 ),
             )
 
-        if obs_text:
-            redacted = redact_text(obs_text)
+        if commands and not obs_text and completeness == "full":
+            raise CheckpointBridgeError(
+                f"Harbor agent step {step.get('step_id')} has commands but no "
+                "terminal observation",
+            )
+
+        if obs_text or is_complete:
+            redacted = redact_text(obs_text) if obs_text else ""
             await self._trajectory.append(
                 Terminus2TerminalObservationEvent(
                     emitted_at=datetime.now(UTC),
@@ -211,7 +218,7 @@ class HarborCheckpointBridge:
                     truncated=False,
                     completeness=completeness,
                     content_hash=hashlib.sha256(redacted.encode()).hexdigest(),
-                    redaction_applied=redacted != obs_text,
+                    redaction_applied=bool(obs_text) and redacted != obs_text,
                     is_aggregate=len(commands) > 1,
                 ),
             )

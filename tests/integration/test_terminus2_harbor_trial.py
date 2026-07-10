@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path, PurePosixPath
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import TypeAdapter
@@ -22,6 +22,22 @@ _adapter: TypeAdapter[TrajectoryEvent] = TypeAdapter(TrajectoryEvent)
 class _NoopCP:
     async def mint_step_token(self, **kwargs: object) -> str:
         return "loom-step-token"
+
+    async def get_trial_llm_calls(self, trial_id: UUID) -> list[dict[str, object]]:
+        return [
+            {
+                "id": "gw-integration-1",
+                "trial_id": str(trial_id),
+                "step_id": "agent",
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "dialect": "openai_chat",
+                "model": "gpt-4",
+                "cost_usd": 0.0,
+                "rate_card_hash": "abc",
+                "captured_at": "2026-07-10T00:00:00Z",
+            },
+        ]
 
 
 @pytest.mark.asyncio
@@ -49,8 +65,8 @@ async def test_runtime_bridges_harbor_trajectory(tmp_path: Path, monkeypatch) ->
                                 "source": "agent",
                                 "message": "complete",
                                 "metrics": {
-                                    "input_tokens": 1,
-                                    "output_tokens": 1,
+                                    "prompt_tokens": 1,
+                                    "completion_tokens": 1,
                                     "cost_usd": 0.0,
                                 },
                                 "tool_calls": [

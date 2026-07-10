@@ -18,5 +18,6 @@ COPY packages ./packages
 RUN pip install --no-cache-dir -e . && \
     pip install --no-cache-dir -e ./packages/loom-launcher && \
     pip install --no-cache-dir \
-      "harbor @ git+https://github.com/harbor-framework/harbor.git@${HARBOR_COMPAT_SHA}"
+      "harbor @ git+https://github.com/harbor-framework/harbor.git@${HARBOR_COMPAT_SHA}" && \
+    pip check
 CMD ["python", "-m", "loom_worker"]

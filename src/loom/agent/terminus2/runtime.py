@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 import tempfile
 from collections.abc import Sequence
@@ -14,6 +13,7 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
 from loom.agent.terminus2.checkpoint_bridge import HarborCheckpointBridge
+from loom.agent.terminus2.gateway_ledger import CheckpointBridgeError
 from loom.agent.terminus2.harbor_environment import (
     LoomHarborEnvironment,
     ensure_sandbox_deps,
@@ -132,6 +132,7 @@ class LoomTerminus2Runtime:
             trial_id=self.trial_id,
             step_id=step_id,
             model=self.model,
+            cp_client=self.cp_client,
         )
         await bridge.emit_provenance()
 
@@ -157,10 +158,17 @@ class LoomTerminus2Runtime:
         trajectory_path = logs_root / "trajectory.json"
         completeness = "full"
         poll_stop = asyncio.Event()
+        bridge_error: CheckpointBridgeError | None = None
 
         async def _poll_checkpoints() -> None:
+            nonlocal bridge_error
             while not poll_stop.is_set():
-                await bridge.sync_trajectory_file(trajectory_path)
+                try:
+                    await bridge.sync_trajectory_file(trajectory_path)
+                except CheckpointBridgeError as exc:
+                    bridge_error = exc
+                    poll_stop.set()
+                    return
                 try:
                     await asyncio.wait_for(poll_stop.wait(), timeout=0.5)
                 except TimeoutError:
@@ -178,17 +186,24 @@ class LoomTerminus2Runtime:
             await agent.run(instruction, harbor_env, context)
         except asyncio.CancelledError:
             completeness = "partial"
-            await bridge.sync_trajectory_file(
-                trajectory_path, completeness=completeness,
-            )
+            try:
+                await bridge.sync_trajectory_file(
+                    trajectory_path, completeness=completeness,
+                )
+            except CheckpointBridgeError:
+                pass
             raise
         finally:
             poll_stop.set()
-            with contextlib.suppress(Exception):
-                await poll_task
-            await bridge.sync_trajectory_file(
-                trajectory_path, completeness=completeness,
-            )
+            await poll_task
+            if bridge_error is not None:
+                raise AgentError(str(bridge_error)) from bridge_error
+            try:
+                await bridge.sync_trajectory_file(
+                    trajectory_path, completeness=completeness,
+                )
+            except CheckpointBridgeError as exc:
+                raise AgentError(str(exc)) from exc
             sandbox_paths = await _publish_harbor_artifacts_to_sandbox(
                 env, logs_root, self.workdir,
             )
