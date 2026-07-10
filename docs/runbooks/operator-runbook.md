@@ -4277,23 +4277,27 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    and #85 request-parameter baselines unless a retry succeeds with
    `llm_evidence_status=calls_observed`; do not count the original reward-0 row
    as clean model/provider parity evidence.
-   For `terminus-2`, also inspect the trajectory for setup-time
-   `terminus2_error` events before debugging provider credentials; upstream
-   Terminal-Bench starts a tmux/asciinema recording session before the first
-   model call, so missing sandbox dependencies can produce `no_calls_invalid`.
-   For score-zero or timeout diagnosis, inspect `terminus2_exec_run` events:
-   they record bounded command metadata (`cmd_excerpt`, `exit_code`,
-   `output_len`, and `duration_sec`) without storing command output content.
-   A healthy `terminus-2` trajectory should show `terminus2_session_ready`
-   before model-driven terminal commands. If upstream `session.start()` returns
-   without creating `loom-terminus-2`, the runner emits
-   `terminus2_session_start_verify_failed`, tries one explicit
-   `tmux new-session -x 160 -y 40 -d -s loom-terminus-2` recovery, and then
-   emits either `terminus2_session_recovered` or a structured
-   `terminus2_session_recovery_*` failure before provider-heavy work proceeds.
-   If the initial probes such as `tmux -V` succeed but every later tmux command
-   exits non-zero, treat it as a session-bootstrap/runtime issue rather than a
-   model quality result until the session lifecycle is verified.
+   For `terminus-2`, inspect the Harbor-embedded runtime path documented in
+   [`terminus2-runtime.md`](../architecture/terminus2-runtime.md). The agent
+   runs pinned Harbor `Terminus2` in-process in the worker image
+   (`deploy/Dockerfile.worker`, Harbor `@527d50d`); it is not a
+   `loom-launcher` subprocess adapter.
+   A healthy trajectory should include `terminus2_runtime_provenance` (Harbor
+   pin + bridge revision), then model-driven `terminus2_turn`,
+   `terminus2_command`, and `terminus2_terminal_observation` events with LLM
+   rows joined to real Control Plane `llm_calls.id` values via the gateway
+   ledger. Setup failures before the first model call often surface as
+   `no_calls_invalid` or a trial `agent` phase error from
+   `CheckpointBridgeError` (missing CP client, ambiguous token match, or
+   command without a matching observation).
+   Harbor artifacts should appear under `.loom/agent/trajectory.json` and
+   `.loom/agent/recording.cast`. If import or Harbor version drift is
+   suspected, verify the deployed worker image tag matches the rollout SHA and
+   that `deploy/worker-image.lock` was regenerated for the candidate build.
+   On ARM64 GB10 hosts, the first Terminus-2 task image may also spend time
+   in `_ensure_terminus_2_arm64_base_if_needed` before `started_at`; treat
+   long pre-start claims with fresh `pre_start_heartbeat_at` as normal cold
+   cache work, not provider failure.
    For opencode/subprocess timeout investigation, confirm a worker watchdog
    hard deadline or control-plane stale-running reclaim produces
    `state=failed`, `failure_reason=agent_timeout`, and a failure message that

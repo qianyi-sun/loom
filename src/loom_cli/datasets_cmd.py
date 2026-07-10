@@ -182,6 +182,27 @@ def _add_register_args(p: argparse.ArgumentParser) -> None:
         default=os.environ.get("LOOM_BENCHMARK_BUCKET", "loom-benchmarks"),
         help="Target object-store bucket for mirrored task bundles.",
     )
+    p.add_argument(
+        "--chunk-size",
+        type=int,
+        default=None,
+        help=(
+            "Split the HF snapshot download into batches of N task bundles "
+            "with `--chunk-sleep-secs` between each batch. Use for benchmarks "
+            "large enough to trip HF's 5000 resolves/5min free-tier rate "
+            "limit (see #764). Omit or 0 to keep the single-shot behaviour."
+        ),
+    )
+    p.add_argument(
+        "--chunk-sleep-secs",
+        type=float,
+        default=300.0,
+        help=(
+            "Seconds to sleep between snapshot batches when `--chunk-size` "
+            "is set (default 300 = 5 minutes, matching HF's rate-limit "
+            "window). Ignored when --chunk-size is omitted."
+        ),
+    )
 
 
 def _add_verify_args(p: argparse.ArgumentParser) -> None:
@@ -801,6 +822,8 @@ def _cmd_register(args: argparse.Namespace) -> int:
         mirror_to_object_store=args.mirror_to_object_store,
         object_store=object_store,
         bucket=args.bucket,
+        chunk_size=args.chunk_size,
+        chunk_sleep_secs=args.chunk_sleep_secs,
     ))
     parts = [
         f"register {args.benchmark}:",

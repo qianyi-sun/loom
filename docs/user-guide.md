@@ -1348,6 +1348,11 @@ loom run
 - `oracle` — runs `solution/solve.sh` from the task bundle (reference
   baseline, no model call)
 - `litellm` — talks to the configured model via LiteLLM dialect routing
+- `terminus-2` — Harbor Terminus2 embedded in the worker image; tool-use
+  terminal loop with typed `terminus2_*` trajectory events and Harbor artifacts
+  under `.loom/agent/`. Requires a provider + model; does not use
+  `loom-launcher` or per-trial `install_script`. See
+  [`architecture/terminus2-runtime.md`](architecture/terminus2-runtime.md).
 - any other name — resolved via `loom_launcher.get_adapter(name)`;
   ships 11 concrete adapters (claude-code, codex, openhands, aider,
   opencode, swe-agent, mini-swe-agent, openhands-sdk, gemini-cli,
