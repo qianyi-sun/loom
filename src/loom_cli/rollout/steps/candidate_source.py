@@ -132,13 +132,15 @@ def _rewrite_rollout_local_cluster_config_paths(
 def rollout_cluster_config(ctx: RolloutContext, step_dir: StepDir) -> Path:
     """Write and return the per-rollout cluster config artifact.
 
-    The rollout CLI owns ``ctx.image_tag``. The operator's source config may
-    intentionally be long-lived and stale, so cluster render/apply/gate steps
-    must consume a rollout-local config that pins the target image tag. Paths
-    that were relative to the source config must also be made rollout-stable so
-    later steps do not resolve them relative to the evidence directory.
+    The rollout CLI owns ``ctx.image_tag``. The runner checkout may be stale,
+    so cluster render/apply/gate steps must synthesize from the resolved
+    candidate's repo-local profile when it exists, then pin the target image
+    tag. Paths that were relative to that source config must also be made
+    rollout-stable so later steps do not resolve them relative to the evidence
+    directory.
     """
     target = rollout_cluster_config_path(step_dir)
+    source_config_path = candidate_relative_path(ctx.cluster_config_path, step_dir)
     if target.is_file():
         try:
             raw = tomllib.loads(target.read_text(encoding="utf-8"))
@@ -148,13 +150,13 @@ def rollout_cluster_config(ctx: RolloutContext, step_dir: StepDir) -> Path:
             ) from exc
         if _rewrite_rollout_local_cluster_config_paths(
             raw,
-            source_config_path=ctx.cluster_config_path,
+            source_config_path=source_config_path,
             step_dir=step_dir,
         ):
             target.write_text(tomli_w.dumps(raw), encoding="utf-8")
         return target
     try:
-        raw = tomllib.loads(ctx.cluster_config_path.read_text(encoding="utf-8"))
+        raw = tomllib.loads(source_config_path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise CandidateToolingError(
             f"failed to read cluster config for rollout synthesis: {exc}",
@@ -162,7 +164,7 @@ def rollout_cluster_config(ctx: RolloutContext, step_dir: StepDir) -> Path:
     raw["image_tag"] = ctx.image_tag
     _rewrite_rollout_local_cluster_config_paths(
         raw,
-        source_config_path=ctx.cluster_config_path,
+        source_config_path=source_config_path,
         step_dir=step_dir,
     )
     target.write_text(tomli_w.dumps(raw), encoding="utf-8")
