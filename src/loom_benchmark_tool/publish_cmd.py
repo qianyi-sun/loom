@@ -215,19 +215,31 @@ def run_publish(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         )
 
-        commit_info = api.upload_folder(
+        # `upload_folder` produces a single commit — HF's commit endpoint
+        # 504s reliably on any benchmark whose staging tree runs into the
+        # thousands of files or tens of megabytes (mmlu-pro, hendrycks-math,
+        # browsecomp, swe-bench, gpqa, gpqa-diamond, math-500, ...). The
+        # supported workaround per HF's own upload docs is `upload_large_folder`,
+        # which internally chunks the tree into many small commits and
+        # streams over LFS with resume + retry. Trade-off: no single commit
+        # captures the whole publish, so we fetch the head revision after
+        # the upload settles to keep the return contract of run_publish
+        # ({"revision": ...}) intact.
+        api.upload_large_folder(
             repo_id=repo_id,
             repo_type="dataset",
             folder_path=str(staging_dir),
-            commit_message=(
-                f"Publish {adapter.name}: {len(task_entries)} task(s) "
-                f"({adapter.upstream_source.locator})"
-            ),
+            print_report=False,
+        )
+        refs = api.list_repo_refs(repo_id=repo_id, repo_type="dataset")
+        head_rev = next(
+            (branch.target_commit for branch in refs.branches if branch.name == "main"),
+            "main",
         )
 
     return {
         "published": stats["published"],
         "warnings": stats["warnings"],
         "repo_id": repo_id,
-        "revision": getattr(commit_info, "oid", "main"),
+        "revision": head_rev,
     }
