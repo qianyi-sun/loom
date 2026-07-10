@@ -81,11 +81,26 @@ def _empty_environment_profile() -> EnvironmentStateProfile:
     )
 
 
+def _protected_v1_config(tmp_path: Path) -> Path:
+    config_path = tmp_path / "protected-v1.toml"
+    config_path.write_text(
+        """[workload_contract]
+workload_trust_mode = "internal_trusted"
+taskset_transforms_enabled = false
+taskset_transform_network_isolated = false
+untrusted_workload_isolation = false
+""",
+        encoding="utf-8",
+    )
+    return config_path
+
+
 def test_cluster_up_protected_conflict_fails_before_loading_clients(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    config_path = _protected_v1_config(tmp_path)
     RolloutLeaseManager(tmp_path).acquire(
         environment="staging",
         owner_id="owner-a",
@@ -105,6 +120,8 @@ def test_cluster_up_protected_conflict_fails_before_loading_clients(
         "staging",
         "--namespace",
         "loom-staging",
+        "--config",
+        str(config_path),
         "--rollout-lock-dir",
         str(tmp_path),
     ])
@@ -121,6 +138,7 @@ def test_cluster_up_protected_records_lock_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_cluster_up_happy_path(monkeypatch)
+    config_path = _protected_v1_config(tmp_path)
     evidence_path = tmp_path / "lock-evidence.json"
 
     rc = main([
@@ -130,6 +148,8 @@ def test_cluster_up_protected_records_lock_evidence(
         "staging",
         "--namespace",
         "loom-staging",
+        "--config",
+        str(config_path),
         "--rollout-lock-dir",
         str(tmp_path),
         "--rollout-id",

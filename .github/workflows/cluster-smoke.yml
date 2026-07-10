@@ -16,7 +16,7 @@ name: cluster-smoke
 #
 # Trigger model:
 #   - workflow_dispatch (manual)
-#   - PRs labelled `cluster-smoke` (so it doesn't fire on every PR)
+#   - PRs selected by changed paths or the additive `cluster-smoke` label
 #   - push to dev when cluster CLI / templates change
 
 on:
@@ -29,10 +29,12 @@ on:
       - "src/loom_cli/templates/k8s/**"
       - ".github/workflows/cluster-smoke.yml"
   pull_request:
-    # Label gate (see `if:` on the job). We accept any PR event so a
-    # labelled-after-open PR triggers a run; the `if:` checks the
-    # label is actually present.
+    # The workflow starts for every PR event so its stable gate always
+    # reports. The planner selects the smoke from changed paths or the
+    # additive label, and a later label change retriggers the workflow.
     types: [labeled, opened, synchronize, reopened]
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -42,15 +44,71 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  plan:
+    name: cluster smoke plan
+    runs-on: ubuntu-latest
+    outputs:
+      required: ${{ steps.plan.outputs.cluster_smoke }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
+
+      - name: Plan required cluster smoke validation
+        id: plan
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request)
+              git diff --name-only "$BASE_SHA...$HEAD_SHA" \
+                > /tmp/loom-changed-files.txt
+              ;;
+            merge_group)
+              git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
+                > /tmp/loom-changed-files.txt
+              ;;
+            push)
+              if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
+                git ls-tree -r --name-only "$HEAD_SHA" \
+                  > /tmp/loom-changed-files.txt
+              else
+                git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
+                  > /tmp/loom-changed-files.txt
+              fi
+              ;;
+            workflow_dispatch)
+              git show --pretty=format: --name-only "$HEAD_SHA" \
+                > /tmp/loom-changed-files.txt
+              PR_LABELS_JSON='["cluster-smoke"]'
+              ;;
+            *)
+              echo "Unsupported event: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+          sort -u -o /tmp/loom-changed-files.txt /tmp/loom-changed-files.txt
+          if [[ -z "$PR_LABELS_JSON" || "$PR_LABELS_JSON" == "null" ]]; then
+            PR_LABELS_JSON='[]'
+          fi
+          uv run python scripts/plan_ci_validations.py \
+            --changed-files /tmp/loom-changed-files.txt \
+            --labels-json "$PR_LABELS_JSON" \
+            --event-name "$EVENT_NAME" \
+            --github-output "$GITHUB_OUTPUT"
+
   smoke:
     name: kind smoke (render → apply → status → down)
-    # PR runs are gated on the `cluster-smoke` label so we don't burn
-    # minutes on unrelated PRs. push + workflow_dispatch always run.
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push' ||
-      (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'cluster-smoke'))
+    needs: plan
+    if: needs.plan.outputs.required == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -202,3 +260,23 @@ jobs:
       - name: Cleanup kind
         if: always()
         run: kind delete cluster --name loom-smoke
+
+  cluster-smoke-gate:
+    name: cluster-smoke-gate
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [plan, smoke]
+    steps:
+      - name: Enforce selected cluster smoke result
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          REQUIRED: ${{ needs.plan.outputs.required }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
+        run: |
+          set -euo pipefail
+          [[ "$PLAN_RESULT" == "success" ]] || exit 1
+          if [[ "$REQUIRED" == "true" ]]; then
+            [[ "$SMOKE_RESULT" == "success" ]] || exit 1
+          else
+            [[ "$SMOKE_RESULT" == "skipped" || "$SMOKE_RESULT" == "success" ]] || exit 1
+          fi

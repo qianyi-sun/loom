@@ -159,8 +159,12 @@ spec:
           value: '3'
         - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_RETRY_ON
           value: '["gateway_error", "provider_transport_disconnect"]'
+        - name: LOOM_SVC_UNTRUSTED_WORKLOAD_ISOLATION
+          value: 'False'
         - name: LOOM_SVC_WORKER_HEARTBEAT_EXPIRY_SEC
           value: '120'
+        - name: LOOM_SVC_WORKLOAD_TRUST_MODE
+          value: internal_trusted
         - name: LOOM_SVC_ADMIN_SECRET_FILE
           value: /var/run/loom/secrets/admin/secrets.toml
         - name: LOOM_SECRET_STORE_MASTER_KEY

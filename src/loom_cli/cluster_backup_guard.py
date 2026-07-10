@@ -31,16 +31,25 @@ def infer_environment(
     environment: str | None,
     namespace: str,
 ) -> str:
-    if environment:
-        return environment
     lowered = namespace.lower()
     if "staging" in lowered:
-        return "staging"
-    if "staging" in lowered or "stage" in lowered:
-        return "staging"
-    if "prod" in lowered:
-        return "production"
-    return "development"
+        namespace_environment = "staging"
+    elif "stage" in lowered:
+        namespace_environment = "staging"
+    elif "prod" in lowered:
+        namespace_environment = "production"
+    else:
+        namespace_environment = "development"
+
+    if (
+        namespace_environment in PROTECTED_ENVIRONMENTS
+        and environment is not None
+        and environment != namespace_environment
+    ):
+        raise ValueError(
+            "explicit environment conflicts with authoritative protected namespace",
+        )
+    return environment or namespace_environment
 
 
 def is_protected_environment(

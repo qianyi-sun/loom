@@ -32,6 +32,7 @@ from loom.db.schema_startup import assert_schema_at_head
 from loom.security.secret_store import assert_existing_secrets_decryptable
 from loom.startup_retry import retry_startup_dependency
 from loom.taskset.transform_sandbox import TransformSandboxConfig
+from loom.workload_trust import WorkloadTrustContract
 from loom_service.batch_runner import run_loop as batch_run_loop
 from loom_service.config import LoomServiceSettings
 from loom_service.metrics import (
@@ -84,6 +85,19 @@ def _load_admin_secret_verifier(
     )
 
 
+def _validated_v1_workload_contract(
+    settings: LoomServiceSettings,
+) -> WorkloadTrustContract:
+    """Return the deployment workload contract or reject an invalid v1 startup."""
+    contract = settings.workload_contract
+    violations = contract.v1_violations()
+    if violations:
+        raise RuntimeError(
+            "invalid v1 workload trust contract: " + "; ".join(violations),
+        )
+    return contract
+
+
 async def _assert_secret_store_startup(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> int:
@@ -96,6 +110,8 @@ async def _assert_schema_startup(engine: AsyncEngine) -> int:
 
 
 def create_app(settings: LoomServiceSettings) -> FastAPI:
+    workload_contract = _validated_v1_workload_contract(settings)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_async_engine(
@@ -188,6 +204,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                 transform_config=TransformSandboxConfig(
                     enabled=settings.taskset_materializer_transforms_enabled,
                     network_isolated=settings.taskset_materializer_transform_network_isolated,
+                    workload_contract=workload_contract,
                     wall_timeout_sec=settings.taskset_materializer_transform_wall_timeout_sec,
                     cpu_limit_sec=settings.taskset_materializer_transform_cpu_limit_sec,
                     memory_limit_mb=settings.taskset_materializer_transform_memory_limit_mb,

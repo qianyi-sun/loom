@@ -329,6 +329,30 @@ def test_cli_down_protected_volume_delete_requires_verified_backup(
     assert "staging" in err
 
 
+def test_cli_down_rejects_protected_environment_conflict_before_kube_call(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _unexpected_kube_call(_: str | None) -> object:
+        pytest.fail("protected target conflict must fail before Kubernetes access")
+
+    monkeypatch.setattr("loom_cli.cluster_cmd._load_clients", _unexpected_kube_call)
+
+    rc = main([
+        "cluster", "down",
+        "--yes",
+        "--namespace", "loom-staging",
+        "--environment", "development",
+        "--with-volumes",
+    ])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "protected-target-environment" in err
+    assert "Traceback" not in err
+    assert "development" not in err
+
+
 def test_cli_down_protected_namespace_delete_requires_acknowledgement(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

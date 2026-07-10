@@ -8,6 +8,7 @@ import tarfile
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import boto3
@@ -433,12 +434,12 @@ async def test_materialization_transform_fails_when_gates_disabled(materializati
         )
     body = get_resp.json()
     assert body["status"] == "failed"
-    assert body["status_reason"] == "transform_unsupported_on_host"
+    assert body["status_reason"] == "transform_unavailable_in_internal_trusted"
     assert body["materialization_job_state"] == "failed"
 
 
 @pytest.mark.asyncio
-async def test_materialization_transform_succeeds_when_gates_enabled(
+async def test_materialization_transform_rejects_legacy_gates_before_fetch_or_run(
     materialization_setup,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -447,30 +448,47 @@ async def test_materialization_transform_succeeds_when_gates_enabled(
     app, tokens, _teams = materialization_setup
     app.state.settings = LoomServiceSettings(_env_file=None)
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        post = await client.post(
-            "/api/v1/tasksets",
-            headers={"Authorization": f"Bearer {tokens['team_a']}"},
-            files={
-                "manifest": (
-                    "manifest.yaml",
-                    _MANIFEST_TRANSFORM.encode(),
-                    "application/x-yaml",
-                ),
-                "transform": ("transform.py", b"def transform(row): return row", "text/x-python"),
-            },
-        )
-        assert post.status_code == 202
-        task_set_id = post.json()["task_set_id"]
-        await _run_materializer_once(app)
-        get_resp = await client.get(
-            f"/api/v1/tasksets/{task_set_id}",
-            headers={"Authorization": f"Bearer {tokens['team_a']}"},
-        )
+    with (
+        patch(
+            "loom.taskset.materialize._fetch_blob_bytes",
+            side_effect=AssertionError("v1 rejection must not fetch blobs"),
+        ) as fetch_blob,
+        patch(
+            "loom.taskset.transform_sandbox.run_transform",
+            side_effect=AssertionError("v1 rejection must not invoke a runner"),
+        ) as run,
+    ):
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            post = await client.post(
+                "/api/v1/tasksets",
+                headers={"Authorization": f"Bearer {tokens['team_a']}"},
+                files={
+                    "manifest": (
+                        "manifest.yaml",
+                        _MANIFEST_TRANSFORM.encode(),
+                        "application/x-yaml",
+                    ),
+                    "transform": (
+                        "transform.py",
+                        b"def transform(row): return row",
+                        "text/x-python",
+                    ),
+                },
+            )
+            assert post.status_code == 202
+            task_set_id = post.json()["task_set_id"]
+            await _run_materializer_once(app)
+            get_resp = await client.get(
+                f"/api/v1/tasksets/{task_set_id}",
+                headers={"Authorization": f"Bearer {tokens['team_a']}"},
+            )
     body = get_resp.json()
-    assert body["status"] == "ready"
-    assert body["task_count"] == 1
-    assert body["materialization_job_state"] == "succeeded"
+    assert body["status"] == "failed"
+    assert body["status_reason"] == "transform_unavailable_in_internal_trusted"
+    assert body["task_count"] == 0
+    assert body["materialization_job_state"] == "failed"
+    fetch_blob.assert_not_called()
+    run.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -805,6 +805,53 @@ def test_cli_up_skip_preflight_bypasses_check(
     assert captures.get("apply_ns") == "loom"
 
 
+@pytest.mark.parametrize(
+    ("namespace", "skip_preflight"),
+    [
+        ("loom-staging", False),
+        ("loom-staging", True),
+        ("loom-production", False),
+        ("loom-production", True),
+    ],
+)
+def test_cli_up_rejects_protected_namespace_environment_downgrade_before_lock_or_apply(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    namespace: str,
+    skip_preflight: bool,
+) -> None:
+    captures = _patch_full_up_path(monkeypatch)
+    lock_attempts: list[str] = []
+
+    def _unexpected_lock(*args, **kwargs):  # type: ignore[no-untyped-def]
+        lock_attempts.append("called")
+        return None
+
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._acquire_protected_rollout_lock",
+        _unexpected_lock,
+    )
+
+    command = [
+        "cluster",
+        "up",
+        "--namespace",
+        namespace,
+        "--environment",
+        "development",
+        "--no-wait",
+    ]
+    if skip_preflight:
+        command.append("--skip-preflight")
+
+    rc = main(command)
+
+    assert rc == 1
+    assert lock_attempts == []
+    assert "apply_ns" not in captures
+    assert "protected-target-environment" in capsys.readouterr().err
+
+
 def test_cli_up_apply_failure_returns_1(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1009,8 +1056,17 @@ def test_cli_up_namespace_flag_threads_through(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captures = _patch_full_up_path(monkeypatch)
-    main(["cluster", "up", "--namespace", "loom-stage"])
-    assert captures["apply_ns"] == "loom-stage"
+    main(
+        [
+            "cluster",
+            "up",
+            "--namespace",
+            "loom-custom",
+            "--environment",
+            "development",
+        ]
+    )
+    assert captures["apply_ns"] == "loom-custom"
 
 
 def test_cli_up_backup_guard_flags_thread_to_preflight(
@@ -1019,6 +1075,16 @@ def test_cli_up_backup_guard_flags_thread_to_preflight(
 ) -> None:
     manifest = tmp_path / "backup-manifest.json"
     manifest.write_text("{}", encoding="utf-8")
+    config = tmp_path / "staging.cluster.toml"
+    config.write_text(
+        'namespace = "loom-staging"\n'
+        "[workload_contract]\n"
+        'workload_trust_mode = "internal_trusted"\n'
+        "taskset_transforms_enabled = false\n"
+        "taskset_transform_network_isolated = false\n"
+        "untrusted_workload_isolation = false\n",
+        encoding="utf-8",
+    )
     captures = _patch_full_up_path(monkeypatch)
 
     rc = main(
@@ -1029,6 +1095,8 @@ def test_cli_up_backup_guard_flags_thread_to_preflight(
             "loom-staging",
             "--environment",
             "staging",
+            "--config",
+            str(config),
             "--backup-manifest",
             str(manifest),
             "--backup-max-age-hours",

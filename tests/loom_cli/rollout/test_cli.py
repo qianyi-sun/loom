@@ -139,6 +139,34 @@ class TestRolloutCLIDryRun:
         assert "image_tag: staging-manual" in out
         assert "rollout_id: rid-staging-manual" in out
 
+    def test_staging_preset_rejects_environment_downgrade_before_evidence(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "staging",
+                "--ref",
+                "origin/dev",
+                "--image-tag",
+                "candidate-aaaaaaa",
+                "--environment",
+                "development",
+                "--rollout-root",
+                str(tmp_path),
+                "--dry-run",
+            ]
+        )
+
+        assert rc == 2
+        assert not (tmp_path / "rollouts").exists()
+        err = capsys.readouterr().err
+        assert "protected rollout target mismatch" in err
+        assert "development" not in err
+
     def test_prod_preset_fails_closed_until_configured(
         self,
         tmp_path: Path,
@@ -369,10 +397,198 @@ class TestRolloutCLIDryRun:
 
         assert rc == 2
         err = capsys.readouterr().err
-        assert "staging rollout must use physical staging resources" in err
-        assert "loom-staging" in err
-        assert "/data/loom-staging" in err
-        assert "loom-legacy-preprod" in err
+        assert "protected rollout target mismatch" in err
+        assert "loom-legacy-preprod" not in err
+
+    @pytest.mark.parametrize(
+        ("cluster_name", "namespace", "environment"),
+        [
+            ("loom-staging", "loom-custom", "development"),
+            ("loom-custom", "loom-production", "development"),
+            ("loom-staging", "loom-staging", "production"),
+        ],
+    )
+    def test_manual_dry_run_rejects_protected_physical_target_mismatch_before_evidence(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        cluster_name: str,
+        namespace: str,
+        environment: str,
+    ) -> None:
+        config = tmp_path / "cluster-config.toml"
+        config.write_text("image_tag = 'x'\n", encoding="utf-8")
+        backup = tmp_path / "backup-manifest.json"
+        backup.write_text("{}", encoding="utf-8")
+
+        def _unexpected_run_rollout(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            pytest.fail("protected target mismatch must fail before run_rollout")
+
+        monkeypatch.setattr("loom_cli.rollout.cli.run_rollout", _unexpected_run_rollout)
+
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "--ref",
+                "origin/dev",
+                "--image-tag",
+                "candidate-aaaaaaa",
+                "--cluster-name",
+                cluster_name,
+                "--namespace",
+                namespace,
+                "--environment",
+                environment,
+                "--cp-url",
+                "http://control-node.lan:18081",
+                "--cluster-config",
+                str(config),
+                "--backup-manifest",
+                str(backup),
+                "--rollout-root",
+                str(tmp_path),
+                "--dry-run",
+            ]
+        )
+
+        assert rc == 2
+        assert not (tmp_path / "rollouts").exists()
+        err = capsys.readouterr().err
+        assert "protected rollout target mismatch" in err
+        assert environment not in err
+
+    def test_manual_handle_rejects_protected_target_before_evidence_or_driver(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        config = tmp_path / "cluster-config.toml"
+        config.write_text("image_tag = 'x'\n", encoding="utf-8")
+        backup = tmp_path / "backup-manifest.json"
+        backup.write_text("{}", encoding="utf-8")
+
+        def _unexpected(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            pytest.fail("protected target mismatch must stop before evidence or driver work")
+
+        monkeypatch.setattr("loom_cli.rollout.cli.EvidenceDirectory.find_in_progress", _unexpected)
+        monkeypatch.setattr("loom_cli.rollout.cli.new_rollout_id", _unexpected)
+        monkeypatch.setattr("loom_cli.rollout.cli.run_rollout", _unexpected)
+
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "--ref",
+                "origin/dev",
+                "--image-tag",
+                "candidate-aaaaaaa",
+                "--cluster-name",
+                "loom-production",
+                "--namespace",
+                "loom-production",
+                "--environment",
+                "development",
+                "--cp-url",
+                "http://control-node.lan:18081",
+                "--cluster-config",
+                str(config),
+                "--backup-manifest",
+                str(backup),
+                "--rollout-root",
+                str(tmp_path),
+            ]
+        )
+
+        assert rc == 2
+        assert not (tmp_path / "rollouts").exists()
+        err = capsys.readouterr().err
+        assert "protected rollout target mismatch" in err
+        assert "development" not in err
+
+    def test_custom_manual_dry_run_preserves_explicit_preview_environment(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        config = tmp_path / "cluster-config.toml"
+        config.write_text("image_tag = 'x'\n", encoding="utf-8")
+        backup = tmp_path / "backup-manifest.json"
+        backup.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(subprocess, "run", _FakeSubprocess())
+
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "--ref",
+                "origin/dev",
+                "--image-tag",
+                "preview-aaaaaaa",
+                "--cluster-name",
+                "loom-preview",
+                "--namespace",
+                "loom-preview",
+                "--environment",
+                "preview",
+                "--cp-url",
+                "http://control-node.lan:18081",
+                "--cluster-config",
+                str(config),
+                "--backup-manifest",
+                str(backup),
+                "--rollout-root",
+                str(tmp_path),
+                "--dry-run",
+            ]
+        )
+
+        assert rc == 0
+        assert "environment: preview" in capsys.readouterr().out
+
+    def test_matching_production_manual_dry_run_is_allowed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        config = tmp_path / "cluster-config.toml"
+        config.write_text("image_tag = 'x'\n", encoding="utf-8")
+        backup = tmp_path / "backup-manifest.json"
+        backup.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(subprocess, "run", _FakeSubprocess())
+
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "--ref",
+                "origin/main",
+                "--image-tag",
+                "production-aaaaaaa",
+                "--cluster-name",
+                "loom-production",
+                "--namespace",
+                "loom-production",
+                "--environment",
+                "production",
+                "--cp-url",
+                "http://control-node.lan:18081",
+                "--cluster-config",
+                str(config),
+                "--backup-manifest",
+                str(backup),
+                "--rollout-root",
+                str(tmp_path),
+                "--dry-run",
+            ]
+        )
+
+        assert rc == 0
+        assert "environment: production" in capsys.readouterr().out
 
 
 class TestRolloutCLIRealRun:

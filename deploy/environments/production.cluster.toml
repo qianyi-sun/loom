@@ -18,6 +18,12 @@ persistent_storage_host_path_root = "/data/loom-prod"
 [k8s_worker]
 enabled = false
 
+[workload_contract]
+workload_trust_mode = "internal_trusted"
+taskset_transforms_enabled = false
+taskset_transform_network_isolated = false
+untrusted_workload_isolation = false
+
 # Single-node default for now (#637). The multi-node HA templates
 # (#642) exist and were validated on a real k3s + CNPG + Longhorn
 # cluster, but we intentionally keep production on the single-node

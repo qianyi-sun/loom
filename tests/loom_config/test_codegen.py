@@ -85,3 +85,17 @@ def test_renders_cluster_config_example() -> None:
     assert "[replicas]" in out
     assert "service = 2" in out
     assert "control_plane = 2" in out
+
+
+def test_renders_v1_workload_trust_contract_config() -> None:
+    schema = load_schema(_REPO_SCHEMA)
+    service_settings = render_service_settings(schema, "loom-service")
+    cluster_example = render_cluster_config_example(schema)
+
+    assert 'workload_trust_mode: str = "internal_trusted"' in service_settings
+    assert "untrusted_workload_isolation: bool = False" in service_settings
+    assert "[workload_contract]" in cluster_example
+    assert 'workload_trust_mode = "internal_trusted"' in cluster_example
+    assert "taskset_transforms_enabled = false" in cluster_example
+    assert "taskset_transform_network_isolated = false" in cluster_example
+    assert "untrusted_workload_isolation = false" in cluster_example

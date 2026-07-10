@@ -1148,6 +1148,30 @@ def test_loom_service_env_carries_k8s_worker_enabled_from_profile() -> None:
         assert by_name["LOOM_SVC_K8S_WORKER_ENABLED"]["value"] == str(enabled)
 
 
+def test_loom_service_env_carries_v1_workload_trust_contract_from_profile() -> None:
+    expected = {
+        "LOOM_SVC_WORKLOAD_TRUST_MODE": "internal_trusted",
+        "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORMS_ENABLED": "False",
+        "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_NETWORK_ISOLATED": "False",
+        "LOOM_SVC_UNTRUSTED_WORKLOAD_ISOLATION": "False",
+    }
+    for profile_name in ("staging.cluster.toml", "production.cluster.toml"):
+        cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / profile_name)
+        assert (
+            cfg.workload_contract.workload_trust_mode,
+            cfg.workload_contract.taskset_transforms_enabled,
+            cfg.workload_contract.taskset_transform_network_isolated,
+            cfg.workload_contract.untrusted_workload_isolation,
+        ) == ("internal_trusted", False, False, False)
+        docs = _load_docs(render_manifests(cfg))
+        service = next(
+            d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-service"
+        )
+        env = service["spec"]["template"]["spec"]["containers"][0]["env"]
+        by_name = {entry["name"]: entry["value"] for entry in env if "value" in entry}
+        assert {name: by_name[name] for name in expected} == expected
+
+
 # ──────────────────────────────────────────────────────────────────────
 # #547 drain hook + HPA
 # ──────────────────────────────────────────────────────────────────────

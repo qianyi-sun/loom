@@ -35,7 +35,6 @@ from loom.taskset.template_render import render_task_template
 from loom.taskset.transform_sandbox import (
     TransformSandboxConfig,
     TransformSandboxError,
-    run_transform,
 )
 from loom.taskset.upstream_rows import UpstreamFetchError, iter_upstream_rows
 from loom.terminal_bench_normalize import normalize_terminal_bench_task_toml
@@ -557,7 +556,17 @@ def materialize_task_set(
     prefix = _storage_prefix(team_id=owning_team_id, slug=slug)
     has_evaluation = "evaluation" in intents
     max_instances = (manifest.limits.max_instances if manifest.limits else 500)
-    manifest_timeout_s = manifest.limits.timeout_per_task_s if manifest.limits else None
+
+    # v1 internal-trusted workloads deliberately have no transform execution
+    # capability. This guard precedes every blob fetch and subprocess path so
+    # direct callers cannot recover the retired legacy execution path by
+    # supplying permissive TransformSandboxConfig flags.
+    if manifest.transform is not None:
+        return MaterializeOutput(
+            status="failed",
+            status_reason="transform_unavailable_in_internal_trusted",
+            job_failure_reason="transform_unavailable_in_internal_trusted",
+        )
 
     if manifest.source.type == "bundle-upload":
         return _materialize_bundle_upload(
@@ -572,35 +581,6 @@ def materialize_task_set(
             team_storage_baseline=team_storage_baseline,
             max_team_storage_bytes=max_team_storage_bytes,
         )
-
-    transform_bytes: bytes | None = None
-    if manifest.transform is not None:
-        if transform_config is None or not transform_config.enabled or not transform_config.network_isolated:
-            return MaterializeOutput(
-                status="failed",
-                status_reason="transform_unsupported_on_host",
-                job_failure_reason="transform_unsupported_on_host",
-                job_failure_message=(
-                    "transform manifests require taskset_materializer_transforms_enabled "
-                    "and taskset_materializer_transform_network_isolated"
-                ),
-            )
-        try:
-            transform_bytes = _fetch_blob_bytes(minio_client, transform_blob_uri)
-        except Exception as exc:
-            return MaterializeOutput(
-                status="failed",
-                status_reason="transform_blob_missing",
-                job_failure_reason="transform_blob_missing",
-                job_failure_message=str(exc),
-            )
-        if not transform_bytes:
-            return MaterializeOutput(
-                status="failed",
-                status_reason="transform_blob_missing",
-                job_failure_reason="transform_blob_missing",
-                job_failure_message="transform blob uri missing or empty",
-            )
 
     verifier_bytes = _fetch_verifier_bytes(minio_client, verifier_blob_uri)
 
@@ -632,14 +612,6 @@ def materialize_task_set(
             row_index = attempted
             try:
                 working_row = row
-                if manifest.transform is not None and transform_bytes is not None:
-                    assert transform_config is not None
-                    working_row = run_transform(
-                        transform_script=transform_bytes,
-                        row=row,
-                        config=transform_config,
-                        manifest_timeout_s=manifest_timeout_s,
-                    )
                 instance = resolve_mapping(working_row, manifest.instance_mapping)
                 rendered = render_task_template(
                     manifest.task_template,

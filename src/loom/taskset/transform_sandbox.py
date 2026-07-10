@@ -13,18 +13,27 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from loom.workload_trust import INTERNAL_TRUSTED, WorkloadTrustContract
+
 logger = logging.getLogger(__name__)
 
 _STDERR_CAP = 2048
 _HARNESS_NAME = "loom_transform_harness.py"
 _USER_SCRIPT_NAME = "transform.py"
 _CLONE_NEWNET = 0x40000000
+_V1_INTERNAL_TRUSTED_CONTRACT = WorkloadTrustContract(
+    workload_trust_mode=INTERNAL_TRUSTED,
+    taskset_transforms_enabled=False,
+    taskset_transform_network_isolated=False,
+    untrusted_workload_isolation=False,
+)
 
 
 @dataclass(frozen=True)
 class TransformSandboxConfig:
     enabled: bool
     network_isolated: bool
+    workload_contract: WorkloadTrustContract = _V1_INTERNAL_TRUSTED_CONTRACT
     wall_timeout_sec: int = 30
     cpu_limit_sec: int = 10
     memory_limit_mb: int = 256

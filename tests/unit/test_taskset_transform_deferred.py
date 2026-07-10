@@ -4,9 +4,14 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from loom.models.taskset import UserTaskSetManifest
 from loom.taskset.materialize import materialize_task_set
 from loom.taskset.transform_sandbox import TransformSandboxConfig
+from loom.workload_trust import WorkloadTrustContract
+from loom_service.app import create_app
+from loom_service.config import LoomServiceSettings
 
 _MANIFEST = {
     "apiVersion": "loom.taskset/v1",
@@ -23,51 +28,71 @@ _MANIFEST = {
     "transform": {"file": "transform.py"},
 }
 
-_GATES_OFF = TransformSandboxConfig(enabled=False, network_isolated=False)
-_GATES_ON = TransformSandboxConfig(enabled=True, network_isolated=True)
+_V1_INTERNAL_TRUSTED = WorkloadTrustContract(
+    workload_trust_mode="internal_trusted",
+    taskset_transforms_enabled=False,
+    taskset_transform_network_isolated=False,
+    untrusted_workload_isolation=False,
+)
 
 
-def test_transform_gates_disabled_fails_job() -> None:
-    manifest = UserTaskSetManifest.model_validate(_MANIFEST)
-    output = materialize_task_set(
-        manifest=manifest,
-        task_set_id="ts/team/tasks",
-        owning_team_id="team",
-        intents=["trajectory_generation"],
-        verifier_blob_uri=None,
-        transform_blob_uri="s3://artifacts/x/transform.py",
-        transform_config=_GATES_OFF,
-        minio_client=MagicMock(),
-        artifacts_bucket="artifacts",
-        upstream_cache_root=__import__("pathlib").Path("/tmp/loom-test"),
+def _legacy_gates_on() -> TransformSandboxConfig:
+    return TransformSandboxConfig(
+        enabled=True,
+        network_isolated=True,
+        workload_contract=_V1_INTERNAL_TRUSTED,
     )
-    assert output.status == "failed"
-    assert output.status_reason == "transform_unsupported_on_host"
-    assert output.job_failure_reason == "transform_unsupported_on_host"
 
 
-def test_transform_applied_before_mapping() -> None:
+def test_v1_contract_rejects_transform_before_blob_fetch_or_runner() -> None:
     manifest = UserTaskSetManifest.model_validate(_MANIFEST)
     minio = MagicMock()
-    minio.get_object.return_value = {"Body": MagicMock(read=lambda: b"def transform(row): return row")}
-
-    with patch(
-        "loom.taskset.materialize.run_transform",
-        return_value={"id": "1", "question": "mapped"},
-    ) as mock_transform:
+    with (
+        patch(
+            "loom.taskset.materialize._fetch_blob_bytes",
+            side_effect=AssertionError("v1 rejection must not fetch blobs"),
+        ) as fetch_blob,
+        patch(
+            "loom.taskset.transform_sandbox.run_transform",
+            side_effect=AssertionError("v1 rejection must not invoke a runner"),
+        ) as run,
+    ):
         output = materialize_task_set(
             manifest=manifest,
             task_set_id="ts/team/tasks",
             owning_team_id="team",
             intents=["trajectory_generation"],
             verifier_blob_uri=None,
-            transform_blob_uri="s3://artifacts/tasksets/user/team/tasks/transform.py",
-            transform_config=_GATES_ON,
+            transform_blob_uri="s3://artifacts/x/transform.py",
+            transform_config=_legacy_gates_on(),
             minio_client=minio,
             artifacts_bucket="artifacts",
             upstream_cache_root=__import__("pathlib").Path("/tmp/loom-test"),
         )
 
-    mock_transform.assert_called_once()
-    assert output.status == "ready"
-    assert output.task_count == 1
+    assert output.status == "failed"
+    assert output.status_reason == "transform_unavailable_in_internal_trusted"
+    assert output.job_failure_reason == "transform_unavailable_in_internal_trusted"
+    assert output.task_rows == []
+    assert output.task_count == 0
+    assert minio.mock_calls == []
+    fetch_blob.assert_not_called()
+    run.assert_not_called()
+
+
+def test_service_startup_rejects_invalid_v1_workload_trust_tuple() -> None:
+    settings = LoomServiceSettings(
+        _env_file=None,
+        db_url="postgresql+asyncpg://user:password@db.example/loom",
+        minio_access_key="access-key",
+        minio_secret_key="secret-key",
+        taskset_materializer_transforms_enabled=True,
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        create_app(settings)
+
+    assert str(exc_info.value) == (
+        "invalid v1 workload trust contract: "
+        "taskset_transforms_enabled must be false"
+    )

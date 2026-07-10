@@ -104,3 +104,10 @@ cpu_request = "500m"
 cpu_limit = "8"
 memory_request = "1Gi"
 memory_limit = "16Gi"
+# Canonical v1 workload-trust contract injected into loom-service.
+
+[workload_contract]
+workload_trust_mode = "internal_trusted"
+taskset_transforms_enabled = false
+taskset_transform_network_isolated = false
+untrusted_workload_isolation = false
