@@ -434,6 +434,33 @@ class TestMaterializationGenerationPrefixes:
 class TestBoundedPrefixDeletion:
     """S3 deletion reports errors and respects the per-sweep budget."""
 
+    def test_delete_prefix_at_exact_budget_is_complete_when_no_objects_remain(self) -> None:
+        from loom_service.taskset_gc import _delete_s3_prefix
+
+        client = MagicMock()
+        client.get_paginator.return_value.paginate.return_value = [{
+            "Contents": [
+                {"Key": "prefix/one"},
+                {"Key": "prefix/two"},
+            ],
+        }]
+        client.delete_objects.return_value = {
+            "Deleted": [{"Key": "prefix/one"}, {"Key": "prefix/two"}],
+            "Errors": [],
+        }
+
+        result = _delete_s3_prefix(
+            client,
+            bucket="artifacts",
+            prefix="prefix/",
+            max_objects=2,
+        )
+
+        assert result.attempted_objects == 2
+        assert result.deleted_objects == 2
+        assert result.error_objects == 0
+        assert result.partial is False
+
     def test_delete_prefix_counts_errors_without_claiming_success(self) -> None:
         from loom_service.taskset_gc import _delete_s3_prefix
 

@@ -608,6 +608,99 @@ async def test_live_generation_gc_preserves_active_epoch_and_resumes_at_budget(
 
 
 @pytest.mark.asyncio
+async def test_live_generation_gc_rotates_past_clean_taskset_and_job_windows(
+    materialization_setup,
+) -> None:
+    """A later orphan converges without giving clean earlier rows special treatment."""
+    app, _tokens, teams = materialization_setup
+    created_at = datetime(2025, 1, 1, tzinfo=UTC)
+    tail_job_id = uuid4()
+
+    task_sets: list[TaskSet] = []
+    jobs: list[TaskSetMaterializationJob] = []
+    for task_set_index in range(101):
+        slug = f"gc-window-{task_set_index:03d}"
+        task_set_id = f"ts/{teams['team_a']}/{slug}"
+        task_sets.append(TaskSet(
+            id=task_set_id,
+            owning_team_id=teams["team_a"],
+            slug=slug,
+            display_name=f"GC window {task_set_index}",
+            visibility="private",
+            status="failed",
+            intents=["trajectory_generation"],
+            manifest_blob_uri=f"s3://artifacts/{slug}/manifest.yaml",
+            created_at=created_at + timedelta(seconds=task_set_index),
+        ))
+        job_count = 1 if task_set_index < 100 else 101
+        for job_index in range(job_count):
+            jobs.append(TaskSetMaterializationJob(
+                id=(tail_job_id if job_index == 100 else uuid4()),
+                task_set_id=task_set_id,
+                owning_team_id=teams["team_a"],
+                state="failed",
+                lease_epoch=1,
+                enqueued_at=created_at + timedelta(seconds=job_index),
+            ))
+
+    async with app.state.session_factory() as session:
+        session.add_all(task_sets)
+        session.add_all(jobs)
+        await session.commit()
+
+    orphan_prefix = (
+        f"tasksets/user/{teams['team_a']}/gc-window-100/materializations/"
+        f"{tail_job_id}/1/"
+    )
+    orphan_key = f"{orphan_prefix}tasks/orphan/task.toml"
+    app.state.minio_client.put_object(
+        Bucket=app.state.settings.artifacts_bucket,
+        Key=orphan_key,
+        Body=b"orphan",
+    )
+
+    async with app.state.session_factory() as session:
+        first_window = await purge_abandoned_materialization_generations(
+            session,
+            minio_client=app.state.minio_client,
+            artifacts_bucket=app.state.settings.artifacts_bucket,
+            task_set_limit=100,
+            job_limit=100,
+            object_delete_budget=10,
+            sweep_window=0,
+        )
+    assert first_window.deleted_objects == 0
+    assert orphan_key in _object_keys(app, prefix=orphan_key)
+
+    async with app.state.session_factory() as session:
+        first_tail_job_window = await purge_abandoned_materialization_generations(
+            session,
+            minio_client=app.state.minio_client,
+            artifacts_bucket=app.state.settings.artifacts_bucket,
+            task_set_limit=100,
+            job_limit=100,
+            object_delete_budget=10,
+            sweep_window=1,
+        )
+    assert first_tail_job_window.deleted_objects == 0
+    assert orphan_key in _object_keys(app, prefix=orphan_key)
+
+    async with app.state.session_factory() as session:
+        converged = await purge_abandoned_materialization_generations(
+            session,
+            minio_client=app.state.minio_client,
+            artifacts_bucket=app.state.settings.artifacts_bucket,
+            task_set_limit=100,
+            job_limit=100,
+            object_delete_budget=10,
+            sweep_window=3,
+        )
+    assert converged.deleted_objects == 1
+    assert converged.partial is False
+    assert _object_keys(app, prefix=orphan_prefix) == set()
+
+
+@pytest.mark.asyncio
 async def test_soft_delete_gc_uses_taskset_root_delimiter(materialization_setup) -> None:
     app, _tokens, teams = materialization_setup
     deleted_at = datetime.now(UTC) - timedelta(days=8)
