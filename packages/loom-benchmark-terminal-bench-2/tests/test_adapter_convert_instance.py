@@ -664,7 +664,12 @@ def test_multiservice_stages_sidecar_build_contexts(
 def test_client_compose_sandbox_options_are_preserved(
     fixtures_dir: Path, tmp_path: Path,
 ) -> None:
-    staged = tmp_path / "tasks" / "broken-networking"
+    # Named `sandbox-options-preserved` rather than `broken-networking`
+    # because the latter is now on the adapter's _UNSUPPORTED_INSTANCES
+    # list (see adapter.py, #760). The test's intent — that compose-level
+    # dns / extra_hosts / tmpfs get copied through to the emitted task
+    # config — is independent of the instance name.
+    staged = tmp_path / "tasks" / "sandbox-options-preserved"
     shutil.copytree(fixtures_dir / "tb2-task-hello-world", staged)
     (staged / "docker-compose.yaml").write_text(
         "services:\n"

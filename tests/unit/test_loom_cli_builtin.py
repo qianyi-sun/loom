@@ -84,7 +84,10 @@ def test_terminal_bench_2_surfaces_pinned_task_count() -> None:
     edited the masked catalog row."""
     entries = load_builtin_entries()
     tb2 = next(e for e in entries if e.slug == "terminal-bench-2")
-    assert tb2.task_count == 86
+    # 86 upstream tasks minus 2 (broken-networking, extract-safely) that
+    # ship Dockerfiles which structurally cannot pass Loom's task-bundle
+    # compatibility validators — see adapter._UNSUPPORTED_INSTANCES + #760.
+    assert tb2.task_count == 84
 
 
 def test_third_party_adapter_without_task_count_falls_back_to_none(
