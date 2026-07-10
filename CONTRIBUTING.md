@@ -17,6 +17,11 @@
 > enables GitHub auto-merge with squash immediately after opening each normal
 > `dev` PR. This queues the merge; GitHub waits for every required gate on the
 > current head SHA and any applicable repository protection before merging.
+> Static documentation is a location-and-format allowlist; unknown runtime
+> paths fail safe to the full validation set. Manual runs report `*-manual`
+> contexts and cannot satisfy protected PR contexts. Changes to the CI/release
+> trust root require a CODEOWNER, while routine source changes keep the
+> zero-review auto-merge path.
 > External pull requests are accepted for issue-scoped work that follows
 > the templates below. Workflows that need publish or deployment secrets
 > must use protected GitHub Environments and must not expose secrets to
@@ -143,7 +148,8 @@ secrets.
 - The four stable gate contexts are `repository-checks`, `images-gate`,
   `cluster-smoke-gate`, and `staging-smoke-gate`. The shared planner selects
   their validation work from changed paths; labels request additional work but
-  cannot turn off path-inferred work.
+  cannot turn off path-inferred work. A new non-document path without a known
+  owner selects every heavy lane until its ownership is declared.
 - Codex enables GitHub auto-merge with squash immediately after opening a
   normal `dev` PR. It remains queued until every required gate is visible and
   successful on the current head SHA and any applicable repository protection
@@ -159,6 +165,10 @@ secrets.
   review practices are managed independently. If repository or environment
   protection requires review, GitHub enforces it while the auto-merge request
   remains queued.
+- Changes to `.github/**`, CI planning/test policy, and production release
+  verification are a narrow exception: they require a declared code owner
+  because those files define the authority that permits zero-review routine
+  changes. Manual dispatches use distinct `*-manual` check names.
 - Squash merge is the only allowed merge method, keeping `dev` linear
 - Do not add credentials, private endpoints, local environment files, or
   generated run artifacts
@@ -207,6 +217,8 @@ have one place to audit them.
 - **Target branch-protection policy for `main` and `dev`** must require
   `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
   `staging-smoke-gate`, block direct pushes, and enforce squash-only merges.
+  `dev` additionally requires CODEOWNER review only for the narrow CI/release
+  trust root; it does not impose a repository-wide approval count.
   Task 6 verifies the remote GitHub settings and check contexts; this policy
   description is not evidence that those settings are already applied.
 - **Merge queue readiness**: all four stable gate contexts run on GitHub's
