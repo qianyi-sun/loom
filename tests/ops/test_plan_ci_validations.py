@@ -141,9 +141,21 @@ def test_runtime_inputs_fail_safe_to_every_heavy_check(path: str) -> None:
     )
 
     assert plan.docs_only is False
+    assert plan.unowned_runtime is True
     assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
     expected_reason = f"unowned-runtime-path:{path}"
     assert all(expected_reason in plan.reasons[check] for check in HEAVY_CHECKS)
+
+
+def test_mixed_known_and_unowned_paths_preserve_unowned_runtime_signal() -> None:
+    plan = plan_validations(
+        changed_paths=["web/src/App.tsx", "unowned-runtime/new-input.bin"],
+        labels=set(),
+        event_name="pull_request",
+    )
+
+    assert plan.unowned_runtime is True
+    assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
 
 
 def test_codeowners_is_not_static_documentation() -> None:

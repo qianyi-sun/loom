@@ -57,6 +57,7 @@ PLANNER_PATHS = {
 @dataclass(frozen=True)
 class ValidationPlan:
     docs_only: bool
+    unowned_runtime: bool
     integration: bool
     integration_docker: bool
     images: bool
@@ -73,6 +74,7 @@ class ValidationPlan:
             name: str(bool(getattr(self, name))).lower()
             for name in (
                 "docs_only",
+                "unowned_runtime",
                 *HEAVY_CHECKS,
                 "coverage_summary",
             )
@@ -106,6 +108,7 @@ def plan_validations(
 ) -> ValidationPlan:
     paths = tuple(dict.fromkeys(path.strip() for path in changed_paths if path.strip()))
     docs_only = bool(paths) and all(_is_documentation_path(path) for path in paths)
+    unowned_runtime = False
     selected = {name: False for name in (*HEAVY_CHECKS, "coverage_summary")}
     reasons: dict[str, list[str]] = {name: [] for name in selected}
 
@@ -230,6 +233,7 @@ def plan_validations(
             select("staging_smoke", f"path:{path}")
             matched_owner = True
         if not matched_owner:
+            unowned_runtime = True
             reason = f"unowned-runtime-path:{path}"
             for name in HEAVY_CHECKS:
                 select(name, reason)
@@ -245,6 +249,7 @@ def plan_validations(
 
     return ValidationPlan(
         docs_only=docs_only,
+        unowned_runtime=unowned_runtime,
         integration=selected["integration"],
         integration_docker=selected["integration_docker"],
         images=selected["images"],

@@ -51,6 +51,8 @@ def _run_image_matrix_plan(
     tmp_path: Path,
     *,
     required: str,
+    unowned_runtime: str,
+    changed_paths: tuple[str, ...] = ("unowned-runtime/new-input.bin",),
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -63,10 +65,11 @@ def _run_image_matrix_plan(
     _git(repo, "commit", "--quiet", "-m", "base")
     base_sha = _git(repo, "rev-parse", "HEAD")
 
-    unowned_path = repo / "unowned-runtime" / "new-input.bin"
-    unowned_path.parent.mkdir()
-    unowned_path.write_bytes(b"runtime input\n")
-    _git(repo, "add", "unowned-runtime/new-input.bin")
+    for changed_path in changed_paths:
+        target = repo / changed_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"runtime input\n")
+    _git(repo, "add", *changed_paths)
     _git(repo, "commit", "--quiet", "-m", "head")
     head_sha = _git(repo, "rev-parse", "HEAD")
 
@@ -84,6 +87,7 @@ def _run_image_matrix_plan(
             "HEAD_SHA": head_sha,
             "PR_LABELS_JSON": "[]",
             "REQUIRED": required,
+            "UNOWNED_RUNTIME": unowned_runtime,
             "GITHUB_OUTPUT": str(github_output),
         },
         check=False,
@@ -143,13 +147,21 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
 
 
 def test_images_matrix_plan_receives_shared_required_decision() -> None:
-    assert _image_matrix_step()["env"]["REQUIRED"] == (
+    env = _image_matrix_step()["env"]
+    assert env["REQUIRED"] == (
         "${{ steps.required.outputs.images }}"
+    )
+    assert env["UNOWNED_RUNTIME"] == (
+        "${{ steps.required.outputs.unowned_runtime }}"
     )
 
 
 def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path) -> None:
-    result, output = _run_image_matrix_plan(tmp_path, required="true")
+    result, output = _run_image_matrix_plan(
+        tmp_path,
+        required="true",
+        unowned_runtime="true",
+    )
 
     assert result.returncode == 0, result.stderr
     matrix = json.loads(output.removeprefix("images=").strip())
@@ -169,15 +181,55 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
     ]
 
 
+def test_images_mixed_known_and_unowned_paths_select_all_images(tmp_path: Path) -> None:
+    result, output = _run_image_matrix_plan(
+        tmp_path,
+        required="true",
+        unowned_runtime="true",
+        changed_paths=("web/src/App.tsx", "unowned-runtime/new-input.bin"),
+    )
+
+    assert result.returncode == 0, result.stderr
+    matrix = json.loads(output.removeprefix("images=").strip())
+    assert {entry["image"] for entry in matrix} == {
+        "worker",
+        "service",
+        "control-plane",
+        "llm-gateway",
+        "web",
+        "llm-gateway-sandbox",
+    }
+
+
 @pytest.mark.parametrize("required", ["", "invalid"])
 def test_images_matrix_plan_rejects_malformed_required(
     tmp_path: Path,
     required: str,
 ) -> None:
-    result, output = _run_image_matrix_plan(tmp_path, required=required)
+    result, output = _run_image_matrix_plan(
+        tmp_path,
+        required=required,
+        unowned_runtime="false",
+    )
 
     assert result.returncode != 0
     assert "FAIL: invalid planner boolean required=" in result.stderr
+    assert output == ""
+
+
+@pytest.mark.parametrize("unowned_runtime", ["", "invalid"])
+def test_images_matrix_plan_rejects_malformed_unowned_runtime(
+    tmp_path: Path,
+    unowned_runtime: str,
+) -> None:
+    result, output = _run_image_matrix_plan(
+        tmp_path,
+        required="true",
+        unowned_runtime=unowned_runtime,
+    )
+
+    assert result.returncode != 0
+    assert "FAIL: invalid planner boolean unowned_runtime=" in result.stderr
     assert output == ""
 
 

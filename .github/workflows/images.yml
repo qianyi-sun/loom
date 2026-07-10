@@ -125,6 +125,7 @@ jobs:
         id: plan
         env:
           REQUIRED: ${{ steps.required.outputs.images }}
+          UNOWNED_RUNTIME: ${{ steps.required.outputs.unowned_runtime }}
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
@@ -148,10 +149,15 @@ jobs:
           }
           python_images = {"worker", "service", "control-plane", "llm-gateway"}
           required = os.environ["REQUIRED"]
-          if required not in {"true", "false"}:
-              raise SystemExit(
-                  f"FAIL: invalid planner boolean required={required!r}"
-              )
+          unowned_runtime = os.environ["UNOWNED_RUNTIME"]
+          for name, value in {
+              "required": required,
+              "unowned_runtime": unowned_runtime,
+          }.items():
+              if value not in {"true", "false"}:
+                  raise SystemExit(
+                      f"FAIL: invalid planner boolean {name}={value!r}"
+                  )
 
           def all_images() -> set[str]:
               return set(images)
@@ -230,7 +236,9 @@ jobs:
           labels = set(json.loads(os.environ["PR_LABELS_JSON"] or "[]") or [])
           if "ci:images" in labels and not selected:
               selected = all_images()
-          if required == "true" and not selected:
+          if unowned_runtime == "true":
+              selected = all_images()
+          elif required == "true" and not selected:
               selected = all_images()
 
           matrix = [
