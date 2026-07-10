@@ -9,16 +9,23 @@ import hashlib
 import logging
 import re
 from collections import defaultdict
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from loom.db.schema import Task, TaskSet, TaskSetManifest, TaskSetMaterializationJob
+from loom.db.schema import (
+    Task,
+    TaskSet,
+    TaskSetGenerationGcCursor,
+    TaskSetManifest,
+    TaskSetMaterializationJob,
+)
 from loom.taskset.storage_bytes import (
     generated_tasks_prefix,
     generation_prefix,
@@ -35,7 +42,7 @@ _ROOT_GC_OBJECT_DELETE_BUDGET = 1_000
 _LIVE_GC_TASK_SET_LIMIT = 100
 _LIVE_GC_JOB_LIMIT = 100
 _LIVE_GC_OBJECT_DELETE_BUDGET = 1_000
-_LIVE_GC_ROTATION_INTERVAL_SEC = 3_600
+_LIVE_GENERATION_GC_CURSOR_NAME = "live-generation-gc"
 
 
 @dataclass(frozen=True)
@@ -82,6 +89,54 @@ class _GenerationCandidate:
     epoch: int
     prefix: str
     tasks_prefix: str
+
+
+async def _load_live_generation_gc_sweep(session: AsyncSession) -> int:
+    """Return the durable next sequence without holding a transaction for I/O."""
+    try:
+        await session.execute(
+            pg_insert(TaskSetGenerationGcCursor)
+            .values(name=_LIVE_GENERATION_GC_CURSOR_NAME, next_sweep=0)
+            .on_conflict_do_nothing(index_elements=["name"]),
+        )
+        next_sweep = (await session.execute(
+            select(TaskSetGenerationGcCursor.next_sweep).where(
+                TaskSetGenerationGcCursor.name == _LIVE_GENERATION_GC_CURSOR_NAME,
+            ),
+        )).scalar_one()
+        await session.commit()
+        return next_sweep
+    except Exception:
+        await session.rollback()
+        raise
+
+
+async def _advance_live_generation_gc_sweep(
+    session: AsyncSession,
+    *,
+    completed_sweep: int,
+) -> None:
+    """Advance once iff this worker completed the sequence it selected."""
+    try:
+        advanced_to = (await session.execute(
+            update(TaskSetGenerationGcCursor)
+            .where(
+                TaskSetGenerationGcCursor.name == _LIVE_GENERATION_GC_CURSOR_NAME,
+                TaskSetGenerationGcCursor.next_sweep == completed_sweep,
+            )
+            .values(next_sweep=completed_sweep + 1)
+            .returning(TaskSetGenerationGcCursor.next_sweep),
+        )).scalar_one_or_none()
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+
+    if advanced_to is None:
+        logger.info(
+            "taskset_generation_gc sequence %d was already advanced by another worker",
+            completed_sweep,
+        )
 
 
 def _storage_prefix(*, team_id: UUID | str, slug: str) -> str:
@@ -325,7 +380,6 @@ async def purge_abandoned_materialization_generations(
     task_set_limit: int = _LIVE_GC_TASK_SET_LIMIT,
     job_limit: int = _LIVE_GC_JOB_LIMIT,
     object_delete_budget: int = _LIVE_GC_OBJECT_DELETE_BUDGET,
-    sweep_window: int | None = None,
 ) -> MaterializationGenerationGcResult:
     """Boundedly remove unreferenced generated output from live TaskSets.
 
@@ -336,10 +390,11 @@ async def purge_abandoned_materialization_generations(
     """
     if task_set_limit <= 0 or job_limit <= 0 or object_delete_budget < 0:
         raise ValueError("live generation GC bounds must be positive (budget may be zero)")
-    if sweep_window is None:
-        sweep_window = int(datetime.now(UTC).timestamp()) // _LIVE_GC_ROTATION_INTERVAL_SEC
-    if isinstance(sweep_window, bool) or not isinstance(sweep_window, int) or sweep_window < 0:
-        raise ValueError("live generation GC sweep window must be a non-negative integer")
+
+    sweep_sequence = await _load_live_generation_gc_sweep(session)
+    task_sets: dict[str, _LiveTaskSet] = {}
+    job_rows: Sequence[Any] = ()
+    source_rows: Sequence[Any] = ()
 
     try:
         live_task_set_filter = (
@@ -349,57 +404,53 @@ async def purge_abandoned_materialization_generations(
         task_set_count = (await session.execute(
             select(func.count()).select_from(TaskSet).where(*live_task_set_filter),
         )).scalar_one()
-        if task_set_count == 0:
-            return MaterializationGenerationGcResult()
-        task_set_page_count = (task_set_count + task_set_limit - 1) // task_set_limit
-        task_set_offset = (sweep_window % task_set_page_count) * task_set_limit
-        task_set_rows = (await session.execute(
-            select(TaskSet.id, TaskSet.owning_team_id, TaskSet.slug)
-            .where(*live_task_set_filter)
-            .order_by(TaskSet.created_at, TaskSet.id)
-            .offset(task_set_offset)
-            .limit(task_set_limit),
-        )).all()
-        task_sets = {
-            row.id: _LiveTaskSet(
-                id=row.id,
-                owning_team_id=row.owning_team_id,
-                slug=row.slug,
-            )
-            for row in task_set_rows
-        }
-        if not task_sets:
-            return MaterializationGenerationGcResult()
-
-        live_job_filter = TaskSetMaterializationJob.task_set_id.in_(task_sets)
-        job_count = (await session.execute(
-            select(func.count())
-            .select_from(TaskSetMaterializationJob)
-            .where(live_job_filter),
-        )).scalar_one()
-        if job_count:
-            job_window = sweep_window // task_set_page_count
-            job_offset = (job_window * job_limit) % job_count
-            job_rows = (await session.execute(
-                select(
-                    TaskSetMaterializationJob.id,
-                    TaskSetMaterializationJob.task_set_id,
-                    TaskSetMaterializationJob.state,
-                    TaskSetMaterializationJob.lease_epoch,
-                )
-                .where(live_job_filter)
-                .order_by(
-                    TaskSetMaterializationJob.enqueued_at,
-                    TaskSetMaterializationJob.id,
-                )
-                .offset(job_offset)
-                .limit(job_limit),
+        if task_set_count:
+            task_set_page_count = (task_set_count + task_set_limit - 1) // task_set_limit
+            task_set_offset = (sweep_sequence % task_set_page_count) * task_set_limit
+            task_set_rows = (await session.execute(
+                select(TaskSet.id, TaskSet.owning_team_id, TaskSet.slug)
+                .where(*live_task_set_filter)
+                .order_by(TaskSet.created_at, TaskSet.id)
+                .offset(task_set_offset)
+                .limit(task_set_limit),
             )).all()
-        else:
-            job_rows = ()
-        source_rows = (await session.execute(
-            select(Task.task_set_id, Task.source).where(Task.task_set_id.in_(task_sets)),
-        )).all()
+            task_sets = {
+                row.id: _LiveTaskSet(
+                    id=row.id,
+                    owning_team_id=row.owning_team_id,
+                    slug=row.slug,
+                )
+                for row in task_set_rows
+            }
+
+        if task_sets:
+            live_job_filter = TaskSetMaterializationJob.task_set_id.in_(task_sets)
+            job_count = (await session.execute(
+                select(func.count())
+                .select_from(TaskSetMaterializationJob)
+                .where(live_job_filter),
+            )).scalar_one()
+            if job_count:
+                job_window = sweep_sequence // task_set_page_count
+                job_offset = (job_window * job_limit) % job_count
+                job_rows = (await session.execute(
+                    select(
+                        TaskSetMaterializationJob.id,
+                        TaskSetMaterializationJob.task_set_id,
+                        TaskSetMaterializationJob.state,
+                        TaskSetMaterializationJob.lease_epoch,
+                    )
+                    .where(live_job_filter)
+                    .order_by(
+                        TaskSetMaterializationJob.enqueued_at,
+                        TaskSetMaterializationJob.id,
+                    )
+                    .offset(job_offset)
+                    .limit(job_limit),
+                )).all()
+            source_rows = (await session.execute(
+                select(Task.task_set_id, Task.source).where(Task.task_set_id.in_(task_sets)),
+            )).all()
     finally:
         # Do not hold a DB transaction while traversing object storage.
         await session.rollback()
@@ -519,7 +570,7 @@ async def purge_abandoned_materialization_generations(
         remaining_budget -= delete_result.attempted_objects
         partial = partial or delete_result.partial
 
-    return MaterializationGenerationGcResult(
+    result = MaterializationGenerationGcResult(
         candidate_generations=len(candidates),
         protected_generations=protected,
         attempted_objects=attempted,
@@ -527,6 +578,11 @@ async def purge_abandoned_materialization_generations(
         error_objects=errors,
         partial=partial,
     )
+    await _advance_live_generation_gc_sweep(
+        session,
+        completed_sweep=sweep_sequence,
+    )
+    return result
 
 
 async def purge_expired_task_sets(
@@ -618,7 +674,6 @@ async def run_once(
     minio_client: Any,
     artifacts_bucket: str,
     retention_days: int,
-    generation_sweep_window: int | None = None,
 ) -> tuple[int, MaterializationGenerationGcResult]:
     """Run both independent TaskSet cleanup contracts once."""
     async with session_factory() as session:
@@ -633,7 +688,6 @@ async def run_once(
             session,
             minio_client=minio_client,
             artifacts_bucket=artifacts_bucket,
-            sweep_window=generation_sweep_window,
         )
     return purged, generation_result
 
@@ -653,9 +707,6 @@ async def run_loop(
                 minio_client=minio_client,
                 artifacts_bucket=artifacts_bucket,
                 retention_days=retention_days,
-                generation_sweep_window=(
-                    int(datetime.now(UTC).timestamp()) // max(poll_interval_sec, 1)
-                ),
             )
             if purged > 0:
                 logger.info("taskset_gc purged %d expired task sets", purged)

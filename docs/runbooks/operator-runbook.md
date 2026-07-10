@@ -1304,11 +1304,12 @@ prefix to clear a stalled TaskSet. The TaskSet GC poll loop runs a bounded live
 generation reconciler alongside retained soft-delete root cleanup. It retries
 only stale, unreferenced `materializations/<job-id>/<epoch>/` prefixes and
 leaves durable inputs, legacy paths, active lease epochs, and current Task
-sources intact. Its DB candidate pages rotate with the poll window, so clean
-older TaskSets or jobs do not indefinitely delay a later abandoned generation.
-A complete root is removed only after the configured soft-delete retention
-delay; investigate materializer/job state instead of shortening that retention
-or performing object/DB surgery.
+sources intact. A durable database cursor advances only after each completed
+bounded sweep, so clean older TaskSets or jobs do not indefinitely delay a
+later abandoned generation and a restart repeats rather than skips a page. A
+complete root is removed only after the configured soft-delete retention delay;
+investigate materializer/job state instead of shortening that retention or
+performing object/DB surgery.
 
 ### Protected workload-trust contract (#755)
 

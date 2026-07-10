@@ -428,10 +428,12 @@ Two cleanup contracts remain deliberately separate:
   current active epoch and every generation referenced by a current
   `Task.source`. Unknown jobs, malformed/future epochs, legacy `tasks/`, and
   all stable inputs are never live-GC targets.
-  Its bounded TaskSet and job pages rotate deterministically with the GC poll
-  window, so a clean leading page cannot starve a later abandoned generation;
-  the rotation is derived from the current window rather than process-local
-  state and therefore remains safe across service restarts.
+  A singleton durable database cursor selects the next bounded TaskSet and job
+  windows, so clean leading rows cannot starve a later abandoned generation.
+  It advances with a compare-and-swap only after a complete sweep; a crash or
+  restart before that update repeats the same safe page rather than skipping a
+  page. The cursor stores scheduling progress only, never a bucket, prefix, or
+  deletion target.
 - Retention-delayed soft-delete GC is the only path that removes an entire
   TaskSet root. After `soft_deleted_at + retention`, it deletes the
   delimiter-terminated `<root>/` and then hard-deletes the TaskSet rows. It is

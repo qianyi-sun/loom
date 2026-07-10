@@ -48,6 +48,16 @@ def postgres_url_at_0061() -> Iterator[str]:
         yield url
 
 
+@pytest.fixture(scope="module")
+def postgres_url_at_0062() -> Iterator[str]:
+    with PostgresContainer("postgres:16") as pg:
+        url = pg.get_connection_url().replace(
+            "postgresql+psycopg2://", "postgresql+psycopg://",
+        )
+        _alembic(url, "upgrade", "0062")
+        yield url
+
+
 def _insert_task_set(conn, *, team_id: str, slug: str) -> str:
     task_set_id = f"ts/{team_id}/{slug}"
     conn.execute(
@@ -274,3 +284,54 @@ def test_upgrade_persists_lease_fencing_state(
         "published_materialization_generation",
     } & remaining_columns
     assert "task_set_materialization_jobs_active_heartbeat_idx" not in remaining_indexes
+
+
+def test_upgrade_persists_generation_gc_cursor(postgres_url_at_0062: str) -> None:
+    """Revision 0063 adds a scheduling-only durable GC cursor."""
+    _alembic(postgres_url_at_0062, "upgrade", "0063")
+    engine = create_engine(postgres_url_at_0062)
+    with engine.begin() as conn:
+        columns = {
+            row.column_name: row.is_nullable
+            for row in conn.execute(
+                text(
+                    "SELECT column_name, is_nullable "
+                    "FROM information_schema.columns "
+                    "WHERE table_schema = 'public' "
+                    "AND table_name = 'task_set_generation_gc_cursors'",
+                ),
+            )
+        }
+        assert columns == {"name": "NO", "next_sweep": "NO"}
+
+        next_sweep = conn.execute(
+            text(
+                "INSERT INTO task_set_generation_gc_cursors (name) "
+                "VALUES ('live-generation-gc') RETURNING next_sweep",
+            ),
+        ).scalar_one()
+        assert next_sweep == 0
+
+        with pytest.raises(IntegrityError):
+            conn.execute(
+                text(
+                    "INSERT INTO task_set_generation_gc_cursors (name) "
+                    "VALUES ('unexpected-authority')",
+                ),
+            )
+    engine.dispose()
+
+    _alembic(postgres_url_at_0062, "downgrade", "0062")
+    engine = create_engine(postgres_url_at_0062)
+    with engine.begin() as conn:
+        table_exists = conn.execute(
+            text(
+                "SELECT EXISTS ("
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = 'public' "
+                "AND table_name = 'task_set_generation_gc_cursors'"
+                ")",
+            ),
+        ).scalar_one()
+    engine.dispose()
+    assert table_exists is False

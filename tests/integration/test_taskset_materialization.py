@@ -28,6 +28,7 @@ from testcontainers.minio import MinioContainer
 from loom.db.schema import (
     Task,
     TaskSet,
+    TaskSetGenerationGcCursor,
     TaskSetManifest,
     TaskSetMaterializationJob,
     Team,
@@ -38,7 +39,7 @@ from loom.db.schema import (
 from loom.taskset.materialize import MaterializeOutput, TaskRowDraft
 from loom.taskset.storage_bytes import team_taskset_storage_bytes
 from loom.taskset.transform_sandbox import TransformSandboxConfig
-from loom_service import taskset_materializer
+from loom_service import taskset_gc, taskset_materializer
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from loom_service.taskset_gc import (
@@ -320,6 +321,7 @@ async def materialization_setup(
         await engine.dispose()
         with sl() as s:
             s.execute(delete(Task).where(Task.task_set_id.is_not(None)))
+            s.execute(delete(TaskSetGenerationGcCursor))
             s.execute(delete(TaskSetMaterializationJob))
             s.execute(delete(TaskSetManifest))
             s.execute(delete(TaskSet))
@@ -608,10 +610,11 @@ async def test_live_generation_gc_preserves_active_epoch_and_resumes_at_budget(
 
 
 @pytest.mark.asyncio
-async def test_live_generation_gc_rotates_past_clean_taskset_and_job_windows(
+async def test_live_generation_gc_uses_durable_cursor_across_skipped_clock_restarts(
     materialization_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A later orphan converges without giving clean earlier rows special treatment."""
+    """A durable sequence reaches tail pages despite restart times 0, 2, 4, and 6."""
     app, _tokens, teams = materialization_setup
     created_at = datetime(2025, 1, 1, tzinfo=UTC)
     tail_job_id = uuid4()
@@ -659,44 +662,118 @@ async def test_live_generation_gc_rotates_past_clean_taskset_and_job_windows(
         Body=b"orphan",
     )
 
+    skipped_clock_starts = [0, 2, 4, 6]
+
+    class _SkippedClock:
+        @classmethod
+        def now(cls, _timezone: object) -> datetime:
+            return datetime.fromtimestamp(skipped_clock_starts.pop(0) * 3_600, UTC)
+
+    monkeypatch.setattr(taskset_gc, "datetime", _SkippedClock)
+
+    results = []
+    for expected_next_sweep in range(1, 5):
+        # A new session for every call models a supervisor restart.  The old
+        # wall-clock scheme would observe only 0, 2, 4, and 6 and never leave
+        # the first TaskSet page; durable scheduling must not consult it.
+        async with app.state.session_factory() as session:
+            results.append(await purge_abandoned_materialization_generations(
+                session,
+                minio_client=app.state.minio_client,
+                artifacts_bucket=app.state.settings.artifacts_bucket,
+                task_set_limit=100,
+                job_limit=100,
+                object_delete_budget=10,
+            ))
+        async with app.state.session_factory() as session:
+            next_sweep = (await session.execute(
+                select(TaskSetGenerationGcCursor.next_sweep),
+            )).scalar_one()
+        assert next_sweep == expected_next_sweep
+
+    assert skipped_clock_starts == [0, 2, 4, 6]
+    assert [result.deleted_objects for result in results] == [0, 0, 0, 1]
+    assert results[-1].partial is False
+    assert _object_keys(app, prefix=orphan_prefix) == set()
+
+
+@pytest.mark.asyncio
+async def test_live_generation_gc_repeats_unadvanced_cursor_after_cancellation(
+    materialization_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crash before completion leaves the cursor on the same safe page."""
+    app, _tokens, teams = materialization_setup
+    job_id = uuid4()
+    task_set_id = f"ts/{teams['team_a']}/gc-cancelled"
     async with app.state.session_factory() as session:
-        first_window = await purge_abandoned_materialization_generations(
-            session,
-            minio_client=app.state.minio_client,
-            artifacts_bucket=app.state.settings.artifacts_bucket,
-            task_set_limit=100,
-            job_limit=100,
-            object_delete_budget=10,
-            sweep_window=0,
-        )
-    assert first_window.deleted_objects == 0
-    assert orphan_key in _object_keys(app, prefix=orphan_key)
+        session.add(TaskSet(
+            id=task_set_id,
+            owning_team_id=teams["team_a"],
+            slug="gc-cancelled",
+            display_name="GC cancelled",
+            visibility="private",
+            status="failed",
+            intents=["trajectory_generation"],
+            manifest_blob_uri="s3://artifacts/gc-cancelled/manifest.yaml",
+        ))
+        session.add(TaskSetMaterializationJob(
+            id=job_id,
+            task_set_id=task_set_id,
+            owning_team_id=teams["team_a"],
+            state="failed",
+            lease_epoch=1,
+        ))
+        await session.commit()
+
+    orphan_prefix = (
+        f"tasksets/user/{teams['team_a']}/gc-cancelled/materializations/{job_id}/1/"
+    )
+    orphan_key = f"{orphan_prefix}tasks/orphan/task.toml"
+    app.state.minio_client.put_object(
+        Bucket=app.state.settings.artifacts_bucket,
+        Key=orphan_key,
+        Body=b"orphan",
+    )
+
+    async def cancel_recheck(_session: object, **_kwargs: object) -> tuple[bool, bool]:
+        raise asyncio.CancelledError
+
+    original_recheck = taskset_gc._candidate_is_protected_after_recheck
+    monkeypatch.setattr(taskset_gc, "_candidate_is_protected_after_recheck", cancel_recheck)
+    async with app.state.session_factory() as session:
+        with pytest.raises(asyncio.CancelledError):
+            await purge_abandoned_materialization_generations(
+                session,
+                minio_client=app.state.minio_client,
+                artifacts_bucket=app.state.settings.artifacts_bucket,
+            )
 
     async with app.state.session_factory() as session:
-        first_tail_job_window = await purge_abandoned_materialization_generations(
-            session,
-            minio_client=app.state.minio_client,
-            artifacts_bucket=app.state.settings.artifacts_bucket,
-            task_set_limit=100,
-            job_limit=100,
-            object_delete_budget=10,
-            sweep_window=1,
-        )
-    assert first_tail_job_window.deleted_objects == 0
+        next_sweep_after_cancellation = (await session.execute(
+            select(TaskSetGenerationGcCursor.next_sweep),
+        )).scalar_one()
+    assert next_sweep_after_cancellation == 0
     assert orphan_key in _object_keys(app, prefix=orphan_key)
 
+    monkeypatch.setattr(
+        taskset_gc,
+        "_candidate_is_protected_after_recheck",
+        original_recheck,
+    )
     async with app.state.session_factory() as session:
-        converged = await purge_abandoned_materialization_generations(
+        result = await purge_abandoned_materialization_generations(
             session,
             minio_client=app.state.minio_client,
             artifacts_bucket=app.state.settings.artifacts_bucket,
-            task_set_limit=100,
-            job_limit=100,
-            object_delete_budget=10,
-            sweep_window=3,
         )
-    assert converged.deleted_objects == 1
-    assert converged.partial is False
+
+    assert result.deleted_objects == 1
+    async with app.state.session_factory() as session:
+        next_sweep_after_retry = (await session.execute(
+            select(TaskSetGenerationGcCursor.next_sweep),
+        )).scalar_one()
+    assert next_sweep_after_retry == 1
     assert _object_keys(app, prefix=orphan_prefix) == set()
 
 

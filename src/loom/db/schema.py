@@ -656,6 +656,28 @@ class TaskSetMaterializationJob(Base):
     )
 
 
+class TaskSetGenerationGcCursor(Base):
+    """Scheduling-only progress for bounded live-generation reconciliation."""
+    __tablename__ = "task_set_generation_gc_cursors"
+    __table_args__ = (
+        CheckConstraint(
+            "name = 'live-generation-gc'",
+            name="task_set_generation_gc_cursors_name_check",
+        ),
+        CheckConstraint(
+            "next_sweep >= 0",
+            name="task_set_generation_gc_cursors_next_sweep_nonneg_check",
+        ),
+    )
+
+    name: Mapped[str] = mapped_column(Text, primary_key=True)
+    next_sweep: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        server_default=text("0"),
+    )
+
+
 class Agent(Base):
     __tablename__ = "agents"
     name: Mapped[str] = mapped_column(String, primary_key=True)
