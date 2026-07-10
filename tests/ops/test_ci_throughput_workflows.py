@@ -138,9 +138,11 @@ def test_manual_aggregate_contexts_have_distinct_event_specific_names() -> None:
         workflow = _workflow(workflow_path)
         gate_name = workflow["jobs"][gate_id]["name"]
 
-        assert "github.event_name == 'workflow_dispatch'" in gate_name
-        assert f"'{protected_name}-manual'" in gate_name
-        assert f"'{protected_name}'" in gate_name
+        assert gate_name == (
+            "${{ github.event_name == 'workflow_dispatch' "
+            f"&& '{protected_name}-manual' || '{protected_name}' "
+            "}}"
+        )
 
 
 @pytest.mark.parametrize("required", ["", "invalid"])
