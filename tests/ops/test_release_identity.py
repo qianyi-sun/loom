@@ -31,13 +31,15 @@ def _squash_equivalent_repo(tmp_path: Path) -> tuple[Path, str, str]:
 
     tracked = repo / "tracked.txt"
     tracked.write_text("base\n", encoding="utf-8")
-    _git(repo, "add", "tracked.txt")
+    (repo / ".gitignore").write_text(".env\n.venv/\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt", ".gitignore")
     _git(repo, "commit", "-m", "base")
 
     _git(repo, "switch", "-c", "dev")
     tracked.write_text("candidate\n", encoding="utf-8")
     _git(repo, "commit", "-am", "candidate")
     candidate_sha = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "update-ref", "refs/remotes/origin/dev", candidate_sha)
 
     _git(repo, "switch", "main")
     _git(repo, "merge", "--squash", "dev")
@@ -164,12 +166,146 @@ def test_release_identity_rejects_modified_tracked_worktree(tmp_path: Path) -> N
     )
 
     assert result.returncode == 1
-    assert "tracked worktree differs from release commit" in result.stderr
+    assert "repository contains staged, unstaged, or untracked changes" in result.stderr
+
+
+def test_release_identity_rejects_orphan_same_tree_candidate(tmp_path: Path) -> None:
+    repo, candidate_sha, release_sha = _squash_equivalent_repo(tmp_path)
+    candidate_tree = _git(repo, "rev-parse", f"{candidate_sha}^{{tree}}")
+    orphan_sha = _git(repo, "commit-tree", candidate_tree, input_text="orphan candidate\n")
+
+    result = _run_identity(
+        repo,
+        candidate_sha=orphan_sha,
+        release_sha=release_sha,
+    )
+
+    assert result.returncode == 1
+    assert "candidate_sha is not reachable from trusted candidate ref origin/dev" in result.stderr
+
+
+def test_release_identity_rejects_missing_trusted_candidate_ref(tmp_path: Path) -> None:
+    repo, candidate_sha, release_sha = _squash_equivalent_repo(tmp_path)
+    _git(repo, "update-ref", "-d", "refs/remotes/origin/dev")
+
+    result = _run_identity(
+        repo,
+        candidate_sha=candidate_sha,
+        release_sha=release_sha,
+    )
+
+    assert result.returncode == 1
+    assert "trusted candidate ref origin/dev does not resolve to a commit" in result.stderr
+
+
+def test_release_identity_rejects_release_sha_that_is_not_head(tmp_path: Path) -> None:
+    repo, candidate_sha, release_sha = _squash_equivalent_repo(tmp_path)
+    _git(repo, "commit", "--allow-empty", "-m", "different release head")
+
+    result = _run_identity(
+        repo,
+        candidate_sha=candidate_sha,
+        release_sha=release_sha,
+    )
+
+    assert result.returncode == 1
+    assert "release_sha must exactly match HEAD" in result.stderr
+
+
+@pytest.mark.parametrize("change", ["staged", "deleted", "untracked"])
+def test_release_identity_rejects_any_nonignored_worktree_change(
+    tmp_path: Path,
+    change: str,
+) -> None:
+    repo, candidate_sha, release_sha = _squash_equivalent_repo(tmp_path)
+    tracked = repo / "tracked.txt"
+    if change == "staged":
+        tracked.write_text("staged modification\n", encoding="utf-8")
+        _git(repo, "add", "tracked.txt")
+    elif change == "deleted":
+        tracked.unlink()
+    else:
+        (repo / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+
+    result = _run_identity(
+        repo,
+        candidate_sha=candidate_sha,
+        release_sha=release_sha,
+    )
+
+    assert result.returncode == 1
+    assert "repository contains staged, unstaged, or untracked changes" in result.stderr
+
+
+def test_release_identity_rejects_ignored_root_dotenv(tmp_path: Path) -> None:
+    repo, candidate_sha, release_sha = _squash_equivalent_repo(tmp_path)
+    (repo / ".env").write_text("LOOM_SERVICE_API_TOKEN=not-a-real-token\n", encoding="utf-8")
+    assert _git(repo, "check-ignore", ".env") == ".env"
+
+    result = _run_identity(
+        repo,
+        candidate_sha=candidate_sha,
+        release_sha=release_sha,
+    )
+
+    assert result.returncode == 1
+    assert "repository root .env is forbidden during release verification" in result.stderr
+
+
+def test_release_identity_allows_ignored_virtual_environment(tmp_path: Path) -> None:
+    repo, candidate_sha, release_sha = _squash_equivalent_repo(tmp_path)
+    (repo / ".venv").mkdir()
+    (repo / ".venv" / "cache.txt").write_text("ignored cache\n", encoding="utf-8")
+
+    result = _run_identity(
+        repo,
+        candidate_sha=candidate_sha,
+        release_sha=release_sha,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("git_path", "is_directory"),
+    [
+        ("MERGE_HEAD", False),
+        ("rebase-merge", True),
+        ("CHERRY_PICK_HEAD", False),
+        ("REVERT_HEAD", False),
+        ("BISECT_START", False),
+    ],
+)
+def test_release_identity_rejects_in_progress_git_operation(
+    tmp_path: Path,
+    git_path: str,
+    is_directory: bool,
+) -> None:
+    repo, candidate_sha, release_sha = _squash_equivalent_repo(tmp_path)
+    marker = Path(_git(repo, "rev-parse", "--git-path", git_path))
+    if not marker.is_absolute():
+        marker = repo / marker
+    if is_directory:
+        marker.mkdir(parents=True)
+    else:
+        marker.write_text(candidate_sha + "\n", encoding="utf-8")
+
+    result = _run_identity(
+        repo,
+        candidate_sha=candidate_sha,
+        release_sha=release_sha,
+    )
+
+    assert result.returncode == 1
+    assert "Git operation is in progress" in result.stderr
 
 
 def test_production_verifier_uses_squash_safe_tree_identity() -> None:
     verifier = PRODUCTION_VERIFY_SCRIPT.read_text(encoding="utf-8")
 
-    assert "scripts/ops/release_identity.py verify" in verifier
+    assert "python3 scripts/ops/release_identity.py verify" in verifier
     assert '--release-sha "${release_sha}"' in verifier
+    assert '--trusted-candidate-ref "origin/dev"' in verifier
+    assert "python3 scripts/ops/release_gate.py verify-production" in verifier
+    assert "uv run python" not in verifier
     assert "git merge-base --is-ancestor" not in verifier

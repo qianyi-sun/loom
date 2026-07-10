@@ -781,7 +781,7 @@ manifest = {
 )
 PY
 
-uv run python scripts/ops/release_gate.py validate \
+python3 scripts/ops/release_gate.py validate \
   --manifest "$ROLLOUT_DIR/release-gate-input.json" \
   --candidate-sha "$CANDIDATE_SHA" \
   --image-tag "$IMAGE_TAG" \
@@ -811,6 +811,11 @@ The workflow immediately runs `verify-production` against the same
 `release-gate-evidence.json` artifact it uploads. The official producer output
 is therefore the production verifier input, and a missing or changed
 `schema_version` fails before artifact publication.
+
+This round-trip proves schema and content compatibility only. Binding the
+artifact to the expected GitHub workflow identity, run, actor, conclusion, and
+artifact digest remains the next #789 PR; caller-supplied evidence is not yet a
+complete provenance attestation, so this slice does not close #789.
 
 Expected failure output:
 
@@ -869,10 +874,12 @@ git push origin "$PROD_TAG"
 
 Dry-run the production deploy first. Even with `dry_run=true`, this enters the
 production deployment workflow and must go through production approval.
+Production deployment dispatches use `--ref main` only; immutable SemVer tags
+remain release records and are not workflow entry points.
 
 ```bash
 gh workflow run deploy-environment.yml \
-  --ref "$PROD_TAG" \
+  --ref main \
   -f environment=production \
   -f image_tag="$IMAGE_TAG" \
   -f dry_run=true \
@@ -884,7 +891,7 @@ Then deploy for real:
 
 ```bash
 gh workflow run deploy-environment.yml \
-  --ref "$PROD_TAG" \
+  --ref main \
   -f environment=production \
   -f image_tag="$IMAGE_TAG" \
   -f dry_run=false \
@@ -907,14 +914,19 @@ squash-safe identity check before downloading gate evidence:
 
 ```bash
 release_sha="$(git rev-parse --verify HEAD)"
-uv run python scripts/ops/release_identity.py verify \
+python3 scripts/ops/release_identity.py verify \
   --candidate-sha "$CANDIDATE_SHA" \
-  --release-sha "$release_sha"
+  --release-sha "$release_sha" \
+  --trusted-candidate-ref origin/dev
 ```
 
 Both inputs must be canonical 40-character lowercase SHA values that resolve
-directly to commit objects. Unknown objects, blobs/tags, a modified tracked
-worktree, or different candidate/release trees fail closed.
+directly to commit objects. The candidate must be reachable from `origin/dev`,
+the release SHA must equal checked-out `HEAD`, and both tree objects must match.
+Unknown objects, blobs/tags, staged or unstaged changes, deleted or non-ignored
+untracked files, a repository-root `.env`, or an in-progress merge, rebase,
+cherry-pick, revert, or bisect fail closed. Ignored tooling state such as
+`.venv/` does not fail the clean-worktree proof.
 
 Expected failure output when required live inputs are missing:
 
@@ -978,13 +990,16 @@ Expected success output:
 }
 ```
 
-For a live image rollback to the previous validated production tag:
+For a workflow-driven rollback, first merge an owner-reviewed rollback PR that
+restores `main` to the exact previous validated candidate tree. The production
+workflow rejects a previous tag ref and also rejects a previous candidate while
+`main` still has the newer tree. After the rollback PR lands:
 
 `LIVE PROD AUTHORITY REQUIRED`
 
 ```bash
 gh workflow run deploy-environment.yml \
-  --ref "$PREVIOUS_PROD_TAG" \
+  --ref main \
   -f environment=production \
   -f image_tag="$PREVIOUS_PROD_IMAGE_TAG" \
   -f dry_run=false \
@@ -1024,7 +1039,8 @@ Before declaring the first production release ready:
   base.
 - Staging smoke evidence includes the final `service.no_oom_restarts` row
   after route probes and security scanning, not only the pre-route baseline.
-- The production deploy uses `main` or an immutable `vX.Y.Z` tag, never `dev`.
+- The production deploy uses `main` only; immutable `vX.Y.Z` tags are release
+  records, not deployment workflow entry points.
 - Rollback prep records previous image/tag, previous release-gate run, DB
   recovery point, object-storage recovery point, and redacted secret evidence.
 - No live prod/staging workload, DB change, worker cancellation, tag push,

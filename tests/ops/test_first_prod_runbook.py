@@ -111,3 +111,12 @@ def test_first_prod_runbook_documents_round_trip_and_squash_safe_identity() -> N
         assert fragment in normalized
 
     assert "non-ancestor production ref" not in text
+
+
+def test_first_prod_runbook_dispatches_production_from_main_only() -> None:
+    text = _runbook_text()
+
+    assert "Production deployment dispatches use `--ref main` only" in text
+    assert '--ref "$PROD_TAG"' not in text
+    assert '--ref "$PREVIOUS_PROD_TAG"' not in text
+    assert "uses `main` or an immutable `vX.Y.Z` tag" not in text

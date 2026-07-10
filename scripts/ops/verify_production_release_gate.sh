@@ -22,9 +22,10 @@ if ! release_sha=$(git rev-parse --verify HEAD 2>/dev/null); then
   exit 1
 fi
 
-uv run python scripts/ops/release_identity.py verify \
+python3 scripts/ops/release_identity.py verify \
   --candidate-sha "${LOOM_CANDIDATE_SHA}" \
-  --release-sha "${release_sha}"
+  --release-sha "${release_sha}" \
+  --trusted-candidate-ref "origin/dev"
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "${tmpdir}"' EXIT
@@ -42,7 +43,7 @@ if [[ -z "${manifest}" || ! -f "${manifest}" ]]; then
   exit 1
 fi
 
-uv run python scripts/ops/release_gate.py verify-production \
+python3 scripts/ops/release_gate.py verify-production \
   --manifest "${manifest}" \
   --candidate-sha "${LOOM_CANDIDATE_SHA}" \
   --image-tag "${LOOM_IMAGE_TAG}"
