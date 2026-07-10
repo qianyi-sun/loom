@@ -799,12 +799,18 @@ Expected JSON evidence snippet:
 
 ```json
 {
+  "schema_version": 1,
   "status": "pass",
   "candidate_sha": "0123456789abcdef0123456789abcdef01234567",
   "image_tag": "release-0123456789ab",
   "prod_tag": "v1.0.0"
 }
 ```
+
+The workflow immediately runs `verify-production` against the same
+`release-gate-evidence.json` artifact it uploads. The official producer output
+is therefore the production verifier input, and a missing or changed
+`schema_version` fails before artifact publication.
 
 Expected failure output:
 
@@ -848,8 +854,11 @@ Created workflow_dispatch event for release-promotion-gate.yml at dev
 
 Prepare the release PR from `dev` to `main`; attach the release-gate run,
 frontend route evidence, worker-capacity evidence, raw-delivery/user-E2E
-status, HF mirror/token-boundary evidence, and rollback plan. After merge, tag
-the merged `main` commit exactly once:
+status, HF mirror/token-boundary evidence, and rollback plan. A squash merge
+creates a different commit identity, so production compares the candidate and
+merged release Git tree object IDs. Equal trees prove that the promoted source
+content is exact and does not require candidate commit ancestry. After merge,
+tag the merged `main` commit exactly once:
 
 ```bash
 git fetch origin main --tags
@@ -893,6 +902,20 @@ GH_TOKEN="$GH_TOKEN" \
 bash scripts/ops/verify_production_release_gate.sh
 ```
 
+The preflight resolves the checked-out release commit and performs the
+squash-safe identity check before downloading gate evidence:
+
+```bash
+release_sha="$(git rev-parse --verify HEAD)"
+uv run python scripts/ops/release_identity.py verify \
+  --candidate-sha "$CANDIDATE_SHA" \
+  --release-sha "$release_sha"
+```
+
+Both inputs must be canonical 40-character lowercase SHA values that resolve
+directly to commit objects. Unknown objects, blobs/tags, a modified tracked
+worktree, or different candidate/release trees fail closed.
+
 Expected failure output when required live inputs are missing:
 
 ```text
@@ -901,8 +924,9 @@ error: production deploy requires release gate inputs: LOOM_CANDIDATE_SHA LOOM_I
 
 Stop condition: do not bypass this script. If it rejects the candidate SHA,
 image tag, artifact download, missing gate evidence, leaked secret, internal
-service URL, or non-ancestor production ref, fix evidence or rollback instead
-of editing the workflow.
+service URL, unknown/non-commit source object, modified tracked worktree, or
+candidate/release tree mismatch, fix evidence or rollback instead of editing
+the workflow.
 
 ## Rollback Preparation
 

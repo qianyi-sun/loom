@@ -340,6 +340,47 @@ def test_release_gate_accepts_complete_manifest_and_writes_artifacts(tmp_path: P
     assert "raw_delivery_export_status" in markdown
 
 
+def test_release_gate_official_json_round_trips_through_production_verifier(
+    tmp_path: Path,
+) -> None:
+    json_out = tmp_path / "release-gate-evidence.json"
+    validate = _run_release_gate(
+        tmp_path,
+        _passing_evidence(),
+        "validate",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "release-0123456789ab",
+        "--output-json",
+        str(json_out),
+    )
+
+    assert validate.returncode == 0, validate.stderr
+    evidence = json.loads(json_out.read_text(encoding="utf-8"))
+    assert evidence["schema_version"] == 1
+
+    verify = subprocess.run(
+        [
+            sys.executable,
+            "scripts/ops/release_gate.py",
+            "verify-production",
+            "--manifest",
+            str(json_out),
+            "--candidate-sha",
+            _candidate_sha(),
+            "--image-tag",
+            "release-0123456789ab",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert verify.returncode == 0, verify.stderr
+
+
 def test_release_gate_requires_hf_mirror_token_boundary_check(tmp_path: Path) -> None:
     manifest = _passing_evidence()
     manifest["checks"].pop("hf_mirror_token_boundary")
@@ -719,6 +760,26 @@ def test_release_gate_verify_production_rejects_candidate_or_image_mismatch(
     assert "image_tag mismatch" in result.stderr
 
 
+def test_release_gate_verify_production_rejects_missing_schema_version(
+    tmp_path: Path,
+) -> None:
+    manifest = _passing_evidence()
+    manifest.pop("schema_version")
+
+    result = _run_release_gate(
+        tmp_path,
+        manifest,
+        "verify-production",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "release-0123456789ab",
+    )
+
+    assert result.returncode == 1
+    assert "schema_version must be 1" in result.stderr
+
+
 def test_release_promotion_workflow_uploads_candidate_evidence() -> None:
     workflow_path = REPO_ROOT / ".github/workflows/release-promotion-gate.yml"
     workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
@@ -733,6 +794,21 @@ def test_release_promotion_workflow_uploads_candidate_evidence() -> None:
     assert job["environment"]["name"] == "staging"
     assert "inputs.candidate_sha" in str(job)
     assert "scripts/ops/release_gate.py validate" in str(job)
+    assert "scripts/ops/release_gate.py verify-production" in str(job)
+    validate_step = next(
+        index
+        for index, step in enumerate(job["steps"])
+        if "scripts/ops/release_gate.py validate" in str(step)
+    )
+    verify_step = next(
+        index
+        for index, step in enumerate(job["steps"])
+        if "scripts/ops/release_gate.py verify-production" in str(step)
+    )
+    upload_step = next(
+        index for index, step in enumerate(job["steps"]) if "actions/upload-artifact" in str(step)
+    )
+    assert validate_step < verify_step < upload_step
     assert "scripts/validate_environment_isolation.py" in str(job)
     assert "deploy/environments/staging.cluster.toml" in str(job)
     assert "deploy/environments/production.cluster.toml" in str(job)

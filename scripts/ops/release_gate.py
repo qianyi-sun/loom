@@ -838,6 +838,7 @@ def validate_manifest(
 
 def _evidence_report(manifest: dict[str, Any]) -> dict[str, Any]:
     return {
+        "schema_version": manifest["schema_version"],
         "status": "pass",
         "candidate_sha": manifest["candidate_sha"],
         "image_tag": manifest["image_tag"],

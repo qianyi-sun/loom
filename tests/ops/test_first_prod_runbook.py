@@ -95,3 +95,19 @@ def test_first_prod_runbook_requires_beta_leases_to_be_temporary() -> None:
     assert "stop condition" in text
     assert "no-secret" in text
     assert "non-production" in text
+
+
+def test_first_prod_runbook_documents_round_trip_and_squash_safe_identity() -> None:
+    text = _runbook_text()
+    normalized = " ".join(text.split())
+
+    for fragment in (
+        '"schema_version": 1',
+        "same `release-gate-evidence.json`",
+        "scripts/ops/release_identity.py verify",
+        "Git tree object",
+        "does not require candidate commit ancestry",
+    ):
+        assert fragment in normalized
+
+    assert "non-ancestor production ref" not in text

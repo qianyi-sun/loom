@@ -44,10 +44,7 @@ def test_governance_docs_define_path_inferred_validation_gates() -> None:
         assert gate in contributing
         assert gate in quickstart
 
-    assert (
-        "Labels may add validation but cannot remove path-inferred validation"
-        in contributing
-    )
+    assert "Labels may add validation but cannot remove path-inferred validation" in contributing
     assert "Codex enabled GitHub auto-merge" in pr_template
 
     for document in (contributing, quickstart):
@@ -118,8 +115,14 @@ def test_codeowners_is_narrow_ci_and_release_trust_root() -> None:
         "/tests/ops/test_ci_throughput_workflows.py",
         "/pyproject.toml",
         "/scripts/ops/release_gate.py",
+        "/scripts/ops/release_identity.py",
         "/scripts/ops/verify_production_release_gate.sh",
         "/scripts/ops/deploy_environment.sh",
+        "/tests/ops/test_release_identity.py",
+        "/tests/ops/test_release_promotion_gate.py",
+        "/tests/ops/test_first_prod_runbook.py",
+        "/tests/unit/test_repo_governance_templates.py",
+        "/docs/runbooks/first-prod-release-runbook.md",
         "/CONTRIBUTING.md",
         "/SECURITY.md",
         "/LICENSE",
