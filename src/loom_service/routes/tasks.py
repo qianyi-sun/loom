@@ -9,12 +9,14 @@ ordered by it.
 from __future__ import annotations
 
 from typing import Annotated, Any
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom.db.schema import Task
+from loom.db.schema import Task, TaskSet
 from loom_service.dependencies import SessionAndCtx
 from loom_service.task_config_validation import split_valid_task_configs
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
@@ -32,7 +34,7 @@ class _CountReq(BaseModel):
     task_filter: dict[str, Any] = Field(default_factory=dict)
 
 
-def _task_row(t: Task) -> dict[str, Any]:
+def _task_row(t: Task, *, owned_task_set_ids: set[str]) -> dict[str, Any]:
     """List/detail shape. Surfaces the fields the SPA browse view
     needs (name, description, agent/verifier/step counts) without
     requiring a per-row config fetch — the JSON path lookups are
@@ -50,11 +52,36 @@ def _task_row(t: Task) -> dict[str, Any]:
         "verifier_name": verifier.get("name"),
         "step_count": len(steps) if isinstance(steps, list) else 0,
         "checksum": t.checksum,
-        "source": t.source,
+        "source": (
+            t.source if t.task_set_id is None or t.task_set_id in owned_task_set_ids else None
+        ),
         "license": t.license,
         "benchmark_id": t.benchmark_id,
         "registered_at": t.registered_at.isoformat(),
     }
+
+
+async def _owned_task_set_ids(
+    session: AsyncSession,
+    *,
+    tasks: list[Task],
+    team_id: UUID | None,
+) -> set[str]:
+    """Return only TaskSet ids whose private source this principal owns."""
+    task_set_ids = {task.task_set_id for task in tasks if task.task_set_id is not None}
+    if not task_set_ids or team_id is None:
+        return set()
+    return set(
+        (
+            await session.execute(
+                select(TaskSet.id).where(
+                    TaskSet.id.in_(task_set_ids),
+                    TaskSet.owning_team_id == team_id,
+                    TaskSet.soft_deleted_at.is_(None),
+                ),
+            )
+        ).scalars(),
+    )
 
 
 @router.get("/tasks")
@@ -75,7 +102,7 @@ async def list_tasks(
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(gt=0, le=200)] = 50,
 ) -> dict[str, Any]:
-    s, _ctx = sc
+    s, ctx = sc
     # Shared where clauses so the page query and the count query
     # touch the same predicate (count gets a clean COUNT(*) plan
     # rather than COUNT over an ordered subquery).
@@ -98,6 +125,11 @@ async def list_tasks(
         stmt = stmt.where(Task.id > cursor)
     stmt = stmt.limit(limit + 1)
     rows = list((await s.execute(stmt)).scalars().all())
+    owned_task_set_ids = await _owned_task_set_ids(
+        s,
+        tasks=rows,
+        team_id=ctx.team_id,
+    )
 
     if len(rows) > limit:
         rows = rows[:limit]
@@ -105,7 +137,7 @@ async def list_tasks(
     else:
         next_cursor = None
     return {
-        "items": [_task_row(r) for r in rows],
+        "items": [_task_row(r, owned_task_set_ids=owned_task_set_ids) for r in rows],
         "next_cursor": next_cursor,
         "total": int(total),
     }
@@ -147,7 +179,7 @@ async def count_tasks(payload: _CountReq, sc: SessionAndCtx) -> dict[str, Any]:
 
 @router.get("/tasks/{task_id:path}")
 async def get_task(task_id: str, sc: SessionAndCtx) -> dict[str, Any]:
-    s, _ctx = sc
+    s, ctx = sc
     t = (
         await s.execute(
             select(Task).where(Task.id == task_id),
@@ -155,6 +187,13 @@ async def get_task(task_id: str, sc: SessionAndCtx) -> dict[str, Any]:
     ).scalar_one_or_none()
     if t is None:
         raise HTTPException(status_code=404, detail="task not found")
-    d = _task_row(t)
+    d = _task_row(
+        t,
+        owned_task_set_ids=await _owned_task_set_ids(
+            s,
+            tasks=[t],
+            team_id=ctx.team_id,
+        ),
+    )
     d["config"] = t.config
     return d

@@ -22,6 +22,7 @@ from loom_cli.secret_source import SecretSourceError, resolve_secret_source
 from loom_cli.taskset_fence_canary import (
     TaskSetFenceCanaryContract,
     TaskSetFenceCanaryContractError,
+    is_candidate_image_tag,
 )
 
 _SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -118,7 +119,7 @@ def _candidate_from_rollout(rollout_fd: int) -> tuple[str, str]:
         or not isinstance(candidate_sha, str)
         or not _SHA40_RE.fullmatch(candidate_sha)
         or not isinstance(image_tag, str)
-        or image_tag != f"staging-{candidate_sha[:7]}"
+        or not is_candidate_image_tag(image_tag, candidate_sha=candidate_sha)
     ):
         raise TaskSetFenceCanaryDeploymentError("rollout is not an eligible staging candidate")
     return candidate_sha, image_tag

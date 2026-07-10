@@ -57,3 +57,42 @@ def test_upgrade_reserves_the_fixed_canary_team_and_quota(
 
     assert team == (_SYSTEM_CANARY_TEAM_ID, _SYSTEM_CANARY_TEAM_NAME, None)
     assert quota_team_id == _SYSTEM_CANARY_TEAM_ID
+
+
+@pytest.mark.parametrize(
+    ("team_id", "name"),
+    [
+        (_SYSTEM_CANARY_TEAM_ID, _SYSTEM_CANARY_TEAM_NAME),
+        (_SYSTEM_CANARY_TEAM_ID, "unexpected-system-team"),
+        ("9e0a00da-8f35-4ee5-a98d-31338cd52275", _SYSTEM_CANARY_TEAM_NAME),
+    ],
+)
+def test_upgrade_rejects_any_preexisting_canary_identity(
+    team_id: str,
+    name: str,
+) -> None:
+    """A release migration must never adopt a possibly user-owned Team."""
+    with PostgresContainer("postgres:16") as pg:
+        postgres_url = pg.get_connection_url().replace(
+            "postgresql+psycopg2://",
+            "postgresql+psycopg://",
+        )
+        cfg = _cfg(postgres_url)
+        command.upgrade(cfg, "0064")
+        engine = create_engine(postgres_url)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO teams (id, name) VALUES (CAST(:team_id AS uuid), :name)",
+                    ),
+                    {
+                        "team_id": team_id,
+                        "name": name,
+                    },
+                )
+
+            with pytest.raises(Exception, match="reserved TaskSet fence-canary Team"):
+                command.upgrade(cfg, "head")
+        finally:
+            engine.dispose()

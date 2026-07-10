@@ -1330,6 +1330,11 @@ completed rollout's `inputs.json`, rejects any non-staging/prod/mismatched
 candidate, and writes exactly one immutable JSON record at the rollout-owned
 `canaries/taskset-lease-fencing/evidence.json` path.
 
+If a failed candidate rollout needs a separate retry evidence directory, use a
+staging tag such as `staging-rerun-<sha7>`. The deployment canary accepts that
+form only when the final seven hexadecimal characters match the fixed candidate
+SHA; a retry label never permits a different candidate or image identity.
+
 The launcher pins the fixed staging Kubernetes context and selects a Ready
 `loom-service` Pod only when its service-container digest, template image, and
 converged Deployment generation match the completed candidate release
@@ -1350,9 +1355,11 @@ not match; never pass, print, or attach this value.
 Inside the selected service Pod, the deployment runner creates a fresh
 one-task disposable bundle under the fixed `loom-system-taskset-fence-canary`
 system Team through normal TaskSet intake. Migration `0065` reserves this Team
-by a stable UUID and inserts its quota row; the runner matches both the UUID
+only when neither its fixed UUID nor name exists; any pre-existing identity
+fails the upgrade rather than being adopted. The runner matches both the UUID
 and name, takes the Team row lock, and fails closed if it is absent, disabled,
-or altered. It is not a self-service registration target. The runner calculates
+or altered. Neither registration nor an administrator invite can add a human
+member. The runner calculates
 the normal materializer checksum, creates the TaskSet/job, and writes its
 durable one-use authorization bound to the candidate, exact initial job,
 checksum, and a service-generated high-entropy nonce retained only as a digest
@@ -1363,9 +1370,15 @@ selected, authorized, or consumed by this flow. The later runner only locks and
 consumes that pre-existing record. A pre-existing, rebuilt, claimed, published,
 deleted, mismatched, or replayed canary TaskSet fails closed. If a post-stage
 check fails, the current lease is relinquished through the normal fenced
-transition rather than remaining running. Stream API responses through a
-whitelist if retaining submission/status context; never save a full Task
-response because it includes a storage `source` field.
+transition rather than remaining running. If the runner exits before consuming
+its authorization, it retires that exact TaskSet; an authenticated later
+prepare also retires any earlier unconsumed system canary before allocating its
+successor, so repeated killed-driver handoffs cannot consume the Team quota.
+Stream API responses through a whitelist if retaining submission/status
+context; never save a full Task response because it includes a storage
+`source` field. The public catalog returns private TaskSet source locations
+only to the owning Team; foreign catalog/detail reads retain non-sensitive
+metadata but redact `source`.
 
 ```bash
 loom cluster taskset-fence-canary \
@@ -1387,8 +1400,12 @@ Validate the final JSON before attachment:
 - The winner's published generation equals its lease epoch, the selected task
   checksum is from the normal task API, and the loser was fenced before
   publication.
-- The canary itself performs no GC or deletion. Eligibility is evidence for
-  the existing bounded reconciler, not permission to run it during collection.
+- The canary never performs object deletion or runs GC. On a runner exit it
+  soft-deletes only its own authorization-bound system TaskSet, and the next
+  authenticated prepare retires any earlier unconsumed system canary. This
+  frees the active TaskSet quota while retaining the root for the normal
+  delayed GC policy. Eligibility is evidence for the existing bounded
+  reconciler, not permission to run it during collection.
 
 Do **not** manufacture the handoff by killing a driver or pod, using `SIGSTOP`,
 editing rows with manual SQL, mutating the object store, injecting a failure,

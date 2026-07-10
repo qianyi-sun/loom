@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -87,6 +88,41 @@ def test_contract_rejects_invalid_candidate_sha_without_echoing_input() -> None:
 
     assert str(exc_info.value) == "invalid candidate identity"
     assert "not-a-candidate-sha" not in str(exc_info.value)
+
+
+def test_contract_accepts_a_candidate_bound_retry_tag() -> None:
+    """A retry gets distinct rollout evidence without weakening SHA binding."""
+    from loom_cli.taskset_fence_canary import TaskSetFenceCanaryContract
+
+    contract = TaskSetFenceCanaryContract.from_mapping(
+        _contract(image_tag="staging-rerun-aaaaaaa"),
+    )
+
+    assert contract.image_tag == "staging-rerun-aaaaaaa"
+
+
+def test_contract_rejects_a_retry_tag_for_another_candidate() -> None:
+    from loom_cli.taskset_fence_canary import (
+        TaskSetFenceCanaryContract,
+        TaskSetFenceCanaryContractError,
+    )
+
+    with pytest.raises(TaskSetFenceCanaryContractError, match="invalid candidate identity"):
+        TaskSetFenceCanaryContract.from_mapping(
+            _contract(image_tag="staging-rerun-bbbbbbb"),
+        )
+
+
+def test_contract_rejects_an_overlong_candidate_bound_retry_tag() -> None:
+    from loom_cli.taskset_fence_canary import (
+        TaskSetFenceCanaryContract,
+        TaskSetFenceCanaryContractError,
+    )
+
+    with pytest.raises(TaskSetFenceCanaryContractError, match="invalid candidate identity"):
+        TaskSetFenceCanaryContract.from_mapping(
+            _contract(image_tag=f"staging-{'r' * 50}-aaaaaaa"),
+        )
 
 
 @pytest.mark.parametrize(
@@ -264,6 +300,27 @@ def _write_candidate_rollout(rollout_dir: Path) -> None:
     manifest_path = rollout_dir / "14-release-gate/release-manifest-staging-aaaaaaa.json"
     manifest_path.parent.mkdir(parents=True)
     manifest_path.write_text(json.dumps(_release_manifest()))
+
+
+def test_deployment_runner_accepts_a_candidate_bound_retry_rollout(
+    tmp_path: Path,
+) -> None:
+    from loom_cli.cluster_taskset_fence_canary import _candidate_from_rollout
+
+    rollout_dir = tmp_path / "rollouts" / "candidate"
+    rollout_dir.mkdir(parents=True)
+    (rollout_dir / "inputs.json").write_text(
+        json.dumps(_rollout_inputs(image_tag="staging-rerun-aaaaaaa")),
+    )
+    (rollout_dir / "state.json").write_text(json.dumps({"status": "done"}))
+    directory_fd = os.open(rollout_dir, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert _candidate_from_rollout(directory_fd) == (
+            "a" * 40,
+            "staging-rerun-aaaaaaa",
+        )
+    finally:
+        os.close(directory_fd)
 
 
 def _live_runner(

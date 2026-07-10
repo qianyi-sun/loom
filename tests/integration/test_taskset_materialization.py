@@ -408,7 +408,11 @@ async def _seed_canary_system_team(app: FastAPI) -> UUID:
     return team.id
 
 
-async def _prepare_deployment_fence_canary(app: FastAPI):  # type: ignore[no-untyped-def]
+async def _prepare_deployment_fence_canary(
+    app: FastAPI,
+    *,
+    image_tag: str = "staging-aaaaaaa",
+):  # type: ignore[no-untyped-def]
     from loom_cli.taskset_fence_canary import (
         TaskSetFenceCanaryPreparationRequest,
         prepare_deployment_fence_canary,
@@ -421,7 +425,7 @@ async def _prepare_deployment_fence_canary(app: FastAPI):  # type: ignore[no-unt
         request=TaskSetFenceCanaryPreparationRequest.from_mapping(
             {
                 "candidate_sha": "a" * 40,
-                "image_tag": "staging-aaaaaaa",
+                "image_tag": image_tag,
                 "authorization_token": "deployment-only-capability",
             }
         ),
@@ -434,6 +438,120 @@ async def _prepare_deployment_fence_canary(app: FastAPI):  # type: ignore[no-unt
         bundle_max_bytes=settings.taskset_quota_max_bundle_bytes,
         nonce_factory=lambda: "n" * 43,
     )
+
+
+@pytest.mark.asyncio
+async def test_deployment_fence_canary_preparation_persists_a_candidate_bound_retry_tag(
+    materialization_setup,
+) -> None:
+    """A deployment retry tag remains bound to the same candidate in storage."""
+    app, _tokens, _teams = materialization_setup
+
+    contract = await _prepare_deployment_fence_canary(
+        app,
+        image_tag="staging-rerun-aaaaaaa",
+    )
+
+    async with app.state.session_factory() as session:
+        authorization = await session.get(
+            TaskSetFenceCanaryAuthorization,
+            contract.task_set_id,
+        )
+
+    assert authorization is not None
+    assert authorization.image_tag == "staging-rerun-aaaaaaa"
+
+
+@pytest.mark.asyncio
+async def test_next_preparation_retires_an_unclaimed_canary_left_by_a_dead_driver(
+    materialization_setup,
+) -> None:
+    """An interrupted prepare/run handoff cannot exhaust the system quota."""
+    app, _tokens, _teams = materialization_setup
+
+    abandoned = await _prepare_deployment_fence_canary(app)
+    successor = await _prepare_deployment_fence_canary(app)
+
+    async with app.state.session_factory() as session:
+        abandoned_task_set = await session.get(TaskSet, abandoned.task_set_id)
+        abandoned_job = (
+            await session.execute(
+                select(TaskSetMaterializationJob).where(
+                    TaskSetMaterializationJob.task_set_id == abandoned.task_set_id,
+                ),
+            )
+        ).scalar_one()
+        abandoned_authorization = await session.get(
+            TaskSetFenceCanaryAuthorization,
+            abandoned.task_set_id,
+        )
+        successor_task_set = await session.get(TaskSet, successor.task_set_id)
+
+    assert abandoned_task_set is not None
+    assert abandoned_task_set.status == "deleted"
+    assert abandoned_task_set.soft_deleted_at is not None
+    assert abandoned_job.state == "cancelled"
+    assert abandoned_authorization is not None
+    assert abandoned_authorization.consumed_at is None
+    assert successor_task_set is not None
+    assert successor_task_set.status == "materializing"
+
+
+@pytest.mark.asyncio
+async def test_deployment_fence_canary_retires_before_claim_when_owner_setup_fails(
+    materialization_setup,
+) -> None:
+    """A local pre-claim runner error releases its disposable quota immediately."""
+    from loom_cli.taskset_fence_canary import (
+        TaskSetFenceCanaryRuntimeError,
+        run_deployment_fence_canary,
+    )
+
+    app, _tokens, _teams = materialization_setup
+    settings = app.state.settings
+    contract = await _prepare_deployment_fence_canary(app)
+
+    with pytest.raises(TaskSetFenceCanaryRuntimeError, match="owners were not available"):
+        await run_deployment_fence_canary(
+            contract,
+            configured_token="deployment-only-capability",
+            session_factory=app.state.session_factory,
+            minio_client=app.state.minio_client,
+            artifacts_bucket=settings.artifacts_bucket,
+            upstream_cache_root=settings.taskset_materializer_upstream_cache_root,
+            transform_config=TransformSandboxConfig(
+                enabled=settings.taskset_materializer_transforms_enabled,
+                network_isolated=settings.taskset_materializer_transform_network_isolated,
+                workload_contract=settings.workload_contract,
+                wall_timeout_sec=settings.taskset_materializer_transform_wall_timeout_sec,
+                cpu_limit_sec=settings.taskset_materializer_transform_cpu_limit_sec,
+                memory_limit_mb=settings.taskset_materializer_transform_memory_limit_mb,
+            ),
+            max_bundle_bytes=settings.taskset_quota_max_bundle_bytes,
+            max_team_storage_bytes=settings.taskset_quota_max_storage_bytes_per_team,
+            claim_ttl_sec=settings.taskset_materializer_claim_ttl_sec,
+            owner_factory=iter(("same-owner", "same-owner")).__next__,
+        )
+
+    async with app.state.session_factory() as session:
+        task_set = await session.get(TaskSet, contract.task_set_id)
+        job = (
+            await session.execute(
+                select(TaskSetMaterializationJob).where(
+                    TaskSetMaterializationJob.task_set_id == contract.task_set_id,
+                ),
+            )
+        ).scalar_one()
+        authorization = await session.get(
+            TaskSetFenceCanaryAuthorization,
+            contract.task_set_id,
+        )
+
+    assert task_set is not None
+    assert task_set.status == "deleted"
+    assert job.state == "cancelled"
+    assert authorization is not None
+    assert authorization.consumed_at is None
 
 
 def _stage_output_for_lease(
@@ -2064,11 +2182,11 @@ async def test_deployment_fence_canary_rechecks_a_deleted_task_set_at_claim(
 
 
 @pytest.mark.asyncio
-async def test_deployment_fence_canary_relinquishes_a_post_stage_mismatch(
+async def test_deployment_fence_canary_retires_a_post_stage_mismatch(
     materialization_setup,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A mismatched staged output cannot leave the consumed canary job running."""
+    """A failed canary cannot retain an active system TaskSet quota slot."""
     from loom_cli.taskset_fence_canary import (
         TaskSetFenceCanaryRuntimeError,
         run_deployment_fence_canary,
@@ -2120,6 +2238,7 @@ async def test_deployment_fence_canary_relinquishes_a_post_stage_mismatch(
     assert str(exc_info.value) == "canary staged output did not match contract"
 
     async with app.state.session_factory() as session:
+        task_set = await session.get(TaskSet, contract.task_set_id)
         job = (
             await session.execute(
                 select(TaskSetMaterializationJob).where(
@@ -2131,7 +2250,10 @@ async def test_deployment_fence_canary_relinquishes_a_post_stage_mismatch(
             TaskSetFenceCanaryAuthorization,
             contract.task_set_id,
         )
-    assert job.state == "queued"
+    assert task_set is not None
+    assert task_set.status == "deleted"
+    assert task_set.soft_deleted_at is not None
+    assert job.state == "cancelled"
     assert job.claimed_by is None
     assert job.lease_heartbeat_at is None
     assert job.started_at is None
@@ -2316,6 +2438,53 @@ async def test_deployment_fence_canary_materializes_its_bundle_without_mocks(
     assert len(tasks) == 1
     assert tasks[0].checksum == contract.expected_task_checksum
     assert tasks[0].source.startswith("s3://")
+
+
+@pytest.mark.asyncio
+async def test_deployment_fence_canary_retires_its_system_task_set_after_evidence(
+    materialization_setup,
+) -> None:
+    """A successful rollout canary cannot exhaust the active TaskSet quota."""
+    from loom_cli.taskset_fence_canary import run_deployment_fence_canary
+
+    app, _tokens, _teams = materialization_setup
+    settings = app.state.settings
+    contract = await _prepare_deployment_fence_canary(app)
+
+    evidence = await run_deployment_fence_canary(
+        contract,
+        configured_token="deployment-only-capability",
+        session_factory=app.state.session_factory,
+        minio_client=app.state.minio_client,
+        artifacts_bucket=settings.artifacts_bucket,
+        upstream_cache_root=settings.taskset_materializer_upstream_cache_root,
+        transform_config=TransformSandboxConfig(
+            enabled=settings.taskset_materializer_transforms_enabled,
+            network_isolated=settings.taskset_materializer_transform_network_isolated,
+            workload_contract=settings.workload_contract,
+            wall_timeout_sec=settings.taskset_materializer_transform_wall_timeout_sec,
+            cpu_limit_sec=settings.taskset_materializer_transform_cpu_limit_sec,
+            memory_limit_mb=settings.taskset_materializer_transform_memory_limit_mb,
+        ),
+        max_bundle_bytes=settings.taskset_quota_max_bundle_bytes,
+        max_team_storage_bytes=settings.taskset_quota_max_storage_bytes_per_team,
+        claim_ttl_sec=settings.taskset_materializer_claim_ttl_sec,
+        owner_factory=iter(("retire-owner-a", "retire-owner-b")).__next__,
+    )
+
+    async with app.state.session_factory() as session:
+        task_set = await session.get(TaskSet, contract.task_set_id)
+        authorization = await session.get(
+            TaskSetFenceCanaryAuthorization,
+            contract.task_set_id,
+        )
+
+    assert evidence["stale_cas_outcome"] == "LeaseLost"
+    assert task_set is not None
+    assert task_set.status == "deleted"
+    assert task_set.soft_deleted_at is not None
+    assert authorization is not None
+    assert authorization.consumed_at is not None
 
 
 @pytest.mark.asyncio

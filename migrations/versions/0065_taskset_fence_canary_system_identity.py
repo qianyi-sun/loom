@@ -27,40 +27,34 @@ def upgrade() -> None:
     op.execute(
         f"""
         DO $$
-        DECLARE
-            existing_name text;
         BEGIN
-            SELECT name
-              INTO existing_name
-              FROM teams
-             WHERE id = '{_SYSTEM_CANARY_TEAM_ID}'::uuid
-             FOR UPDATE;
-
-            IF FOUND THEN
-                IF existing_name <> '{_SYSTEM_CANARY_TEAM_NAME}' THEN
-                    RAISE EXCEPTION
-                        'reserved TaskSet fence-canary Team id has unexpected name';
-                END IF;
-            ELSE
-                IF EXISTS (
-                    SELECT 1
-                      FROM teams
-                     WHERE name = '{_SYSTEM_CANARY_TEAM_NAME}'
-                ) THEN
-                    RAISE EXCEPTION
-                        'reserved TaskSet fence-canary Team name is already in use';
-                END IF;
-
-                INSERT INTO teams (id, name)
-                VALUES (
-                    '{_SYSTEM_CANARY_TEAM_ID}'::uuid,
-                    '{_SYSTEM_CANARY_TEAM_NAME}'
-                );
+            IF EXISTS (
+                SELECT 1
+                  FROM teams
+                 WHERE id = '{_SYSTEM_CANARY_TEAM_ID}'::uuid
+                    OR name = '{_SYSTEM_CANARY_TEAM_NAME}'
+            ) THEN
+                RAISE EXCEPTION
+                    'reserved TaskSet fence-canary Team identity already exists';
             END IF;
+
+            INSERT INTO teams (id, name)
+            VALUES (
+                '{_SYSTEM_CANARY_TEAM_ID}'::uuid,
+                '{_SYSTEM_CANARY_TEAM_NAME}'
+            );
 
             INSERT INTO team_quotas (team_id)
             VALUES ('{_SYSTEM_CANARY_TEAM_ID}'::uuid)
             ON CONFLICT (team_id) DO NOTHING;
+
+            ALTER TABLE task_set_fence_canary_authorizations
+                DROP CONSTRAINT task_set_fence_canary_authorizations_image_tag_check;
+            ALTER TABLE task_set_fence_canary_authorizations
+                ADD CONSTRAINT task_set_fence_canary_authorizations_image_tag_check
+                CHECK (
+                    image_tag ~ '^staging(-[a-z0-9][a-z0-9_-]*)?-[0-9a-f]{{7}}$'
+                );
         END
         $$;
         """

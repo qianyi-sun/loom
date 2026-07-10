@@ -400,7 +400,9 @@ A background job-queue consumer:
 9. In one lease-fenced transaction, replace the current `tasks` rows linked to
    the TaskSet and owning team. Those `Task.source` values are the publication
    pointer for a generation; an uploaded object key or a job audit field is not
-   a published result.
+   a published result. The catalog and task-detail API return this private
+   source only to the owning Team; a non-owning Team may see non-sensitive task
+   metadata but receives `source: null` for a TaskSet-backed task.
 10. On completion, update `task_sets.status` to `ready`, `partial`, or
     `failed`; set `evaluation_ready=true` only when verifier/scoring config is
     valid and at least one task materialized.

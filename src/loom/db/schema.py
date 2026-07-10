@@ -666,7 +666,7 @@ class TaskSetFenceCanaryAuthorization(Base):
             name="task_set_fence_canary_authorizations_candidate_sha_check",
         ),
         CheckConstraint(
-            "image_tag ~ '^staging-[0-9a-f]{7}$'",
+            "image_tag ~ '^staging(-[a-z0-9][a-z0-9_-]*)?-[0-9a-f]{7}$'",
             name="task_set_fence_canary_authorizations_image_tag_check",
         ),
         CheckConstraint(

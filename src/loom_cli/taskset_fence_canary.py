@@ -49,10 +49,16 @@ from loom.taskset.transform_sandbox import TransformSandboxConfig
 from loom_service import taskset_materializer
 from loom_service.config import LoomServiceSettings
 from loom_service.storage import create_minio_client
-from loom_service.taskset_intake import TaskSetIntakeResult, submit_task_set
+from loom_service.taskset_intake import (
+    TaskSetIntakeResult,
+    submit_task_set,
+)
 
 _SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA64_RE = re.compile(r"^[0-9a-f]{64}$")
+_CANDIDATE_IMAGE_TAG_RE = re.compile(
+    r"^staging(?:-[a-z0-9][a-z0-9_-]*)?-[0-9a-f]{7}$",
+)
 _TASK_SET_ID_RE = re.compile(
     r"^ts/(?P<team_id>[0-9a-f-]{36})/"
     r"(?P<slug>[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?)$",
@@ -76,6 +82,7 @@ _ALLOWED_PREPARATION_FIELDS = frozenset(
     }
 )
 _CANARY_ARCHIVE_NAME = "fence-canary.tar.gz"
+_ACTIVE_CANARY_JOB_STATES = frozenset({"queued", "claimed", "running"})
 _CANARY_TASK_FILES = {
     "tasks/fence-canary/task.toml": b"""schema_version = "1"
 
@@ -103,6 +110,14 @@ artifacts = ["canary.txt"]
     "tasks/fence-canary/instruction.md": b"Write canary.txt containing canary.\n",
     "tasks/fence-canary/verifier/noop.sh": b"#!/bin/sh\nexit 0\n",
 }
+
+
+def is_candidate_image_tag(image_tag: str, *, candidate_sha: str) -> bool:
+    return (
+        len(image_tag) <= 64
+        and _CANDIDATE_IMAGE_TAG_RE.fullmatch(image_tag) is not None
+        and image_tag.endswith(f"-{candidate_sha[:7]}")
+    )
 
 
 class TaskSetFenceCanaryContractError(ValueError):
@@ -138,7 +153,7 @@ class TaskSetFenceCanaryContract:
             not isinstance(candidate_sha, str)
             or not _SHA40_RE.fullmatch(candidate_sha)
             or not isinstance(image_tag, str)
-            or image_tag != f"staging-{candidate_sha[:7]}"
+            or not is_candidate_image_tag(image_tag, candidate_sha=candidate_sha)
         ):
             raise TaskSetFenceCanaryContractError("invalid candidate identity")
 
@@ -198,7 +213,7 @@ class TaskSetFenceCanaryPreparationRequest:
             not isinstance(candidate_sha, str)
             or not _SHA40_RE.fullmatch(candidate_sha)
             or not isinstance(image_tag, str)
-            or image_tag != f"staging-{candidate_sha[:7]}"
+            or not is_candidate_image_tag(image_tag, candidate_sha=candidate_sha)
         ):
             raise TaskSetFenceCanaryContractError("invalid candidate identity")
         authorization_token = payload.get("authorization_token")
@@ -319,11 +334,7 @@ async def _locked_disposable_rows(
         .scalars()
         .all()
     )
-    task_set = (
-        await session.execute(
-            select(TaskSet).where(TaskSet.id == task_set_id).with_for_update(),
-        )
-    ).scalar_one_or_none()
+    task_set = await session.get(TaskSet, task_set_id, with_for_update=True)
     manifest = (
         await session.execute(
             select(TaskSetManifest)
@@ -404,17 +415,7 @@ async def prepare_deployment_fence_canary(
     bundle_bytes, expected_checksum = _canary_bundle()
     slug = f"fence-canary-{uuid4().hex}"
     async with session_factory() as session:
-        system_team = (
-            await session.execute(
-                select(Team).where(Team.id == TASKSET_FENCE_CANARY_TEAM_ID).with_for_update(),
-            )
-        ).scalar_one_or_none()
-        if (
-            system_team is None
-            or system_team.name != TASKSET_FENCE_CANARY_TEAM_NAME
-            or system_team.disabled_at is not None
-        ):
-            raise TaskSetFenceCanaryRuntimeError("canary system identity was not available")
+        system_team = await _retire_unconsumed_deployment_canaries(session)
 
         async def pre_commit(result: TaskSetIntakeResult) -> None:
             contract = TaskSetFenceCanaryContract(
@@ -609,6 +610,173 @@ async def _relinquish_current_lease(
         return
 
 
+def _soft_delete_deployment_canary(
+    task_set: TaskSet,
+    *,
+    jobs: list[TaskSetMaterializationJob],
+    now: datetime,
+) -> None:
+    """Release a disposable canary's active quota without deleting objects."""
+    if task_set.soft_deleted_at is None:
+        task_set.status = "deleted"
+        task_set.soft_deleted_at = now
+        task_set.updated_at = now
+    for job in jobs:
+        if job.state not in _ACTIVE_CANARY_JOB_STATES:
+            continue
+        job.state = "cancelled"
+        job.lease_epoch += 1
+        job.claimed_at = None
+        job.claimed_by = None
+        job.lease_heartbeat_at = None
+        job.finished_at = now
+        job.updated_at = now
+
+
+async def _retire_unconsumed_deployment_canaries(
+    session: AsyncSession,
+) -> Team:
+    """Retire abandoned canaries before allocating the next one.
+
+    ``prepare`` and ``run`` are separate deployment processes. If a driver is
+    killed between them, its one-use authorization remains unconsumed. The
+    next authenticated preparation retires every such system-owned canary
+    under the materializer's job-first lock ordering before creating a
+    successor, so repeated interrupted handoffs cannot consume the bounded
+    Team quota.
+    """
+    stale_job_ids = select(TaskSetFenceCanaryAuthorization.materialization_job_id).where(
+        TaskSetFenceCanaryAuthorization.consumed_at.is_(None),
+    )
+    jobs = list(
+        (
+            await session.execute(
+                select(TaskSetMaterializationJob)
+                .where(TaskSetMaterializationJob.id.in_(stale_job_ids))
+                .order_by(
+                    TaskSetMaterializationJob.enqueued_at,
+                    TaskSetMaterializationJob.id,
+                )
+                .with_for_update(),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    task_sets = {
+        job.task_set_id: await session.get(
+            TaskSet,
+            job.task_set_id,
+            with_for_update=True,
+        )
+        for job in jobs
+    }
+    authorizations = list(
+        (
+            await session.execute(
+                select(TaskSetFenceCanaryAuthorization)
+                .where(TaskSetFenceCanaryAuthorization.materialization_job_id.in_(job.id for job in jobs))
+                .order_by(TaskSetFenceCanaryAuthorization.materialization_job_id)
+                .with_for_update(),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    system_team = await session.get(
+        Team,
+        TASKSET_FENCE_CANARY_TEAM_ID,
+        with_for_update=True,
+    )
+    if (
+        system_team is None
+        or system_team.name != TASKSET_FENCE_CANARY_TEAM_NAME
+        or system_team.disabled_at is not None
+        or len(authorizations) != len(jobs)
+    ):
+        await session.rollback()
+        raise TaskSetFenceCanaryRuntimeError("canary system identity was not available")
+
+    authorizations_by_job_id = {
+        authorization.materialization_job_id: authorization
+        for authorization in authorizations
+    }
+    for job in jobs:
+        task_set = task_sets[job.task_set_id]
+        authorization = authorizations_by_job_id.get(job.id)
+        if (
+            task_set is None
+            or authorization is None
+            or authorization.task_set_id != job.task_set_id
+            or job.owning_team_id != system_team.id
+            or task_set.owning_team_id != system_team.id
+            or authorization.consumed_at is not None
+        ):
+            await session.rollback()
+            raise TaskSetFenceCanaryRuntimeError("canary retirement was not available")
+
+    now = datetime.now(UTC)
+    for job in jobs:
+        task_set = task_sets[job.task_set_id]
+        if task_set is not None:
+            _soft_delete_deployment_canary(task_set, jobs=[job], now=now)
+    return system_team
+
+
+async def _retire_deployment_canary(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    contract: TaskSetFenceCanaryContract,
+) -> None:
+    """Soft-delete one authorization-bound system canary without deleting objects.
+
+    A valid deployment contract is sufficient to identify its own disposable
+    TaskSet before or after the one-use authorization is consumed. Retiring it
+    on any runner exit releases the bounded system-team quota. This uses the
+    materializer's job-first locking order and revokes only active jobs.
+    """
+    async with session_factory() as session:
+        task_set, _manifest, jobs, _task_exists = await _locked_disposable_rows(
+            session,
+            task_set_id=contract.task_set_id,
+        )
+        authorization = (
+            await session.execute(
+                select(TaskSetFenceCanaryAuthorization)
+                .where(TaskSetFenceCanaryAuthorization.task_set_id == contract.task_set_id)
+                .with_for_update(),
+            )
+        ).scalar_one_or_none()
+        system_team = (
+            await session.execute(
+                select(Team).where(Team.id == TASKSET_FENCE_CANARY_TEAM_ID).with_for_update(),
+            )
+        ).scalar_one_or_none()
+        if (
+            system_team is None
+            or system_team.name != TASKSET_FENCE_CANARY_TEAM_NAME
+            or system_team.disabled_at is not None
+            or task_set is None
+            or task_set.owning_team_id != TASKSET_FENCE_CANARY_TEAM_ID
+            or task_set.soft_deleted_at is not None
+            or authorization is None
+            or len(jobs) != 1
+            or authorization.materialization_job_id != jobs[0].id
+            or authorization.candidate_sha != contract.candidate_sha
+            or authorization.image_tag != contract.image_tag
+            or authorization.expected_task_checksum != contract.expected_task_checksum
+            or not hmac.compare_digest(
+                authorization.nonce_digest,
+                _nonce_digest(contract),
+            )
+        ):
+            await session.rollback()
+            raise TaskSetFenceCanaryRuntimeError("canary retirement was not available")
+        now = datetime.now(UTC)
+        _soft_delete_deployment_canary(task_set, jobs=jobs, now=now)
+        await session.commit()
+
+
 async def _stage_lease(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -676,19 +844,19 @@ async def run_deployment_fence_canary(
     is emitted.
     """
     validate_contract_authorization(contract, configured_token=configured_token)
-    owner_a = owner_factory()
-    owner_b = owner_factory()
-    if not (
-        isinstance(owner_a, str)
-        and owner_a
-        and isinstance(owner_b, str)
-        and owner_b
-        and owner_a != owner_b
-    ):
-        raise TaskSetFenceCanaryRuntimeError("canary owners were not available")
-
     active_lease: taskset_materializer.MaterializationLease | None = None
     try:
+        owner_a = owner_factory()
+        owner_b = owner_factory()
+        if not (
+            isinstance(owner_a, str)
+            and owner_a
+            and isinstance(owner_b, str)
+            and owner_b
+            and owner_a != owner_b
+        ):
+            raise TaskSetFenceCanaryRuntimeError("canary owners were not available")
+
         lease_a = await _claim_authorized_disposable_job(
             session_factory,
             contract=contract,
@@ -790,8 +958,12 @@ async def run_deployment_fence_canary(
     finally:
         if active_lease is not None:
             await _relinquish_current_lease(session_factory, lease=active_lease)
+        await _retire_deployment_canary(
+            session_factory,
+            contract=contract,
+        )
 
-    return {
+    evidence = {
         "schema_version": 1,
         "candidate_sha": contract.candidate_sha,
         "image_tag": contract.image_tag,
@@ -821,6 +993,7 @@ async def run_deployment_fence_canary(
             "a_lease_lost_at": _utc_timestamp(a_lease_lost_at),
         },
     }
+    return evidence
 
 
 async def _run_internal_contract(
