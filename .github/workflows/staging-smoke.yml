@@ -49,6 +49,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: false
 
       - name: Plan required staging smoke validation
         id: plan

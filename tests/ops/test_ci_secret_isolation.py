@@ -36,6 +36,10 @@ def _named_step(job: dict[str, Any], name: str) -> dict[str, Any]:
     return next(step for step in job["steps"] if step.get("name") == name)
 
 
+def _normalized_expression(value: str) -> str:
+    return " ".join(value.split())
+
+
 def _run_validation_step(
     step: dict[str, Any],
     *,
@@ -58,7 +62,11 @@ def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache()
 
     assert workflow["permissions"] == {"contents": "read"}
     assert build["permissions"] == {"contents": "read"}
-    assert "github.event_name != 'push'" in build["if"]
+    assert _normalized_expression(build["if"]) == (
+        "github.event_name != 'push' && "
+        "needs.plan.outputs.required == 'true' && "
+        "needs.plan.outputs.images != '[]'"
+    )
     assert _checkout_steps(build)
     assert all(
         step.get("with", {}).get("persist-credentials") is False
@@ -68,6 +76,10 @@ def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache()
     script = "\n".join(_run_blocks(build))
     assert "docker login" not in script
     assert "--push" not in script
+    assert "--output" not in script
+    assert "type=registry" not in script
+    assert "ghcr.io" not in script
+    assert "--cache-from" not in script
     assert "--cache-to" not in script
     assert "secrets." not in str(build)
     assert "${{" not in script
@@ -84,11 +96,12 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
     }
     assert write_capable_jobs == {"publish"}
     assert publish["permissions"] == {"contents": "read", "packages": "write"}
-    condition = publish["if"]
-    assert "github.event_name == 'push'" in condition
-    assert "github.ref == 'refs/heads/dev'" in condition
-    assert "github.ref == 'refs/heads/main'" in condition
-    assert "workflow_dispatch" not in condition
+    assert _normalized_expression(publish["if"]) == (
+        "github.event_name == 'push' && "
+        "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
+        "needs.plan.outputs.required == 'true' && "
+        "needs.plan.outputs.images != '[]'"
+    )
     assert _checkout_steps(publish)
     assert all(
         step.get("with", {}).get("persist-credentials") is False
@@ -102,7 +115,8 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
     script = "\n".join(_run_blocks(publish))
     assert "docker login" in script
     assert "--push" in script
-    assert "--cache-to" in script
+    assert "--cache-from" not in script
+    assert "--cache-to" not in script
     assert "build_args=(" in script
     assert '"${build_args[@]}"' in script
     assert "${{" not in script
@@ -115,9 +129,48 @@ def test_images_manual_dispatch_is_build_only() -> None:
     publish = workflow["jobs"]["publish"]
 
     assert "workflow_dispatch" in on_config
-    assert "github.event_name != 'push'" in build["if"]
-    assert "github.event_name == 'push'" in publish["if"]
-    assert "workflow_dispatch" not in publish["if"]
+    assert _normalized_expression(build["if"]).startswith(
+        "github.event_name != 'push' &&"
+    )
+    assert _normalized_expression(publish["if"]).startswith(
+        "github.event_name == 'push' &&"
+    )
+
+
+def test_images_permissions_are_an_exact_job_allowlist() -> None:
+    workflow = _workflow(".github/workflows/images.yml")
+    jobs = workflow["jobs"]
+
+    assert set(jobs) == {"plan", "build", "publish", "images-gate"}
+    for job_name in ("plan", "build", "images-gate"):
+        effective = jobs[job_name].get("permissions", workflow["permissions"])
+        assert effective == {"contents": "read"}
+        assert "environment" not in jobs[job_name]
+        assert "id-token" not in effective
+        assert all(value != "write" for value in effective.values())
+
+    assert jobs["publish"]["permissions"] == {
+        "contents": "read",
+        "packages": "write",
+    }
+    assert "environment" not in jobs["publish"]
+
+
+@pytest.mark.parametrize(
+    "workflow_path",
+    [".github/workflows/images.yml", ".github/workflows/staging-smoke.yml"],
+)
+def test_untrusted_workflows_disable_setup_uv_cache_writes(workflow_path: str) -> None:
+    workflow = _workflow(workflow_path)
+    setup_steps = [
+        step
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+        if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")
+    ]
+
+    assert setup_steps
+    assert all(step.get("with", {}).get("enable-cache") is False for step in setup_steps)
 
 
 def test_staging_pr_gate_is_credential_free_and_does_not_depend_on_real_aws() -> None:
@@ -136,6 +189,11 @@ def test_staging_pr_gate_is_credential_free_and_does_not_depend_on_real_aws() ->
     assert "ci-aws" not in str(workflow)
 
     for job in jobs.values():
+        effective = job.get("permissions", workflow["permissions"])
+        assert effective == {"contents": "read"}
+        assert "environment" not in job
+        assert "id-token" not in effective
+        assert all(value != "write" for value in effective.values())
         assert all(
             step.get("with", {}).get("persist-credentials") is False
             for step in _checkout_steps(job)

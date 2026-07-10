@@ -72,6 +72,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: false
 
       - name: Plan required image validation
         id: required
@@ -363,7 +365,6 @@ jobs:
             --platform "linux/amd64,linux/arm64"
             --file "$DOCKERFILE"
             --tag "loom-ci-${IMAGE_NAME}:${image_tag}"
-            --cache-from "type=gha,scope=images-publish-${IMAGE_NAME}"
             --provenance=false
             .
           )
@@ -476,8 +477,6 @@ jobs:
             --tag "${image}:${sha_short}"
             --tag "${image}:${REF_NAME}"
             --push
-            --cache-from "type=gha,scope=images-publish-${IMAGE_NAME}"
-            --cache-to "type=gha,scope=images-publish-${IMAGE_NAME},mode=max"
             --provenance=false
             .
           )

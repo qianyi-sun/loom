@@ -157,10 +157,14 @@ secrets.
 - Do not assume labels are the only way to select validation. For example,
   relevant image paths select `images-gate` automatically; `ci:images` adds
   multi-arch image validation when the changed paths do not already require it.
-  Pull requests, merge groups, and manual dispatches build with a read-only
-  token, do not log in to GHCR, and cannot write the shared publication cache.
-  Manual dispatch is build-only. Only a trusted push to `dev` or `main` enters
-  the job that has `packages: write` and publishes deployable images.
+  In the checked-in workflow, pull requests, merge groups, and manual
+  dispatches build with a read-only token, do not log in to GHCR, and do not
+  use a shared publication cache. Manual dispatch is build-only. Only the
+  `publish` job on a push to `dev` or `main` requests `packages: write` and
+  publishes deployable images. This is not a repository-wide sandbox for
+  same-repository writers: branch workflow code runs before CODEOWNERS review.
+  Autonomous agents need a fork-only execution boundary or an external trusted
+  workflow/App before this can be treated as a hard token ceiling.
 - `staging-smoke-gate` is a credential-free kind validation lane. It does not
   request the `ci-aws` environment and does not treat a skipped real-AWS check
   as successful cloud evidence. Real AWS validation is a separate trusted,

@@ -150,10 +150,13 @@ dispatchable. Manual runs report `images-gate-manual`, not the protected
 workflows. The image workflow plans a path-aware matrix so web-only changes
 build only the web image, Dockerfile-only changes build the matching component,
 and shared Python/runtime changes rebuild the affected Python images. Relevant
-pull requests, merge groups, and manual dispatches have read-only permissions,
-do not log in to GHCR, and cannot write the publication cache. Manual dispatch
-is build-only. Only trusted pushes to `dev` or `main` receive job-scoped
-`packages: write` authority and publish multi-arch images.
+pull requests, merge groups, and manual dispatches use the checked-in read-only
+build path, do not log in to GHCR, and do not use a publication cache. Manual
+dispatch is build-only. Only the checked-in `publish` job on a push to `dev` or
+`main` requests job-scoped `packages: write` authority and publishes multi-arch
+images. CODEOWNERS does not stop a same-repository branch workflow from running
+before review; autonomous-agent hard isolation still requires fork-only
+execution or an external trusted workflow/App.
 
 `staging-smoke-gate` proves the credential-free kind deployment smoke only. It
 never enters `ci-aws`, and a missing or skipped real-AWS run is not represented
