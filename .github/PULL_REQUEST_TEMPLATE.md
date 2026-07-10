@@ -42,7 +42,12 @@
 
 - Changed paths automatically select the minimum required validation work.
 - Labels may add validation but cannot remove path-inferred validation.
-- Record any manually dispatched additional validation above.
+- Static docs use a location-and-format fast path; unknown runtime paths select
+  every heavy lane until they have an explicit owner.
+- Manual dispatches report `*-manual` contexts and never replace the protected
+  PR contexts. Record any manually dispatched additional validation above.
+- Changes to the CI/release trust root require a declared CODEOWNER even though
+  routine `dev` source changes have no repository-wide approval count.
 
 ## Documentation
 

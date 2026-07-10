@@ -85,7 +85,17 @@ Every PR and merge-group candidate reports four stable required contexts:
 by changed paths and labels, and each gate enforces its selected result. A
 selected job that is cancelled, skipped unexpectedly, or absent is a failure.
 Labels may add validation but cannot remove path-inferred validation. Docs-only
-PRs keep a bounded fast path while the stable contexts still report.
+PRs keep a bounded location-and-format fast path while the stable contexts
+still report. Runtime Markdown, executable files under `docs/`, and unknown
+non-document paths are not docs-only; unknown runtime paths select every heavy
+lane until a canonical owner is declared.
+
+Manual dispatch remains available, but aggregate jobs report
+`repository-checks-manual`, `images-gate-manual`,
+`cluster-smoke-gate-manual`, and `staging-smoke-gate-manual`. Those names
+cannot satisfy the protected PR contexts. Pull-request `edited` events rerun
+the planner so a base retarget cannot reuse a plan computed against the old
+base.
 
 Codex enables squash auto-merge immediately after opening each normal `dev`
 PR. GitHub queues the merge until every required gate is visible and successful
@@ -110,14 +120,19 @@ prevents workflow-to-documentation drift.
 
 GitHub settings are part of the acceptance evidence:
 
-- `dev` requires the final aggregate but no human approval; Codex-authored
-  routine `dev` PRs auto-merge only after the required current-head CI is
-  successful;
+- `dev` has no repository-wide approval count; Codex-authored routine `dev`
+  PRs auto-merge after current-head CI, while the narrow CI/release trust root
+  requires a CODEOWNER because it defines that merge authority;
 - conversation resolution is required;
 - production-capable environments restrict deployment branches;
 - `production` requires owner approval;
 - secret-bearing `ci-aws` and `huggingface-publish` environments no longer have
   empty protection policy.
+
+The targeted CODEOWNERS boundary is a personal-repository bootstrap, not the
+ideal final trust root. An organization-required workflow or separate GitHub
+App with a distinct app identity should eventually emit merge authority so a
+PR cannot redefine its own judge.
 
 ### Workstream B: Workload Trust Contract
 

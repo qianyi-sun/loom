@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -16,6 +20,104 @@ def _workflow(path: str) -> dict[str, Any]:
 def _workflow_on(workflow: dict[str, Any]) -> dict[str, Any]:
     # PyYAML treats unquoted GitHub Actions key `on` as YAML 1.1 bool.
     return workflow.get("on", workflow.get(True))
+
+
+def _image_matrix_step() -> dict[str, Any]:
+    workflow = _workflow(".github/workflows/images.yml")
+    return next(
+        step
+        for step in workflow["jobs"]["plan"]["steps"]
+        if step.get("name") == "Select affected images"
+    )
+
+
+def _image_matrix_python() -> str:
+    script = _image_matrix_step()["run"]
+    _, python_and_marker = script.split("python - <<'PY'\n", maxsplit=1)
+    python_body, trailing = python_and_marker.rsplit("\nPY", maxsplit=1)
+    assert not trailing.strip()
+    return python_body
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.check_output(
+        ["git", *args],
+        cwd=repo,
+        text=True,
+    ).strip()
+
+
+def _run_image_matrix_plan(
+    tmp_path: Path,
+    *,
+    required: str,
+    unowned_runtime: str,
+    changed_paths: tuple[str, ...] = ("unowned-runtime/new-input.bin",),
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "--quiet")
+    _git(repo, "config", "user.email", "ci@example.invalid")
+    _git(repo, "config", "user.name", "CI Test")
+
+    (repo / "seed.txt").write_text("seed\n", encoding="utf-8")
+    _git(repo, "add", "seed.txt")
+    _git(repo, "commit", "--quiet", "-m", "base")
+    base_sha = _git(repo, "rev-parse", "HEAD")
+
+    for changed_path in changed_paths:
+        target = repo / changed_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"runtime input\n")
+    _git(repo, "add", *changed_paths)
+    _git(repo, "commit", "--quiet", "-m", "head")
+    head_sha = _git(repo, "rev-parse", "HEAD")
+
+    github_output = tmp_path / "github-output.txt"
+    result = subprocess.run(
+        [sys.executable, "-"],
+        input=_image_matrix_python(),
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "EVENT_NAME": "pull_request",
+            "BASE_SHA": base_sha,
+            "HEAD_SHA": head_sha,
+            "PR_LABELS_JSON": "[]",
+            "REQUIRED": required,
+            "UNOWNED_RUNTIME": unowned_runtime,
+            "GITHUB_OUTPUT": str(github_output),
+        },
+        check=False,
+    )
+    output = github_output.read_text(encoding="utf-8") if github_output.exists() else ""
+    return result, output
+
+
+GATE_CONTRACTS = {
+    ".github/workflows/ci.yml": ("repository-checks", "repository-checks"),
+    ".github/workflows/images.yml": ("images-gate", "images-gate"),
+    ".github/workflows/cluster-smoke.yml": (
+        "cluster-smoke-gate",
+        "cluster-smoke-gate",
+    ),
+    ".github/workflows/staging-smoke.yml": (
+        "staging-smoke-gate",
+        "staging-smoke-gate",
+    ),
+}
+
+
+def _gate_script(workflow_path: str, gate_id: str) -> str:
+    workflow = _workflow(workflow_path)
+    gate_step = next(
+        step
+        for step in workflow["jobs"][gate_id]["steps"]
+        if step.get("name", "").startswith("Enforce selected")
+    )
+    return gate_step["run"]
 
 
 def test_images_builds_use_planner_selection() -> None:
@@ -42,6 +144,93 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     assert "web/index.html" in plan_script
     assert "deploy/Dockerfile.worker" in plan_script
     assert "migrations/" in plan_script
+
+
+def test_images_matrix_plan_receives_shared_required_decision() -> None:
+    env = _image_matrix_step()["env"]
+    assert env["REQUIRED"] == (
+        "${{ steps.required.outputs.images }}"
+    )
+    assert env["UNOWNED_RUNTIME"] == (
+        "${{ steps.required.outputs.unowned_runtime }}"
+    )
+
+
+def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path) -> None:
+    result, output = _run_image_matrix_plan(
+        tmp_path,
+        required="true",
+        unowned_runtime="true",
+    )
+
+    assert result.returncode == 0, result.stderr
+    matrix = json.loads(output.removeprefix("images=").strip())
+    assert matrix == [
+        {"image": "worker", "dockerfile": "deploy/Dockerfile.worker"},
+        {"image": "service", "dockerfile": "deploy/Dockerfile.service"},
+        {
+            "image": "control-plane",
+            "dockerfile": "deploy/Dockerfile.control-plane",
+        },
+        {"image": "llm-gateway", "dockerfile": "deploy/Dockerfile.gateway"},
+        {"image": "web", "dockerfile": "deploy/Dockerfile.web"},
+        {
+            "image": "llm-gateway-sandbox",
+            "dockerfile": "deploy/Dockerfile.gateway-sandbox",
+        },
+    ]
+
+
+def test_images_mixed_known_and_unowned_paths_select_all_images(tmp_path: Path) -> None:
+    result, output = _run_image_matrix_plan(
+        tmp_path,
+        required="true",
+        unowned_runtime="true",
+        changed_paths=("web/src/App.tsx", "unowned-runtime/new-input.bin"),
+    )
+
+    assert result.returncode == 0, result.stderr
+    matrix = json.loads(output.removeprefix("images=").strip())
+    assert {entry["image"] for entry in matrix} == {
+        "worker",
+        "service",
+        "control-plane",
+        "llm-gateway",
+        "web",
+        "llm-gateway-sandbox",
+    }
+
+
+@pytest.mark.parametrize("required", ["", "invalid"])
+def test_images_matrix_plan_rejects_malformed_required(
+    tmp_path: Path,
+    required: str,
+) -> None:
+    result, output = _run_image_matrix_plan(
+        tmp_path,
+        required=required,
+        unowned_runtime="false",
+    )
+
+    assert result.returncode != 0
+    assert "FAIL: invalid planner boolean required=" in result.stderr
+    assert output == ""
+
+
+@pytest.mark.parametrize("unowned_runtime", ["", "invalid"])
+def test_images_matrix_plan_rejects_malformed_unowned_runtime(
+    tmp_path: Path,
+    unowned_runtime: str,
+) -> None:
+    result, output = _run_image_matrix_plan(
+        tmp_path,
+        required="true",
+        unowned_runtime=unowned_runtime,
+    )
+
+    assert result.returncode != 0
+    assert "FAIL: invalid planner boolean unowned_runtime=" in result.stderr
+    assert output == ""
 
 
 def test_images_merge_groups_select_a_nonempty_matrix() -> None:
@@ -86,20 +275,10 @@ def test_images_merge_groups_do_not_publish_or_use_queue_ref_tags() -> None:
 
 def test_stable_gate_scripts_have_valid_bash_syntax() -> None:
     invalid_gates: dict[str, str] = {}
-    for workflow_path, gate_id in (
-        (".github/workflows/images.yml", "images-gate"),
-        (".github/workflows/cluster-smoke.yml", "cluster-smoke-gate"),
-        (".github/workflows/staging-smoke.yml", "staging-smoke-gate"),
-    ):
-        workflow = _workflow(workflow_path)
-        gate_step = next(
-            step
-            for step in workflow["jobs"][gate_id]["steps"]
-            if step.get("name", "").startswith("Enforce selected")
-        )
+    for workflow_path, (gate_id, _) in GATE_CONTRACTS.items():
         result = subprocess.run(
             ["bash", "-n"],
-            input=gate_step["run"],
+            input=_gate_script(workflow_path, gate_id),
             text=True,
             capture_output=True,
             check=False,
@@ -108,6 +287,181 @@ def test_stable_gate_scripts_have_valid_bash_syntax() -> None:
             invalid_gates[gate_id] = result.stderr
 
     assert not invalid_gates, invalid_gates
+
+
+def test_protected_workflows_rerun_when_pull_request_base_is_edited() -> None:
+    for workflow_path in GATE_CONTRACTS:
+        workflow = _workflow(workflow_path)
+        pull_request = _workflow_on(workflow)["pull_request"]
+
+        assert "edited" in pull_request["types"], workflow_path
+
+
+def test_manual_aggregate_contexts_have_distinct_event_specific_names() -> None:
+    for workflow_path, (gate_id, protected_name) in GATE_CONTRACTS.items():
+        workflow = _workflow(workflow_path)
+        gate_name = workflow["jobs"][gate_id]["name"]
+
+        assert gate_name == (
+            "${{ github.event_name == 'workflow_dispatch' "
+            f"&& '{protected_name}-manual' || '{protected_name}' "
+            "}}"
+        )
+
+
+@pytest.mark.parametrize("required", ["", "invalid"])
+@pytest.mark.parametrize(
+    ("workflow_path", "gate_id", "result_env"),
+    [
+        (
+            ".github/workflows/images.yml",
+            "images-gate",
+            {"BUILD_RESULT": "skipped"},
+        ),
+        (
+            ".github/workflows/cluster-smoke.yml",
+            "cluster-smoke-gate",
+            {"SMOKE_RESULT": "skipped"},
+        ),
+        (
+            ".github/workflows/staging-smoke.yml",
+            "staging-smoke-gate",
+            {"SMOKE_RESULT": "skipped", "AWS_S3_RESULT": "skipped"},
+        ),
+    ],
+)
+def test_optional_gate_scripts_fail_closed_for_invalid_required(
+    workflow_path: str,
+    gate_id: str,
+    result_env: dict[str, str],
+    required: str,
+) -> None:
+    result = subprocess.run(
+        ["bash"],
+        input=_gate_script(workflow_path, gate_id),
+        text=True,
+        capture_output=True,
+        env={"PLAN_RESULT": "success", "REQUIRED": required, **result_env},
+        check=False,
+    )
+
+    assert result.returncode != 0, (workflow_path, required, result.stdout)
+    assert "FAIL: invalid planner boolean required=" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("required", "heavy_result"),
+    [("true", "success"), ("false", "skipped"), ("false", "success")],
+)
+@pytest.mark.parametrize(
+    ("workflow_path", "gate_id", "result_names"),
+    [
+        (".github/workflows/images.yml", "images-gate", ["BUILD_RESULT"]),
+        (
+            ".github/workflows/cluster-smoke.yml",
+            "cluster-smoke-gate",
+            ["SMOKE_RESULT"],
+        ),
+        (
+            ".github/workflows/staging-smoke.yml",
+            "staging-smoke-gate",
+            ["SMOKE_RESULT", "AWS_S3_RESULT"],
+        ),
+    ],
+)
+def test_optional_gate_scripts_preserve_result_semantics(
+    workflow_path: str,
+    gate_id: str,
+    result_names: list[str],
+    required: str,
+    heavy_result: str,
+) -> None:
+    result = subprocess.run(
+        ["bash"],
+        input=_gate_script(workflow_path, gate_id),
+        text=True,
+        capture_output=True,
+        env={
+            "PLAN_RESULT": "success",
+            "REQUIRED": required,
+            **dict.fromkeys(result_names, heavy_result),
+        },
+        check=False,
+    )
+
+    assert result.returncode == 0, (workflow_path, required, result.stderr)
+
+
+@pytest.mark.parametrize("planner_value", ["", "invalid"])
+@pytest.mark.parametrize(
+    "planner_name",
+    [
+        "DOCS_ONLY",
+        "INTEGRATION_SELECTED",
+        "DOCKER_SELECTED",
+        "COVERAGE_SELECTED",
+    ],
+)
+def test_repository_checks_fails_closed_for_invalid_planner_booleans(
+    planner_name: str,
+    planner_value: str,
+) -> None:
+    env = {
+        "PLAN_RESULT": "success",
+        "FAST_RESULT": "success",
+        "GO_RESULT": "success",
+        "DOCS_ONLY": "false",
+        "INTEGRATION_SELECTED": "false",
+        "INTEGRATION_RESULT": "skipped",
+        "DOCKER_SELECTED": "false",
+        "DOCKER_RESULT": "skipped",
+        "COVERAGE_SELECTED": "false",
+        "COVERAGE_RESULT": "skipped",
+    }
+    env[planner_name] = planner_value
+
+    result = subprocess.run(
+        ["bash"],
+        input=_gate_script(".github/workflows/ci.yml", "repository-checks"),
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode != 0, (planner_name, planner_value, result.stdout)
+    assert "FAIL: invalid planner boolean" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("selected", "validation_result"),
+    [("true", "success"), ("false", "skipped"), ("false", "success")],
+)
+def test_repository_checks_preserves_result_semantics(
+    selected: str,
+    validation_result: str,
+) -> None:
+    result = subprocess.run(
+        ["bash"],
+        input=_gate_script(".github/workflows/ci.yml", "repository-checks"),
+        text=True,
+        capture_output=True,
+        env={
+            "PLAN_RESULT": "success",
+            "FAST_RESULT": "success",
+            "GO_RESULT": "success",
+            "DOCS_ONLY": "false",
+            "INTEGRATION_SELECTED": selected,
+            "INTEGRATION_RESULT": validation_result,
+            "DOCKER_SELECTED": selected,
+            "DOCKER_RESULT": validation_result,
+            "COVERAGE_SELECTED": selected,
+            "COVERAGE_RESULT": validation_result,
+        },
+        check=False,
+    )
+
+    assert result.returncode == 0, (selected, validation_result, result.stderr)
 
 
 def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
@@ -141,7 +495,7 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
         assert "paths" not in on_config["pull_request"]
         assert "plan" in jobs
         assert "always()" in jobs[gate_id]["if"]
-        assert jobs[gate_id]["name"] == gate_name
+        assert gate_name in jobs[gate_id]["name"]
         assert set(jobs[gate_id]["needs"]) == {"plan", *heavy_jobs}
 
         plan_script = "\n".join(
@@ -181,7 +535,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     }
     assert jobs["integration"]["needs"] == "fast-checks"
     assert jobs["integration-docker"]["needs"] == "fast-checks"
-    assert jobs["repository-checks"]["name"] == "repository-checks"
+    assert "repository-checks" in jobs["repository-checks"]["name"]
     assert set(jobs["repository-checks"]["needs"]) == {
         "workflow-plan",
         "fast-checks",
@@ -214,6 +568,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "PLAN_RESULT": "${{ needs.workflow-plan.result }}",
         "FAST_RESULT": "${{ needs.fast-checks.result }}",
         "GO_RESULT": "${{ needs.go-checks.result }}",
+        "DOCS_ONLY": "${{ needs.workflow-plan.outputs.docs_only }}",
         "INTEGRATION_SELECTED": "${{ needs.workflow-plan.outputs.integration }}",
         "INTEGRATION_RESULT": "${{ needs.integration.result }}",
         "DOCKER_SELECTED": "${{ needs.workflow-plan.outputs.integration_docker }}",
