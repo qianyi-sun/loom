@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +20,76 @@ def _workflow(path: str) -> dict[str, Any]:
 def _workflow_on(workflow: dict[str, Any]) -> dict[str, Any]:
     # PyYAML treats unquoted GitHub Actions key `on` as YAML 1.1 bool.
     return workflow.get("on", workflow.get(True))
+
+
+def _image_matrix_step() -> dict[str, Any]:
+    workflow = _workflow(".github/workflows/images.yml")
+    return next(
+        step
+        for step in workflow["jobs"]["plan"]["steps"]
+        if step.get("name") == "Select affected images"
+    )
+
+
+def _image_matrix_python() -> str:
+    script = _image_matrix_step()["run"]
+    _, python_and_marker = script.split("python - <<'PY'\n", maxsplit=1)
+    python_body, trailing = python_and_marker.rsplit("\nPY", maxsplit=1)
+    assert not trailing.strip()
+    return python_body
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.check_output(
+        ["git", *args],
+        cwd=repo,
+        text=True,
+    ).strip()
+
+
+def _run_image_matrix_plan(
+    tmp_path: Path,
+    *,
+    required: str,
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "--quiet")
+    _git(repo, "config", "user.email", "ci@example.invalid")
+    _git(repo, "config", "user.name", "CI Test")
+
+    (repo / "seed.txt").write_text("seed\n", encoding="utf-8")
+    _git(repo, "add", "seed.txt")
+    _git(repo, "commit", "--quiet", "-m", "base")
+    base_sha = _git(repo, "rev-parse", "HEAD")
+
+    unowned_path = repo / "unowned-runtime" / "new-input.bin"
+    unowned_path.parent.mkdir()
+    unowned_path.write_bytes(b"runtime input\n")
+    _git(repo, "add", "unowned-runtime/new-input.bin")
+    _git(repo, "commit", "--quiet", "-m", "head")
+    head_sha = _git(repo, "rev-parse", "HEAD")
+
+    github_output = tmp_path / "github-output.txt"
+    result = subprocess.run(
+        [sys.executable, "-"],
+        input=_image_matrix_python(),
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "EVENT_NAME": "pull_request",
+            "BASE_SHA": base_sha,
+            "HEAD_SHA": head_sha,
+            "PR_LABELS_JSON": "[]",
+            "REQUIRED": required,
+            "GITHUB_OUTPUT": str(github_output),
+        },
+        check=False,
+    )
+    output = github_output.read_text(encoding="utf-8") if github_output.exists() else ""
+    return result, output
 
 
 GATE_CONTRACTS = {
@@ -67,6 +140,45 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     assert "web/index.html" in plan_script
     assert "deploy/Dockerfile.worker" in plan_script
     assert "migrations/" in plan_script
+
+
+def test_images_matrix_plan_receives_shared_required_decision() -> None:
+    assert _image_matrix_step()["env"]["REQUIRED"] == (
+        "${{ steps.required.outputs.images }}"
+    )
+
+
+def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path) -> None:
+    result, output = _run_image_matrix_plan(tmp_path, required="true")
+
+    assert result.returncode == 0, result.stderr
+    matrix = json.loads(output.removeprefix("images=").strip())
+    assert matrix == [
+        {"image": "worker", "dockerfile": "deploy/Dockerfile.worker"},
+        {"image": "service", "dockerfile": "deploy/Dockerfile.service"},
+        {
+            "image": "control-plane",
+            "dockerfile": "deploy/Dockerfile.control-plane",
+        },
+        {"image": "llm-gateway", "dockerfile": "deploy/Dockerfile.gateway"},
+        {"image": "web", "dockerfile": "deploy/Dockerfile.web"},
+        {
+            "image": "llm-gateway-sandbox",
+            "dockerfile": "deploy/Dockerfile.gateway-sandbox",
+        },
+    ]
+
+
+@pytest.mark.parametrize("required", ["", "invalid"])
+def test_images_matrix_plan_rejects_malformed_required(
+    tmp_path: Path,
+    required: str,
+) -> None:
+    result, output = _run_image_matrix_plan(tmp_path, required=required)
+
+    assert result.returncode != 0
+    assert "FAIL: invalid planner boolean required=" in result.stderr
+    assert output == ""
 
 
 def test_images_merge_groups_select_a_nonempty_matrix() -> None:
