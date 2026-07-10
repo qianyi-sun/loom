@@ -23,6 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
+    Task,
     TaskSet,
     TaskSetManifest,
     TaskSetMaterializationJob,
@@ -522,8 +523,12 @@ async def rebuild_task_set(
         verifier_file_present=manifest_row.verifier_blob_uri is not None,
     )
 
-    task_set.status = "materializing"
-    task_set.status_reason = None
+    has_published_rows = (await session.execute(
+        select(Task.id).where(Task.task_set_id == task_set_id).limit(1),
+    )).scalar_one_or_none() is not None
+    if not has_published_rows:
+        task_set.status = "materializing"
+        task_set.status_reason = None
     task_set.updated_at = datetime.now(UTC)
     job = TaskSetMaterializationJob(
         task_set_id=task_set_id,
