@@ -40,7 +40,7 @@ from loom.taskset.transform_sandbox import TransformSandboxConfig
 from loom_service import taskset_materializer
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
-from loom_service.taskset_intake import delete_task_set
+from loom_service.taskset_intake import delete_task_set, get_latest_job, rebuild_task_set
 from loom_service.taskset_materializer import run_once
 
 _MANIFEST_INLINE = """
@@ -997,6 +997,111 @@ async def test_empty_terminal_failure_keeps_prior_published_generation(
     assert job_after.state == "failed"
     assert job_after.failure_reason == "transform_unavailable_in_internal_trusted"
     assert job_after.published_materialization_generation == 7
+
+
+@pytest.mark.asyncio
+async def test_empty_failed_rebuild_keeps_published_task_set_state(
+    materialization_setup,
+) -> None:
+    app, tokens, teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    await _run_materializer_once(app)
+
+    async with app.state.session_factory() as session:
+        published_task_set = await session.get(TaskSet, task_set_id)
+        published_job = (await session.execute(
+            select(TaskSetMaterializationJob).where(
+                TaskSetMaterializationJob.task_set_id == task_set_id,
+            ),
+        )).scalar_one()
+        published_rows = tuple(sorted(
+            (row.id, row.source)
+            for row in (await session.execute(
+                select(Task).where(Task.task_set_id == task_set_id),
+            )).scalars().all()
+        ))
+    assert published_task_set is not None
+    assert published_job.state == "succeeded"
+    published_task_set_state = (
+        published_task_set.status,
+        published_task_set.status_reason,
+        published_task_set.task_count,
+        published_task_set.evaluation_ready,
+    )
+    published_generation = published_job.published_materialization_generation
+
+    async with app.state.session_factory() as session:
+        rebuild = await rebuild_task_set(
+            session,
+            team_id=teams["team_a"],
+            task_set_id=task_set_id,
+        )
+        task_set_after_enqueue = await session.get(TaskSet, task_set_id)
+        rebuilt_job = await session.get(TaskSetMaterializationJob, rebuild.job_id)
+    assert task_set_after_enqueue is not None
+    assert rebuilt_job is not None
+    assert (
+        task_set_after_enqueue.status,
+        task_set_after_enqueue.status_reason,
+        task_set_after_enqueue.task_count,
+        task_set_after_enqueue.evaluation_ready,
+    ) == published_task_set_state
+    assert rebuilt_job.state == "queued"
+
+    async with app.state.session_factory() as session:
+        claimed = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by="empty-rebuild-owner",
+        )
+    assert len(claimed) == 1
+    lease = claimed[0]
+    assert lease.id == rebuild.job_id
+
+    async with app.state.session_factory() as session:
+        await taskset_materializer._start_job(session, lease=lease)
+        await taskset_materializer.publish_if_current(
+            session,
+            lease=lease,
+            task_set_id=task_set_id,
+            output=MaterializeOutput(
+                status="failed",
+                status_reason="transform_unavailable_in_internal_trusted",
+                job_failure_reason="transform_unavailable_in_internal_trusted",
+            ),
+            claim_ttl_sec=60,
+        )
+
+    async with app.state.session_factory() as session:
+        rows_after_failure = tuple(sorted(
+            (row.id, row.source)
+            for row in (await session.execute(
+                select(Task).where(Task.task_set_id == task_set_id),
+            )).scalars().all()
+        ))
+        task_set_after_failure = await session.get(TaskSet, task_set_id)
+        latest_job_after_failure = await get_latest_job(session, task_set_id)
+        published_job_after_failure = await session.get(
+            TaskSetMaterializationJob,
+            published_job.id,
+        )
+    assert task_set_after_failure is not None
+    assert latest_job_after_failure is not None
+    assert published_job_after_failure is not None
+    assert rows_after_failure == published_rows
+    assert (
+        task_set_after_failure.status,
+        task_set_after_failure.status_reason,
+        task_set_after_failure.task_count,
+        task_set_after_failure.evaluation_ready,
+    ) == published_task_set_state
+    assert latest_job_after_failure.id == rebuild.job_id
+    assert latest_job_after_failure.state == "failed"
+    assert latest_job_after_failure.failure_reason == "transform_unavailable_in_internal_trusted"
+    assert (
+        published_job_after_failure.published_materialization_generation
+        == published_generation
+    )
 
 
 @pytest.mark.asyncio
