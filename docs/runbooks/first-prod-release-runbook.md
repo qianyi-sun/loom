@@ -26,6 +26,27 @@ JSON, Markdown, logs, PRs, or issues. Use secret references such as
 `file:/secure/path/token`. Expected redacted evidence may contain
 `<redacted>` or `[REDACTED sha256:<12-hex> len=<N>]`.
 
+## Workload Trust Release Gate
+
+The v1 production candidate must retain the protected
+`internal_trusted` workload profile: TaskSet transforms, transform network
+isolation, and untrusted-workload isolation are all `false`. The release
+manifest records this structural tuple; the release gate requires it to match
+the live `loom-service` environment. A `--skip-preflight` invocation cannot
+bypass the protected check before `cluster up` leases or applies resources.
+A protected namespace is authoritative: `--environment` must match it, or the
+command fails before a rollout lease, apply, or release manifest is accepted.
+Explicit environments remain valid for non-protected custom namespaces.
+Manual rollout validates protected cluster and namespace identity before
+evidence or Kind work, including when generating a dry-run plan.
+
+Do not use a transform submission as a release canary. In v1 it must fail with
+`transform_unavailable_in_internal_trusted` before blob fetch or runner start.
+The gate reports only secret-safe structural/expected evidence, never raw
+invalid profile, manifest, or live env values. See
+[`v1-workload-trust-contract.md`](../architecture/adr/v1-workload-trust-contract.md)
+for the decision and #758 for the post-v1 untrusted-isolation scope.
+
 ## Required Inputs
 
 Set these once at the start of an operator session. The fake values shown here

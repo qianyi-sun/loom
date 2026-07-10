@@ -10,7 +10,8 @@ earlier user-brought-benchmarks design by separating the
 user-facing object from the platform benchmark catalog. It complements
 [`benchmark-adapter.md`](benchmark-adapter.md) for native platform benchmarks
 and [`sandbox-isolation.md`](sandbox-isolation.md) for verifier and transform
-trust boundaries.
+trust boundaries. The release-level rule is recorded in
+[`adr/v1-workload-trust-contract.md`](adr/v1-workload-trust-contract.md).
 
 ## Goal
 
@@ -57,7 +58,8 @@ now.
 - Browser zip upload as the normal path for first-party benchmarks. User
   TaskSet upload is a separate user-owned intake surface.
 - Letting users ship a full `BenchmarkAdapter` Python package. Conversion is
-  declarative plus an optional sandboxed `transform()`.
+  declarative in v1. User-provided `transform()` execution is unavailable in
+  the v1 `internal_trusted` workload mode.
 - VM-backed task shapes (OSWorld, WebArena). These remain first-party-only
   until the cluster has a provisioned VM substrate.
 - A curation / review pipeline. Owner-private removes the need.
@@ -77,10 +79,11 @@ now.
 - **Evaluation is a capability, not the object identity.** A TaskSet with a
   verifier is evaluation-ready; a TaskSet without one is still valid for
   trajectory/data-production runs.
-- **Trust boundary = existing trial sandbox plus transform sandbox.** Verifier
-  scripts ride the same isolation primitives first-party verifiers already use.
-  The only new sandboxed surface is optional `transform()`, executed during
-  materialization.
+- **Trust boundary = existing trial sandbox.** Verifier scripts ride the same
+  isolation primitives first-party verifiers already use. v1 has no trusted
+  transform-execution boundary: any manifest that declares `transform` fails
+  materialization with `transform_unavailable_in_internal_trusted` before any
+  transform, verifier, or source blob is fetched.
 - **Forward-compat for sharing without building it.** A `visibility` column
   ships in v1 with the single value `private`. Promoting a TaskSet later is a
   metadata change plus the filter rule already in place.
@@ -118,7 +121,7 @@ benchmark rows.
 | `schema_version` | int NOT NULL | Manifest schema version. |
 | `manifest` | jsonb NOT NULL | Parsed manifest. |
 | `verifier_blob_uri` | text NULL | Present only for evaluation-ready TaskSets. |
-| `transform_blob_uri` | text NULL | Optional `transform.py` in object storage. |
+| `transform_blob_uri` | text NULL | Compatibility storage for an uploaded `transform.py`; v1 never fetches or executes it. |
 | `created_at`, `updated_at` | timestamptz | Standard audit columns. |
 
 Stored separately so TaskSet rows stay queryable and manifest revisions can be
@@ -193,7 +196,7 @@ benchmarks/system/<slug>/...                                  # unchanged
 tasksets/user/<owning_team_id>/<slug>/manifest.yaml
 tasksets/user/<owning_team_id>/<slug>/<source.locator>.tar.gz # bundle-upload source
 tasksets/user/<owning_team_id>/<slug>/verifier.{py,sh}         # optional
-tasksets/user/<owning_team_id>/<slug>/transform.py             # optional
+tasksets/user/<owning_team_id>/<slug>/transform.py             # retained blob; v1 never executes it
 tasksets/user/<owning_team_id>/<slug>/tasks/<task_id>/...
 ```
 
@@ -243,8 +246,9 @@ verifier:                             # optional; required for row-source evalua
   type: pytest                        # pytest | script
   file: verifier/test_solution.py     # path inside the upload bundle
 
-transform:                            # optional
-  file: transform.py                  # must export `def transform(row: dict) -> dict`
+# `transform` is intentionally unavailable in v1 internal_trusted mode.
+# If present for compatibility with an older manifest, materialization fails
+# with `transform_unavailable_in_internal_trusted` before any blob fetch.
 
 limits:
   max_instances: 500
@@ -310,7 +314,7 @@ bundle.tar.gz
 
 | Endpoint | Behavior |
 |---|---|
-| `POST /api/v1/tasksets` | multipart: `manifest.yaml` + optional `verifier.*` + optional `transform.py`; `bundle-upload` manifests also require a `bundle` part matching `source.locator`. Validates, uploads blobs, inserts TaskSet rows, enqueues materialization. Returns 202 + `task_set_id`. |
+| `POST /api/v1/tasksets` | multipart: `manifest.yaml` + optional `verifier.*`; `bundle-upload` manifests also require a `bundle` part matching `source.locator`. A compatibility `transform.py` part may be stored, but a manifest declaring `transform` deterministically fails materialization in v1 with `transform_unavailable_in_internal_trusted`. |
 | `GET /api/v1/tasksets/{id}` | materialization status, capabilities, task count, and per-instance error summary. |
 | `POST /api/v1/tasksets/{id}/rebuild` | re-enqueues materialization; manifest re-fetched from storage. |
 | `DELETE /api/v1/tasksets/{id}` | soft-delete; blobs purged by GC after 7 days. |
@@ -338,7 +342,7 @@ task sources before `task_ids`, tag filters, and subset filters are applied.
 ### CLI
 
 ```
-loom tasksets submit ./my-taskset/        # manifest.yaml, [verifier.*], [transform.py], [bundle.tar.gz]
+loom tasksets submit ./my-taskset/        # manifest.yaml, [verifier.*], [bundle.tar.gz]
 loom tasksets status <id>
 loom tasksets rebuild <id>
 loom tasksets delete <id>
@@ -373,10 +377,11 @@ A background job-queue consumer:
    `packages/loom-benchmarks/loom_benchmarks/fetch.py` unchanged where
    possible for row-oriented sources. For `bundle-upload`, fetch the uploaded
    tar archive from the TaskSet prefix instead.
-3. Iterate rows up to `limits.max_instances`.
-4. For each row: optionally run `transform(row)` in a constrained subprocess
-   (see Sandbox).
-5. Render `task.toml` from `task_template` using the transformed row plus
+3. If the manifest declares `transform`, fail the job with
+   `transform_unavailable_in_internal_trusted` before fetching any blob or
+   iterating any rows.
+4. Iterate rows up to `limits.max_instances`.
+5. Render `task.toml` from `task_template` using the raw mapped row plus
    `instance_mapping`.
 6. Validate via `TaskConfig` (`extra="forbid"`) - per-row failure is a skip,
    not an abort.
@@ -398,27 +403,17 @@ A background job-queue consumer:
 
 ### Sandbox
 
-Two surfaces:
+v1 has one executable user-authored surface:
 
 - **Verifier** runs only for evaluation-ready TaskSets and native benchmarks. It
   runs at trial time in the existing trial sandbox container. The user's
   `verifier.*` is mounted as `verifier/<name>`, exactly like a first-party
   verifier. No new verifier isolation infrastructure.
-- **Transform** runs at materialization time, in a constrained subprocess on the
-  worker:
-  - `RLIMIT_CPU`, `RLIMIT_AS`, `RLIMIT_NOFILE`, wall-clock timeout
-  - empty parent environment
-  - ephemeral working directory
-  - no network (network namespace or seccomp filter, whichever the worker host
-    already supports - to be reconciled with
-    [`sandbox-isolation.md`](sandbox-isolation.md) during plan writing)
-  - stdout/stderr captured to error log; structured return is the only result
-    channel
-
-If the platform cannot guarantee the no-network constraint for in-process
-subprocesses on a given worker, that worker MUST refuse to schedule
-materialization jobs that include a `transform`. Better to surface "transforms
-unsupported on this cluster" than to silently grant network.
+- **Transform** is not executable in v1. The legacy constrained-subprocess
+  helper remains dormant, but `os.unshare`, resource limits, and legacy flags
+  are not authorization semantics. A manifest declaring `transform` fails
+  before source, verifier, or transform blob fetches and before a subprocess
+  can run. Untrusted transform isolation is a post-v1 workload-mode capability.
 
 ### UI
 
@@ -429,8 +424,8 @@ Add a TaskSets surface instead of folding user uploads into the Benchmarks page:
   `deleted`) with a detail panel showing the first 50 per-instance errors.
 - Capability badge: `trajectory-only`, `evaluation-ready`, or `both`.
 - "Submit TaskSet" CTA: drag-and-drop directory upload, or paste a manifest
-  with separate file pickers for verifier, transform, and bundle archive when
-  `source.type=bundle-upload`.
+  with separate file pickers for verifier and bundle archive when
+  `source.type=bundle-upload`. The UI must not offer a transform picker in v1.
 - Data-production run creation selects TaskSets.
 - Evaluation run creation selects native Benchmarks and clearly labeled
   evaluation-ready TaskSets.
@@ -444,7 +439,7 @@ present every user upload as a benchmark.
 ### Submit
 
 ```
-CLI/UI -> build multipart (manifest + [verifier] + [transform])
+CLI/UI -> build multipart (manifest + [verifier])
        -> POST /api/v1/tasksets
 API    -> validate manifest (pydantic, extra=forbid)
        -> upload blobs to tasksets/user/<owning_team_id>/<slug>/
@@ -454,14 +449,18 @@ API    -> validate manifest (pydantic, extra=forbid)
        -> 202 + task_set_id
 ```
 
-For `bundle-upload`, the multipart form is
-`manifest + bundle + [verifier] + [transform]`, although transform is not
-currently supported with uploaded bundle archives.
+For `bundle-upload`, the multipart form is `manifest + bundle + [verifier]`.
+Any manifest that declares `transform` fails its asynchronous materialization
+with `transform_unavailable_in_internal_trusted`; it must not be used as a
+successful submission path.
 
 ### Materialize (worker)
 
 ```
 load manifest
+if manifest.transform:
+    fail task set and job with transform_unavailable_in_internal_trusted
+    # Do not fetch source, verifier, transform, or bundle blobs.
 if source.type == bundle-upload:
     fetch archive from tasksets/user/<team>/<slug>/<source.locator>
     safely extract archive; reject traversal/link/device entries
@@ -474,7 +473,6 @@ if source.type == bundle-upload:
 else:
     fetch_upstream(source)
     foreach row up to limits.max_instances:
-        [if transform: row = sandboxed transform(row)]
         render task.toml from task_template using row + instance_mapping
         validate TaskConfig (extra=forbid)
         write bundle to object storage
@@ -514,8 +512,7 @@ agent/model runs -> verifier runs in trial sandbox -> score/reward persisted
 | Unsafe uploaded archive entry | Materialization fails with `bundle_extract_unsafe`. |
 | Uploaded archive contains no task directories | Materialization fails with `bundle_no_tasks`. |
 | Source unreachable | 3 retries with exponential backoff, then `status=failed` (`source_unreachable`). |
-| `transform()` crash on a row | Capture stderr, skip instance, record error; first 50 errors retained on TaskSet detail. |
-| `transform()` exceeds resource limits | Killed, instance skipped with `transform_limit_exceeded`. |
+| Manifest declares `transform` | Materialization fails before any blob fetch or runner call with `transform_unavailable_in_internal_trusted`; no task rows are created. |
 | Rendered `task.toml` fails validation | Per-row skip, recorded. |
 | 0 rows skipped | TaskSet goes `ready`. |
 | 1 row skipped up to and including 50% | TaskSet goes `partial` with skip count surfaced. |
@@ -594,9 +591,9 @@ table.
 
 - Malicious verifier (network call, file escape, fork bomb) is contained /
   killed by the trial sandbox; evaluation trial reports `verifier_error`.
-- Malicious transform (same vectors) is contained / killed by the
-  materialization sandbox; instance reports `transform_limit_exceeded` or
-  `transform_error`.
+- Malicious transform is never executed in v1. Its manifest fails closed with
+  `transform_unavailable_in_internal_trusted`, independent of legacy sandbox
+  flags or best-effort `os.unshare` behavior.
 - Path traversal in slug rejected (`ts/<team>/../../etc/passwd`).
 - Manifest size cap enforced before parsing.
 - Authz check present on every TaskSet read/write/run endpoint asserted via
@@ -617,8 +614,9 @@ the implementation plan is drafted.
 
 - Whether evaluation-ready TaskSets appear in `/api/v1/benchmarks` only behind
   an explicit flag, or only through run-creation selector endpoints.
-- Whether the `transform` sandbox should reuse an existing worker-side primitive
-  from [`sandbox-isolation.md`](sandbox-isolation.md) or introduce a new helper.
+- For a post-v1 untrusted-workload mode, whether transform isolation should use
+  a gVisor/Kata-capable executor rather than the dormant worker-side subprocess
+  primitive.
 - The choice of job queue for materialization jobs (reuse the trial queue with a
   distinct kind, or stand up a sibling queue).
 - Whether to add a human-readable `team_handle` column to `teams`. Until then,

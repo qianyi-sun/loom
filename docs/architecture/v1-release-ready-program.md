@@ -110,7 +110,9 @@ prevents workflow-to-documentation drift.
 
 GitHub settings are part of the acceptance evidence:
 
-- `dev` requires the final aggregate and at least one approving review;
+- `dev` requires the final aggregate but no human approval; Codex-authored
+  routine `dev` PRs auto-merge only after the required current-head CI is
+  successful;
 - conversation resolution is required;
 - production-capable environments restrict deployment branches;
 - `production` requires owner approval;
@@ -118,6 +120,9 @@ GitHub settings are part of the acceptance evidence:
   empty protection policy.
 
 ### Workstream B: Workload Trust Contract
+
+The durable decision record is
+[`adr/v1-workload-trust-contract.md`](adr/v1-workload-trust-contract.md).
 
 Loom v1.0 is an internal, trusted-workload release. It does not claim that
 arbitrary uploaded Python, verifier code, or task container images are securely
@@ -186,8 +191,8 @@ Issue #39 is the release umbrella and must not duplicate an executable matrix.
 Issue #715 is the single pre-promotion matrix. Its rows are split into:
 
 - pre-promotion evidence required for Ready-to-Promote;
-- explicit release-owner decisions, such as the remaining #88 killed-driver
-  drill;
+- explicit release-owner dispositions, including the deferred post-v1 #88
+  killed-driver drill;
 - post-promotion production validation that keeps #39 open but does not
   redefine readiness retroactively.
 
@@ -213,8 +218,8 @@ No issue closes merely because code merged. Live-acceptance issues stay open as
 The final matrix is executed against one immutable candidate from the fixed
 `platform-dev` runner. It includes:
 
-- Terminal-Bench 2.0, SkillLearnBench, and the already-scoped realistic
-  user-uploaded TaskSet lane;
+- canonical Terminal-Bench 2.1 Harbor Hub revision 6, SkillLearnBench, and the
+  already-scoped realistic user-uploaded TaskSet lane;
 - representative agent/model cells from #35;
 - operator-free frontend and CLI/API submit, monitor, detail/debug, usage,
   artifact, trajectory, and export paths;
@@ -339,11 +344,12 @@ or acceptance of the current design.
 ## Rollback and Safety
 
 Repository and GitHub governance changes are applied incrementally and verified
-after each mutation. Branch protection is never weakened while a replacement
-gate is unproven. Production secrets are referenced, never printed. Staging
-capacity changes use leases and preserve in-flight work. No destructive #88
-killed-driver drill, `main` merge, tag creation, production rollout, or
-production capacity mutation occurs without explicit authority.
+after each mutation. Required CI gates are never weakened while a replacement
+gate is unproven; routine `dev` approval policy follows the owner governance
+decision. Production secrets are referenced, never printed. Staging capacity
+changes use leases and preserve in-flight work. The #88 killed-driver drill is
+post-v1; no `main` merge, tag creation, production rollout, or production
+capacity mutation occurs without explicit authority.
 
 ## Completion Audit
 

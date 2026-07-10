@@ -70,7 +70,11 @@ Quickest entry points:
 - **[architecture/cli-mode.md](architecture/cli-mode.md)** — the `loom` CLI
   as a stateless wrapper around `Trial.run()`
 - **[architecture/adr/](architecture/adr/README.md)** — architecture
-  decision records (post-v1 typed artifacts + skill artifact injection)
+  decision records, including the v1 workload-trust boundary
+- **[agent/domain-model.md](agent/domain-model.md)** — release candidate,
+  Ready-to-Promote, Release, and Workload Trust Mode definitions
+- **[architecture/v1-release-ready-program.md](architecture/v1-release-ready-program.md)**
+  — evidence-backed v1 readiness program and its release-boundary workstreams
 
 ## I'm contributing to Loom
 

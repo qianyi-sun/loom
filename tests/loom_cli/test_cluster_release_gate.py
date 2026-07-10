@@ -4,6 +4,8 @@ import json
 import subprocess
 from typing import Any
 
+import pytest
+
 from loom_cli.__main__ import main
 from loom_cli.cluster_release_gate import (
     ReleaseGateCheck,
@@ -48,7 +50,14 @@ def _deployment(
     generation: int = 7,
     observed_generation: int = 7,
     replicas: int = 1,
+    workload_contract_env: dict[str, str] | None = None,
 ) -> Any:
+    workload_contract_env = workload_contract_env or {
+        "LOOM_SVC_WORKLOAD_TRUST_MODE": "internal_trusted",
+        "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORMS_ENABLED": "False",
+        "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_NETWORK_ISOLATED": "False",
+        "LOOM_SVC_UNTRUSTED_WORKLOAD_ISOLATION": "False",
+    }
     return _Spec(
         metadata=_Spec(name=name, generation=generation),
         spec=_Spec(
@@ -56,7 +65,19 @@ def _deployment(
             selector=_Spec(match_labels={"app": name}),
             template=_Spec(
                 metadata=_Spec(labels={"app": name}),
-                spec=_Spec(containers=[_Spec(name="app", image=image)]),
+                spec=_Spec(
+                    containers=[
+                        _Spec(name="app", image=image),
+                        _Spec(
+                            name="loom-service",
+                            image=image,
+                            env=[
+                                _Spec(name=key, value=value)
+                                for key, value in workload_contract_env.items()
+                            ],
+                        ),
+                    ]
+                ),
             ),
         ),
         status=_Spec(
@@ -147,10 +168,215 @@ def _manifest(
             "expected_heads": alembic_heads or ["0050"],
             "compatible_heads": alembic_heads or ["0050"],
         },
+        "workload_contract": {
+            "workload_trust_mode": "internal_trusted",
+            "taskset_transforms_enabled": False,
+            "taskset_transform_network_isolated": False,
+            "untrusted_workload_isolation": False,
+        },
     }
     if external_workers is not None:
         manifest["external_workers"] = external_workers
     return manifest
+
+
+@pytest.mark.parametrize(
+    "workload_contract",
+    [
+        None,
+        {"workload_trust_mode": "unknown"},
+        {
+            "workload_trust_mode": "internal_trusted",
+            "taskset_transforms_enabled": True,
+            "taskset_transform_network_isolated": False,
+            "untrusted_workload_isolation": False,
+        },
+    ],
+)
+def test_release_gate_rejects_absent_or_invalid_manifest_workload_contract(
+    workload_contract: dict[str, Any] | None,
+) -> None:
+    manifest = _manifest()
+    if workload_contract is None:
+        manifest.pop("workload_contract")
+    else:
+        manifest["workload_contract"] = workload_contract
+    apps = _FakeAppsV1(
+        {"loom-service": _deployment(name="loom-service", image="loom-service:staging-abc123")}
+    )
+
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=apps,
+        core_v1=_FakeCoreV1([]),
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+    )
+
+    check = next(check for check in report.checks if check.name == "workload-trust-contract")
+    assert check.outcome == "fail"
+    assert not report.all_pass
+
+
+def test_release_gate_invalid_workload_contract_does_not_echo_raw_candidate_value() -> None:
+    raw_mode = "hf_abcdefghijklmnopqrstuvwxyz1234567890"
+    manifest = _manifest()
+    manifest["workload_contract"]["workload_trust_mode"] = raw_mode
+    apps = _FakeAppsV1(
+        {"loom-service": _deployment(name="loom-service", image="loom-service:staging-abc123")}
+    )
+
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=apps,
+        core_v1=_FakeCoreV1([]),
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+    )
+
+    check = next(check for check in report.checks if check.name == "workload-trust-contract")
+    assert check.outcome == "fail"
+    assert raw_mode not in json.dumps(check.evidence, sort_keys=True)
+
+
+def test_release_gate_does_not_echo_unknown_workload_contract_field_name() -> None:
+    raw_field = "hf_abcdefghijklmnopqrstuvwxyz1234567890"
+    manifest = _manifest()
+    manifest["workload_contract"][raw_field] = False
+    apps = _FakeAppsV1(
+        {"loom-service": _deployment(name="loom-service", image="loom-service:staging-abc123")}
+    )
+
+    report = collect_release_gate_report(
+        manifest=manifest,
+        apps_v1=apps,
+        core_v1=_FakeCoreV1([]),
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+    )
+
+    check = next(check for check in report.checks if check.name == "workload-trust-contract")
+    assert check.outcome == "fail"
+    assert raw_field not in json.dumps(
+        {"detail": check.detail, "evidence": check.evidence},
+        sort_keys=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "expected_env_name",
+    [
+        "LOOM_SVC_WORKLOAD_TRUST_MODE",
+        "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORMS_ENABLED",
+        "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_NETWORK_ISOLATED",
+        "LOOM_SVC_UNTRUSTED_WORKLOAD_ISOLATION",
+    ],
+)
+def test_release_gate_rejects_live_loom_service_workload_contract_mismatch(
+    expected_env_name: str,
+) -> None:
+    live_env = {
+        "LOOM_SVC_WORKLOAD_TRUST_MODE": "internal_trusted",
+        "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORMS_ENABLED": "False",
+        "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_NETWORK_ISOLATED": "False",
+        "LOOM_SVC_UNTRUSTED_WORKLOAD_ISOLATION": "False",
+    }
+    live_env[expected_env_name] = "mismatch"
+    apps = _FakeAppsV1(
+        {
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+                workload_contract_env=live_env,
+            )
+        }
+    )
+
+    report = collect_release_gate_report(
+        manifest=_manifest(),
+        apps_v1=apps,
+        core_v1=_FakeCoreV1([]),
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+    )
+
+    check = next(check for check in report.checks if check.name == "workload-trust-contract")
+    assert check.outcome == "fail"
+    assert check.evidence["expected"][expected_env_name] != check.evidence["actual"][expected_env_name]
+    assert not report.all_pass
+
+
+def test_release_gate_live_workload_contract_mismatch_redacts_raw_actual_value() -> None:
+    raw_mode = "hf_abcdefghijklmnopqrstuvwxyz1234567890"
+    live_env = {
+        "LOOM_SVC_WORKLOAD_TRUST_MODE": raw_mode,
+        "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORMS_ENABLED": "False",
+        "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_NETWORK_ISOLATED": "False",
+        "LOOM_SVC_UNTRUSTED_WORKLOAD_ISOLATION": "False",
+    }
+    apps = _FakeAppsV1(
+        {
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+                workload_contract_env=live_env,
+            )
+        }
+    )
+
+    report = collect_release_gate_report(
+        manifest=_manifest(),
+        apps_v1=apps,
+        core_v1=_FakeCoreV1([]),
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+    )
+
+    check = next(check for check in report.checks if check.name == "workload-trust-contract")
+    assert check.outcome == "fail"
+    assert raw_mode not in json.dumps(check.evidence, sort_keys=True)
+    assert check.evidence["actual"]["LOOM_SVC_WORKLOAD_TRUST_MODE"] == "[REDACTED]"
+
+
+def test_release_gate_rejects_missing_live_loom_service_workload_contract_env() -> None:
+    live_env = {
+        "LOOM_SVC_WORKLOAD_TRUST_MODE": "internal_trusted",
+        "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORMS_ENABLED": "False",
+        "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_NETWORK_ISOLATED": "False",
+    }
+    apps = _FakeAppsV1(
+        {
+            "loom-service": _deployment(
+                name="loom-service",
+                image="loom-service:staging-abc123",
+                workload_contract_env=live_env,
+            )
+        }
+    )
+
+    report = collect_release_gate_report(
+        manifest=_manifest(),
+        apps_v1=apps,
+        core_v1=_FakeCoreV1([]),
+        namespace="loom",
+        rendered_manifest_sha256="rendered-sha",
+        cluster_config_sha256="config-sha",
+        live_alembic_heads=["0050"],
+    )
+
+    check = next(check for check in report.checks if check.name == "workload-trust-contract")
+    assert check.outcome == "fail"
+    assert check.evidence["actual"]["LOOM_SVC_UNTRUSTED_WORKLOAD_ISOLATION"] is None
 
 
 def _external_workers_manifest_section() -> dict[str, Any]:

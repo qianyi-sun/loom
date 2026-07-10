@@ -17,6 +17,7 @@ from loom.taskset.transform_sandbox import (
     TransformSandboxConfig,
     TransformSandboxError,
     _child_setup,
+    _try_unshare_network,
     run_transform,
 )
 
@@ -62,6 +63,16 @@ def test_child_setup_applies_resource_limits_and_network_isolation() -> None:
     assert resource.RLIMIT_CPU in limit_names
     assert resource.RLIMIT_AS in limit_names
     assert resource.RLIMIT_NOFILE in limit_names
+
+
+def test_os_unshare_failure_does_not_authorize_v1_transform_execution() -> None:
+    """The retained best-effort primitive returns no authorization signal."""
+    with patch(
+        "loom.taskset.transform_sandbox.os.unshare",
+        side_effect=OSError("operation not permitted"),
+        create=True,
+    ):
+        assert _try_unshare_network() is None
 
 
 def test_run_transform_surfaces_subprocess_timeout_as_limit_exceeded() -> None:

@@ -6,15 +6,29 @@ here.
 """
 from __future__ import annotations
 
+from functools import cached_property
 from typing import Any
 
 from pydantic import computed_field
 
+from loom.workload_trust import WorkloadTrustContract
 from loom_service.config._generated import LoomServiceSettings as _BaseSettings
 
 
 class LoomServiceSettings(_BaseSettings):
     """LoomServiceSettings adds behavior on top of the codegen'd class."""
+
+    @cached_property
+    def workload_contract(self) -> WorkloadTrustContract:
+        """The v1 workload-trust contract represented by this settings object."""
+        return WorkloadTrustContract(
+            workload_trust_mode=self.workload_trust_mode,
+            taskset_transforms_enabled=self.taskset_materializer_transforms_enabled,
+            taskset_transform_network_isolated=(
+                self.taskset_materializer_transform_network_isolated
+            ),
+            untrusted_workload_isolation=self.untrusted_workload_isolation,
+        )
 
     @computed_field  # type: ignore[prop-decorator]
     @property

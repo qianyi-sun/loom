@@ -36,6 +36,22 @@ execute arbitrary code chosen by the task's agent. The isolation
 goal is to bound the blast radius of that code, not prevent the
 task itself from running.
 
+### v1 TaskSet workload boundary
+
+This document describes the shipped trial sandbox and provider-key/network
+boundary. It is not untrusted-workload isolation for arbitrary uploaded TaskSet
+transform code. In the v1 `internal_trusted` release mode, TaskSet transforms
+are unavailable and a manifest that declares `transform` fails with
+`transform_unavailable_in_internal_trusted` before any transform, source, or
+verifier blob fetch and before a runner can start.
+
+A legacy subprocess helper, resource limit, or a failed/best-effort
+`os.unshare` call cannot authorize transform execution. Loom v1 does not claim
+OCI, gVisor, Kata, user namespaces, or seccomp as a delivered arbitrary-code
+isolation capability; the post-v1 #758 work owns that separate boundary. See
+[`adr/v1-workload-trust-contract.md`](adr/v1-workload-trust-contract.md) for
+the protected release contract.
+
 ## Enforcement mechanisms — as shipped
 
 ### Container-level: iptables-based NetworkPolicy

@@ -104,6 +104,13 @@ if TYPE_CHECKING:
         memory_limit: str = "16Gi"
 
     @dataclass(frozen=True)
+    class _WorkloadContractConfig:
+        workload_trust_mode: str = "internal_trusted"
+        taskset_transforms_enabled: bool = False
+        taskset_transform_network_isolated: bool = False
+        untrusted_workload_isolation: bool = False
+
+    @dataclass(frozen=True)
     class _K8sWorkerConfig:
         enabled: bool = False
 
@@ -168,6 +175,7 @@ if TYPE_CHECKING:
         worker_capacity: _WorkerCapacityConfig = field(default_factory=_WorkerCapacityConfig)
         worker_subprocess_gateway_url: str = "http://host.docker.internal:30443/openai/v1"
         worker_trajectory_storage_gi: int = 100
+        workload_contract: _WorkloadContractConfig = field(default_factory=_WorkloadContractConfig)
 
         def to_render_context(self) -> dict[str, Any]: ...
 else:

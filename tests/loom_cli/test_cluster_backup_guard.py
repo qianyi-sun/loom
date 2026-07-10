@@ -3,12 +3,52 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
+import pytest
+
 from loom_cli.__main__ import main
 from loom_cli.cluster_backup_guard import (
     REQUIRED_BACKUP_COMPONENTS,
+    infer_environment,
     validate_backup_manifest,
     write_backup_manifest,
 )
+
+
+@pytest.mark.parametrize(
+    ("namespace", "environment"),
+    [
+        ("loom-staging", "development"),
+        ("loom-production", "development"),
+        ("loom-staging", "production"),
+        ("loom-production", "staging"),
+    ],
+)
+def test_infer_environment_rejects_protected_namespace_disagreement(
+    namespace: str,
+    environment: str,
+) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        infer_environment(environment=environment, namespace=namespace)
+
+    assert "protected namespace" in str(exc_info.value)
+    assert environment not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("namespace", "environment", "expected"),
+    [
+        ("loom-staging", "staging", "staging"),
+        ("loom-production", "production", "production"),
+        ("loom-custom", "development", "development"),
+        ("loom-custom", "preview", "preview"),
+    ],
+)
+def test_infer_environment_keeps_matching_and_nonprotected_explicit_targets(
+    namespace: str,
+    environment: str,
+    expected: str,
+) -> None:
+    assert infer_environment(environment=environment, namespace=namespace) == expected
 
 
 def test_backup_manifest_records_components_without_secret_contents(tmp_path):

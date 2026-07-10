@@ -59,6 +59,9 @@ there.
 - **[sandbox-isolation.md](sandbox-isolation.md)** — honest description of
   the sandbox trust boundary as shipped: what iptables policies enforce,
   what's still aspirational, the known `Public`-policy metadata-IP gap.
+- **[adr/v1-workload-trust-contract.md](adr/v1-workload-trust-contract.md)**
+  — v1's `internal_trusted` release boundary; user TaskSet transforms are
+  unavailable, and #758 owns future untrusted arbitrary-code isolation.
 
 ## Storage and Run Library
 
