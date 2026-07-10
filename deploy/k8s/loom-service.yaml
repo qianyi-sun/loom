@@ -111,6 +111,12 @@ spec:
           value: static_keys
         - name: LOOM_SVC_STORAGE_BACKEND
           value: minio
+        - name: LOOM_SVC_TASKSET_FENCE_CANARY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: taskset-fence-canary-token
+              optional: true
         - name: LOOM_SVC_TASKSET_GC_POLL_INTERVAL_SEC
           value: '3600'
         - name: LOOM_SVC_TASKSET_GC_RETENTION_DAYS

@@ -55,7 +55,7 @@ def test_operator_runbook_staging_gate_matches_current_launch_scope() -> None:
     assert "blocked artifact" in gate_section
 
 
-def test_taskset_fence_canary_requires_task_7_deployment_runner() -> None:
+def test_taskset_fence_canary_uses_task_7_deployment_runner() -> None:
     runbook = _read("docs/runbooks/operator-runbook.md")
     canary_section = runbook.split(
         "### Disposable TaskSet lease-fencing canary (#756)",
@@ -63,15 +63,17 @@ def test_taskset_fence_canary_requires_task_7_deployment_runner() -> None:
     )[1].split("### Protected workload-trust contract (#755)", maxsplit=1)[0]
     normalized_canary_section = " ".join(canary_section.split())
 
-    assert "fixture-only support, not a deployed staging runner" in normalized_canary_section
     assert "Task 6 tests are not staging proof" in normalized_canary_section
     assert (
-        "Task 7 must first implement and independently verify a deployment-side, "
-        "authorization-restricted cooperative runner using normal materializer "
-        "claim/reclaim/publish primitives before any candidate staging handoff can "
-        "be collected."
+        "Task 7 supplies the deployment-side, authorization-restricted cooperative "
+        "runner. It runs only through `loom cluster taskset-fence-canary`"
     ) in normalized_canary_section
-    assert "candidate-bound JSON/Markdown artifact" in normalized_canary_section
+    assert "taskset-fence-canary-token" in canary_section
+    assert "evidence.json" in canary_section
+    assert "--rollout-dir \"$ROLLOUT_DIR\"" in canary_section
+    assert "--task-set-id \"$TASK_SET_ID\"" in canary_section
+    assert "--expected-task-checksum \"$EXPECTED_TASK_CHECKSUM\"" in canary_section
+    assert "candidate-bound JSON" in normalized_canary_section
 
     for prohibited_action in [
         "killing a driver or pod",

@@ -1596,6 +1596,256 @@ async def test_materialization_staged_loser_cannot_publish_over_winner(
 
 
 @pytest.mark.asyncio
+async def test_materialization_relinquish_revokes_a_current_lease_for_reclaim(
+    materialization_setup,
+) -> None:
+    """The deployment canary may only hand off through a fenced transition."""
+    app, tokens, _teams = materialization_setup
+    await _submit_inline_task_set(app, token=tokens["team_a"])
+
+    async with app.state.session_factory() as session:
+        lease_a = (await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by="test-relinquish-a",
+        ))[0]
+    async with app.state.session_factory() as session:
+        await taskset_materializer._start_job(session, lease=lease_a)
+    async with app.state.session_factory() as session:
+        await taskset_materializer.relinquish_if_current(session, lease=lease_a)
+
+    async with app.state.session_factory() as session:
+        job_after_relinquish = await session.get(
+            TaskSetMaterializationJob,
+            lease_a.job_id,
+        )
+    assert job_after_relinquish is not None
+    assert job_after_relinquish.state == "queued"
+    assert job_after_relinquish.claimed_by is None
+    assert job_after_relinquish.lease_heartbeat_at is None
+    assert job_after_relinquish.started_at is None
+    assert job_after_relinquish.lease_epoch == lease_a.lease_epoch + 1
+    assert job_after_relinquish.next_attempt_at is None
+
+    async with app.state.session_factory() as session:
+        lease_b = (await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by="test-relinquish-b",
+            job_id=lease_a.job_id,
+        ))[0]
+    assert lease_b.job_id == lease_a.job_id
+    assert lease_b.lease_epoch > lease_a.lease_epoch
+
+    async with app.state.session_factory() as session:
+        with pytest.raises(taskset_materializer.LeaseLost):
+            await taskset_materializer._start_job(session, lease=lease_a)
+
+
+@pytest.mark.asyncio
+async def test_materialization_can_stage_a_current_lease_before_publication(
+    materialization_setup,
+) -> None:
+    """The deployment canary stages through the worker's normal code path."""
+    app, tokens, _teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    settings = app.state.settings
+
+    async with app.state.session_factory() as session:
+        lease = (await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by="test-stage-only",
+        ))[0]
+
+    staged_lease, staged_task_set_id, output = await taskset_materializer.stage_claimed_job(
+        app.state.session_factory,
+        job_id=lease.job_id,
+        lease=lease,
+        minio_client=app.state.minio_client,
+        artifacts_bucket=settings.artifacts_bucket,
+        upstream_cache_root=settings.taskset_materializer_upstream_cache_root,
+        transform_config=TransformSandboxConfig(
+            enabled=settings.taskset_materializer_transforms_enabled,
+            network_isolated=settings.taskset_materializer_transform_network_isolated,
+            workload_contract=settings.workload_contract,
+            wall_timeout_sec=settings.taskset_materializer_transform_wall_timeout_sec,
+            cpu_limit_sec=settings.taskset_materializer_transform_cpu_limit_sec,
+            memory_limit_mb=settings.taskset_materializer_transform_memory_limit_mb,
+        ),
+        max_bundle_bytes=settings.taskset_quota_max_bundle_bytes,
+        max_team_storage_bytes=settings.taskset_quota_max_storage_bytes_per_team,
+        claim_ttl_sec=settings.taskset_materializer_claim_ttl_sec,
+    )
+
+    assert staged_lease == lease
+    assert staged_task_set_id == task_set_id
+    assert output.task_rows
+    async with app.state.session_factory() as session:
+        job = await session.get(TaskSetMaterializationJob, lease.job_id)
+        published_rows = (await session.execute(
+            select(Task).where(Task.task_set_id == task_set_id),
+        )).scalars().all()
+    assert job is not None
+    assert job.state == "running"
+    assert job.claimed_by == lease.claimed_by
+    assert published_rows == []
+
+
+@pytest.mark.asyncio
+async def test_deployment_fence_canary_uses_normal_primitives_and_redacts_evidence(
+    materialization_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deployment runner is a canary, not a generic materializer control."""
+    from loom_cli.taskset_fence_canary import (
+        TaskSetFenceCanaryContract,
+        run_deployment_fence_canary,
+    )
+
+    app, tokens, _teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    settings = app.state.settings
+    raw_owner_a = "private-owner-a"
+    raw_owner_b = "private-owner-b"
+    destructive_operations: list[str] = []
+    timestamps = iter((
+        datetime(2030, 1, 1, 0, 0, 0, tzinfo=UTC),
+        datetime(2030, 1, 1, 0, 0, 1, tzinfo=UTC),
+        datetime(2030, 1, 1, 0, 0, 2, tzinfo=UTC),
+    ))
+
+    def reject_delete(*_args: object, **_kwargs: object) -> None:
+        destructive_operations.append("delete")
+        raise AssertionError("the fence canary must not delete object storage")
+
+    def fake_stage(**kwargs: object) -> MaterializeOutput:
+        job_id = kwargs["materialization_job_id"]
+        epoch = kwargs["materialization_epoch"]
+        assert isinstance(job_id, UUID)
+        assert isinstance(epoch, int)
+        return MaterializeOutput(
+            task_rows=[TaskRowDraft(
+                id=f"{task_set_id}/tasks/disposable",
+                checksum="c" * 64,
+                config={},
+                source=(
+                    "s3://private-bucket/tasksets/user/private-team/"
+                    f"materializations/{job_id}/{epoch}/tasks/disposable"
+                ),
+            )],
+            task_count=1,
+            status="ready",
+            evaluation_ready=True,
+        )
+
+    monkeypatch.setattr(taskset_materializer, "materialize_task_set", fake_stage)
+    monkeypatch.setattr(taskset_materializer, "team_taskset_storage_bytes", lambda *_a, **_k: 0)
+    monkeypatch.setattr(app.state.minio_client, "delete_object", reject_delete)
+    monkeypatch.setattr(app.state.minio_client, "delete_objects", reject_delete)
+
+    evidence = await run_deployment_fence_canary(
+        TaskSetFenceCanaryContract.from_mapping({
+            "candidate_sha": "a" * 40,
+            "image_tag": "staging-aaaaaaa",
+            "task_set_id": task_set_id,
+            "expected_task_checksum": "c" * 64,
+            "authorization_token": "deployment-only-capability",
+        }),
+        configured_token="deployment-only-capability",
+        session_factory=app.state.session_factory,
+        minio_client=app.state.minio_client,
+        artifacts_bucket=settings.artifacts_bucket,
+        upstream_cache_root=settings.taskset_materializer_upstream_cache_root,
+        transform_config=TransformSandboxConfig(
+            enabled=settings.taskset_materializer_transforms_enabled,
+            network_isolated=settings.taskset_materializer_transform_network_isolated,
+            workload_contract=settings.workload_contract,
+            wall_timeout_sec=settings.taskset_materializer_transform_wall_timeout_sec,
+            cpu_limit_sec=settings.taskset_materializer_transform_cpu_limit_sec,
+            memory_limit_mb=settings.taskset_materializer_transform_memory_limit_mb,
+        ),
+        max_bundle_bytes=settings.taskset_quota_max_bundle_bytes,
+        max_team_storage_bytes=settings.taskset_quota_max_storage_bytes_per_team,
+        claim_ttl_sec=settings.taskset_materializer_claim_ttl_sec,
+        owner_factory=iter((raw_owner_a, raw_owner_b)).__next__,
+        now=timestamps.__next__,
+    )
+
+    assert evidence == {
+        "schema_version": 1,
+        "candidate_sha": "a" * 40,
+        "image_tag": "staging-aaaaaaa",
+        "task_set_id": task_set_id,
+        "winner": {
+            "job_id": evidence["winner"]["job_id"],
+            "lease_epoch": evidence["winner"]["lease_epoch"],
+            "owner_fingerprint": "sha256:7194da2956c8",
+            "published_generation": evidence["winner"]["lease_epoch"],
+            "outcome": "published",
+        },
+        "loser": {
+            "job_id": evidence["loser"]["job_id"],
+            "lease_epoch": evidence["loser"]["lease_epoch"],
+            "owner_fingerprint": "sha256:fb82085ccef8",
+            "outcome": "fenced_before_publish",
+            "gc_eligible": True,
+        },
+        "published_task": {
+            "task_count": 1,
+            "checksum": "c" * 64,
+        },
+        "stale_cas_outcome": "LeaseLost",
+        "timestamps": {
+            "a_staged_at": "2030-01-01T00:00:00Z",
+            "b_published_at": "2030-01-01T00:00:01Z",
+            "a_lease_lost_at": "2030-01-01T00:00:02Z",
+        },
+    }
+    assert evidence["winner"]["lease_epoch"] > evidence["loser"]["lease_epoch"]
+    encoded_evidence = json.dumps(evidence, sort_keys=True)
+    for forbidden in (
+        raw_owner_a,
+        raw_owner_b,
+        "private-bucket",
+        "private-team",
+        "s3://",
+        "source",
+        "claimed_by",
+    ):
+        assert forbidden not in encoded_evidence
+    assert destructive_operations == []
+
+
+@pytest.mark.asyncio
+async def test_deployment_fence_canary_rejects_noninitial_task_sets(
+    materialization_setup,
+) -> None:
+    """An authorization capability cannot turn an existing TaskSet into a canary."""
+    from loom_cli.taskset_fence_canary import (
+        TaskSetFenceCanaryRuntimeError,
+        _require_disposable_queued_job,
+    )
+
+    app, tokens, _teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    async with app.state.session_factory() as session:
+        await session.execute(
+            update(TaskSetMaterializationJob)
+            .where(TaskSetMaterializationJob.task_set_id == task_set_id)
+            .values(attempt_count=1),
+        )
+        await session.commit()
+
+    with pytest.raises(TaskSetFenceCanaryRuntimeError) as exc_info:
+        await _require_disposable_queued_job(
+            app.state.session_factory,
+            task_set_id=task_set_id,
+        )
+    assert str(exc_info.value) == "canary task set is not disposable"
+
+
+@pytest.mark.asyncio
 async def test_materialization_cooperative_two_owner_canary_records_safe_evidence(
     materialization_setup,
     monkeypatch: pytest.MonkeyPatch,

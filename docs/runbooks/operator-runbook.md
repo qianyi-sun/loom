@@ -1313,28 +1313,38 @@ performing object/DB surgery.
 
 ### Disposable TaskSet lease-fencing canary (#756)
 
-The candidate-bound staging canary remains required, but it is not a runnable
-staging procedure yet. Task 6 provides fixture-only support, not a deployed
-staging runner: its cooperative integration test relies on test-local timing
-and barriers around private materializer calls. Task 6 tests are not staging
-proof and do not authorize an operator to create a handoff. It is not a
-release-gate schema change and does not persist candidate identity in a
-TaskSet row. Task 7 owns the dated, candidate-bound JSON/Markdown artifact
-produced after merge.
+Task 6 tests are not staging proof: they remain deterministic fixture support
+for the fenced materializer. Task 7 supplies the deployment-side,
+authorization-restricted cooperative runner. It runs only through
+`loom cluster taskset-fence-canary`; it adds no HTTP route, normal-user CLI
+command, worker mode, generic pause, or failure-injection control. It is not a
+release-gate schema change and does not persist candidate identity in a TaskSet
+row.
 
-Task 7 must first implement and independently verify a deployment-side,
-authorization-restricted cooperative runner using normal materializer
-claim/reclaim/publish primitives before any candidate staging handoff can be
-collected. Until then, record the canary as unavailable; do not try to turn
-the Task 6 fixture into an operator procedure or use direct materializer calls
-to force a handoff.
+Do not collect this canary until the runner is merged, its PR CI is green, the
+candidate staging rollout is complete, the candidate SHA/image tag is fixed,
+and Task 7 integration has explicitly reached staging collection. The command
+accepts no candidate SHA/image tag, owner, storage prefix, output path, or
+authorization-token argument. It derives candidate identity only from the
+completed rollout's `inputs.json`, rejects any non-staging/prod/mismatched
+candidate, and writes exactly one immutable JSON record at the rollout-owned
+`canaries/taskset-lease-fencing/evidence.json` path.
 
-After Task 7 has supplied and independently verified that runner, use a normal
-user/team session and a one-task disposable bundle with a known task id.
-Capture the existing rollout's 40-character candidate SHA and image tag, then
-submit the bundle through the ordinary CLI. Stream API responses through a
-whitelist before writing any evidence; never save a full Task response because
-it includes a storage `source` field.
+Before collection, provision the same new high-entropy capability in both
+operator-managed deployment locations: the protected staging
+`loom-secrets` key `taskset-fence-canary-token` (mounted only into
+`loom-service` as `LOOM_SVC_TASKSET_FENCE_CANARY_TOKEN`) and the fixed
+platform-dev file source used by the rollout command. Keep the file private to
+the rollout identity. The runner fails closed if either side is absent or does
+not match; never pass, print, or attach this value.
+
+Use a normal user/team session to submit a fresh, one-task disposable bundle.
+Before submission, independently record that bundle's expected 64-hex task
+checksum as `EXPECTED_TASK_CHECKSUM`. The runner refuses anything except the
+initial unclaimed/unmaterialized job: no pre-existing, rebuilt, claimed,
+published, deleted, or arbitrary TaskSet can be targeted. Stream API responses
+through a whitelist if retaining submission/status context; never save a full
+Task response because it includes a storage `source` field.
 
 ```bash
 CANARY_DIR="$ROLLOUT_DIR/canaries/taskset-lease-fencing"
@@ -1344,36 +1354,23 @@ loom tasksets submit "$DISPOSABLE_BUNDLE_DIR" --format json \
   | jq '{task_set_id, materialization_job_id}' \
   > "$CANARY_DIR/submission.json"
 
-TASK_SET_ID="$(jq -r '.task_set_id' "$CANARY_DIR/submission.json")"
-loom tasksets status "$TASK_SET_ID" --format json \
-  | jq '{task_set_id, status, task_count, materialization_fence}' \
-  > "$CANARY_DIR/status-a-staged.json"
+TASK_SET_ID="$(jq -r '.task_set_id' \
+  "$CANARY_DIR/submission.json")"
+
+loom cluster taskset-fence-canary \
+  --rollout-dir "$ROLLOUT_DIR" \
+  --task-set-id "$TASK_SET_ID" \
+  --expected-task-checksum "$EXPECTED_TASK_CHECKSUM"
 ```
 
-When Task 7 makes the runner available, it must record the second owner only
-after the first owner has staged and use the deployed claim/reclaim/publish
-path. The Task 6 deterministic integration test is fixture support only, not
-the timing contract for an operator handoff. After the winner publishes,
-collect the second safe status snapshot and the selected task checksum through
-the normal authenticated API, filtering before the file is written:
-
-```bash
-loom tasksets status "$TASK_SET_ID" --format json \
-  | jq '{task_set_id, status, task_count, materialization_fence}' \
-  > "$CANARY_DIR/status-b-published.json"
-
-curl --fail-with-body --silent --show-error \
-  -H "Authorization: Bearer $LOOM_API_TOKEN" \
-  "$LOOM_SERVER_URL/api/v1/tasks/$DISPOSABLE_TASK_ID" \
-  | jq '{id, checksum}' \
-  > "$CANARY_DIR/published-task.json"
-```
-
-The Task 7 artifact combines the rollout candidate SHA/image tag, submission
-job id with both observed lease epochs, only the two owner fingerprints,
-published generation, task count and checksum, the observed stale-CAS
-`LeaseLost` outcome, loser-GC eligibility (not a GC execution), and the
-collection timestamps. Validate the final JSON/Markdown before attachment:
+The runner cooperatively stages A, relinquishes only A's current lease through
+the normal fenced transition, claims/stages/publishes B, then resumes A's
+normal publication CAS and requires `LeaseLost`. It writes the candidate-bound
+JSON evidence only after the winning generation, expected checksum, and stale
+CAS result all match. The artifact contains candidate SHA/image tag, job/epoch
+pairs, opaque owner fingerprints, published generation, task count/checksum,
+stale-CAS outcome, loser-GC eligibility (not GC execution), and timestamps.
+Validate the final JSON before attachment:
 
 - It contains no raw `claimed_by`, token, cookie, authorization header, host or
   PID, source URI, object key/prefix, signed URL, manifest, credential, or raw

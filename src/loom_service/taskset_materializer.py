@@ -128,15 +128,47 @@ async def reclaim_stale_jobs(
     return reclaimed
 
 
+async def relinquish_if_current(
+    session: AsyncSession,
+    *,
+    lease: MaterializationLease,
+) -> None:
+    """Cooperatively revoke one current lease without touching staged output.
+
+    This is an internal materializer transition, not an API or user-command
+    control.  The increment makes any delayed owner fail the same CAS checks
+    used after a stale-heartbeat reclaim, while the cleared ``next_attempt_at``
+    lets an authorized deployment canary claim the queued job immediately.
+    """
+    now = datetime.now(UTC)
+    await _update_job_for_lease(
+        session,
+        lease=lease,
+        states=("claimed", "running"),
+        values={
+            "state": "queued",
+            "claimed_at": None,
+            "claimed_by": None,
+            "lease_epoch": TaskSetMaterializationJob.lease_epoch + 1,
+            "lease_heartbeat_at": None,
+            "started_at": None,
+            "next_attempt_at": None,
+            "updated_at": now,
+        },
+    )
+    await session.commit()
+
+
 async def _claim_jobs(
     session: AsyncSession,
     *,
     batch_size: int,
     claimed_by: str,
+    job_id: UUID | None = None,
 ) -> list[MaterializationLease]:
     """Claim available jobs and return immutable owner fencing tokens."""
     now = datetime.now(UTC)
-    job_ids = (await session.execute(
+    query = (
         select(TaskSetMaterializationJob.id)
         .where(
             TaskSetMaterializationJob.state == "queued",
@@ -145,8 +177,11 @@ async def _claim_jobs(
         )
         .order_by(TaskSetMaterializationJob.enqueued_at)
         .with_for_update(skip_locked=True)
-        .limit(batch_size),
-    )).scalars().all()
+        .limit(batch_size)
+    )
+    if job_id is not None:
+        query = query.where(TaskSetMaterializationJob.id == job_id)
+    job_ids = (await session.execute(query)).scalars().all()
     leases: list[MaterializationLease] = []
     for job_id in job_ids:
         claimed = (await session.execute(
@@ -447,7 +482,7 @@ async def _stop_heartbeat(heartbeat_task: asyncio.Task[None]) -> None:
         await heartbeat_task
 
 
-async def _materialize_claimed_job(
+async def stage_claimed_job(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     job_id: UUID,
@@ -459,12 +494,19 @@ async def _materialize_claimed_job(
     max_team_storage_bytes: int | None = None,
     claim_ttl_sec: int = 300,
     lease: MaterializationLease | None = None,
-) -> None:
+) -> tuple[MaterializationLease, str, MaterializeOutput] | None:
+    """Stage a current lease with the worker's ordinary materialization path.
+
+    Normal workers publish the returned output immediately.  The only other
+    caller is the deployment-only fence canary, which voluntarily relinquishes
+    its lease before any publication attempt; this function itself has no
+    pause, failure, deletion, or externally exposed control.
+    """
     if lease is None:
         async with session_factory() as session:
             job = await session.get(TaskSetMaterializationJob, job_id)
             if job is None or job.state != "claimed":
-                return
+                return None
             lease = _lease_for_job(job)
 
     async with session_factory() as session:
@@ -488,7 +530,7 @@ async def _materialize_claimed_job(
                 failure_message="task set or manifest row missing",
                 claim_ttl_sec=claim_ttl_sec,
             )
-            return
+            return None
         manifest = UserTaskSetManifest.model_validate(manifest_row.manifest)
         quota_row = (await session.execute(
             select(TeamQuota).where(TeamQuota.team_id == task_set.owning_team_id),
@@ -544,10 +586,42 @@ async def _materialize_claimed_job(
         raise
     await _stop_heartbeat(heartbeat_task)
 
+    return lease, task_set_id, output
+
+
+async def _materialize_claimed_job(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    job_id: UUID,
+    minio_client: Any,
+    artifacts_bucket: str,
+    upstream_cache_root: Path,
+    transform_config: TransformSandboxConfig,
+    max_bundle_bytes: int | None = None,
+    max_team_storage_bytes: int | None = None,
+    claim_ttl_sec: int = 300,
+    lease: MaterializationLease | None = None,
+) -> None:
+    """Stage then publish a claimed job for the ordinary worker loop."""
+    staged = await stage_claimed_job(
+        session_factory,
+        job_id=job_id,
+        minio_client=minio_client,
+        artifacts_bucket=artifacts_bucket,
+        upstream_cache_root=upstream_cache_root,
+        transform_config=transform_config,
+        max_bundle_bytes=max_bundle_bytes,
+        max_team_storage_bytes=max_team_storage_bytes,
+        claim_ttl_sec=claim_ttl_sec,
+        lease=lease,
+    )
+    if staged is None:
+        return
+    current_lease, task_set_id, output = staged
     async with session_factory() as session:
         await publish_if_current(
             session,
-            lease=lease,
+            lease=current_lease,
             task_set_id=task_set_id,
             output=output,
             claim_ttl_sec=claim_ttl_sec,

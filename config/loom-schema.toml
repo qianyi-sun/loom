@@ -611,6 +611,13 @@ used_by     = ["loom-service"]
 python_type = "int"
 default     = 600
 
+[service_config.taskset_fence_canary_token]
+used_by     = ["loom-service"]
+python_type = "SecretStr"
+required    = false
+secret      = { key = "taskset-fence-canary-token" }
+description = "Deployment-only capability for the disposable TaskSet lease-fencing canary. It is never accepted by a public API or written to evidence."
+
 [service_config.taskset_materializer_upstream_cache_root]
 used_by     = ["loom-service"]
 python_type = "Path"
