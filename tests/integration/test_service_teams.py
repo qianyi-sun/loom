@@ -25,6 +25,10 @@ from loom.db.schema import (
     Token,
     User,
 )
+from loom.system_identities import (
+    TASKSET_FENCE_CANARY_TEAM_ID,
+    TASKSET_FENCE_CANARY_TEAM_NAME,
+)
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -328,6 +332,50 @@ async def test_admin_team_emergency_controls_update_state_and_audit(
     for event in audit.json()["items"]:
         assert "provider incident" not in str(event["metadata"])
         assert event["actor"] == "incident-commander" or event["actor"] == "ops-admin"
+
+
+async def test_admin_cannot_mutate_the_deployment_only_canary_team(
+    teams_setup: tuple[FastAPI, str, str, UUID, UUID],
+) -> None:
+    """The reserved Team is not an administrator-managed tenant Team."""
+    app, _raw, _team_a_str, _team_a, _team_b = teams_setup
+    async with app.state.session_factory() as session:
+        system_team = await session.get(Team, TASKSET_FENCE_CANARY_TEAM_ID)
+        if system_team is None:
+            session.add(Team(
+                id=TASKSET_FENCE_CANARY_TEAM_ID,
+                name=TASKSET_FENCE_CANARY_TEAM_NAME,
+            ))
+            session.add(TeamQuota(team_id=TASKSET_FENCE_CANARY_TEAM_ID))
+            await session.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        responses = [
+            await ac.patch(
+                f"/api/v1/admin/teams/{TASKSET_FENCE_CANARY_TEAM_ID}",
+                headers=_admin_headers(),
+                json={"name": "changed"},
+            ),
+            *[
+                await ac.post(
+                    f"/api/v1/admin/teams/{TASKSET_FENCE_CANARY_TEAM_ID}/{action}",
+                    headers=_admin_headers(),
+                    json={"reason": "test"},
+                )
+                for action in (
+                    "disable",
+                    "enable",
+                    "pause-submissions",
+                    "resume-submissions",
+                )
+            ],
+        ]
+
+    assert [response.status_code for response in responses] == [403] * 5
+    assert all(response.json()["detail"] == "team is deployment-only" for response in responses)
 
 
 async def test_admin_can_list_create_and_rename_internal_teams(

@@ -1358,8 +1358,14 @@ system Team through normal TaskSet intake. Migration `0065` reserves this Team
 only when neither its fixed UUID nor name exists; any pre-existing identity
 fails the upgrade rather than being adopted. The runner matches both the UUID
 and name, takes the Team row lock, and fails closed if it is absent, disabled,
-or altered. Neither registration nor an administrator invite can add a human
-member. The runner calculates
+or altered. Neither registration, an administrator invite, nor administrator
+Team mutation controls can alter or add a human to this identity. A database
+downgrade restores the `0064` image-tag constraint and
+removes this Team only while the identity is pristine and has no dependent
+rows; any existing canary/reference/alteration makes the downgrade fail closed
+rather than cascade or reuse deployment data. If legacy cleanup has already
+removed the deployment-owned identity, the downgrade only restores the `0064`
+constraint and a later upgrade recreates it. The runner calculates
 the normal materializer checksum, creates the TaskSet/job, and writes its
 durable one-use authorization bound to the candidate, exact initial job,
 checksum, and a service-generated high-entropy nonce retained only as a digest

@@ -24,22 +24,172 @@ def _cfg(postgres_url: str) -> Config:
 
 
 @pytest.fixture(scope="module")
-def postgres_url_at_0064() -> Iterator[str]:
+def db_url_before_0064_fixture() -> str | None:
+    """Capture, but never prescribe, the suite's existing DB target."""
+    return os.environ.get("LOOM_DB_URL")
+
+
+@pytest.fixture(scope="module")
+def postgres_url_at_0064(
+    db_url_before_0064_fixture: str | None,
+) -> Iterator[str]:
+    _ = db_url_before_0064_fixture
     with PostgresContainer("postgres:16") as pg:
         postgres_url = pg.get_connection_url().replace(
             "postgresql+psycopg2://",
             "postgresql+psycopg://",
         )
-        previous_db_url = os.environ.get("LOOM_DB_URL")
+        command.upgrade(_cfg(postgres_url), "0064")
+        yield postgres_url
+
+
+def test_0064_fixture_does_not_rebind_the_shared_integration_database(
+    db_url_before_0064_fixture: str | None,
+    postgres_url_at_0064: str,
+) -> None:
+    """A historical migration fixture cannot redirect later integration tests."""
+    assert postgres_url_at_0064
+    assert os.environ.get("LOOM_DB_URL") == db_url_before_0064_fixture
+
+
+def test_pristine_system_identity_downgrade_restores_0064_and_allows_reupgrade(
+    postgres_url_at_0064: str,
+) -> None:
+    """Historical migration tests can safely return a pristine DB to 0064."""
+    cfg = _cfg(postgres_url_at_0064)
+    engine = create_engine(postgres_url_at_0064)
+    try:
+        command.upgrade(cfg, "head")
+        command.downgrade(cfg, "0064")
+        with engine.connect() as conn:
+            team = conn.execute(
+                text("SELECT 1 FROM teams WHERE id = CAST(:team_id AS uuid)"),
+                {"team_id": _SYSTEM_CANARY_TEAM_ID},
+            ).scalar_one_or_none()
+            image_tag_constraint = conn.execute(
+                text(
+                    "SELECT pg_get_constraintdef(oid) "
+                    "FROM pg_constraint "
+                    "WHERE conname = :name",
+                ),
+                {"name": "task_set_fence_canary_authorizations_image_tag_check"},
+            ).scalar_one()
+        assert team is None
+        assert "staging-[0-9a-f]{7}" in image_tag_constraint
+        assert "staging(-[a-z0-9]" not in image_tag_constraint
+
+        command.upgrade(cfg, "head")
+        with engine.connect() as conn:
+            team = conn.execute(
+                text("SELECT name FROM teams WHERE id = CAST(:team_id AS uuid)"),
+                {"team_id": _SYSTEM_CANARY_TEAM_ID},
+            ).scalar_one()
+        assert team == _SYSTEM_CANARY_TEAM_NAME
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_refuses_to_delete_a_referenced_system_identity() -> None:
+    """Downgrade never cascades a real deployment canary's TaskSet data."""
+    with PostgresContainer("postgres:16") as pg:
+        postgres_url = pg.get_connection_url().replace(
+            "postgresql+psycopg2://",
+            "postgresql+psycopg://",
+        )
+        cfg = _cfg(postgres_url)
+        engine = create_engine(postgres_url)
         try:
-            os.environ["LOOM_DB_URL"] = postgres_url
-            command.upgrade(_cfg(postgres_url), "0064")
-            yield postgres_url
+            command.upgrade(cfg, "head")
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO task_sets ("
+                        "id, owning_team_id, slug, display_name, status, intents, manifest_blob_uri"
+                        ") VALUES ("
+                        "'ts/' || :team_id || '/downgrade-guard', "
+                        "CAST(:team_id AS uuid), 'downgrade-guard', 'downgrade guard', "
+                        "'ready', ARRAY['evaluation'], 's3://guard/manifest'"
+                        ")",
+                    ),
+                    {"team_id": _SYSTEM_CANARY_TEAM_ID},
+                )
+
+            with pytest.raises(Exception, match=r"cannot downgrade.*references"):
+                command.downgrade(cfg, "0064")
         finally:
-            if previous_db_url is None:
-                os.environ.pop("LOOM_DB_URL", None)
-            else:
-                os.environ["LOOM_DB_URL"] = previous_db_url
+            engine.dispose()
+
+
+def test_downgrade_refuses_to_delete_an_altered_system_identity() -> None:
+    """A paused Team or modified quota is deployment data, not migration state."""
+    with PostgresContainer("postgres:16") as pg:
+        postgres_url = pg.get_connection_url().replace(
+            "postgresql+psycopg2://",
+            "postgresql+psycopg://",
+        )
+        cfg = _cfg(postgres_url)
+        engine = create_engine(postgres_url)
+        try:
+            command.upgrade(cfg, "head")
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "UPDATE teams "
+                        "SET disabled_reason = 'operator change', "
+                        "submissions_paused_at = now(), "
+                        "submissions_paused_reason = 'operator change' "
+                        "WHERE id = CAST(:team_id AS uuid)"
+                    ),
+                    {"team_id": _SYSTEM_CANARY_TEAM_ID},
+                )
+                conn.execute(
+                    text(
+                        "UPDATE team_quotas "
+                        "SET fair_share_weight = 2.0, max_attempts_ceiling = 4, "
+                        "taskset_max_count = 1, taskset_max_storage_bytes = 1, "
+                        "allow_private_endpoints = true "
+                        "WHERE team_id = CAST(:team_id AS uuid)"
+                    ),
+                    {"team_id": _SYSTEM_CANARY_TEAM_ID},
+                )
+
+            with pytest.raises(Exception, match=r"cannot downgrade.*altered"):
+                command.downgrade(cfg, "0064")
+        finally:
+            engine.dispose()
+
+
+def test_downgrade_is_reversible_when_the_system_identity_is_already_missing() -> None:
+    """A missing migration-owned Team is not adopted or treated as user data."""
+    with PostgresContainer("postgres:16") as pg:
+        postgres_url = pg.get_connection_url().replace(
+            "postgresql+psycopg2://",
+            "postgresql+psycopg://",
+        )
+        cfg = _cfg(postgres_url)
+        engine = create_engine(postgres_url)
+        try:
+            command.upgrade(cfg, "head")
+            with engine.begin() as conn:
+                conn.execute(
+                    text("DELETE FROM team_quotas WHERE team_id = CAST(:team_id AS uuid)"),
+                    {"team_id": _SYSTEM_CANARY_TEAM_ID},
+                )
+                conn.execute(
+                    text("DELETE FROM teams WHERE id = CAST(:team_id AS uuid)"),
+                    {"team_id": _SYSTEM_CANARY_TEAM_ID},
+                )
+
+            command.downgrade(cfg, "0064")
+            command.upgrade(cfg, "head")
+            with engine.connect() as conn:
+                team = conn.execute(
+                    text("SELECT name FROM teams WHERE id = CAST(:team_id AS uuid)"),
+                    {"team_id": _SYSTEM_CANARY_TEAM_ID},
+                ).scalar_one()
+            assert team == _SYSTEM_CANARY_TEAM_NAME
+        finally:
+            engine.dispose()
 
 
 def test_upgrade_reserves_the_fixed_canary_team_and_quota(
@@ -84,10 +234,8 @@ def test_upgrade_rejects_any_preexisting_canary_identity(
             "postgresql+psycopg2://",
             "postgresql+psycopg://",
         )
-        previous_db_url = os.environ.get("LOOM_DB_URL")
         engine = create_engine(postgres_url)
         try:
-            os.environ["LOOM_DB_URL"] = postgres_url
             cfg = _cfg(postgres_url)
             command.upgrade(cfg, "0064")
             with engine.begin() as conn:
@@ -105,7 +253,3 @@ def test_upgrade_rejects_any_preexisting_canary_identity(
                 command.upgrade(cfg, "head")
         finally:
             engine.dispose()
-            if previous_db_url is None:
-                os.environ.pop("LOOM_DB_URL", None)
-            else:
-                os.environ["LOOM_DB_URL"] = previous_db_url
