@@ -101,9 +101,11 @@ def test_web_runtime_config_preserves_root_asset_contract(tmp_path: Path) -> Non
 
 def test_web_runtime_config_restart_never_retains_or_doubles_prefix(tmp_path: Path) -> None:
     _run_runtime_config(tmp_path, environment="staging", route_path="/dev")
+    _run_runtime_config(tmp_path, environment="production", route_path="/prod")
     _, html = _run_runtime_config(tmp_path, environment="staging", route_path="/dev")
     assert html.count("/dev/assets/") == 2
     assert "/dev/dev/assets/" not in html
+    assert "/prod/assets/" not in html
 ```
 
 Import `Path` from `pathlib`. Replace the existing
@@ -142,13 +144,28 @@ fi
 
 tmp_index_path="${index_path}.tmp"
 if [ -n "${route_path}" ]; then
-  sed "s|\./assets/|${route_path}/assets/|g" \
+  sed \
+    -e "s|src=\"\./assets/|src=\"${route_path}/assets/|g" \
+    -e "s|href=\"\./assets/|href=\"${route_path}/assets/|g" \
     "${index_template_path}" > "${tmp_index_path}"
 else
   cp "${index_template_path}" "${tmp_index_path}"
 fi
+if grep -Eq '(src|href)="\./assets/' "${tmp_index_path}"; then
+  echo "frontend shell retained a relative build asset" >&2
+  rm -f "${tmp_index_path}"
+  exit 1
+fi
+if grep -Eq '/(dev|prod)/(dev|prod)/assets/' "${tmp_index_path}"; then
+  echo "frontend shell contains a double or stale route prefix" >&2
+  rm -f "${tmp_index_path}"
+  exit 1
+fi
 mv "${tmp_index_path}" "${index_path}"
 ```
+
+Apply the two validation checks only inside the non-empty `route_path` branch;
+root deployment intentionally retains Vite's `./assets/` contract.
 
 In the final stage of `deploy/Dockerfile.web`, retain the build shell before dropping privileges:
 
@@ -217,7 +234,10 @@ assert redirect_path["pathType"] == "ImplementationSpecific"
 assert redirect_path["backend"]["service"]["name"] == "loom-web"
 ```
 
-Extend `test_render_ingress_redirect_hosts_bind_tls_and_redirect_to_canonical` to assert both resources carry `from-to-www-redirect: "true"` and the same TLS hosts/secret.
+Extend `test_render_ingress_redirect_hosts_bind_tls_and_redirect_to_canonical`
+to assert only `loom-ingress` carries `from-to-www-redirect: "true"`, the
+exact-prefix resource does not duplicate the host redirect annotation, and
+both resources use the same TLS hosts/secret.
 
 - [ ] **Step 2: Run the renderer tests and confirm the one-Ingress implementation fails**
 
@@ -263,9 +283,6 @@ metadata:
   annotations:
     nginx.ingress.kubernetes.io/proxy-body-size: "100m"
     nginx.ingress.kubernetes.io/use-regex: "true"
-{% if ingress_redirect_hosts %}
-    nginx.ingress.kubernetes.io/from-to-www-redirect: "true"
-{% endif %}
 spec:
   ingressClassName: {{ ingress_class_name }}
   tls:
@@ -297,13 +314,20 @@ spec:
 {% endif %}
 ```
 
-The second resource deliberately omits `rewrite-target` and the cert-manager issuer; it reuses the TLS secret issued by `loom-ingress`.
+The second resource deliberately omits `rewrite-target`,
+`from-to-www-redirect`, and the cert-manager issuer. Host redirect generation
+and certificate issuance remain single-owner responsibilities of
+`loom-ingress`; the exact resource only reuses its TLS secret.
 
 - [ ] **Step 4: Return canonical 308 responses before the SPA fallback**
 
 Add these exact locations above the prefixed regex location in `deploy/nginx-spa.conf`:
 
 ```nginx
+    # Keep redirects origin-relative behind TLS-terminating ingress. Without
+    # this, nginx can expose its internal http://host:8080 listener.
+    absolute_redirect off;
+
     location = /dev {
         return 308 /dev/$is_args$args;
     }
@@ -509,7 +533,18 @@ web = 1
 worker = 0
 ```
 
-After component readiness, add an ingress test that retries `http://127.0.0.1/dev`, asserts 308 and a `Location` ending `/dev/`, checks query preservation with `?from=smoke`, downloads `/dev/`, extracts `/dev/assets/*.js|css`, and verifies each response has status 200 and the expected MIME. Also assert `/dev/batches/example-id` returns HTML and `/assets/<same-name>` does not return 200 through the public Ingress.
+After component readiness, invoke the route smoke through the kind HTTPS
+mapping with `--resolve yylx.world:443:127.0.0.1` semantics and a dedicated
+`--insecure-for-kind` flag. That flag may disable certificate verification
+only for this disposable kind invocation; ordinary CLI runs and live staging
+must reject invalid TLS. Assert 308 and a `Location` ending `/dev/`, query
+preservation with `?from=smoke`, canonical/deep shell HTML, and 200 with the
+expected MIME for every `/dev/assets/*.js|css` reference. Also assert
+`/assets/<same-name>` is not 200 and `/devil`, `/devapi`, and `/prodfoo` do not
+match either prefixed Ingress.
+
+Apply the `ci:images`, `cluster-smoke`, and `staging-smoke` labels to the PR so
+the controller-level route contract is exercised before merge.
 
 - [ ] **Step 5: Run all local non-cluster coverage**
 
