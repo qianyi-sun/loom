@@ -112,6 +112,8 @@ def test_codeowners_is_narrow_ci_and_release_trust_root() -> None:
     authority_paths = {
         "/.github/",
         "/scripts/plan_ci_validations.py",
+        "/scripts/check_install_scripts_pinned.py",
+        "/scripts/validate_environment_isolation.py",
         "/tests/ops/test_plan_ci_validations.py",
         "/tests/ops/test_ci_throughput_workflows.py",
         "/pyproject.toml",

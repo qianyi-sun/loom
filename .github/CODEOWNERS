@@ -6,6 +6,8 @@
 
 # CI planner, policy, and contract tests.
 /scripts/plan_ci_validations.py @qianyi-sun @Hongjian-Gu
+/scripts/check_install_scripts_pinned.py @qianyi-sun @Hongjian-Gu
+/scripts/validate_environment_isolation.py @qianyi-sun @Hongjian-Gu
 /tests/ops/test_plan_ci_validations.py @qianyi-sun @Hongjian-Gu
 /tests/ops/test_ci_throughput_workflows.py @qianyi-sun @Hongjian-Gu
 /pyproject.toml @qianyi-sun @Hongjian-Gu
