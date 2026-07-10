@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -1426,6 +1427,52 @@ def test_rollout_cluster_config_is_stable_after_first_synthesis(
     assert cluster_up_config == rendered_config
     assert rendered_raw["image_tag"] == "staging-new"
     assert rendered_raw["namespace"] == "loom-staging"
+
+
+def test_rollout_cluster_config_uses_candidate_profile_when_runner_is_stale(
+    tmp_path: Path,
+) -> None:
+    """Protected rollout config follows the resolved candidate, not the runner."""
+    runner_root = tmp_path / "runner"
+    runner_config = runner_root / "deploy" / "environments" / "staging.cluster.toml"
+    runner_config.parent.mkdir(parents=True)
+    runner_config.write_text(
+        'image_tag = "staging-old"\nnamespace = "loom-staging"\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "--quiet", str(runner_root)], check=True)
+
+    ctx = replace(
+        make_ctx(tmp_path, image_tag="staging-new"),
+        cluster_config_path=runner_config,
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    worktree = _prepare_candidate_worktree(ev)
+    candidate_config = worktree / "deploy" / "environments" / "staging.cluster.toml"
+    candidate_config.parent.mkdir(parents=True)
+    candidate_config.write_text(
+        'image_tag = "staging-candidate"\n'
+        'namespace = "loom-staging"\n'
+        "\n"
+        "[workload_contract]\n"
+        'workload_trust_mode = "internal_trusted"\n'
+        "taskset_transforms_enabled = false\n"
+        "taskset_transform_network_isolated = false\n"
+        "untrusted_workload_isolation = false\n",
+        encoding="utf-8",
+    )
+
+    rendered_config = rollout_cluster_config(ctx, ev.step_dir(8, "preflight"))
+    rendered_raw = tomllib.loads(rendered_config.read_text(encoding="utf-8"))
+
+    assert rendered_raw["image_tag"] == "staging-new"
+    assert rendered_raw["workload_contract"] == {
+        "workload_trust_mode": "internal_trusted",
+        "taskset_transforms_enabled": False,
+        "taskset_transform_network_isolated": False,
+        "untrusted_workload_isolation": False,
+    }
 
 
 def test_rollout_cluster_config_rewrites_repo_relative_gb10_paths_to_candidate(

@@ -1477,6 +1477,12 @@ the resolved `--ref`. Use `loom cluster rollout staging --ref origin/dev
 --dry-run` to inspect the resolved preset, rollout id, SHA, image tag, and
 redacted expanded inputs before launching a detached unit.
 
+The rollout-local cluster config is synthesized from the resolved candidate
+worktree's repo-local profile, rather than from the long-lived runner checkout,
+then pins that candidate's image tag. This keeps new protected-profile fields
+in preflight/render/release-gate even while the fixed runner itself has not yet
+checked out the candidate.
+
 `prod` is also an explicit selector, but it fails closed until first-prod
 values are configured; it never falls back to staging values. Manual full-argv
 mode remains available for diagnostics, but normal staging rollouts should use
