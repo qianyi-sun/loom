@@ -577,6 +577,13 @@ async def delete_task_set(
     )).scalars().all()
     for job in active_jobs:
         job.state = "cancelled"
+        # Cancellation explicitly revokes any materializer lease.  A worker
+        # that resumes after deletion must fail its lease CAS instead of
+        # publishing rows or a terminal status for this TaskSet.
+        job.lease_epoch += 1
+        job.claimed_at = None
+        job.claimed_by = None
+        job.lease_heartbeat_at = None
         job.finished_at = now
         job.updated_at = now
     await session.commit()

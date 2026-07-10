@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import tarfile
+import threading
 from collections.abc import AsyncIterator, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 from uuid import UUID, uuid4
@@ -17,7 +19,7 @@ import pytest
 from botocore.config import Config
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import create_engine, delete, insert, select
+from sqlalchemy import create_engine, delete, insert, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from testcontainers.minio import MinioContainer
@@ -32,7 +34,9 @@ from loom.db.schema import (
     Token,
     User,
 )
+from loom.taskset.materialize import MaterializeOutput
 from loom.taskset.transform_sandbox import TransformSandboxConfig
+from loom_service import taskset_materializer
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from loom_service.taskset_materializer import run_once
@@ -337,6 +341,303 @@ async def _run_materializer_once(app: FastAPI) -> None:
             memory_limit_mb=settings.taskset_materializer_transform_memory_limit_mb,
         ),
     )
+
+
+async def _submit_inline_task_set(
+    app: FastAPI,
+    *,
+    token: str,
+) -> str:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/tasksets",
+            headers={"Authorization": f"Bearer {token}"},
+            files={
+                "manifest": (
+                    "manifest.yaml",
+                    _MANIFEST_INLINE.encode(),
+                    "application/x-yaml",
+                ),
+            },
+        )
+    assert response.status_code == 202, response.text
+    return response.json()["task_set_id"]
+
+
+@pytest.mark.asyncio
+async def test_materialization_reclaims_only_stale_lease_heartbeats(
+    materialization_setup,
+) -> None:
+    app, tokens, _teams = materialization_setup
+    await _submit_inline_task_set(app, token=tokens["team_a"])
+    owner_a = "test-owner-a"
+    owner_b = "test-owner-b"
+
+    async with app.state.session_factory() as session:
+        claimed_by_a = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by=owner_a,
+        )
+    assert len(claimed_by_a) == 1
+    lease_a = claimed_by_a[0]
+
+    now = datetime.now(UTC)
+    async with app.state.session_factory() as session:
+        await session.execute(
+            update(TaskSetMaterializationJob)
+            .where(TaskSetMaterializationJob.id == lease_a.id)
+            .values(
+                claimed_at=now - timedelta(minutes=5),
+                lease_heartbeat_at=now,
+            ),
+        )
+        await session.commit()
+        assert await taskset_materializer.reclaim_stale_jobs(
+            session,
+            claim_ttl_sec=60,
+        ) == 0
+
+    async with app.state.session_factory() as session:
+        await session.execute(
+            update(TaskSetMaterializationJob)
+            .where(TaskSetMaterializationJob.id == lease_a.id)
+            .values(lease_heartbeat_at=now - timedelta(minutes=5)),
+        )
+        await session.commit()
+        assert await taskset_materializer.reclaim_stale_jobs(
+            session,
+            claim_ttl_sec=60,
+        ) == 1
+        await session.execute(
+            update(TaskSetMaterializationJob)
+            .where(TaskSetMaterializationJob.id == lease_a.id)
+            .values(next_attempt_at=now - timedelta(seconds=1)),
+        )
+        await session.commit()
+        claimed_by_b = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by=owner_b,
+        )
+
+    assert len(claimed_by_b) == 1
+    lease_b = claimed_by_b[0]
+    assert lease_b.id == lease_a.id
+    assert lease_b.lease_epoch > lease_a.lease_epoch
+    assert lease_b.claimed_by == owner_b
+
+
+@pytest.mark.asyncio
+async def test_materialization_stale_owner_cannot_overwrite_reclaimed_winner(
+    materialization_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, tokens, _teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    owner_a = "test-owner-a"
+    owner_b = "test-owner-b"
+    loop = asyncio.get_running_loop()
+    materialization_started = asyncio.Event()
+    release_owner_a = threading.Event()
+    materialization_calls = 0
+
+    def materialize_for_owner_race(**_kwargs: object) -> MaterializeOutput:
+        nonlocal materialization_calls
+        materialization_calls += 1
+        if materialization_calls == 1:
+            loop.call_soon_threadsafe(materialization_started.set)
+            assert release_owner_a.wait(timeout=10)
+            return MaterializeOutput(
+                status="failed",
+                status_reason="owner_a_result",
+                job_failure_reason="owner_a_result",
+                job_failure_message="owner A resumed after reclaim",
+            )
+        return MaterializeOutput(
+            status="failed",
+            status_reason="owner_b_result",
+            job_failure_reason="owner_b_result",
+            job_failure_message="owner B is the fenced winner",
+        )
+
+    monkeypatch.setattr(
+        taskset_materializer,
+        "materialize_task_set",
+        materialize_for_owner_race,
+    )
+
+    async with app.state.session_factory() as session:
+        claimed_by_a = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by=owner_a,
+        )
+    assert len(claimed_by_a) == 1
+    lease_a = claimed_by_a[0]
+
+    owner_a_task = asyncio.create_task(
+        taskset_materializer._materialize_claimed_job(
+            app.state.session_factory,
+            job_id=lease_a.id,
+            minio_client=app.state.minio_client,
+            artifacts_bucket=app.state.settings.artifacts_bucket,
+            upstream_cache_root=app.state.settings.taskset_materializer_upstream_cache_root,
+            transform_config=TransformSandboxConfig(
+                enabled=False,
+                network_isolated=False,
+            ),
+        ),
+    )
+    await asyncio.wait_for(materialization_started.wait(), timeout=5)
+
+    stale_at = datetime.now(UTC) - timedelta(minutes=5)
+    async with app.state.session_factory() as session:
+        await session.execute(
+            update(TaskSetMaterializationJob)
+            .where(TaskSetMaterializationJob.id == lease_a.id)
+            .values(claimed_at=stale_at, lease_heartbeat_at=stale_at),
+        )
+        await session.commit()
+        assert await taskset_materializer.reclaim_stale_jobs(
+            session,
+            claim_ttl_sec=60,
+        ) == 1
+        await session.execute(
+            update(TaskSetMaterializationJob)
+            .where(TaskSetMaterializationJob.id == lease_a.id)
+            .values(next_attempt_at=datetime.now(UTC) - timedelta(seconds=1)),
+        )
+        await session.commit()
+        claimed_by_b = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by=owner_b,
+        )
+    assert len(claimed_by_b) == 1
+
+    await taskset_materializer._materialize_claimed_job(
+        app.state.session_factory,
+        job_id=lease_a.id,
+        minio_client=app.state.minio_client,
+        artifacts_bucket=app.state.settings.artifacts_bucket,
+        upstream_cache_root=app.state.settings.taskset_materializer_upstream_cache_root,
+        transform_config=TransformSandboxConfig(
+            enabled=False,
+            network_isolated=False,
+        ),
+    )
+
+    async with app.state.session_factory() as session:
+        winner_before_resume = await session.get(
+            TaskSetMaterializationJob,
+            lease_a.id,
+        )
+        task_set_before_resume = await session.get(TaskSet, task_set_id)
+    assert winner_before_resume is not None
+    assert task_set_before_resume is not None
+    winner_snapshot = (
+        winner_before_resume.state,
+        winner_before_resume.lease_epoch,
+        winner_before_resume.claimed_by,
+        winner_before_resume.failure_reason,
+        task_set_before_resume.status,
+        task_set_before_resume.status_reason,
+    )
+
+    release_owner_a.set()
+    owner_a_result = (await asyncio.gather(owner_a_task, return_exceptions=True))[0]
+
+    async with app.state.session_factory() as session:
+        winner_after_resume = await session.get(
+            TaskSetMaterializationJob,
+            lease_a.id,
+        )
+        task_set_after_resume = await session.get(TaskSet, task_set_id)
+    assert winner_after_resume is not None
+    assert task_set_after_resume is not None
+    assert (
+        winner_after_resume.state,
+        winner_after_resume.lease_epoch,
+        winner_after_resume.claimed_by,
+        winner_after_resume.failure_reason,
+        task_set_after_resume.status,
+        task_set_after_resume.status_reason,
+    ) == winner_snapshot
+    lease_lost = getattr(taskset_materializer, "LeaseLost", RuntimeError)
+    assert isinstance(owner_a_result, lease_lost)
+
+
+@pytest.mark.asyncio
+async def test_materialization_rejects_stale_lease_for_every_state_transition(
+    materialization_setup,
+) -> None:
+    app, tokens, _teams = materialization_setup
+    await _submit_inline_task_set(app, token=tokens["team_a"])
+    owner_a = "test-owner-a"
+    owner_b = "test-owner-b"
+
+    async with app.state.session_factory() as session:
+        claimed_by_a = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by=owner_a,
+        )
+    assert len(claimed_by_a) == 1
+    initial_job = claimed_by_a[0]
+    stale_at = datetime.now(UTC) - timedelta(minutes=5)
+    async with app.state.session_factory() as session:
+        await session.execute(
+            update(TaskSetMaterializationJob)
+            .where(TaskSetMaterializationJob.id == initial_job.id)
+            .values(claimed_at=stale_at, lease_heartbeat_at=stale_at),
+        )
+        await session.commit()
+        assert await taskset_materializer.reclaim_stale_jobs(
+            session,
+            claim_ttl_sec=60,
+        ) == 1
+        await session.execute(
+            update(TaskSetMaterializationJob)
+            .where(TaskSetMaterializationJob.id == initial_job.id)
+            .values(next_attempt_at=datetime.now(UTC) - timedelta(seconds=1)),
+        )
+        await session.commit()
+        claimed_by_b = await taskset_materializer._claim_jobs(
+            session,
+            batch_size=1,
+            claimed_by=owner_b,
+        )
+    assert len(claimed_by_b) == 1
+
+    lease_type = getattr(taskset_materializer, "MaterializationLease", None)
+    lease_lost = getattr(taskset_materializer, "LeaseLost", None)
+    transition = getattr(taskset_materializer, "_update_job_for_lease", None)
+    assert lease_type is not None
+    assert lease_lost is not None
+    assert callable(transition)
+    stale_lease = lease_type(
+        job_id=initial_job.id,
+        lease_epoch=initial_job.lease_epoch,
+        claimed_by=owner_a,
+    )
+    now = datetime.now(UTC)
+    transitions = (
+        (("claimed", "running"), {"lease_heartbeat_at": now}),
+        (("claimed",), {"state": "running", "started_at": now}),
+        (("running",), {"state": "queued", "next_attempt_at": now}),
+        (("running",), {"state": "failed", "finished_at": now}),
+    )
+    for states, values in transitions:
+        async with app.state.session_factory() as session:
+            with pytest.raises(lease_lost):
+                await transition(
+                    session,
+                    lease=stale_lease,
+                    states=states,
+                    values=values,
+                )
 
 
 @pytest.mark.asyncio
