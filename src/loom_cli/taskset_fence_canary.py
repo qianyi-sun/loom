@@ -12,18 +12,23 @@ import argparse
 import asyncio
 import hashlib
 import hmac
+import io
 import json
 import os
 import re
+import secrets
 import sys
+import tarfile
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from sqlalchemy import select, update
+from fastapi import UploadFile
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
@@ -32,12 +37,15 @@ from loom.db.schema import (
     TaskSetFenceCanaryAuthorization,
     TaskSetManifest,
     TaskSetMaterializationJob,
+    Team,
 )
+from loom.models.task_checksum import task_checksum
 from loom.taskset.materialize import MaterializeOutput
 from loom.taskset.transform_sandbox import TransformSandboxConfig
 from loom_service import taskset_materializer
 from loom_service.config import LoomServiceSettings
 from loom_service.storage import create_minio_client
+from loom_service.taskset_intake import TaskSetIntakeResult, submit_task_set
 
 _SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA64_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -46,14 +54,52 @@ _TASK_SET_ID_RE = re.compile(
     r"(?P<slug>[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?)$",
 )
 _NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
-_ALLOWED_CONTRACT_FIELDS = frozenset({
-    "candidate_sha",
-    "image_tag",
-    "task_set_id",
-    "expected_task_checksum",
-    "authorization_token",
-    "nonce",
-})
+_ALLOWED_CONTRACT_FIELDS = frozenset(
+    {
+        "candidate_sha",
+        "image_tag",
+        "task_set_id",
+        "expected_task_checksum",
+        "authorization_token",
+        "nonce",
+    }
+)
+_ALLOWED_PREPARATION_FIELDS = frozenset(
+    {
+        "candidate_sha",
+        "image_tag",
+        "authorization_token",
+    }
+)
+_SYSTEM_CANARY_TEAM_NAME = "admin"
+_CANARY_ARCHIVE_NAME = "fence-canary.tar.gz"
+_CANARY_TASK_FILES = {
+    "tasks/fence-canary/task.toml": b"""schema_version = "1"
+
+[task]
+id = "fence-canary"
+name = "TaskSet lease fencing canary"
+description = "Deployment-owned materialization fencing canary."
+
+[environment]
+os = "linux"
+
+[agent]
+name = "default"
+
+[verifier]
+name = "script"
+
+[verifier.args]
+script_path = "verifier/noop.sh"
+
+[[steps]]
+name = "main"
+artifacts = ["canary.txt"]
+""",
+    "tasks/fence-canary/instruction.md": b"Write canary.txt containing canary.\n",
+    "tasks/fence-canary/verifier/noop.sh": b"#!/bin/sh\nexit 0\n",
+}
 
 
 class TaskSetFenceCanaryContractError(ValueError):
@@ -104,9 +150,8 @@ class TaskSetFenceCanaryContract:
             raise TaskSetFenceCanaryContractError("invalid disposable task set") from exc
 
         expected_task_checksum = payload.get("expected_task_checksum")
-        if (
-            not isinstance(expected_task_checksum, str)
-            or not _SHA64_RE.fullmatch(expected_task_checksum)
+        if not isinstance(expected_task_checksum, str) or not _SHA64_RE.fullmatch(
+            expected_task_checksum
         ):
             raise TaskSetFenceCanaryContractError("invalid expected task checksum")
 
@@ -128,17 +173,69 @@ class TaskSetFenceCanaryContract:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class TaskSetFenceCanaryPreparationRequest:
+    """The deployment-owned inputs allowed to create a disposable canary."""
+
+    candidate_sha: str
+    image_tag: str
+    authorization_token: str
+
+    @classmethod
+    def from_mapping(
+        cls,
+        payload: Mapping[str, Any],
+    ) -> TaskSetFenceCanaryPreparationRequest:
+        if set(payload) != _ALLOWED_PREPARATION_FIELDS:
+            raise TaskSetFenceCanaryContractError("invalid canary preparation fields")
+
+        candidate_sha = payload.get("candidate_sha")
+        image_tag = payload.get("image_tag")
+        if (
+            not isinstance(candidate_sha, str)
+            or not _SHA40_RE.fullmatch(candidate_sha)
+            or not isinstance(image_tag, str)
+            or image_tag != f"staging-{candidate_sha[:7]}"
+        ):
+            raise TaskSetFenceCanaryContractError("invalid candidate identity")
+        authorization_token = payload.get("authorization_token")
+        if not isinstance(authorization_token, str) or not authorization_token:
+            raise TaskSetFenceCanaryContractError("missing canary authorization")
+        return cls(
+            candidate_sha=candidate_sha,
+            image_tag=image_tag,
+            authorization_token=authorization_token,
+        )
+
+
+def _validate_authorization_token(
+    authorization_token: str,
+    *,
+    configured_token: str | None,
+) -> None:
+    """Require the separate capability mounted in the service Deployment."""
+    if not configured_token or not hmac.compare_digest(
+        authorization_token,
+        configured_token,
+    ):
+        raise TaskSetFenceCanaryAuthorizationError("canary authorization rejected")
+
+
 def validate_contract_authorization(
     contract: TaskSetFenceCanaryContract,
     *,
     configured_token: str | None,
 ) -> None:
     """Require the separate capability mounted in the service Deployment."""
-    if not configured_token or not hmac.compare_digest(
+    _validate_authorization_token(
         contract.authorization_token,
-        configured_token,
-    ):
-        raise TaskSetFenceCanaryAuthorizationError("canary authorization rejected")
+        configured_token=configured_token,
+    )
+
+
+def _new_canary_nonce() -> str:
+    """Generate the one-use nonce inside the service-pod trust boundary."""
+    return secrets.token_urlsafe(32)
 
 
 class TaskSetFenceCanaryRuntimeError(RuntimeError):
@@ -207,72 +304,161 @@ async def _locked_disposable_rows(
     bool,
 ]:
     """Lock mutable job/TaskSet rows in the materializer's job-first order."""
-    jobs = (await session.execute(
-        select(TaskSetMaterializationJob)
-        .where(TaskSetMaterializationJob.task_set_id == task_set_id)
-        .order_by(TaskSetMaterializationJob.enqueued_at)
-        .with_for_update(),
-    )).scalars().all()
-    task_set = (await session.execute(
-        select(TaskSet)
-        .where(TaskSet.id == task_set_id)
-        .with_for_update(),
-    )).scalar_one_or_none()
-    manifest = (await session.execute(
-        select(TaskSetManifest)
-        .where(TaskSetManifest.task_set_id == task_set_id)
-        .with_for_update(),
-    )).scalar_one_or_none()
-    task_exists = (await session.execute(
-        select(Task.id).where(Task.task_set_id == task_set_id).limit(1),
-    )).scalar_one_or_none() is not None
+    jobs = (
+        (
+            await session.execute(
+                select(TaskSetMaterializationJob)
+                .where(TaskSetMaterializationJob.task_set_id == task_set_id)
+                .order_by(TaskSetMaterializationJob.enqueued_at)
+                .with_for_update(),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    task_set = (
+        await session.execute(
+            select(TaskSet).where(TaskSet.id == task_set_id).with_for_update(),
+        )
+    ).scalar_one_or_none()
+    manifest = (
+        await session.execute(
+            select(TaskSetManifest)
+            .where(TaskSetManifest.task_set_id == task_set_id)
+            .with_for_update(),
+        )
+    ).scalar_one_or_none()
+    task_exists = (
+        await session.execute(
+            select(Task.id).where(Task.task_set_id == task_set_id).limit(1),
+        )
+    ).scalar_one_or_none() is not None
     return task_set, manifest, list(jobs), task_exists
 
 
-async def register_deployment_fence_authorization(
+def _canary_bundle() -> tuple[bytes, str]:
+    """Build the fixed one-task bundle and its normal materializer checksum."""
+    with tempfile.TemporaryDirectory() as tmp:
+        bundle_root = Path(tmp) / "bundle"
+        for relative_path, content in _CANARY_TASK_FILES.items():
+            target = bundle_root / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        expected_checksum = task_checksum(bundle_root / "tasks/fence-canary")
+
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+        for relative_path, content in _CANARY_TASK_FILES.items():
+            member = tarfile.TarInfo(relative_path)
+            member.size = len(content)
+            member.mode = 0o644
+            tar.addfile(member, io.BytesIO(content))
+    return archive.getvalue(), expected_checksum
+
+
+def _canary_manifest(*, slug: str) -> bytes:
+    return f"""apiVersion: loom.taskset/v1
+kind: UserTaskSet
+metadata:
+  name: {slug}
+  display_name: Deployment TaskSet lease fencing canary
+source:
+  type: bundle-upload
+  locator: {_CANARY_ARCHIVE_NAME}
+  subset: tasks
+limits:
+  max_instances: 1
+""".encode()
+
+
+async def prepare_deployment_fence_canary(
     session_factory: async_sessionmaker[AsyncSession],
     *,
-    contract: TaskSetFenceCanaryContract,
+    request: TaskSetFenceCanaryPreparationRequest,
     configured_token: str | None,
-) -> None:
-    """Persist one service-authorized canary binding before it can be claimed.
+    minio_client: Any,
+    artifacts_bucket: str,
+    taskset_quota_max_count: int,
+    taskset_quota_max_storage_bytes: int,
+    manifest_max_bytes: int,
+    bundle_max_bytes: int,
+    nonce_factory: Callable[[], str] = _new_canary_nonce,
+) -> TaskSetFenceCanaryContract:
+    """Create and bind a deployment-owned one-use canary transactionally.
 
-    This entrypoint is only reached by the deployment-only internal mode after
-    the service-mounted capability has been compared.  The nonce is retained
-    only as a digest, so a durable row is neither a bearer credential nor a
-    reusable TaskSet control surface.
+    The only caller-controlled values are the rollout-derived candidate and
+    image tag.  The selected service Pod chooses the fixed system Team, random
+    TaskSet slug, one-task bundle, checksum, and nonce before inserting the
+    authorization in the same database transaction as normal TaskSet intake.
     """
-    validate_contract_authorization(contract, configured_token=configured_token)
+    _validate_authorization_token(
+        request.authorization_token,
+        configured_token=configured_token,
+    )
+    nonce = nonce_factory()
+    if not isinstance(nonce, str) or not _NONCE_RE.fullmatch(nonce):
+        raise TaskSetFenceCanaryRuntimeError("canary nonce was not available")
+    bundle_bytes, expected_checksum = _canary_bundle()
+    slug = f"fence-canary-{uuid4().hex}"
     async with session_factory() as session:
-        task_set, manifest, jobs, task_exists = await _locked_disposable_rows(
+        system_team = (
+            await session.execute(
+                select(Team).where(func.lower(Team.name) == _SYSTEM_CANARY_TEAM_NAME),
+            )
+        ).scalar_one_or_none()
+        if system_team is None or system_team.disabled_at is not None:
+            raise TaskSetFenceCanaryRuntimeError("canary system identity was not available")
+
+        async def pre_commit(result: TaskSetIntakeResult) -> None:
+            contract = TaskSetFenceCanaryContract(
+                candidate_sha=request.candidate_sha,
+                image_tag=request.image_tag,
+                task_set_id=result.task_set_id,
+                expected_task_checksum=expected_checksum,
+                authorization_token=request.authorization_token,
+                nonce=nonce,
+            )
+            session.add(
+                TaskSetFenceCanaryAuthorization(
+                    task_set_id=result.task_set_id,
+                    materialization_job_id=result.job_id,
+                    candidate_sha=contract.candidate_sha,
+                    image_tag=contract.image_tag,
+                    expected_task_checksum=contract.expected_task_checksum,
+                    nonce_digest=_nonce_digest(contract),
+                )
+            )
+            await session.flush()
+
+        result = await submit_task_set(
             session,
-            task_set_id=contract.task_set_id,
+            team_id=system_team.id,
+            minio_client=minio_client,
+            artifacts_bucket=artifacts_bucket,
+            manifest_upload=UploadFile(
+                file=io.BytesIO(_canary_manifest(slug=slug)),
+                filename="canary-manifest.yaml",
+            ),
+            verifier_upload=None,
+            transform_upload=None,
+            bundle_upload=UploadFile(
+                file=io.BytesIO(bundle_bytes),
+                filename=_CANARY_ARCHIVE_NAME,
+            ),
+            taskset_quota_max_count=taskset_quota_max_count,
+            taskset_quota_max_storage_bytes=taskset_quota_max_storage_bytes,
+            manifest_max_bytes=manifest_max_bytes,
+            bundle_max_bytes=bundle_max_bytes,
+            before_commit=pre_commit,
         )
-        authorization = (await session.execute(
-            select(TaskSetFenceCanaryAuthorization)
-            .where(TaskSetFenceCanaryAuthorization.task_set_id == contract.task_set_id)
-            .with_for_update(),
-        )).scalar_one_or_none()
-        if not _is_initial_disposable_job(
-            task_set=task_set,
-            manifest=manifest,
-            jobs=jobs,
-            task_exists=task_exists,
-        ):
-            await session.rollback()
-            raise TaskSetFenceCanaryRuntimeError("canary task set is not disposable")
-        if authorization is not None:
-            await session.rollback()
-            raise TaskSetFenceCanaryRuntimeError("canary authorization was not available")
-        session.add(TaskSetFenceCanaryAuthorization(
-            task_set_id=contract.task_set_id,
-            materialization_job_id=jobs[0].id,
-            candidate_sha=contract.candidate_sha,
-            image_tag=contract.image_tag,
-            expected_task_checksum=contract.expected_task_checksum,
-            nonce_digest=_nonce_digest(contract),
-        ))
-        await session.commit()
+    return TaskSetFenceCanaryContract(
+        candidate_sha=request.candidate_sha,
+        image_tag=request.image_tag,
+        task_set_id=result.task_set_id,
+        expected_task_checksum=expected_checksum,
+        authorization_token=request.authorization_token,
+        nonce=nonce,
+    )
 
 
 async def _claim_authorized_disposable_job(
@@ -292,14 +478,25 @@ async def _claim_authorized_disposable_job(
             session,
             task_set_id=contract.task_set_id,
         )
-        authorization = (await session.execute(
-            select(TaskSetFenceCanaryAuthorization)
-            .where(TaskSetFenceCanaryAuthorization.task_set_id == contract.task_set_id)
-            .with_for_update(),
-        )).scalar_one_or_none()
+        authorization = (
+            await session.execute(
+                select(TaskSetFenceCanaryAuthorization)
+                .where(TaskSetFenceCanaryAuthorization.task_set_id == contract.task_set_id)
+                .with_for_update(),
+            )
+        ).scalar_one_or_none()
+        system_team = (
+            await session.execute(
+                select(Team).where(func.lower(Team.name) == _SYSTEM_CANARY_TEAM_NAME),
+            )
+        ).scalar_one_or_none()
         expected_nonce_digest = _nonce_digest(contract)
         if (
             authorization is None
+            or system_team is None
+            or system_team.disabled_at is not None
+            or task_set is None
+            or task_set.owning_team_id != system_team.id
             or authorization.consumed_at is not None
             or authorization.candidate_sha != contract.candidate_sha
             or authorization.image_tag != contract.image_tag
@@ -318,43 +515,47 @@ async def _claim_authorized_disposable_job(
             raise TaskSetFenceCanaryRuntimeError("canary authorization was not available")
 
         now = datetime.now(UTC)
-        claimed = (await session.execute(
-            update(TaskSetMaterializationJob)
-            .where(
-                TaskSetMaterializationJob.id == authorization.materialization_job_id,
-                TaskSetMaterializationJob.state == "queued",
-                TaskSetMaterializationJob.attempt_count == 0,
-                TaskSetMaterializationJob.lease_epoch == 0,
-                TaskSetMaterializationJob.next_attempt_at.is_(None),
+        claimed = (
+            await session.execute(
+                update(TaskSetMaterializationJob)
+                .where(
+                    TaskSetMaterializationJob.id == authorization.materialization_job_id,
+                    TaskSetMaterializationJob.state == "queued",
+                    TaskSetMaterializationJob.attempt_count == 0,
+                    TaskSetMaterializationJob.lease_epoch == 0,
+                    TaskSetMaterializationJob.next_attempt_at.is_(None),
+                )
+                .values(
+                    state="claimed",
+                    claimed_at=now,
+                    claimed_by=owner,
+                    lease_epoch=1,
+                    lease_heartbeat_at=now,
+                    attempt_count=1,
+                    updated_at=now,
+                )
+                .returning(
+                    TaskSetMaterializationJob.id,
+                    TaskSetMaterializationJob.lease_epoch,
+                ),
             )
-            .values(
-                state="claimed",
-                claimed_at=now,
-                claimed_by=owner,
-                lease_epoch=1,
-                lease_heartbeat_at=now,
-                attempt_count=1,
-                updated_at=now,
-            )
-            .returning(
-                TaskSetMaterializationJob.id,
-                TaskSetMaterializationJob.lease_epoch,
-            ),
-        )).one_or_none()
+        ).one_or_none()
         if claimed is None:
             await session.rollback()
             raise TaskSetFenceCanaryRuntimeError("canary authorization was not available")
-        consumed = (await session.execute(
-            update(TaskSetFenceCanaryAuthorization)
-            .where(
-                TaskSetFenceCanaryAuthorization.task_set_id == contract.task_set_id,
-                TaskSetFenceCanaryAuthorization.consumed_at.is_(None),
-                TaskSetFenceCanaryAuthorization.materialization_job_id == claimed.id,
-                TaskSetFenceCanaryAuthorization.nonce_digest == expected_nonce_digest,
+        consumed = (
+            await session.execute(
+                update(TaskSetFenceCanaryAuthorization)
+                .where(
+                    TaskSetFenceCanaryAuthorization.task_set_id == contract.task_set_id,
+                    TaskSetFenceCanaryAuthorization.consumed_at.is_(None),
+                    TaskSetFenceCanaryAuthorization.materialization_job_id == claimed.id,
+                    TaskSetFenceCanaryAuthorization.nonce_digest == expected_nonce_digest,
+                )
+                .values(consumed_at=now, consumed_lease_epoch=claimed.lease_epoch)
+                .returning(TaskSetFenceCanaryAuthorization.task_set_id),
             )
-            .values(consumed_at=now, consumed_lease_epoch=claimed.lease_epoch)
-            .returning(TaskSetFenceCanaryAuthorization.task_set_id),
-        )).one_or_none()
+        ).one_or_none()
         if consumed is None:
             await session.rollback()
             raise TaskSetFenceCanaryRuntimeError("canary authorization was not available")
@@ -545,9 +746,15 @@ async def run_deployment_fence_canary(
 
         async with session_factory() as session:
             winner_job = await session.get(TaskSetMaterializationJob, lease_a.job_id)
-            winner_rows = (await session.execute(
-                select(Task).where(Task.task_set_id == contract.task_set_id),
-            )).scalars().all()
+            winner_rows = (
+                (
+                    await session.execute(
+                        select(Task).where(Task.task_set_id == contract.task_set_id),
+                    )
+                )
+                .scalars()
+                .all()
+            )
         if (
             winner_job is None
             or winner_job.state != "succeeded"
@@ -612,7 +819,6 @@ async def _run_internal_contract(
     contract: TaskSetFenceCanaryContract,
     *,
     settings: LoomServiceSettings,
-    authorize_only: bool = False,
 ) -> dict[str, object]:
     configured_token = (
         settings.taskset_fence_canary_token.get_secret_value()
@@ -627,13 +833,6 @@ async def _run_internal_contract(
     )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        if authorize_only:
-            await register_deployment_fence_authorization(
-                session_factory,
-                contract=contract,
-                configured_token=configured_token,
-            )
-            return {"status": "authorized"}
         return await run_deployment_fence_canary(
             contract,
             configured_token=configured_token,
@@ -657,11 +856,55 @@ async def _run_internal_contract(
         await engine.dispose()
 
 
+async def _prepare_internal_contract(
+    request: TaskSetFenceCanaryPreparationRequest,
+    *,
+    settings: LoomServiceSettings,
+) -> TaskSetFenceCanaryContract:
+    configured_token = (
+        settings.taskset_fence_canary_token.get_secret_value()
+        if settings.taskset_fence_canary_token is not None
+        else None
+    )
+    if not configured_token:
+        raise TaskSetFenceCanaryAuthorizationError("canary authorization rejected")
+    engine = create_async_engine(
+        settings.db_engine_url,
+        connect_args=settings.db_engine_connect_args,
+    )
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        return await prepare_deployment_fence_canary(
+            session_factory,
+            request=request,
+            configured_token=configured_token,
+            minio_client=create_minio_client(settings, endpoint_url=settings.minio_endpoint),
+            artifacts_bucket=settings.artifacts_bucket,
+            taskset_quota_max_count=settings.taskset_quota_max_count_per_team,
+            taskset_quota_max_storage_bytes=settings.taskset_quota_max_storage_bytes_per_team,
+            manifest_max_bytes=settings.taskset_manifest_max_bytes,
+            bundle_max_bytes=settings.taskset_quota_max_bundle_bytes,
+        )
+    finally:
+        await engine.dispose()
+
+
+def _prepared_contract_payload(contract: TaskSetFenceCanaryContract) -> dict[str, str]:
+    """Return only non-capability metadata needed for the later canary exec."""
+    return {
+        "candidate_sha": contract.candidate_sha,
+        "image_tag": contract.image_tag,
+        "task_set_id": contract.task_set_id,
+        "expected_task_checksum": contract.expected_task_checksum,
+        "nonce": contract.nonce,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     """Internal-only process entrypoint invoked through ``kubectl exec``."""
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--internal", action="store_true")
-    parser.add_argument("--authorize", action="store_true")
+    parser.add_argument("--prepare", action="store_true")
     try:
         args = parser.parse_args(argv)
     except SystemExit:
@@ -673,12 +916,22 @@ def main(argv: list[str] | None = None) -> int:
         payload = json.loads(sys.stdin.read())
         if not isinstance(payload, Mapping):
             raise TaskSetFenceCanaryContractError("invalid canary contract fields")
-        contract = TaskSetFenceCanaryContract.from_mapping(payload)
-        evidence = asyncio.run(_run_internal_contract(
-            contract,
-            settings=LoomServiceSettings(),
-            authorize_only=args.authorize,
-        ))
+        settings = LoomServiceSettings()
+        if args.prepare:
+            prepared = asyncio.run(
+                _prepare_internal_contract(
+                    TaskSetFenceCanaryPreparationRequest.from_mapping(payload),
+                    settings=settings,
+                )
+            )
+            evidence: Mapping[str, object] = _prepared_contract_payload(prepared)
+        else:
+            evidence = asyncio.run(
+                _run_internal_contract(
+                    TaskSetFenceCanaryContract.from_mapping(payload),
+                    settings=settings,
+                )
+            )
     except (
         TaskSetFenceCanaryContractError,
         TaskSetFenceCanaryAuthorizationError,

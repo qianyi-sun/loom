@@ -57,6 +57,16 @@ def _runner_evidence(
     }
 
 
+def _prepared_contract() -> dict[str, str]:
+    return {
+        "candidate_sha": "a" * 40,
+        "image_tag": "staging-aaaaaaa",
+        "task_set_id": "ts/9ec52425-99d5-421c-a90b-9e21e215f424/fence-canary",
+        "expected_task_checksum": "b" * 64,
+        "nonce": "n" * 43,
+    }
+
+
 def test_contract_rejects_invalid_candidate_sha_without_echoing_input() -> None:
     from loom_cli.taskset_fence_canary import (
         TaskSetFenceCanaryContract,
@@ -84,7 +94,11 @@ def test_contract_rejects_invalid_candidate_sha_without_echoing_input() -> None:
     [
         (_contract(image_tag="staging-deadbee"), "invalid candidate identity", None),
         (_contract(task_set_id="not-a-task-set-id"), "invalid disposable task set", None),
-        (_contract(expected_task_checksum="not-a-checksum"), "invalid expected task checksum", None),
+        (
+            _contract(expected_task_checksum="not-a-checksum"),
+            "invalid expected task checksum",
+            None,
+        ),
         (_contract(authorization_token=""), "missing canary authorization", None),
         (
             _contract(owner="operator-owned-value"),
@@ -136,7 +150,9 @@ def test_contract_requires_the_deployed_canary_capability() -> None:
     assert "different-secret" not in str(exc_info.value)
 
 
-def _rollout_inputs(*, sha: str = "a" * 40, image_tag: str = "staging-aaaaaaa") -> dict[str, object]:
+def _rollout_inputs(
+    *, sha: str = "a" * 40, image_tag: str = "staging-aaaaaaa"
+) -> dict[str, object]:
     return {
         "environment": "staging",
         "namespace": "loom-staging",
@@ -151,6 +167,7 @@ def _release_manifest(
     sha: str = "a" * 40,
     image_tag: str = "staging-aaaaaaa",
     digest: str = "sha256:" + "1" * 64,
+    image_id: str | None = None,
 ) -> dict[str, object]:
     return {
         "release": {
@@ -165,7 +182,7 @@ def _release_manifest(
                     "loom-service": {
                         "image": f"loom-service:{image_tag}",
                         "repo_digest": f"registry.example/loom-service@{digest}",
-                        "image_id": digest,
+                        "image_id": image_id if image_id is not None else digest,
                     },
                 },
             },
@@ -208,6 +225,7 @@ def _live_pod(
     name: str = "loom-service-abc",
     image_tag: str = "staging-aaaaaaa",
     digest: str = "sha256:" + "1" * 64,
+    runtime_image_id: str | None = None,
     ready: bool = True,
 ) -> dict[str, object]:
     return {
@@ -228,7 +246,11 @@ def _live_pod(
                 {
                     "name": "loom-service",
                     "image": f"loom-service:{image_tag}",
-                    "imageID": f"docker-pullable://registry.example/loom-service@{digest}",
+                    "imageID": (
+                        runtime_image_id
+                        if runtime_image_id is not None
+                        else f"docker-pullable://registry.example/loom-service@{digest}"
+                    ),
                 },
             ],
         },
@@ -259,8 +281,8 @@ def _live_runner(
                 json.dumps({"items": [_live_pod()]}),
                 "",
             )
-        if "--authorize" in command:
-            return subprocess.CompletedProcess(command, 0, '{"status":"authorized"}', "")
+        if "--prepare" in command:
+            return subprocess.CompletedProcess(command, 0, json.dumps(_prepared_contract()), "")
         if on_internal is not None:
             return on_internal(command, payload)
         return subprocess.CompletedProcess(command, 0, json.dumps(evidence), "")
@@ -320,7 +342,55 @@ def test_live_target_parser_rejects_stale_or_noncandidate_deployments(
     assert str(exc_info.value) == "live staging target was rejected"
 
 
-def test_deployment_runner_uses_rollout_owned_candidate_and_evidence_path(
+def test_live_target_parser_accepts_distinct_release_repo_digest_and_image_id() -> None:
+    """Runtime image IDs follow the release repo-digest identity when present."""
+    from loom_cli.cluster_taskset_fence_canary import _select_live_target
+
+    target = _select_live_target(
+        _release_manifest(image_id="sha256:" + "2" * 64),
+        candidate_sha="a" * 40,
+        image_tag="staging-aaaaaaa",
+        deployment=_live_deployment(),
+        pods={"items": [_live_pod()]},
+    )
+
+    assert target.service_image_digest == "sha256:" + "1" * 64
+
+
+def test_live_target_parser_uses_exact_image_id_only_without_a_repo_digest() -> None:
+    """The image-ID fallback does not weaken a missing-repo-digest check."""
+    from loom_cli.cluster_taskset_fence_canary import (
+        TaskSetFenceCanaryDeploymentError,
+        _select_live_target,
+    )
+
+    manifest = _release_manifest(image_id="sha256:" + "2" * 64)
+    identity = manifest["rendered_manifest"]["deployment_image_identities"]["loom-service"][
+        "loom-service"
+    ]
+    assert isinstance(identity, dict)
+    del identity["repo_digest"]
+
+    with pytest.raises(TaskSetFenceCanaryDeploymentError):
+        _select_live_target(
+            manifest,
+            candidate_sha="a" * 40,
+            image_tag="staging-aaaaaaa",
+            deployment=_live_deployment(),
+            pods={"items": [_live_pod(digest="sha256:" + "2" * 64)]},
+        )
+
+    target = _select_live_target(
+        manifest,
+        candidate_sha="a" * 40,
+        image_tag="staging-aaaaaaa",
+        deployment=_live_deployment(),
+        pods={"items": [_live_pod(runtime_image_id="sha256:" + "2" * 64)]},
+    )
+    assert target.service_image_digest == "sha256:" + "2" * 64
+
+
+def test_deployment_runner_creates_its_own_canary_and_uses_rollout_owned_evidence_path(
     tmp_path: Path,
 ) -> None:
     from loom_cli.cluster_taskset_fence_canary import run_staging_fence_canary
@@ -331,6 +401,8 @@ def test_deployment_runner_uses_rollout_owned_candidate_and_evidence_path(
     observed: list[tuple[list[str], str]] = []
 
     def capture_internal(command: list[str], payload: str) -> subprocess.CompletedProcess[str]:
+        if "--prepare" in command:
+            return subprocess.CompletedProcess(command, 0, json.dumps(_prepared_contract()), "")
         return subprocess.CompletedProcess(command, 0, json.dumps(_runner_evidence()), "")
 
     base_runner = _live_runner(on_internal=capture_internal)
@@ -341,12 +413,9 @@ def test_deployment_runner_uses_rollout_owned_candidate_and_evidence_path(
 
     evidence_path = run_staging_fence_canary(
         rollout_dir=rollout_dir,
-        task_set_id="ts/9ec52425-99d5-421c-a90b-9e21e215f424/fence-canary",
-        expected_task_checksum="b" * 64,
         authorization_token="deployment-only-secret",
         rollout_root=rollout_root,
         runner=runner,
-        nonce_factory=lambda: "n" * 43,
     )
 
     assert evidence_path == rollout_dir / "canaries/taskset-lease-fencing/evidence.json"
@@ -358,24 +427,57 @@ def test_deployment_runner_uses_rollout_owned_candidate_and_evidence_path(
         "service_image_digest": "sha256:" + "1" * 64,
     }
     internal_commands = [
-        (command, json.loads(payload))
-        for command, payload in observed
-        if "exec" in command
+        (command, json.loads(payload)) for command, payload in observed if "exec" in command
     ]
     assert [command for command, _payload in internal_commands] == [
         [
-            "kubectl", "--context", "kind-loom-staging", "-n", "loom-staging",
-            "exec", "pod/loom-service-abc", "-c", "loom-service", "-i", "--",
-            "python3", "-m", "loom_cli.taskset_fence_canary", "--internal", "--authorize",
+            "kubectl",
+            "--context",
+            "kind-loom-staging",
+            "-n",
+            "loom-staging",
+            "exec",
+            "pod/loom-service-abc",
+            "-c",
+            "loom-service",
+            "-i",
+            "--",
+            "python3",
+            "-m",
+            "loom_cli.taskset_fence_canary",
+            "--internal",
+            "--prepare",
         ],
         [
-            "kubectl", "--context", "kind-loom-staging", "-n", "loom-staging",
-            "exec", "pod/loom-service-abc", "-c", "loom-service", "-i", "--",
-            "python3", "-m", "loom_cli.taskset_fence_canary", "--internal",
+            "kubectl",
+            "--context",
+            "kind-loom-staging",
+            "-n",
+            "loom-staging",
+            "exec",
+            "pod/loom-service-abc",
+            "-c",
+            "loom-service",
+            "-i",
+            "--",
+            "python3",
+            "-m",
+            "loom_cli.taskset_fence_canary",
+            "--internal",
         ],
     ]
-    payload = internal_commands[0][1]
-    assert payload == {
+    prepare_payload = internal_commands[0][1]
+    assert prepare_payload == {
+        "candidate_sha": "a" * 40,
+        "image_tag": "staging-aaaaaaa",
+        "authorization_token": "deployment-only-secret",
+    }
+    assert "task_set_id" not in prepare_payload
+    assert "expected_task_checksum" not in prepare_payload
+    assert "owner" not in prepare_payload
+    assert "prefix" not in prepare_payload
+    runner_payload = internal_commands[1][1]
+    assert runner_payload == {
         "candidate_sha": "a" * 40,
         "image_tag": "staging-aaaaaaa",
         "task_set_id": "ts/9ec52425-99d5-421c-a90b-9e21e215f424/fence-canary",
@@ -383,9 +485,6 @@ def test_deployment_runner_uses_rollout_owned_candidate_and_evidence_path(
         "authorization_token": "deployment-only-secret",
         "nonce": "n" * 43,
     }
-    assert "owner" not in payload
-    assert "prefix" not in payload
-    assert internal_commands[1][1] == payload
 
 
 @pytest.mark.parametrize(
@@ -415,8 +514,6 @@ def test_deployment_runner_rejects_noncanonical_or_production_rollouts(
     with pytest.raises(TaskSetFenceCanaryDeploymentError) as exc_info:
         run_staging_fence_canary(
             rollout_dir=rollout_dir,
-            task_set_id="ts/9ec52425-99d5-421c-a90b-9e21e215f424/fence-canary",
-            expected_task_checksum="b" * 64,
             authorization_token="deployment-only-secret",
             rollout_root=rollout_root,
             runner=lambda *_args: pytest.fail("runner must not be called"),
@@ -448,18 +545,17 @@ def test_cluster_surface_exposes_only_the_disposable_contract_fields() -> None:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     add_subparser(sub)
-    args = parser.parse_args([
-        "taskset-fence-canary",
-        "--rollout-dir", "/data/loom-staging/rollouts/candidate",
-        "--task-set-id", "ts/9ec52425-99d5-421c-a90b-9e21e215f424/fence-canary",
-        "--expected-task-checksum", "b" * 64,
-    ])
+    args = parser.parse_args(
+        [
+            "taskset-fence-canary",
+            "--rollout-dir",
+            "/data/loom-staging/rollouts/candidate",
+        ]
+    )
 
     assert vars(args).keys() == {
         "command",
         "rollout_dir",
-        "task_set_id",
-        "expected_task_checksum",
         "handler",
     }
 
@@ -592,8 +688,6 @@ def test_deployment_runner_translates_kubectl_execution_exceptions(
     with pytest.raises(TaskSetFenceCanaryDeploymentError) as exc_info:
         run_staging_fence_canary(
             rollout_dir=rollout_dir,
-            task_set_id="ts/9ec52425-99d5-421c-a90b-9e21e215f424/fence-canary",
-            expected_task_checksum="b" * 64,
             authorization_token="deployment-only-secret",
             rollout_root=rollout_root,
             runner=_live_runner(on_internal=fail_internal),
@@ -621,8 +715,6 @@ def test_deployment_runner_rejects_existing_evidence_before_remote_execution(
     with pytest.raises(TaskSetFenceCanaryDeploymentError) as exc_info:
         run_staging_fence_canary(
             rollout_dir=rollout_dir,
-            task_set_id="ts/9ec52425-99d5-421c-a90b-9e21e215f424/fence-canary",
-            expected_task_checksum="b" * 64,
             authorization_token="deployment-only-secret",
             rollout_root=rollout_root,
             runner=lambda *_args: pytest.fail("existing evidence must stop before exec"),
@@ -645,8 +737,6 @@ def test_deployment_runner_discards_interrupted_private_evidence_file(
 
     evidence_path = run_staging_fence_canary(
         rollout_dir=rollout_dir,
-        task_set_id="ts/9ec52425-99d5-421c-a90b-9e21e215f424/fence-canary",
-        expected_task_checksum="b" * 64,
         authorization_token="deployment-only-secret",
         rollout_root=rollout_root,
         runner=_live_runner(evidence=_runner_evidence()),
@@ -674,6 +764,13 @@ def test_deployment_runner_rejects_rollout_path_replacement_after_validation(
         command: list[str],
         _payload: str,
     ) -> subprocess.CompletedProcess[str]:
+        if "--prepare" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(_prepared_contract()),
+                stderr="",
+            )
         original = rollout_dir.with_name("candidate-original")
         rollout_dir.rename(original)
         rollout_dir.symlink_to(replacement, target_is_directory=True)
@@ -687,8 +784,6 @@ def test_deployment_runner_rejects_rollout_path_replacement_after_validation(
     with pytest.raises(TaskSetFenceCanaryDeploymentError) as exc_info:
         run_staging_fence_canary(
             rollout_dir=rollout_dir,
-            task_set_id="ts/9ec52425-99d5-421c-a90b-9e21e215f424/fence-canary",
-            expected_task_checksum="b" * 64,
             authorization_token="deployment-only-secret",
             rollout_root=rollout_root,
             runner=_live_runner(on_internal=replace_after_execution),

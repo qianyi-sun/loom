@@ -15,10 +15,7 @@ def test_operator_runbook_uses_current_provider_model_syntax() -> None:
     assert "loom providers models refresh" not in runbook
     assert "loom providers models list" not in runbook
     assert "loom providers models mz_tn_canada_qianyi --refresh" in runbook
-    assert (
-        "loom providers models mz_tn_canada_qianyi --preflight glm-5.1-thinking"
-        in runbook
-    )
+    assert "loom providers models mz_tn_canada_qianyi --preflight glm-5.1-thinking" in runbook
 
 
 def test_operator_runbook_staging_batch_smoke_matches_cli_contract() -> None:
@@ -26,10 +23,7 @@ def test_operator_runbook_staging_batch_smoke_matches_cli_contract() -> None:
 
     assert "--benchmark hello-world" not in runbook
     assert "--provider smoke-openai --model gpt-4o-mini --agent oracle" not in runbook
-    assert (
-        "--task-filter '{\"task_ids\":[\"loom-smoke/gb10-oracle-hello-world\"]}'"
-        in runbook
-    )
+    assert '--task-filter \'{"task_ids":["loom-smoke/gb10-oracle-hello-world"]}\'' in runbook
     assert "--provider mz_tn_canada_qianyi" in runbook
     assert "--model glm-5.1-thinking" in runbook
     assert "--agent opencode" in runbook
@@ -39,7 +33,8 @@ def test_operator_runbook_staging_batch_smoke_matches_cli_contract() -> None:
 def test_operator_runbook_staging_gate_matches_current_launch_scope() -> None:
     runbook = _read("docs/runbooks/operator-runbook.md")
     gate_section = runbook.split("## Staging smoke gate", maxsplit=1)[1].split(
-        "## Capacity planning", maxsplit=1,
+        "## Capacity planning",
+        maxsplit=1,
     )[0]
 
     assert "scripts/staging_smoke_gate.py" in gate_section
@@ -70,11 +65,13 @@ def test_taskset_fence_canary_uses_task_7_deployment_runner() -> None:
     ) in normalized_canary_section
     assert "taskset-fence-canary-token" in canary_section
     assert "evidence.json" in canary_section
-    assert "--rollout-dir \"$ROLLOUT_DIR\"" in canary_section
-    assert "--task-set-id \"$TASK_SET_ID\"" in canary_section
-    assert "--expected-task-checksum \"$EXPECTED_TASK_CHECKSUM\"" in canary_section
+    assert '--rollout-dir "$ROLLOUT_DIR"' in canary_section
+    assert "--task-set-id" not in canary_section
+    assert "--expected-task-checksum" not in canary_section
     assert "candidate-bound JSON" in normalized_canary_section
     assert "durable one-use authorization" in normalized_canary_section
+    assert "fixed `admin` system Team" in canary_section
+    assert "never accepts a TaskSet id or checksum" in normalized_canary_section
     assert "fixed staging Kubernetes context" in normalized_canary_section
     assert "atomically published without replacement" in normalized_canary_section
 
@@ -103,8 +100,7 @@ def test_cluster_deploy_eval_run_example_matches_supported_options() -> None:
     cluster_deploy = _read("docs/architecture/cluster-deploy.md")
 
     assert (
-        "loom eval run --provider N --model M --agent A --task ID\n"
-        "    [--backend B] [--name N]"
+        "loom eval run --provider N --model M --agent A --task ID\n    [--backend B] [--name N]"
     ) not in cluster_deploy
     assert "loom eval batch create" in cluster_deploy
     assert "[--name N | --name-suffix S] [--benchmark B | --task-filter JSON]" in cluster_deploy

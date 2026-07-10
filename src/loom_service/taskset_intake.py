@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import re
 import tempfile
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -199,9 +200,11 @@ async def check_taskset_storage_quota(
     """Reject if team TaskSet blob storage is at or would exceed the cap."""
     if incoming_bytes < 0:
         raise ValueError("incoming_bytes must be non-negative")
-    quota_row = (await session.execute(
-        select(TeamQuota).where(TeamQuota.team_id == team_id),
-    )).scalar_one_or_none()
+    quota_row = (
+        await session.execute(
+            select(TeamQuota).where(TeamQuota.team_id == team_id),
+        )
+    ).scalar_one_or_none()
     max_storage = (
         quota_row.taskset_max_storage_bytes
         if quota_row is not None and quota_row.taskset_max_storage_bytes is not None
@@ -228,9 +231,11 @@ async def check_taskset_count_quota(
     default_max_count: int,
 ) -> None:
     """Reject if team has hit their active TaskSet count quota."""
-    quota_row = (await session.execute(
-        select(TeamQuota).where(TeamQuota.team_id == team_id),
-    )).scalar_one_or_none()
+    quota_row = (
+        await session.execute(
+            select(TeamQuota).where(TeamQuota.team_id == team_id),
+        )
+    ).scalar_one_or_none()
     max_count = (
         quota_row.taskset_max_count
         if quota_row is not None and quota_row.taskset_max_count is not None
@@ -238,7 +243,9 @@ async def check_taskset_count_quota(
     )
 
     active_count_result = await session.execute(
-        select(sa_func.count()).select_from(TaskSet).where(
+        select(sa_func.count())
+        .select_from(TaskSet)
+        .where(
             TaskSet.owning_team_id == team_id,
             TaskSet.soft_deleted_at.is_(None),
         ),
@@ -265,9 +272,12 @@ async def submit_task_set(
     taskset_quota_max_storage_bytes: int = 21_474_836_480,
     manifest_max_bytes: int = 1_048_576,
     bundle_max_bytes: int = 5_368_709_120,
+    before_commit: Callable[[TaskSetIntakeResult], Awaitable[None]] | None = None,
 ) -> TaskSetIntakeResult:
     await check_taskset_count_quota(
-        session, team_id=team_id, default_max_count=taskset_quota_max_count,
+        session,
+        team_id=team_id,
+        default_max_count=taskset_quota_max_count,
     )
     manifest_model, raw_manifest = await parse_manifest_upload(
         manifest_upload,
@@ -288,7 +298,8 @@ async def submit_task_set(
         _reject_unsafe_filename(verifier_upload.filename or manifest_model.verifier.file)
         verifier_bytes = await _read_upload(verifier_upload)
         verifier_key = bundle_object_key(
-            prefix=prefix, relative_path=manifest_model.verifier.file,
+            prefix=prefix,
+            relative_path=manifest_model.verifier.file,
         )
 
     transform_bytes: bytes | None = None
@@ -302,7 +313,8 @@ async def submit_task_set(
         _reject_unsafe_filename(transform_upload.filename or manifest_model.transform.file)
         transform_bytes = await _read_upload(transform_upload)
         transform_key = bundle_object_key(
-            prefix=prefix, relative_path=manifest_model.transform.file,
+            prefix=prefix,
+            relative_path=manifest_model.transform.file,
         )
 
     bundle_key: str | None = None
@@ -330,7 +342,8 @@ async def submit_task_set(
 
     manifest_key = f"{prefix}/manifest.yaml"
     manifest_bytes = yaml.safe_dump(
-        raw_manifest, sort_keys=False,
+        raw_manifest,
+        sort_keys=False,
     ).encode("utf-8")
 
     incoming_bytes = len(manifest_bytes)
@@ -434,6 +447,20 @@ async def submit_task_set(
                 upload=bundle_file,
                 content_type="application/gzip",
             )
+        result = TaskSetIntakeResult(
+            task_set_id=task_set_id,
+            status="materializing",
+            intents=normalized.effective_intents,
+            manifest_intents=normalized.manifest_intents,
+            inferred_intents=normalized.inferred_intents,
+            capabilities=normalized.capabilities,
+            warnings=_warnings_to_dict(normalized.warnings),
+            evaluation_ready=False,
+            task_count=0,
+            job_id=job.id,
+        )
+        if before_commit is not None:
+            await before_commit(result)
         await session.commit()
     except Exception:
         await session.rollback()
@@ -443,18 +470,7 @@ async def submit_task_set(
             bundle_file.file.close()
     await session.refresh(job)
 
-    return TaskSetIntakeResult(
-        task_set_id=task_set_id,
-        status="materializing",
-        intents=normalized.effective_intents,
-        manifest_intents=normalized.manifest_intents,
-        inferred_intents=normalized.inferred_intents,
-        capabilities=normalized.capabilities,
-        warnings=_warnings_to_dict(normalized.warnings),
-        evaluation_ready=False,
-        task_count=0,
-        job_id=job.id,
-    )
+    return result
 
 
 async def get_visible_task_set(
@@ -463,9 +479,11 @@ async def get_visible_task_set(
     team_id: UUID | None,
     task_set_id: str,
 ) -> TaskSet:
-    row = (await session.execute(
-        visible_task_sets(team_id=team_id).where(TaskSet.id == task_set_id),
-    )).scalar_one_or_none()
+    row = (
+        await session.execute(
+            visible_task_sets(team_id=team_id).where(TaskSet.id == task_set_id),
+        )
+    ).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="task_set not found")
     return row
@@ -475,12 +493,14 @@ async def get_latest_job(
     session: AsyncSession,
     task_set_id: str,
 ) -> TaskSetMaterializationJob | None:
-    return (await session.execute(
-        select(TaskSetMaterializationJob)
-        .where(TaskSetMaterializationJob.task_set_id == task_set_id)
-        .order_by(TaskSetMaterializationJob.enqueued_at.desc())
-        .limit(1),
-    )).scalar_one_or_none()
+    return (
+        await session.execute(
+            select(TaskSetMaterializationJob)
+            .where(TaskSetMaterializationJob.task_set_id == task_set_id)
+            .order_by(TaskSetMaterializationJob.enqueued_at.desc())
+            .limit(1),
+        )
+    ).scalar_one_or_none()
 
 
 async def rebuild_task_set(
@@ -490,26 +510,32 @@ async def rebuild_task_set(
     task_set_id: str,
 ) -> TaskSetIntakeResult:
     task_set = await get_visible_task_set(
-        session, team_id=team_id, task_set_id=task_set_id,
+        session,
+        team_id=team_id,
+        task_set_id=task_set_id,
     )
     if task_set.status == "deleted":
         raise HTTPException(status_code=404, detail="task_set not found")
 
-    active = (await session.execute(
-        select(TaskSetMaterializationJob).where(
-            TaskSetMaterializationJob.task_set_id == task_set_id,
-            TaskSetMaterializationJob.state.in_(_ACTIVE_JOB_STATES),
-        ),
-    )).scalar_one_or_none()
+    active = (
+        await session.execute(
+            select(TaskSetMaterializationJob).where(
+                TaskSetMaterializationJob.task_set_id == task_set_id,
+                TaskSetMaterializationJob.state.in_(_ACTIVE_JOB_STATES),
+            ),
+        )
+    ).scalar_one_or_none()
     if active is not None:
         raise HTTPException(
             status_code=409,
             detail="materialization_already_active",
         )
 
-    manifest_row = (await session.execute(
-        select(TaskSetManifest).where(TaskSetManifest.task_set_id == task_set_id),
-    )).scalar_one_or_none()
+    manifest_row = (
+        await session.execute(
+            select(TaskSetManifest).where(TaskSetManifest.task_set_id == task_set_id),
+        )
+    ).scalar_one_or_none()
     if manifest_row is None:
         raise HTTPException(status_code=404, detail="task_set manifest not found")
 
@@ -523,9 +549,11 @@ async def rebuild_task_set(
         verifier_file_present=manifest_row.verifier_blob_uri is not None,
     )
 
-    has_published_rows = (await session.execute(
-        select(Task.id).where(Task.task_set_id == task_set_id).limit(1),
-    )).scalar_one_or_none() is not None
+    has_published_rows = (
+        await session.execute(
+            select(Task.id).where(Task.task_set_id == task_set_id).limit(1),
+        )
+    ).scalar_one_or_none() is not None
     if not has_published_rows:
         task_set.status = "materializing"
         task_set.status_reason = None
@@ -567,14 +595,24 @@ async def delete_task_set(
     task_set_id: str,
 ) -> None:
     task_set = await get_visible_task_set(
-        session, team_id=team_id, task_set_id=task_set_id,
+        session,
+        team_id=team_id,
+        task_set_id=task_set_id,
     )
-    active_jobs = (await session.execute(
-        select(TaskSetMaterializationJob).where(
-            TaskSetMaterializationJob.task_set_id == task_set_id,
-            TaskSetMaterializationJob.state.in_(_ACTIVE_JOB_STATES),
-        ).with_for_update(),
-    )).scalars().all()
+    active_jobs = (
+        (
+            await session.execute(
+                select(TaskSetMaterializationJob)
+                .where(
+                    TaskSetMaterializationJob.task_set_id == task_set_id,
+                    TaskSetMaterializationJob.state.in_(_ACTIVE_JOB_STATES),
+                )
+                .with_for_update(),
+            )
+        )
+        .scalars()
+        .all()
+    )
     now = datetime.now(UTC)
     task_set.status = "deleted"
     task_set.soft_deleted_at = now

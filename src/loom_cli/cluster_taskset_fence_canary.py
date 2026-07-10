@@ -7,7 +7,6 @@ import contextlib
 import json
 import os
 import re
-import secrets
 import stat
 import subprocess
 import sys
@@ -53,18 +52,12 @@ _EVIDENCE_RELATIVE_PATH = Path("canaries/taskset-lease-fencing/evidence.json")
 # taskset-fence-canary-token key mounted into loom-service.  It is deliberately
 # not a user-provided flag and no raw token enters the rollout evidence tree.
 _STAGING_CANARY_TOKEN_SOURCE = (
-    "file:/shared_work/qianyi/loom-worker-capacity/"
-    "staging-taskset-fence-canary-token"
+    "file:/shared_work/qianyi/loom-worker-capacity/staging-taskset-fence-canary-token"
 )
 
 
 class TaskSetFenceCanaryDeploymentError(RuntimeError):
     """The deployment-only launcher rejected an unsafe canary invocation."""
-
-
-def _new_canary_nonce() -> str:
-    """Return the per-launch 256-bit nonce stored only as a database digest."""
-    return secrets.token_urlsafe(32)
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,19 +299,15 @@ def _release_service_identity(
     *,
     candidate_sha: str,
     image_tag: str,
-) -> tuple[str, str]:
+) -> tuple[str, str | None, str | None]:
     release = _as_mapping(manifest.get("release"))
     cluster_config = _as_mapping(manifest.get("cluster_config"))
     rendered = _as_mapping(manifest.get("rendered_manifest"))
     identities = (
-        _as_mapping(rendered.get("deployment_image_identities"))
-        if rendered is not None
-        else None
+        _as_mapping(rendered.get("deployment_image_identities")) if rendered is not None else None
     )
     service_identities = (
-        _as_mapping(identities.get(_SERVICE_DEPLOYMENT))
-        if identities is not None
-        else None
+        _as_mapping(identities.get(_SERVICE_DEPLOYMENT)) if identities is not None else None
     )
     identity = (
         _as_mapping(service_identities.get(_SERVICE_CONTAINER))
@@ -338,17 +327,13 @@ def _release_service_identity(
     expected_image = identity.get("image")
     if not isinstance(expected_image, str) or not expected_image.endswith(f":{image_tag}"):
         raise _invalid_live_target()
-    expected_digests = {
-        digest
-        for digest in (
-            _digest_from_value(identity.get("repo_digest")),
-            _digest_from_value(identity.get("image_id")),
-        )
-        if digest is not None
-    }
-    if len(expected_digests) != 1:
+    expected_repo_digest = _digest_from_value(identity.get("repo_digest"))
+    expected_image_id = identity.get("image_id")
+    if expected_repo_digest is not None:
+        return expected_image, expected_repo_digest, None
+    if not isinstance(expected_image_id, str) or not expected_image_id:
         raise _invalid_live_target()
-    return expected_image, expected_digests.pop()
+    return expected_image, None, expected_image_id
 
 
 def _pod_is_ready(pod: Mapping[str, Any]) -> bool:
@@ -370,7 +355,9 @@ def _pod_is_ready(pod: Mapping[str, Any]) -> bool:
 def _pod_matches_labels(pod: Mapping[str, Any], labels: Mapping[str, str]) -> bool:
     metadata = _as_mapping(pod.get("metadata"))
     pod_labels = _as_mapping(metadata.get("labels")) if metadata is not None else None
-    return pod_labels is not None and all(pod_labels.get(key) == value for key, value in labels.items())
+    return pod_labels is not None and all(
+        pod_labels.get(key) == value for key, value in labels.items()
+    )
 
 
 def _select_live_target(
@@ -382,7 +369,7 @@ def _select_live_target(
     pods: Mapping[str, Any],
 ) -> LiveTarget:
     """Accept only an observed-ready candidate Deployment and homogeneous Pods."""
-    expected_image, expected_digest = _release_service_identity(
+    expected_image, expected_repo_digest, expected_image_id = _release_service_identity(
         manifest,
         candidate_sha=candidate_sha,
         image_tag=image_tag,
@@ -417,7 +404,9 @@ def _select_live_target(
         or total_replicas != desired_replicas
         or match_labels is None
         or not match_labels
-        or not all(isinstance(key, str) and isinstance(value, str) for key, value in match_labels.items())
+        or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in match_labels.items()
+        )
         or container is None
         or container.get("image") != expected_image
     ):
@@ -426,8 +415,7 @@ def _select_live_target(
     if not isinstance(items, list):
         raise _invalid_live_target()
     selected = [
-        pod for pod in items
-        if isinstance(pod, Mapping) and _pod_matches_labels(pod, match_labels)
+        pod for pod in items if isinstance(pod, Mapping) and _pod_matches_labels(pod, match_labels)
     ]
     if len(selected) != desired_replicas:
         raise _invalid_live_target()
@@ -438,10 +426,15 @@ def _select_live_target(
         pod_status = _as_mapping(pod.get("status"))
         pod_container = _container_by_name(pod_spec, _SERVICE_CONTAINER) if pod_spec else None
         statuses = pod_status.get("containerStatuses") if pod_status is not None else None
-        status_matches = [
-            item for item in statuses
-            if isinstance(item, Mapping) and item.get("name") == _SERVICE_CONTAINER
-        ] if isinstance(statuses, list) else []
+        status_matches = (
+            [
+                item
+                for item in statuses
+                if isinstance(item, Mapping) and item.get("name") == _SERVICE_CONTAINER
+            ]
+            if isinstance(statuses, list)
+            else []
+        )
         if (
             not _pod_is_ready(pod)
             or pod_metadata is None
@@ -450,15 +443,23 @@ def _select_live_target(
             or pod_container is None
             or pod_container.get("image") != expected_image
             or len(status_matches) != 1
-            or _digest_from_value(status_matches[0].get("imageID")) != expected_digest
+            or (
+                _digest_from_value(status_matches[0].get("imageID")) != expected_repo_digest
+                if expected_repo_digest is not None
+                else status_matches[0].get("imageID") != expected_image_id
+            )
         ):
             raise _invalid_live_target()
-        accepted.append(LiveTarget(
-            pod_name=pod_metadata["name"],
-            pod_uid=pod_metadata["uid"],
-            deployment_generation=generation,
-            service_image_digest=expected_digest,
-        ))
+        expected_runtime_identity = expected_repo_digest or expected_image_id
+        assert expected_runtime_identity is not None
+        accepted.append(
+            LiveTarget(
+                pod_name=pod_metadata["name"],
+                pod_uid=pod_metadata["uid"],
+                deployment_generation=generation,
+                service_image_digest=expected_runtime_identity,
+            )
+        )
     return sorted(accepted, key=lambda target: target.pod_name)[0]
 
 
@@ -503,7 +504,9 @@ def _deployment_selector_text(deployment: Mapping[str, Any]) -> str:
     if (
         match_labels is None
         or not match_labels
-        or not all(isinstance(key, str) and isinstance(value, str) for key, value in match_labels.items())
+        or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in match_labels.items()
+        )
     ):
         raise _invalid_live_target()
     return ",".join(f"{key}={value}" for key, value in sorted(match_labels.items()))
@@ -593,13 +596,31 @@ def _validate_evidence(
         raise _invalid_evidence()
     if not isinstance(timestamps, dict):
         raise _invalid_evidence()
-    if set(winner) != {
-        "job_id", "lease_epoch", "owner_fingerprint", "published_generation", "outcome",
-    } or set(loser) != {
-        "job_id", "lease_epoch", "owner_fingerprint", "outcome", "gc_eligible",
-    } or set(task) != {"task_count", "checksum"} or set(timestamps) != {
-        "a_staged_at", "b_published_at", "a_lease_lost_at",
-    }:
+    if (
+        set(winner)
+        != {
+            "job_id",
+            "lease_epoch",
+            "owner_fingerprint",
+            "published_generation",
+            "outcome",
+        }
+        or set(loser)
+        != {
+            "job_id",
+            "lease_epoch",
+            "owner_fingerprint",
+            "outcome",
+            "gc_eligible",
+        }
+        or set(task) != {"task_count", "checksum"}
+        or set(timestamps)
+        != {
+            "a_staged_at",
+            "b_published_at",
+            "a_lease_lost_at",
+        }
+    ):
         raise _invalid_evidence()
     try:
         UUID(str(winner["job_id"]))
@@ -652,7 +673,7 @@ def _kubectl_runner(command: list[str], payload: str) -> subprocess.CompletedPro
 def _internal_command(
     target: LiveTarget,
     *,
-    authorize: bool = False,
+    prepare: bool = False,
 ) -> list[str]:
     command = [
         "kubectl",
@@ -671,20 +692,57 @@ def _internal_command(
         "loom_cli.taskset_fence_canary",
         "--internal",
     ]
-    if authorize:
-        command.append("--authorize")
+    if prepare:
+        command.append("--prepare")
     return command
 
 
 def _internal_contract_payload(contract: TaskSetFenceCanaryContract) -> str:
-    return json.dumps({
-        "candidate_sha": contract.candidate_sha,
-        "image_tag": contract.image_tag,
-        "task_set_id": contract.task_set_id,
-        "expected_task_checksum": contract.expected_task_checksum,
-        "authorization_token": contract.authorization_token,
-        "nonce": contract.nonce,
-    }, sort_keys=True)
+    return json.dumps(
+        {
+            "candidate_sha": contract.candidate_sha,
+            "image_tag": contract.image_tag,
+            "task_set_id": contract.task_set_id,
+            "expected_task_checksum": contract.expected_task_checksum,
+            "authorization_token": contract.authorization_token,
+            "nonce": contract.nonce,
+        },
+        sort_keys=True,
+    )
+
+
+def _preparation_payload(
+    *,
+    candidate_sha: str,
+    image_tag: str,
+    authorization_token: str,
+) -> str:
+    return json.dumps(
+        {
+            "candidate_sha": candidate_sha,
+            "image_tag": image_tag,
+            "authorization_token": authorization_token,
+        },
+        sort_keys=True,
+    )
+
+
+def _contract_from_preparation(
+    payload: object,
+    *,
+    authorization_token: str,
+) -> TaskSetFenceCanaryContract:
+    if not isinstance(payload, Mapping):
+        raise TaskSetFenceCanaryDeploymentError("invalid canary contract")
+    try:
+        return TaskSetFenceCanaryContract.from_mapping(
+            {
+                **payload,
+                "authorization_token": authorization_token,
+            }
+        )
+    except TaskSetFenceCanaryContractError as exc:
+        raise TaskSetFenceCanaryDeploymentError("invalid canary contract") from exc
 
 
 def _run_internal_command(
@@ -705,12 +763,9 @@ def _run_internal_command(
 def run_staging_fence_canary(
     *,
     rollout_dir: Path,
-    task_set_id: str,
-    expected_task_checksum: str,
     authorization_token: str,
     rollout_root: Path = _STAGING_ROLLOUT_ROOT,
     runner: Callable[[list[str], str], subprocess.CompletedProcess[str]] = _kubectl_runner,
-    nonce_factory: Callable[[], str] = _new_canary_nonce,
 ) -> Path:
     """Run the one-shot canary from an already-complete staging rollout only."""
     canonical_rollout_dir = _eligible_candidate(
@@ -722,17 +777,6 @@ def run_staging_fence_canary(
         _assert_directory_identity(canonical_rollout_dir, rollout_fd)
         candidate_sha, image_tag = _candidate_from_rollout(rollout_fd)
         manifest = _candidate_release_manifest(rollout_fd, image_tag=image_tag)
-        try:
-            contract = TaskSetFenceCanaryContract.from_mapping({
-                "candidate_sha": candidate_sha,
-                "image_tag": image_tag,
-                "task_set_id": task_set_id,
-                "expected_task_checksum": expected_task_checksum,
-                "authorization_token": authorization_token,
-                "nonce": nonce_factory(),
-            })
-        except TaskSetFenceCanaryContractError as exc:
-            raise TaskSetFenceCanaryDeploymentError("invalid canary contract") from exc
         evidence_dir_fd = _evidence_directory(rollout_fd)
         try:
             _discard_interrupted_evidence_temps(evidence_dir_fd)
@@ -741,15 +785,25 @@ def run_staging_fence_canary(
             live_target = _live_target_for_candidate(
                 runner=runner,
                 manifest=manifest,
-                candidate_sha=contract.candidate_sha,
-                image_tag=contract.image_tag,
+                candidate_sha=candidate_sha,
+                image_tag=image_tag,
             )
-            payload = _internal_contract_payload(contract)
-            _run_internal_command(
+            prepared = _run_internal_command(
                 runner,
-                command=_internal_command(live_target, authorize=True),
-                payload=payload,
+                command=_internal_command(live_target, prepare=True),
+                payload=_preparation_payload(
+                    candidate_sha=candidate_sha,
+                    image_tag=image_tag,
+                    authorization_token=authorization_token,
+                ),
             )
+            try:
+                contract = _contract_from_preparation(
+                    json.loads(prepared.stdout),
+                    authorization_token=authorization_token,
+                )
+            except json.JSONDecodeError as exc:
+                raise TaskSetFenceCanaryDeploymentError("invalid canary contract") from exc
             authorized_target = _live_target_for_candidate(
                 runner=runner,
                 manifest=manifest,
@@ -758,6 +812,7 @@ def run_staging_fence_canary(
             )
             if authorized_target != live_target:
                 raise _invalid_live_target()
+            payload = _internal_contract_payload(contract)
             result = _run_internal_command(
                 runner,
                 command=_internal_command(live_target),
@@ -766,7 +821,9 @@ def run_staging_fence_canary(
             try:
                 evidence = _validate_evidence(json.loads(result.stdout), contract=contract)
             except json.JSONDecodeError as exc:
-                raise TaskSetFenceCanaryDeploymentError("internal canary evidence was rejected") from exc
+                raise TaskSetFenceCanaryDeploymentError(
+                    "internal canary evidence was rejected"
+                ) from exc
             post_exec_target = _live_target_for_candidate(
                 runner=runner,
                 manifest=manifest,
@@ -799,8 +856,6 @@ def add_subparser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
         required=True,
         help="Completed staging rollout evidence directory under /data/loom-staging/rollouts.",
     )
-    parser.add_argument("--task-set-id", required=True)
-    parser.add_argument("--expected-task-checksum", required=True)
     parser.set_defaults(handler=handle)
 
 
@@ -813,8 +868,6 @@ def handle(args: argparse.Namespace) -> int:
         )
         evidence_path = run_staging_fence_canary(
             rollout_dir=args.rollout_dir,
-            task_set_id=args.task_set_id,
-            expected_task_checksum=args.expected_task_checksum,
             authorization_token=authorization_token,
         )
     except (

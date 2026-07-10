@@ -377,6 +377,51 @@ async def _submit_inline_task_set(
     return response.json()["task_set_id"]
 
 
+async def _seed_canary_system_team(app: FastAPI) -> UUID:
+    """Return the migration-created fixed deployment-owned Team."""
+    async with app.state.session_factory() as session:
+        team = (
+            await session.execute(
+                select(Team).where(Team.name == "admin"),
+            )
+        ).scalar_one_or_none()
+        if team is None:
+            team = Team(name="admin")
+            session.add(team)
+            await session.flush()
+            session.add(TeamQuota(team_id=team.id))
+            await session.commit()
+    return team.id
+
+
+async def _prepare_deployment_fence_canary(app: FastAPI):  # type: ignore[no-untyped-def]
+    from loom_cli.taskset_fence_canary import (
+        TaskSetFenceCanaryPreparationRequest,
+        prepare_deployment_fence_canary,
+    )
+
+    await _seed_canary_system_team(app)
+    settings = app.state.settings
+    return await prepare_deployment_fence_canary(
+        app.state.session_factory,
+        request=TaskSetFenceCanaryPreparationRequest.from_mapping(
+            {
+                "candidate_sha": "a" * 40,
+                "image_tag": "staging-aaaaaaa",
+                "authorization_token": "deployment-only-capability",
+            }
+        ),
+        configured_token="deployment-only-capability",
+        minio_client=app.state.minio_client,
+        artifacts_bucket=settings.artifacts_bucket,
+        taskset_quota_max_count=settings.taskset_quota_max_count_per_team,
+        taskset_quota_max_storage_bytes=settings.taskset_quota_max_storage_bytes_per_team,
+        manifest_max_bytes=settings.taskset_manifest_max_bytes,
+        bundle_max_bytes=settings.taskset_quota_max_bundle_bytes,
+        nonce_factory=lambda: "n" * 43,
+    )
+
+
 def _stage_output_for_lease(
     app: FastAPI,
     *,
@@ -453,10 +498,13 @@ async def test_live_generation_gc_deletes_only_unreferenced_db_generation(
             .values(lease_heartbeat_at=datetime.now(UTC) - timedelta(minutes=5)),
         )
         await session.commit()
-        assert await taskset_materializer.reclaim_stale_jobs(
-            session,
-            claim_ttl_sec=60,
-        ) == 1
+        assert (
+            await taskset_materializer.reclaim_stale_jobs(
+                session,
+                claim_ttl_sec=60,
+            )
+            == 1
+        )
         await session.execute(
             update(TaskSetMaterializationJob)
             .where(TaskSetMaterializationJob.id == lease_a.id)
@@ -500,19 +548,14 @@ async def test_live_generation_gc_deletes_only_unreferenced_db_generation(
         await session.commit()
 
     root = f"tasksets/user/{teams['team_a']}/inline-tasks/"
-    loser_prefix = (
-        f"{root}materializations/{lease_a.job_id}/{lease_a.lease_epoch}/"
-    )
-    winner_prefix = (
-        f"{root}materializations/{lease_b.job_id}/{lease_b.lease_epoch}/"
-    )
+    loser_prefix = f"{root}materializations/{lease_a.job_id}/{lease_a.lease_epoch}/"
+    winner_prefix = f"{root}materializations/{lease_b.job_id}/{lease_b.lease_epoch}/"
     stable_key = f"{root}manifest.yaml"
     legacy_key = f"{root}tasks/legacy/task.toml"
     unknown_key = f"{root}materializations/not-a-uuid/0/tasks/unknown/task.toml"
     malformed_key = f"{root}materializations/{lease_b.job_id}/01/tasks/bad/task.toml"
     future_key = (
-        f"{root}materializations/{lease_b.job_id}/{lease_b.lease_epoch + 1}/"
-        "tasks/future/task.toml"
+        f"{root}materializations/{lease_b.job_id}/{lease_b.lease_epoch + 1}/tasks/future/task.toml"
     )
     for key in (stable_key, legacy_key, unknown_key, malformed_key, future_key):
         app.state.minio_client.put_object(
@@ -627,27 +670,31 @@ async def test_live_generation_gc_uses_durable_cursor_across_skipped_clock_resta
     for task_set_index in range(101):
         slug = f"gc-window-{task_set_index:03d}"
         task_set_id = f"ts/{teams['team_a']}/{slug}"
-        task_sets.append(TaskSet(
-            id=task_set_id,
-            owning_team_id=teams["team_a"],
-            slug=slug,
-            display_name=f"GC window {task_set_index}",
-            visibility="private",
-            status="failed",
-            intents=["trajectory_generation"],
-            manifest_blob_uri=f"s3://artifacts/{slug}/manifest.yaml",
-            created_at=created_at + timedelta(seconds=task_set_index),
-        ))
+        task_sets.append(
+            TaskSet(
+                id=task_set_id,
+                owning_team_id=teams["team_a"],
+                slug=slug,
+                display_name=f"GC window {task_set_index}",
+                visibility="private",
+                status="failed",
+                intents=["trajectory_generation"],
+                manifest_blob_uri=f"s3://artifacts/{slug}/manifest.yaml",
+                created_at=created_at + timedelta(seconds=task_set_index),
+            )
+        )
         job_count = 1 if task_set_index < 100 else 101
         for job_index in range(job_count):
-            jobs.append(TaskSetMaterializationJob(
-                id=(tail_job_id if job_index == 100 else uuid4()),
-                task_set_id=task_set_id,
-                owning_team_id=teams["team_a"],
-                state="failed",
-                lease_epoch=1,
-                enqueued_at=created_at + timedelta(seconds=job_index),
-            ))
+            jobs.append(
+                TaskSetMaterializationJob(
+                    id=(tail_job_id if job_index == 100 else uuid4()),
+                    task_set_id=task_set_id,
+                    owning_team_id=teams["team_a"],
+                    state="failed",
+                    lease_epoch=1,
+                    enqueued_at=created_at + timedelta(seconds=job_index),
+                )
+            )
 
     async with app.state.session_factory() as session:
         session.add_all(task_sets)
@@ -655,8 +702,7 @@ async def test_live_generation_gc_uses_durable_cursor_across_skipped_clock_resta
         await session.commit()
 
     orphan_prefix = (
-        f"tasksets/user/{teams['team_a']}/gc-window-100/materializations/"
-        f"{tail_job_id}/1/"
+        f"tasksets/user/{teams['team_a']}/gc-window-100/materializations/{tail_job_id}/1/"
     )
     orphan_key = f"{orphan_prefix}tasks/orphan/task.toml"
     app.state.minio_client.put_object(
@@ -680,18 +726,22 @@ async def test_live_generation_gc_uses_durable_cursor_across_skipped_clock_resta
         # wall-clock scheme would observe only 0, 2, 4, and 6 and never leave
         # the first TaskSet page; durable scheduling must not consult it.
         async with app.state.session_factory() as session:
-            results.append(await purge_abandoned_materialization_generations(
-                session,
-                minio_client=app.state.minio_client,
-                artifacts_bucket=app.state.settings.artifacts_bucket,
-                task_set_limit=100,
-                job_limit=100,
-                object_delete_budget=10,
-            ))
+            results.append(
+                await purge_abandoned_materialization_generations(
+                    session,
+                    minio_client=app.state.minio_client,
+                    artifacts_bucket=app.state.settings.artifacts_bucket,
+                    task_set_limit=100,
+                    job_limit=100,
+                    object_delete_budget=10,
+                )
+            )
         async with app.state.session_factory() as session:
-            next_sweep = (await session.execute(
-                select(TaskSetGenerationGcCursor.next_sweep),
-            )).scalar_one()
+            next_sweep = (
+                await session.execute(
+                    select(TaskSetGenerationGcCursor.next_sweep),
+                )
+            ).scalar_one()
         assert next_sweep == expected_next_sweep
 
     assert skipped_clock_starts == [0, 2, 4, 6]
@@ -710,28 +760,30 @@ async def test_live_generation_gc_repeats_unadvanced_cursor_after_cancellation(
     job_id = uuid4()
     task_set_id = f"ts/{teams['team_a']}/gc-cancelled"
     async with app.state.session_factory() as session:
-        session.add(TaskSet(
-            id=task_set_id,
-            owning_team_id=teams["team_a"],
-            slug="gc-cancelled",
-            display_name="GC cancelled",
-            visibility="private",
-            status="failed",
-            intents=["trajectory_generation"],
-            manifest_blob_uri="s3://artifacts/gc-cancelled/manifest.yaml",
-        ))
-        session.add(TaskSetMaterializationJob(
-            id=job_id,
-            task_set_id=task_set_id,
-            owning_team_id=teams["team_a"],
-            state="failed",
-            lease_epoch=1,
-        ))
+        session.add(
+            TaskSet(
+                id=task_set_id,
+                owning_team_id=teams["team_a"],
+                slug="gc-cancelled",
+                display_name="GC cancelled",
+                visibility="private",
+                status="failed",
+                intents=["trajectory_generation"],
+                manifest_blob_uri="s3://artifacts/gc-cancelled/manifest.yaml",
+            )
+        )
+        session.add(
+            TaskSetMaterializationJob(
+                id=job_id,
+                task_set_id=task_set_id,
+                owning_team_id=teams["team_a"],
+                state="failed",
+                lease_epoch=1,
+            )
+        )
         await session.commit()
 
-    orphan_prefix = (
-        f"tasksets/user/{teams['team_a']}/gc-cancelled/materializations/{job_id}/1/"
-    )
+    orphan_prefix = f"tasksets/user/{teams['team_a']}/gc-cancelled/materializations/{job_id}/1/"
     orphan_key = f"{orphan_prefix}tasks/orphan/task.toml"
     app.state.minio_client.put_object(
         Bucket=app.state.settings.artifacts_bucket,
@@ -753,9 +805,11 @@ async def test_live_generation_gc_repeats_unadvanced_cursor_after_cancellation(
             )
 
     async with app.state.session_factory() as session:
-        next_sweep_after_cancellation = (await session.execute(
-            select(TaskSetGenerationGcCursor.next_sweep),
-        )).scalar_one()
+        next_sweep_after_cancellation = (
+            await session.execute(
+                select(TaskSetGenerationGcCursor.next_sweep),
+            )
+        ).scalar_one()
     assert next_sweep_after_cancellation == 0
     assert orphan_key in _object_keys(app, prefix=orphan_key)
 
@@ -773,9 +827,11 @@ async def test_live_generation_gc_repeats_unadvanced_cursor_after_cancellation(
 
     assert result.deleted_objects == 1
     async with app.state.session_factory() as session:
-        next_sweep_after_retry = (await session.execute(
-            select(TaskSetGenerationGcCursor.next_sweep),
-        )).scalar_one()
+        next_sweep_after_retry = (
+            await session.execute(
+                select(TaskSetGenerationGcCursor.next_sweep),
+            )
+        ).scalar_one()
     assert next_sweep_after_retry == 1
     assert _object_keys(app, prefix=orphan_prefix) == set()
 
@@ -787,29 +843,31 @@ async def test_soft_delete_gc_uses_taskset_root_delimiter(materialization_setup)
     alpha_id = f"ts/{teams['team_a']}/alpha"
     alpha_next_id = f"ts/{teams['team_a']}/alpha-next"
     async with app.state.session_factory() as session:
-        session.add_all([
-            TaskSet(
-                id=alpha_id,
-                owning_team_id=teams["team_a"],
-                slug="alpha",
-                display_name="Alpha",
-                visibility="private",
-                status="deleted",
-                intents=["trajectory_generation"],
-                manifest_blob_uri="s3://artifacts/alpha/manifest.yaml",
-                soft_deleted_at=deleted_at,
-            ),
-            TaskSet(
-                id=alpha_next_id,
-                owning_team_id=teams["team_a"],
-                slug="alpha-next",
-                display_name="Alpha Next",
-                visibility="private",
-                status="ready",
-                intents=["trajectory_generation"],
-                manifest_blob_uri="s3://artifacts/alpha-next/manifest.yaml",
-            ),
-        ])
+        session.add_all(
+            [
+                TaskSet(
+                    id=alpha_id,
+                    owning_team_id=teams["team_a"],
+                    slug="alpha",
+                    display_name="Alpha",
+                    visibility="private",
+                    status="deleted",
+                    intents=["trajectory_generation"],
+                    manifest_blob_uri="s3://artifacts/alpha/manifest.yaml",
+                    soft_deleted_at=deleted_at,
+                ),
+                TaskSet(
+                    id=alpha_next_id,
+                    owning_team_id=teams["team_a"],
+                    slug="alpha-next",
+                    display_name="Alpha Next",
+                    visibility="private",
+                    status="ready",
+                    intents=["trajectory_generation"],
+                    manifest_blob_uri="s3://artifacts/alpha-next/manifest.yaml",
+                ),
+            ]
+        )
         await session.commit()
 
     alpha_key = f"tasksets/user/{teams['team_a']}/alpha/manifest.yaml"
@@ -822,12 +880,15 @@ async def test_soft_delete_gc_uses_taskset_root_delimiter(materialization_setup)
         )
 
     async with app.state.session_factory() as session:
-        assert await purge_expired_task_sets(
-            session,
-            minio_client=app.state.minio_client,
-            artifacts_bucket=app.state.settings.artifacts_bucket,
-            retention_days=7,
-        ) == 1
+        assert (
+            await purge_expired_task_sets(
+                session,
+                minio_client=app.state.minio_client,
+                artifacts_bucket=app.state.settings.artifacts_bucket,
+                retention_days=7,
+            )
+            == 1
+        )
 
     assert alpha_key not in _object_keys(app, prefix=alpha_key)
     assert alpha_next_key in _object_keys(app, prefix=alpha_next_key)
@@ -842,12 +903,18 @@ async def test_rebuild_quota_counts_existing_taskset_root_bytes(
     await _run_materializer_once(app)
 
     async with app.state.session_factory() as session:
-        published_rows = tuple(sorted(
-            (row.id, row.source)
-            for row in (await session.execute(
-                select(Task).where(Task.task_set_id == task_set_id),
-            )).scalars().all()
-        ))
+        published_rows = tuple(
+            sorted(
+                (row.id, row.source)
+                for row in (
+                    await session.execute(
+                        select(Task).where(Task.task_set_id == task_set_id),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        )
         published_bytes = team_taskset_storage_bytes(
             app.state.minio_client,
             bucket=app.state.settings.artifacts_bucket,
@@ -867,12 +934,18 @@ async def test_rebuild_quota_counts_existing_taskset_root_bytes(
     await _run_materializer_once(app)
 
     async with app.state.session_factory() as session:
-        rows_after = tuple(sorted(
-            (row.id, row.source)
-            for row in (await session.execute(
-                select(Task).where(Task.task_set_id == task_set_id),
-            )).scalars().all()
-        ))
+        rows_after = tuple(
+            sorted(
+                (row.id, row.source)
+                for row in (
+                    await session.execute(
+                        select(Task).where(Task.task_set_id == task_set_id),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        )
         latest_job = await get_latest_job(session, task_set_id)
     assert latest_job is not None
     assert rows_after == published_rows
@@ -889,11 +962,13 @@ async def test_delete_locks_active_job_before_task_set_and_revokes_lease(
     claimed_at = datetime.now(UTC)
 
     async with app.state.session_factory() as session:
-        job = (await session.execute(
-            select(TaskSetMaterializationJob).where(
-                TaskSetMaterializationJob.task_set_id == task_set_id,
-            ),
-        )).scalar_one()
+        job = (
+            await session.execute(
+                select(TaskSetMaterializationJob).where(
+                    TaskSetMaterializationJob.task_set_id == task_set_id,
+                ),
+            )
+        ).scalar_one()
         job.state = "running"
         job.claimed_by = "delete-lock-order-owner"
         job.claimed_at = claimed_at
@@ -985,10 +1060,13 @@ async def test_materialization_reclaims_only_stale_lease_heartbeats(
             ),
         )
         await session.commit()
-        assert await taskset_materializer.reclaim_stale_jobs(
-            session,
-            claim_ttl_sec=60,
-        ) == 0
+        assert (
+            await taskset_materializer.reclaim_stale_jobs(
+                session,
+                claim_ttl_sec=60,
+            )
+            == 0
+        )
 
     async with app.state.session_factory() as session:
         await session.execute(
@@ -997,10 +1075,13 @@ async def test_materialization_reclaims_only_stale_lease_heartbeats(
             .values(lease_heartbeat_at=now - timedelta(minutes=5)),
         )
         await session.commit()
-        assert await taskset_materializer.reclaim_stale_jobs(
-            session,
-            claim_ttl_sec=60,
-        ) == 1
+        assert (
+            await taskset_materializer.reclaim_stale_jobs(
+                session,
+                claim_ttl_sec=60,
+            )
+            == 1
+        )
         await session.execute(
             update(TaskSetMaterializationJob)
             .where(TaskSetMaterializationJob.id == lease_a.id)
@@ -1089,27 +1170,38 @@ async def test_materialization_heartbeats_while_blocked_in_threaded_work(
         # test TTL while the blocking ``to_thread`` materialization is still live.
         await asyncio.wait_for(enough_heartbeats.wait(), timeout=5)
         async with app.state.session_factory() as session:
-            assert await taskset_materializer.reclaim_stale_jobs(
-                session,
-                claim_ttl_sec=1,
-            ) == 0
+            assert (
+                await taskset_materializer.reclaim_stale_jobs(
+                    session,
+                    claim_ttl_sec=1,
+                )
+                == 0
+            )
             job_while_blocked = await session.get(TaskSetMaterializationJob, lease.id)
         assert job_while_blocked is not None
         assert job_while_blocked.state == "running"
         assert job_while_blocked.lease_epoch == lease.lease_epoch
     finally:
         release_materialization.set()
-        owner_result = (await asyncio.wait_for(
-            asyncio.gather(owner_task, return_exceptions=True),
-            timeout=5,
-        ))[0]
+        owner_result = (
+            await asyncio.wait_for(
+                asyncio.gather(owner_task, return_exceptions=True),
+                timeout=5,
+            )
+        )[0]
 
     assert owner_result is None
     async with app.state.session_factory() as session:
         job_after = await session.get(TaskSetMaterializationJob, lease.id)
-        rows_after = (await session.execute(
-            select(Task).where(Task.task_set_id == task_set_id),
-        )).scalars().all()
+        rows_after = (
+            (
+                await session.execute(
+                    select(Task).where(Task.task_set_id == task_set_id),
+                )
+            )
+            .scalars()
+            .all()
+        )
     assert job_after is not None
     assert job_after.state == "succeeded"
     assert [row.id for row in rows_after] == [f"{task_set_id}/tasks/heartbeat-owner"]
@@ -1190,18 +1282,26 @@ async def test_cancelled_materializer_cannot_publish_after_blocking_work_resumes
         )
     finally:
         release_materialization.set()
-        owner_result = (await asyncio.wait_for(
-            asyncio.gather(owner_task, return_exceptions=True),
-            timeout=5,
-        ))[0]
+        owner_result = (
+            await asyncio.wait_for(
+                asyncio.gather(owner_task, return_exceptions=True),
+                timeout=5,
+            )
+        )[0]
 
     assert isinstance(owner_result, taskset_materializer.LeaseLost)
     async with app.state.session_factory() as session:
         job_after = await session.get(TaskSetMaterializationJob, lease.id)
         task_set_after = await session.get(TaskSet, task_set_id)
-        rows_after = (await session.execute(
-            select(Task).where(Task.task_set_id == task_set_id),
-        )).scalars().all()
+        rows_after = (
+            (
+                await session.execute(
+                    select(Task).where(Task.task_set_id == task_set_id),
+                )
+            )
+            .scalars()
+            .all()
+        )
     assert job_after is not None
     assert task_set_after is not None
     assert (
@@ -1297,9 +1397,15 @@ async def test_crash_after_staged_upload_leaves_only_orphaned_generation_output(
     async with app.state.session_factory() as session:
         job_after = await session.get(TaskSetMaterializationJob, lease.id)
         task_set_after = await session.get(TaskSet, task_set_id)
-        rows_after = (await session.execute(
-            select(Task).where(Task.task_set_id == task_set_id),
-        )).scalars().all()
+        rows_after = (
+            (
+                await session.execute(
+                    select(Task).where(Task.task_set_id == task_set_id),
+                )
+            )
+            .scalars()
+            .all()
+        )
     assert job_after is not None
     assert task_set_after is not None
     assert (
@@ -1314,10 +1420,13 @@ async def test_crash_after_staged_upload_leaves_only_orphaned_generation_output(
         task_set_after.evaluation_ready,
     ) == ("materializing", 0, False)
     assert rows_after == []
-    assert app.state.minio_client.get_object(
-        Bucket=app.state.settings.artifacts_bucket,
-        Key=output_key,
-    )["Body"].read() == b"version = '1'\n"
+    assert (
+        app.state.minio_client.get_object(
+            Bucket=app.state.settings.artifacts_bucket,
+            Key=output_key,
+        )["Body"].read()
+        == b"version = '1'\n"
+    )
 
 
 @pytest.mark.asyncio
@@ -1391,10 +1500,13 @@ async def test_materialization_stale_owner_cannot_overwrite_reclaimed_winner(
             .values(claimed_at=stale_at, lease_heartbeat_at=stale_at),
         )
         await session.commit()
-        assert await taskset_materializer.reclaim_stale_jobs(
-            session,
-            claim_ttl_sec=60,
-        ) == 1
+        assert (
+            await taskset_materializer.reclaim_stale_jobs(
+                session,
+                claim_ttl_sec=60,
+            )
+            == 1
+        )
         await session.execute(
             update(TaskSetMaterializationJob)
             .where(TaskSetMaterializationJob.id == lease_a.id)
@@ -1494,10 +1606,13 @@ async def test_materialization_staged_loser_cannot_publish_over_winner(
             .values(lease_heartbeat_at=datetime.now(UTC) - timedelta(minutes=5)),
         )
         await session.commit()
-        assert await taskset_materializer.reclaim_stale_jobs(
-            session,
-            claim_ttl_sec=60,
-        ) == 1
+        assert (
+            await taskset_materializer.reclaim_stale_jobs(
+                session,
+                claim_ttl_sec=60,
+            )
+            == 1
+        )
         await session.execute(
             update(TaskSetMaterializationJob)
             .where(TaskSetMaterializationJob.id == lease_a.id)
@@ -1531,12 +1646,18 @@ async def test_materialization_staged_loser_cannot_publish_over_winner(
         )
 
     async with app.state.session_factory() as session:
-        winner_rows_before = tuple(sorted(
-            (row.id, row.source)
-            for row in (await session.execute(
-                select(Task).where(Task.task_set_id == task_set_id),
-            )).scalars().all()
-        ))
+        winner_rows_before = tuple(
+            sorted(
+                (row.id, row.source)
+                for row in (
+                    await session.execute(
+                        select(Task).where(Task.task_set_id == task_set_id),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        )
         winner_task_set_before = await session.get(TaskSet, task_set_id)
         winner_job_before = await session.get(TaskSetMaterializationJob, lease_b.id)
     assert winner_task_set_before is not None
@@ -1548,9 +1669,7 @@ async def test_materialization_staged_loser_cannot_publish_over_winner(
         winner_task_set_before.evaluation_ready,
         winner_job_before.published_materialization_generation,
     )
-    assert winner_rows_before == (
-        (f"{task_set_id}/tasks/winner-b", output_b.task_rows[0].source),
-    )
+    assert winner_rows_before == ((f"{task_set_id}/tasks/winner-b", output_b.task_rows[0].source),)
     assert f"/materializations/{lease_b.job_id}/{lease_b.lease_epoch}/tasks/" in (
         output_b.task_rows[0].source
     )
@@ -1578,12 +1697,18 @@ async def test_materialization_staged_loser_cannot_publish_over_winner(
             )
 
     async with app.state.session_factory() as session:
-        winner_rows_after = tuple(sorted(
-            (row.id, row.source)
-            for row in (await session.execute(
-                select(Task).where(Task.task_set_id == task_set_id),
-            )).scalars().all()
-        ))
+        winner_rows_after = tuple(
+            sorted(
+                (row.id, row.source)
+                for row in (
+                    await session.execute(
+                        select(Task).where(Task.task_set_id == task_set_id),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        )
         winner_task_set_after = await session.get(TaskSet, task_set_id)
         winner_job_after = await session.get(TaskSetMaterializationJob, lease_b.id)
     assert winner_task_set_after is not None
@@ -1606,11 +1731,13 @@ async def test_materialization_relinquish_revokes_a_current_lease_for_reclaim(
     await _submit_inline_task_set(app, token=tokens["team_a"])
 
     async with app.state.session_factory() as session:
-        lease_a = (await taskset_materializer._claim_jobs(
-            session,
-            batch_size=1,
-            claimed_by="test-relinquish-a",
-        ))[0]
+        lease_a = (
+            await taskset_materializer._claim_jobs(
+                session,
+                batch_size=1,
+                claimed_by="test-relinquish-a",
+            )
+        )[0]
     async with app.state.session_factory() as session:
         await taskset_materializer._start_job(session, lease=lease_a)
     async with app.state.session_factory() as session:
@@ -1630,12 +1757,14 @@ async def test_materialization_relinquish_revokes_a_current_lease_for_reclaim(
     assert job_after_relinquish.next_attempt_at is None
 
     async with app.state.session_factory() as session:
-        lease_b = (await taskset_materializer._claim_jobs(
-            session,
-            batch_size=1,
-            claimed_by="test-relinquish-b",
-            job_id=lease_a.job_id,
-        ))[0]
+        lease_b = (
+            await taskset_materializer._claim_jobs(
+                session,
+                batch_size=1,
+                claimed_by="test-relinquish-b",
+                job_id=lease_a.job_id,
+            )
+        )[0]
     assert lease_b.job_id == lease_a.job_id
     assert lease_b.lease_epoch > lease_a.lease_epoch
 
@@ -1654,11 +1783,13 @@ async def test_materialization_can_stage_a_current_lease_before_publication(
     settings = app.state.settings
 
     async with app.state.session_factory() as session:
-        lease = (await taskset_materializer._claim_jobs(
-            session,
-            batch_size=1,
-            claimed_by="test-stage-only",
-        ))[0]
+        lease = (
+            await taskset_materializer._claim_jobs(
+                session,
+                batch_size=1,
+                claimed_by="test-stage-only",
+            )
+        )[0]
 
     staged_lease, staged_task_set_id, output = await taskset_materializer.stage_claimed_job(
         app.state.session_factory,
@@ -1685,9 +1816,15 @@ async def test_materialization_can_stage_a_current_lease_before_publication(
     assert output.task_rows
     async with app.state.session_factory() as session:
         job = await session.get(TaskSetMaterializationJob, lease.job_id)
-        published_rows = (await session.execute(
-            select(Task).where(Task.task_set_id == task_set_id),
-        )).scalars().all()
+        published_rows = (
+            (
+                await session.execute(
+                    select(Task).where(Task.task_set_id == task_set_id),
+                )
+            )
+            .scalars()
+            .all()
+        )
     assert job is not None
     assert job.state == "running"
     assert job.claimed_by == lease.claimed_by
@@ -1695,41 +1832,93 @@ async def test_materialization_can_stage_a_current_lease_before_publication(
 
 
 @pytest.mark.asyncio
-async def test_deployment_fence_canary_requires_a_durable_one_use_authorization(
+async def test_deployment_fence_canary_preparation_creates_a_system_owned_one_use_authorization(
     materialization_setup,
 ) -> None:
-    """A fresh ordinary TaskSet is never a canary merely because it matches a checksum."""
+    """A prepared canary is created and bound under deployment control only."""
     from loom_cli.taskset_fence_canary import (
         TaskSetFenceCanaryContract,
+        TaskSetFenceCanaryPreparationRequest,
         TaskSetFenceCanaryRuntimeError,
         _claim_authorized_disposable_job,
-        register_deployment_fence_authorization,
+        prepare_deployment_fence_canary,
     )
 
     app, tokens, _teams = materialization_setup
-    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
-    contract = TaskSetFenceCanaryContract.from_mapping({
-        "candidate_sha": "a" * 40,
-        "image_tag": "staging-aaaaaaa",
-        "task_set_id": task_set_id,
-        "expected_task_checksum": "c" * 64,
-        "authorization_token": "deployment-only-capability",
-        "nonce": "n" * 43,
-    })
+    system_team_id = await _seed_canary_system_team(app)
+    user_task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    settings = app.state.settings
+    contract = await prepare_deployment_fence_canary(
+        app.state.session_factory,
+        request=TaskSetFenceCanaryPreparationRequest.from_mapping(
+            {
+                "candidate_sha": "a" * 40,
+                "image_tag": "staging-aaaaaaa",
+                "authorization_token": "deployment-only-capability",
+            }
+        ),
+        configured_token="deployment-only-capability",
+        minio_client=app.state.minio_client,
+        artifacts_bucket=settings.artifacts_bucket,
+        taskset_quota_max_count=settings.taskset_quota_max_count_per_team,
+        taskset_quota_max_storage_bytes=settings.taskset_quota_max_storage_bytes_per_team,
+        manifest_max_bytes=settings.taskset_manifest_max_bytes,
+        bundle_max_bytes=settings.taskset_quota_max_bundle_bytes,
+        nonce_factory=lambda: "n" * 43,
+    )
 
-    with pytest.raises(TaskSetFenceCanaryRuntimeError) as missing_authorization:
+    assert contract.task_set_id != user_task_set_id
+    assert contract.expected_task_checksum
+    async with app.state.session_factory() as session:
+        canary_task_set = await session.get(TaskSet, contract.task_set_id)
+        authorization = await session.get(
+            TaskSetFenceCanaryAuthorization,
+            contract.task_set_id,
+        )
+    assert canary_task_set is not None
+    assert canary_task_set.owning_team_id == system_team_id
+    assert authorization is not None
+    assert authorization.expected_task_checksum == contract.expected_task_checksum
+
+    user_contract = TaskSetFenceCanaryContract.from_mapping(
+        {
+            "candidate_sha": "a" * 40,
+            "image_tag": "staging-aaaaaaa",
+            "task_set_id": user_task_set_id,
+            "expected_task_checksum": "c" * 64,
+            "authorization_token": "deployment-only-capability",
+            "nonce": "n" * 43,
+        }
+    )
+
+    async with app.state.session_factory() as session:
+        user_job = (
+            await session.execute(
+                select(TaskSetMaterializationJob).where(
+                    TaskSetMaterializationJob.task_set_id == user_task_set_id,
+                )
+            )
+        ).scalar_one()
+        session.add(
+            TaskSetFenceCanaryAuthorization(
+                task_set_id=user_task_set_id,
+                materialization_job_id=user_job.id,
+                candidate_sha=user_contract.candidate_sha,
+                image_tag=user_contract.image_tag,
+                expected_task_checksum=user_contract.expected_task_checksum,
+                nonce_digest=hashlib.sha256(user_contract.nonce.encode()).digest(),
+            )
+        )
+        await session.commit()
+
+    with pytest.raises(TaskSetFenceCanaryRuntimeError) as user_authorization:
         await _claim_authorized_disposable_job(
             app.state.session_factory,
-            contract=contract,
+            contract=user_contract,
             owner="canary-owner-a",
         )
-    assert str(missing_authorization.value) == "canary authorization was not available"
+    assert str(user_authorization.value) == "canary authorization was not available"
 
-    await register_deployment_fence_authorization(
-        app.state.session_factory,
-        contract=contract,
-        configured_token="deployment-only-capability",
-    )
     lease = await _claim_authorized_disposable_job(
         app.state.session_factory,
         contract=contract,
@@ -1746,12 +1935,17 @@ async def test_deployment_fence_canary_requires_a_durable_one_use_authorization(
     assert str(consumed_authorization.value) == "canary authorization was not available"
 
     async with app.state.session_factory() as session:
-        authorization = await session.get(TaskSetFenceCanaryAuthorization, task_set_id)
-        job = (await session.execute(
-            select(TaskSetMaterializationJob).where(
-                TaskSetMaterializationJob.task_set_id == task_set_id,
-            ),
-        )).scalar_one()
+        authorization = await session.get(
+            TaskSetFenceCanaryAuthorization,
+            contract.task_set_id,
+        )
+        job = (
+            await session.execute(
+                select(TaskSetMaterializationJob).where(
+                    TaskSetMaterializationJob.task_set_id == contract.task_set_id,
+                ),
+            )
+        ).scalar_one()
     assert authorization is not None
     assert authorization.consumed_at is not None
     assert authorization.materialization_job_id == lease.job_id
@@ -1768,32 +1962,20 @@ async def test_deployment_fence_canary_rejects_bound_contract_mismatch_without_c
         TaskSetFenceCanaryContract,
         TaskSetFenceCanaryRuntimeError,
         _claim_authorized_disposable_job,
-        register_deployment_fence_authorization,
     )
 
-    app, tokens, _teams = materialization_setup
-    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
-    contract = TaskSetFenceCanaryContract.from_mapping({
-        "candidate_sha": "a" * 40,
-        "image_tag": "staging-aaaaaaa",
-        "task_set_id": task_set_id,
-        "expected_task_checksum": "c" * 64,
-        "authorization_token": "deployment-only-capability",
-        "nonce": "n" * 43,
-    })
-    await register_deployment_fence_authorization(
-        app.state.session_factory,
-        contract=contract,
-        configured_token="deployment-only-capability",
+    app, _tokens, _teams = materialization_setup
+    contract = await _prepare_deployment_fence_canary(app)
+    mismatched_contract = TaskSetFenceCanaryContract.from_mapping(
+        {
+            "candidate_sha": "d" * 40,
+            "image_tag": "staging-ddddddd",
+            "task_set_id": contract.task_set_id,
+            "expected_task_checksum": contract.expected_task_checksum,
+            "authorization_token": "deployment-only-capability",
+            "nonce": "n" * 43,
+        }
     )
-    mismatched_contract = TaskSetFenceCanaryContract.from_mapping({
-        "candidate_sha": "d" * 40,
-        "image_tag": "staging-ddddddd",
-        "task_set_id": task_set_id,
-        "expected_task_checksum": "c" * 64,
-        "authorization_token": "deployment-only-capability",
-        "nonce": "n" * 43,
-    })
 
     with pytest.raises(TaskSetFenceCanaryRuntimeError) as exc_info:
         await _claim_authorized_disposable_job(
@@ -1804,12 +1986,17 @@ async def test_deployment_fence_canary_rejects_bound_contract_mismatch_without_c
     assert str(exc_info.value) == "canary authorization was not available"
 
     async with app.state.session_factory() as session:
-        authorization = await session.get(TaskSetFenceCanaryAuthorization, task_set_id)
-        job = (await session.execute(
-            select(TaskSetMaterializationJob).where(
-                TaskSetMaterializationJob.task_set_id == task_set_id,
-            ),
-        )).scalar_one()
+        authorization = await session.get(
+            TaskSetFenceCanaryAuthorization,
+            contract.task_set_id,
+        )
+        job = (
+            await session.execute(
+                select(TaskSetMaterializationJob).where(
+                    TaskSetMaterializationJob.task_set_id == contract.task_set_id,
+                ),
+            )
+        ).scalar_one()
     assert authorization is not None
     assert authorization.consumed_at is None
     assert job.state == "queued"
@@ -1822,32 +2009,18 @@ async def test_deployment_fence_canary_rechecks_a_deleted_task_set_at_claim(
 ) -> None:
     """Deletion after authorization cannot race into a canary materialization claim."""
     from loom_cli.taskset_fence_canary import (
-        TaskSetFenceCanaryContract,
         TaskSetFenceCanaryRuntimeError,
         _claim_authorized_disposable_job,
-        register_deployment_fence_authorization,
     )
 
-    app, tokens, teams = materialization_setup
-    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
-    contract = TaskSetFenceCanaryContract.from_mapping({
-        "candidate_sha": "a" * 40,
-        "image_tag": "staging-aaaaaaa",
-        "task_set_id": task_set_id,
-        "expected_task_checksum": "c" * 64,
-        "authorization_token": "deployment-only-capability",
-        "nonce": "n" * 43,
-    })
-    await register_deployment_fence_authorization(
-        app.state.session_factory,
-        contract=contract,
-        configured_token="deployment-only-capability",
-    )
+    app, _tokens, _teams = materialization_setup
+    system_team_id = await _seed_canary_system_team(app)
+    contract = await _prepare_deployment_fence_canary(app)
     async with app.state.session_factory() as session:
         await delete_task_set(
             session,
-            team_id=teams["team_a"],
-            task_set_id=task_set_id,
+            team_id=system_team_id,
+            task_set_id=contract.task_set_id,
         )
 
     with pytest.raises(TaskSetFenceCanaryRuntimeError) as exc_info:
@@ -1859,12 +2032,17 @@ async def test_deployment_fence_canary_rechecks_a_deleted_task_set_at_claim(
     assert str(exc_info.value) == "canary authorization was not available"
 
     async with app.state.session_factory() as session:
-        job = (await session.execute(
-            select(TaskSetMaterializationJob).where(
-                TaskSetMaterializationJob.task_set_id == task_set_id,
-            ),
-        )).scalar_one()
-        authorization = await session.get(TaskSetFenceCanaryAuthorization, task_set_id)
+        job = (
+            await session.execute(
+                select(TaskSetMaterializationJob).where(
+                    TaskSetMaterializationJob.task_set_id == contract.task_set_id,
+                ),
+            )
+        ).scalar_one()
+        authorization = await session.get(
+            TaskSetFenceCanaryAuthorization,
+            contract.task_set_id,
+        )
     assert job.state == "cancelled"
     assert job.claimed_by is None
     assert authorization is not None
@@ -1878,37 +2056,24 @@ async def test_deployment_fence_canary_relinquishes_a_post_stage_mismatch(
 ) -> None:
     """A mismatched staged output cannot leave the consumed canary job running."""
     from loom_cli.taskset_fence_canary import (
-        TaskSetFenceCanaryContract,
         TaskSetFenceCanaryRuntimeError,
-        register_deployment_fence_authorization,
         run_deployment_fence_canary,
     )
 
-    app, tokens, _teams = materialization_setup
-    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    app, _tokens, _teams = materialization_setup
     settings = app.state.settings
-    contract = TaskSetFenceCanaryContract.from_mapping({
-        "candidate_sha": "a" * 40,
-        "image_tag": "staging-aaaaaaa",
-        "task_set_id": task_set_id,
-        "expected_task_checksum": "c" * 64,
-        "authorization_token": "deployment-only-capability",
-        "nonce": "n" * 43,
-    })
-    await register_deployment_fence_authorization(
-        app.state.session_factory,
-        contract=contract,
-        configured_token="deployment-only-capability",
-    )
+    contract = await _prepare_deployment_fence_canary(app)
 
     def stage_wrong_checksum(**_kwargs: object) -> MaterializeOutput:
         return MaterializeOutput(
-            task_rows=[TaskRowDraft(
-                id=f"{task_set_id}/tasks/mismatch",
-                checksum="d" * 64,
-                config={},
-                source="s3://private-bucket/canary-mismatch",
-            )],
+            task_rows=[
+                TaskRowDraft(
+                    id=f"{contract.task_set_id}/tasks/mismatch",
+                    checksum="d" * 64,
+                    config={},
+                    source="s3://private-bucket/canary-mismatch",
+                )
+            ],
             task_count=1,
             status="ready",
             evaluation_ready=True,
@@ -1941,12 +2106,17 @@ async def test_deployment_fence_canary_relinquishes_a_post_stage_mismatch(
     assert str(exc_info.value) == "canary staged output did not match contract"
 
     async with app.state.session_factory() as session:
-        job = (await session.execute(
-            select(TaskSetMaterializationJob).where(
-                TaskSetMaterializationJob.task_set_id == task_set_id,
-            ),
-        )).scalar_one()
-        authorization = await session.get(TaskSetFenceCanaryAuthorization, task_set_id)
+        job = (
+            await session.execute(
+                select(TaskSetMaterializationJob).where(
+                    TaskSetMaterializationJob.task_set_id == contract.task_set_id,
+                ),
+            )
+        ).scalar_one()
+        authorization = await session.get(
+            TaskSetFenceCanaryAuthorization,
+            contract.task_set_id,
+        )
     assert job.state == "queued"
     assert job.claimed_by is None
     assert job.lease_heartbeat_at is None
@@ -1962,25 +2132,27 @@ async def test_deployment_fence_canary_uses_normal_primitives_and_redacts_eviden
 ) -> None:
     """The deployment runner is a canary, not a generic materializer control."""
     from loom_cli.taskset_fence_canary import (
-        TaskSetFenceCanaryContract,
         run_deployment_fence_canary,
     )
 
-    app, tokens, _teams = materialization_setup
-    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    app, _tokens, _teams = materialization_setup
     settings = app.state.settings
     raw_owner_a = "private-owner-a"
     raw_owner_b = "private-owner-b"
     destructive_operations: list[str] = []
-    timestamps = iter((
-        datetime(2030, 1, 1, 0, 0, 0, tzinfo=UTC),
-        datetime(2030, 1, 1, 0, 0, 1, tzinfo=UTC),
-        datetime(2030, 1, 1, 0, 0, 2, tzinfo=UTC),
-    ))
+    timestamps = iter(
+        (
+            datetime(2030, 1, 1, 0, 0, 0, tzinfo=UTC),
+            datetime(2030, 1, 1, 0, 0, 1, tzinfo=UTC),
+            datetime(2030, 1, 1, 0, 0, 2, tzinfo=UTC),
+        )
+    )
 
     def reject_delete(*_args: object, **_kwargs: object) -> None:
         destructive_operations.append("delete")
         raise AssertionError("the fence canary must not delete object storage")
+
+    contract = await _prepare_deployment_fence_canary(app)
 
     def fake_stage(**kwargs: object) -> MaterializeOutput:
         job_id = kwargs["materialization_job_id"]
@@ -1988,15 +2160,17 @@ async def test_deployment_fence_canary_uses_normal_primitives_and_redacts_eviden
         assert isinstance(job_id, UUID)
         assert isinstance(epoch, int)
         return MaterializeOutput(
-            task_rows=[TaskRowDraft(
-                id=f"{task_set_id}/tasks/disposable",
-                checksum="c" * 64,
-                config={},
-                source=(
-                    "s3://private-bucket/tasksets/user/private-team/"
-                    f"materializations/{job_id}/{epoch}/tasks/disposable"
-                ),
-            )],
+            task_rows=[
+                TaskRowDraft(
+                    id=f"{contract.task_set_id}/tasks/disposable",
+                    checksum=contract.expected_task_checksum,
+                    config={},
+                    source=(
+                        "s3://private-bucket/tasksets/user/private-team/"
+                        f"materializations/{job_id}/{epoch}/tasks/disposable"
+                    ),
+                )
+            ],
             task_count=1,
             status="ready",
             evaluation_ready=True,
@@ -2007,21 +2181,6 @@ async def test_deployment_fence_canary_uses_normal_primitives_and_redacts_eviden
     monkeypatch.setattr(app.state.minio_client, "delete_object", reject_delete)
     monkeypatch.setattr(app.state.minio_client, "delete_objects", reject_delete)
 
-    contract = TaskSetFenceCanaryContract.from_mapping({
-        "candidate_sha": "a" * 40,
-        "image_tag": "staging-aaaaaaa",
-        "task_set_id": task_set_id,
-        "expected_task_checksum": "c" * 64,
-        "authorization_token": "deployment-only-capability",
-        "nonce": "n" * 43,
-    })
-    from loom_cli.taskset_fence_canary import register_deployment_fence_authorization
-
-    await register_deployment_fence_authorization(
-        app.state.session_factory,
-        contract=contract,
-        configured_token="deployment-only-capability",
-    )
     evidence = await run_deployment_fence_canary(
         contract,
         configured_token="deployment-only-capability",
@@ -2048,7 +2207,7 @@ async def test_deployment_fence_canary_uses_normal_primitives_and_redacts_eviden
         "schema_version": 1,
         "candidate_sha": "a" * 40,
         "image_tag": "staging-aaaaaaa",
-        "task_set_id": task_set_id,
+        "task_set_id": contract.task_set_id,
         "winner": {
             "job_id": evidence["winner"]["job_id"],
             "lease_epoch": evidence["winner"]["lease_epoch"],
@@ -2065,7 +2224,7 @@ async def test_deployment_fence_canary_uses_normal_primitives_and_redacts_eviden
         },
         "published_task": {
             "task_count": 1,
-            "checksum": "c" * 64,
+            "checksum": contract.expected_task_checksum,
         },
         "stale_cas_outcome": "LeaseLost",
         "timestamps": {
@@ -2090,40 +2249,30 @@ async def test_deployment_fence_canary_uses_normal_primitives_and_redacts_eviden
 
 
 @pytest.mark.asyncio
-async def test_deployment_fence_canary_rejects_noninitial_task_sets(
+async def test_deployment_fence_canary_preparation_cannot_select_a_noninitial_user_task_set(
     materialization_setup,
 ) -> None:
-    """An authorization capability cannot turn an existing TaskSet into a canary."""
-    from loom_cli.taskset_fence_canary import (
-        TaskSetFenceCanaryContract,
-        TaskSetFenceCanaryRuntimeError,
-        register_deployment_fence_authorization,
-    )
+    """Preparation makes a new system canary instead of selecting a user TaskSet."""
 
     app, tokens, _teams = materialization_setup
-    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    user_task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
     async with app.state.session_factory() as session:
         await session.execute(
             update(TaskSetMaterializationJob)
-            .where(TaskSetMaterializationJob.task_set_id == task_set_id)
+            .where(TaskSetMaterializationJob.task_set_id == user_task_set_id)
             .values(attempt_count=1),
         )
         await session.commit()
 
-    with pytest.raises(TaskSetFenceCanaryRuntimeError) as exc_info:
-        await register_deployment_fence_authorization(
-            app.state.session_factory,
-            contract=TaskSetFenceCanaryContract.from_mapping({
-                "candidate_sha": "a" * 40,
-                "image_tag": "staging-aaaaaaa",
-                "task_set_id": task_set_id,
-                "expected_task_checksum": "c" * 64,
-                "authorization_token": "deployment-only-capability",
-                "nonce": "n" * 43,
-            }),
-            configured_token="deployment-only-capability",
+    contract = await _prepare_deployment_fence_canary(app)
+
+    assert contract.task_set_id != user_task_set_id
+    async with app.state.session_factory() as session:
+        user_authorization = await session.get(
+            TaskSetFenceCanaryAuthorization,
+            user_task_set_id,
         )
-    assert str(exc_info.value) == "canary task set is not disposable"
+    assert user_authorization is None
 
 
 @pytest.mark.asyncio
@@ -2206,10 +2355,13 @@ async def test_materialization_cooperative_two_owner_canary_records_safe_evidenc
     # no row is directly edited and no driver, pod, or object is killed.
     CanaryClock.current += timedelta(seconds=claim_ttl_sec + 1)
     async with app.state.session_factory() as session:
-        assert await taskset_materializer.reclaim_stale_jobs(
-            session,
-            claim_ttl_sec=claim_ttl_sec,
-        ) == 1
+        assert (
+            await taskset_materializer.reclaim_stale_jobs(
+                session,
+                claim_ttl_sec=claim_ttl_sec,
+            )
+            == 1
+        )
 
     # The reclaimer applies the normal retry delay before B can claim.
     CanaryClock.current += timedelta(seconds=31)
@@ -2249,9 +2401,15 @@ async def test_materialization_cooperative_two_owner_canary_records_safe_evidenc
 
     async with app.state.session_factory() as session:
         winner_job = await session.get(TaskSetMaterializationJob, lease_b.id)
-        winner_rows = (await session.execute(
-            select(Task).where(Task.task_set_id == task_set_id),
-        )).scalars().all()
+        winner_rows = (
+            (
+                await session.execute(
+                    select(Task).where(Task.task_set_id == task_set_id),
+                )
+            )
+            .scalars()
+            .all()
+        )
     assert winner_job is not None
     assert winner_job.published_materialization_generation == lease_b.lease_epoch
     assert [(row.id, row.checksum) for row in winner_rows] == [
@@ -2319,11 +2477,13 @@ async def test_materialization_db_failure_after_staging_keeps_published_generati
 
     async with app.state.session_factory() as session:
         task_set = await session.get(TaskSet, task_set_id)
-        job = (await session.execute(
-            select(TaskSetMaterializationJob).where(
-                TaskSetMaterializationJob.task_set_id == task_set_id,
-            ),
-        )).scalar_one()
+        job = (
+            await session.execute(
+                select(TaskSetMaterializationJob).where(
+                    TaskSetMaterializationJob.task_set_id == task_set_id,
+                ),
+            )
+        ).scalar_one()
         assert task_set is not None
         task_set.status = "ready"
         task_set.task_count = 1
@@ -2376,12 +2536,18 @@ async def test_materialization_db_failure_after_staging_keeps_published_generati
             )
 
     async with app.state.session_factory() as session:
-        rows_after_failure = tuple(sorted(
-            (row.id, row.source)
-            for row in (await session.execute(
-                select(Task).where(Task.task_set_id == task_set_id),
-            )).scalars().all()
-        ))
+        rows_after_failure = tuple(
+            sorted(
+                (row.id, row.source)
+                for row in (
+                    await session.execute(
+                        select(Task).where(Task.task_set_id == task_set_id),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        )
         task_set_after_failure = await session.get(TaskSet, task_set_id)
         job_after_failure = await session.get(TaskSetMaterializationJob, lease.id)
     assert task_set_after_failure is not None
@@ -2392,17 +2558,23 @@ async def test_materialization_db_failure_after_staging_keeps_published_generati
     assert task_set_after_failure.evaluation_ready is True
     assert job_after_failure.state == "running"
     assert job_after_failure.published_materialization_generation == 0
-    assert app.state.minio_client.get_object(
-        Bucket=app.state.settings.artifacts_bucket,
-        Key=(
-            f"tasksets/user/{teams['team_a']}/inline-tasks/materializations/"
-            f"{lease.job_id}/{lease.lease_epoch}/tasks/new/task.toml"
-        ),
-    )["Body"].read() == b"version = '1'\n"
-    assert app.state.minio_client.list_objects_v2(
-        Bucket=app.state.settings.artifacts_bucket,
-        Prefix=f"tasksets/user/{teams['team_a']}/inline-tasks/tasks/",
-    ).get("Contents", []) == []
+    assert (
+        app.state.minio_client.get_object(
+            Bucket=app.state.settings.artifacts_bucket,
+            Key=(
+                f"tasksets/user/{teams['team_a']}/inline-tasks/materializations/"
+                f"{lease.job_id}/{lease.lease_epoch}/tasks/new/task.toml"
+            ),
+        )["Body"].read()
+        == b"version = '1'\n"
+    )
+    assert (
+        app.state.minio_client.list_objects_v2(
+            Bucket=app.state.settings.artifacts_bucket,
+            Prefix=f"tasksets/user/{teams['team_a']}/inline-tasks/tasks/",
+        ).get("Contents", [])
+        == []
+    )
 
     staged_prefix = (
         f"tasksets/user/{teams['team_a']}/inline-tasks/materializations/"
@@ -2431,12 +2603,18 @@ async def test_materialization_db_failure_after_staging_keeps_published_generati
             minio_client=app.state.minio_client,
             artifacts_bucket=app.state.settings.artifacts_bucket,
         )
-        rows_after_gc = tuple(sorted(
-            (row.id, row.source)
-            for row in (await session.execute(
-                select(Task).where(Task.task_set_id == task_set_id),
-            )).scalars().all()
-        ))
+        rows_after_gc = tuple(
+            sorted(
+                (row.id, row.source)
+                for row in (
+                    await session.execute(
+                        select(Task).where(Task.task_set_id == task_set_id),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        )
     assert terminal_gc.deleted_objects == 1
     assert _object_keys(app, prefix=staged_prefix) == set()
     assert rows_after_gc == rows_after_failure
@@ -2455,11 +2633,13 @@ async def test_empty_terminal_failure_keeps_prior_published_generation(
 
     async with app.state.session_factory() as session:
         task_set = await session.get(TaskSet, task_set_id)
-        job = (await session.execute(
-            select(TaskSetMaterializationJob).where(
-                TaskSetMaterializationJob.task_set_id == task_set_id,
-            ),
-        )).scalar_one()
+        job = (
+            await session.execute(
+                select(TaskSetMaterializationJob).where(
+                    TaskSetMaterializationJob.task_set_id == task_set_id,
+                ),
+            )
+        ).scalar_one()
         assert task_set is not None
         task_set.status = "ready"
         task_set.status_reason = "published_generation"
@@ -2502,12 +2682,18 @@ async def test_empty_terminal_failure_keeps_prior_published_generation(
         )
 
     async with app.state.session_factory() as session:
-        rows = tuple(sorted(
-            (row.id, row.source)
-            for row in (await session.execute(
-                select(Task).where(Task.task_set_id == task_set_id),
-            )).scalars().all()
-        ))
+        rows = tuple(
+            sorted(
+                (row.id, row.source)
+                for row in (
+                    await session.execute(
+                        select(Task).where(Task.task_set_id == task_set_id),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        )
         task_set_after = await session.get(TaskSet, task_set_id)
         job_after = await session.get(TaskSetMaterializationJob, lease.id)
     assert task_set_after is not None
@@ -2534,17 +2720,25 @@ async def test_empty_failed_rebuild_keeps_published_task_set_state(
 
     async with app.state.session_factory() as session:
         published_task_set = await session.get(TaskSet, task_set_id)
-        published_job = (await session.execute(
-            select(TaskSetMaterializationJob).where(
-                TaskSetMaterializationJob.task_set_id == task_set_id,
-            ),
-        )).scalar_one()
-        published_rows = tuple(sorted(
-            (row.id, row.source)
-            for row in (await session.execute(
-                select(Task).where(Task.task_set_id == task_set_id),
-            )).scalars().all()
-        ))
+        published_job = (
+            await session.execute(
+                select(TaskSetMaterializationJob).where(
+                    TaskSetMaterializationJob.task_set_id == task_set_id,
+                ),
+            )
+        ).scalar_one()
+        published_rows = tuple(
+            sorted(
+                (row.id, row.source)
+                for row in (
+                    await session.execute(
+                        select(Task).where(Task.task_set_id == task_set_id),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        )
     assert published_task_set is not None
     assert published_job.state == "succeeded"
     published_task_set_state = (
@@ -2598,12 +2792,18 @@ async def test_empty_failed_rebuild_keeps_published_task_set_state(
         )
 
     async with app.state.session_factory() as session:
-        rows_after_failure = tuple(sorted(
-            (row.id, row.source)
-            for row in (await session.execute(
-                select(Task).where(Task.task_set_id == task_set_id),
-            )).scalars().all()
-        ))
+        rows_after_failure = tuple(
+            sorted(
+                (row.id, row.source)
+                for row in (
+                    await session.execute(
+                        select(Task).where(Task.task_set_id == task_set_id),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        )
         task_set_after_failure = await session.get(TaskSet, task_set_id)
         latest_job_after_failure = await get_latest_job(session, task_set_id)
         published_job_after_failure = await session.get(
@@ -2623,10 +2823,7 @@ async def test_empty_failed_rebuild_keeps_published_task_set_state(
     assert latest_job_after_failure.id == rebuild.job_id
     assert latest_job_after_failure.state == "failed"
     assert latest_job_after_failure.failure_reason == "transform_unavailable_in_internal_trusted"
-    assert (
-        published_job_after_failure.published_materialization_generation
-        == published_generation
-    )
+    assert published_job_after_failure.published_materialization_generation == published_generation
 
 
 @pytest.mark.asyncio
@@ -2709,10 +2906,13 @@ async def test_materialization_rejects_stale_lease_for_every_state_transition(
             .values(claimed_at=stale_at, lease_heartbeat_at=stale_at),
         )
         await session.commit()
-        assert await taskset_materializer.reclaim_stale_jobs(
-            session,
-            claim_ttl_sec=60,
-        ) == 1
+        assert (
+            await taskset_materializer.reclaim_stale_jobs(
+                session,
+                claim_ttl_sec=60,
+            )
+            == 1
+        )
         await session.execute(
             update(TaskSetMaterializationJob)
             .where(TaskSetMaterializationJob.id == initial_job.id)
@@ -2788,9 +2988,15 @@ async def test_materialization_e2e_jsonl_inline(materialization_setup) -> None:
     assert body["materialization_job_state"] == "succeeded"
 
     async with app.state.session_factory() as session:
-        rows = (await session.execute(
-            select(Task).where(Task.task_set_id == task_set_id),
-        )).scalars().all()
+        rows = (
+            (
+                await session.execute(
+                    select(Task).where(Task.task_set_id == task_set_id),
+                )
+            )
+            .scalars()
+            .all()
+        )
     assert len(rows) == 2
     assert all(row.source and row.source.startswith("s3://") for row in rows)
 
@@ -2967,14 +3173,22 @@ async def test_materialization_rejects_incompatible_task_bundle(
     ]
 
     async with app.state.session_factory() as session:
-        rows = (await session.execute(
-            select(Task).where(Task.task_set_id == task_set_id),
-        )).scalars().all()
-        job = (await session.execute(
-            select(TaskSetMaterializationJob).where(
-                TaskSetMaterializationJob.task_set_id == task_set_id,
-            ),
-        )).scalar_one()
+        rows = (
+            (
+                await session.execute(
+                    select(Task).where(Task.task_set_id == task_set_id),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        job = (
+            await session.execute(
+                select(TaskSetMaterializationJob).where(
+                    TaskSetMaterializationJob.task_set_id == task_set_id,
+                ),
+            )
+        ).scalar_one()
     assert rows == []
     assert job.failure_reason == "bundle_compatibility_error"
 
@@ -3016,18 +3230,20 @@ async def test_materialization_e2e_bundle_upload_preserves_per_task_assets(
     assert body["materialization_job_state"] == "succeeded"
 
     async with app.state.session_factory() as session:
-        row = (await session.execute(
-            select(Task).where(Task.task_set_id == task_set_id),
-        )).scalar_one()
-        job = (await session.execute(
-            select(TaskSetMaterializationJob).where(
-                TaskSetMaterializationJob.task_set_id == task_set_id,
-            ),
-        )).scalar_one()
+        row = (
+            await session.execute(
+                select(Task).where(Task.task_set_id == task_set_id),
+            )
+        ).scalar_one()
+        job = (
+            await session.execute(
+                select(TaskSetMaterializationJob).where(
+                    TaskSetMaterializationJob.task_set_id == task_set_id,
+                ),
+            )
+        ).scalar_one()
 
-    assert row.id == (
-        f"{task_set_id}/tasks/source-useful-frontier-5003_alpha"
-    )
+    assert row.id == (f"{task_set_id}/tasks/source-useful-frontier-5003_alpha")
     assert row.config["task"]["id"] == "source-useful-frontier-5003/alpha"
     assert row.config["environment"]["os"] == "linux"
     assert row.config["verifier"]["args"]["script_path"] == "verifier/check.sh"
@@ -3042,14 +3258,20 @@ async def test_materialization_e2e_bundle_upload_preserves_per_task_assets(
         Bucket=settings.artifacts_bucket,
         Key=f"tasksets/user/{teams['team_a']}/bundle-upload-tasks/manifest.yaml",
     )["Body"].read()
-    assert app.state.minio_client.get_object(
-        Bucket=settings.artifacts_bucket,
-        Key=f"tasksets/user/{teams['team_a']}/bundle-upload-tasks/bundle.tar.gz",
-    )["Body"].read() == bundle_archive
-    assert app.state.minio_client.list_objects_v2(
-        Bucket=settings.artifacts_bucket,
-        Prefix=f"tasksets/user/{teams['team_a']}/bundle-upload-tasks/tasks/",
-    ).get("Contents", []) == []
+    assert (
+        app.state.minio_client.get_object(
+            Bucket=settings.artifacts_bucket,
+            Key=f"tasksets/user/{teams['team_a']}/bundle-upload-tasks/bundle.tar.gz",
+        )["Body"].read()
+        == bundle_archive
+    )
+    assert (
+        app.state.minio_client.list_objects_v2(
+            Bucket=settings.artifacts_bucket,
+            Prefix=f"tasksets/user/{teams['team_a']}/bundle-upload-tasks/tasks/",
+        ).get("Contents", [])
+        == []
+    )
     payload = app.state.minio_client.get_object(
         Bucket=settings.artifacts_bucket,
         Key=data_key,
@@ -3058,10 +3280,13 @@ async def test_materialization_e2e_bundle_upload_preserves_per_task_assets(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("archive_factory", [
-    _unsafe_symlink_bundle_tar_bytes,
-    _unsafe_traversal_bundle_tar_bytes,
-])
+@pytest.mark.parametrize(
+    "archive_factory",
+    [
+        _unsafe_symlink_bundle_tar_bytes,
+        _unsafe_traversal_bundle_tar_bytes,
+    ],
+)
 async def test_materialization_rejects_bundle_upload_unsafe_archives(
     materialization_setup,
     archive_factory: Callable[[], bytes],
