@@ -1,4 +1,9 @@
-from scripts.plan_ci_validations import plan_validations
+from pathlib import Path
+
+import pytest
+from scripts.plan_ci_validations import HEAVY_CHECKS, plan_validations
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_docs_only_selects_no_heavy_validation() -> None:
@@ -120,6 +125,69 @@ def test_planner_change_selects_every_heavy_gate() -> None:
         "cluster_smoke",
         "staging_smoke",
     }
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/instruction.md",
+        "docs/architecture/cluster-deploy-spikes/01-sandbox-bridge.sh",
+        "unowned-runtime/new-input.bin",
+    ],
+)
+def test_runtime_inputs_fail_safe_to_every_heavy_check(path: str) -> None:
+    plan = plan_validations(
+        changed_paths=[path], labels=set(), event_name="pull_request"
+    )
+
+    assert plan.docs_only is False
+    assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
+    expected_reason = f"unowned-runtime-path:{path}"
+    assert all(expected_reason in plan.reasons[check] for check in HEAVY_CHECKS)
+
+
+def test_codeowners_is_not_static_documentation() -> None:
+    plan = plan_validations(
+        changed_paths=[".github/CODEOWNERS"],
+        labels=set(),
+        event_name="pull_request",
+    )
+
+    assert plan.docs_only is False
+    assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
+
+
+def test_migration_change_selects_integration_images_and_staging() -> None:
+    plan = plan_validations(
+        changed_paths=["migrations/versions/1234_add_runtime_state.py"],
+        labels=set(),
+        event_name="pull_request",
+    )
+
+    assert plan.selected_heavy_checks() == {
+        "integration",
+        "images",
+        "staging_smoke",
+    }
+
+
+def test_every_docker_marked_integration_module_selects_docker() -> None:
+    integration_dir = REPO_ROOT / "tests" / "integration"
+    docker_marked_modules = [
+        path
+        for path in sorted(integration_dir.rglob("*.py"))
+        if "pytest.mark.docker" in path.read_text(encoding="utf-8")
+    ]
+    assert docker_marked_modules
+
+    for module in docker_marked_modules:
+        relative_path = module.relative_to(REPO_ROOT).as_posix()
+        plan = plan_validations(
+            changed_paths=[relative_path],
+            labels=set(),
+            event_name="pull_request",
+        )
+        assert plan.integration_docker is True, relative_path
 
 
 def test_merge_group_selects_every_heavy_gate() -> None:
