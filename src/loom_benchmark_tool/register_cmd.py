@@ -175,22 +175,64 @@ async def _download_hf_bundle_snapshot(
     revision: str,
     hf_token: str | None,
     tasks: list[dict[str, Any]],
+    chunk_size: int | None = None,
+    chunk_sleep_secs: float = 300.0,
 ) -> Path:
+    """Snapshot-download the HF bundles for `tasks` into the shared HF cache.
+
+    When `chunk_size` is set, `tasks` is split into batches and
+    `snapshot_download` is called once per batch with `chunk_sleep_secs` seconds
+    of sleep between batches. This keeps the total `resolve` API calls per
+    5-minute window below HF's 5000/5min free-tier budget, at the cost of extra
+    wall time. Because `snapshot_download` returns the same snapshot directory
+    for a given `repo_id` + `revision`, files from every batch accumulate under
+    the same returned path.
+    """
     from huggingface_hub import snapshot_download
 
     patterns = [
         f"{_validate_relative_prefix(str(task['hf_path']), label='hf_path')}/*"
         for task in tasks
     ]
-    snapshot = await asyncio.to_thread(
-        snapshot_download,
-        repo_id=repo_id,
-        revision=revision,
-        repo_type="dataset",
-        allow_patterns=patterns,
-        token=hf_token,
-    )
-    return Path(snapshot)
+
+    if chunk_size is None or chunk_size <= 0 or len(patterns) <= chunk_size:
+        single_shot = await asyncio.to_thread(
+            snapshot_download,
+            repo_id=repo_id,
+            revision=revision,
+            repo_type="dataset",
+            allow_patterns=patterns,
+            token=hf_token,
+        )
+        return Path(single_shot)
+
+    snapshot_path: str | None = None
+    total_batches = (len(patterns) + chunk_size - 1) // chunk_size
+    for batch_idx in range(total_batches):
+        start = batch_idx * chunk_size
+        batch_patterns = patterns[start : start + chunk_size]
+        print(
+            f"mirror snapshot: batch {batch_idx + 1}/{total_batches} "
+            f"({len(batch_patterns)} bundles)",
+            flush=True,
+        )
+        snapshot_path = await asyncio.to_thread(
+            snapshot_download,
+            repo_id=repo_id,
+            revision=revision,
+            repo_type="dataset",
+            allow_patterns=batch_patterns,
+            token=hf_token,
+        )
+        if batch_idx < total_batches - 1 and chunk_sleep_secs > 0:
+            print(
+                f"mirror snapshot: sleeping {chunk_sleep_secs}s "
+                "to stay under HF resolve budget",
+                flush=True,
+            )
+            await asyncio.sleep(chunk_sleep_secs)
+    assert snapshot_path is not None
+    return Path(snapshot_path)
 
 
 def task_config_from_manifest_entry(entry: dict[str, Any]) -> dict[str, Any]:
@@ -225,6 +267,8 @@ async def run_register(
     mirror_to_object_store: bool = False,
     object_store: ObjectStore | None = None,
     bucket: str = "loom-benchmarks",
+    chunk_size: int | None = None,
+    chunk_sleep_secs: float = 300.0,
 ) -> dict[str, Any]:
     """Read manifest from HF, upsert Benchmark + Task rows. Returns
     `{"registered": N, "skipped": M, "repo_id": str, "revision": str}`.
@@ -257,6 +301,8 @@ async def run_register(
             revision=revision,
             hf_token=hf_token,
             tasks=manifest_tasks,
+            chunk_size=chunk_size,
+            chunk_sleep_secs=chunk_sleep_secs,
         )
 
     engine = create_async_engine(normalize_db_url(db_url))
