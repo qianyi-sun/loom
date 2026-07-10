@@ -19,12 +19,12 @@ from uuid import UUID, uuid4
 from botocore.exceptions import ClientError
 from sqlalchemy import select
 
+from loom.auth import AuthContext
+from loom.db.schema import Artifact, Batch, LlmCall, Task, Trial
 from loom_service.delivery_export_tb2_v2 import (
     build_per_trial_v2_bundle,
     parse_trajectory_events,
 )
-from loom.auth import AuthContext
-from loom.db.schema import Artifact, Batch, LlmCall, Task, Trial
 
 SELECTION_RULE = "highest_priority_succeeded_by_task_sample_combination"
 SCHEMA_VERSION = "1"

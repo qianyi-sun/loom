@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA
-from loom.db.schema import LlmCall, Trial
+from loom.db.schema import Trial
 from loom.models.trajectory import (
     AgentThoughtEvent,
     ChatMessage,
@@ -171,7 +171,7 @@ class _FakeS3:
     def __init__(self, objects: dict[tuple[str, str], bytes] | None = None) -> None:
         self.objects = objects or {}
 
-    def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+    def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:  # noqa: N803
         data = self.objects[(Bucket, Key)]
         return {"Body": io.BytesIO(data)}
 
