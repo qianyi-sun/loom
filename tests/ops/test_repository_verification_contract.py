@@ -34,7 +34,7 @@ def test_contributor_quickstart_documents_full_fast_coverage_gate() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
     root_steps = workflow["jobs"]["tests-root"]["steps"]
     package_steps = workflow["jobs"]["tests-packages"]["steps"]
-    repository_steps = workflow["jobs"]["repository-checks"]["steps"]
+    fast_steps = workflow["jobs"]["fast-checks"]["steps"]
     root_pytest_step = next(
         step for step in root_steps if step.get("name") == "Pytest — unit + contract + property + loom_cli"
     )
@@ -43,7 +43,7 @@ def test_contributor_quickstart_documents_full_fast_coverage_gate() -> None:
     )
     coverage_gate_step = next(
         step
-        for step in repository_steps
+        for step in fast_steps
         if step.get("name") == "Coverage gate + summary (fast tier)"
     )
 

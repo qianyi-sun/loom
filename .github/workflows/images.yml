@@ -22,29 +22,11 @@ name: images
 
 on:
   pull_request:
-    # PR image validation is opt-in because each run fans out to five
-    # multi-arch builds. Add the `ci:images` label when image evidence is
-    # needed before merge; pushes to dev/main still publish deployable images.
+    # The workflow always reports its stable gate. The shared planner selects
+    # image builds from changed paths or the additive `ci:images` label.
     types: [opened, synchronize, reopened, labeled]
-    paths:
-      - "deploy/Dockerfile.*"
-      - "deploy/nginx-spa.conf"
-      - "deploy/web-runtime-config.sh"
-      - "src/**"
-      - "packages/**"
-      - "pyproject.toml"
-      - "web/index.html"
-      - "web/package*.json"
-      - "web/src/**"
-      - "web/vite.config.ts"
-      # Go source for the llm-gateway-sandbox binary (#547 item #3).
-      - "cmd/**"
-      - "go.mod"
-      - "go.sum"
-      - ".github/workflows/images.yml"
-      # Markdown is never baked into the image; trailing negation
-      # overrides any positive match above (e.g. packages/<x>/README.md).
-      - "!**/*.md"
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [dev, main]
     paths:
@@ -80,25 +62,72 @@ jobs:
   plan:
     name: image plan
     runs-on: ubuntu-latest
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push' ||
-      (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'ci:images'))
     outputs:
+      required: ${{ steps.required.outputs.images }}
       images: ${{ steps.plan.outputs.images }}
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
+
+      - name: Plan required image validation
+        id: required
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request)
+              git diff --name-only "$BASE_SHA...$HEAD_SHA" \
+                > /tmp/loom-changed-files.txt
+              ;;
+            merge_group)
+              git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
+                > /tmp/loom-changed-files.txt
+              ;;
+            push)
+              if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
+                git ls-tree -r --name-only "$HEAD_SHA" \
+                  > /tmp/loom-changed-files.txt
+              else
+                git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
+                  > /tmp/loom-changed-files.txt
+              fi
+              ;;
+            workflow_dispatch)
+              git show --pretty=format: --name-only "$HEAD_SHA" \
+                > /tmp/loom-changed-files.txt
+              PR_LABELS_JSON='["ci:images"]'
+              ;;
+            *)
+              echo "Unsupported event: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+          sort -u -o /tmp/loom-changed-files.txt /tmp/loom-changed-files.txt
+          if [[ -z "$PR_LABELS_JSON" || "$PR_LABELS_JSON" == "null" ]]; then
+            PR_LABELS_JSON='[]'
+          fi
+          uv run python scripts/plan_ci_validations.py \
+            --changed-files /tmp/loom-changed-files.txt \
+            --labels-json "$PR_LABELS_JSON" \
+            --event-name "$EVENT_NAME" \
+            --github-output "$GITHUB_OUTPUT"
+
       - name: Select affected images
         id: plan
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BEFORE_SHA: ${{ github.event.before }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: |
           python - <<'PY'
           import json
@@ -132,14 +161,14 @@ jobs:
 
           event = os.environ["EVENT_NAME"]
           selected: set[str] = set()
-          if event == "workflow_dispatch":
+          if event in {"workflow_dispatch", "merge_group"}:
               selected = all_images()
-          elif event == "pull_request":
+          elif event in {"pull_request", "merge_group"}:
               changed = diff_names(os.environ["BASE_SHA"], os.environ["HEAD_SHA"])
           else:
-              changed = diff_names(os.environ["BEFORE_SHA"], os.environ["GITHUB_SHA"])
+              changed = diff_names(os.environ["BASE_SHA"], os.environ["HEAD_SHA"])
 
-          if event != "workflow_dispatch":
+          if event not in {"workflow_dispatch", "merge_group"}:
               if not changed:
                   selected = all_images()
               for path in changed:
@@ -192,6 +221,10 @@ jobs:
                       selected = all_images()
                       break
 
+          labels = set(json.loads(os.environ["PR_LABELS_JSON"] or "[]") or [])
+          if "ci:images" in labels and not selected:
+              selected = all_images()
+
           matrix = [
               {"image": image, "dockerfile": dockerfile}
               for image, dockerfile in images.items()
@@ -208,11 +241,8 @@ jobs:
     name: ${{ matrix.image }} (multi-arch)
     needs: plan
     if: >-
-      needs.plan.outputs.images != '[]' &&
-      (github.event_name == 'workflow_dispatch' ||
-       github.event_name == 'push' ||
-       (github.event_name == 'pull_request' &&
-        contains(github.event.pull_request.labels.*.name, 'ci:images')))
+      needs.plan.outputs.required == 'true' &&
+      needs.plan.outputs.images != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -232,7 +262,9 @@ jobs:
           docker buildx inspect
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+        if: >-
+          github.event_name != 'pull_request' &&
+          github.event_name != 'merge_group'
         # Plain `docker login`, not docker/login-action.
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \
@@ -247,13 +279,16 @@ jobs:
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             echo "tag_args=--tag ${image}:pr-${{ github.event.number }}" >> "$GITHUB_OUTPUT"
             echo "push_flag=" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "merge_group" ]]; then
+            echo "tag_args=--tag ${image}:merge-group-${sha_short}" >> "$GITHUB_OUTPUT"
+            echo "push_flag=" >> "$GITHUB_OUTPUT"
           else
             branch="${{ github.ref_name }}"
             echo "tag_args=--tag ${image}:${sha_short} --tag ${image}:${branch}" >> "$GITHUB_OUTPUT"
             echo "push_flag=--push" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build (+ push on dev/main)
+      - name: Build (+ publish on push/manual)
         # `docker buildx build` with explicit platforms. The buildx
         # builder created above is the default; --platform triggers
         # the cross-arch build via QEMU emulation.
@@ -272,3 +307,23 @@ jobs:
           # picks them up to talk to the GHA cache service.
           ACTIONS_CACHE_URL: ${{ env.ACTIONS_CACHE_URL }}
           ACTIONS_RUNTIME_TOKEN: ${{ env.ACTIONS_RUNTIME_TOKEN }}
+
+  images-gate:
+    name: images-gate
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [plan, build]
+    steps:
+      - name: Enforce selected image result
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          REQUIRED: ${{ needs.plan.outputs.required }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          set -euo pipefail
+          [[ "$PLAN_RESULT" == "success" ]] || exit 1
+          if [[ "$REQUIRED" == "true" ]]; then
+            [[ "$BUILD_RESULT" == "success" ]] || exit 1
+          else
+            [[ "$BUILD_RESULT" == "skipped" || "$BUILD_RESULT" == "success" ]] || exit 1
+          fi

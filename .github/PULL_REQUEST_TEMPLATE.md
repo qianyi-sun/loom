@@ -16,8 +16,14 @@
 ## Target Branch
 
 - [ ] This PR targets `dev` for normal development.
-- [ ] I enabled GitHub auto-merge for this `dev` PR.
-- [ ] This PR targets `main` only for a production release promotion from `dev`.
+- [ ] For this Codex-authored normal `dev` PR, Codex enabled GitHub auto-merge
+      with squash immediately after opening it. GitHub keeps it queued until
+      `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
+      `staging-smoke-gate` succeed on the current head SHA and any applicable
+      repository protection passes.
+- [ ] This PR targets `main` only for a production release promotion from `dev`;
+      it remains explicitly owner-managed and does not use routine `dev`
+      auto-merge.
 
 ## Scope
 
@@ -31,6 +37,12 @@
 ## Verification
 
 - 
+
+## Validation Selection
+
+- Changed paths automatically select the minimum required validation work.
+- Labels may add validation but cannot remove path-inferred validation.
+- Record any manually dispatched additional validation above.
 
 ## Documentation
 

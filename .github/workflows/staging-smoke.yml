@@ -16,7 +16,7 @@ name: staging-smoke
 #
 # Trigger model:
 #   - workflow_dispatch (manual)
-#   - PRs labelled `staging-smoke` (gated; full smoke is slow)
+#   - PRs selected by changed paths or the additive `staging-smoke` label
 #
 # Expected runtime: ~15-20 min (5 image builds + kind boot + apply
 # + wait-for-ready).
@@ -25,6 +25,8 @@ on:
   workflow_dispatch:
   pull_request:
     types: [labeled, opened, synchronize, reopened]
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -34,12 +36,62 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  plan:
+    name: staging smoke plan
+    runs-on: ubuntu-latest
+    outputs:
+      required: ${{ steps.plan.outputs.staging_smoke }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
+
+      - name: Plan required staging smoke validation
+        id: plan
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request)
+              git diff --name-only "$BASE_SHA...$HEAD_SHA" \
+                > /tmp/loom-changed-files.txt
+              ;;
+            merge_group)
+              git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
+                > /tmp/loom-changed-files.txt
+              ;;
+            workflow_dispatch)
+              git show --pretty=format: --name-only "$HEAD_SHA" \
+                > /tmp/loom-changed-files.txt
+              PR_LABELS_JSON='["staging-smoke"]'
+              ;;
+            *)
+              echo "Unsupported event: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+          sort -u -o /tmp/loom-changed-files.txt /tmp/loom-changed-files.txt
+          if [[ -z "$PR_LABELS_JSON" || "$PR_LABELS_JSON" == "null" ]]; then
+            PR_LABELS_JSON='[]'
+          fi
+          uv run python scripts/plan_ci_validations.py \
+            --changed-files /tmp/loom-changed-files.txt \
+            --labels-json "$PR_LABELS_JSON" \
+            --event-name "$EVENT_NAME" \
+            --github-output "$GITHUB_OUTPUT"
+
   smoke:
     name: kind staging smoke (build images → cluster up → verify ready)
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'staging-smoke'))
+    needs: plan
+    if: needs.plan.outputs.required == 'true'
     runs-on: ubuntu-latest
     # 5 image builds (uncached) + kind boot + ingress-nginx + apply +
     # wait-for-ready easily run 30-40 min on a cold runner. 45 leaves
@@ -528,16 +580,14 @@ jobs:
   # the job records the missing variable names and exits successfully
   # without exercising real AWS S3.
   #
-  # Runs on the same `staging-smoke` label trigger as the MinIO smoke
-  # so a PR that touches storage code exercises both backends in one
-  # go. Skips cleanly on PRs without the label.
+  # Uses the same planner selection as the MinIO smoke so a PR that
+  # touches storage code exercises both backends in one go. Skips
+  # cleanly when the staging smoke is not selected.
   # ────────────────────────────────────────────────────────────────
   smoke-storage-aws-s3:
     name: storage smoke (real AWS S3)
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'staging-smoke'))
+    needs: plan
+    if: needs.plan.outputs.required == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: ci-aws
@@ -809,3 +859,26 @@ jobs:
           except s3.exceptions.ClientError:
               pass
           " || true
+
+  staging-smoke-gate:
+    name: staging-smoke-gate
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [plan, smoke, smoke-storage-aws-s3]
+    steps:
+      - name: Enforce selected staging smoke results
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          REQUIRED: ${{ needs.plan.outputs.required }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
+          AWS_S3_RESULT: ${{ needs.smoke-storage-aws-s3.result }}
+        run: |
+          set -euo pipefail
+          [[ "$PLAN_RESULT" == "success" ]] || exit 1
+          if [[ "$REQUIRED" == "true" ]]; then
+            [[ "$SMOKE_RESULT" == "success" ]] || exit 1
+            [[ "$AWS_S3_RESULT" == "success" ]] || exit 1
+          else
+            [[ "$SMOKE_RESULT" == "skipped" || "$SMOKE_RESULT" == "success" ]] || exit 1
+            [[ "$AWS_S3_RESULT" == "skipped" || "$AWS_S3_RESULT" == "success" ]] || exit 1
+          fi
