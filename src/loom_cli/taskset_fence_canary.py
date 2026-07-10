@@ -28,7 +28,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import UploadFile
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
@@ -40,6 +40,10 @@ from loom.db.schema import (
     Team,
 )
 from loom.models.task_checksum import task_checksum
+from loom.system_identities import (
+    TASKSET_FENCE_CANARY_TEAM_ID,
+    TASKSET_FENCE_CANARY_TEAM_NAME,
+)
 from loom.taskset.materialize import MaterializeOutput
 from loom.taskset.transform_sandbox import TransformSandboxConfig
 from loom_service import taskset_materializer
@@ -71,7 +75,6 @@ _ALLOWED_PREPARATION_FIELDS = frozenset(
         "authorization_token",
     }
 )
-_SYSTEM_CANARY_TEAM_NAME = "admin"
 _CANARY_ARCHIVE_NAME = "fence-canary.tar.gz"
 _CANARY_TASK_FILES = {
     "tasks/fence-canary/task.toml": b"""schema_version = "1"
@@ -387,7 +390,7 @@ async def prepare_deployment_fence_canary(
     """Create and bind a deployment-owned one-use canary transactionally.
 
     The only caller-controlled values are the rollout-derived candidate and
-    image tag.  The selected service Pod chooses the fixed system Team, random
+    image tag. The selected service Pod chooses the fixed deployment-owned Team, random
     TaskSet slug, one-task bundle, checksum, and nonce before inserting the
     authorization in the same database transaction as normal TaskSet intake.
     """
@@ -403,10 +406,14 @@ async def prepare_deployment_fence_canary(
     async with session_factory() as session:
         system_team = (
             await session.execute(
-                select(Team).where(func.lower(Team.name) == _SYSTEM_CANARY_TEAM_NAME),
+                select(Team).where(Team.id == TASKSET_FENCE_CANARY_TEAM_ID).with_for_update(),
             )
         ).scalar_one_or_none()
-        if system_team is None or system_team.disabled_at is not None:
+        if (
+            system_team is None
+            or system_team.name != TASKSET_FENCE_CANARY_TEAM_NAME
+            or system_team.disabled_at is not None
+        ):
             raise TaskSetFenceCanaryRuntimeError("canary system identity was not available")
 
         async def pre_commit(result: TaskSetIntakeResult) -> None:
@@ -487,13 +494,14 @@ async def _claim_authorized_disposable_job(
         ).scalar_one_or_none()
         system_team = (
             await session.execute(
-                select(Team).where(func.lower(Team.name) == _SYSTEM_CANARY_TEAM_NAME),
+                select(Team).where(Team.id == TASKSET_FENCE_CANARY_TEAM_ID).with_for_update(),
             )
         ).scalar_one_or_none()
         expected_nonce_digest = _nonce_digest(contract)
         if (
             authorization is None
             or system_team is None
+            or system_team.name != TASKSET_FENCE_CANARY_TEAM_NAME
             or system_team.disabled_at is not None
             or task_set is None
             or task_set.owning_team_id != system_team.id

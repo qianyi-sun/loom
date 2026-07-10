@@ -24,6 +24,7 @@ from loom.db.schema import (
     UserRegistrationRequest,
     UserSession,
 )
+from loom.system_identities import TASKSET_FENCE_CANARY_TEAM_ID
 from loom_service.admin_audit import (
     actor_from_context,
     hash_optional,
@@ -319,13 +320,15 @@ def _credential_type(ctx: AuthContext) -> str:
 
 @router.get("/public-teams")
 async def public_teams(request: Request) -> dict[str, list[dict[str, str]]]:
-    # `admin` is a real system team, but it is not a self-service
-    # registration target.
+    # System Teams are deployment-owned and never self-service registration
+    # targets. ``admin`` predates the fixed canary identity and remains name
+    # scoped for compatibility; the canary uses a reserved UUID.
     async with request.app.state.session_factory() as session:
         rows = (await session.execute(
             select(Team)
             .where(Team.disabled_at.is_(None))
             .where(func.lower(Team.name) != "admin")
+            .where(Team.id != TASKSET_FENCE_CANARY_TEAM_ID)
             .order_by(func.lower(Team.name).asc(), Team.id.asc()),
         )).scalars().all()
     return {"items": [{"id": str(team.id), "name": team.name} for team in rows]}
@@ -341,7 +344,12 @@ async def request_registration(
         team = (await session.execute(
             select(Team).where(Team.id == payload.team_id),
         )).scalar_one_or_none()
-        if team is None or team.disabled_at is not None or team.name.lower() == "admin":
+        if (
+            team is None
+            or team.disabled_at is not None
+            or team.name.lower() == "admin"
+            or team.id == TASKSET_FENCE_CANARY_TEAM_ID
+        ):
             raise HTTPException(status_code=404, detail="team not found")
         existing_user = (await session.execute(
             select(User.id).where(User.username_normalized == username_normalized),

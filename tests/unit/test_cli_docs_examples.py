@@ -70,7 +70,8 @@ def test_taskset_fence_canary_uses_task_7_deployment_runner() -> None:
     assert "--expected-task-checksum" not in canary_section
     assert "candidate-bound JSON" in normalized_canary_section
     assert "durable one-use authorization" in normalized_canary_section
-    assert "fixed `admin` system Team" in canary_section
+    assert "fixed `loom-system-taskset-fence-canary`" in canary_section
+    assert "Migration `0065` reserves this Team" in canary_section
     assert "never accepts a TaskSet id or checksum" in normalized_canary_section
     assert "fixed staging Kubernetes context" in normalized_canary_section
     assert "atomically published without replacement" in normalized_canary_section

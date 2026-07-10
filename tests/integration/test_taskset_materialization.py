@@ -184,6 +184,10 @@ limits:
 """
 
 
+_SYSTEM_CANARY_TEAM_ID = UUID("2c9506e1-7d5e-4b49-b532-4b8f0a3f5ea9")
+_SYSTEM_CANARY_TEAM_NAME = "loom-system-taskset-fence-canary"
+
+
 def _add_tar_file(tar: tarfile.TarFile, name: str, body: bytes) -> None:
     info = tarfile.TarInfo(name)
     info.size = len(body)
@@ -378,19 +382,29 @@ async def _submit_inline_task_set(
 
 
 async def _seed_canary_system_team(app: FastAPI) -> UUID:
-    """Return the migration-created fixed deployment-owned Team."""
+    """Return the migration-created fixed deployment-owned Team.
+
+    Seed a separate historical ``admin`` Team too: the canary must not select
+    it by display name now that its deployment identity is explicit.
+    """
     async with app.state.session_factory() as session:
-        team = (
+        team = await session.get(Team, _SYSTEM_CANARY_TEAM_ID)
+        if team is None:
+            team = Team(id=_SYSTEM_CANARY_TEAM_ID, name=_SYSTEM_CANARY_TEAM_NAME)
+            session.add(team)
+            await session.flush()
+            session.add(TeamQuota(team_id=team.id))
+        admin_team = (
             await session.execute(
                 select(Team).where(Team.name == "admin"),
             )
         ).scalar_one_or_none()
-        if team is None:
-            team = Team(name="admin")
-            session.add(team)
+        if admin_team is None:
+            admin_team = Team(name="admin")
+            session.add(admin_team)
             await session.flush()
-            session.add(TeamQuota(team_id=team.id))
-            await session.commit()
+            session.add(TeamQuota(team_id=admin_team.id))
+        await session.commit()
     return team.id
 
 
@@ -2246,6 +2260,62 @@ async def test_deployment_fence_canary_uses_normal_primitives_and_redacts_eviden
     ):
         assert forbidden not in encoded_evidence
     assert destructive_operations == []
+
+
+@pytest.mark.asyncio
+async def test_deployment_fence_canary_materializes_its_bundle_without_mocks(
+    materialization_setup,
+) -> None:
+    """The deployment-owned bundle reaches normal staged publication unmocked."""
+    from loom_cli.taskset_fence_canary import run_deployment_fence_canary
+
+    app, _tokens, _teams = materialization_setup
+    settings = app.state.settings
+    contract = await _prepare_deployment_fence_canary(app)
+
+    evidence = await run_deployment_fence_canary(
+        contract,
+        configured_token="deployment-only-capability",
+        session_factory=app.state.session_factory,
+        minio_client=app.state.minio_client,
+        artifacts_bucket=settings.artifacts_bucket,
+        upstream_cache_root=settings.taskset_materializer_upstream_cache_root,
+        transform_config=TransformSandboxConfig(
+            enabled=settings.taskset_materializer_transforms_enabled,
+            network_isolated=settings.taskset_materializer_transform_network_isolated,
+            workload_contract=settings.workload_contract,
+            wall_timeout_sec=settings.taskset_materializer_transform_wall_timeout_sec,
+            cpu_limit_sec=settings.taskset_materializer_transform_cpu_limit_sec,
+            memory_limit_mb=settings.taskset_materializer_transform_memory_limit_mb,
+        ),
+        max_bundle_bytes=settings.taskset_quota_max_bundle_bytes,
+        max_team_storage_bytes=settings.taskset_quota_max_storage_bytes_per_team,
+        claim_ttl_sec=settings.taskset_materializer_claim_ttl_sec,
+        owner_factory=iter(("bundle-owner-a", "bundle-owner-b")).__next__,
+    )
+
+    async with app.state.session_factory() as session:
+        job = (
+            await session.execute(
+                select(TaskSetMaterializationJob).where(
+                    TaskSetMaterializationJob.task_set_id == contract.task_set_id,
+                )
+            )
+        ).scalar_one()
+        tasks = (
+            await session.execute(
+                select(Task).where(Task.task_set_id == contract.task_set_id),
+            )
+        ).scalars().all()
+
+    assert evidence["published_task"] == {
+        "task_count": 1,
+        "checksum": contract.expected_task_checksum,
+    }
+    assert job.state == "succeeded"
+    assert len(tasks) == 1
+    assert tasks[0].checksum == contract.expected_task_checksum
+    assert tasks[0].source.startswith("s3://")
 
 
 @pytest.mark.asyncio

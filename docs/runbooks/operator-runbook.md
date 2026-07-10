@@ -1348,21 +1348,24 @@ the rollout identity. The runner fails closed if either side is absent or does
 not match; never pass, print, or attach this value.
 
 Inside the selected service Pod, the deployment runner creates a fresh
-one-task disposable bundle under the fixed `admin` system Team through normal
-TaskSet intake. It calculates the normal materializer checksum, creates the
-TaskSet/job, and writes its durable one-use authorization bound to the
-candidate, exact initial job, checksum, and a service-generated high-entropy
-nonce retained only as a digest in one database transaction. Only then does it
-return safe TaskSet/checksum metadata to the launcher for the later runner
-exec. The external command never accepts a TaskSet id or checksum, so a fresh
-ordinary user TaskSet cannot be selected, authorized, or consumed by this
-flow. The later runner only locks and consumes that pre-existing record. A
-pre-existing, rebuilt, claimed, published, deleted, mismatched, or replayed
-canary TaskSet fails closed. If a post-stage check fails, the current lease is
-relinquished through the normal fenced transition rather than remaining
-running. Stream API responses through a whitelist if retaining
-submission/status context; never save a full Task response because it includes
-a storage `source` field.
+one-task disposable bundle under the fixed `loom-system-taskset-fence-canary`
+system Team through normal TaskSet intake. Migration `0065` reserves this Team
+by a stable UUID and inserts its quota row; the runner matches both the UUID
+and name, takes the Team row lock, and fails closed if it is absent, disabled,
+or altered. It is not a self-service registration target. The runner calculates
+the normal materializer checksum, creates the TaskSet/job, and writes its
+durable one-use authorization bound to the candidate, exact initial job,
+checksum, and a service-generated high-entropy nonce retained only as a digest
+in one database transaction. Only then does it return safe TaskSet/checksum
+metadata to the launcher for the later runner exec. The external command never
+accepts a TaskSet id or checksum, so a fresh ordinary user TaskSet cannot be
+selected, authorized, or consumed by this flow. The later runner only locks and
+consumes that pre-existing record. A pre-existing, rebuilt, claimed, published,
+deleted, mismatched, or replayed canary TaskSet fails closed. If a post-stage
+check fails, the current lease is relinquished through the normal fenced
+transition rather than remaining running. Stream API responses through a
+whitelist if retaining submission/status context; never save a full Task
+response because it includes a storage `source` field.
 
 ```bash
 loom cluster taskset-fence-canary \

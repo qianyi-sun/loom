@@ -31,6 +31,8 @@ from loom_service.password_auth import hash_password
 ADMIN_PASSWORD = "admin-passphrase-1"
 ADA_PASSWORD = "ada-passphrase-1"
 ADA_NEW_PASSWORD = "ada-new-passphrase-1"
+SYSTEM_CANARY_TEAM_ID = UUID("2c9506e1-7d5e-4b49-b532-4b8f0a3f5ea9")
+SYSTEM_CANARY_TEAM_NAME = "loom-system-taskset-fence-canary"
 
 
 def _ensure_admin_seed(session) -> UUID:  # type: ignore[no-untyped-def]
@@ -295,6 +297,31 @@ async def test_user_registers_sets_password_and_logs_in(
         assert me["user"]["email"] is None
         assert me["current_team"]["name"] == team_name
         assert me["current_team"]["role"] == "member"
+
+
+async def test_system_canary_team_is_not_a_self_service_registration_target(
+    username_auth_app: tuple[FastAPI, UUID, str],
+) -> None:
+    """The deployment-only identity cannot grant ordinary user membership."""
+    app, _team_id, _team_name = username_auth_app
+    async with app.state.session_factory() as session:
+        session.add(Team(id=SYSTEM_CANARY_TEAM_ID, name=SYSTEM_CANARY_TEAM_NAME))
+        session.add(TeamQuota(team_id=SYSTEM_CANARY_TEAM_ID))
+        await session.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as client:
+        teams = await client.get("/api/v1/auth/public-teams")
+        registration = await client.post(
+            "/api/v1/auth/registration-requests",
+            json={"username": "CanaryRegistrant", "team_id": str(SYSTEM_CANARY_TEAM_ID)},
+        )
+
+    assert teams.status_code == 200, teams.text
+    assert {"id": str(SYSTEM_CANARY_TEAM_ID), "name": SYSTEM_CANARY_TEAM_NAME} not in (
+        teams.json()["items"]
+    )
+    assert registration.status_code == 404, registration.text
 
 
 async def test_setup_link_uses_public_base_url_when_configured(
