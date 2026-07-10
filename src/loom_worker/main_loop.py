@@ -850,8 +850,8 @@ async def _spawn_trial(
                 team_id,
                 trial_id,
                 cp_client=cp_client,
-                gateway_url=str(settings.gateway_url),
-                agent_gateway_url=subprocess_gateway_url_str,
+                worker_gateway_url=str(settings.gateway_url),
+                sandbox_gateway_url=subprocess_gateway_url_str,
                 provider_connection_id=payload.get("provider_connection_id"),
             ),
             verifier_factory=_verifier_factory(task_config),
@@ -1312,8 +1312,8 @@ def _default_agent_factory(
     trial_id: UUID,
     *,
     cp_client: StepTokenClient,
-    gateway_url: str,
-    agent_gateway_url: str | None = None,
+    worker_gateway_url: str,
+    sandbox_gateway_url: str | None = None,
     provider_connection_id: str | None = None,
 ) -> AgentFactory:
     """Build the agent factory used by LocalTrialRunner. Routes by
@@ -1321,9 +1321,12 @@ def _default_agent_factory(
 
     - "oracle"      → OracleAgent (solution/solve.sh baseline)
     - "litellm"     → LiteLLMAgent (v0.7 tool-loop runtime)
+    - "terminus-2"  → LoomTerminus2Runtime (Harbor-embedded in-box runtime;
+                      uses ``worker_gateway_url`` only)
     - anything else → SubprocessAgent wrapping the loom-launcher adapter
-      of that name. Raises AgentError if the name is unknown (i.e. no
-      v0.7 runtime and no registered adapter).
+      of that name (uses ``sandbox_gateway_url`` when set). Raises
+      AgentError if the name is unknown (i.e. no v0.7 runtime and no
+      registered adapter).
     """
 
     def make(
@@ -1360,8 +1363,7 @@ def _default_agent_factory(
                 team_id=str(team_id),
                 trial_id=trial_id,
                 cp_client=cp_client,
-                gateway_url=gateway_url,
-                agent_gateway_url=agent_gateway_url,
+                gateway_url=worker_gateway_url,
                 provider_connection_id=provider_connection_id,
             )
         else:
@@ -1392,8 +1394,8 @@ def _default_agent_factory(
                 adapter=adapter,
                 model=model,
                 cp_client=cp_client,
-                gateway_url=gateway_url,
-                agent_gateway_url=agent_gateway_url,
+                gateway_url=worker_gateway_url,
+                agent_gateway_url=sandbox_gateway_url,
                 team_id=team_id,
                 trial_id=trial_id,
             )
