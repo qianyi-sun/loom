@@ -19,7 +19,7 @@ import pytest
 from botocore.config import Config
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import create_engine, delete, insert, select, update
+from sqlalchemy import create_engine, delete, event, insert, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from testcontainers.minio import MinioContainer
@@ -39,6 +39,7 @@ from loom.taskset.transform_sandbox import TransformSandboxConfig
 from loom_service import taskset_materializer
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from loom_service.taskset_intake import delete_task_set
 from loom_service.taskset_materializer import run_once
 
 _MANIFEST_INLINE = """
@@ -363,6 +364,82 @@ async def _submit_inline_task_set(
         )
     assert response.status_code == 202, response.text
     return response.json()["task_set_id"]
+
+
+@pytest.mark.asyncio
+async def test_delete_locks_active_job_before_task_set_and_revokes_lease(
+    materialization_setup,
+) -> None:
+    app, tokens, teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    claimed_at = datetime.now(UTC)
+
+    async with app.state.session_factory() as session:
+        job = (await session.execute(
+            select(TaskSetMaterializationJob).where(
+                TaskSetMaterializationJob.task_set_id == task_set_id,
+            ),
+        )).scalar_one()
+        job.state = "running"
+        job.claimed_by = "delete-lock-order-owner"
+        job.claimed_at = claimed_at
+        job.lease_heartbeat_at = claimed_at
+        job.lease_epoch = 7
+        job_id = job.id
+        await session.commit()
+
+    statements: list[str] = []
+
+    def capture_statement(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        normalized = " ".join(statement.lower().split())
+        if "task_set_materialization_jobs" in normalized or "task_sets" in normalized:
+            statements.append(normalized)
+
+    engine = app.state.session_factory.kw["bind"]
+    event.listen(engine.sync_engine, "before_cursor_execute", capture_statement)
+    try:
+        async with app.state.session_factory() as session:
+            await delete_task_set(
+                session,
+                team_id=teams["team_a"],
+                task_set_id=task_set_id,
+            )
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", capture_statement)
+
+    active_job_select_index = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement.startswith("select") and "task_set_materialization_jobs" in statement
+    )
+    task_set_update_index = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement.startswith("update task_sets")
+    )
+    assert "for update" in statements[active_job_select_index]
+    assert active_job_select_index < task_set_update_index
+
+    async with app.state.session_factory() as session:
+        job_after_delete = await session.get(TaskSetMaterializationJob, job_id)
+        task_set_after_delete = await session.get(TaskSet, task_set_id)
+
+    assert job_after_delete is not None
+    assert job_after_delete.state == "cancelled"
+    assert job_after_delete.lease_epoch == 8
+    assert job_after_delete.claimed_at is None
+    assert job_after_delete.claimed_by is None
+    assert job_after_delete.lease_heartbeat_at is None
+    assert task_set_after_delete is not None
+    assert task_set_after_delete.status == "deleted"
+    assert task_set_after_delete.soft_deleted_at is not None
 
 
 @pytest.mark.asyncio

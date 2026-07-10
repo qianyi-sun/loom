@@ -564,17 +564,16 @@ async def delete_task_set(
     task_set = await get_visible_task_set(
         session, team_id=team_id, task_set_id=task_set_id,
     )
-    now = datetime.now(UTC)
-    task_set.status = "deleted"
-    task_set.soft_deleted_at = now
-    task_set.updated_at = now
-
     active_jobs = (await session.execute(
         select(TaskSetMaterializationJob).where(
             TaskSetMaterializationJob.task_set_id == task_set_id,
             TaskSetMaterializationJob.state.in_(_ACTIVE_JOB_STATES),
-        ),
+        ).with_for_update(),
     )).scalars().all()
+    now = datetime.now(UTC)
+    task_set.status = "deleted"
+    task_set.soft_deleted_at = now
+    task_set.updated_at = now
     for job in active_jobs:
         job.state = "cancelled"
         # Cancellation explicitly revokes any materializer lease.  A worker
