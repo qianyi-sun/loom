@@ -60,26 +60,37 @@ member changes:
 | --- | --- |
 | Harbor dataset | `terminal-bench/terminal-bench-2-1` |
 | Harbor revision | `6` |
+| Harbor metadata version | `sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a` |
 | Physical profile | `terminal-bench-2@tb2.1-r6` |
-| Source audit repository | `harbor-framework/terminal-bench-2-1` |
-| Source snapshot | `dde3cd95b80ff25af5abd99a80b6513a018ad3b4` |
-| Manifest | `tasks/dataset.toml` |
-| Manifest SHA-256 | `d90b4389992d07ed6f4ab8de963a70241eaa4b60072eeaec4c3b261b6c4a6dd8` |
-| Task packages | exactly 89 immutable Harbor package digests |
+| Source-reference repository | `harbor-framework/terminal-bench-2-1` |
+| Source-reference snapshot | `dde3cd95b80ff25af5abd99a80b6513a018ad3b4` |
+| Source-reference manifest | `tasks/dataset.toml` |
+| Source-reference manifest SHA-256 | `d90b4389992d07ed6f4ab8de963a70241eaa4b60072eeaec4c3b261b6c4a6dd8` |
+| Task packages | exactly 89 immutable Harbor metadata package digests |
 
-Authoritative inputs are the [Harbor Hub revision 6](https://hub.harborframework.com/datasets/terminal-bench/terminal-bench-2-1/6), the [pinned source snapshot](https://github.com/harbor-framework/terminal-bench-2-1/tree/dde3cd95b80ff25af5abd99a80b6513a018ad3b4), and its [dataset manifest](https://github.com/harbor-framework/terminal-bench-2-1/blob/dde3cd95b80ff25af5abd99a80b6513a018ad3b4/tasks/dataset.toml).
+The [Harbor Hub revision 6](https://hub.harborframework.com/datasets/terminal-bench/terminal-bench-2-1/6)
+is the sole authority for execution content. The pinned [source snapshot](https://github.com/harbor-framework/terminal-bench-2-1/tree/dde3cd95b80ff25af5abd99a80b6513a018ad3b4)
+and its [dataset manifest](https://github.com/harbor-framework/terminal-bench-2-1/blob/dde3cd95b80ff25af5abd99a80b6513a018ad3b4/tasks/dataset.toml)
+remain source-reference provenance, not a second execution authority.
 
-The adapter package will contain a reviewed, machine-readable lock derived
-from that manifest. It records all 89 task names and immutable package digests,
-the source snapshot, manifest hash, Harbor dataset/revision, and verifier
-identity. Fetching performs both checks below before conversion:
+The adapter package contains a reviewed, machine-readable lock derived from
+Hub metadata. It records all 89 task names and immutable package digests, the
+Hub metadata version, the source-reference snapshot and manifest hash, and a
+reviewed source-manifest comparison. Fetching performs both checks below before
+conversion:
 
 1. Resolve `terminal-bench/terminal-bench-2-1@6` through the Harbor package
-   registry and download the referenced content-addressed packages. The
-   returned package references must match the checked-in 89-entry lock exactly.
-2. Fetch the source audit repository at the fixed commit, hash
-   `tasks/dataset.toml`, and require its parsed task/digest set to equal the
-   same lock.
+   registry. The returned metadata version and 89 package references must match
+   the checked-in lock exactly.
+2. Fetch the source-reference repository at the fixed commit, hash
+   `tasks/dataset.toml`, and require 89 unique names matching the Hub name set.
+   The lock records the only approved divergence:
+   `terminal-bench/sanitize-git-repo` has source digest
+   `sha256:73c94a21ebe370bae843adbeeaaa9e991374867b18483aaf56c7cd470dcddea7`
+   and Hub digest
+   `sha256:6e86297715fae62cd499fbdd27013e11a38d05d7e05b7f661cb50b4ecead128f`.
+   Any additional, missing, or changed divergence fails closed and is surfaced
+   in the audit; it is never silently normalized.
 
 The Harbor download client is publishing tooling, not the agent runtime. Its
 version/hash is recorded in catalog-import evidence, while Terminus2's Harbor
@@ -97,13 +108,15 @@ from a public alias:
 
 - `Benchmark.execution_state`: `runnable` or `historical` (default existing
   non-versioned benchmarks to `runnable`).
-- `Benchmark.profile_provenance`: catalog-level JSON containing the dataset
-  ref/revision, source snapshot, manifest SHA, 89-entry lock fingerprint, and
+- `Benchmark.profile_provenance`: catalog-level JSON containing the Hub dataset
+  ref/revision, Hub metadata version, source-reference snapshot and manifest
+  SHA, reviewed divergence record, 89-entry lock fingerprint, and
   adapter/importer identity.
 - `Task.source_provenance`: task-level JSON containing the canonical task name,
-  Harbor package digest, verifier identity, and task-image provenance. The
-  existing `Task.checksum` remains the Loom bundle checksum; it is repeated in
-  audit output rather than treated as an upstream digest.
+  Hub package digest and metadata version, source-reference comparison when
+  divergent, verifier identity, and task-image provenance. The existing
+  `Task.checksum` remains the Loom bundle checksum; it is repeated in audit
+  output rather than treated as an upstream digest.
 - `benchmark_aliases`: public `alias` primary key, target `benchmark_id` FK,
   and an immutable activation/audit timestamp. Only a target with
   `execution_state = runnable` may be an active alias.
@@ -244,11 +257,13 @@ TB2.1 input and the evidence they must consume.
 
 ### Automated regression coverage
 
-- Lock parser tests prove the exact 89 names/digests, fixed Harbor revision,
-  source SHA, and manifest SHA; count drift, missing/extra tasks, duplicate
-  task names, and any digest mismatch fail before conversion.
-- Fetch tests simulate Harbor package and source-snapshot disagreement,
-  truncated downloads, digest mismatch, and offline cache reuse without
+- Lock parser tests prove the exact 89 Hub names/digests, Hub metadata version,
+  fixed Harbor revision, source-reference SHA, manifest SHA, and reviewed
+  single divergence. Count drift, missing/extra tasks, duplicate task names,
+  Hub-digest drift, or any unrecorded source-reference difference fails before
+  conversion.
+- Fetch tests simulate Hub metadata/version drift, truncated downloads,
+  unrecorded source-snapshot disagreement, and offline cache reuse without
   consulting a floating `latest` alias.
 - Native-layout fixture tests cover instruction, TOML metadata, environment,
   timeouts/resources, architecture, tests, solution isolation, and all 89
@@ -267,7 +282,8 @@ TB2.1 input and the evidence they must consume.
 
 ### Candidate and live evidence
 
-- A candidate audit reports 89/89 locked packages, converted bundles,
+- A candidate audit reports 89/89 Hub-locked packages, the exact Hub metadata
+  version, the reviewed source-reference divergence, converted bundles,
   registrations, object-store mirrors, and checksum matches.
 - Architecture audit covers all 89 tasks. Every unavailable architecture or
   environment exception has a task-level classification and linked issue; none
