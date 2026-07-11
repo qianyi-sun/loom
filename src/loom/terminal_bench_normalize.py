@@ -14,6 +14,7 @@ from typing import Any
 DEFAULT_AGENT_TIMEOUT_SEC = 360.0
 DEFAULT_VERIFIER_TIMEOUT_SEC = 60.0
 DEFAULT_VERIFIER_SCRIPT_PATH = "/app/verifier/run.sh"
+_TB21_VERIFIER_ARTIFACT_GLOB = "logs/verifier/**"
 
 _UNSUPPORTED_ENVIRONMENT_FIELDS: frozenset[str] = frozenset(
     {
@@ -201,9 +202,14 @@ def _normalize_native_tb21_task_toml(payload: dict[str, Any]) -> dict[str, Any]:
             verifier[field] = deepcopy(source_verifier[field])
 
     artifacts = payload.get("artifacts")
-    steps: list[dict[str, Any]] = []
-    if isinstance(artifacts, list) and all(isinstance(item, str) for item in artifacts):
-        steps.append({"name": "main", "artifacts": list(artifacts)})
+    source_artifacts = (
+        list(artifacts)
+        if isinstance(artifacts, list) and all(isinstance(item, str) for item in artifacts)
+        else []
+    )
+    if _TB21_VERIFIER_ARTIFACT_GLOB not in source_artifacts:
+        source_artifacts.append(_TB21_VERIFIER_ARTIFACT_GLOB)
+    steps = [{"name": "main", "artifacts": source_artifacts}]
 
     normalized: dict[str, Any] = {
         "schema_version": "1",

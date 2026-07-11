@@ -119,7 +119,7 @@ def test_adapter_declares_tb21_profile_metadata() -> None:
     assert TerminalBench2Adapter.task_count == 89
 
 
-def test_adapter_converts_every_locked_native_task(
+def test_adapter_lists_all_locked_native_tasks_and_converts_one(
     source_root: Path,
     tmp_path: Path,
 ) -> None:
@@ -147,7 +147,10 @@ def test_adapter_converts_every_locked_native_task(
     cfg = TaskConfig.model_validate(tomllib.loads((bundle / "task.toml").read_text()))
     assert cfg.task.id == converted.task_id
     assert cfg.environment.docker_image == "example/tb21:rev6"
-    assert cfg.steps[0].artifacts == ["logs/verifier/ctrf.json"]
+    assert cfg.steps[0].artifacts == [
+        "logs/verifier/ctrf.json",
+        "logs/verifier/**",
+    ]
 
 
 def test_oracle_eligibility_requires_a_real_non_symlink_solution(

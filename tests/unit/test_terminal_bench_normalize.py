@@ -63,7 +63,7 @@ class TestNormalizeMapping:
         """
         raw = {
             "schema_version": "1.1",
-            "artifacts": ["logs/verifier/ctrf.json", "result.json"],
+            "artifacts": [],
             "task": {
                 "name": "terminal-bench/adaptive-rejection-sampler",
                 "description": "Native TB2.1 task.",
@@ -109,12 +109,25 @@ class TestNormalizeMapping:
         assert cfg.verifier.args == {
             "script_path": DEFAULT_VERIFIER_SCRIPT_PATH,
         }
-        assert cfg.steps[0].artifacts == [
-            "logs/verifier/ctrf.json",
-            "result.json",
-        ]
+        assert cfg.steps[0].artifacts == ["logs/verifier/**"]
         assert raw["schema_version"] == "1.1"
         assert raw["environment"]["architecture"] == "x86_64"
+
+    def test_native_tb21_appends_verifier_artifact_glob_without_replacing_source_patterns(
+        self,
+    ) -> None:
+        raw = {
+            "schema_version": "1.1",
+            "artifacts": ["result.json"],
+            "task": {"name": "terminal-bench/with-artifacts"},
+            "environment": {"docker_image": "example/tb21:rev6"},
+        }
+
+        normalized = normalize_terminal_bench_task_toml(raw)
+        cfg = TaskConfig.model_validate(normalized)
+
+        assert cfg.steps[0].artifacts == ["result.json", "logs/verifier/**"]
+        assert raw["artifacts"] == ["result.json"]
 
     def test_produces_valid_loom_taskconfig(self) -> None:
         normalized = normalize_terminal_bench_task_toml(_tb_raw())

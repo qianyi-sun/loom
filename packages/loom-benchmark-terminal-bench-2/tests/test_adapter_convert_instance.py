@@ -130,4 +130,8 @@ def test_convert_preserves_native_bytes_modes_and_supported_contract(
     assert cfg.agent.timeout_sec == 222.0
     assert cfg.verifier.timeout_sec == 111.0
     assert cfg.verifier.args["script_path"] == "/app/verifier/run.sh"
-    assert cfg.steps[0].artifacts == ["logs/verifier/ctrf.json", "answer.json"]
+    assert cfg.steps[0].artifacts == [
+        "logs/verifier/ctrf.json",
+        "answer.json",
+        "logs/verifier/**",
+    ]
