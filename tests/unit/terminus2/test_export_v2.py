@@ -25,6 +25,7 @@ from loom.models.trajectory import (
 )
 from loom.models.types import ModelSpec
 from loom_service.delivery_export_tb2_v2 import (
+    SECRET_PATTERNS,
     Tb2V2ExportError,
     build_per_trial_v2_bundle,
     build_terminal_transcript,
@@ -309,3 +310,14 @@ def test_build_per_trial_v2_bundle_happy_path() -> None:
     )
     assert bundle.execution_trajectory["schema_version"] == "harbor-tb2-v2-projection"
     assert bundle.native_artifacts["native/harbor_trajectory.json"] == native
+
+
+def test_secret_patterns_ignore_task_id_substrings() -> None:
+    task_json = '{"task_id": "source-useful-5003/task-0001"}'
+    assert "sk-" in task_json
+    assert not any(pattern.search(task_json) for pattern in SECRET_PATTERNS)
+
+
+def test_secret_patterns_detect_openai_key_shape() -> None:
+    leaked = '{"token": "sk-abcdefghijklmnopqrstuvwxyz"}'
+    assert any(pattern.search(leaked) for pattern in SECRET_PATTERNS)

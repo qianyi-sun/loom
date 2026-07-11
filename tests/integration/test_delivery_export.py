@@ -31,6 +31,14 @@ from loom.db.schema import (
 )
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from loom_service.delivery_export_tb2_v2 import SECRET_PATTERNS
+
+
+def _assert_no_secret_patterns(text: str) -> None:
+    """Match export-time secret scan; avoid naive `sk-` substring false positives."""
+    for pattern in SECRET_PATTERNS:
+        match = pattern.search(text)
+        assert match is None, f"unexpected secret pattern {pattern.pattern!r}: {match!r}"
 
 
 class _FakeS3Client:
@@ -688,7 +696,7 @@ async def test_raw_harbor_tb2_delivery_export_streams_sample_compatible_bundle(
         rendered_provider_log = json.dumps(first_provider_log)
         assert "prompt " in rendered_provider_log
         assert "state_analysis" in rendered_provider_log
-        assert "sk-" not in rendered_provider_log
+        _assert_no_secret_patterns(rendered_provider_log)
         sft_lines = (
             tar.extractfile("derived/sft_messages.jsonl")  # type: ignore[union-attr]
             .read()
@@ -1539,4 +1547,5 @@ async def test_raw_harbor_tb2_v2_export_from_typed_events(
         ).read()
         assert native == native_by_trial[first_trial]
         rendered = json.dumps(trajectory)
-        assert "sk-" not in rendered
+        # task_id values like `task-0001` contain `sk-` as a substring; use export scan patterns.
+        _assert_no_secret_patterns(rendered)
