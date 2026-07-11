@@ -14,5 +14,5 @@ def test_license_is_apache_2() -> None:
 
 
 def test_license_url_points_to_upstream_repo() -> None:
-    assert "laude-institute/terminal-bench" in tb2_adapter.license_url
+    assert "harbor-framework/terminal-bench-2-1" in tb2_adapter.license_url
     assert tb2_adapter.license_url.endswith("LICENSE")
