@@ -10,6 +10,7 @@
 /scripts/validate_environment_isolation.py @qianyi-sun @Hongjian-Gu
 /tests/ops/test_plan_ci_validations.py @qianyi-sun @Hongjian-Gu
 /tests/ops/test_ci_throughput_workflows.py @qianyi-sun @Hongjian-Gu
+/tests/ops/test_ci_secret_isolation.py @qianyi-sun @Hongjian-Gu
 /pyproject.toml @qianyi-sun @Hongjian-Gu
 
 # Production release verification and deployment entry points.
