@@ -181,9 +181,15 @@ tasks/<task>/
   solution/solve.sh
 ```
 
-The converter preserves task TOML metadata, instruction bytes, environment
-assets and image/build definition, resource and timeout limits, architecture
-constraints, test files, and solution isolation. It never exposes
+The converter preserves the exact native schema-1.1 TOML as
+`upstream-task.toml` beside a Loom-schema-1 `task.toml`. The Loom config is
+produced by an explicit native-1.1 normalizer, which rewrites only the physical
+task ID and maps representable execution fields. Native resource quota,
+internet, and architecture fields that Loom's current `TaskConfig` cannot
+represent remain byte-preserved in `upstream-task.toml` and are carried into
+task provenance and preflight/audit rather than being silently dropped. The
+converter also preserves instruction bytes, environment assets and image/build
+definition, timeout limits, test files, and solution isolation. It never exposes
 `solution/solve.sh` to a normal agent. It does not retain the legacy
 `_UNSUPPORTED_INSTANCES` filter: the lock requires exactly 89 converted
 bundles, not an adapter-selected subset.
