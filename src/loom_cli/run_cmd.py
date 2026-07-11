@@ -34,6 +34,7 @@ from loom.models.types import ModelSpec
 from loom_cli.config import LocalProvider, load_config
 from loom_cli.local_object_store import LocalDiskObjectStore
 from loom_cli.local_runner import LocalRunner
+from loom_cli.model_spec import parse_model
 from loom_cli.output import format_json_line, format_text_line
 from loom_cli.task_loader import LoadedTask, load_tasks
 from loom_cli.vllm_runner import (
@@ -67,7 +68,7 @@ async def _run_async(args: argparse.Namespace) -> int:
     if len(model_specs) == 1:
         return await _run_one_model(
             args,
-            model=_parse_model(model_specs[0]),
+            model=parse_model(model_specs[0]),
             output_dir=None,
         )
     if args.parallel_models:
@@ -293,7 +294,7 @@ async def _run_sequential(
             f"\n→ [{slug}] starting trials for --model {spec_str}\n",
         )
         try:
-            model = _parse_model(spec_str)
+            model = parse_model(spec_str)
             code = await _run_one_model(args, model=model, output_dir=sub_output)
         except SystemExit:
             raise  # let argparse / explicit user-error exits propagate
@@ -325,7 +326,7 @@ async def _run_parallel(
             f"→ [{slug}] starting (parallel) for --model {spec_str}\n",
         )
         try:
-            model = _parse_model(spec_str)
+            model = parse_model(spec_str)
             return await _run_one_model(
                 args, model=model, output_dir=sub_output,
             )
@@ -363,45 +364,6 @@ def _maybe_write_tb2_report(
         return
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(to_tb2_report(trials), indent=2, sort_keys=True))
-
-
-def _parse_model(spec: str) -> ModelSpec:
-    """Parse `--model VALUE` into a `ModelSpec`.
-
-    Recognized shapes:
-
-    - `<provider>/<name>` — cloud provider or registered local server.
-      Examples: `anthropic/claude-opus-4-7`,
-      `local/vllm/Llama-3.1-8B-Instruct`.
-    - `hf:<org>/<name>` — HuggingFace model id; Loom will launch vLLM
-      on this model for the duration of the run.
-      Example: `hf:meta-llama/Llama-3.1-8B-Instruct`.
-    - `<absolute-or-relative-path-to-weights-dir>` — local weights
-      directory; Loom launches vLLM on it. Detected by leading `/`,
-      `~`, `./`, or `../`. Example: `/data/checkpoints/my-model/`.
-    """
-    # Path detection — a leading filesystem marker is unambiguous and
-    # avoids forcing the user to type a `file:` prefix.
-    if spec.startswith(("/", "~", "./", "../")):
-        return ModelSpec(provider="file", name=spec)
-    if spec.startswith("hf:"):
-        body = spec[len("hf:"):]
-        if "/" not in body:
-            raise SystemExit(
-                f"hf:<id> must be `<org>/<name>` (got hf:{body!r}). "
-                "Example: hf:meta-llama/Llama-3.1-8B-Instruct",
-            )
-        return ModelSpec(provider="hf", name=body)
-    if "/" not in spec:
-        raise SystemExit(
-            f"--model must be 'provider/name', 'hf:<id>', or an "
-            f"absolute / relative path to weights (got {spec!r}); "
-            f"e.g. anthropic/claude-opus-4-7, "
-            f"hf:meta-llama/Llama-3.1-8B-Instruct, or "
-            f"/data/checkpoints/my-model/",
-        )
-    provider, name = spec.split("/", 1)
-    return ModelSpec(provider=provider, name=name)
 
 
 def _patch_agent(
