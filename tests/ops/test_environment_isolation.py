@@ -143,7 +143,7 @@ def test_environment_isolation_rejects_shared_prod_secret_refs(tmp_path: Path) -
     assert "production: service_api_token_ref must start with" in completed.stderr
 
 
-def test_deploy_workflow_keeps_production_secrets_on_main_or_semver_tags() -> None:
+def test_deploy_workflow_keeps_production_secrets_on_main_only() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/deploy-environment.yml").read_text())
     jobs = workflow["jobs"]
 
@@ -161,7 +161,7 @@ def test_deploy_workflow_keeps_production_secrets_on_main_or_semver_tags() -> No
     assert "production" not in staging_job["if"]
 
     assert "refs/heads/main" in prod_job["if"]
-    assert "refs/tags/v" in prod_job["if"]
+    assert "refs/tags/" not in prod_job["if"]
     assert "environment == 'production'" in prod_job["if"]
 
     for secret_name in (
