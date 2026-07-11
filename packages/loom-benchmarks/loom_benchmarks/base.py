@@ -22,7 +22,7 @@ from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
 
 @dataclass(frozen=True)
 class UpstreamSource:
-    kind: Literal["huggingface", "git", "https-tarball"]
+    kind: Literal["huggingface", "git", "https-tarball", "harbor-package"]
     locator: str
     revision: str | None = None
     subset: str | None = None
