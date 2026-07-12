@@ -66,23 +66,34 @@ checksum, verifier identity, and separately supplied runtime provenance.
 Publishing emits manifest schema 4. The manifest and every task record the
 Hub package digest, Hub metadata version, source-reference snapshot (including
 the sole reviewed divergence), verifier identity, image provenance, and the
-private workspace staging policy. Register persists that evidence to the
-physical profile and task rows but never changes the public alias.
+private workspace staging policy. Every task additionally records the native
+configured `verifier/run.sh` path and SHA-256. Register persists that evidence
+to the physical profile and task rows but never changes the public alias.
 
 The normal-agent workspace staging path excludes `solution/`, `tests/`,
 `verifier/`, and `upstream-task.toml`; the worker fails closed if a rev-6 task
-lacks that persisted policy. It uploads the private subset only immediately
-before running the verifier. To move `terminal-bench-2`, an operator must
-produce a complete 89-bundle audit result and then call:
+lacks that exact persisted policy. The verifier runs in a new driver/container:
+only public agent-workspace files cross from the completed agent driver, while
+the fresh verifier driver receives the private subset. To move
+`terminal-bench-2`, an operator must produce a complete 89-bundle audit result
+and then call:
 
 ```bash
 loom datasets activate terminal-bench-2 \
   --profile terminal-bench-2@tb2.1-r6 \
-  --audit-json "$PWD/tb21-audit.json"
+  --audit-json "$PWD/tb21-audit.json" \
+  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
+  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
+  --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
 ```
 
-Activation rejects partial audits, provenance/config/checksum drift, and any
-missing private-workspace isolation evidence.
+The JSON carries the prior audit's snapshot identity, not a trusted clean
+assertion. Activation locks the current catalog rows, downloads and audits all
+89 current bundles again, records the resulting snapshot on the physical
+profile, and upserts the alias in that transaction only when the snapshots
+match and the fresh audit is clean. It rejects stale/forged evidence,
+provenance/config/checksum drift, incompatible task images, missing or
+non-executable verifier assets, and any missing private-workspace isolation.
 
 ## License
 

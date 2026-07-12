@@ -5,8 +5,9 @@ from __future__ import annotations
 import shutil
 import tomllib
 from collections.abc import Iterator
+from hashlib import sha256
 from importlib.resources import files
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import tomli_w
 from loom_benchmarks.base import BenchmarkInstance, ConvertedTask, UpstreamSource
@@ -52,16 +53,41 @@ class TerminalBench2Adapter:
         checksum: str,
     ) -> dict[str, object]:
         """Evidence tying one Loom bundle to its rev-6 source package."""
-        del bundle_dir, checksum  # The publish layer records the bundle checksum.
+        del checksum  # The publish layer records the complete bundle checksum.
         source_name = f"terminal-bench/{instance.instance_id}"
         lock = upstream.load_tb21_lock()
         environment = task_config.get("environment")
         env = environment if isinstance(environment, dict) else {}
+        verifier = task_config.get("verifier")
+        verifier_config = verifier if isinstance(verifier, dict) else {}
+        verifier_args = verifier_config.get("args")
+        args = verifier_args if isinstance(verifier_args, dict) else {}
+        script_path = args.get("script_path")
+        workdir = env.get("workdir")
+        if not isinstance(script_path, str) or not isinstance(workdir, str):
+            raise upstream.TB21LockError("TB2.1 verifier must declare script_path and workdir")
+        try:
+            relative_script = PurePosixPath(script_path).relative_to(PurePosixPath(workdir))
+        except ValueError as exc:
+            raise upstream.TB21LockError(
+                "TB2.1 verifier script_path must be under the configured workdir",
+            ) from exc
+        if relative_script != PurePosixPath("verifier/run.sh"):
+            raise upstream.TB21LockError("TB2.1 verifier must use verifier/run.sh")
+        verifier_script = bundle_dir / "verifier" / "run.sh"
+        if not verifier_script.is_file() or verifier_script.is_symlink():
+            raise upstream.TB21LockError("TB2.1 verifier shim is missing or not regular")
+        if not verifier_script.stat().st_mode & 0o111:
+            raise upstream.TB21LockError("TB2.1 verifier shim is not executable")
         return {
             "harbor_package_digest": lock.digest_for(source_name),
             "harbor_metadata_version": lock.hub_metadata_version,
             "source_reference": lock.source_reference_for(source_name),
             "verifier_identity": "tb21-native-reward-file-v1",
+            "verifier_asset": {
+                "script_path": script_path,
+                "sha256": f"sha256:{sha256(verifier_script.read_bytes()).hexdigest()}",
+            },
             "image_provenance": {
                 "docker_image": env.get("docker_image"),
                 "dockerfile": env.get("dockerfile"),

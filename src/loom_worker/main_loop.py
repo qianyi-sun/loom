@@ -61,7 +61,7 @@ from loom.startup_retry import (
 from loom.task_bundle_compat import validate_task_dir_compatibility
 from loom.trajectory.cp_event_sink import CpEventSink
 from loom.trajectory.storage import MinioObjectStore, ObjectStore
-from loom.trial.workspace import WorkspaceStagingPolicy
+from loom.trial.workspace import TB21_AGENT_WORKSPACE_POLICY, WorkspaceStagingPolicy
 from loom.verifier.base import Verifier
 from loom.verifier.pytest_verifier import PytestVerifier
 from loom.verifier.script_verifier import ScriptVerifier
@@ -107,6 +107,28 @@ _VERIFIER_CTORS: dict[str, Callable[..., Verifier]] = {
     "pytest": PytestVerifier,
     "script": ScriptVerifier,
 }
+
+
+def _tb21_workspace_staging_policy_from_provenance(
+    raw_policy: object,
+) -> WorkspaceStagingPolicy:
+    """Parse only the reviewed TB2.1 rev-6 workspace boundary.
+
+    WorkspaceStagingPolicy intentionally supports future benchmark-specific
+    layouts.  The physical TB2.1 profile is stricter: its four private paths
+    are part of the reviewed immutable contract, so a merely valid alternate
+    policy must fail before materialization or driver startup.
+    """
+    if not isinstance(raw_policy, dict):
+        raise ValueError("TB2.1 task is missing canonical private workspace isolation policy")
+    try:
+        policy = WorkspaceStagingPolicy.from_provenance(raw_policy)
+    except ValueError as exc:
+        raise ValueError("TB2.1 task has invalid private workspace isolation policy") from exc
+    canonical = WorkspaceStagingPolicy.from_provenance(TB21_AGENT_WORKSPACE_POLICY)
+    if policy != canonical:
+        raise ValueError("TB2.1 task requires the canonical private workspace isolation policy")
+    return policy
 
 
 def _host_cpu_arch() -> str:
@@ -711,17 +733,15 @@ async def _spawn_trial(
             raw_provenance = bundle.get("source_provenance")
             provenance = raw_provenance if isinstance(raw_provenance, dict) else {}
             raw_policy = provenance.get("workspace_staging_policy")
-            workspace_staging_policy = (
-                WorkspaceStagingPolicy.from_provenance(raw_policy)
-                if isinstance(raw_policy, dict)
-                else None
-            )
-            if (
-                task_config.task.id.startswith("terminal-bench-2@tb2.1-r6/")
-                and workspace_staging_policy is None
-            ):
-                raise ValueError(
-                    "TB2.1 task is missing required private workspace isolation policy",
+            if task_config.task.id.startswith("terminal-bench-2@tb2.1-r6/"):
+                workspace_staging_policy = _tb21_workspace_staging_policy_from_provenance(
+                    raw_policy,
+                )
+            else:
+                workspace_staging_policy = (
+                    WorkspaceStagingPolicy.from_provenance(raw_policy)
+                    if isinstance(raw_policy, dict)
+                    else None
                 )
 
             # Plan 13 Task 3: materialize the fixture content from

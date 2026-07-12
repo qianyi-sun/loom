@@ -1,25 +1,22 @@
 """_run_step — per-step body (spec §3.4).
 
 Phase order: prepare (skipped in v1; setup.sh lives in Plan 7) → agent →
-artifact collection → verifier. Errors are recorded as StepError and the
-loop continues to next phase.
-
-NOTE on verifier_env_mode (spec §3.8): v1 ignores the setting and always
-runs the verifier in the agent's Driver (shared mode). Separate mode (fresh
-Driver from tests/Dockerfile, upload artifacts in, run verifier there) is
-a v1.5 concern — it requires a "second driver" lifecycle the v1 runner does
-not orchestrate. Tasks whose verifier_env_mode = "separate" will silently
-run in shared mode.
+verifier → artifact collection. Errors are recorded as StepError and the loop
+continues to the next phase. Provenance-gated private workspaces use a fresh
+verifier driver; ordinary tasks preserve the legacy single-driver path.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import tempfile
 import time
 from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
+from loom.driver.base import Driver, StartOptions
 from loom.errors import AgentError, classify_failure, classify_failure_message
 from loom.models.networking import NetworkPolicy
 from loom.models.result import ArtifactRef, FailureReason, StepError, StepResult
@@ -83,20 +80,9 @@ async def run_step(
 
     # Verifier phase ───────────────────────────────────────────────────────
     verifier_result = None
+    verifier_env: Driver = ctx.driver
+    isolated_verifier_driver: Driver | None = None
     if not ctx.trial_config.skip_verifier:
-        # The normal-agent staging policy keeps private tests, verifier code,
-        # and reference solutions out of /workspace until the agent has
-        # finished.  Upload only that private subset immediately before the
-        # verifier consumes it; profiles without a policy retain legacy
-        # materialization behavior.
-        if ctx.workspace_staging_policy is not None:
-            await materialize_workspace(
-                driver=ctx.driver,
-                task_dir=ctx.task_dir,
-                dst=workdir,
-                policy=ctx.workspace_staging_policy,
-                phase="verifier",
-            )
         verifier_timeout = _resolve_verifier_timeout(ctx, step)
         verifier_phase: NetworkPolicy = (
             step.network.verifier_phase
@@ -105,8 +91,42 @@ async def run_step(
         )
         verifier_started = time.monotonic()
         try:
+            if ctx.workspace_staging_policy is not None:
+                factory = ctx.verifier_driver_factory
+                if factory is None:
+                    raise RuntimeError(
+                        "private workspace staging requires a fresh verifier driver",
+                    )
+                isolated_verifier_driver = factory()
+                verifier_env = isolated_verifier_driver
+                await verifier_env.start(options=_isolated_verifier_start_options(ctx))
+                # The verifier driver receives a fresh public bundle plus its
+                # private verifier-only files.  We then copy only non-private
+                # agent workspace files across the process boundary; an agent
+                # cannot create a lookalike verifier path that overwrites the
+                # trusted verifier asset.
+                await materialize_workspace(
+                    driver=verifier_env,
+                    task_dir=ctx.task_dir,
+                    dst=workdir,
+                    policy=ctx.workspace_staging_policy,
+                    phase="agent",
+                )
+                await materialize_workspace(
+                    driver=verifier_env,
+                    task_dir=ctx.task_dir,
+                    dst=workdir,
+                    policy=ctx.workspace_staging_policy,
+                    phase="verifier",
+                )
+                await _handoff_agent_workspace(
+                    agent_driver=ctx.driver,
+                    verifier_driver=verifier_env,
+                    workdir=workdir,
+                    policy=ctx.workspace_staging_policy,
+                )
             async with phase_network(
-                ctx.driver,
+                verifier_env,
                 baseline=baseline_policy,
                 phase=verifier_phase,
             ):
@@ -114,7 +134,7 @@ async def run_step(
                 verifier_result = await asyncio.wait_for(
                     ctx.verifier.verify(
                         task=ctx.task_config,
-                        env=ctx.driver,
+                        env=verifier_env,
                         artifacts_dir=workdir,
                         trajectory=reader,
                     ),
@@ -129,7 +149,7 @@ async def run_step(
             # "harness bug" without a rerun. The probe is non-mutating and
             # bounded by its own short timeout so we never let it turn a
             # timeout into a hang.
-            probe_output = await _post_mortem_verifier_probe(ctx.driver)
+            probe_output = await _post_mortem_verifier_probe(verifier_env)
             verifier_result = VerifierResult(
                 rewards={},
                 error=VerifierError(
@@ -179,7 +199,7 @@ async def run_step(
     )
     try:
         collection = await collector.collect(
-            env=ctx.driver,
+            env=verifier_env,
             patterns=_artifact_patterns(ctx, step),
             required_patterns=list(step.required_artifacts),
         )
@@ -218,6 +238,20 @@ async def run_step(
                 occurred_at=datetime.now(UTC),
             )
 
+    if isolated_verifier_driver is not None:
+        try:
+            await asyncio.shield(
+                isolated_verifier_driver.stop(delete=ctx.trial_config.delete_env),
+            )
+        except Exception as exc:
+            if sr_error is None:
+                sr_error = StepError(
+                    phase="verifier",
+                    reason="cleanup",
+                    message=f"verifier driver cleanup failed: {exc}",
+                    occurred_at=datetime.now(UTC),
+                )
+
     sr_finished = datetime.now(UTC)
     step_result = StepResult(
         step_name=step.name,
@@ -250,6 +284,76 @@ class _SeqCounter:
         v = self._n
         self._n += 1
         return v
+
+
+def _isolated_verifier_start_options(ctx: TrialContext) -> StartOptions:
+    """Options for the verifier-only container.
+
+    It shares only task runtime networking/configuration. Agent credentials,
+    family state, and JWT bind mounts deliberately stay on the agent driver.
+    """
+    return StartOptions(
+        force_build=ctx.trial_config.force_build,
+        network=ctx.sandbox_network,
+        environment=tuple(sorted(ctx.task_config.environment.environment.items())),
+        extra_hosts=tuple(
+            sorted({*ctx.task_config.environment.extra_hosts, *ctx.sandbox_extra_hosts}),
+        ),
+        dns=tuple(ctx.task_config.environment.dns),
+        tmpfs=tuple(ctx.task_config.environment.tmpfs),
+        labels=tuple(
+            sorted(
+                {
+                    "loom.trial-container": "true",
+                    "loom.driver-role": "verifier",
+                    "loom.trial_id": str(ctx.trial_id),
+                    "loom.team_id": str(ctx.team_id),
+                    "loom.task_id": ctx.task_id,
+                }.items(),
+            ),
+        ),
+    )
+
+
+async def _handoff_agent_workspace(
+    *,
+    agent_driver: Driver,
+    verifier_driver: Driver,
+    workdir: PurePosixPath,
+    policy: object,
+) -> None:
+    """Copy public agent workspace files into the fresh verifier driver.
+
+    Listing and downloading happen through the agent driver protocol; private
+    paths are rejected again at the handoff boundary even if a malicious agent
+    creates their names after initial staging.
+    """
+    from loom.trial.workspace import WorkspaceStagingPolicy
+
+    if not isinstance(policy, WorkspaceStagingPolicy):
+        raise TypeError("private verifier handoff requires WorkspaceStagingPolicy")
+    listing = await agent_driver.exec(
+        f"find {workdir.as_posix()} -type f -print0",
+        user="root",
+    )
+    if listing.return_code != 0:
+        raise RuntimeError("unable to enumerate agent workspace for verifier handoff")
+    with tempfile.TemporaryDirectory(prefix="loom-verifier-handoff-") as temp:
+        handoff_root = Path(temp)
+        for raw_path in listing.stdout.split(b"\x00"):
+            if not raw_path:
+                continue
+            try:
+                source = PurePosixPath(raw_path.decode("utf-8"))
+                relative = source.relative_to(workdir)
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise RuntimeError("agent workspace listing contains an invalid path") from exc
+            if not relative.parts or policy.is_private(relative):
+                continue
+            local = handoff_root.joinpath(*relative.parts)
+            local.parent.mkdir(parents=True, exist_ok=True)
+            await agent_driver.download(source, local)
+            await verifier_driver.upload(local, workdir / relative)
 
 
 def _artifact_patterns(ctx: TrialContext, step: StepConfig) -> list[str]:

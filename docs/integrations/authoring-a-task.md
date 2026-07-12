@@ -319,8 +319,10 @@ There are three supported task-registration shapes today:
   register persists that config and provenance into `tasks`.
   Terminal-Bench 2.1 rev-6 publication additionally records a private
   workspace policy: normal agents do not receive `solution/`, `tests/`,
-  `verifier/`, or `upstream-task.toml`; those files are staged only for the
-  verifier phase.
+  `verifier/`, or `upstream-task.toml`; those files are staged only in a
+  fresh verifier-only driver after the agent driver has completed. Its
+  provenance also records the configured script-verifier path and content
+  checksum so public activation can attest to the executable that will run.
 
 For a one-off local fixture, use `scripts/seed_test_data.py` as a
 template:

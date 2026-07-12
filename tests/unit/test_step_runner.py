@@ -1,6 +1,6 @@
 import fnmatch
 import shlex
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 import httpx
@@ -28,6 +28,11 @@ from loom.trajectory.storage import FakeObjectStore
 from loom.trajectory.writer import TrajectoryWriter
 from loom.trial.step_runner import run_step
 from loom.trial.trial import TrialContext
+from loom.trial.workspace import (
+    TB21_AGENT_WORKSPACE_POLICY,
+    WorkspaceStagingPolicy,
+    materialize_workspace,
+)
 from tests._trial_config_defaults import stub_trial_config
 
 
@@ -53,12 +58,17 @@ async def context(tmp_path: Path) -> TrialContext:
         verifier=VerifierDefaults(name="pass"),
         steps=[StepConfig(name="main")],
     )
-    handler = command_table_handler({
-        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
-            return_code=0, stdout=b"ok\n", stderr=b"",
-            truncated=False, duration_sec=0.05,
-        ),
-    })
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
+                return_code=0,
+                stdout=b"ok\n",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.05,
+            ),
+        }
+    )
     driver = FakeDriver(exec_handler=handler)
     await driver.start(options=StartOptions())
 
@@ -82,13 +92,16 @@ async def test_run_step_happy_path(context: TrialContext, tmp_path: Path):
     writer = TrajectoryWriter(
         local_path=context.local_trajectory_path,
         store=context.object_store,
-        bucket=context.trajectory_bucket, key=context.trajectory_key,
+        bucket=context.trajectory_bucket,
+        key=context.trajectory_key,
         min_part_bytes=0,
     )
     async with writer:
         sr = await run_step(
-            ctx=context, step=context.task_config.steps[0],
-            trajectory=writer, baseline_policy=Public(),
+            ctx=context,
+            step=context.task_config.steps[0],
+            trajectory=writer,
+            baseline_policy=Public(),
         )
     assert isinstance(sr, StepResult)
     assert sr.verifier_result is not None
@@ -120,13 +133,16 @@ async def test_run_step_records_agent_error(context: TrialContext, tmp_path: Pat
     writer = TrajectoryWriter(
         local_path=context.local_trajectory_path,
         store=context.object_store,
-        bucket=context.trajectory_bucket, key=context.trajectory_key,
+        bucket=context.trajectory_bucket,
+        key=context.trajectory_key,
         min_part_bytes=0,
     )
     async with writer:
         sr = await run_step(
-            ctx=context, step=context.task_config.steps[0],
-            trajectory=writer, baseline_policy=Public(),
+            ctx=context,
+            step=context.task_config.steps[0],
+            trajectory=writer,
+            baseline_policy=Public(),
         )
     assert sr.error is not None
     assert sr.error.phase == "agent"
@@ -178,13 +194,16 @@ async def test_run_step_retries_retryable_gateway_failure(context: TrialContext)
     writer = TrajectoryWriter(
         local_path=context.local_trajectory_path,
         store=context.object_store,
-        bucket=context.trajectory_bucket, key=context.trajectory_key,
+        bucket=context.trajectory_bucket,
+        key=context.trajectory_key,
         min_part_bytes=0,
     )
     async with writer:
         sr = await run_step(
-            ctx=context, step=context.task_config.steps[0],
-            trajectory=writer, baseline_policy=Public(),
+            ctx=context,
+            step=context.task_config.steps[0],
+            trajectory=writer,
+            baseline_policy=Public(),
         )
 
     assert sr.error is None
@@ -238,8 +257,10 @@ async def test_run_step_retries_textual_provider_transport_disconnect(
     )
     async with writer:
         sr = await run_step(
-            ctx=context, step=context.task_config.steps[0],
-            trajectory=writer, baseline_policy=Public(),
+            ctx=context,
+            step=context.task_config.steps[0],
+            trajectory=writer,
+            baseline_policy=Public(),
         )
 
     assert sr.error is None
@@ -266,13 +287,16 @@ async def test_run_step_records_verifier_exception(context: TrialContext):
     writer = TrajectoryWriter(
         local_path=context.local_trajectory_path,
         store=context.object_store,
-        bucket=context.trajectory_bucket, key=context.trajectory_key,
+        bucket=context.trajectory_bucket,
+        key=context.trajectory_key,
         min_part_bytes=0,
     )
     async with writer:
         sr = await run_step(
-            ctx=context, step=context.task_config.steps[0],
-            trajectory=writer, baseline_policy=Public(),
+            ctx=context,
+            step=context.task_config.steps[0],
+            trajectory=writer,
+            baseline_policy=Public(),
         )
     assert sr.error is not None
     assert sr.error.phase == "verifier"
@@ -298,13 +322,16 @@ async def test_run_step_records_verifier_timeout_as_structured_result(
     writer = TrajectoryWriter(
         local_path=context.local_trajectory_path,
         store=context.object_store,
-        bucket=context.trajectory_bucket, key=context.trajectory_key,
+        bucket=context.trajectory_bucket,
+        key=context.trajectory_key,
         min_part_bytes=0,
     )
     async with writer:
         sr = await run_step(
-            ctx=context, step=context.task_config.steps[0],
-            trajectory=writer, baseline_policy=Public(),
+            ctx=context,
+            step=context.task_config.steps[0],
+            trajectory=writer,
+            baseline_policy=Public(),
         )
 
     assert sr.error is not None
@@ -375,8 +402,10 @@ async def test_run_step_collects_verifier_required_artifacts_after_verifier(
 
     async with writer:
         sr = await run_step(
-            ctx=context, step=step,
-            trajectory=writer, baseline_policy=Public(),
+            ctx=context,
+            step=step,
+            trajectory=writer,
+            baseline_policy=Public(),
         )
 
     assert sr.error is None
@@ -407,8 +436,10 @@ async def test_run_step_marks_missing_required_artifact_invalid(
 
     async with writer:
         sr = await run_step(
-            ctx=context, step=step,
-            trajectory=writer, baseline_policy=Public(),
+            ctx=context,
+            step=step,
+            trajectory=writer,
+            baseline_policy=Public(),
         )
 
     assert sr.error is not None
@@ -423,12 +454,133 @@ async def test_run_step_skip_verifier(context: TrialContext):
     writer = TrajectoryWriter(
         local_path=context.local_trajectory_path,
         store=context.object_store,
-        bucket=context.trajectory_bucket, key=context.trajectory_key,
+        bucket=context.trajectory_bucket,
+        key=context.trajectory_key,
         min_part_bytes=0,
     )
     async with writer:
         sr = await run_step(
-            ctx=context, step=context.task_config.steps[0],
-            trajectory=writer, baseline_policy=Public(),
+            ctx=context,
+            step=context.task_config.steps[0],
+            trajectory=writer,
+            baseline_policy=Public(),
         )
     assert sr.verifier_result is None
+
+
+async def test_private_verifier_uses_fresh_driver_without_exposing_agent_workspace(
+    context: TrialContext,
+) -> None:
+    """A background agent process must never observe verifier-only files.
+
+    The observer is deliberately activated after public staging and before the
+    verifier phase.  A late private upload to the agent's container therefore
+    fails this regression test; a fresh verifier driver passes it.
+    """
+
+    class _ObservingDriver(FakeDriver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.background_observer_active = False
+            self.private_paths_observed: list[PurePosixPath] = []
+
+        async def upload(self, src: Path, dst: PurePosixPath) -> None:
+            if self.background_observer_active and (
+                "/solution/" in dst.as_posix()
+                or "/tests/" in dst.as_posix()
+                or "/verifier/" in dst.as_posix()
+                or dst.name == "upstream-task.toml"
+            ):
+                self.private_paths_observed.append(dst)
+            await super().upload(src, dst)
+
+        async def exec(self, cmd, **kwargs):  # type: ignore[no-untyped-def]
+            if cmd.startswith("find "):
+                paths = [
+                    path.as_posix().encode()
+                    for path in sorted(self.filesystem)
+                    if path.is_relative_to(PurePosixPath("/workspace"))
+                ]
+                return ExecResult(
+                    return_code=0,
+                    stdout=b"\x00".join(paths) + (b"\x00" if paths else b""),
+                    stderr=b"",
+                    truncated=False,
+                    duration_sec=0,
+                )
+            return await super().exec(cmd, **kwargs)
+
+    class _BackgroundAgent:
+        mode = "out-of-box"
+        name = "background-agent"
+        version = "1"
+        supports_os = frozenset({"linux"})
+        model = None
+
+        async def run(self, *, env, **_kwargs):  # type: ignore[no-untyped-def]
+            env.background_observer_active = True
+            env.filesystem[PurePosixPath("/workspace/agent-output.txt")] = b"answer"
+
+    class _VerifierThatCapturesItsDriver:
+        name = "pass"
+
+        def __init__(self) -> None:
+            self.env: FakeDriver | None = None
+
+        async def verify(self, *, env, **_kwargs):  # type: ignore[no-untyped-def]
+            self.env = env
+            assert PurePosixPath("/workspace/verifier/run.sh") in env.filesystem
+            assert PurePosixPath("/workspace/solution/solve.sh") in env.filesystem
+            assert PurePosixPath("/workspace/agent-output.txt") in env.filesystem
+            return VerifierResult(rewards={"passed": 1.0})
+
+    task_dir = context.task_dir
+    (task_dir / "instruction.md").write_text("Solve it\n")
+    (task_dir / "tests").mkdir()
+    (task_dir / "tests" / "private-test.sh").write_text("private\n")
+    (task_dir / "verifier").mkdir()
+    (task_dir / "verifier" / "run.sh").write_text("#!/bin/sh\n")
+    (task_dir / "upstream-task.toml").write_text("private upstream\n")
+
+    agent_driver = _ObservingDriver()
+    await agent_driver.start(options=StartOptions())
+    verifier_driver = _ObservingDriver()
+    context.driver = agent_driver
+    context.agent = _BackgroundAgent()  # type: ignore[assignment]
+    context.workspace_staging_policy = WorkspaceStagingPolicy.from_provenance(
+        TB21_AGENT_WORKSPACE_POLICY,
+    )
+    context.verifier_driver_factory = lambda: verifier_driver  # type: ignore[attr-defined]
+    verifier = _VerifierThatCapturesItsDriver()
+    context.verifier = verifier  # type: ignore[assignment]
+
+    await materialize_workspace(
+        driver=agent_driver,
+        task_dir=task_dir,
+        dst=PurePosixPath("/workspace"),
+        policy=context.workspace_staging_policy,
+        phase="agent",
+    )
+    assert agent_driver.private_paths_observed == []
+    assert PurePosixPath("/workspace/verifier/run.sh") not in agent_driver.filesystem
+
+    writer = TrajectoryWriter(
+        local_path=context.local_trajectory_path,
+        store=context.object_store,
+        bucket=context.trajectory_bucket,
+        key=context.trajectory_key,
+        min_part_bytes=0,
+    )
+    async with writer:
+        result = await run_step(
+            ctx=context,
+            step=context.task_config.steps[0],
+            trajectory=writer,
+            baseline_policy=Public(),
+        )
+
+    assert result.error is None
+    assert verifier.env is verifier_driver
+    assert verifier_driver.state == "stopped"
+    assert agent_driver.private_paths_observed == []
+    assert PurePosixPath("/workspace/verifier/run.sh") not in agent_driver.filesystem

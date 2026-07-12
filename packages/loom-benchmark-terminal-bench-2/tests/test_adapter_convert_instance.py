@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tomllib
 from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
 
 from loom_benchmark_terminal_bench_2 import upstream
@@ -135,3 +136,14 @@ def test_convert_preserves_native_bytes_modes_and_supported_contract(
         "answer.json",
         "logs/verifier/**",
     ]
+
+    provenance = TerminalBench2Adapter().task_source_provenance(
+        instance=instance,
+        bundle_dir=out_dir,
+        task_config=cfg.model_dump(mode="json"),
+        checksum=converted.checksum,
+    )
+    assert provenance["verifier_asset"] == {
+        "script_path": "/app/verifier/run.sh",
+        "sha256": f"sha256:{sha256((out_dir / 'verifier' / 'run.sh').read_bytes()).hexdigest()}",
+    }

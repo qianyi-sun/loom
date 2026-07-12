@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import stat
 import tempfile
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from datetime import UTC, datetime
+from hashlib import sha256
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from loom_benchmark_terminal_bench_2.upstream import TB21_TASK_COUNT, load_tb21_lock
@@ -19,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loom.db.schema import Benchmark, BenchmarkAlias
 from loom.db.schema import Task as TaskRow
 from loom.models.task import TaskConfig
+from loom.task_bundle_compat import validate_task_dir_compatibility
 from loom.trajectory.storage import ObjectStore
 from loom_benchmark_tool.manifest import tb21_workspace_policy_isolated
 
@@ -38,6 +42,7 @@ class AuditResult:
     private_workspace_isolation: bool
     issues: tuple[str, ...] = ()
     architecture_diagnostics: tuple[str, ...] = ()
+    snapshot_id: str | None = None
 
     def require_exact_profile(self, profile: str, *, task_count: int) -> None:
         if self.profile != profile:
@@ -60,11 +65,13 @@ class AuditResult:
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "schema_version": 2,
             "profile": self.profile,
             "verified_bundles": self.verified_bundles,
             "private_workspace_isolation": self.private_workspace_isolation,
             "issues": list(self.issues),
             "architecture_diagnostics": list(self.architecture_diagnostics),
+            "snapshot_id": self.snapshot_id,
         }
 
     @classmethod
@@ -74,6 +81,7 @@ class AuditResult:
         isolated = value.get("private_workspace_isolation")
         issues = value.get("issues", [])
         diagnostics = value.get("architecture_diagnostics", [])
+        snapshot_id = value.get("snapshot_id")
         if not isinstance(profile, str) or not isinstance(verified, int):
             raise ValueError("audit JSON requires string profile and integer verified_bundles")
         if not isinstance(isolated, bool):
@@ -84,12 +92,17 @@ class AuditResult:
             isinstance(item, str) for item in diagnostics
         ):
             raise ValueError("audit JSON architecture_diagnostics must be strings")
+        if snapshot_id is not None and (
+            not isinstance(snapshot_id, str) or not snapshot_id.startswith("sha256:")
+        ):
+            raise ValueError("audit JSON snapshot_id must be a sha256 identifier")
         return cls(
             profile=profile,
             verified_bundles=verified,
             private_workspace_isolation=isolated,
             issues=tuple(issues),
             architecture_diagnostics=tuple(diagnostics),
+            snapshot_id=snapshot_id,
         )
 
     @classmethod
@@ -99,31 +112,87 @@ class AuditResult:
             raise ValueError("audit JSON must contain an object")
         return cls.from_dict(raw)
 
+    def require_current_snapshot(self, current: AuditResult) -> None:
+        """Require supplied evidence to name the exact fresh audit snapshot.
 
-async def activate_tb21_alias(session: AsyncSession, audit: AuditResult) -> None:
-    """Atomically point the public alias at the fully audited rev-6 profile."""
-    audit.require_exact_profile(TB21_PROFILE_ID, task_count=TB21_TASK_COUNT)
-    await session.execute(
-        pg_insert(BenchmarkAlias)
-        .values(alias=TB21_PUBLIC_ALIAS, benchmark_id=TB21_PROFILE_ID)
-        .on_conflict_do_update(
-            index_elements=["alias"],
-            set_={"benchmark_id": TB21_PROFILE_ID},
-        ),
-    )
-    await session.commit()
+        This deliberately does not trust `verified_bundles`, isolation, or
+        issue fields from disk.  They are operator evidence only; the caller
+        must separately run and validate `current` inside activation.
+        """
+        if self.profile != current.profile:
+            raise ProfileActivationError(
+                f"audit profile mismatch: expected {current.profile!r}, got {self.profile!r}",
+            )
+        if self.snapshot_id is None:
+            raise ProfileActivationError("activation evidence is missing a snapshot binding")
+        if current.snapshot_id is None or self.snapshot_id != current.snapshot_id:
+            raise ProfileActivationError(
+                "activation evidence snapshot does not match current audit"
+            )
+
+
+async def activate_tb21_alias(
+    session: AsyncSession,
+    *,
+    object_store: ObjectStore,
+    audit_evidence: AuditResult,
+) -> AuditResult:
+    """Re-audit the current physical profile and atomically activate it.
+
+    The JSON evidence is useful as an operator-visible locator/identity for a
+    prior audit, but it cannot authorize activation.  We take row locks, read
+    the registered bundles from object storage again, bind the evidence to the
+    just-observed snapshot, and only then update the alias in the same database
+    transaction.
+    """
+    async with session.begin():
+        current = await audit_tb21_profile(
+            session,
+            object_store=object_store,
+            lock_rows=True,
+        )
+        audit_evidence.require_current_snapshot(current)
+        current.require_exact_profile(TB21_PROFILE_ID, task_count=TB21_TASK_COUNT)
+        benchmark = await session.get(Benchmark, TB21_PROFILE_ID)
+        if benchmark is None:  # Defensive: the locked audit just observed it.
+            raise ProfileActivationError("physical TB2.1 profile disappeared during activation")
+        profile_provenance = dict(benchmark.profile_provenance or {})
+        profile_provenance["activation_audit"] = {
+            "schema_version": 1,
+            "snapshot_id": current.snapshot_id,
+            "verified_bundles": current.verified_bundles,
+            "verified_at": datetime.now(UTC).isoformat(),
+        }
+        benchmark.profile_provenance = profile_provenance
+        await session.execute(
+            pg_insert(BenchmarkAlias)
+            .values(alias=TB21_PUBLIC_ALIAS, benchmark_id=TB21_PROFILE_ID)
+            .on_conflict_do_update(
+                index_elements=["alias"],
+                set_={"benchmark_id": TB21_PROFILE_ID},
+            ),
+        )
+    return current
 
 
 async def audit_tb21_profile(
     session: AsyncSession,
     *,
     object_store: ObjectStore,
+    lock_rows: bool = False,
 ) -> AuditResult:
     """Verify persisted TB2.1 provenance and each mirrored bundle's bytes."""
     lock = load_tb21_lock()
     issues: list[str] = []
     architecture_diagnostics: list[str] = []
-    benchmark = await session.get(Benchmark, TB21_PROFILE_ID)
+    if lock_rows:
+        benchmark = (
+            await session.execute(
+                select(Benchmark).where(Benchmark.id == TB21_PROFILE_ID).with_for_update(),
+            )
+        ).scalar_one_or_none()
+    else:
+        benchmark = await session.get(Benchmark, TB21_PROFILE_ID)
     profile_provenance: dict[str, Any] = (
         dict(benchmark.profile_provenance or {}) if benchmark is not None else {}
     )
@@ -172,13 +241,12 @@ async def audit_tb21_profile(
     if not profile_isolated:
         issues.append("profile lacks reviewed private workspace isolation policy")
 
-    task_rows = list(
-        (
-            await session.scalars(
-                select(TaskRow).where(TaskRow.benchmark_id == TB21_PROFILE_ID).order_by(TaskRow.id),
-            )
-        ).all()
+    tasks_statement = (
+        select(TaskRow).where(TaskRow.benchmark_id == TB21_PROFILE_ID).order_by(TaskRow.id)
     )
+    if lock_rows:
+        tasks_statement = tasks_statement.with_for_update()
+    task_rows = list((await session.scalars(tasks_statement)).all())
     expected_names = {task.name for task in lock.tasks}
     observed_names = {
         row.id.removeprefix(f"{TB21_PROFILE_ID}/")
@@ -194,6 +262,7 @@ async def audit_tb21_profile(
 
     verified = 0
     task_isolated = True
+    snapshot_tasks: list[dict[str, object]] = []
     for row in task_rows:
         short_name = row.id.removeprefix(f"{TB21_PROFILE_ID}/")
         source_name = f"terminal-bench/{short_name}"
@@ -251,10 +320,25 @@ async def audit_tb21_profile(
                 f"{row.id}: cpu_arch={config.environment.cpu_arch}",
             )
 
+        task_snapshot: dict[str, object] = {
+            "id": row.id,
+            "source": row.source,
+            "registered_checksum": row.checksum,
+            "config": row.config,
+            "source_provenance": provenance,
+        }
         try:
-            await _verify_bundle_bytes(row, object_store=object_store, expected_config=config)
+            bundle_snapshot = await _verify_bundle_bytes(
+                row,
+                object_store=object_store,
+                expected_config=config,
+                source_provenance=provenance,
+            )
+            task_snapshot.update(bundle_snapshot)
         except Exception as exc:
             row_issues.append(f"bundle bytes: {exc}")
+            task_snapshot["verification_error"] = str(exc)
+        snapshot_tasks.append(task_snapshot)
 
         if row_issues:
             issues.extend(f"{row.id}: {issue}" for issue in row_issues)
@@ -267,6 +351,11 @@ async def audit_tb21_profile(
         private_workspace_isolation=profile_isolated and task_isolated,
         issues=tuple(issues),
         architecture_diagnostics=tuple(architecture_diagnostics),
+        snapshot_id=_snapshot_id(
+            benchmark=benchmark,
+            profile_provenance=profile_provenance,
+            task_snapshots=snapshot_tasks,
+        ),
     )
 
 
@@ -275,7 +364,8 @@ async def _verify_bundle_bytes(
     *,
     object_store: ObjectStore,
     expected_config: TaskConfig | None,
-) -> None:
+    source_provenance: Mapping[str, object],
+) -> dict[str, object]:
     source = row.source
     if not isinstance(source, str) or not source.startswith("s3://"):
         raise ValueError("requires an internal s3:// source")
@@ -300,6 +390,83 @@ async def _verify_bundle_bytes(
         bundle_config = TaskConfig.model_validate(tomllib.loads(task_toml.read_text()))
         if expected_config is not None and bundle_config != expected_config:
             raise ValueError("normalized config differs from persisted task config")
+        # Use the exact compatibility validator the worker runs after
+        # materialization.  A profile with a build-blocking task can therefore
+        # not receive an activation alias merely because its provenance and
+        # bytes were internally consistent.
+        validate_task_dir_compatibility(bundle_dir)
+        verifier_checksum = _verify_script_verifier_asset(
+            bundle_dir=bundle_dir,
+            config=bundle_config,
+            provenance=source_provenance,
+        )
+        return {
+            "observed_bundle_checksum": f"sha256:{actual}",
+            "observed_verifier_checksum": verifier_checksum,
+        }
+
+
+def _verify_script_verifier_asset(
+    *,
+    bundle_dir: Path,
+    config: TaskConfig,
+    provenance: Mapping[str, object],
+) -> str:
+    """Attest the script verifier that will execute inside the fresh driver."""
+    if config.verifier.name != "script":
+        raise ValueError("TB2.1 requires the native script verifier")
+    raw_script_path = config.verifier.args.get("script_path")
+    if not isinstance(raw_script_path, str) or not raw_script_path:
+        raise ValueError("configured verifier script_path is missing")
+    try:
+        script_path = PurePosixPath(raw_script_path)
+        relative = script_path.relative_to(config.environment.workdir)
+    except ValueError as exc:
+        raise ValueError("configured verifier script_path escapes the task workdir") from exc
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError("configured verifier script_path is invalid")
+    local_script = bundle_dir.joinpath(*relative.parts)
+    try:
+        mode = local_script.lstat().st_mode
+    except FileNotFoundError as exc:
+        raise ValueError("configured verifier script is missing") from exc
+    if not stat.S_ISREG(mode) or local_script.is_symlink():
+        raise ValueError("configured verifier script is not a regular file")
+    if not mode & 0o111:
+        raise ValueError("configured verifier script is not executable")
+
+    raw_asset = provenance.get("verifier_asset")
+    if not isinstance(raw_asset, Mapping):
+        raise ValueError("verifier asset provenance is missing")
+    if raw_asset.get("script_path") != raw_script_path:
+        raise ValueError("verifier asset script_path mismatch")
+    observed = f"sha256:{sha256(local_script.read_bytes()).hexdigest()}"
+    if raw_asset.get("sha256") != observed:
+        raise ValueError("verifier asset checksum mismatch")
+    return observed
+
+
+def _snapshot_id(
+    *,
+    benchmark: Benchmark | None,
+    profile_provenance: Mapping[str, object],
+    task_snapshots: list[dict[str, object]],
+) -> str:
+    """Hash the exact profile and object bytes just read by this audit."""
+    payload = {
+        "profile": TB21_PROFILE_ID,
+        "benchmark": {
+            "id": benchmark.id if benchmark is not None else None,
+            "execution_state": benchmark.execution_state if benchmark is not None else None,
+            "upstream_kind": benchmark.upstream_kind if benchmark is not None else None,
+            "upstream_locator": benchmark.upstream_locator if benchmark is not None else None,
+            "upstream_revision": benchmark.upstream_revision if benchmark is not None else None,
+            "profile_provenance": dict(profile_provenance),
+        },
+        "tasks": task_snapshots,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return f"sha256:{sha256(encoded).hexdigest()}"
 
 
 def _validated_config(value: object, issues: list[str]) -> TaskConfig | None:

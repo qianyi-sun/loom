@@ -114,9 +114,10 @@ from a public alias:
   adapter/importer identity.
 - `Task.source_provenance`: task-level JSON containing the canonical task name,
   Hub package digest and metadata version, source-reference comparison when
-  divergent, verifier identity, and task-image provenance. The existing
-  `Task.checksum` remains the Loom bundle checksum; it is repeated in audit
-  output rather than treated as an upstream digest.
+  divergent, verifier identity plus the configured verifier script path/content
+  checksum, task-image provenance, and the canonical private-workspace policy.
+  The existing `Task.checksum` remains the Loom bundle checksum; it is repeated
+  in audit output rather than treated as an upstream digest.
 - `benchmark_aliases`: public `alias` primary key, target `benchmark_id` FK,
   and an immutable activation/audit timestamp. Only a target with
   `execution_state = runnable` may be an active alias.
@@ -134,9 +135,12 @@ The migration is deliberately ordered so no `Trial.task_id` changes:
 4. Create `terminal-bench-2@tb2.1-r6` as `runnable`, register the newly
    converted 89 tasks under `terminal-bench-2@tb2.1-r6/<task-name>`, and store
    their checked source/package/bundle/verifier/image provenance.
-5. In one DB transaction, create or replace alias `terminal-bench-2` to point
-   to `terminal-bench-2@tb2.1-r6`. Until that commit, no public TB2 selection
-   changes. No inactive or half-published profile is aliased.
+5. In one DB transaction, lock the physical profile/task rows, re-audit the
+   current object-store bundle bytes and verifier assets, persist that snapshot
+   identity on the profile, then create or replace alias `terminal-bench-2` to
+   point to `terminal-bench-2@tb2.1-r6`. Until that commit, no public TB2
+   selection changes. No inactive, half-published, or stale-audit profile is
+   aliased.
 
 Existing non-TB benchmarks do not need aliases or a rename. New benchmark
 versions use the same profile/alias pattern only when they need a moving public

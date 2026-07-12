@@ -12,7 +12,7 @@ Subcommands:
 - register <slug> [--hf-org --hf-token --db-url --revision --mirror-to-object-store --minio-*]
 - verify <slug> [--limit --minio-* --bucket --seed]
 - audit [--all | <slug>] [--db-url] [--json]
-- activate terminal-bench-2 --profile terminal-bench-2@tb2.1-r6 --audit-json PATH
+- activate terminal-bench-2 --profile terminal-bench-2@tb2.1-r6 --audit-json PATH --minio-*
 - hf-boundary-evidence <slug> --environment staging --output PATH
 - sync-mirror [--source-* ...] [--dest-* ...] [--prefix ...] [--dry-run]
 
@@ -311,6 +311,9 @@ def _add_activate_args(p: argparse.ArgumentParser) -> None:
         default=_target_db_url(),
         help="Postgres URL (defaults to env LOOM_DB_URL, then LOOM_SVC_DB_URL).",
     )
+    p.add_argument("--minio-endpoint", default=_target_minio_env("ENDPOINT"))
+    p.add_argument("--minio-access-key", default=_target_minio_env("ACCESS_KEY"))
+    p.add_argument("--minio-secret-key", default=_target_minio_env("SECRET_KEY"))
 
 
 def _add_hf_boundary_evidence_args(p: argparse.ArgumentParser) -> None:
@@ -1191,6 +1194,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
 def _cmd_activate(args: argparse.Namespace) -> int:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+    from loom.trajectory.storage import MinioObjectStore
     from loom_benchmark_tool.audit_cmd import (
         TB21_PROFILE_ID,
         TB21_PUBLIC_ALIAS,
@@ -1218,17 +1222,42 @@ def _cmd_activate(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    missing_minio = [
+        flag
+        for flag, value in (
+            ("--minio-endpoint", args.minio_endpoint),
+            ("--minio-access-key", args.minio_access_key),
+            ("--minio-secret-key", args.minio_secret_key),
+        )
+        if not value
+    ]
+    if missing_minio:
+        print(
+            "error: activate requires current object-store access: " + ", ".join(missing_minio),
+            file=sys.stderr,
+        )
+        return 2
     try:
         audit = AuditResult.from_json_file(args.audit_json)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"error: invalid TB2.1 audit JSON: {exc}", file=sys.stderr)
         return 2
 
+    object_store = MinioObjectStore(
+        endpoint_url=args.minio_endpoint,
+        access_key=args.minio_access_key,
+        secret_key=args.minio_secret_key,
+    )
+
     async def _activate() -> None:
         engine = create_async_engine(normalize_db_url(args.db_url))
         try:
             async with async_sessionmaker(engine, expire_on_commit=False)() as session:
-                await activate_tb21_alias(session, audit)
+                await activate_tb21_alias(
+                    session,
+                    object_store=object_store,
+                    audit_evidence=audit,
+                )
         finally:
             await engine.dispose()
 

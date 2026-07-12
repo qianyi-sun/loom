@@ -101,8 +101,11 @@ class TrialContext:
     # present unless the container is started with host-gateway mapping.
     sandbox_extra_hosts: tuple[tuple[str, str], ...] = ()
     # Profile-task provenance can require private verifier assets to remain
-    # outside the normal agent workspace until the verifier phase.
+    # outside the normal agent workspace.  Such tasks must receive a fresh
+    # verifier-only driver; a delayed upload to the agent driver is unsafe
+    # because background processes can survive the agent phase.
     workspace_staging_policy: WorkspaceStagingPolicy | None = None
+    verifier_driver_factory: Callable[[], Driver] | None = None
     # #5 Slice 3b: optional CP-side event sink. When set, every event
     # appended through the TrajectoryWriter is mirrored to the
     # `trial_events` table via the worker's HttpControlPlaneClient.

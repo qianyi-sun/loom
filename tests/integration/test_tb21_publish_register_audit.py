@@ -73,6 +73,10 @@ def _manifest() -> dict[str, object]:
         "harbor_metadata_version": lock.hub_metadata_version,
         "source_reference": {"snapshot": lock.source_revision, "divergence": None},
         "verifier_identity": "tb21-native-reward-file-v1",
+        "verifier_asset": {
+            "script_path": "/workspace/verifier/run.sh",
+            "sha256": "sha256:" + "b" * 64,
+        },
         "image_provenance": {"docker_image": "python:3.12-slim", "cpu_arch": "x86_64"},
         "workspace_staging_policy": TB21_AGENT_WORKSPACE_POLICY,
     }
@@ -145,6 +149,7 @@ async def test_register_persists_profile_and_task_provenance(
 
 async def test_activation_writes_alias_only_after_exact_isolated_audit(
     db: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await db.execute(
         Benchmark.__table__.insert().values(
@@ -160,12 +165,29 @@ async def test_activation_writes_alias_only_after_exact_isolated_audit(
     )
     await db.commit()
 
-    await activate_tb21_alias(
-        db,
-        AuditResult(
+    object_store = object()
+
+    async def fresh_audit(
+        _session: object, *, object_store: object, **_kwargs: object
+    ) -> AuditResult:
+        assert object_store is object_store_ref
+        return AuditResult(
             profile=PROFILE,
             verified_bundles=89,
             private_workspace_isolation=True,
+            snapshot_id="sha256:" + "c" * 64,
+        )
+
+    object_store_ref = object_store
+    monkeypatch.setattr("loom_benchmark_tool.audit_cmd.audit_tb21_profile", fresh_audit)
+    await activate_tb21_alias(
+        db,
+        object_store=object_store,  # type: ignore[arg-type]
+        audit_evidence=AuditResult(
+            profile=PROFILE,
+            verified_bundles=89,
+            private_workspace_isolation=True,
+            snapshot_id="sha256:" + "c" * 64,
         ),
     )
 
@@ -175,3 +197,6 @@ async def test_activation_writes_alias_only_after_exact_isolated_audit(
         )
     ).scalar_one()
     assert alias.benchmark_id == PROFILE
+    benchmark = await db.get(Benchmark, PROFILE)
+    assert benchmark is not None
+    assert benchmark.profile_provenance["activation_audit"]["snapshot_id"] == ("sha256:" + "c" * 64)

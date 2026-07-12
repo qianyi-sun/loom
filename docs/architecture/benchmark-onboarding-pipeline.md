@@ -145,8 +145,8 @@ Current published benchmark manifests are not all equivalent:
 - v3 manifests provide inline `task_config` or a canonical
   remote `task.toml` path for every runnable task.
 - v4 manifests may additionally bind a physical profile to source package
-  digests, source-reference divergences, verifier/image identity, and a
-  durable private-workspace staging policy.
+  digests, source-reference divergences, verifier/image identity and asset
+  checksum, and a durable private-workspace staging policy.
 
 Registration must keep reading v1 and v2 manifests so existing published
 datasets do not disappear from the catalog. However, compatibility does not
@@ -228,14 +228,22 @@ loom datasets audit terminal-bench-2@tb2.1-r6 \
   --minio-endpoint "$LOOM_MINIO_ENDPOINT"
 loom datasets activate terminal-bench-2 \
   --profile terminal-bench-2@tb2.1-r6 \
-  --audit-json "$PWD/tb21-audit.json"
+  --audit-json "$PWD/tb21-audit.json" \
+  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
+  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
+  --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
 ```
 
 The rev-6 audit checks all 89 Hub lock digests, the one reviewed
 source-reference divergence, normalized task configs, internal bundle bytes
-and checksums, verifier/image/architecture provenance, and the persisted
-private-workspace isolation policy. A partial, stale, or unisolated result
-cannot activate the alias.
+and checksums, each configured verifier script's regular/executable mode and
+content checksum, verifier/image provenance, the same compatibility gate used
+by workers, and the persisted private-workspace isolation policy. The audit
+JSON is evidence identity only: activation locks the profile/task rows and
+performs this audit again against the current object-store bytes before its
+alias upsert. It writes that fresh snapshot identity into profile provenance,
+so a partial, stale, forged, incompatible, or unisolated result cannot activate
+the alias.
 
 Required audit columns:
 

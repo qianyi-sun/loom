@@ -398,6 +398,15 @@ async def run_register(
                 task_provenance.get("workspace_staging_policy"),
             ):
                 raise ValueError("TB2.1 task is missing private workspace isolation provenance")
+            verifier_asset = task_provenance.get("verifier_asset")
+            if (
+                not isinstance(verifier_asset, dict)
+                or not isinstance(verifier_asset.get("script_path"), str)
+                or not verifier_asset["script_path"].startswith("/")
+                or not isinstance(verifier_asset.get("sha256"), str)
+                or not verifier_asset["sha256"].startswith("sha256:")
+            ):
+                raise ValueError("TB2.1 task is missing verifier asset provenance")
 
     snapshot_root: Path | None = None
     mirrored = 0
