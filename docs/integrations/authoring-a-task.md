@@ -314,9 +314,13 @@ There are three supported task-registration shapes today:
   `task.toml` and prints the `[[local]]` snippet to add to the registry.
 - Adapter-backed benchmarks should go through
   `loom datasets publish` followed by `loom datasets register`.
-  Publish validates each generated `task.toml`, writes a schema v3
-  manifest with per-task `task_config`, and register persists that
-  config into `tasks.config`.
+  Publish validates each generated `task.toml`, writes a schema v4
+  manifest with per-task `task_config` and optional source provenance, and
+  register persists that config and provenance into `tasks`.
+  Terminal-Bench 2.1 rev-6 publication additionally records a private
+  workspace policy: normal agents do not receive `solution/`, `tests/`,
+  `verifier/`, or `upstream-task.toml`; those files are staged only for the
+  verifier phase.
 
 For a one-off local fixture, use `scripts/seed_test_data.py` as a
 template:

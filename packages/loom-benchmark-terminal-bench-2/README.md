@@ -61,6 +61,29 @@ For rev-6 trials they additionally record the physical profile, Hub package
 digest and metadata version, source-reference snapshot/divergence, Loom bundle
 checksum, verifier identity, and separately supplied runtime provenance.
 
+## Publication and activation
+
+Publishing emits manifest schema 4. The manifest and every task record the
+Hub package digest, Hub metadata version, source-reference snapshot (including
+the sole reviewed divergence), verifier identity, image provenance, and the
+private workspace staging policy. Register persists that evidence to the
+physical profile and task rows but never changes the public alias.
+
+The normal-agent workspace staging path excludes `solution/`, `tests/`,
+`verifier/`, and `upstream-task.toml`; the worker fails closed if a rev-6 task
+lacks that persisted policy. It uploads the private subset only immediately
+before running the verifier. To move `terminal-bench-2`, an operator must
+produce a complete 89-bundle audit result and then call:
+
+```bash
+loom datasets activate terminal-bench-2 \
+  --profile terminal-bench-2@tb2.1-r6 \
+  --audit-json "$PWD/tb21-audit.json"
+```
+
+Activation rejects partial audits, provenance/config/checksum drift, and any
+missing private-workspace isolation evidence.
+
 ## License
 
 Apache-2.0, following the Terminal-Bench 2.1 source repository.

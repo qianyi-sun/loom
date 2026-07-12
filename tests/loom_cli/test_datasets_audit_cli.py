@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -47,6 +48,46 @@ def test_audit_requires_all_or_benchmark(
     assert "--all" in capsys.readouterr().err
 
 
+def test_activate_rejects_a_non_tb21_alias(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    rc = datasets_cmd.dispatch(
+        [
+            "activate",
+            "other-benchmark",
+            "--profile",
+            "terminal-bench-2@tb2.1-r6",
+            "--audit-json",
+            str(tmp_path / "audit.json"),
+            "--db-url",
+            "postgresql://x/y",
+        ]
+    )
+
+    assert rc == 2
+    assert "terminal-bench-2" in capsys.readouterr().err
+
+
+def test_tb21_audit_json_requires_the_physical_profile(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    rc = datasets_cmd.dispatch(
+        [
+            "audit",
+            "other-benchmark",
+            "--tb21-audit-json",
+            str(tmp_path / "audit.json"),
+            "--db-url",
+            "postgresql://x/y",
+        ]
+    )
+
+    assert rc == 2
+    assert "terminal-bench-2@tb2.1-r6" in capsys.readouterr().err
+
+
 def test_audit_prints_json(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -57,13 +98,15 @@ def test_audit_prints_json(
         return [_item()]
 
     monkeypatch.setattr(datasets_cmd, "run_readiness_audit", fake_run_audit)
-    rc = datasets_cmd.dispatch([
-        "audit",
-        "fake-bench",
-        "--db-url",
-        "postgresql://x/y",
-        "--json",
-    ])
+    rc = datasets_cmd.dispatch(
+        [
+            "audit",
+            "fake-bench",
+            "--db-url",
+            "postgresql://x/y",
+            "--json",
+        ]
+    )
     assert rc == 0
     out = capsys.readouterr().out
     assert '"id": "fake-bench"' in out
@@ -78,12 +121,14 @@ def test_audit_prints_table(
         return [_item()]
 
     monkeypatch.setattr(datasets_cmd, "run_readiness_audit", fake_run_audit)
-    rc = datasets_cmd.dispatch([
-        "audit",
-        "--all",
-        "--db-url",
-        "postgresql://x/y",
-    ])
+    rc = datasets_cmd.dispatch(
+        [
+            "audit",
+            "--all",
+            "--db-url",
+            "postgresql://x/y",
+        ]
+    )
     assert rc == 0
     out = capsys.readouterr().out
     assert "READINESS" in out
@@ -101,13 +146,15 @@ def test_audit_verify_bundles_requires_minio(
     monkeypatch.delenv("LOOM_SVC_MINIO_ACCESS_KEY", raising=False)
     monkeypatch.delenv("LOOM_SVC_MINIO_SECRET_KEY", raising=False)
 
-    rc = datasets_cmd.dispatch([
-        "audit",
-        "--all",
-        "--db-url",
-        "postgresql://x/y",
-        "--verify-bundles",
-    ])
+    rc = datasets_cmd.dispatch(
+        [
+            "audit",
+            "--all",
+            "--db-url",
+            "postgresql://x/y",
+            "--verify-bundles",
+        ]
+    )
 
     assert rc == 2
     assert "minio" in capsys.readouterr().err.lower()
@@ -145,19 +192,21 @@ def test_audit_verify_bundles_prints_summary_and_fails_on_missing(
     monkeypatch.setattr(datasets_cmd, "run_bundle_presence_audit", fake_bundle_audit, raising=False)
     monkeypatch.setattr("loom.trajectory.storage.MinioObjectStore", FakeObjectStore)
 
-    rc = datasets_cmd.dispatch([
-        "audit",
-        "--all",
-        "--db-url",
-        "postgresql://x/y",
-        "--verify-bundles",
-        "--minio-endpoint",
-        "http://target-minio:9000",
-        "--minio-access-key",
-        "target-access",
-        "--minio-secret-key",
-        "target-secret",
-    ])
+    rc = datasets_cmd.dispatch(
+        [
+            "audit",
+            "--all",
+            "--db-url",
+            "postgresql://x/y",
+            "--verify-bundles",
+            "--minio-endpoint",
+            "http://target-minio:9000",
+            "--minio-access-key",
+            "target-access",
+            "--minio-secret-key",
+            "target-secret",
+        ]
+    )
 
     assert rc == 1
     assert stores == [

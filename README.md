@@ -70,7 +70,7 @@ First-prod native benchmark support is intentionally narrow:
 
 | Surface | v1.0 commitment |
 |---|---|
-| Native benchmark: Terminal-Bench 2.0 | Supported through `terminal-bench-2` tasks and compatible agents. |
+| Native benchmark: Terminal-Bench 2.1 rev 6 | The public `terminal-bench-2` selector activates only the audited immutable `terminal-bench-2@tb2.1-r6` profile. |
 | Native benchmark: SkillLearnBench | Supported through `skilllearnbench` tasks, catalog provisioning, and artifact-preserving validation. |
 | User-brought TaskSets | Supported as team-owned task collections that can be submitted, materialized, run, monitored, and downloaded through TaskSet APIs and CLI. |
 | Provider-backed model calls | Supported through team-owned or shared provider connections and the LLM Gateway. |

@@ -26,6 +26,7 @@ from loom.models.types import ModelSpec
 from loom.trajectory.cp_event_sink import CpEventSink
 from loom.trajectory.storage import ObjectStore
 from loom.trial.trial import Trial, TrialContext
+from loom.trial.workspace import WorkspaceStagingPolicy
 from loom.verifier.base import Verifier
 from loom_worker.jwt_rotator import JWTRotator
 from loom_worker.sandbox_network import (
@@ -61,17 +62,13 @@ def _apply_step_token_ttl(agent: object, task_config: TaskConfig) -> None:
     """
     if not hasattr(agent, "step_token_ttl_sec"):
         return
-    agent.step_token_ttl_sec = (
-        int(task_config.agent.timeout_sec) + _STEP_JWT_TTL_BUFFER_SEC
-    )
+    agent.step_token_ttl_sec = int(task_config.agent.timeout_sec) + _STEP_JWT_TTL_BUFFER_SEC
 
 
 # (state, failure_reason, failure_message) → bool: True if the Control Plane
 # accepted the transition, False if the worker has lost its claim (fenced).
 StatePatchCallback = Callable[[str, str | None, str | None], Awaitable[bool]]
-OutputProjectionCallback = Callable[
-    [dict[str, object], dict[str, object]], Awaitable[bool]
-]
+OutputProjectionCallback = Callable[[dict[str, object], dict[str, object]], Awaitable[bool]]
 
 # Factory signature: (task_dir, gateway, model, agent_name) → AgentRuntime.
 # agent_name is read from task_config.agent.name; the factory routes:
@@ -79,7 +76,8 @@ OutputProjectionCallback = Callable[
 #   "litellm" (or model) → LiteLLMAgent
 #   <launcher adapter>   → SubprocessAgent wrapping the adapter
 AgentFactory = Callable[
-    [Path, LLMGatewayClient, "ModelSpec | None", str], AgentRuntime,
+    [Path, LLMGatewayClient, "ModelSpec | None", str],
+    AgentRuntime,
 ]
 
 
@@ -132,9 +130,7 @@ class LocalTrialRunner:
     # `sandbox_step_jwt_ttl_sec / 2`. `sandbox_secrets_root` is the
     # parent dir under which `<trial_id>/run/loom/` is created and
     # bind-mounted at `/run/loom/` in the sandbox.
-    sandbox_mint_token: (
-        Callable[[UUID], Awaitable[str]] | None
-    ) = None
+    sandbox_mint_token: Callable[[UUID], Awaitable[str]] | None = None
     sandbox_secrets_root: Path | None = None
     sandbox_step_jwt_ttl_sec: int = 600
     sandbox_extra_hosts: tuple[tuple[str, str], ...] = ()
@@ -145,6 +141,7 @@ class LocalTrialRunner:
     # "/root/.skills", "rw"). Appended alongside the JWT rotator mount
     # inside :meth:`run`.
     family_state_volumes: tuple[tuple[str, str, str], ...] = ()
+    workspace_staging_policy: WorkspaceStagingPolicy | None = None
     sidecar_runtime_factory: TaskSidecarRuntimeFactory | None = None
     # #5 Slice 3b: optional CP-side event sink. When the worker is
     # configured to dual-write trajectory events into Postgres
@@ -164,10 +161,7 @@ class LocalTrialRunner:
         # silently start the trial without isolation.
         sandbox_bridge: SandboxBridge | None = None
         on_driver_started_cb: Callable[[], Awaitable[None]] | None = None
-        if (
-            self.sandbox_allocator is not None
-            and self.sandbox_singleton is not None
-        ):
+        if self.sandbox_allocator is not None and self.sandbox_singleton is not None:
             if not driver.capabilities.supports_custom_network:
                 raise RuntimeError(
                     "sandbox isolation enabled but driver "
@@ -217,9 +211,7 @@ class LocalTrialRunner:
             and self.sandbox_mint_token is not None
             and self.sandbox_secrets_root is not None
         ):
-            jwt_dir = (
-                self.sandbox_secrets_root / str(self.trial_id) / "run" / "loom"
-            )
+            jwt_dir = self.sandbox_secrets_root / str(self.trial_id) / "run" / "loom"
             jwt_rotator = JWTRotator(
                 trial_id=self.trial_id,
                 jwt_dir=jwt_dir,
@@ -259,9 +251,7 @@ class LocalTrialRunner:
         # Protocol-respecting agents that write their own artifacts
         # (oracle, claude-code, opencode, …) are unaffected.
         if hasattr(agent, "artifact_paths"):
-            agent.artifact_paths = [
-                a for step in self.task_config.steps for a in step.artifacts
-            ]
+            agent.artifact_paths = [a for step in self.task_config.steps for a in step.artifacts]
         if hasattr(agent, "request_params"):
             agent.request_params = dict(self.trial_config.request_params)
         _apply_step_token_ttl(agent, self.task_config)
@@ -278,14 +268,13 @@ class LocalTrialRunner:
             agent=agent,
             verifier=verifier,
             object_store=self.object_store,
-            local_trajectory_path=(
-                self.local_trajectory_root / f"{self.trial_id}.jsonl"
-            ),
+            local_trajectory_path=(self.local_trajectory_root / f"{self.trial_id}.jsonl"),
             llm_calls_fetcher=self.llm_calls_fetcher,
             sandbox_network=(sandbox_bridge.name if sandbox_bridge is not None else None),
             on_driver_started=on_driver_started_cb,
             sandbox_volumes=sandbox_volumes,
             sandbox_extra_hosts=self.sandbox_extra_hosts,
+            workspace_staging_policy=self.workspace_staging_policy,
             cp_event_sink=self.cp_event_sink,
         )
 
@@ -304,25 +293,24 @@ class LocalTrialRunner:
                 ok = await self.state_patch_callback(state, fr, fm)
                 if not ok:
                     logger.warning(
-                        "state_patch_fenced trial=%s state=%s — "
-                        "worker lost claim",
-                        self.trial_id, state,
+                        "state_patch_fenced trial=%s state=%s — worker lost claim",
+                        self.trial_id,
+                        state,
                     )
                     return False
                 return True
             except Exception as exc:
                 logger.warning(
                     "state_patch_error trial=%s state=%s err=%s",
-                    self.trial_id, state, exc,
+                    self.trial_id,
+                    state,
+                    exc,
                 )
                 return False
 
         async def _patch(state: str, fr: str | None, fm: str | None = None) -> None:
             nonlocal deferred_success_patch
-            if (
-                state == TrialState.SUCCEEDED.value
-                and self.output_projection_callback is not None
-            ):
+            if state == TrialState.SUCCEEDED.value and self.output_projection_callback is not None:
                 deferred_success_patch = (state, fr, fm)
                 return
             await _send_state_patch(state, fr, fm)
@@ -339,9 +327,7 @@ class LocalTrialRunner:
         try:
             if sidecar_runtime is not None:
                 ctx.sandbox_network = await sidecar_runtime.start(
-                    network_name=(
-                        sandbox_bridge.name if sandbox_bridge is not None else None
-                    ),
+                    network_name=(sandbox_bridge.name if sandbox_bridge is not None else None),
                 )
             result = await trial.run()
             if result.state == TrialState.SUCCEEDED:
@@ -372,8 +358,7 @@ class LocalTrialRunner:
             if result.state != TrialState.CANCELLED:
                 result.state = TrialState.FAILED
                 result.failure_reason = (
-                    result.failure_reason
-                    or FailureReason.TRAJECTORY_FLUSH_FAILED
+                    result.failure_reason or FailureReason.TRAJECTORY_FLUSH_FAILED
                 )
                 result.finished_at = datetime.now(UTC)
                 await _patch(
@@ -416,7 +401,8 @@ class LocalTrialRunner:
                 except Exception:
                     logger.exception(
                         "sandbox_bridge_teardown_failed trial=%s name=%s",
-                        self.trial_id, sandbox_bridge.name,
+                        self.trial_id,
+                        sandbox_bridge.name,
                     )
 
     async def _patch_output_projection(self, result: TrialResult) -> bool:
@@ -441,7 +427,8 @@ class LocalTrialRunner:
         except Exception as exc:
             logger.warning(
                 "output_projection_patch_error trial=%s err=%s",
-                self.trial_id, exc,
+                self.trial_id,
+                exc,
             )
             return False
 
@@ -461,6 +448,7 @@ class LocalTrialRunner:
             return self.gateway_client
         if self.vllm_registry is None:
             from loom.errors import AgentError
+
             raise AgentError(
                 "trial requests source=hf, hf_execution=local-vllm but "
                 "this worker has no vllm_registry configured. Set up a "
@@ -488,9 +476,7 @@ def _aggregate_reward_scalar(reward: dict[str, float] | None) -> float | None:
 
 def _build_trajectory_index(result: TrialResult) -> dict[str, object]:
     artifacts = [
-        artifact.model_dump(mode="json")
-        for step in result.steps
-        for artifact in step.artifacts
+        artifact.model_dump(mode="json") for step in result.steps for artifact in step.artifacts
     ]
     return {
         "schema_version": "1",

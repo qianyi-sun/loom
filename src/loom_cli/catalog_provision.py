@@ -44,7 +44,7 @@ def _batched(items: list[T], size: int) -> Iterable[list[T]]:
     if size <= 0:
         raise ValueError("batch size must be positive")
     for start in range(0, len(items), size):
-        yield items[start:start + size]
+        yield items[start : start + size]
 
 
 @dataclass(frozen=True)
@@ -67,6 +67,8 @@ class BenchmarkRow:
     splits: list[str]
     series: str | None
     imported_by: str | None
+    execution_state: str = "runnable"
+    profile_provenance: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,7 @@ class TaskRow:
     license: str | None
     benchmark_id: str | None
     tags: dict[str, str]
+    source_provenance: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -169,6 +172,8 @@ class PostgresCatalogStore:
                     splits=list(row.splits),
                     series=row.series,
                     imported_by=row.imported_by,
+                    execution_state=row.execution_state,
+                    profile_provenance=dict(row.profile_provenance or {}),
                 )
                 for row in benchmark_rows
             ],
@@ -181,6 +186,7 @@ class PostgresCatalogStore:
                     license=row.license,
                     benchmark_id=row.benchmark_id,
                     tags=dict(row.tags or {}),
+                    source_provenance=dict(row.source_provenance or {}),
                 )
                 for row in task_rows
             ],
@@ -211,6 +217,8 @@ class PostgresCatalogStore:
                                 "splits": row.splits,
                                 "series": row.series,
                                 "imported_by": row.imported_by,
+                                "execution_state": row.execution_state,
+                                "profile_provenance": row.profile_provenance,
                             }
                             for row in bench_batch
                         ]
@@ -219,25 +227,19 @@ class PostgresCatalogStore:
                             bench_insert.on_conflict_do_update(
                                 index_elements=["id"],
                                 set_={
-                                    "display_name": (
-                                        bench_insert.excluded.display_name
-                                    ),
-                                    "upstream_kind": (
-                                        bench_insert.excluded.upstream_kind
-                                    ),
-                                    "upstream_locator": (
-                                        bench_insert.excluded.upstream_locator
-                                    ),
-                                    "upstream_revision": (
-                                        bench_insert.excluded.upstream_revision
-                                    ),
-                                    "license_spdx": (
-                                        bench_insert.excluded.license_spdx
-                                    ),
+                                    "display_name": (bench_insert.excluded.display_name),
+                                    "upstream_kind": (bench_insert.excluded.upstream_kind),
+                                    "upstream_locator": (bench_insert.excluded.upstream_locator),
+                                    "upstream_revision": (bench_insert.excluded.upstream_revision),
+                                    "license_spdx": (bench_insert.excluded.license_spdx),
                                     "license_url": bench_insert.excluded.license_url,
                                     "splits": bench_insert.excluded.splits,
                                     "series": bench_insert.excluded.series,
                                     "imported_by": bench_insert.excluded.imported_by,
+                                    "execution_state": bench_insert.excluded.execution_state,
+                                    "profile_provenance": (
+                                        bench_insert.excluded.profile_provenance
+                                    ),
                                 },
                             ),
                         )
@@ -281,6 +283,7 @@ class PostgresCatalogStore:
                                 "license": row.license,
                                 "benchmark_id": row.benchmark_id,
                                 "tags": row.tags,
+                                "source_provenance": row.source_provenance,
                             }
                             for row in task_batch
                         ]
@@ -293,10 +296,9 @@ class PostgresCatalogStore:
                                     "config": task_insert.excluded.config,
                                     "source": task_insert.excluded.source,
                                     "license": task_insert.excluded.license,
-                                    "benchmark_id": (
-                                        task_insert.excluded.benchmark_id
-                                    ),
+                                    "benchmark_id": (task_insert.excluded.benchmark_id),
                                     "tags": task_insert.excluded.tags,
+                                    "source_provenance": (task_insert.excluded.source_provenance),
                                 },
                             ),
                         )
@@ -316,6 +318,7 @@ class Boto3CatalogObjectStore:
         auth_kind: str = "static_keys",
     ) -> None:
         from loom.storage_credentials import build_s3_client
+
         self._client = build_s3_client(
             endpoint_url=endpoint_url,
             auth_kind=auth_kind,
@@ -480,12 +483,14 @@ def agent_rows_from_service_catalog(
             "schema_version": AGENT_CATALOG_SPEC_SCHEMA_VERSION,
             "provisioned_by": imported_by,
         }
-        out.append(AgentRow(
-            name=entry.name,
-            version=AGENT_CATALOG_VERSION,
-            mode=entry.kind,
-            spec=spec,
-        ))
+        out.append(
+            AgentRow(
+                name=entry.name,
+                version=AGENT_CATALOG_VERSION,
+                mode=entry.kind,
+                spec=spec,
+            )
+        )
     return out
 
 
@@ -557,7 +562,7 @@ def _rewrite_s3_task_source(task: TaskRow, *, target_bucket: str) -> TaskRow:
 def _parse_s3_uri(source: str | None) -> tuple[str, str] | None:
     if source is None or not source.startswith("s3://"):
         return None
-    rest = source[len("s3://"):]
+    rest = source[len("s3://") :]
     if "/" not in rest:
         return None
     bucket, key = rest.split("/", 1)

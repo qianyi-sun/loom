@@ -43,7 +43,7 @@ from loom.trial.watchdog_cancellation import (
     extract_watchdog_cancellation,
     watchdog_timeout_failure_message,
 )
-from loom.trial.workspace import materialize_workspace
+from loom.trial.workspace import WorkspaceStagingPolicy, materialize_workspace
 from loom.verifier.base import Verifier
 
 logger = logging.getLogger(__name__)
@@ -100,6 +100,9 @@ class TrialContext:
     # endpoints on Linux Docker, where `host.docker.internal` is not
     # present unless the container is started with host-gateway mapping.
     sandbox_extra_hosts: tuple[tuple[str, str], ...] = ()
+    # Profile-task provenance can require private verifier assets to remain
+    # outside the normal agent workspace until the verifier phase.
+    workspace_staging_policy: WorkspaceStagingPolicy | None = None
     # #5 Slice 3b: optional CP-side event sink. When set, every event
     # appended through the TrajectoryWriter is mirrored to the
     # `trial_events` table via the worker's HttpControlPlaneClient.
@@ -244,6 +247,8 @@ class Trial:
                         driver=self.ctx.driver,
                         task_dir=self.ctx.task_dir,
                         dst=workdir,
+                        policy=self.ctx.workspace_staging_policy,
+                        phase="agent",
                     )
                     if hasattr(self.ctx.agent, "workdir"):
                         self.ctx.agent.workdir = workdir

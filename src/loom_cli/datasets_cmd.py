@@ -12,6 +12,7 @@ Subcommands:
 - register <slug> [--hf-org --hf-token --db-url --revision --mirror-to-object-store --minio-*]
 - verify <slug> [--limit --minio-* --bucket --seed]
 - audit [--all | <slug>] [--db-url] [--json]
+- activate terminal-bench-2 --profile terminal-bench-2@tb2.1-r6 --audit-json PATH
 - hf-boundary-evidence <slug> --environment staging --output PATH
 - sync-mirror [--source-* ...] [--dest-* ...] [--prefix ...] [--dry-run]
 
@@ -298,6 +299,17 @@ def _add_audit_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--minio-secret-key",
         default=_target_minio_env("SECRET_KEY"),
+    )
+
+
+def _add_activate_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("benchmark")
+    p.add_argument("--profile", required=True)
+    p.add_argument("--audit-json", required=True, type=Path)
+    p.add_argument(
+        "--db-url",
+        default=_target_db_url(),
+        help="Postgres URL (defaults to env LOOM_DB_URL, then LOOM_SVC_DB_URL).",
     )
 
 
@@ -643,6 +655,10 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_audit_args(sub.add_parser(
         "audit",
         help="Inspect benchmark readiness from registered catalog/task rows.",
+    ))
+    _add_activate_args(sub.add_parser(
+        "activate",
+        help="Atomically activate a fully audited immutable benchmark profile.",
     ))
     _add_hf_boundary_evidence_args(sub.add_parser(
         "hf-boundary-evidence",
@@ -1172,6 +1188,62 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_activate(args: argparse.Namespace) -> int:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from loom_benchmark_tool.audit_cmd import (
+        TB21_PROFILE_ID,
+        TB21_PUBLIC_ALIAS,
+        AuditResult,
+        ProfileActivationError,
+        activate_tb21_alias,
+    )
+    from loom_benchmark_tool.db_url import normalize_db_url
+
+    if args.benchmark != TB21_PUBLIC_ALIAS:
+        print(
+            f"error: activate currently supports only {TB21_PUBLIC_ALIAS!r}",
+            file=sys.stderr,
+        )
+        return 2
+    if args.profile != TB21_PROFILE_ID:
+        print(
+            f"error: {TB21_PUBLIC_ALIAS!r} must activate {TB21_PROFILE_ID!r}",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.db_url:
+        print(
+            "error: activate requires --db-url / env LOOM_DB_URL or LOOM_SVC_DB_URL",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        audit = AuditResult.from_json_file(args.audit_json)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"error: invalid TB2.1 audit JSON: {exc}", file=sys.stderr)
+        return 2
+
+    async def _activate() -> None:
+        engine = create_async_engine(normalize_db_url(args.db_url))
+        try:
+            async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+                await activate_tb21_alias(session, audit)
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(_activate())
+    except ProfileActivationError as exc:
+        print(f"error: TB2.1 activation rejected: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"error: TB2.1 activation failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"activated {TB21_PUBLIC_ALIAS} -> {TB21_PROFILE_ID}")
+    return 0
+
+
 def _cmd_provision_catalog_provision(args: argparse.Namespace) -> int:
     from loom_cli.catalog_provision import (
         Boto3CatalogObjectStore,
@@ -1567,6 +1639,7 @@ _DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "register": _cmd_register,
     "verify": _cmd_verify,
     "audit": _cmd_audit,
+    "activate": _cmd_activate,
     "hf-boundary-evidence": _cmd_hf_boundary_evidence,
     "provision-catalog": _cmd_provision_catalog_provision,
     "validate-local": _cmd_validate_local,

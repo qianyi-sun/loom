@@ -51,11 +51,13 @@ TB21_SOURCE_REVISION = "dde3cd95b80ff25af5abd99a80b6513a018ad3b4"
 TB21_MANIFEST_SOURCE = "tasks/dataset.toml"
 TB21_MANIFEST_SHA256 = "d90b4389992d07ed6f4ab8de963a70241eaa4b60072eeaec4c3b261b6c4a6dd8"
 TB21_TASK_COUNT = 89
-TB21_SOURCE_MANIFEST_DIVERGENCES = [{
-    "task": "terminal-bench/sanitize-git-repo",
-    "source_digest": "sha256:73c94a21ebe370bae843adbeeaaa9e991374867b18483aaf56c7cd470dcddea7",
-    "hub_digest": "sha256:6e86297715fae62cd499fbdd27013e11a38d05d7e05b7f661cb50b4ecead128f",
-}]
+TB21_SOURCE_MANIFEST_DIVERGENCES = [
+    {
+        "task": "terminal-bench/sanitize-git-repo",
+        "source_digest": "sha256:73c94a21ebe370bae843adbeeaaa9e991374867b18483aaf56c7cd470dcddea7",
+        "hub_digest": "sha256:6e86297715fae62cd499fbdd27013e11a38d05d7e05b7f661cb50b4ecead128f",
+    }
+]
 """The only reviewed source-reference digest divergence from Hub rev 6."""
 
 TB21_HARBOR_SOURCE = UpstreamSource(
@@ -104,6 +106,15 @@ class TB21Lock:
             return self.package_digests[name]
         except KeyError as exc:
             raise TB21LockError(f"TB2.1 lock has no task {name!r}") from exc
+
+    def source_reference_for(self, name: str) -> dict[str, object]:
+        """Return the reviewed source reference for one locked Hub task."""
+        self.digest_for(name)
+        divergence = next(
+            (item for item in self.source_manifest_divergences if item["task"] == name),
+            None,
+        )
+        return {"snapshot": self.source_revision, "divergence": divergence}
 
 
 def load_tb21_lock() -> TB21Lock:
@@ -238,8 +249,9 @@ def _verify_canonical_lock(lock: TB21Lock) -> None:
         )
     if lock.source_manifest_divergences != TB21_SOURCE_MANIFEST_DIVERGENCES:
         raise TB21LockError("TB2.1 lock source-manifest divergence record drift")
-    if lock.digest_for("terminal-bench/sanitize-git-repo") != (
-        TB21_SOURCE_MANIFEST_DIVERGENCES[0]["hub_digest"]
+    if (
+        lock.digest_for("terminal-bench/sanitize-git-repo")
+        != (TB21_SOURCE_MANIFEST_DIVERGENCES[0]["hub_digest"])
     ):
         raise TB21LockError("TB2.1 lock reviewed Hub divergence digest drift")
 
@@ -260,7 +272,11 @@ def _mapping_of_digests(value: Any, *, source: str) -> dict[str, str]:
         raise TB21LockError(f"{source} package_digests must be an object")
     result: dict[str, str] = {}
     for name, digest in value.items():
-        if not isinstance(name, str) or not isinstance(digest, str) or not _is_sha256_digest(digest):
+        if (
+            not isinstance(name, str)
+            or not isinstance(digest, str)
+            or not _is_sha256_digest(digest)
+        ):
             raise TB21LockError(f"{source} contains a non-immutable task digest")
         result[name] = digest
     return result
@@ -274,7 +290,11 @@ def _manifest_task_digests(value: Any) -> dict[str, str]:
         if not isinstance(item, dict):
             raise TB21LockError("TB2.1 audit manifest task entries must be objects")
         name, digest = item.get("name"), item.get("digest")
-        if not isinstance(name, str) or not isinstance(digest, str) or not _is_sha256_digest(digest):
+        if (
+            not isinstance(name, str)
+            or not isinstance(digest, str)
+            or not _is_sha256_digest(digest)
+        ):
             raise TB21LockError("TB2.1 audit manifest contains a non-immutable task digest")
         if name in result:
             raise TB21LockError(f"TB2.1 audit manifest contains duplicate task {name!r}")
@@ -309,11 +329,13 @@ def _parse_source_manifest_divergences(value: Any) -> list[dict[str, str]]:
                 f"TB2.1 lock contains duplicate source-manifest divergence {task!r}",
             )
         tasks.add(task)
-        divergences.append({
-            "task": task,
-            "source_digest": source_digest,
-            "hub_digest": hub_digest,
-        })
+        divergences.append(
+            {
+                "task": task,
+                "source_digest": source_digest,
+                "hub_digest": hub_digest,
+            }
+        )
     if [entry["task"] for entry in divergences] != sorted(tasks):
         raise TB21LockError("TB2.1 lock source-manifest divergences must be sorted")
     return divergences
@@ -329,11 +351,15 @@ def _verify_source_manifest(source_digests: dict[str, str], *, lock: TB21Lock) -
             f"missing={sorted(hub_names - source_names)}; "
             f"extra={sorted(source_names - hub_names)}",
         )
-    actual_divergences = [{
-        "task": task,
-        "source_digest": source_digests[task],
-        "hub_digest": hub_digests[task],
-    } for task in sorted(source_names) if source_digests[task] != hub_digests[task]]
+    actual_divergences = [
+        {
+            "task": task,
+            "source_digest": source_digests[task],
+            "hub_digest": hub_digests[task],
+        }
+        for task in sorted(source_names)
+        if source_digests[task] != hub_digests[task]
+    ]
     expected_divergences = lock.source_manifest_divergences
     if actual_divergences != expected_divergences:
         expected_by_task = {entry["task"]: entry for entry in expected_divergences}
@@ -352,7 +378,10 @@ def _verify_source_manifest(source_digests: dict[str, str], *, lock: TB21Lock) -
 
 
 def _verify_task_pairs(
-    actual: dict[str, str], expected: dict[str, str], *, source: str,
+    actual: dict[str, str],
+    expected: dict[str, str],
+    *,
+    source: str,
 ) -> None:
     if len(actual) != len(expected):
         missing = sorted(set(expected) - set(actual))
@@ -374,6 +403,8 @@ def _verify_task_pairs(
 
 def _is_sha256_digest(value: str) -> bool:
     prefix, _, hex_digest = value.partition(":")
-    return prefix == "sha256" and len(hex_digest) == 64 and all(
-        char in "0123456789abcdef" for char in hex_digest
+    return (
+        prefix == "sha256"
+        and len(hex_digest) == 64
+        and all(char in "0123456789abcdef" for char in hex_digest)
     )

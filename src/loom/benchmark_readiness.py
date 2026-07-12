@@ -31,6 +31,7 @@ V1_SUPPORTED_BENCHMARK_IDS = frozenset(
         "skilllearnbench",
         "swe-bench-verified",
         "terminal-bench-2",
+        "terminal-bench-2@tb2.1-r6",
     }
 )
 

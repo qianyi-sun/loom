@@ -39,9 +39,11 @@ async def get_task_bundle(
         raise HTTPException(status_code=401, detail="not authorized")
 
     async with request.app.state.session_factory() as session:
-        row = (await session.execute(
-            select(TaskRow).where(TaskRow.id == task_id),
-        )).scalar_one_or_none()
+        row = (
+            await session.execute(
+                select(TaskRow).where(TaskRow.id == task_id),
+            )
+        ).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="task not found")
 
@@ -50,4 +52,5 @@ async def get_task_bundle(
         "checksum": row.checksum,
         "config": row.config,
         "source": row.source,
+        "source_provenance": row.source_provenance,
     }

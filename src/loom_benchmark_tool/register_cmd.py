@@ -46,9 +46,11 @@ from loom_benchmark_tool.manifest import (
     MANIFEST_FILENAME,
     read_manifest_from_hf,
     repo_id_for,
+    tb21_workspace_policy_isolated,
 )
 
 RegisterSource = Literal["hf", "object-store"]
+_TB21_PROFILE_ID = "terminal-bench-2@tb2.1-r6"
 
 
 def _hf_source_url(
@@ -329,6 +331,8 @@ async def run_register(
     bucket: str = "loom-benchmarks",
     chunk_size: int | None = None,
     chunk_sleep_secs: float = 300.0,
+    manifest: dict[str, Any] | None = None,
+    activate_alias: bool = False,
 ) -> dict[str, Any]:
     """Read manifest from the selected source, upsert Benchmark + Task
     rows. Returns `{"registered": N, "skipped": M, "source": str,
@@ -346,6 +350,8 @@ async def run_register(
       required. `mirror_to_object_store` is a no-op (the bundles are
       already in the bucket).
     """
+    if activate_alias:
+        raise ValueError("register never activates benchmark aliases; run datasets activate")
     if source == "hf":
         if not hf_org:
             raise ValueError("source='hf' requires hf_org")
@@ -368,23 +374,30 @@ async def run_register(
     benchmark_id_hint = benchmark  # publish uses adapter.name; matches for our built-in adapters
     if source == "hf":
         repo_id = repo_id_for(hf_org, benchmark)
-        manifest = read_manifest_from_hf(
-            hf_org=hf_org,
-            benchmark=benchmark,
-            hf_token=hf_token,
-            revision=revision,
+        manifest = manifest or read_manifest_from_hf(
+            hf_org=hf_org, benchmark=benchmark, hf_token=hf_token, revision=revision,
         )
     else:
         assert object_store is not None
-        manifest = await _read_manifest_from_object_store(
-            object_store=object_store,
-            bucket=bucket,
-            benchmark_id=benchmark_id_hint,
-            revision=revision,
+        manifest = manifest or await _read_manifest_from_object_store(
+            object_store=object_store, bucket=bucket,
+            benchmark_id=benchmark_id_hint, revision=revision,
         )
         repo_id = f"s3://{bucket}/{manifest['benchmark_id']}"
 
     manifest_tasks = list(manifest["tasks"])
+    profile_provenance = dict(manifest.get("benchmark_profile_provenance") or {})
+    if manifest.get("benchmark_id") == _TB21_PROFILE_ID:
+        if not tb21_workspace_policy_isolated(
+            profile_provenance.get("workspace_staging_policy"),
+        ):
+            raise ValueError("TB2.1 profile is missing private workspace isolation provenance")
+        for task in manifest_tasks:
+            task_provenance = task.get("source_provenance")
+            if not isinstance(task_provenance, dict) or not tb21_workspace_policy_isolated(
+                task_provenance.get("workspace_staging_policy"),
+            ):
+                raise ValueError("TB2.1 task is missing private workspace isolation provenance")
 
     snapshot_root: Path | None = None
     mirrored = 0
@@ -439,6 +452,8 @@ async def run_register(
             }
             if series is not None:
                 update_set["series"] = series
+            if "benchmark_profile_provenance" in manifest:
+                update_set["profile_provenance"] = profile_provenance
             await session.execute(
                 pg_insert(Benchmark)
                 .values(
@@ -454,6 +469,7 @@ async def run_register(
                     license_url=manifest.get("license_url", ""),
                     splits=manifest.get("splits", ["test"]),
                     series=series,
+                    profile_provenance=profile_provenance,
                     imported_by=registered_by or "loom_benchmark_tool:register",
                 )
                 .on_conflict_do_update(
@@ -485,6 +501,7 @@ async def run_register(
                 # PR-1: per-task tags from manifest v2. v1 manifests
                 # omit `tags`; treat absent + {} identically.
                 tags = dict(t.get("tags") or {})
+                source_provenance = dict(t.get("source_provenance") or {})
                 config = task_config_from_manifest_entry(t)
                 if not config:
                     legacy_placeholders += 1
@@ -535,6 +552,7 @@ async def run_register(
                         ),
                         benchmark_id=manifest["benchmark_id"],
                         tags=tags,
+                        source_provenance=source_provenance,
                     )
                     .on_conflict_do_update(
                         index_elements=["id"],
@@ -548,6 +566,7 @@ async def run_register(
                             "benchmark_id": manifest["benchmark_id"],
                             "tags": tags,
                             "config": config,
+                            "source_provenance": source_provenance,
                         },
                     ),
                 )

@@ -32,6 +32,7 @@ from loom.trajectory.reader import TrajectoryReader
 from loom.trajectory.writer import TrajectoryWriter
 from loom.trial.artifacts import ArtifactCollector
 from loom.trial.phase_network import phase_network
+from loom.trial.workspace import materialize_workspace
 
 if TYPE_CHECKING:
     from loom.trial.trial import TrialContext
@@ -51,19 +52,20 @@ async def run_step(
     seq = _SeqCounter()
     workdir = ctx.task_config.environment.workdir
 
-    await trajectory.append(StepStartEvent(
-        emitted_at=datetime.now(UTC),
-        trial_id=ctx.trial_id,
-        step_id=step.name,
-        seq=seq.next(),
-        instruction_excerpt=instruction[:200],
-    ))
+    await trajectory.append(
+        StepStartEvent(
+            emitted_at=datetime.now(UTC),
+            trial_id=ctx.trial_id,
+            step_id=step.name,
+            seq=seq.next(),
+            instruction_excerpt=instruction[:200],
+        )
+    )
 
     # Agent phase ──────────────────────────────────────────────────────────
     agent_timeout = _resolve_agent_timeout(ctx, step)
     agent_phase: NetworkPolicy = (
-        step.network.agent_phase if step.network and step.network.agent_phase
-        else baseline_policy
+        step.network.agent_phase if step.network and step.network.agent_phase else baseline_policy
     )
     sr_error = await _run_agent_with_retry(
         ctx=ctx,
@@ -82,20 +84,37 @@ async def run_step(
     # Verifier phase ───────────────────────────────────────────────────────
     verifier_result = None
     if not ctx.trial_config.skip_verifier:
+        # The normal-agent staging policy keeps private tests, verifier code,
+        # and reference solutions out of /workspace until the agent has
+        # finished.  Upload only that private subset immediately before the
+        # verifier consumes it; profiles without a policy retain legacy
+        # materialization behavior.
+        if ctx.workspace_staging_policy is not None:
+            await materialize_workspace(
+                driver=ctx.driver,
+                task_dir=ctx.task_dir,
+                dst=workdir,
+                policy=ctx.workspace_staging_policy,
+                phase="verifier",
+            )
         verifier_timeout = _resolve_verifier_timeout(ctx, step)
         verifier_phase: NetworkPolicy = (
-            step.network.verifier_phase if step.network and step.network.verifier_phase
+            step.network.verifier_phase
+            if step.network and step.network.verifier_phase
             else baseline_policy
         )
         verifier_started = time.monotonic()
         try:
             async with phase_network(
-                ctx.driver, baseline=baseline_policy, phase=verifier_phase,
+                ctx.driver,
+                baseline=baseline_policy,
+                phase=verifier_phase,
             ):
                 reader = TrajectoryReader(ctx.local_trajectory_path)
                 verifier_result = await asyncio.wait_for(
                     ctx.verifier.verify(
-                        task=ctx.task_config, env=ctx.driver,
+                        task=ctx.task_config,
+                        env=ctx.driver,
                         artifacts_dir=workdir,
                         trajectory=reader,
                     ),
@@ -127,7 +146,8 @@ async def run_step(
             )
             if sr_error is None:
                 sr_error = StepError(
-                    phase="verifier", reason="timeout",
+                    phase="verifier",
+                    reason="timeout",
                     message=message,
                     occurred_at=datetime.now(UTC),
                 )
@@ -138,8 +158,10 @@ async def run_step(
             # tracking and step_end emission. Mirror the agent-phase pattern.
             if sr_error is None:
                 sr_error = StepError(
-                    phase="verifier", reason="exception",
-                    message=str(exc), occurred_at=datetime.now(UTC),
+                    phase="verifier",
+                    reason="exception",
+                    message=str(exc),
+                    occurred_at=datetime.now(UTC),
                 )
 
     # Artifact collection ──────────────────────────────────────────────────
@@ -147,8 +169,10 @@ async def run_step(
     # same files. This keeps verifier-required outputs from being invisible
     # when they are not part of the generic artifact glob list.
     collector = ArtifactCollector(
-        store=ctx.object_store, bucket=ctx.artifacts_bucket,
-        team_id=str(ctx.team_id), trial_id=str(ctx.trial_id),
+        store=ctx.object_store,
+        bucket=ctx.artifacts_bucket,
+        team_id=str(ctx.team_id),
+        trial_id=str(ctx.trial_id),
         step_name=step.name,
         local_root=ctx.local_trajectory_path.parent / "artifacts" / step.name,
         workspace_root=workdir,
@@ -188,24 +212,33 @@ async def run_step(
     except Exception as exc:
         if sr_error is None:
             sr_error = StepError(
-                phase="artifacts", reason="exception",
-                message=str(exc), occurred_at=datetime.now(UTC),
+                phase="artifacts",
+                reason="exception",
+                message=str(exc),
+                occurred_at=datetime.now(UTC),
             )
 
     sr_finished = datetime.now(UTC)
     step_result = StepResult(
-        step_name=step.name, started_at=sr_started, finished_at=sr_finished,
-        verifier_result=verifier_result, error=sr_error,
-        artifacts_uri=artifacts_uri, artifacts=artifacts,
+        step_name=step.name,
+        started_at=sr_started,
+        finished_at=sr_finished,
+        verifier_result=verifier_result,
+        error=sr_error,
+        artifacts_uri=artifacts_uri,
+        artifacts=artifacts,
     )
 
-    await trajectory.append(StepEndEvent(
-        emitted_at=datetime.now(UTC),
-        trial_id=ctx.trial_id, step_id=step.name,
-        seq=seq.next(),
-        summary=verifier_result.rewards if verifier_result else None,
-        error_phase=sr_error.phase if sr_error else None,
-    ))
+    await trajectory.append(
+        StepEndEvent(
+            emitted_at=datetime.now(UTC),
+            trial_id=ctx.trial_id,
+            step_id=step.name,
+            seq=seq.next(),
+            summary=verifier_result.rewards if verifier_result else None,
+            error_phase=sr_error.phase if sr_error else None,
+        )
+    )
     return step_result
 
 
@@ -323,12 +356,17 @@ async def _run_agent_with_retry(
     while True:
         try:
             async with phase_network(
-                ctx.driver, baseline=baseline_policy, phase=agent_phase,
+                ctx.driver,
+                baseline=baseline_policy,
+                phase=agent_phase,
             ):
                 await asyncio.wait_for(
                     ctx.agent.run(
-                        instruction=instruction, env=ctx.driver,
-                        trajectory=trajectory, mcp=[], skills_dir=None,
+                        instruction=instruction,
+                        env=ctx.driver,
+                        trajectory=trajectory,
+                        mcp=[],
+                        skills_dir=None,
                         step_id=step.name,
                     ),
                     timeout=agent_timeout,
@@ -349,7 +387,8 @@ async def _run_agent_with_retry(
                 attempt += 1
                 continue
             return StepError(
-                phase="agent", reason="timeout",
+                phase="agent",
+                reason="timeout",
                 message=message,
                 occurred_at=datetime.now(UTC),
             )
@@ -371,12 +410,15 @@ async def _run_agent_with_retry(
                     attempt += 1
                     continue
                 return StepError(
-                    phase="agent", reason="exception",
+                    phase="agent",
+                    reason="exception",
                     message=failure_message or str(exc),
                     occurred_at=datetime.now(UTC),
                 )
             return StepError(
-                phase="agent", reason="exception", message=str(exc),
+                phase="agent",
+                reason="exception",
+                message=str(exc),
                 occurred_at=datetime.now(UTC),
             )
         except Exception as exc:

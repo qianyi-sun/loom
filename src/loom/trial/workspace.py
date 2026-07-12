@@ -17,7 +17,11 @@ the production trial path, using the Driver protocol's single-file
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
+from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
+from typing import Literal
 
 from loom.driver.base import Driver
 
@@ -32,17 +36,19 @@ from loom.driver.base import Driver
 # name (e.g., src/__pycache__ is skipped because rglob walks into it,
 # but its files have `.parts == ("src", "__pycache__", "x.pyc")` so
 # the per-file check below specifically also looks at any segment).
-_SKIP_NAMES = frozenset({
-    "task.toml",
-    ".loom-build",
-    ".git",
-    "__pycache__",
-    "node_modules",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    ".DS_Store",
-})
+_SKIP_NAMES = frozenset(
+    {
+        "task.toml",
+        ".loom-build",
+        ".git",
+        "__pycache__",
+        "node_modules",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".DS_Store",
+    }
+)
 
 # Suffix-match (case-sensitive) for individual files to skip. Cheaper
 # than a full glob and covers the common compiled-Python case.
@@ -54,9 +60,84 @@ _SKIP_SUFFIXES = frozenset({".pyc", ".pyo"})
 # other in-flight calls (exec, status, etc.).
 _MAX_PARALLEL_UPLOADS = 16
 
+WorkspacePhase = Literal["agent", "verifier"]
+
+# This exact schema is persisted in the TB2.1 rev-6 manifest and task
+# provenance.  Keep it as plain JSON-compatible data so publication, audit,
+# catalog copying, and the worker can all attest to the same boundary.
+TB21_AGENT_WORKSPACE_POLICY: dict[str, object] = {
+    "schema_version": 1,
+    "agent_excluded_paths": [
+        "solution/**",
+        "tests/**",
+        "verifier/**",
+        "upstream-task.toml",
+    ],
+    "verifier_only_paths": [
+        "solution/**",
+        "tests/**",
+        "verifier/**",
+        "upstream-task.toml",
+    ],
+}
+
+
+@dataclass(frozen=True)
+class WorkspaceStagingPolicy:
+    """Persisted allow/deny boundary for a task's agent workspace.
+
+    Private verifier assets remain in the host-side materialized bundle until
+    the verifier phase.  The policy is data carried by task provenance rather
+    than a benchmark-name convention, so catalog copies and workers can
+    independently verify and enforce the same contract.
+    """
+
+    agent_excluded_paths: tuple[str, ...]
+    verifier_only_paths: tuple[str, ...]
+
+    @classmethod
+    def from_provenance(cls, raw: Mapping[str, object]) -> WorkspaceStagingPolicy:
+        if raw.get("schema_version") != 1:
+            raise ValueError("workspace staging policy schema_version must be 1")
+        required = {"schema_version", "agent_excluded_paths", "verifier_only_paths"}
+        if set(raw) != required:
+            raise ValueError("workspace staging policy must contain the exact v1 fields")
+        agent_paths = cls._validate_paths(raw["agent_excluded_paths"])
+        verifier_paths = cls._validate_paths(raw["verifier_only_paths"])
+        if agent_paths != verifier_paths:
+            raise ValueError(
+                "workspace staging policy verifier_only_paths must equal agent_excluded_paths",
+            )
+        return cls(agent_excluded_paths=agent_paths, verifier_only_paths=verifier_paths)
+
+    @staticmethod
+    def _validate_paths(value: object) -> tuple[str, ...]:
+        if not isinstance(value, list) or not value:
+            raise ValueError("workspace staging policy paths must be a non-empty list")
+        paths: list[str] = []
+        for path in value:
+            if not isinstance(path, str) or not path or path.startswith("/"):
+                raise ValueError("workspace staging policy paths must be relative strings")
+            parts = PurePosixPath(path).parts
+            if ".." in parts or "." in parts:
+                raise ValueError("workspace staging policy paths must not traverse")
+            paths.append(path)
+        if len(paths) != len(set(paths)):
+            raise ValueError("workspace staging policy paths must be unique")
+        return tuple(paths)
+
+    def is_private(self, relative_path: PurePosixPath) -> bool:
+        candidate = relative_path.as_posix()
+        return any(fnmatchcase(candidate, pattern) for pattern in self.agent_excluded_paths)
+
 
 async def materialize_workspace(
-    *, driver: Driver, task_dir: Path, dst: PurePosixPath,
+    *,
+    driver: Driver,
+    task_dir: Path,
+    dst: PurePosixPath,
+    policy: WorkspaceStagingPolicy | None = None,
+    phase: WorkspacePhase = "agent",
 ) -> int:
     """Recursively upload every regular file under `task_dir` to `dst`
     inside the sandbox, preserving the relative path layout. Returns
@@ -83,6 +164,12 @@ async def materialize_workspace(
             continue
         if src.suffix in _SKIP_SUFFIXES:
             continue
+        if policy is not None:
+            private = policy.is_private(PurePosixPath(*rel.parts))
+            if phase == "agent" and private:
+                continue
+            if phase == "verifier" and not private:
+                continue
         targets.append((src, dst / PurePosixPath(*rel.parts)))
     if not targets:
         return 0

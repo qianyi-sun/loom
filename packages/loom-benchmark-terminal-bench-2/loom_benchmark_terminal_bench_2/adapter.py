@@ -13,6 +13,7 @@ from loom_benchmarks.base import BenchmarkInstance, ConvertedTask, UpstreamSourc
 from loom_benchmarks.util import sha256_of_dir
 
 from loom.terminal_bench_normalize import normalize_terminal_bench_task_toml
+from loom.trial.workspace import TB21_AGENT_WORKSPACE_POLICY
 from loom_benchmark_terminal_bench_2 import upstream
 
 
@@ -27,6 +28,48 @@ class TerminalBench2Adapter:
     license_url = "https://github.com/harbor-framework/terminal-bench-2-1/blob/dde3cd95b80ff25af5abd99a80b6513a018ad3b4/LICENSE"
     splits = ("test",)
     task_count = upstream.TB21_TASK_COUNT
+
+    def profile_provenance(self) -> dict[str, object]:
+        """Immutable profile identity persisted with the published manifest."""
+        lock = upstream.load_tb21_lock()
+        return {
+            "physical_profile": self.name,
+            "hub_dataset": lock.dataset,
+            "hub_revision": lock.revision,
+            "hub_metadata_version": lock.hub_metadata_version,
+            "source_reference_snapshot": lock.source_revision,
+            "source_reference_divergences": lock.source_manifest_divergences,
+            "verifier_identity": "tb21-native-reward-file-v1",
+            "workspace_staging_policy": TB21_AGENT_WORKSPACE_POLICY,
+        }
+
+    def task_source_provenance(
+        self,
+        *,
+        instance: BenchmarkInstance,
+        bundle_dir: Path,
+        task_config: dict[str, object],
+        checksum: str,
+    ) -> dict[str, object]:
+        """Evidence tying one Loom bundle to its rev-6 source package."""
+        del bundle_dir, checksum  # The publish layer records the bundle checksum.
+        source_name = f"terminal-bench/{instance.instance_id}"
+        lock = upstream.load_tb21_lock()
+        environment = task_config.get("environment")
+        env = environment if isinstance(environment, dict) else {}
+        return {
+            "harbor_package_digest": lock.digest_for(source_name),
+            "harbor_metadata_version": lock.hub_metadata_version,
+            "source_reference": lock.source_reference_for(source_name),
+            "verifier_identity": "tb21-native-reward-file-v1",
+            "image_provenance": {
+                "docker_image": env.get("docker_image"),
+                "dockerfile": env.get("dockerfile"),
+                "docker_build_context": env.get("docker_build_context"),
+                "cpu_arch": env.get("cpu_arch"),
+            },
+            "workspace_staging_policy": TB21_AGENT_WORKSPACE_POLICY,
+        }
 
     def list_instances(
         self,

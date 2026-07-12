@@ -114,6 +114,8 @@ Manifest vNext should include:
   - `tags`
   - `task_config`, or a canonical path to a `task.toml` that can be fetched
     and validated during `register`
+  - `source_provenance` for profile-specific source, verifier, image, and
+    workspace-isolation attestations
   - optional requirements: sandbox image, network policy, worker capabilities,
     estimated runtime class
 
@@ -127,7 +129,9 @@ Registration behavior:
 - Re-registering should be idempotent and should update checksums, tags, source,
   and configs when the manifest revision changes.
 
-The first #272 implementation uses inline `task_config` in schema v3 manifests.
+The first #272 implementation used inline `task_config` in schema v3 manifests.
+Schema v4 additionally carries immutable profile and per-task provenance for
+audited profiles such as Terminal-Bench 2.1 rev 6.
 The remote-path variant remains the scalable extension point for very large or
 non-HF user-owned benchmark manifests.
 
@@ -138,8 +142,11 @@ Current published benchmark manifests are not all equivalent:
 - v1 manifests predate `series` and per-task `tags`.
 - v2 manifests add `series` and `tags`, but still do not guarantee a
   register-time `TaskConfig`.
-- vNext manifests must provide either inline `task_config` or a canonical
+- v3 manifests provide inline `task_config` or a canonical
   remote `task.toml` path for every runnable task.
+- v4 manifests may additionally bind a physical profile to source package
+  digests, source-reference divergences, verifier/image identity, and a
+  durable private-workspace staging policy.
 
 Registration must keep reading v1 and v2 manifests so existing published
 datasets do not disappear from the catalog. However, compatibility does not
@@ -150,9 +157,13 @@ mean treating them as runnable. The rules are:
   `manifest_legacy_missing_task_config` until backfilled.
 - v2: preserve `series` and `tags`, register raw task metadata, and set the
   same blocker when task config data is absent.
-- vNext: validate every supplied task config before writing it to
+- v3+: validate every supplied task config before writing it to
   `tasks.config`; malformed configs fail registration unless the operator asks
   for placeholder-only import.
+- v4 audited profiles: persist both benchmark and task provenance; registration
+  rejects a Terminal-Bench 2.1 rev-6 profile unless every task carries the
+  reviewed policy that excludes `solution/`, `tests/`, `verifier/`, and
+  `upstream-task.toml` from normal-agent workspace staging.
 
 Backfill should be explicit and repeatable. Operators should republish a
 benchmark using the vNext manifest, then re-run register. The second register
@@ -184,7 +195,7 @@ Source materialization stays behind the existing worker materializer boundary:
 
 Production should prefer object-store-backed sources for all runtime benchmark
 materialization. For HF-published first-party benchmarks, the scalable path is:
-publish schema-v3 manifest and bundles to HF -> operator-side register with
+publish schema-v4 manifest and bundles to HF -> operator-side register with
 `--mirror-to-object-store` -> persist `s3://...` task sources with HF
 provenance -> smoke. Workers should not need HF tokens or direct HF egress to
 run benchmark sources.
@@ -206,6 +217,25 @@ loom datasets register humaneval --hf-org "$LOOM_HF_ORG" \
 loom datasets audit --all --verify-bundles
 loom datasets verify humaneval --limit 3
 ```
+
+For Terminal-Bench 2.1 rev 6, audit the physical profile and activate the
+public alias only from that written audit result. Publish and register never
+move the alias themselves:
+
+```bash
+loom datasets audit terminal-bench-2@tb2.1-r6 \
+  --tb21-audit-json "$PWD/tb21-audit.json" \
+  --minio-endpoint "$LOOM_MINIO_ENDPOINT"
+loom datasets activate terminal-bench-2 \
+  --profile terminal-bench-2@tb2.1-r6 \
+  --audit-json "$PWD/tb21-audit.json"
+```
+
+The rev-6 audit checks all 89 Hub lock digests, the one reviewed
+source-reference divergence, normalized task configs, internal bundle bytes
+and checksums, verifier/image/architecture provenance, and the persisted
+private-workspace isolation policy. A partial, stale, or unisolated result
+cannot activate the alias.
 
 Required audit columns:
 

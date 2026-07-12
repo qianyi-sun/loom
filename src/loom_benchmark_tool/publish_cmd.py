@@ -82,6 +82,38 @@ MANIFEST_SCHEMA_VERSION = 3
 PublishTarget = Literal["hf", "object-store"]
 
 
+def _adapter_profile_provenance(adapter: object) -> dict[str, object]:
+    provider = getattr(adapter, "profile_provenance", None)
+    if provider is None:
+        return {}
+    value = provider()
+    if not isinstance(value, dict):
+        raise TypeError("adapter profile_provenance() must return an object")
+    return dict(value)
+
+
+def _adapter_task_source_provenance(
+    adapter: object,
+    *,
+    instance: object,
+    bundle_dir: Path,
+    task_config: dict[str, object],
+    checksum: str,
+) -> dict[str, object]:
+    provider = getattr(adapter, "task_source_provenance", None)
+    if provider is None:
+        return {}
+    value = provider(
+        instance=instance,
+        bundle_dir=bundle_dir,
+        task_config=task_config,
+        checksum=checksum,
+    )
+    if not isinstance(value, dict):
+        raise TypeError("adapter task_source_provenance() must return an object")
+    return dict(value)
+
+
 def _safe_dirname(instance_id: str) -> str:
     """Turn `HumanEval/0` into `HumanEval_0` so it's a single path
     segment. The reverse mapping isn't needed by the worker — only the
@@ -171,6 +203,13 @@ def _stage_bundles(
                     getattr(adapter, "license_execution_policy", None),
                 ),
                 "task_config": task_config,
+                "source_provenance": _adapter_task_source_provenance(
+                    adapter,
+                    instance=inst,
+                    bundle_dir=bundle_dir,
+                    task_config=task_config,
+                    checksum=checksum,
+                ),
             }
         )
         stats["published"] += 1
@@ -189,6 +228,7 @@ def _stage_bundles(
         "published_at": datetime.now(UTC).isoformat(),
         "splits": list(adapter.splits),
         "task_count": len(task_entries),
+        "benchmark_profile_provenance": _adapter_profile_provenance(adapter),
         "tasks": task_entries,
     }
     (staging_dir / MANIFEST_FILENAME).write_text(
