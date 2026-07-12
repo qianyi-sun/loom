@@ -27,6 +27,7 @@ from loom.models.task import (
 )
 from loom.models.verifier import VerifierResult
 from loom.trajectory.storage import FakeObjectStore
+from loom.trial.workspace import TB21_AGENT_WORKSPACE_POLICY, WorkspaceStagingPolicy
 from loom_worker.trial_runner import LocalTrialRunner
 from tests._trial_config_defaults import stub_trial_config
 
@@ -128,6 +129,102 @@ async def test_runner_invokes_run_and_reports_states(  # type: ignore[no-untyped
     assert result.state == TrialState.SUCCEEDED
     assert ("running", None) in state_calls
     assert ("succeeded", None) in state_calls
+
+
+async def test_runner_uses_fresh_verifier_driver_for_private_workspace_policy(
+    hello_task: Path,
+    tmp_path: Path,
+) -> None:
+    """The actual worker runner must supply the factory required by run_step."""
+
+    class _HandoffDriver(FakeDriver):
+        async def exec(self, cmd: str, **kwargs: object) -> ExecResult:
+            if cmd.startswith("find "):
+                paths = [
+                    path.as_posix().encode()
+                    for path in sorted(self.filesystem)
+                    if path.is_relative_to(PurePosixPath("/workspace"))
+                ]
+                return ExecResult(
+                    return_code=0,
+                    stdout=b"\x00".join(paths) + (b"\x00" if paths else b""),
+                    stderr=b"",
+                    truncated=False,
+                    duration_sec=0,
+                )
+            return await super().exec(cmd, **kwargs)
+
+    class _PublicOutputAgent:
+        mode = "out-of-box"
+        name = "public-output"
+        version = "1"
+        supports_os = frozenset({"linux"})
+        model = None
+
+        async def run(self, *, env, **_kwargs):  # type: ignore[no-untyped-def]
+            env.filesystem[PurePosixPath("/workspace/agent-output.txt")] = b"answer"
+
+    class _CapturingVerifier:
+        name = "capture"
+
+        def __init__(self) -> None:
+            self.env: FakeDriver | None = None
+
+        async def verify(self, *, env, **_kwargs):  # type: ignore[no-untyped-def]
+            self.env = env
+            assert PurePosixPath("/workspace/verifier/run.sh") in env.filesystem
+            assert PurePosixPath("/workspace/solution/solve.sh") in env.filesystem
+            assert PurePosixPath("/workspace/agent-output.txt") in env.filesystem
+            return VerifierResult(rewards={"passed": 1.0})
+
+    (hello_task / "tests").mkdir()
+    (hello_task / "tests" / "private-test.sh").write_text("private\n")
+    (hello_task / "verifier").mkdir()
+    (hello_task / "verifier" / "run.sh").write_text("#!/bin/sh\n")
+    (hello_task / "upstream-task.toml").write_text("private upstream\n")
+    drivers: list[_HandoffDriver] = []
+
+    def driver_factory() -> _HandoffDriver:
+        driver = _HandoffDriver()
+        drivers.append(driver)
+        return driver
+
+    async def state_patch(
+        _state: str,
+        _failure_reason: str | None,
+        _failure_message: str | None = None,
+    ) -> bool:
+        return True
+
+    trial_id = uuid4()
+    verifier = _CapturingVerifier()
+    runner = LocalTrialRunner(
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=_task_config(),
+        task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(),
+        driver_factory=driver_factory,
+        agent_factory=lambda *_args: _PublicOutputAgent(),  # type: ignore[return-value]
+        verifier_factory=lambda: verifier,  # type: ignore[return-value]
+        object_store=FakeObjectStore(),
+        gateway_client=FakeLLMGatewayClient(scripted=[]),
+        local_trajectory_root=tmp_path / "trajectories",
+        state_patch_callback=state_patch,
+        workspace_staging_policy=WorkspaceStagingPolicy.from_provenance(
+            TB21_AGENT_WORKSPACE_POLICY,
+        ),
+    )
+
+    result = await runner.run()
+
+    assert result.state == TrialState.SUCCEEDED
+    assert len(drivers) == 2
+    assert verifier.env is drivers[1]
+    assert drivers[0].state == "stopped"
+    assert drivers[1].state == "stopped"
+    assert PurePosixPath("/workspace/verifier/run.sh") not in drivers[0].filesystem
 
 
 async def test_runner_starts_sidecars_and_uses_returned_network(

@@ -275,6 +275,13 @@ class LocalTrialRunner:
             sandbox_volumes=sandbox_volumes,
             sandbox_extra_hosts=self.sandbox_extra_hosts,
             workspace_staging_policy=self.workspace_staging_policy,
+            # Only provenance-gated private-workspace tasks receive a second
+            # Driver. The existing image-specific factory is safe to reuse:
+            # it creates a fresh instance for the verifier lifecycle, while
+            # ordinary tasks retain the legacy single-driver behavior.
+            verifier_driver_factory=(
+                self.driver_factory if self.workspace_staging_policy is not None else None
+            ),
             cp_event_sink=self.cp_event_sink,
         )
 
