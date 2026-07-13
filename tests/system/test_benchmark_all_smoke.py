@@ -53,20 +53,49 @@ class BenchmarkCase:
     ``benchmark_id`` is the name passed to ``run_import`` AND used as
     the trial task_id prefix (``f"{benchmark_id}/{instance_id}"``).
     ``adapter_import_path`` + ``adapter_class_name`` locate the class
-    whose ``list_instances`` gets monkey-patched. ``fixture_path`` is
-    relative to ``_FIXTURE_ROOT``. ``instance_ids`` names the records
-    to submit — the fixture is filtered to match, so partial fixtures
-    are fine as long as they contain these ids under ``id_field``.
+    whose ``list_instances`` gets monkey-patched.
+
+    Two record-sourcing modes:
+
+    * ``fixture_path`` (relative to ``_FIXTURE_ROOT``): load JSON rows,
+      filter by ``str(row[id_field]) in instance_ids``. Row order
+      matches ``instance_ids`` after filtering. Used when the fixture
+      row's raw id-field is exactly the adapter's ``instance_id``.
+    * ``raw_records``: use these dicts directly, paired positionally
+      with ``instance_ids``. Used when the adapter's ``list_instances``
+      derives the instance_id from more than the raw id-field (e.g.
+      AIME parses ``(year, exam, num)`` from a URL, then joins into
+      ``"{year}-{exam}/{num}"``). Also used to synthesize test rows
+      per year without maintaining a multi-year fixture file.
+
+    Exactly one of ``fixture_path`` / ``raw_records`` is required.
+    ``id_field`` is only consulted when ``fixture_path`` is set.
     """
 
     benchmark_id: str
     adapter_import_path: str
     adapter_class_name: str
-    fixture_path: str
     instance_ids: tuple[str, ...]
+    fixture_path: str | None = None
+    raw_records: tuple[dict[str, object], ...] | None = None
     id_field: str = "task_id"
     timeout_sec: int = 600
     marks: tuple[pytest.MarkDecorator, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        if (self.fixture_path is None) == (self.raw_records is None):
+            raise ValueError(
+                f"{self.benchmark_id}: set exactly one of fixture_path "
+                "or raw_records",
+            )
+        if self.raw_records is not None and len(self.raw_records) != len(
+            self.instance_ids,
+        ):
+            raise ValueError(
+                f"{self.benchmark_id}: raw_records length "
+                f"({len(self.raw_records)}) must match instance_ids length "
+                f"({len(self.instance_ids)}) — pairs are positional",
+            )
 
 
 CASES: tuple[BenchmarkCase, ...] = (
@@ -160,6 +189,91 @@ CASES: tuple[BenchmarkCase, ...] = (
         id_field="instance_id",
         timeout_sec=1800,
     ),
+    # AIME: the adapter derives instance_id from a URL parse (aime-22..24)
+    # or a `(problem_idx, exam)` composite (aime-25), so the raw fixture
+    # id-field doesn't map. Synthesize one row per year in
+    # ``raw_records`` and let the fake list_instances yield with the
+    # already-computed instance_id.
+    BenchmarkCase(
+        benchmark_id="aime-22",
+        adapter_import_path="loom_benchmarks.adapters.aime",
+        adapter_class_name="AIME22Adapter",
+        instance_ids=("2022-I/1",),
+        raw_records=(
+            {
+                "problem": (
+                    "Find the number of ordered pairs of positive "
+                    "integers (a, b) such that 1/a + 1/b = 1/2022."
+                ),
+                "answer": "45",
+                "url": (
+                    "https://artofproblemsolving.com/wiki/index.php/"
+                    "2022_AIME_I_Problems/Problem_1"
+                ),
+            },
+        ),
+        timeout_sec=600,
+    ),
+    BenchmarkCase(
+        benchmark_id="aime-23",
+        adapter_import_path="loom_benchmarks.adapters.aime",
+        adapter_class_name="AIME23Adapter",
+        instance_ids=("2023-I/1",),
+        raw_records=(
+            {
+                "problem": (
+                    "Five men and nine women stand equally spaced around "
+                    "a circle in random order. Compute the probability "
+                    "that every man stands diametrically opposite a "
+                    "woman."
+                ),
+                "answer": "191",
+                "url": (
+                    "https://artofproblemsolving.com/wiki/index.php/"
+                    "2023_AIME_I_Problems/Problem_1"
+                ),
+            },
+        ),
+        timeout_sec=600,
+    ),
+    BenchmarkCase(
+        benchmark_id="aime-24",
+        adapter_import_path="loom_benchmarks.adapters.aime",
+        adapter_class_name="AIME24Adapter",
+        instance_ids=("2024-I/1",),
+        raw_records=(
+            {
+                "problem": (
+                    "Every morning Aya goes for a 9-kilometer walk. "
+                    "Compute the total time she spends walking."
+                ),
+                "answer": "204",
+                "url": (
+                    "https://artofproblemsolving.com/wiki/index.php/"
+                    "2024_AIME_I_Problems/Problem_1"
+                ),
+            },
+        ),
+        timeout_sec=600,
+    ),
+    BenchmarkCase(
+        benchmark_id="aime-25",
+        adapter_import_path="loom_benchmarks.adapters.aime_2025",
+        adapter_class_name="AIME25Adapter",
+        instance_ids=("2025-I/1",),
+        raw_records=(
+            {
+                "problem": (
+                    "Find the sum of all integer bases b > 9 for which "
+                    "17_b is a divisor of 97_b."
+                ),
+                "answer": "70",
+                "exam": "I",
+                "problem_idx": "1",
+            },
+        ),
+        timeout_sec=600,
+    ),
 )
 
 
@@ -168,19 +282,31 @@ def _load_adapter_class(case: BenchmarkCase) -> type:
     return getattr(module, case.adapter_class_name)
 
 
-def _load_fixture_rows(case: BenchmarkCase) -> list[dict[str, object]]:
+def _resolve_rows(
+    case: BenchmarkCase,
+) -> list[tuple[str, dict[str, object]]]:
+    """Return ``[(instance_id, raw), ...]`` in the order the smoke
+    should submit trials."""
+    if case.raw_records is not None:
+        return list(zip(case.instance_ids, case.raw_records, strict=True))
+
+    assert case.fixture_path is not None
     path = _FIXTURE_ROOT / case.fixture_path
     rows = json.loads(path.read_text())
     wanted = set(case.instance_ids)
     # Some fixtures store the id as int (mbpp task_id, webarena task_id);
     # instance_ids in the case is str, so normalize both sides.
-    filtered = [r for r in rows if str(r.get(case.id_field)) in wanted]
-    missing = wanted - {str(r.get(case.id_field)) for r in filtered}
+    by_id: dict[str, dict[str, object]] = {}
+    for r in rows:
+        key = str(r.get(case.id_field))
+        if key in wanted:
+            by_id[key] = r
+    missing = wanted - set(by_id)
     assert not missing, (
         f"{case.benchmark_id}: fixture {path} missing instance ids: "
         f"{sorted(missing)}"
     )
-    return filtered
+    return [(iid, by_id[iid]) for iid in case.instance_ids]
 
 
 @pytest.mark.parametrize(
@@ -196,16 +322,16 @@ async def test_benchmark_smoke(
     from loom_benchmarks.base import BenchmarkInstance
 
     adapter_cls = _load_adapter_class(case)
-    rows = _load_fixture_rows(case)
+    rows = _resolve_rows(case)
 
     def _fake_list(
         self: object, *, source_dir: Path, split: str,
     ) -> Iterator[BenchmarkInstance]:
-        for r in rows:
+        for instance_id, raw in rows:
             yield BenchmarkInstance(
-                instance_id=str(r[case.id_field]),
+                instance_id=instance_id,
                 split=split,
-                raw=r,
+                raw=raw,
             )
 
     monkeypatch.setattr(adapter_cls, "list_instances", _fake_list)
