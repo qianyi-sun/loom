@@ -17,11 +17,15 @@ if ! [[ "${LOOM_CANDIDATE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
   exit 1
 fi
 
-if ! git merge-base --is-ancestor "${LOOM_CANDIDATE_SHA}" HEAD; then
-  printf 'error: candidate SHA %s is not an ancestor of production ref %s\n' \
-    "${LOOM_CANDIDATE_SHA}" "$(git rev-parse HEAD)" >&2
+if ! release_sha=$(git rev-parse --verify HEAD 2>/dev/null); then
+  printf 'error: production ref does not resolve to a commit\n' >&2
   exit 1
 fi
+
+python3 scripts/ops/release_identity.py verify \
+  --candidate-sha "${LOOM_CANDIDATE_SHA}" \
+  --release-sha "${release_sha}" \
+  --trusted-candidate-ref "origin/dev"
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "${tmpdir}"' EXIT
@@ -39,7 +43,7 @@ if [[ -z "${manifest}" || ! -f "${manifest}" ]]; then
   exit 1
 fi
 
-uv run python scripts/ops/release_gate.py verify-production \
+python3 scripts/ops/release_gate.py verify-production \
   --manifest "${manifest}" \
   --candidate-sha "${LOOM_CANDIDATE_SHA}" \
   --image-tag "${LOOM_IMAGE_TAG}"

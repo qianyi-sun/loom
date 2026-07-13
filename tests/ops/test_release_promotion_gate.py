@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -300,6 +301,37 @@ def _workflow_on(workflow: dict[Any, Any]) -> dict[str, Any]:
     return workflow.get("on", workflow.get(True))
 
 
+def _release_promotion_workflow() -> dict[str, Any]:
+    return yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/release-promotion-gate.yml").read_text(encoding="utf-8")
+    )
+
+
+def _run_release_input_preflight(
+    *,
+    candidate_sha: str,
+    image_selector: str,
+) -> subprocess.CompletedProcess[str]:
+    workflow = _release_promotion_workflow()
+    preflight = workflow["jobs"]["preflight"]
+    step = next(step for step in preflight["steps"] if step.get("name") == "Validate inputs")
+    env = os.environ.copy()
+    env.update(
+        {
+            "CANDIDATE_SHA": candidate_sha,
+            "IMAGE_SELECTOR": image_selector,
+        }
+    )
+    return subprocess.run(
+        ["bash", "-c", step["run"]],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 def test_release_gate_accepts_complete_manifest_and_writes_artifacts(tmp_path: Path) -> None:
     json_out = tmp_path / "release-gate-evidence.json"
     markdown_out = tmp_path / "release-gate-evidence.md"
@@ -338,6 +370,48 @@ def test_release_gate_accepts_complete_manifest_and_writes_artifacts(tmp_path: P
     assert "frontend_route_evidence" in markdown
     assert "prod_staging_isolation" in markdown
     assert "raw_delivery_export_status" in markdown
+
+
+def test_release_gate_official_json_round_trips_through_production_verifier(
+    tmp_path: Path,
+) -> None:
+    json_out = tmp_path / "release-gate-evidence.json"
+    validate = _run_release_gate(
+        tmp_path,
+        _passing_evidence(),
+        "validate",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "release-0123456789ab",
+        "--output-json",
+        str(json_out),
+    )
+
+    assert validate.returncode == 0, validate.stderr
+    evidence = json.loads(json_out.read_text(encoding="utf-8"))
+    assert evidence["schema_version"] == 1
+    assert type(evidence["schema_version"]) is int
+
+    verify = subprocess.run(
+        [
+            sys.executable,
+            "scripts/ops/release_gate.py",
+            "verify-production",
+            "--manifest",
+            str(json_out),
+            "--candidate-sha",
+            _candidate_sha(),
+            "--image-tag",
+            "release-0123456789ab",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert verify.returncode == 0, verify.stderr
 
 
 def test_release_gate_requires_hf_mirror_token_boundary_check(tmp_path: Path) -> None:
@@ -719,9 +793,136 @@ def test_release_gate_verify_production_rejects_candidate_or_image_mismatch(
     assert "image_tag mismatch" in result.stderr
 
 
+@pytest.mark.parametrize(
+    "invalid_schema_version",
+    [None, True, 1.0, "1"],
+    ids=["missing", "boolean", "float", "string"],
+)
+def test_release_gate_verify_production_rejects_invalid_schema_version_type(
+    tmp_path: Path,
+    invalid_schema_version: Any,
+) -> None:
+    manifest = _passing_evidence()
+    if invalid_schema_version is None:
+        manifest.pop("schema_version")
+    else:
+        manifest["schema_version"] = invalid_schema_version
+
+    result = _run_release_gate(
+        tmp_path,
+        manifest,
+        "verify-production",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "release-0123456789ab",
+    )
+
+    assert result.returncode == 1
+    assert "schema_version must be 1" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "image_selector",
+    ["release-0123456789ab", "sha256:" + "a" * 64],
+    ids=["tag", "digest"],
+)
+def test_release_promotion_preflight_accepts_safe_inputs(image_selector: str) -> None:
+    result = _run_release_input_preflight(
+        candidate_sha=_candidate_sha(),
+        image_selector=image_selector,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "candidate_sha",
+    [
+        "A" * 40,
+        "a" * 39,
+        "a" * 40 + "\ncommand",
+        "$(touch should-not-exist)",
+    ],
+    ids=["uppercase", "short", "newline", "shell"],
+)
+def test_release_promotion_preflight_rejects_unsafe_candidate(candidate_sha: str) -> None:
+    result = _run_release_input_preflight(
+        candidate_sha=candidate_sha,
+        image_selector="release-0123456789ab",
+    )
+
+    assert result.returncode != 0
+    assert "candidate_sha" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "image_selector",
+    [
+        "$(touch should-not-exist)",
+        "release-ok\ncommand",
+        "../release",
+        "-release",
+        "release;command",
+        "registry.example/loom:release",
+    ],
+    ids=["shell", "newline", "traversal", "leading-dash", "separator", "slash"],
+)
+def test_release_promotion_preflight_rejects_unsafe_image_selector(
+    image_selector: str,
+) -> None:
+    result = _run_release_input_preflight(
+        candidate_sha=_candidate_sha(),
+        image_selector=image_selector,
+    )
+
+    assert result.returncode != 0
+    assert "image selector" in result.stderr
+
+
+def test_release_promotion_preflight_is_unprivileged_and_gates_checkout() -> None:
+    workflow = _release_promotion_workflow()
+    preflight = workflow["jobs"]["preflight"]
+    release_gate = workflow["jobs"]["release-gate"]
+
+    assert preflight.get("permissions") == {}
+    assert "environment" not in preflight
+    assert all("actions/checkout" not in str(step) for step in preflight["steps"])
+    assert release_gate["needs"] == "preflight"
+
+    checkout_index = next(
+        index
+        for index, step in enumerate(release_gate["steps"])
+        if "actions/checkout" in str(step.get("uses", ""))
+    )
+    identity_index = next(
+        index
+        for index, step in enumerate(release_gate["steps"])
+        if step.get("name") == "Assert candidate checkout identity"
+    )
+    assert checkout_index < identity_index
+    assert "git rev-parse HEAD" in release_gate["steps"][identity_index]["run"]
+    assert "CANDIDATE_SHA" in release_gate["steps"][identity_index]["run"]
+
+
+def test_release_promotion_shell_never_interpolates_dispatch_inputs() -> None:
+    workflow = _release_promotion_workflow()
+
+    for job in workflow["jobs"].values():
+        for step in job.get("steps", []):
+            if "run" in step:
+                assert "${{ inputs." not in step["run"]
+
+    release_gate = workflow["jobs"]["release-gate"]
+    assert release_gate["env"]["CANDIDATE_SHA"] == "${{ inputs.candidate_sha }}"
+    assert release_gate["env"]["IMAGE_SELECTOR"] == "${{ inputs.image_tag }}"
+    assert "python3 scripts/ops/release_gate.py validate" in str(release_gate)
+    assert "python3 scripts/ops/release_gate.py verify-production" in str(release_gate)
+    assert "uv run python scripts/ops/release_gate.py" not in str(release_gate)
+
+
 def test_release_promotion_workflow_uploads_candidate_evidence() -> None:
-    workflow_path = REPO_ROOT / ".github/workflows/release-promotion-gate.yml"
-    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    workflow = _release_promotion_workflow()
 
     dispatch_inputs = _workflow_on(workflow)["workflow_dispatch"]["inputs"]
     assert dispatch_inputs["candidate_sha"]["required"] is True
@@ -733,6 +934,21 @@ def test_release_promotion_workflow_uploads_candidate_evidence() -> None:
     assert job["environment"]["name"] == "staging"
     assert "inputs.candidate_sha" in str(job)
     assert "scripts/ops/release_gate.py validate" in str(job)
+    assert "scripts/ops/release_gate.py verify-production" in str(job)
+    validate_step = next(
+        index
+        for index, step in enumerate(job["steps"])
+        if "scripts/ops/release_gate.py validate" in str(step)
+    )
+    verify_step = next(
+        index
+        for index, step in enumerate(job["steps"])
+        if "scripts/ops/release_gate.py verify-production" in str(step)
+    )
+    upload_step = next(
+        index for index, step in enumerate(job["steps"]) if "actions/upload-artifact" in str(step)
+    )
+    assert validate_step < verify_step < upload_step
     assert "scripts/validate_environment_isolation.py" in str(job)
     assert "deploy/environments/staging.cluster.toml" in str(job)
     assert "deploy/environments/production.cluster.toml" in str(job)
@@ -754,6 +970,19 @@ def test_production_deploy_requires_successful_release_gate() -> None:
     step_names = [step.get("name", "") for step in prod_job["steps"]]
     assert step_names.index("Verify release gate evidence") < step_names.index("Deploy production")
     assert "scripts/ops/verify_production_release_gate.sh" in str(prod_job)
+    assert "refs/heads/main" in prod_job["if"]
+    assert "refs/tags/" not in prod_job["if"]
+
+    steps = prod_job["steps"]
+    verify_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("name") == "Verify release gate evidence"
+    )
+    setup_uv_index = next(
+        index for index, step in enumerate(steps) if "astral-sh/setup-uv" in str(step)
+    )
+    assert verify_index < setup_uv_index
 
 
 def test_release_pr_template_requires_promotion_evidence() -> None:

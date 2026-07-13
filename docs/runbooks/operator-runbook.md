@@ -25,7 +25,7 @@ across rows.
 |---|---|---|---|---|---|---|---|
 | `development` | `dev` only | `development` | `loom-dev` | `https://yylx.world/dev` | `https://yylx.world/dev/api` | `loom_dev` | `loom-dev-trajectories`, `loom-dev-artifacts` |
 | `staging` | pinned `dev` SHA | `staging` | `loom-staging` | `https://yylx.world/dev` | `https://yylx.world/dev/api` | `loom_staging` | `loom-staging-trajectories`, `loom-staging-artifacts` |
-| `production` | `main` plus immutable `vX.Y.Z` release tags | `production` | `loom-prod` | `https://yylx.world/prod` | `https://yylx.world/prod/api` | `loom_prod` | `loom-prod-trajectories`, `loom-prod-artifacts` |
+| `production` | `main` only; immutable `vX.Y.Z` tags are records | `production` | `loom-prod` | `https://yylx.world/prod` | `https://yylx.world/prod/api` | `loom_prod` | `loom-prod-trajectories`, `loom-prod-artifacts` |
 
 The public `/dev` route is the single non-production frontend surface. For
 v1.0 validation, physical `staging` owns that surface; do not deploy
@@ -96,8 +96,12 @@ Production tags are immutable SemVer Git tags on `main`, for example
 `v1.0.0`. Pick the exact `prod_tag` in the release issue before opening the
 release PR, record it in the release gate manifest and PR template, and never
 move it after publication. If the same code must be re-released, create a new
-SemVer tag; rollback deploys the previous recorded prod tag or image digest
-instead of force-moving a tag.
+SemVer tag. A workflow-driven rollback first restores the previous validated
+tree through an owner-reviewed `main` PR, then deploys from `main`; never
+force-move a tag.
+
+Production deployment dispatches use `main` only. Immutable SemVer tags remain
+audit records and cannot enter the protected production workflow directly.
 
 Normal flow:
 
@@ -157,8 +161,11 @@ Normal flow:
    release gate workflow run id. The production deploy preflight downloads the
    `release-gate-evidence` artifact, verifies the candidate/image match, scans
    for leaked bearer/provider keys, signed URLs, raw secret values, and
-   internal service URLs, and confirms the candidate SHA is an ancestor of the
-   production ref before it can reach `loom cluster up`.
+   internal service URLs, confirms the candidate is reachable from trusted
+   `origin/dev`, and requires its tree to exactly match clean checked-out
+   `main` before it can reach `loom cluster up`.
+   Artifact workflow/run/actor/digest authenticity binding remains the next
+   #789 PR; this local schema/identity slice does not close #789.
 
 Failed gate path: keep the release on `dev`, record the failing check and
 evidence link on the release issue or PR, fix the owning subsystem, rerun the
@@ -206,10 +213,9 @@ Use `dry_run=true` to render and audit with the environment secret config
 without applying. Every deploy job writes `rollout-evidence/rendered.yaml` and
 `rollout-evidence/release-manifest-<image-tag>.json` before apply, then uploads
 that directory as a workflow artifact for the operator review trail. Production
-deploys from any ref other than `main` or an immutable `vX.Y.Z` tag are skipped by the
-workflow condition and still require the protected `production` environment
-approval when they do run. Production deploys also refuse to run without a
-successful release gate artifact for the
+deploys from every ref except `main` are skipped by the workflow condition and
+still require the protected `production` environment approval when they do
+run. Production deploys also refuse to run without a successful release gate artifact for the
 candidate SHA and image tag being deployed.
 
 Inspect a live environment with its own kubeconfig:
@@ -4867,11 +4873,11 @@ checklist:
 - **`staging-smoke`** (kind, label-gated `staging-smoke`) — builds
   REAL images, applies them, waits for every pod to reach Ready,
   probes `/healthz` + `/metrics` on every component. Closes the
-  cold-start regression gap (~15-20 min). Its real AWS S3 storage
-  subjob runs only when `ci-aws` provides `LOOM_SVC_MINIO_ACCESS_KEY`,
-  `LOOM_SVC_MINIO_SECRET_KEY`, `LOOM_SVC_MINIO_REGION`, and
-  `LOOM_CI_S3_BUCKET`; otherwise it exits successfully after listing
-  the missing variable names only.
+  cold-start regression gap (~15-20 min). This required PR gate is
+  credential-free: it never enters `ci-aws` and does not claim real AWS S3
+  coverage. Record real-AWS validation only from a separately protected,
+  trusted post-merge/release run; a missing or skipped cloud run is not AWS
+  evidence.
 - **`scripts/staging_smoke_gate.py`** — covers public health, logged-out SPA
   reachability, two-team non-admin user-owned API-token auth, provider/model
   discovery, runnable benchmark catalog presence, sampled ready benchmark bundle objects,

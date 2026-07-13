@@ -781,7 +781,7 @@ manifest = {
 )
 PY
 
-uv run python scripts/ops/release_gate.py validate \
+python3 scripts/ops/release_gate.py validate \
   --manifest "$ROLLOUT_DIR/release-gate-input.json" \
   --candidate-sha "$CANDIDATE_SHA" \
   --image-tag "$IMAGE_TAG" \
@@ -799,12 +799,23 @@ Expected JSON evidence snippet:
 
 ```json
 {
+  "schema_version": 1,
   "status": "pass",
   "candidate_sha": "0123456789abcdef0123456789abcdef01234567",
   "image_tag": "release-0123456789ab",
   "prod_tag": "v1.0.0"
 }
 ```
+
+The workflow immediately runs `verify-production` against the same
+`release-gate-evidence.json` artifact it uploads. The official producer output
+is therefore the production verifier input, and a missing or changed
+`schema_version` fails before artifact publication.
+
+This round-trip proves schema and content compatibility only. Binding the
+artifact to the expected GitHub workflow identity, run, actor, conclusion, and
+artifact digest remains the next #789 PR; caller-supplied evidence is not yet a
+complete provenance attestation, so this slice does not close #789.
 
 Expected failure output:
 
@@ -848,8 +859,11 @@ Created workflow_dispatch event for release-promotion-gate.yml at dev
 
 Prepare the release PR from `dev` to `main`; attach the release-gate run,
 frontend route evidence, worker-capacity evidence, raw-delivery/user-E2E
-status, HF mirror/token-boundary evidence, and rollback plan. After merge, tag
-the merged `main` commit exactly once:
+status, HF mirror/token-boundary evidence, and rollback plan. A squash merge
+creates a different commit identity, so production compares the candidate and
+merged release Git tree object IDs. Equal trees prove that the promoted source
+content is exact and does not require candidate commit ancestry. After merge,
+tag the merged `main` commit exactly once:
 
 ```bash
 git fetch origin main --tags
@@ -860,10 +874,12 @@ git push origin "$PROD_TAG"
 
 Dry-run the production deploy first. Even with `dry_run=true`, this enters the
 production deployment workflow and must go through production approval.
+Production deployment dispatches use `--ref main` only; immutable SemVer tags
+remain release records and are not workflow entry points.
 
 ```bash
 gh workflow run deploy-environment.yml \
-  --ref "$PROD_TAG" \
+  --ref main \
   -f environment=production \
   -f image_tag="$IMAGE_TAG" \
   -f dry_run=true \
@@ -875,7 +891,7 @@ Then deploy for real:
 
 ```bash
 gh workflow run deploy-environment.yml \
-  --ref "$PROD_TAG" \
+  --ref main \
   -f environment=production \
   -f image_tag="$IMAGE_TAG" \
   -f dry_run=false \
@@ -893,6 +909,25 @@ GH_TOKEN="$GH_TOKEN" \
 bash scripts/ops/verify_production_release_gate.sh
 ```
 
+The preflight resolves the checked-out release commit and performs the
+squash-safe identity check before downloading gate evidence:
+
+```bash
+release_sha="$(git rev-parse --verify HEAD)"
+python3 scripts/ops/release_identity.py verify \
+  --candidate-sha "$CANDIDATE_SHA" \
+  --release-sha "$release_sha" \
+  --trusted-candidate-ref origin/dev
+```
+
+Both inputs must be canonical 40-character lowercase SHA values that resolve
+directly to commit objects. The candidate must be reachable from `origin/dev`,
+the release SHA must equal checked-out `HEAD`, and both tree objects must match.
+Unknown objects, blobs/tags, staged or unstaged changes, deleted or non-ignored
+untracked files, a repository-root `.env`, or an in-progress merge, rebase,
+cherry-pick, revert, or bisect fail closed. Ignored tooling state such as
+`.venv/` does not fail the clean-worktree proof.
+
 Expected failure output when required live inputs are missing:
 
 ```text
@@ -901,8 +936,9 @@ error: production deploy requires release gate inputs: LOOM_CANDIDATE_SHA LOOM_I
 
 Stop condition: do not bypass this script. If it rejects the candidate SHA,
 image tag, artifact download, missing gate evidence, leaked secret, internal
-service URL, or non-ancestor production ref, fix evidence or rollback instead
-of editing the workflow.
+service URL, unknown/non-commit source object, modified tracked worktree, or
+candidate/release tree mismatch, fix evidence or rollback instead of editing
+the workflow.
 
 ## Rollback Preparation
 
@@ -954,13 +990,16 @@ Expected success output:
 }
 ```
 
-For a live image rollback to the previous validated production tag:
+For a workflow-driven rollback, first merge an owner-reviewed rollback PR that
+restores `main` to the exact previous validated candidate tree. The production
+workflow rejects a previous tag ref and also rejects a previous candidate while
+`main` still has the newer tree. After the rollback PR lands:
 
 `LIVE PROD AUTHORITY REQUIRED`
 
 ```bash
 gh workflow run deploy-environment.yml \
-  --ref "$PREVIOUS_PROD_TAG" \
+  --ref main \
   -f environment=production \
   -f image_tag="$PREVIOUS_PROD_IMAGE_TAG" \
   -f dry_run=false \
@@ -1000,7 +1039,8 @@ Before declaring the first production release ready:
   base.
 - Staging smoke evidence includes the final `service.no_oom_restarts` row
   after route probes and security scanning, not only the pre-route baseline.
-- The production deploy uses `main` or an immutable `vX.Y.Z` tag, never `dev`.
+- The production deploy uses `main` only; immutable `vX.Y.Z` tags are release
+  records, not deployment workflow entry points.
 - Rollback prep records previous image/tag, previous release-gate run, DB
   recovery point, object-storage recovery point, and redacted secret evidence.
 - No live prod/staging workload, DB change, worker cancellation, tag push,

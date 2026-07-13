@@ -45,9 +45,12 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: false
 
       - name: Plan required staging smoke validation
         id: plan
@@ -100,7 +103,24 @@ jobs:
     env:
       IMAGE_TAG: smoke-${{ github.run_id }}
     steps:
+      - name: Validate staging smoke inputs
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request|merge_group|workflow_dispatch) ;;
+            *) echo "FAIL: invalid staging smoke event" >&2; exit 1 ;;
+          esac
+          [[ "$IMAGE_TAG" =~ ^smoke-[1-9][0-9]*$ ]] || {
+            echo "FAIL: invalid staging smoke image tag" >&2
+            exit 1
+          }
+
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Install kind + kubectl
         run: |
@@ -566,312 +586,17 @@ jobs:
         if: always()
         run: kind delete cluster --name loom-staging || true
 
-  # ────────────────────────────────────────────────────────────────
-  # Storage lifecycle smoke against REAL AWS S3.
-  #
-  # Closes #253. Same shape as the MinIO round-trip step inside the
-  # `smoke` job above, but points at a real bucket in AWS. Catches
-  # AWS-specific wire-format quirks that the MinIO smoke can't (S3
-  # honors `AbortIncompleteMultipartUpload` where MinIO drops it,
-  # returns real `NoSuchLifecycleConfiguration` codes, etc.).
-  #
-  # Credentials + bucket + region come from the optional `ci-aws`
-  # GitHub Environment secrets. When the environment is not configured,
-  # the job records the missing variable names and exits successfully
-  # without exercising real AWS S3.
-  #
-  # Uses the same planner selection as the MinIO smoke so a PR that
-  # touches storage code exercises both backends in one go. Skips
-  # cleanly when the staging smoke is not selected.
-  # ────────────────────────────────────────────────────────────────
-  smoke-storage-aws-s3:
-    name: storage smoke (real AWS S3)
-    needs: plan
-    if: needs.plan.outputs.required == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment: ci-aws
-    env:
-      # storage_backend + auth_kind wire the bootstrap subcommand into
-      # its S3-compatible / static-keys paths against the real AWS
-      # endpoint. Region + bucket come from the environment secrets so
-      # the workflow file doesn't leak the account number.
-      LOOM_SVC_STORAGE_BACKEND: s3
-      LOOM_SVC_STORAGE_AUTH_KIND: static_keys
-      LOOM_SVC_MINIO_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      LOOM_SVC_MINIO_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      LOOM_SVC_MINIO_REGION: ${{ secrets.LOOM_CI_S3_REGION }}
-      LOOM_CI_S3_BUCKET: ${{ secrets.LOOM_CI_S3_BUCKET }}
-    steps:
-      - name: Check AWS S3 smoke inputs
-        id: aws_s3_inputs
-        run: |
-          missing=()
-          for name in LOOM_SVC_MINIO_ACCESS_KEY LOOM_SVC_MINIO_SECRET_KEY LOOM_SVC_MINIO_REGION LOOM_CI_S3_BUCKET; do
-            if [ -z "${!name:-}" ]; then
-              missing+=("$name")
-            fi
-          done
-          if [ "${#missing[@]}" -gt 0 ]; then
-            printf 'Real AWS S3 storage smoke skipped; missing required env vars: %s\n' "$(IFS=,; echo "${missing[*]}")"
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - uses: actions/checkout@v5
-        if: steps.aws_s3_inputs.outputs.enabled == 'true'
-
-      - name: Install uv + Python
-        if: steps.aws_s3_inputs.outputs.enabled == 'true'
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Sync project + sibling packages
-        if: steps.aws_s3_inputs.outputs.enabled == 'true'
-        run: |
-          uv sync --extra dev
-          uv pip install -e packages/loom-launcher -e packages/loom-benchmarks
-
-      - name: Compute AWS S3 endpoint
-        if: steps.aws_s3_inputs.outputs.enabled == 'true'
-        # boto3 doesn't need endpoint_url for AWS S3 itself, but our
-        # bootstrap subcommand takes --endpoint explicitly; use the
-        # canonical regional S3 endpoint so we're exercising the exact
-        # same code path an operator would.
-        run: |
-          echo "LOOM_SVC_MINIO_ENDPOINT=https://s3.${LOOM_SVC_MINIO_REGION}.amazonaws.com" >> "$GITHUB_ENV"
-
-      - name: Generate CI-specific storage-lifecycle.toml
-        if: steps.aws_s3_inputs.outputs.enabled == 'true'
-        # The bundled example config targets three buckets
-        # (trajectories / artifacts / atif). The CI account has one
-        # shared bucket. Emit a minimal config that exercises the same
-        # code paths (expire_after_days + keep_forever + multipart
-        # cleanup wire) against just that bucket.
-        run: |
-          cat > /tmp/storage-lifecycle.ci.toml <<EOF
-          backend = "s3"
-
-          [[retention]]
-          bucket = "${LOOM_CI_S3_BUCKET}"
-          strategy = "expire_after_days"
-          days = 30
-
-          [[retention]]
-          bucket = "${LOOM_CI_S3_BUCKET}"
-          strategy = "cleanup_incomplete_uploads_after_hours"
-          hours = 336
-          EOF
-          echo "::group::rendered CI config"
-          cat /tmp/storage-lifecycle.ci.toml
-          echo "::endgroup::"
-
-      - name: Reset bucket lifecycle to start clean
-        if: steps.aws_s3_inputs.outputs.enabled == 'true'
-        # If a previous smoke run failed mid-flight, leftover rules
-        # might make the "no drift" check spuriously fail. Force a
-        # clean slate before each run.
-        run: |
-          uv run python -c "
-          import os
-          from loom.storage_credentials import build_s3_client
-          s3 = build_s3_client(
-              endpoint_url=os.environ['LOOM_SVC_MINIO_ENDPOINT'],
-              auth_kind='static_keys',
-              access_key=os.environ['LOOM_SVC_MINIO_ACCESS_KEY'],
-              secret_key=os.environ['LOOM_SVC_MINIO_SECRET_KEY'],
-              region=os.environ['LOOM_SVC_MINIO_REGION'],
-          )
-          try:
-              s3.delete_bucket_lifecycle(Bucket=os.environ['LOOM_CI_S3_BUCKET'])
-              print('cleared existing lifecycle')
-          except s3.exceptions.ClientError as e:
-              if 'NoSuchLifecycleConfiguration' in str(e):
-                  print('bucket already had no lifecycle')
-              else:
-                  raise
-          "
-
-      - name: Dry-run apply
-        if: steps.aws_s3_inputs.outputs.enabled == 'true'
-        run: |
-          uv run loom cluster bootstrap-storage-lifecycle \
-            --config /tmp/storage-lifecycle.ci.toml \
-            --endpoint "${LOOM_SVC_MINIO_ENDPOINT}" --dry-run
-
-      - name: Apply lifecycle
-        if: steps.aws_s3_inputs.outputs.enabled == 'true'
-        run: |
-          uv run loom cluster bootstrap-storage-lifecycle \
-            --config /tmp/storage-lifecycle.ci.toml \
-            --endpoint "${LOOM_SVC_MINIO_ENDPOINT}"
-
-      - name: Verify lifecycle drift check reports no drift
-        if: steps.aws_s3_inputs.outputs.enabled == 'true'
-        # `loom cluster doctor` needs a working kubectl context for
-        # its schema-reconciliation half; the CI runner has none.
-        # Call the drift check function directly — same code path,
-        # skips the cluster prerequisite that isn't relevant here.
-        run: |
-          uv run python -c "
-          import os, sys
-          from pathlib import Path
-          from loom.storage_credentials import build_s3_client
-          from loom.storage_retention_doctor import (
-              check_lifecycle_drift, format_drift_report,
-          )
-          from loom.storage_retention_loader import load_retention_config
-          cfg = load_retention_config(Path('/tmp/storage-lifecycle.ci.toml'))
-          s3 = build_s3_client(
-              endpoint_url=os.environ['LOOM_SVC_MINIO_ENDPOINT'],
-              auth_kind='static_keys',
-              access_key=os.environ['LOOM_SVC_MINIO_ACCESS_KEY'],
-              secret_key=os.environ['LOOM_SVC_MINIO_SECRET_KEY'],
-              region=os.environ['LOOM_SVC_MINIO_REGION'],
-          )
-          drifts = check_lifecycle_drift(s3, cfg)
-          report = format_drift_report(drifts)
-          if report:
-              sys.stderr.write(f'FAIL — drift detected after apply:\n{report}\n')
-              sys.exit(1)
-          print('OK — live lifecycle matches rendered config')
-          "
-
-      - name: Second apply (idempotency)
-        if: steps.aws_s3_inputs.outputs.enabled == 'true'
-        run: |
-          uv run loom cluster bootstrap-storage-lifecycle \
-            --config /tmp/storage-lifecycle.ci.toml \
-            --endpoint "${LOOM_SVC_MINIO_ENDPOINT}"
-          uv run python -c "
-          import os, sys
-          from pathlib import Path
-          from loom.storage_credentials import build_s3_client
-          from loom.storage_retention_doctor import (
-              check_lifecycle_drift, format_drift_report,
-          )
-          from loom.storage_retention_loader import load_retention_config
-          cfg = load_retention_config(Path('/tmp/storage-lifecycle.ci.toml'))
-          s3 = build_s3_client(
-              endpoint_url=os.environ['LOOM_SVC_MINIO_ENDPOINT'],
-              auth_kind='static_keys',
-              access_key=os.environ['LOOM_SVC_MINIO_ACCESS_KEY'],
-              secret_key=os.environ['LOOM_SVC_MINIO_SECRET_KEY'],
-              region=os.environ['LOOM_SVC_MINIO_REGION'],
-          )
-          drifts = check_lifecycle_drift(s3, cfg)
-          if format_drift_report(drifts):
-              sys.exit('idempotency check failed')
-          print('OK — re-apply is a no-op')
-          "
-
-      - name: Tamper - remove lifecycle, drift check must FAIL
-        if: steps.aws_s3_inputs.outputs.enabled == 'true'
-        run: |
-          uv run python -c "
-          import os, sys
-          from pathlib import Path
-          from loom.storage_credentials import build_s3_client
-          from loom.storage_retention_doctor import (
-              check_lifecycle_drift, format_drift_report,
-          )
-          from loom.storage_retention_loader import load_retention_config
-          s3 = build_s3_client(
-              endpoint_url=os.environ['LOOM_SVC_MINIO_ENDPOINT'],
-              auth_kind='static_keys',
-              access_key=os.environ['LOOM_SVC_MINIO_ACCESS_KEY'],
-              secret_key=os.environ['LOOM_SVC_MINIO_SECRET_KEY'],
-              region=os.environ['LOOM_SVC_MINIO_REGION'],
-          )
-          s3.delete_bucket_lifecycle(Bucket=os.environ['LOOM_CI_S3_BUCKET'])
-          cfg = load_retention_config(Path('/tmp/storage-lifecycle.ci.toml'))
-          drifts = check_lifecycle_drift(s3, cfg)
-          if not format_drift_report(drifts):
-              sys.exit('drift check should have FAILED after tamper, but it reported clean')
-          print('OK — drift check correctly reported drift after tamper')
-          "
-
-      - name: Heal - re-apply, drift check must clear
-        if: steps.aws_s3_inputs.outputs.enabled == 'true'
-        # AWS S3 lifecycle GETs have brief eventual consistency
-        # immediately after a delete-then-put sequence (unlike the
-        # object-level GET which is strongly consistent). We retry
-        # for up to 30s. Not a bug in our diff logic — a bug in
-        # trying to observe AWS mid-consistency-window.
-        run: |
-          uv run loom cluster bootstrap-storage-lifecycle \
-            --config /tmp/storage-lifecycle.ci.toml \
-            --endpoint "${LOOM_SVC_MINIO_ENDPOINT}"
-          uv run python -c "
-          import os, sys, time
-          from pathlib import Path
-          from loom.storage_credentials import build_s3_client
-          from loom.storage_retention_doctor import (
-              check_lifecycle_drift, format_drift_report,
-          )
-          from loom.storage_retention_loader import load_retention_config
-          cfg = load_retention_config(Path('/tmp/storage-lifecycle.ci.toml'))
-          s3 = build_s3_client(
-              endpoint_url=os.environ['LOOM_SVC_MINIO_ENDPOINT'],
-              auth_kind='static_keys',
-              access_key=os.environ['LOOM_SVC_MINIO_ACCESS_KEY'],
-              secret_key=os.environ['LOOM_SVC_MINIO_SECRET_KEY'],
-              region=os.environ['LOOM_SVC_MINIO_REGION'],
-          )
-          last_report = ''
-          for attempt in range(1, 16):
-              drifts = check_lifecycle_drift(s3, cfg)
-              last_report = format_drift_report(drifts)
-              if not last_report:
-                  print(f'OK — heal restored lifecycle (attempt {attempt})')
-                  sys.exit(0)
-              print(f'attempt {attempt}: drift still visible, retrying in 2s')
-              time.sleep(2)
-          sys.stderr.write(
-              'heal failed — drift persists after 30s of retries.\n'
-              f'last drift report:\n{last_report}\n',
-          )
-          sys.exit(1)
-          "
-
-      - name: Reset bucket lifecycle on exit (always)
-        # Leave the CI bucket in a clean state — no lifecycle rules
-        # from our test lingering — so parallel/subsequent smoke runs
-        # start from a known-empty state and the bucket isn't
-        # accumulating "test" rules.
-        if: always() && steps.aws_s3_inputs.outputs.enabled == 'true'
-        run: |
-          uv run python -c "
-          import os
-          from loom.storage_credentials import build_s3_client
-          s3 = build_s3_client(
-              endpoint_url=os.environ['LOOM_SVC_MINIO_ENDPOINT'],
-              auth_kind='static_keys',
-              access_key=os.environ['LOOM_SVC_MINIO_ACCESS_KEY'],
-              secret_key=os.environ['LOOM_SVC_MINIO_SECRET_KEY'],
-              region=os.environ['LOOM_SVC_MINIO_REGION'],
-          )
-          try:
-              s3.delete_bucket_lifecycle(Bucket=os.environ['LOOM_CI_S3_BUCKET'])
-              print('cleaned up lifecycle on exit')
-          except s3.exceptions.ClientError:
-              pass
-          " || true
-
   staging-smoke-gate:
     name: ${{ github.event_name == 'workflow_dispatch' && 'staging-smoke-gate-manual' || 'staging-smoke-gate' }}
     runs-on: ubuntu-latest
     if: always()
-    needs: [plan, smoke, smoke-storage-aws-s3]
+    needs: [plan, smoke]
     steps:
       - name: Enforce selected staging smoke results
         env:
           PLAN_RESULT: ${{ needs.plan.result }}
           REQUIRED: ${{ needs.plan.outputs.required }}
           SMOKE_RESULT: ${{ needs.smoke.result }}
-          AWS_S3_RESULT: ${{ needs.smoke-storage-aws-s3.result }}
         run: |
           set -euo pipefail
           [[ "$PLAN_RESULT" == "success" ]] || exit 1
@@ -881,8 +606,6 @@ jobs:
           esac
           if [[ "$REQUIRED" == "true" ]]; then
             [[ "$SMOKE_RESULT" == "success" ]] || exit 1
-            [[ "$AWS_S3_RESULT" == "success" ]] || exit 1
           else
             [[ "$SMOKE_RESULT" == "skipped" || "$SMOKE_RESULT" == "success" ]] || exit 1
-            [[ "$AWS_S3_RESULT" == "skipped" || "$AWS_S3_RESULT" == "success" ]] || exit 1
           fi

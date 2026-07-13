@@ -245,32 +245,22 @@ def test_images_merge_groups_select_a_nonempty_matrix() -> None:
     assert 'if event not in {"workflow_dispatch", "merge_group"}:' in plan_script
 
 
-def test_images_merge_groups_do_not_publish_or_use_queue_ref_tags() -> None:
+def test_images_merge_groups_do_not_publish_or_write_cache() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     build_steps = workflow["jobs"]["build"]["steps"]
-    login_step = next(
-        step for step in build_steps if step.get("name") == "Log in to GHCR"
+    build_script = "\n".join(
+        str(step["run"]) for step in build_steps if "run" in step
     )
-    ref_step = next(
-        step for step in build_steps if step.get("id") == "ref"
-    )
+    publish = workflow["jobs"]["publish"]
 
-    assert login_step["if"] == (
-        "github.event_name != 'pull_request' && github.event_name != 'merge_group'"
+    assert "docker login" not in build_script
+    assert "--push" not in build_script
+    assert "--cache-to" not in build_script
+    assert 'merge_group) image_tag="merge-group-${sha_short}"' in build_script
+    assert "github.event_name == 'push'" in publish["if"]
+    assert any(
+        step.get("name") == "Log in to GHCR" for step in publish["steps"]
     )
-    assert (
-        'if [[ "${{ github.event_name }}" == "pull_request" ]]; then\n'
-        '  echo "tag_args=--tag ${image}:pr-${{ github.event.number }}" >> "$GITHUB_OUTPUT"\n'
-        '  echo "push_flag=" >> "$GITHUB_OUTPUT"\n'
-        'elif [[ "${{ github.event_name }}" == "merge_group" ]]; then\n'
-        '  echo "tag_args=--tag ${image}:merge-group-${sha_short}" >> "$GITHUB_OUTPUT"\n'
-        '  echo "push_flag=" >> "$GITHUB_OUTPUT"\n'
-        "else\n"
-        '  branch="${{ github.ref_name }}"\n'
-        '  echo "tag_args=--tag ${image}:${sha_short} --tag ${image}:${branch}" >> "$GITHUB_OUTPUT"\n'
-        '  echo "push_flag=--push" >> "$GITHUB_OUTPUT"\n'
-        "fi"
-    ) in ref_step["run"]
 
 
 def test_stable_gate_scripts_have_valid_bash_syntax() -> None:
@@ -316,7 +306,11 @@ def test_manual_aggregate_contexts_have_distinct_event_specific_names() -> None:
         (
             ".github/workflows/images.yml",
             "images-gate",
-            {"BUILD_RESULT": "skipped"},
+            {
+                "EVENT_NAME": "pull_request",
+                "BUILD_RESULT": "skipped",
+                "PUBLISH_RESULT": "skipped",
+            },
         ),
         (
             ".github/workflows/cluster-smoke.yml",
@@ -326,7 +320,7 @@ def test_manual_aggregate_contexts_have_distinct_event_specific_names() -> None:
         (
             ".github/workflows/staging-smoke.yml",
             "staging-smoke-gate",
-            {"SMOKE_RESULT": "skipped", "AWS_S3_RESULT": "skipped"},
+            {"SMOKE_RESULT": "skipped"},
         ),
     ],
 )
@@ -356,7 +350,6 @@ def test_optional_gate_scripts_fail_closed_for_invalid_required(
 @pytest.mark.parametrize(
     ("workflow_path", "gate_id", "result_names"),
     [
-        (".github/workflows/images.yml", "images-gate", ["BUILD_RESULT"]),
         (
             ".github/workflows/cluster-smoke.yml",
             "cluster-smoke-gate",
@@ -365,7 +358,7 @@ def test_optional_gate_scripts_fail_closed_for_invalid_required(
         (
             ".github/workflows/staging-smoke.yml",
             "staging-smoke-gate",
-            ["SMOKE_RESULT", "AWS_S3_RESULT"],
+            ["SMOKE_RESULT"],
         ),
     ],
 )
@@ -390,6 +383,74 @@ def test_optional_gate_scripts_preserve_result_semantics(
     )
 
     assert result.returncode == 0, (workflow_path, required, result.stderr)
+
+
+@pytest.mark.parametrize(
+    ("event_name", "required", "build_result", "publish_result"),
+    [
+        ("pull_request", "true", "success", "skipped"),
+        ("merge_group", "true", "success", "skipped"),
+        ("workflow_dispatch", "true", "success", "skipped"),
+        ("push", "true", "skipped", "success"),
+        ("pull_request", "false", "skipped", "skipped"),
+    ],
+)
+def test_images_gate_separates_untrusted_build_from_trusted_publish(
+    event_name: str,
+    required: str,
+    build_result: str,
+    publish_result: str,
+) -> None:
+    result = subprocess.run(
+        ["bash"],
+        input=_gate_script(".github/workflows/images.yml", "images-gate"),
+        text=True,
+        capture_output=True,
+        env={
+            "EVENT_NAME": event_name,
+            "PLAN_RESULT": "success",
+            "REQUIRED": required,
+            "BUILD_RESULT": build_result,
+            "PUBLISH_RESULT": publish_result,
+        },
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("event_name", "required", "build_result", "publish_result"),
+    [
+        ("pull_request", "true", "success", "success"),
+        ("workflow_dispatch", "true", "skipped", "success"),
+        ("push", "true", "success", "skipped"),
+        ("pull_request", "false", "success", "skipped"),
+        ("invalid", "true", "success", "skipped"),
+    ],
+)
+def test_images_gate_rejects_cross_lane_or_ambiguous_results(
+    event_name: str,
+    required: str,
+    build_result: str,
+    publish_result: str,
+) -> None:
+    result = subprocess.run(
+        ["bash"],
+        input=_gate_script(".github/workflows/images.yml", "images-gate"),
+        text=True,
+        capture_output=True,
+        env={
+            "EVENT_NAME": event_name,
+            "PLAN_RESULT": "success",
+            "REQUIRED": required,
+            "BUILD_RESULT": build_result,
+            "PUBLISH_RESULT": publish_result,
+        },
+        check=False,
+    )
+
+    assert result.returncode != 0
 
 
 @pytest.mark.parametrize("planner_value", ["", "invalid"])
@@ -469,7 +530,7 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
         ".github/workflows/images.yml": (
             "images-gate",
             "images-gate",
-            {"build": "BUILD_RESULT"},
+            {"build": "BUILD_RESULT", "publish": "PUBLISH_RESULT"},
         ),
         ".github/workflows/cluster-smoke.yml": (
             "cluster-smoke-gate",
@@ -479,10 +540,7 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
         ".github/workflows/staging-smoke.yml": (
             "staging-smoke-gate",
             "staging-smoke-gate",
-            {
-                "smoke": "SMOKE_RESULT",
-                "smoke-storage-aws-s3": "AWS_S3_RESULT",
-            },
+            {"smoke": "SMOKE_RESULT"},
         ),
     }
 
@@ -631,34 +689,14 @@ def test_opt_in_pr_smokes_cancel_superseded_pr_runs() -> None:
         ]["group"]
 
 
-def test_real_aws_s3_storage_smoke_skips_without_environment_secrets() -> None:
+def test_real_aws_s3_storage_smoke_is_not_a_pull_request_gate() -> None:
     workflow = _workflow(".github/workflows/staging-smoke.yml")
-    job = workflow["jobs"]["smoke-storage-aws-s3"]
-    steps = job["steps"]
+    jobs = workflow["jobs"]
+    gate = jobs["staging-smoke-gate"]
 
-    guard = steps[0]
-    assert guard["name"] == "Check AWS S3 smoke inputs"
-    assert guard["id"] == "aws_s3_inputs"
-
-    guard_script = guard["run"]
-    for required_env in (
-        "LOOM_SVC_MINIO_ACCESS_KEY",
-        "LOOM_SVC_MINIO_SECRET_KEY",
-        "LOOM_SVC_MINIO_REGION",
-        "LOOM_CI_S3_BUCKET",
-    ):
-        assert required_env in guard_script
-    assert "Real AWS S3 storage smoke skipped; missing required env vars:" in guard_script
-    assert 'echo "enabled=false" >> "$GITHUB_OUTPUT"' in guard_script
-    assert 'echo "enabled=true" >> "$GITHUB_OUTPUT"' in guard_script
-
-    for step in steps[1:]:
-        assert "steps.aws_s3_inputs.outputs.enabled == 'true'" in step["if"]
-
-    cleanup = next(
-        step for step in steps if step.get("name") == "Reset bucket lifecycle on exit (always)"
-    )
-    assert cleanup["if"] == "always() && steps.aws_s3_inputs.outputs.enabled == 'true'"
+    assert "smoke-storage-aws-s3" not in jobs
+    assert set(gate["needs"]) == {"plan", "smoke"}
+    assert "ci-aws" not in str(workflow)
 
 
 def test_repository_checks_writes_default_fast_coverage_summary() -> None:

@@ -24,17 +24,57 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    name: Validate release inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    env:
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      IMAGE_SELECTOR: ${{ inputs.image_tag }}
+    steps:
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${CANDIDATE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            printf 'error: candidate_sha must be exactly 40 lowercase hexadecimal characters\n' >&2
+            exit 1
+          fi
+
+          tag_pattern='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'
+          digest_pattern='^sha256:[0-9a-f]{64}$'
+          if [[ ! "${IMAGE_SELECTOR}" =~ ${tag_pattern} ]] && \
+             [[ ! "${IMAGE_SELECTOR}" =~ ${digest_pattern} ]]; then
+            printf 'error: image selector must be a safe OCI tag or sha256 digest\n' >&2
+            exit 1
+          fi
+
   release-gate:
     name: Release promotion gate
+    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment:
       name: staging
+    env:
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      IMAGE_SELECTOR: ${{ inputs.image_tag }}
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.candidate_sha }}
           fetch-depth: 0
+
+      - name: Assert candidate checkout identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [[ "${checked_out_sha}" != "${CANDIDATE_SHA}" ]]; then
+            printf 'error: checked out HEAD does not match validated candidate_sha\n' >&2
+            exit 1
+          fi
 
       - uses: astral-sh/setup-uv@v8.2.0
         with:
@@ -86,13 +126,20 @@ jobs:
 
       - name: Validate release gate evidence
         run: |
-          uv run python scripts/ops/release_gate.py validate \
+          python3 scripts/ops/release_gate.py validate \
             --manifest release-gate-input.json \
-            --candidate-sha "${{ inputs.candidate_sha }}" \
-            --image-tag "${{ inputs.image_tag }}" \
+            --candidate-sha "${CANDIDATE_SHA}" \
+            --image-tag "${IMAGE_SELECTOR}" \
             --output-json release-gate-evidence.json \
             --output-markdown release-gate-evidence.md
           cat release-gate-evidence.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify official evidence round trip
+        run: |
+          python3 scripts/ops/release_gate.py verify-production \
+            --manifest release-gate-evidence.json \
+            --candidate-sha "${CANDIDATE_SHA}" \
+            --image-tag "${IMAGE_SELECTOR}"
 
       - name: Upload release gate evidence
         uses: actions/upload-artifact@v4
