@@ -462,7 +462,10 @@ class LifecycleCoordinator:
             if event.attempt_number == pointer.attempt_number
             and event.unit_name == pointer.unit_name
         ]
-        if any(event.event in {"attempt_failed", "launch_failed"} for event in matching_events):
+        if any(
+            event.event in {"attempt_failed", "launch_failed", "cancelled"}
+            for event in matching_events
+        ):
             return False
         return any(
             event.event == "attempt_done"
