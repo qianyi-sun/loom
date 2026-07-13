@@ -98,12 +98,45 @@ def _add_import_args(p: argparse.ArgumentParser) -> None:
 def _add_publish_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("benchmark")
     p.add_argument(
+        "--target",
+        choices=("hf", "object-store"),
+        default="hf",
+        help=(
+            "Where to publish: 'hf' (default, HuggingFace dataset repo) "
+            "or 'object-store' (direct to MinIO/R2/S3, skipping HF entirely). "
+            "See #804."
+        ),
+    )
+    p.add_argument(
         "--hf-org", default=os.environ.get("LOOM_HF_ORG", "PRHW"),
         help="HF namespace to publish under (default: env LOOM_HF_ORG, falling back to 'PRHW').",
     )
     p.add_argument(
         "--hf-token", default=os.environ.get("HF_TOKEN"),
-        help="HF write token (env: HF_TOKEN). Required.",
+        help="HF write token (env: HF_TOKEN). Required when --target=hf.",
+    )
+    p.add_argument(
+        "--minio-endpoint",
+        default=_target_minio_env("ENDPOINT"),
+        help=(
+            "Object-store endpoint for --target=object-store "
+            "(env LOOM_MINIO_ENDPOINT, then LOOM_SVC_MINIO_ENDPOINT)."
+        ),
+    )
+    p.add_argument(
+        "--minio-access-key",
+        default=_target_minio_env("ACCESS_KEY"),
+        help="Object-store access key (env LOOM_MINIO_ACCESS_KEY / LOOM_SVC_MINIO_ACCESS_KEY).",
+    )
+    p.add_argument(
+        "--minio-secret-key",
+        default=_target_minio_env("SECRET_KEY"),
+        help="Object-store secret key (env LOOM_MINIO_SECRET_KEY / LOOM_SVC_MINIO_SECRET_KEY).",
+    )
+    p.add_argument(
+        "--bucket",
+        default=os.environ.get("LOOM_BENCHMARK_BUCKET", "loom-benchmarks"),
+        help="Target bucket for --target=object-store.",
     )
     p.add_argument(
         "--cache-dir", type=Path,
@@ -731,17 +764,52 @@ def _cmd_import(args: argparse.Namespace) -> int:
 
 def _cmd_publish(args: argparse.Namespace) -> int:
     from loom.security.redaction import redact_text
+    from loom.trajectory.storage import MinioObjectStore
     from loom_benchmark_tool.publish_cmd import run_publish
 
-    if not args.hf_token:
-        print(
-            "error: publish requires --hf-token / env HF_TOKEN",
-            file=sys.stderr,
+    object_store = None
+    if args.target == "hf":
+        if not args.hf_token:
+            print(
+                "error: --target=hf requires --hf-token / env HF_TOKEN",
+                file=sys.stderr,
+            )
+            return 2
+    else:  # target == "object-store"
+        missing = [
+            flag for flag, value in (
+                (
+                    "--minio-endpoint / LOOM_MINIO_ENDPOINT / "
+                    "LOOM_SVC_MINIO_ENDPOINT",
+                    args.minio_endpoint,
+                ),
+                (
+                    "--minio-access-key / LOOM_MINIO_ACCESS_KEY / "
+                    "LOOM_SVC_MINIO_ACCESS_KEY",
+                    args.minio_access_key,
+                ),
+                (
+                    "--minio-secret-key / LOOM_MINIO_SECRET_KEY / "
+                    "LOOM_SVC_MINIO_SECRET_KEY",
+                    args.minio_secret_key,
+                ),
+            ) if not value
+        ]
+        if missing:
+            print(
+                f"error: --target=object-store requires: {', '.join(missing)}",
+                file=sys.stderr,
+            )
+            return 2
+        object_store = MinioObjectStore(
+            endpoint_url=args.minio_endpoint,
+            access_key=args.minio_access_key,
+            secret_key=args.minio_secret_key,
         )
-        return 2
     try:
-        result = run_publish(
+        result = asyncio.run(run_publish(
             benchmark=args.benchmark,
+            target=args.target,
             hf_org=args.hf_org,
             hf_token=args.hf_token,
             cache_dir=args.cache_dir,
@@ -749,7 +817,9 @@ def _cmd_publish(args: argparse.Namespace) -> int:
             instance_ids=set(args.instance_ids) if args.instance_ids else None,
             private=args.private,
             refresh=args.refresh,
-        )
+            object_store=object_store,
+            bucket=args.bucket,
+        ))
     except ValueError as exc:
         print(f"error: {redact_text(str(exc))}", file=sys.stderr)
         return 2
@@ -764,6 +834,7 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         return 1
     print(
         f"publish {args.benchmark}: "
+        f"target={result['target']} "
         f"published={result['published']} "
         f"warnings={result['warnings']} "
         f"repo={result['repo_id']} "
