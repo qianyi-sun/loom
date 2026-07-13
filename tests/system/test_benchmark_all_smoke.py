@@ -80,11 +80,83 @@ CASES: tuple[BenchmarkCase, ...] = (
         timeout_sec=600,
     ),
     BenchmarkCase(
+        benchmark_id="mbpp",
+        adapter_import_path="loom_benchmarks.adapters.mbpp",
+        adapter_class_name="MBPPAdapter",
+        fixture_path="mbpp/sample.json",
+        instance_ids=("11",),
+        id_field="task_id",
+        timeout_sec=600,
+    ),
+    BenchmarkCase(
+        benchmark_id="bfcl",
+        adapter_import_path="loom_benchmarks.adapters.bfcl",
+        adapter_class_name="BFCLAdapter",
+        fixture_path="bfcl/sample.json",
+        instance_ids=("simple_0",),
+        id_field="id",
+        timeout_sec=600,
+    ),
+    BenchmarkCase(
+        benchmark_id="livecodebench",
+        adapter_import_path="loom_benchmarks.adapters.livecodebench",
+        adapter_class_name="LiveCodeBenchAdapter",
+        fixture_path="livecodebench/sample.json",
+        instance_ids=("lcb-9001",),
+        id_field="question_id",
+        timeout_sec=1800,
+    ),
+    BenchmarkCase(
+        benchmark_id="gaia",
+        adapter_import_path="loom_benchmarks.adapters.gaia",
+        adapter_class_name="GAIAAdapter",
+        fixture_path="gaia/sample.json",
+        instance_ids=("c61d22de-5f6c-4958-a7f6-5e9707bd3466",),
+        id_field="task_id",
+        timeout_sec=1800,
+    ),
+    BenchmarkCase(
+        benchmark_id="osworld",
+        adapter_import_path="loom_benchmarks.adapters.osworld",
+        adapter_class_name="OSWorldAdapter",
+        fixture_path="osworld/sample.json",
+        instance_ids=("8849e9da-d935-46bb-9bef-d3204c1f1e3c",),
+        id_field="id",
+        timeout_sec=1800,
+    ),
+    BenchmarkCase(
+        benchmark_id="webarena",
+        adapter_import_path="loom_benchmarks.adapters.webarena",
+        adapter_class_name="WebArenaAdapter",
+        fixture_path="webarena/sample.json",
+        instance_ids=("42",),
+        id_field="task_id",
+        timeout_sec=1800,
+    ),
+    BenchmarkCase(
+        benchmark_id="swe-bench",
+        adapter_import_path="loom_benchmarks.adapters.swe_bench",
+        adapter_class_name="SWEBenchAdapter",
+        fixture_path="swe_bench/sample.json",
+        instance_ids=("astropy__astropy-12907",),
+        id_field="instance_id",
+        timeout_sec=1800,
+    ),
+    BenchmarkCase(
         benchmark_id="swe-bench-verified",
         adapter_import_path="loom_benchmarks.adapters.swe_bench_verified",
         adapter_class_name="SWEBenchVerifiedAdapter",
         fixture_path="swe_bench_verified/sample.json",
         instance_ids=("django__django-12345",),
+        id_field="instance_id",
+        timeout_sec=1800,
+    ),
+    BenchmarkCase(
+        benchmark_id="swe-bench-multimodal",
+        adapter_import_path="loom_benchmarks.adapters.swe_bench_multimodal",
+        adapter_class_name="SWEBenchMultimodalAdapter",
+        fixture_path="swe_bench_multimodal/sample.json",
+        instance_ids=("vega__vega-lite-9001",),
         id_field="instance_id",
         timeout_sec=1800,
     ),
@@ -100,7 +172,9 @@ def _load_fixture_rows(case: BenchmarkCase) -> list[dict[str, object]]:
     path = _FIXTURE_ROOT / case.fixture_path
     rows = json.loads(path.read_text())
     wanted = set(case.instance_ids)
-    filtered = [r for r in rows if r.get(case.id_field) in wanted]
+    # Some fixtures store the id as int (mbpp task_id, webarena task_id);
+    # instance_ids in the case is str, so normalize both sides.
+    filtered = [r for r in rows if str(r.get(case.id_field)) in wanted]
     missing = wanted - {str(r.get(case.id_field)) for r in filtered}
     assert not missing, (
         f"{case.benchmark_id}: fixture {path} missing instance ids: "
