@@ -24,7 +24,7 @@ import importlib
 import json
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -55,21 +55,23 @@ class BenchmarkCase:
     ``adapter_import_path`` + ``adapter_class_name`` locate the class
     whose ``list_instances`` gets monkey-patched.
 
-    Two record-sourcing modes:
+    Three record-sourcing modes; set exactly one:
 
     * ``fixture_path`` (relative to ``_FIXTURE_ROOT``): load JSON rows,
-      filter by ``str(row[id_field]) in instance_ids``. Row order
-      matches ``instance_ids`` after filtering. Used when the fixture
-      row's raw id-field is exactly the adapter's ``instance_id``.
+      filter by ``str(row[id_field]) in instance_ids``. Used when the
+      fixture row's raw id-field IS the adapter's ``instance_id``.
     * ``raw_records``: use these dicts directly, paired positionally
       with ``instance_ids``. Used when the adapter's ``list_instances``
       derives the instance_id from more than the raw id-field (e.g.
-      AIME parses ``(year, exam, num)`` from a URL, then joins into
-      ``"{year}-{exam}/{num}"``). Also used to synthesize test rows
-      per year without maintaining a multi-year fixture file.
+      AIME parses ``(year, exam, num)`` from a URL) — or when we
+      simply want to synthesize test rows without a fixture file.
+    * ``records_factory``: a callable ``(tmp_path) -> tuple[dict, ...]``
+      that runs at test time and can populate on-disk state (dir tree,
+      files) that the raw records reference. Used by adapters whose
+      ``convert_instance`` copies files from a ``source_root`` path in
+      the raw dict (e.g. tau2-bench).
 
-    Exactly one of ``fixture_path`` / ``raw_records`` is required.
-    ``id_field`` is only consulted when ``fixture_path`` is set.
+    ``id_field`` is only consulted for ``fixture_path`` mode.
     """
 
     benchmark_id: str
@@ -78,15 +80,26 @@ class BenchmarkCase:
     instance_ids: tuple[str, ...]
     fixture_path: str | None = None
     raw_records: tuple[dict[str, object], ...] | None = None
+    records_factory: Callable[[Path], tuple[dict[str, object], ...]] | None = None
     id_field: str = "task_id"
+    # ``run_import`` calls list_instances once per split declared on the
+    # adapter (see ``benchmarks.json`` -> ``splits``). The fake yields
+    # the same records for every call, so multi-split benchmarks would
+    # double-import. Restrict yielding to this one split.
+    target_split: str = "test"
     timeout_sec: int = 600
     marks: tuple[pytest.MarkDecorator, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
-        if (self.fixture_path is None) == (self.raw_records is None):
+        sources = [
+            self.fixture_path is not None,
+            self.raw_records is not None,
+            self.records_factory is not None,
+        ]
+        if sum(sources) != 1:
             raise ValueError(
-                f"{self.benchmark_id}: set exactly one of fixture_path "
-                "or raw_records",
+                f"{self.benchmark_id}: set exactly one of fixture_path, "
+                "raw_records, records_factory",
             )
         if self.raw_records is not None and len(self.raw_records) != len(
             self.instance_ids,
@@ -274,7 +287,166 @@ CASES: tuple[BenchmarkCase, ...] = (
         ),
         timeout_sec=600,
     ),
+    # Bucket B: dynamic-loader benchmarks whose real list_instances
+    # fetches from HF / git and derives instance_id from an enumeration
+    # (``f"{split}/{idx:04d}"``) or a rekeying. Each case synthesizes
+    # one row inline with the fields ``convert_instance`` reads.
+    BenchmarkCase(
+        benchmark_id="browsecomp",
+        adapter_import_path="loom_benchmarks.adapters.browsecomp",
+        adapter_class_name="BrowseCompAdapter",
+        instance_ids=("test/0000",),
+        raw_records=(
+            {
+                "problem": "What is the capital of France?",
+                "answer": "Paris",
+                "topic": "geography",
+            },
+        ),
+        timeout_sec=600,
+    ),
+    BenchmarkCase(
+        benchmark_id="gpqa",
+        adapter_import_path="loom_benchmarks.adapters.gpqa",
+        adapter_class_name="GPQAAdapter",
+        instance_ids=("smoke-record-1",),
+        raw_records=(
+            {
+                "Record ID": "smoke-record-1",
+                "Question": (
+                    "What is the ground-state electron configuration of "
+                    "atomic carbon?"
+                ),
+                "Correct Answer": "1s2 2s2 2p2",
+                "Incorrect Answer 1": "1s2 2s2 2p3",
+                "Incorrect Answer 2": "1s2 2s2 2p4",
+                "Incorrect Answer 3": "1s2 2s1 2p3",
+                "High-level domain": "Chemistry",
+                "Subdomain": "Physical Chemistry",
+            },
+        ),
+        timeout_sec=600,
+    ),
+    BenchmarkCase(
+        benchmark_id="gpqa-diamond",
+        adapter_import_path="loom_benchmarks.adapters.gpqa",
+        adapter_class_name="GPQADiamondAdapter",
+        instance_ids=("smoke-record-diamond-1",),
+        raw_records=(
+            {
+                "Record ID": "smoke-record-diamond-1",
+                "Question": (
+                    "Which particle mediates the strong nuclear force?"
+                ),
+                "Correct Answer": "gluon",
+                "Incorrect Answer 1": "photon",
+                "Incorrect Answer 2": "W boson",
+                "Incorrect Answer 3": "graviton",
+                "High-level domain": "Physics",
+                "Subdomain": "Particle Physics",
+            },
+        ),
+        timeout_sec=600,
+    ),
+    BenchmarkCase(
+        benchmark_id="hendrycks-math",
+        adapter_import_path="loom_benchmarks.adapters.hendrycks_math",
+        adapter_class_name="HendrycksMATHAdapter",
+        instance_ids=("test/00000",),
+        raw_records=(
+            {
+                "problem": "Compute $2 + 2$.",
+                # HendrycksMATHAdapter has answer_field=None and pulls
+                # the answer via _extract_boxed_answer(solution). Any
+                # ``\boxed{...}`` in the solution string qualifies.
+                "solution": "Adding gives $\\boxed{4}$.",
+                "level": "Level 1",
+                "type": "Prealgebra",
+            },
+        ),
+        timeout_sec=600,
+    ),
+    BenchmarkCase(
+        benchmark_id="math-500",
+        adapter_import_path="loom_benchmarks.adapters.hendrycks_math",
+        adapter_class_name="MATH500Adapter",
+        instance_ids=("test/00000",),
+        raw_records=(
+            {
+                "problem": "What is the value of $3 \\times 5$?",
+                "answer": "15",
+                "level": "Level 1",
+                "subject": "Prealgebra",
+            },
+        ),
+        timeout_sec=600,
+    ),
+    BenchmarkCase(
+        benchmark_id="mmlu-pro",
+        adapter_import_path="loom_benchmarks.adapters.mmlu_pro",
+        adapter_class_name="MMLUProAdapter",
+        instance_ids=("test/9001",),
+        raw_records=(
+            {
+                "question_id": 9001,
+                "question": (
+                    "Which of the following is the SI unit of electric "
+                    "current?"
+                ),
+                "options": ["ampere", "volt", "ohm", "coulomb"],
+                "answer_index": 0,
+                "answer": "A",
+                "category": "physics",
+            },
+        ),
+        timeout_sec=600,
+    ),
+    # tau2-bench's convert_instance copies files from raw["source_root"]
+    # into the task bundle. Use a records_factory so we can materialize
+    # a fake source_root/domains/airline/ tree inside tmp_path before
+    # yielding the record.
+    BenchmarkCase(
+        benchmark_id="tau2-bench",
+        adapter_import_path="loom_benchmarks.adapters.tau2_bench",
+        adapter_class_name="Tau2BenchAdapter",
+        instance_ids=("airline/000",),
+        records_factory=lambda tmp: _tau2_records_factory(tmp),
+        timeout_sec=1200,
+    ),
 )
+
+
+def _tau2_records_factory(
+    tmp_path: Path,
+) -> tuple[dict[str, object], ...]:
+    """Materialize a stub tau2-bench source tree and return one record
+    that references it. ``_copy_domain_assets`` iterates the domain
+    directory; an empty directory is a valid (no-op) tree."""
+    source_root = tmp_path / "tau2-source"
+    (source_root / "domains" / "airline").mkdir(parents=True, exist_ok=True)
+    task = {
+        "id": "smoke-airline-1",
+        "description": {
+            "purpose": (
+                "Smoke: verify airline domain agent can lookup a "
+                "reservation"
+            ),
+        },
+        "user_scenario": {
+            "persona": "Traveler who booked a one-way ticket.",
+            "instructions": "Ask the agent to look up your reservation.",
+        },
+        "ticket": "Reservation lookup",
+        "evaluation_criteria": {"expected_actions": []},
+    }
+    return (
+        {
+            "domain": "airline",
+            "source_root": str(source_root),
+            "upstream_task_id": "smoke-airline-1",
+            "task": task,
+        },
+    )
 
 
 def _load_adapter_class(case: BenchmarkCase) -> type:
@@ -283,12 +455,16 @@ def _load_adapter_class(case: BenchmarkCase) -> type:
 
 
 def _resolve_rows(
-    case: BenchmarkCase,
+    case: BenchmarkCase, tmp_path: Path,
 ) -> list[tuple[str, dict[str, object]]]:
     """Return ``[(instance_id, raw), ...]`` in the order the smoke
     should submit trials."""
     if case.raw_records is not None:
         return list(zip(case.instance_ids, case.raw_records, strict=True))
+
+    if case.records_factory is not None:
+        records = case.records_factory(tmp_path)
+        return list(zip(case.instance_ids, records, strict=True))
 
     assert case.fixture_path is not None
     path = _FIXTURE_ROOT / case.fixture_path
@@ -322,11 +498,15 @@ async def test_benchmark_smoke(
     from loom_benchmarks.base import BenchmarkInstance
 
     adapter_cls = _load_adapter_class(case)
-    rows = _resolve_rows(case)
+    rows = _resolve_rows(case, tmp_path)
 
     def _fake_list(
         self: object, *, source_dir: Path, split: str,
     ) -> Iterator[BenchmarkInstance]:
+        # Adapter.splits may be multi-valued (e.g. gaia = validation +
+        # test); yield only on the target split to avoid double-import.
+        if split != case.target_split:
+            return
         for instance_id, raw in rows:
             yield BenchmarkInstance(
                 instance_id=instance_id,
