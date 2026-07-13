@@ -401,6 +401,56 @@ CASES: tuple[BenchmarkCase, ...] = (
         ),
         timeout_sec=600,
     ),
+    # Bucket C: skill family. skillflow / skillflow-iterative share the
+    # SkillFlow manifest-based fixture (raw carries ``files`` dict);
+    # SkillLearnBench variants inherit that path, and _inject_skills
+    # gracefully skips when ``__upstream_root`` is missing, so the same
+    # fixture flows through the model-specific variant adapters too.
+    BenchmarkCase(
+        benchmark_id="skillflow",
+        adapter_import_path="loom_benchmarks.adapters.skillflow",
+        adapter_class_name="SkillFlowAdapter",
+        fixture_path="skillflow/sample.json",
+        instance_ids=("skillflow/python-list-comprehension/01",),
+        id_field="instance_id",
+        timeout_sec=900,
+    ),
+    BenchmarkCase(
+        benchmark_id="skillflow-iterative",
+        adapter_import_path="loom_benchmarks.adapters.skillflow",
+        adapter_class_name="SkillFlowIterativeAdapter",
+        fixture_path="skillflow/sample.json",
+        instance_ids=("skillflow/python-list-comprehension/01",),
+        id_field="instance_id",
+        timeout_sec=900,
+    ),
+    BenchmarkCase(
+        benchmark_id="skilllearnbench",
+        adapter_import_path="loom_benchmarks.adapters.skilllearnbench",
+        adapter_class_name="SkillLearnBenchAdapter",
+        fixture_path="skilllearnbench/sample.json",
+        instance_ids=("skilllearnbench/python-iterators/01",),
+        id_field="instance_id",
+        timeout_sec=900,
+    ),
+    BenchmarkCase(
+        benchmark_id="skilllearnbench-human-authored",
+        adapter_import_path="loom_benchmarks.adapters.skilllearnbench",
+        adapter_class_name="SkillLearnBenchHumanAuthoredAdapter",
+        fixture_path="skilllearnbench/sample.json",
+        instance_ids=("skilllearnbench/python-iterators/01",),
+        id_field="instance_id",
+        timeout_sec=900,
+    ),
+    BenchmarkCase(
+        benchmark_id="skilllearnbench-b1-one-shot-claude-opus-4-6",
+        adapter_import_path="loom_benchmarks.adapters.skilllearnbench",
+        adapter_class_name="SkillLearnBenchB1OneShotClaudeOpus46Adapter",
+        fixture_path="skilllearnbench/sample.json",
+        instance_ids=("skilllearnbench/python-iterators/01",),
+        id_field="instance_id",
+        timeout_sec=900,
+    ),
     # tau2-bench's convert_instance copies files from raw["source_root"]
     # into the task bundle. Use a records_factory so we can materialize
     # a fake source_root/domains/airline/ tree inside tmp_path before
