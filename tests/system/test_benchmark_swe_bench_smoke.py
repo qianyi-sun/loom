@@ -69,7 +69,16 @@ async def test_swe_bench_verified_three_instances(
         access_key=compose_stack["minio_access_key"],
         secret_key=compose_stack["minio_secret_key"],
     )
-    minio_store._client.create_bucket(Bucket="loom-benchmarks")
+    # Guard against BucketAlreadyOwnedByYou when other smokes in the
+    # same session (e.g. all-benchmark smoke) created it first.
+    try:
+        minio_store._client.create_bucket(Bucket="loom-benchmarks")
+    except minio_store._client.exceptions.ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code not in {
+            "BucketAlreadyOwnedByYou", "BucketAlreadyExists",
+        }:
+            raise
 
     # PR-1 (series): the `swe-bench-verified` adapter slug is gone —
     # verified status is now a tag on the unified `swe-bench` benchmark.

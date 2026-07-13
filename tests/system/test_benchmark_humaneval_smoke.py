@@ -62,7 +62,16 @@ async def test_humaneval_end_to_end(
         secret_key=compose_stack["minio_secret_key"],
     )
     # Stack bootstrap doesn't create the bundle bucket by default.
-    minio_store._client.create_bucket(Bucket="loom-benchmarks")
+    # Guard against BucketAlreadyOwnedByYou when other smokes in the
+    # same session (e.g. all-benchmark smoke) created it first.
+    try:
+        minio_store._client.create_bucket(Bucket="loom-benchmarks")
+    except minio_store._client.exceptions.ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code not in {
+            "BucketAlreadyOwnedByYou", "BucketAlreadyExists",
+        }:
+            raise
 
     stats = await run_import(
         benchmark="humaneval",

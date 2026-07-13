@@ -275,6 +275,15 @@ Built-in benchmarks outside the v1.0 allowlist are intentionally visible but
 marked `Not in v1.0`; they are not selectable or countable until a support
 issue promotes them into the supported set.
 
+Adapter-surface regressions across the whole registry are caught by
+`tests/system/test_benchmark_all_smoke.py`, an opt-in unified end-to-end
+smoke that submits 1-3 representative tasks per benchmark through the
+compose-based stack and asserts every trial reaches `succeeded`. Gated
+behind `LOOM_RUN_ALL_BENCHMARKS_SMOKE=1`; never runs per-PR. When adding
+a new adapter or catalog entry, add a corresponding `BenchmarkCase` so
+the adapter's `list_instances` + `convert_instance` path is exercised
+in the same integration environment as production.
+
 LiveCodeBench is pinned to `livecodebench/code_generation_lite` revision
 `0fe84c3912ea0c4d4a78037083943e8f0c4dd505`. The selected official split has
 1055 tasks and 28254 public/private cases. Its converter must preserve both
