@@ -486,7 +486,11 @@ class DriverEnvelope:
         concurrency = _require_positive_int(self.gb10_prep_concurrency, "gb10_prep_concurrency")
         if concurrency > 15:
             raise ValueError("gb10_prep_concurrency must be between 1 and 15")
-        _require_bool(self.resume, "resume")
+        resume = _require_bool(self.resume, "resume")
+        if self.attempt_number == 1 and resume:
+            raise ValueError("resume must be false for attempt 1")
+        if self.attempt_number > 1 and not resume:
+            raise ValueError("resume must be true after attempt 1")
 
     def rollout_inputs(self) -> dict[str, object]:
         return {

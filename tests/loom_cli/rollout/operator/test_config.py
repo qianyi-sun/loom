@@ -303,6 +303,16 @@ def test_driver_envelope_keeps_attempt_actor_out_of_immutable_inputs() -> None:
     assert "resume" not in immutable
 
 
+def test_driver_envelope_rejects_resume_for_first_attempt() -> None:
+    with pytest.raises(ValueError, match="resume must be false for attempt 1"):
+        make_driver_envelope(attempt_number=1, resume=True)
+
+
+def test_driver_envelope_requires_resume_after_first_attempt() -> None:
+    with pytest.raises(ValueError, match="resume must be true after attempt 1"):
+        make_driver_envelope(attempt_number=2, resume=False)
+
+
 def test_pre_backup_request_is_strict_and_has_no_backup_binding() -> None:
     request = make_request()
 
