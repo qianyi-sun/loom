@@ -40,7 +40,7 @@ from loom.benchmark_readiness import CURRENTLY_UNSUPPORTED_BENCHMARK_IDS
 from loom.db.schema import Task, TaskSet
 from loom.db.task_set_visibility import visible_task_sets
 from loom_service.benchmark_profiles import (
-    reject_historical_benchmark_profiles,
+    reject_non_runnable_benchmark_profiles,
     resolve_benchmark_selectors,
 )
 
@@ -290,7 +290,7 @@ async def resolve_task_filter_with_diagnostics(
             stmt = stmt.where(or_(*value_clauses))
     candidate_rows = (await session.execute(stmt)).all()
     if require_runnable:
-        await reject_historical_benchmark_profiles(
+        await reject_non_runnable_benchmark_profiles(
             session,
             [
                 str(benchmark_id)

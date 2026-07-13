@@ -2,7 +2,8 @@
 
 **Issue:** #749
 
-**Status:** approved design; implementation has not started
+**Status:** implemented catalog contract; fresh release evidence remains a
+separate activation/rollout responsibility
 
 **Date:** 2026-07-10
 
@@ -106,8 +107,10 @@ inferred from the other.
 benchmarks. Add the smallest catalog metadata needed to distinguish a profile
 from a public alias:
 
-- `Benchmark.execution_state`: `runnable` or `historical` (default existing
-  non-versioned benchmarks to `runnable`).
+- `Benchmark.execution_state`: `pending`, `runnable`, or `historical` (default
+  existing non-versioned benchmarks to `runnable`). A newly registered TB2.1
+  physical profile is always `pending`; a re-register returns it to `pending`
+  because its mirrored bundle bytes may have changed.
 - `Benchmark.profile_provenance`: catalog-level JSON containing the Hub dataset
   ref/revision, Hub metadata version, source-reference snapshot and manifest
   SHA, reviewed divergence record, 89-entry lock fingerprint, and
@@ -132,15 +135,15 @@ The migration is deliberately ordered so no `Trial.task_id` changes:
 3. Remove the old unversioned Benchmark row only after no task refers to it.
    Historical presentation labels it `Terminal-Bench 2.0 (archived,
    91e10457)`; its data is not rewritten.
-4. Create `terminal-bench-2@tb2.1-r6` as `runnable`, register the newly
+4. Create `terminal-bench-2@tb2.1-r6` as `pending`, register the newly
    converted 89 tasks under `terminal-bench-2@tb2.1-r6/<task-name>`, and store
    their checked source/package/bundle/verifier/image provenance.
 5. In one DB transaction, lock the physical profile/task rows, re-audit the
-   current object-store bundle bytes and verifier assets, persist that snapshot
-   identity on the profile, then create or replace alias `terminal-bench-2` to
-   point to `terminal-bench-2@tb2.1-r6`. Until that commit, no public TB2
-   selection changes. No inactive, half-published, or stale-audit profile is
-   aliased.
+   current object-store bundle bytes and verifier assets, set the profile to
+   `runnable`, persist that snapshot identity on the profile, then create or
+   replace alias `terminal-bench-2` to point to `terminal-bench-2@tb2.1-r6`.
+   Until that commit, no public TB2 selection changes. No inactive,
+   half-published, or stale-audit profile is aliased.
 
 Existing non-TB benchmarks do not need aliases or a rename. New benchmark
 versions use the same profile/alias pattern only when they need a moving public
@@ -158,6 +161,10 @@ or historical batch.
 Direct selection of `terminal-bench-2@tb2.0-91e10457` returns a typed
 `benchmark_retired` validation error for new execution. Read APIs, old trial
 detail, delivery exports, and task-bundle downloads continue to resolve it.
+Direct selection of a pending TB2.1 physical profile similarly returns typed
+`benchmark_not_runnable`; alias absence is not the authorization boundary.
+Pending and historical profiles remain directly readable for diagnosis and
+provenance, but neither may create a new submission.
 The catalog lists only the public current entry by default; a historical view
 may show the archived profile and its source revision, never as release-ready
 evidence.
@@ -219,7 +226,12 @@ Publication is a two-phase operation:
    every bundle checksum and provenance field. This phase has no public alias.
 2. **Activate:** after the package/digest audit, architecture preflight, and
    required Oracle evidence pass, atomically switch `terminal-bench-2` to the
-   new runnable profile. Release configuration and canaries use the resolved
+   new runnable profile. The snapshot hashes immutable profile provenance and
+   audited bytes, not mutable activation metadata or lifecycle state, so a
+   fresh post-activation audit reproduces its identity. Before task-image
+   build or driver startup, workers rehash their materialized TB2.1 directory
+   against `Task.checksum`; a changed object-store prefix cannot execute
+   unaudited bytes. Release configuration and canaries use the resolved
    physical task ID, not a floating alias.
 
 If prepare or activate validation fails, new TB2 submission is disabled or

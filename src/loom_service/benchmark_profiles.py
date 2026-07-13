@@ -20,38 +20,49 @@ class ResolvedBenchmarkSelectors:
     provenance: tuple[dict[str, str], ...]
 
 
-def _benchmark_retired_error(profile_id: str) -> HTTPException:
+def _benchmark_not_runnable_error(profile_id: str, execution_state: str) -> HTTPException:
+    reason = (
+        "benchmark_retired" if execution_state == "historical" else "benchmark_not_runnable"
+    )
+    lifecycle = "historical" if execution_state == "historical" else execution_state
     return HTTPException(
         status_code=409,
         detail={
-            "reason": "benchmark_retired",
+            "reason": reason,
             "benchmark_profile": profile_id,
             "message": (
-                "historical benchmark profile "
-                f"{profile_id!r} cannot be selected for a new submission"
+                f"{lifecycle} benchmark profile {profile_id!r} "
+                "cannot be selected for a new submission"
             ),
         },
     )
 
 
-async def reject_historical_benchmark_profiles(
+async def reject_non_runnable_benchmark_profiles(
     session: AsyncSession,
     profile_ids: Sequence[str],
 ) -> None:
-    """Raise the standard 409 payload when a selected profile is historical."""
+    """Reject every non-runnable profile at the execution boundary.
+
+    Historical profiles remain readable through catalog endpoints, while
+    pending audited profiles preserve their registration evidence until the
+    activation transaction promotes them.  Neither state can be selected for
+    a new submission, including by a direct physical-profile selector.
+    """
     requested_profiles = tuple(dict.fromkeys(profile_ids))
     if not requested_profiles:
         return
-    retired = (
-        await session.scalars(
-            select(Benchmark.id)
+    unavailable = (
+        await session.execute(
+            select(Benchmark.id, Benchmark.execution_state)
             .where(Benchmark.id.in_(requested_profiles))
-            .where(Benchmark.execution_state == "historical")
+            .where(Benchmark.execution_state != "runnable")
             .order_by(Benchmark.id.asc()),
         )
     ).first()
-    if retired is not None:
-        raise _benchmark_retired_error(str(retired))
+    if unavailable is not None:
+        profile_id, execution_state = unavailable
+        raise _benchmark_not_runnable_error(str(profile_id), str(execution_state))
 
 
 async def resolve_benchmark_selectors(
@@ -83,7 +94,7 @@ async def resolve_benchmark_selectors(
     }
     physical_ids = tuple(aliases.get(selector, selector) for selector in requested)
     if require_runnable:
-        await reject_historical_benchmark_profiles(session, physical_ids)
+        await reject_non_runnable_benchmark_profiles(session, physical_ids)
 
     return ResolvedBenchmarkSelectors(
         physical_ids=physical_ids,

@@ -156,6 +156,7 @@ async def activate_tb21_alias(
         benchmark = await session.get(Benchmark, TB21_PROFILE_ID)
         if benchmark is None:  # Defensive: the locked audit just observed it.
             raise ProfileActivationError("physical TB2.1 profile disappeared during activation")
+        benchmark.execution_state = "runnable"
         profile_provenance = dict(benchmark.profile_provenance or {})
         profile_provenance["activation_audit"] = {
             "schema_version": 1,
@@ -208,7 +209,7 @@ async def audit_tb21_profile(
         _require_equal(issues, "profile upstream kind", benchmark.upstream_kind, "harbor-package")
         _require_equal(issues, "profile Hub dataset", benchmark.upstream_locator, lock.dataset)
         _require_equal(issues, "profile Hub revision", benchmark.upstream_revision, lock.revision)
-        if benchmark.execution_state != "runnable":
+        if benchmark.execution_state not in {"pending", "runnable"}:
             issues.append(f"physical profile execution_state is {benchmark.execution_state!r}")
         _require_equal(
             issues,
@@ -452,16 +453,25 @@ def _snapshot_id(
     profile_provenance: Mapping[str, object],
     task_snapshots: list[dict[str, object]],
 ) -> str:
-    """Hash the exact profile and object bytes just read by this audit."""
+    """Hash the immutable profile identity and exact object bytes just read.
+
+    Lifecycle state and activation evidence change during a successful
+    promotion, so neither belongs in the evidence identity that activation
+    persists and a subsequent audit must reproduce.
+    """
+    immutable_profile_provenance = {
+        key: value
+        for key, value in profile_provenance.items()
+        if key != "activation_audit"
+    }
     payload = {
         "profile": TB21_PROFILE_ID,
         "benchmark": {
             "id": benchmark.id if benchmark is not None else None,
-            "execution_state": benchmark.execution_state if benchmark is not None else None,
             "upstream_kind": benchmark.upstream_kind if benchmark is not None else None,
             "upstream_locator": benchmark.upstream_locator if benchmark is not None else None,
             "upstream_revision": benchmark.upstream_revision if benchmark is not None else None,
-            "profile_provenance": dict(profile_provenance),
+            "profile_provenance": immutable_profile_provenance,
         },
         "tasks": task_snapshots,
     }

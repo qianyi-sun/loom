@@ -68,7 +68,9 @@ Hub package digest, Hub metadata version, source-reference snapshot (including
 the sole reviewed divergence), verifier identity, image provenance, and the
 private workspace staging policy. Every task additionally records the native
 configured `verifier/run.sh` path and SHA-256. Register persists that evidence
-to the physical profile and task rows but never changes the public alias.
+to the physical profile and task rows but never changes the public alias;
+TB2.1 rows stay `pending` and cannot be submitted through either the public
+alias or a direct physical selector.
 
 The normal-agent workspace staging path excludes `solution/`, `tests/`,
 `verifier/`, and `upstream-task.toml`; the worker fails closed if a rev-6 task
@@ -89,11 +91,16 @@ loom datasets activate terminal-bench-2 \
 
 The JSON carries the prior audit's snapshot identity, not a trusted clean
 assertion. Activation locks the current catalog rows, downloads and audits all
-89 current bundles again, records the resulting snapshot on the physical
-profile, and upserts the alias in that transaction only when the snapshots
-match and the fresh audit is clean. It rejects stale/forged evidence,
-provenance/config/checksum drift, incompatible task images, missing or
-non-executable verifier assets, and any missing private-workspace isolation.
+89 current bundles again, marks the profile `runnable`, records the resulting
+immutable snapshot on the physical profile, and upserts the alias in that
+transaction only when the snapshots match and the fresh audit is clean. The
+snapshot excludes mutable activation metadata, so a fresh audit after
+activation has the same identity. Before execution, a worker rehashes its
+materialized bundle against `Task.checksum`; modifying an object after audit
+therefore fails closed rather than executing unaudited bytes. Activation
+rejects stale/forged evidence, provenance/config/checksum drift, incompatible
+task images, missing or non-executable verifier assets, and any missing
+private-workspace isolation.
 
 ## License
 

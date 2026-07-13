@@ -220,7 +220,9 @@ loom datasets verify humaneval --limit 3
 
 For Terminal-Bench 2.1 rev 6, audit the physical profile and activate the
 public alias only from that written audit result. Publish and register never
-move the alias themselves:
+move the alias themselves; register (and re-register) leaves the physical
+profile `pending`, so direct physical selection is rejected for new work until
+activation atomically makes it `runnable` and upserts the alias:
 
 ```bash
 loom datasets audit terminal-bench-2@tb2.1-r6 \
@@ -242,8 +244,12 @@ by workers, and the persisted private-workspace isolation policy. The audit
 JSON is evidence identity only: activation locks the profile/task rows and
 performs this audit again against the current object-store bytes before its
 alias upsert. It writes that fresh snapshot identity into profile provenance,
-so a partial, stale, forged, incompatible, or unisolated result cannot activate
-the alias.
+excluding mutable activation metadata and lifecycle state so an immediate
+re-audit reproduces the same identity. Workers also rehash each materialized
+TB2.1 directory against `Task.checksum` before image build or driver startup;
+the database lock is not treated as an object-store lock. A partial, stale,
+forged, incompatible, unisolated, or post-audit-mutated result cannot activate
+or execute through the alias.
 
 Required audit columns:
 

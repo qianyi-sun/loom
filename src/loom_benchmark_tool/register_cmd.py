@@ -387,6 +387,13 @@ async def run_register(
 
     manifest_tasks = list(manifest["tasks"])
     profile_provenance = dict(manifest.get("benchmark_profile_provenance") or {})
+    # TB2.1 is a security-sensitive physical profile.  Registration stores its
+    # immutable bytes and provenance, but cannot itself make those bytes
+    # submit-able: only the fresh object-store audit in `datasets activate`
+    # promotes the row and its public alias together.
+    execution_state = (
+        "pending" if manifest.get("benchmark_id") == _TB21_PROFILE_ID else "runnable"
+    )
     if manifest.get("benchmark_id") == _TB21_PROFILE_ID:
         if not tb21_workspace_policy_isolated(
             profile_provenance.get("workspace_staging_policy"),
@@ -459,6 +466,11 @@ async def run_register(
                 ),
                 "imported_by": (registered_by or "loom_benchmark_tool:register"),
             }
+            if manifest.get("benchmark_id") == _TB21_PROFILE_ID:
+                # Re-registering replaces the mirrored bytes/provenance, so it
+                # intentionally revokes prior runnable status until a new
+                # all-bundle audit succeeds.
+                update_set["execution_state"] = execution_state
             if series is not None:
                 update_set["series"] = series
             if "benchmark_profile_provenance" in manifest:
@@ -478,6 +490,7 @@ async def run_register(
                     license_url=manifest.get("license_url", ""),
                     splits=manifest.get("splits", ["test"]),
                     series=series,
+                    execution_state=execution_state,
                     profile_provenance=profile_provenance,
                     imported_by=registered_by or "loom_benchmark_tool:register",
                 )

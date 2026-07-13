@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 import pytest
+from fastapi import HTTPException
 from loom_benchmark_terminal_bench_2.upstream import load_tb21_lock
 from sqlalchemy import create_engine, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -16,6 +17,7 @@ from loom.models.task import TaskConfig
 from loom_benchmark_tool.audit_cmd import AuditResult, activate_tb21_alias
 from loom_benchmark_tool.manifest import TB21_AGENT_WORKSPACE_POLICY
 from loom_benchmark_tool.register_cmd import run_register
+from loom_service.task_filter import resolve_task_filter_with_diagnostics
 
 PROFILE = "terminal-bench-2@tb2.1-r6"
 TASK_ID = f"{PROFILE}/chess-best-move"
@@ -113,7 +115,7 @@ def _manifest() -> dict[str, object]:
     }
 
 
-async def test_register_persists_profile_and_task_provenance(
+async def test_register_keeps_tb21_profile_pending_and_rejects_direct_physical_selection(
     db: AsyncSession,
     postgres_url: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -138,13 +140,20 @@ async def test_register_persists_profile_and_task_provenance(
     task = await db.get(TaskRow, TASK_ID)
     assert result["registered"] == 1
     assert benchmark is not None
-    assert benchmark.execution_state == "runnable"
+    assert benchmark.execution_state == "pending"
     assert benchmark.profile_provenance["workspace_staging_policy"] == TB21_AGENT_WORKSPACE_POLICY
     assert task is not None
     assert task.source_provenance["harbor_package_digest"].startswith("sha256:")
     assert task.source_provenance["workspace_staging_policy"] == TB21_AGENT_WORKSPACE_POLICY
     TaskConfig.model_validate(task.config)
     assert await db.get(BenchmarkAlias, "terminal-bench-2") is None
+    with pytest.raises(HTTPException) as exc_info:
+        await resolve_task_filter_with_diagnostics(
+            db,
+            {"benchmark_id": PROFILE},
+        )
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["reason"] == "benchmark_not_runnable"
 
 
 async def test_activation_writes_alias_only_after_exact_isolated_audit(
@@ -161,6 +170,7 @@ async def test_activation_writes_alias_only_after_exact_isolated_audit(
             license_spdx="Apache-2.0",
             license_url="https://example.test/license",
             splits=["test"],
+            execution_state="pending",
         ),
     )
     await db.commit()
@@ -199,4 +209,5 @@ async def test_activation_writes_alias_only_after_exact_isolated_audit(
     assert alias.benchmark_id == PROFILE
     benchmark = await db.get(Benchmark, PROFILE)
     assert benchmark is not None
+    assert benchmark.execution_state == "runnable"
     assert benchmark.profile_provenance["activation_audit"]["snapshot_id"] == ("sha256:" + "c" * 64)

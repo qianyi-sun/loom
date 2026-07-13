@@ -5,6 +5,7 @@ from __future__ import annotations
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 import tomli_w
@@ -22,7 +23,10 @@ from loom_benchmark_tool.manifest import (
     MANIFEST_SCHEMA_VERSION,
     TB21_AGENT_WORKSPACE_POLICY,
 )
+from loom_worker import main_loop as worker_main_loop
 from loom_worker.main_loop import _tb21_workspace_staging_policy_from_provenance
+from loom_worker.runner_pool import RunnerPool
+from loom_worker.vllm_registry import WorkerVLLMRegistry
 
 
 class _RecordingDriver:
@@ -46,6 +50,16 @@ class _TB21AuditSession:
 
     async def scalars(self, _statement: object) -> object:
         return SimpleNamespace(all=lambda: self._task_rows)
+
+    def begin(self) -> object:
+        class _Transaction:
+            async def __aenter__(self) -> None:
+                return None
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+        return _Transaction()
 
 
 class _TB21ObjectStore:
@@ -131,7 +145,7 @@ def _tb21_audit_fixture(
         )
     benchmark = SimpleNamespace(
         id=profile,
-        execution_state="runnable",
+        execution_state="pending",
         upstream_kind="harbor-package",
         upstream_locator=lock.dataset,
         upstream_revision=lock.revision,
@@ -152,6 +166,96 @@ def _tb21_audit_fixture(
         task_rows,
         bundles,
     )
+
+
+@pytest.mark.asyncio
+async def test_activate_then_fresh_audit_keeps_the_same_snapshot_identity(
+    tmp_path: Path,
+) -> None:
+    session, object_store, _rows, _bundles = _tb21_audit_fixture(tmp_path)
+
+    before_activation = await audit_tb21_profile(session, object_store=object_store)
+    assert before_activation.issues == ()
+
+    activated = await activate_tb21_alias(
+        session,
+        object_store=object_store,
+        audit_evidence=before_activation,
+    )
+    after_activation = await audit_tb21_profile(session, object_store=object_store)
+
+    assert session._benchmark.execution_state == "runnable"
+    assert activated.snapshot_id == before_activation.snapshot_id
+    assert after_activation.snapshot_id == activated.snapshot_id
+
+
+@pytest.mark.asyncio
+async def test_worker_rejects_tb21_bundle_mutated_after_its_clean_audit(
+    tmp_path: Path,
+) -> None:
+    session, object_store, task_rows, bundles = _tb21_audit_fixture(tmp_path)
+    audited = await audit_tb21_profile(session, object_store=object_store)
+    assert audited.issues == ()
+
+    short_name = "chess-best-move"
+    (bundles[f"{short_name}/"] / "unaudited.txt").write_text("tampered\n")
+    task_row = next(row for row in task_rows if row.id.endswith(f"/{short_name}"))
+    trial_id = uuid4()
+    worker_id = uuid4()
+    patches: list[dict[str, object]] = []
+
+    class _ControlPlane:
+        async def get_task_bundle(self, _task_id: str) -> dict[str, object]:
+            return {
+                "id": task_row.id,
+                "checksum": task_row.checksum,
+                "config": task_row.config,
+                "source": task_row.source,
+                "source_provenance": task_row.source_provenance,
+            }
+
+        async def pre_start_heartbeat(self, **_kwargs: object) -> bool:
+            return True
+
+        async def patch_state(self, **kwargs: object) -> bool:
+            patches.append(kwargs)
+            return True
+
+    class _Settings:
+        trajectory_cache_dir = tmp_path / "trajectories"
+        gateway_url = "http://gateway.test"
+        fixtures_root = None
+        benchmark_cache = None
+        task_materialize_timeout_sec = 5.0
+        pre_start_heartbeat_interval_sec = 0.01
+
+    pool = RunnerPool(max_concurrent=1)
+    await worker_main_loop._spawn_trial(
+        pool=pool,
+        settings=_Settings(),  # type: ignore[arg-type]
+        cp_client=_ControlPlane(),  # type: ignore[arg-type]
+        gateway_client=None,  # type: ignore[arg-type]
+        object_store=object_store,  # type: ignore[arg-type]
+        worker_id=worker_id,
+        payload={
+            "trial_id": str(trial_id),
+            "team_id": str(uuid4()),
+            "task_id": task_row.id,
+            "config": {"agent_name": "oracle", "agent_model": None},
+        },
+        vllm_registry=WorkerVLLMRegistry(enabled=False),
+    )
+    await pool.wait_all(timeout=2.0)
+
+    assert len(patches) == 1
+    assert patches[0]["trial_id"] == trial_id
+    assert patches[0]["worker_id"] == worker_id
+    assert patches[0]["state"] == "failed"
+    assert patches[0]["failure_reason"] == "internal_error"
+    assert "materialized TB2.1 bundle checksum mismatch" in str(
+        patches[0]["failure_message"],
+    )
+    assert task_row.checksum in str(patches[0]["failure_message"])
 
 
 def test_tb21_manifest_schema_requires_a_private_agent_workspace_policy() -> None:

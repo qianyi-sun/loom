@@ -323,6 +323,11 @@ There are three supported task-registration shapes today:
   fresh verifier-only driver after the agent driver has completed. Its
   provenance also records the configured script-verifier path and content
   checksum so public activation can attest to the executable that will run.
+  Its physical profile stays `pending` after register or re-register: direct
+  profile selection cannot create a batch until a fresh full audit atomically
+  promotes it to `runnable` and publishes the alias. Workers rehash the
+  materialized bundle against the stored checksum before execution, so an
+  object-store mutation after audit fails closed.
 
 For a one-off local fixture, use `scripts/seed_test_data.py` as a
 template:

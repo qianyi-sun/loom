@@ -37,6 +37,7 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
+from loom_benchmarks.util import sha256_of_dir
 
 from loom.agent.base import AgentRuntime
 from loom.agent.gateway_client import LLMGatewayClient
@@ -757,6 +758,11 @@ async def _spawn_trial(
                 benchmark_cache=settings.benchmark_cache,
                 timeout_sec=settings.task_materialize_timeout_sec,
             )
+            if task_config.task.id.startswith("terminal-bench-2@tb2.1-r6/"):
+                _verify_materialized_tb21_bundle_checksum(
+                    task_dir=task_dir,
+                    expected_checksum=task_checksum,
+                )
             validate_task_dir_compatibility(task_dir)
             # #275: serialize concurrent task-image builds so a burst of
             # trials cannot fan out unbounded apt-get / dpkg / build
@@ -1327,6 +1333,26 @@ def _source_scheme_for_diagnostic(source: object) -> str:
     if not sep or not scheme:
         return "unknown"
     return scheme
+
+
+def _verify_materialized_tb21_bundle_checksum(
+    *,
+    task_dir: Path,
+    expected_checksum: str,
+) -> None:
+    """Fail closed when current object-store bytes differ from the audited row.
+
+    The physical mirror prefix is content-addressed, but object storage cannot
+    be treated as immutable merely because the catalog transaction was locked.
+    Rehashing the worker's own materialized directory closes the audit-to-run
+    time-of-check/time-of-use window before image build or driver startup.
+    """
+    actual_checksum = sha256_of_dir(task_dir)
+    if expected_checksum.removeprefix("sha256:") != actual_checksum:
+        raise ValueError(
+            "materialized TB2.1 bundle checksum mismatch "
+            f"expected={expected_checksum} actual=sha256:{actual_checksum}",
+        )
 
 
 def _default_agent_factory(
