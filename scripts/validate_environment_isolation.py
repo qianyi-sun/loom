@@ -5,6 +5,7 @@ This is intentionally static: it checks committed profile files and the
 GitHub Actions deployment workflow before a production release, without
 requiring access to live clusters or secrets.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -43,7 +44,7 @@ EXPECTED_ENVIRONMENTS = {
         "frontend_api_base": "https://yylx.world/prod/api",
         "github_environment": "production",
         "allowed_refs": ("refs/heads/main",),
-        "allowed_tag_prefixes": ("refs/tags/v",),
+        "allowed_tag_prefixes": (),
     },
 }
 
@@ -223,9 +224,7 @@ def validate_profiles(profiles: list[EnvironmentProfile], repo_root: Path) -> li
                     f"{env_name}: {profile.cluster_config} {key}={actual!r} "
                     f"does not match profile {expected_value!r}",
                 )
-        expected_frontend_environment = (
-            "production" if env_name == "production" else env_name
-        )
+        expected_frontend_environment = "production" if env_name == "production" else env_name
         if raw_cluster.get("frontend_environment") != expected_frontend_environment:
             errors.append(
                 f"{env_name}: {profile.cluster_config} frontend_environment="
@@ -274,8 +273,7 @@ def validate_profiles(profiles: list[EnvironmentProfile], repo_root: Path) -> li
             expected_prefix = f"github-environment:{profile.github_environment}/"
             if not value.startswith(expected_prefix):
                 errors.append(
-                    f"{profile.environment}: {field} must start with "
-                    f"{expected_prefix!r}",
+                    f"{profile.environment}: {field} must start with {expected_prefix!r}",
                 )
             if not value.startswith(SAFE_SECRET_REF_PREFIXES):
                 errors.append(
@@ -349,8 +347,7 @@ def validate_workflow(workflow_path: Path) -> list[str]:
         environment = job.get("environment", {})
         if environment.get("name") != expected["github_environment"]:
             errors.append(
-                f"{job_name}: environment.name must be "
-                f"{expected['github_environment']!r}",
+                f"{job_name}: environment.name must be {expected['github_environment']!r}",
             )
         condition = str(job.get("if", ""))
         if f"environment == '{env_name}'" not in condition:
@@ -363,6 +360,8 @@ def validate_workflow(workflow_path: Path) -> list[str]:
                 errors.append(
                     f"{job_name}: if condition missing allowed tag prefix {tag_prefix!r}",
                 )
+        if not expected["allowed_tag_prefixes"] and "refs/tags/" in condition:
+            errors.append(f"{job_name}: if condition must not allow tag refs")
         if env_name != "production" and "production" in condition:
             errors.append(f"{job_name}: non-production job references production")
         for secret_name in (
@@ -373,8 +372,7 @@ def validate_workflow(workflow_path: Path) -> list[str]:
             expected_secret = f"${{{{ secrets.{secret_name} }}}}"
             if job.get("env", {}).get(secret_name) != expected_secret:
                 errors.append(
-                    f"{job_name}: env.{secret_name} must use environment secret "
-                    f"{secret_name}",
+                    f"{job_name}: env.{secret_name} must use environment secret {secret_name}",
                 )
 
     return errors

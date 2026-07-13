@@ -44,10 +44,7 @@ def test_governance_docs_define_path_inferred_validation_gates() -> None:
         assert gate in contributing
         assert gate in quickstart
 
-    assert (
-        "Labels may add validation but cannot remove path-inferred validation"
-        in contributing
-    )
+    assert "Labels may add validation but cannot remove path-inferred validation" in contributing
     assert "Codex enabled GitHub auto-merge" in pr_template
 
     for document in (contributing, quickstart):
@@ -80,6 +77,7 @@ def test_release_promotion_template_requires_first_prod_evidence() -> None:
     assert "immutable `vX.Y.Z` production release tags" in contributing
     assert "Never force-move or reuse a published prod tag" in contributing
     assert "Production tags are immutable SemVer Git tags on `main`" in operator_runbook
+    assert "Production deployment dispatches use `main` only" in operator_runbook
     assert "`prod_tag`" in operator_runbook
     assert "`frontend_route_evidence`" in operator_runbook
     assert "`prod_staging_isolation`" in operator_runbook
@@ -116,10 +114,20 @@ def test_codeowners_is_narrow_ci_and_release_trust_root() -> None:
         "/scripts/validate_environment_isolation.py",
         "/tests/ops/test_plan_ci_validations.py",
         "/tests/ops/test_ci_throughput_workflows.py",
+        "/tests/ops/test_ci_secret_isolation.py",
         "/pyproject.toml",
         "/scripts/ops/release_gate.py",
+        "/scripts/ops/release_identity.py",
         "/scripts/ops/verify_production_release_gate.sh",
         "/scripts/ops/deploy_environment.sh",
+        "/deploy/environments/production.toml",
+        "/tests/ops/test_release_identity.py",
+        "/tests/ops/test_release_promotion_gate.py",
+        "/tests/ops/test_first_prod_runbook.py",
+        "/tests/ops/test_environment_isolation.py",
+        "/tests/unit/test_repo_governance_templates.py",
+        "/docs/runbooks/first-prod-release-runbook.md",
+        "/docs/runbooks/operator-runbook.md",
         "/CONTRIBUTING.md",
         "/SECURITY.md",
         "/LICENSE",

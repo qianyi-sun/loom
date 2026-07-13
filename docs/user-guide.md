@@ -317,6 +317,22 @@ loom eval batch delivery-bundle <batch-id> \
   --output raw-harbor-tb2-v1-delivery.tar.gz
 ```
 
+Use `--mode raw-harbor-tb2-v2` when the trial trajectory contains typed
+`terminus2_*` events from the Harbor checkpoint bridge. This mode writes
+execution history from typed events (not provider-log synthesis), keeps model
+input in `model_input_trajectory.json`, and embeds hash-verified native Harbor
+artifacts under `native/`:
+
+```bash
+loom eval batch delivery-bundle <batch-id> \
+  --mode raw-harbor-tb2-v2 \
+  --output raw-harbor-tb2-v2-delivery.tar.gz
+```
+
+Live staging validation for `raw-harbor-tb2-v2` is still pending; continue
+using `raw-harbor-tb2-v1` for provider-log-based exports until typed-event
+batches are available.
+
 `delivery-bundle` asks the service to choose the final trial for each
 task/sample/combination coordinate across the main batch and any explicit
 supplemental rerun batches. Later linked reruns replace earlier failed attempts
@@ -363,12 +379,17 @@ schemas unchanged. The `raw-harbor-tb2-v1` profile instead writes
 `loom_trajectory.jsonl` as the raw timing/audit spine, and normalizes
 Loom/Terminus assistant action keys such as `state_analysis`, `explanation`,
 `timeout_sec`, and `is_task_complete` into the TB2-facing `analysis`, `plan`,
-`duration`, and `task_complete` schema.
+`duration`, and `task_complete` schema. The `raw-harbor-tb2-v2` profile
+projects execution from typed `terminus2_*` events, writes
+`model_input_trajectory.json` and `terminal_transcript.jsonl`, omits
+`derived/sft_messages.jsonl`, and includes native Harbor files under
+`agent_runs/<task_id>/<trial_id>/native/`.
 
 The same flow is available in the SPA Batch Detail page through the **Delivery
 bundle** card. API clients can call
 `POST /api/v1/batches/{id}/delivery-export` with optional
-`mode` (`lightweight`, `raw-harbor`, or `raw-harbor-tb2-v1`) and
+`mode` (`lightweight`, `raw-harbor`, `raw-harbor-tb2-v1`, or
+`raw-harbor-tb2-v2`) and
 `supplemental_batch_ids`, poll
 `GET /api/v1/batches/{id}/delivery-export`, and download through the returned
 route-aware `/api/v1/batches/.../delivery-export/.../download` URL. On hosted

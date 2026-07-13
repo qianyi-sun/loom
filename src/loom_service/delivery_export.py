@@ -21,13 +21,22 @@ from sqlalchemy import select
 
 from loom.auth import AuthContext
 from loom.db.schema import Artifact, Batch, LlmCall, Task, Trial
+from loom_service.delivery_export_tb2_v2 import (
+    build_per_trial_v2_bundle,
+    parse_trajectory_events,
+)
 
 SELECTION_RULE = "highest_priority_succeeded_by_task_sample_combination"
 SCHEMA_VERSION = "1"
 TERMINAL_BATCH_STATES = {"finished", "cancelled"}
 PAYLOAD_CHECKSUMS_FILE = "checksums/SHA256SUMS"
 DEFAULT_ARCHIVE_SPOOL_MAX_BYTES = 64 * 1024 * 1024
-DeliveryExportMode = Literal["lightweight", "raw-harbor", "raw-harbor-tb2-v1"]
+DeliveryExportMode = Literal[
+    "lightweight",
+    "raw-harbor",
+    "raw-harbor-tb2-v1",
+    "raw-harbor-tb2-v2",
+]
 
 
 class DeliveryExportError(Exception):
@@ -795,12 +804,22 @@ def _summary(
     }
     if _is_raw_harbor_mode(mode):
         summary["layout"] = _raw_harbor_layout()
-    if _is_tb2_profile(mode):
+    if _is_tb2_v1_profile(mode):
         summary["export_profile"] = {
             "name": "raw-harbor-tb2",
             "version": "1",
             "source_of_truth": "provider_logs",
             "audit_spine": "loom_trajectory.jsonl",
+        }
+    elif _is_tb2_v2_profile(mode):
+        summary["export_profile"] = {
+            "name": "raw-harbor-tb2",
+            "version": "2",
+            "source_of_truth": "harbor-checkpoint-bridge",
+            "audit_spine": "loom_trajectory.jsonl",
+            "model_input_trajectory": "model_input_trajectory.json",
+            "execution_trajectory": "trajectory.json",
+            "terminal_transcript": "terminal_transcript.jsonl",
         }
     return summary
 
@@ -1307,11 +1326,19 @@ def _raw_agent_native_note(item: SelectedTrial) -> dict[str, Any]:
 
 
 def _is_raw_harbor_mode(mode: DeliveryExportMode) -> bool:
-    return mode in {"raw-harbor", "raw-harbor-tb2-v1"}
+    return mode in {"raw-harbor", "raw-harbor-tb2-v1", "raw-harbor-tb2-v2"}
+
+
+def _is_tb2_v1_profile(mode: DeliveryExportMode) -> bool:
+    return mode == "raw-harbor-tb2-v1"
+
+
+def _is_tb2_v2_profile(mode: DeliveryExportMode) -> bool:
+    return mode == "raw-harbor-tb2-v2"
 
 
 def _is_tb2_profile(mode: DeliveryExportMode) -> bool:
-    return mode == "raw-harbor-tb2-v1"
+    return mode in {"raw-harbor-tb2-v1", "raw-harbor-tb2-v2"}
 
 
 def _raw_provider_log_path(item: SelectedTrial, index: int) -> str:
@@ -1332,6 +1359,7 @@ def _build_archive(
     mode: DeliveryExportMode,
     tasks_by_id: dict[str, Task] | None = None,
     llm_calls_by_trial: dict[UUID, list[LlmCall]] | None = None,
+    artifacts_bucket: str = "artifacts",
     spool_max_bytes: int = DEFAULT_ARCHIVE_SPOOL_MAX_BYTES,
 ) -> ArchiveBuildResult:
     spool = tempfile.SpooledTemporaryFile(max_size=spool_max_bytes, mode="w+b")
@@ -1363,7 +1391,8 @@ def _build_archive(
                     selected=selected,
                     tasks_by_id=tasks_by_id or {},
                     llm_calls_by_trial=llm_calls_by_trial or {},
-                    tb2_profile=_is_tb2_profile(mode),
+                    mode=mode,
+                    artifacts_bucket=artifacts_bucket,
                 )
             add_bytes(tar, PAYLOAD_CHECKSUMS_FILE, _payload_checksums_from_entries(checksums))
     size_bytes = int(spool.tell())
@@ -1375,6 +1404,16 @@ def _build_archive(
     )
 
 
+def _load_trajectory_events(client: Any, ref: ObjectRef) -> list[Any]:
+    body, _size = _get_object_stream(client, ref)
+    try:
+        return parse_trajectory_events(body)
+    finally:
+        close = getattr(body, "close", None)
+        if callable(close):
+            close()
+
+
 def _add_raw_harbor_entries(
     *,
     tar: tarfile.TarFile,
@@ -1384,8 +1423,12 @@ def _add_raw_harbor_entries(
     selected: list[SelectedTrial],
     tasks_by_id: dict[str, Task],
     llm_calls_by_trial: dict[UUID, list[LlmCall]],
-    tb2_profile: bool,
+    mode: DeliveryExportMode,
+    artifacts_bucket: str,
 ) -> None:
+    tb2_v1_profile = _is_tb2_v1_profile(mode)
+    tb2_v2_profile = _is_tb2_v2_profile(mode)
+    tb2_profile = _is_tb2_profile(mode)
     provider_logs: list[dict[str, Any]] = []
     sft_rows: list[dict[str, Any]] = []
     task_bundle_files: list[dict[str, Any]] = []
@@ -1410,22 +1453,23 @@ def _add_raw_harbor_entries(
             }
             provider_logs.append(manifest_row)
             trial_provider_logs.append(manifest_row)
-            messages = _messages_from_raw_log(raw_log, normalize_tb2=tb2_profile)
-            if messages:
-                sft_rows.append(
-                    {
-                        "trial_id": str(item.trial.id),
-                        "task_id": item.trial.task_id,
-                        "llm_call_id": str(call.id),
-                        "reward": item.reward,
-                        "reward_positive": (
-                            bool(item.reward > 0) if item.reward is not None else None
-                        ),
-                        "source": "provider_logs",
-                        "selection_source": item.selection_source,
-                        "messages": messages,
-                    }
-                )
+            if not tb2_v2_profile:
+                messages = _messages_from_raw_log(raw_log, normalize_tb2=tb2_profile)
+                if messages:
+                    sft_rows.append(
+                        {
+                            "trial_id": str(item.trial.id),
+                            "task_id": item.trial.task_id,
+                            "llm_call_id": str(call.id),
+                            "reward": item.reward,
+                            "reward_positive": (
+                                bool(item.reward > 0) if item.reward is not None else None
+                            ),
+                            "source": "provider_logs",
+                            "selection_source": item.selection_source,
+                            "messages": messages,
+                        }
+                    )
 
         add_bytes(
             tar,
@@ -1442,7 +1486,51 @@ def _add_raw_harbor_entries(
             _raw_agent_run_path(item, "verifier_output.json"),
             _public_json_bytes(_raw_verifier_output(item)),
         )
-        if tb2_profile:
+
+        trajectory_artifacts: list[dict[str, str]]
+        if tb2_v2_profile:
+            events = _load_trajectory_events(client, item.trajectory)
+            bundle = build_per_trial_v2_bundle(
+                trial=item.trial,
+                events=events,
+                calls=calls,
+                client=client,
+                artifacts_bucket=artifacts_bucket,
+                messages_from_raw_log=_messages_from_raw_log,
+            )
+            add_bytes(
+                tar,
+                _raw_agent_run_path(item, "trajectory.json"),
+                _public_json_bytes(bundle.execution_trajectory),
+            )
+            add_bytes(
+                tar,
+                _raw_agent_run_path(item, "model_input_trajectory.json"),
+                _public_json_bytes(bundle.model_input_trajectory),
+            )
+            add_bytes(
+                tar,
+                _raw_agent_run_path(item, "terminal_transcript.jsonl"),
+                bundle.terminal_transcript,
+            )
+            add_bytes(
+                tar,
+                _raw_agent_run_path(item, "export_provenance.json"),
+                _public_json_bytes(bundle.export_provenance),
+            )
+            add_ref(
+                tar,
+                _raw_agent_run_path(item, "loom_trajectory.jsonl"),
+                item.trajectory,
+            )
+            for archive_path, data in bundle.native_artifacts.items():
+                add_bytes(
+                    tar,
+                    _raw_agent_run_path(item, archive_path),
+                    data,
+                )
+            trajectory_artifacts = list(bundle.artifact_manifest_entries)
+        elif tb2_v1_profile:
             add_bytes(
                 tar,
                 _raw_agent_run_path(item, "trajectory.json"),
@@ -1454,17 +1542,17 @@ def _add_raw_harbor_entries(
                 _public_json_bytes(_raw_agent_native_note(item)),
             )
             add_ref(tar, _raw_agent_run_path(item, "loom_trajectory.jsonl"), item.trajectory)
-        else:
-            add_ref(tar, _raw_agent_run_path(item, "trajectory.jsonl"), item.trajectory)
-        add_ref(tar, _raw_agent_run_path(item, "atif.json"), item.atif)
-        trajectory_artifacts = (
-            [
+            trajectory_artifacts = [
                 {"kind": "trajectory", "path": "trajectory.json"},
                 {"kind": "agent_native_trajectory", "path": "loom_trajectory.jsonl"},
             ]
-            if tb2_profile
-            else [{"kind": "agent_native_trajectory", "path": "trajectory.jsonl"}]
-        )
+        else:
+            add_ref(tar, _raw_agent_run_path(item, "trajectory.jsonl"), item.trajectory)
+            trajectory_artifacts = [
+                {"kind": "agent_native_trajectory", "path": "trajectory.jsonl"},
+            ]
+
+        add_ref(tar, _raw_agent_run_path(item, "atif.json"), item.atif)
         artifact_manifest = {
             "schema_version": "1",
             "trial_id": str(item.trial.id),
@@ -1547,11 +1635,12 @@ def _add_raw_harbor_entries(
             }
         ),
     )
-    add_bytes(
-        tar,
-        "derived/sft_messages.jsonl",
-        b"".join(_json_bytes(row) for row in sft_rows),
-    )
+    if not tb2_v2_profile:
+        add_bytes(
+            tar,
+            "derived/sft_messages.jsonl",
+            b"".join(_json_bytes(row) for row in sft_rows),
+        )
 
 
 def _archive_filename(batch: Batch, *, mode: DeliveryExportMode) -> str:
@@ -1559,6 +1648,7 @@ def _archive_filename(batch: Batch, *, mode: DeliveryExportMode) -> str:
         "lightweight": "delivery",
         "raw-harbor": "raw-harbor",
         "raw-harbor-tb2-v1": "raw-harbor-tb2-v1",
+        "raw-harbor-tb2-v2": "raw-harbor-tb2-v2",
     }
     suffix = suffix_by_mode[mode]
     return f"{_safe_slug(batch.name, max_len=120)}-{suffix}.tar.gz"
@@ -1713,6 +1803,7 @@ async def create_delivery_export(
         mode=mode,
         tasks_by_id=tasks_by_id,
         llm_calls_by_trial=llm_calls_by_trial,
+        artifacts_bucket=settings.artifacts_bucket,
     )
     sha256 = archive.sha256
     manifest = dict(archive_manifest)

@@ -10,9 +10,19 @@
 /scripts/validate_environment_isolation.py @qianyi-sun @Hongjian-Gu
 /tests/ops/test_plan_ci_validations.py @qianyi-sun @Hongjian-Gu
 /tests/ops/test_ci_throughput_workflows.py @qianyi-sun @Hongjian-Gu
+/tests/ops/test_ci_secret_isolation.py @qianyi-sun @Hongjian-Gu
 /pyproject.toml @qianyi-sun @Hongjian-Gu
 
 # Production release verification and deployment entry points.
 /scripts/ops/release_gate.py @qianyi-sun @Hongjian-Gu
+/scripts/ops/release_identity.py @qianyi-sun @Hongjian-Gu
 /scripts/ops/verify_production_release_gate.sh @qianyi-sun @Hongjian-Gu
 /scripts/ops/deploy_environment.sh @qianyi-sun @Hongjian-Gu
+/deploy/environments/production.toml @qianyi-sun @Hongjian-Gu
+/tests/ops/test_release_identity.py @qianyi-sun @Hongjian-Gu
+/tests/ops/test_release_promotion_gate.py @qianyi-sun @Hongjian-Gu
+/tests/ops/test_first_prod_runbook.py @qianyi-sun @Hongjian-Gu
+/tests/ops/test_environment_isolation.py @qianyi-sun @Hongjian-Gu
+/tests/unit/test_repo_governance_templates.py @qianyi-sun @Hongjian-Gu
+/docs/runbooks/first-prod-release-runbook.md @qianyi-sun @Hongjian-Gu
+/docs/runbooks/operator-runbook.md @qianyi-sun @Hongjian-Gu

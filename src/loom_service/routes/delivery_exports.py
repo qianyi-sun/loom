@@ -20,6 +20,7 @@ from loom_service.delivery_export import (
     latest_delivery_export,
     load_delivery_artifact,
 )
+from loom_service.delivery_export_tb2_v2 import Tb2V2ExportError
 from loom_service.dependencies import SessionAndCtx
 from loom_service.public_links import public_base_url
 from loom_service.routes.object_downloads import stream_object_response
@@ -28,14 +29,21 @@ router = APIRouter()
 
 
 class _DeliveryExportRequest(BaseModel):
-    mode: Literal["lightweight", "raw-harbor", "raw-harbor-tb2-v1"] = Field(
+    mode: Literal[
+        "lightweight",
+        "raw-harbor",
+        "raw-harbor-tb2-v1",
+        "raw-harbor-tb2-v2",
+    ] = Field(
         default="lightweight",
         description=(
             "Export mode. `lightweight` preserves the #390 ledger, ATIF, and "
             "trajectory bundle. `raw-harbor` adds Derek-style raw provider "
             "logs, task bundle inputs, agent-run artifacts, and derived SFT JSONL. "
             "`raw-harbor-tb2-v1` adds the versioned TB2-facing delivery profile "
-            "while preserving Loom-native audit artifacts."
+            "while preserving Loom-native audit artifacts. "
+            "`raw-harbor-tb2-v2` projects execution from typed terminus2 events "
+            "and native Harbor artifacts."
         ),
     )
     supplemental_batch_ids: list[UUID] | None = Field(
@@ -101,7 +109,7 @@ async def create_batch_delivery_export(
             mode=mode,
             public_base_url=public_base_url(request),
         )
-    except DeliveryExportError as exc:
+    except (DeliveryExportError, Tb2V2ExportError) as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
@@ -121,7 +129,7 @@ async def download_delivery_export(
             artifact_id=artifact_id,
         )
         bucket, key, filename = artifact_storage_for_download(artifact)
-    except DeliveryExportError as exc:
+    except (DeliveryExportError, Tb2V2ExportError) as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     return stream_object_response(
         client=request.app.state.minio_client,

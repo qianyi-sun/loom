@@ -31,6 +31,14 @@ from loom.db.schema import (
 )
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from loom_service.delivery_export_tb2_v2 import SECRET_PATTERNS
+
+
+def _assert_no_secret_patterns(text: str) -> None:
+    """Match export-time secret scan; avoid naive `sk-` substring false positives."""
+    for pattern in SECRET_PATTERNS:
+        match = pattern.search(text)
+        assert match is None, f"unexpected secret pattern {pattern.pattern!r}: {match!r}"
 
 
 class _FakeS3Client:
@@ -688,7 +696,7 @@ async def test_raw_harbor_tb2_delivery_export_streams_sample_compatible_bundle(
         rendered_provider_log = json.dumps(first_provider_log)
         assert "prompt " in rendered_provider_log
         assert "state_analysis" in rendered_provider_log
-        assert "sk-" not in rendered_provider_log
+        _assert_no_secret_patterns(rendered_provider_log)
         sft_lines = (
             tar.extractfile("derived/sft_messages.jsonl")  # type: ignore[union-attr]
             .read()
@@ -1149,3 +1157,395 @@ async def test_delivery_export_rejects_unresolved_platform_failures(
     body = response.json()
     assert body["detail"]["code"] == "delivery_export_unresolved_trials"
     assert body["detail"]["unresolved_trials"][0]["task_id"].startswith("source-useful-5003/")
+
+
+def _tb2_v2_events_jsonl(*, trial_id: UUID, artifact_hash: str) -> bytes:
+    emitted_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    common = {
+        "trial_id": str(trial_id),
+        "step_id": "main",
+        "emitted_at": emitted_at,
+    }
+    lines = [
+        {
+            "seq": 1,
+            "kind": "terminus2_runtime_provenance",
+            **common,
+            "parser_name": "json",
+            "prompt_hash": "abc",
+            "template_hashes": {},
+            "harbor_compat_sha": "527d50deb63a5d279e8c20593c18a2cbc7f61f9e",
+            "benchmark_provenance": None,
+            "loom_runtime_revision": "1.0",
+            "terminal_image_digest": None,
+        },
+        {
+            "seq": 2,
+            "kind": "llm_call",
+            **common,
+            "model": {"provider": "openai", "name": "gpt-4o"},
+            "rate_card_hash": "h",
+            "system_prompt": None,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": None,
+            "tool_choice": None,
+            "response": {"role": "assistant", "content": "{}"},
+            "finish_reason": "stop",
+            "input_tokens": 1,
+            "cached_input_tokens": 0,
+            "cache_write_tokens": 0,
+            "output_tokens": 1,
+            "thinking_tokens": 0,
+            "provider_extras": {},
+            "request_params": {"status": "available", "parameters": {}},
+            "cost_usd_snapshot": 0.0,
+            "duration_sec": 0.1,
+            "streamed": False,
+            "time_to_first_token_sec": None,
+            "gateway_request_id": f"gw-{trial_id.hex[:8]}",
+            "cache_keys": [],
+            "attempt": 1,
+        },
+        {
+            "seq": 3,
+            "kind": "terminus2_turn",
+            **common,
+            "turn_id": f"turn-{trial_id.hex[:8]}",
+            "turn_index": 0,
+            "gateway_request_id": f"gw-{trial_id.hex[:8]}",
+            "parse_state": "ok",
+            "completion_state": "continue",
+            "analysis": "",
+            "plan": "",
+            "raw_response_excerpt": "",
+        },
+        {
+            "seq": 4,
+            "kind": "terminus2_command",
+            **common,
+            "turn_id": f"turn-{trial_id.hex[:8]}",
+            "command_batch_id": "batch-1",
+            "command_id": "cmd-1",
+            "index": 0,
+            "keystrokes": "ls\n",
+            "duration_sec": 0.1,
+        },
+        {
+            "seq": 5,
+            "kind": "terminus2_terminal_observation",
+            **common,
+            "turn_id": f"turn-{trial_id.hex[:8]}",
+            "command_batch_id": "batch-1",
+            "observation_id": "obs-1",
+            "text": "New Terminal Output:\nfile.txt\n",
+            "capture_source": "incremental",
+            "byte_len": 10,
+            "truncated": False,
+            "completeness": "full",
+            "content_hash": "abc",
+            "redaction_applied": False,
+            "is_aggregate": False,
+        },
+        {
+            "seq": 6,
+            "kind": "terminus2_artifact_ref",
+            **common,
+            "artifact_kind": "terminus_2.pane",
+            "sandbox_path": "/app/.loom/agent/trajectory.json",
+            "content_hash": artifact_hash,
+            "size_bytes": 42,
+            "share_policy": "restricted",
+        },
+    ]
+    return b"".join((json.dumps(line) + "\n").encode() for line in lines)
+
+
+def _seed_tb2_v2_trial(
+    *,
+    conn: object,
+    fake_s3: _FakeS3Client,
+    settings: LoomServiceSettings,
+    team_id: UUID,
+    trial_id: UUID,
+    task_id: str,
+) -> bytes:
+    native = json.dumps(
+        {
+            "schema_version": "ATIF-v1.7",
+            "steps": [{"observation": {"results": [{"content": "native\n"}]}}],
+        }
+    ).encode()
+    artifact_hash = hashlib.sha256(native).hexdigest()
+    prefix = f"{team_id}/{trial_id}"
+    artifact_key = f"{prefix}/main/.loom/agent/trajectory.json"
+    fake_s3.objects[(settings.trajectories_bucket, f"{prefix}/events.jsonl")] = (
+        _tb2_v2_events_jsonl(trial_id=trial_id, artifact_hash=artifact_hash)
+    )
+    fake_s3.objects[(settings.artifacts_bucket, artifact_key)] = native
+    conn.execute(
+        update(Trial)
+        .where(Trial.id == trial_id)
+        .values(
+            config={
+                "agent_name": "terminus-2",
+                "agent_model": {"provider": "yibu", "name": "glm-5.1-thinking"},
+            },
+            trajectory_index={
+                "trajectory_uri": (
+                    f"s3://{settings.trajectories_bucket}/{prefix}/events.jsonl"
+                ),
+                "atif_uri": f"s3://{settings.trajectories_bucket}/{prefix}/atif.json",
+                "artifacts": [
+                    {
+                        "step_name": "main",
+                        "bucket": "artifacts",
+                        "key": artifact_key,
+                        "size": len(native),
+                        "content_hash": f"sha256:{artifact_hash}",
+                    }
+                ],
+            },
+        )
+    )
+    return native
+
+
+async def test_raw_harbor_tb2_v2_export_rejects_legacy_runtime_stream(
+    delivery_setup: dict[str, object],
+    postgres_url: str,
+) -> None:
+    app = delivery_setup["app"]
+    raw = str(delivery_setup["raw"])
+    main_batch_id = delivery_setup["main_batch_id"]
+    supplemental_batch_id = delivery_setup["supplemental_batch_id"]
+    targeted_batch_id = delivery_setup["targeted_batch_id"]
+    selected_trials: dict[str, UUID] = delivery_setup["selected_trials"]  # type: ignore[assignment]
+    settings: LoomServiceSettings = delivery_setup["settings"]  # type: ignore[assignment]
+    fake_s3: _FakeS3Client = delivery_setup["fake_s3"]  # type: ignore[assignment]
+    emitted_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+    sync_engine = create_engine(postgres_url)
+    try:
+        with sync_engine.begin() as conn:
+            for trial_id in selected_trials.values():
+                prefix = f"{delivery_setup['team_id']}/{trial_id}"
+                fake_s3.objects[
+                    (settings.trajectories_bucket, f"{prefix}/events.jsonl")
+                ] = (
+                    json.dumps(
+                        {
+                            "seq": 1,
+                            "kind": "terminus2_runtime_provenance",
+                            "step_id": "main",
+                            "trial_id": str(trial_id),
+                            "emitted_at": emitted_at,
+                            "parser_name": "json",
+                            "prompt_hash": "abc",
+                            "template_hashes": {},
+                            "harbor_compat_sha": (
+                                "527d50deb63a5d279e8c20593c18a2cbc7f61f9e"
+                            ),
+                            "benchmark_provenance": None,
+                            "loom_runtime_revision": "1.0",
+                        }
+                    )
+                    + "\n"
+                    + json.dumps(
+                        {
+                            "seq": 2,
+                            "kind": "agent_thought",
+                            "step_id": "main",
+                            "trial_id": str(trial_id),
+                            "emitted_at": emitted_at,
+                            "content": "legacy subprocess thought",
+                        }
+                    )
+                    + "\n"
+                ).encode()
+                conn.execute(
+                    update(Trial)
+                    .where(Trial.id == trial_id)
+                    .values(
+                        config={
+                            "agent_name": "terminus-2",
+                            "agent_model": {
+                                "provider": "yibu",
+                                "name": "glm-5.1-thinking",
+                            },
+                        }
+                    )
+                )
+    finally:
+        sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            f"/api/v1/batches/{main_batch_id}/delivery-export",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "mode": "raw-harbor-tb2-v2",
+                "supplemental_batch_ids": [
+                    str(supplemental_batch_id),
+                    str(targeted_batch_id),
+                ],
+            },
+        )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "legacy_runtime_stream"
+
+
+async def test_raw_harbor_tb2_v2_export_from_typed_events(
+    delivery_setup: dict[str, object],
+    postgres_url: str,
+) -> None:
+    app = delivery_setup["app"]
+    raw = str(delivery_setup["raw"])
+    main_batch_id = delivery_setup["main_batch_id"]
+    supplemental_batch_id = delivery_setup["supplemental_batch_id"]
+    targeted_batch_id = delivery_setup["targeted_batch_id"]
+    selected_trials: dict[str, UUID] = delivery_setup["selected_trials"]  # type: ignore[assignment]
+    task_ids: list[str] = delivery_setup["task_ids"]  # type: ignore[assignment]
+    fake_s3: _FakeS3Client = delivery_setup["fake_s3"]  # type: ignore[assignment]
+    settings: LoomServiceSettings = delivery_setup["settings"]  # type: ignore[assignment]
+    team_id: UUID = delivery_setup["team_id"]  # type: ignore[assignment]
+    app.state.settings.public_base_url = "https://yylx.world/dev"
+
+    task_bundle_key = f"{task_ids[0]}/task.toml"
+    fake_s3.objects[("task-bundles", task_bundle_key)] = (
+        f'id = "{task_ids[0]}"\n'
+    ).encode()
+    fake_s3.objects[("task-bundles", f"{task_ids[0]}/instruction.md")] = (
+        b"solve the task\n"
+    )
+
+    sync_engine = create_engine(postgres_url)
+    native_by_trial: dict[UUID, bytes] = {}
+    try:
+        with sync_engine.begin() as conn:
+            captured_at_base = datetime.now(UTC)
+            for index, task_id in enumerate(task_ids, start=1):
+                trial_id = selected_trials[task_id]
+                native_by_trial[trial_id] = _seed_tb2_v2_trial(
+                    conn=conn,
+                    fake_s3=fake_s3,
+                    settings=settings,
+                    team_id=team_id,
+                    trial_id=trial_id,
+                    task_id=task_id,
+                )
+                if index != 1:
+                    continue
+                conn.execute(
+                    insert(LlmCall).values(
+                        team_id=team_id,
+                        trial_id=trial_id,
+                        step_id="step-1",
+                        dialect="openai_facade",
+                        model="gpt-4o",
+                        input_tokens=10,
+                        output_tokens=5,
+                        provider_extras={
+                            "_loom_raw_provider_log": {
+                                "schema_version": "1",
+                                "request": {
+                                    "body": {
+                                        "messages": [
+                                            {"role": "user", "content": "prompt 1"},
+                                        ]
+                                    }
+                                },
+                                "response": {
+                                    "body": {
+                                        "choices": [
+                                            {
+                                                "message": {
+                                                    "role": "assistant",
+                                                    "content": "answer 1",
+                                                }
+                                            }
+                                        ]
+                                    }
+                                },
+                            }
+                        },
+                        request_params={"status": "available", "parameters": {}},
+                        cost_usd=0,
+                        rate_card_hash="facade:operator-supplied",
+                        captured_at=captured_at_base + timedelta(seconds=index),
+                    )
+                )
+    finally:
+        sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            f"/api/v1/batches/{main_batch_id}/delivery-export",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "mode": "raw-harbor-tb2-v2",
+                "supplemental_batch_ids": [
+                    str(supplemental_batch_id),
+                    str(targeted_batch_id),
+                ],
+            },
+        )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["manifest"]["mode"] == "raw-harbor-tb2-v2"
+    assert body["manifest"]["export_profile"] == {
+        "name": "raw-harbor-tb2",
+        "version": "2",
+        "source_of_truth": "harbor-checkpoint-bridge",
+        "audit_spine": "loom_trajectory.jsonl",
+        "model_input_trajectory": "model_input_trajectory.json",
+        "execution_trajectory": "trajectory.json",
+        "terminal_transcript": "terminal_transcript.jsonl",
+    }
+    assert body["archive_filename"].endswith("-raw-harbor-tb2-v2.tar.gz")
+
+    first_task = task_ids[0]
+    first_trial = selected_trials[first_task]
+    archive_bytes = fake_s3.objects[(body["storage"]["bucket"], body["storage"]["key"])]
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        names = set(tar.getnames())
+        assert "derived/sft_messages.jsonl" not in names
+        assert f"agent_runs/{first_task}/{first_trial}/model_input_trajectory.json" in names
+        assert f"agent_runs/{first_task}/{first_trial}/terminal_transcript.jsonl" in names
+        assert (
+            f"agent_runs/{first_task}/{first_trial}/native/harbor_trajectory.json"
+            in names
+        )
+        trajectory = json.load(
+            tar.extractfile(f"agent_runs/{first_task}/{first_trial}/trajectory.json")  # type: ignore[arg-type]
+        )
+        assert trajectory["schema_version"] == "harbor-tb2-v2-projection"
+        assert isinstance(trajectory["steps"][0]["observation"], str)
+        assert trajectory["steps"][0]["observation"].startswith("New Terminal Output")
+        model_input = json.load(
+            tar.extractfile(  # type: ignore[arg-type]
+                f"agent_runs/{first_task}/{first_trial}/model_input_trajectory.json"
+            )
+        )
+        assert model_input["source_of_truth"] == "provider_logs"
+        assert model_input["calls"][0]["messages"] == [
+            {"role": "user", "content": "prompt 1"},
+            {"role": "assistant", "content": "answer 1"},
+        ]
+        transcript_lines = (
+            tar.extractfile(  # type: ignore[union-attr]
+                f"agent_runs/{first_task}/{first_trial}/terminal_transcript.jsonl"
+            )
+            .read()
+            .decode()
+            .splitlines()
+        )
+        assert json.loads(transcript_lines[0])["text"].startswith("New Terminal Output")
+        native = tar.extractfile(  # type: ignore[union-attr]
+            f"agent_runs/{first_task}/{first_trial}/native/harbor_trajectory.json"
+        ).read()
+        assert native == native_by_trial[first_trial]
+        rendered = json.dumps(trajectory)
+        # task_id values like `task-0001` contain `sk-` as a substring; use export scan patterns.
+        _assert_no_secret_patterns(rendered)
