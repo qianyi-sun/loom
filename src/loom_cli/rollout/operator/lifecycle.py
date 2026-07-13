@@ -456,13 +456,19 @@ class LifecycleCoordinator:
             events = self.store.read_events(pointer.request_id)
         except RequestStoreError:
             return False
-        return any(
-            event.attempt_number == pointer.attempt_number
+        matching_events = [
+            event
+            for event in events
+            if event.attempt_number == pointer.attempt_number
             and event.unit_name == pointer.unit_name
-            and event.event == "attempt_done"
+        ]
+        if any(event.event in {"attempt_failed", "launch_failed"} for event in matching_events):
+            return False
+        return any(
+            event.event == "attempt_done"
             and event.status == "done"
             and _safe_utc_timestamp(event.occurred_at)
-            for event in events
+            for event in matching_events
         )
 
     def _reconcile_running(

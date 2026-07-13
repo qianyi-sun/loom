@@ -23,7 +23,9 @@ from loom_cli.rollout.operator.model import (
     CallerIdentity,
     CandidateBinding,
     DriverEnvelope,
+    EventStatus,
     RequestEvent,
+    RequestEventType,
     RolloutRequest,
 )
 from loom_cli.rollout.operator.store import RequestStore, RequestStoreError
@@ -780,6 +782,108 @@ def test_reconcile_done_state_with_missing_unit_and_done_event_is_done(
             attempt_number=1,
             unit_name=active.unit_name,
             status="done",
+        )
+    )
+
+    result = make_coordinator(config, store=store).reconcile_active()
+
+    assert result.outcome == "done"
+    assert result.cleared
+    assert store.read_active() is None
+
+
+@pytest.mark.parametrize(
+    "failure_event",
+    ["attempt_failed", "launch_failed"],
+)
+@pytest.mark.parametrize(
+    "failure_first",
+    [False, True],
+    ids=["done-then-failed", "failed-then-done"],
+)
+def test_reconcile_missing_unit_rejects_contradictory_terminal_event_in_any_order(
+    tmp_path: Path,
+    failure_event: RequestEventType,
+    failure_first: bool,
+) -> None:
+    config = make_config(tmp_path)
+    store = RequestStore(config.state_root)
+    request, envelope = persist_attempt(config, store, "req-alpha", sha_char="a")
+    active = pointer("req-alpha")
+    store.set_active(active)
+    write_rollout_state(config, envelope, status="done")
+    terminal_events: list[tuple[RequestEventType, EventStatus]] = [
+        ("attempt_done", "done"),
+        (failure_event, "failed"),
+    ]
+    if failure_first:
+        terminal_events.reverse()
+    for index, (event, status) in enumerate(terminal_events, start=5):
+        store.append_event(
+            RequestEvent(
+                request_id=request.request_id,
+                event=event,
+                occurred_at=f"2026-07-13T20:0{index}:00Z",
+                operator=request.caller.username,
+                operator_uid=request.caller.uid,
+                attempt_number=1,
+                unit_name=active.unit_name,
+                status=status,
+            )
+        )
+
+    result = make_coordinator(config, store=store).reconcile_active()
+
+    assert result.outcome == "stale"
+    assert result.safe_status["reason"] == "unit_missing_without_corroborated_success"
+    assert result.cleared
+    assert store.read_active() is None
+
+
+@pytest.mark.parametrize(
+    ("failure_event", "unrelated_identity"),
+    [
+        ("attempt_failed", "attempt"),
+        ("launch_failed", "unit"),
+    ],
+)
+def test_reconcile_missing_unit_ignores_unrelated_terminal_failure(
+    tmp_path: Path,
+    failure_event: RequestEventType,
+    unrelated_identity: str,
+) -> None:
+    config = make_config(tmp_path)
+    store = RequestStore(config.state_root)
+    request, envelope = persist_attempt(config, store, "req-alpha", sha_char="a")
+    active = pointer("req-alpha")
+    store.set_active(active)
+    write_rollout_state(config, envelope, status="done")
+    store.append_event(
+        RequestEvent(
+            request_id=request.request_id,
+            event="attempt_done",
+            occurred_at="2026-07-13T20:05:00Z",
+            operator=request.caller.username,
+            operator_uid=request.caller.uid,
+            attempt_number=1,
+            unit_name=active.unit_name,
+            status="done",
+        )
+    )
+    store.append_event(
+        RequestEvent(
+            request_id=request.request_id,
+            event=failure_event,
+            occurred_at="2026-07-13T20:06:00Z",
+            operator=request.caller.username,
+            operator_uid=request.caller.uid,
+            attempt_number=2 if unrelated_identity == "attempt" else 1,
+            unit_name=(
+                "loom-staging-rollout-req-alpha-2.service"
+                if unrelated_identity == "attempt"
+                else "loom-staging-rollout-req-bravo-1.service"
+            ),
+            status="failed",
         )
     )
 

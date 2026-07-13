@@ -205,19 +205,58 @@ def _parse_show_output(unit_name: str, stdout: str) -> SystemdUnitStatus:
     )
 
 
-def _safe_journal_lines(lines: JournalLineStream) -> Generator[str, None, None]:
-    try:
-        for line in lines:
-            if not isinstance(line, str):
-                raise SystemdOperationError("rollout unit journal stream is malformed")
-            yield line
-    except Exception as exc:
-        raise SystemdOperationError("rollout unit journal stream failed") from exc
-    finally:
+class _JournalLineIterator:
+    def __init__(self, lines: JournalLineStream) -> None:
+        self._lines = lines
+        self._closed = False
+
+    def __iter__(self) -> _JournalLineIterator:
+        return self
+
+    def __next__(self) -> str:
+        if self._closed:
+            raise StopIteration
+        line: object | None = None
+        exhausted = False
+        iteration_failed = False
         try:
-            lines.close()
-        except Exception as exc:
-            raise SystemdOperationError("rollout unit journal stream could not be closed") from exc
+            line = next(self._lines)
+        except StopIteration:
+            exhausted = True
+        except Exception:
+            iteration_failed = True
+        if iteration_failed:
+            self._close_underlying()
+            raise SystemdOperationError("rollout unit journal stream failed") from None
+        if exhausted:
+            if self._close_underlying():
+                raise SystemdOperationError(
+                    "rollout unit journal stream could not be closed"
+                ) from None
+            raise StopIteration
+        if not isinstance(line, str):
+            self._close_underlying()
+            raise SystemdOperationError("rollout unit journal stream is malformed") from None
+        return line
+
+    def close(self) -> None:
+        if self._close_underlying():
+            raise SystemdOperationError("rollout unit journal stream could not be closed") from None
+
+    def _close_underlying(self) -> bool:
+        if self._closed:
+            return False
+        self._closed = True
+        close_failed = False
+        try:
+            self._lines.close()
+        except Exception:
+            close_failed = True
+        return close_failed
+
+
+def _safe_journal_lines(lines: JournalLineStream) -> JournalLineStream:
+    return _JournalLineIterator(lines)
 
 
 def _buffered_journal_lines(stdout: str) -> Generator[str, None, None]:
@@ -331,12 +370,15 @@ class SystemdUserManager:
             argv.append("--follow")
             if self._stream is None:
                 raise SystemdOperationError("journal follow streaming is not configured")
+            lines = None
             try:
                 lines = self._stream(argv)
-            except Exception as exc:
+            except Exception:
+                pass
+            if lines is None:
                 raise SystemdOperationError(
                     "rollout unit journal stream could not be opened"
-                ) from exc
+                ) from None
             return _safe_journal_lines(lines)
         try:
             result = self._run(argv)

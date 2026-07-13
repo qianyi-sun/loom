@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Generator
+import traceback
 from pathlib import Path
 from typing import cast
 
@@ -9,6 +9,7 @@ import pytest
 
 from loom_cli.rollout.operator.config import OperatorConfig
 from loom_cli.rollout.operator.systemd import (
+    JournalStreamRunner,
     SystemdOperationError,
     SystemdQueryError,
     SystemdUnitStatus,
@@ -69,38 +70,80 @@ class RecordingRunner:
         return subprocess.CompletedProcess(argv, self.returncode, self.stdout, self.stderr)
 
 
+class RecordingLineStream:
+    def __init__(
+        self,
+        *,
+        lines: tuple[str, ...],
+        iteration_error: Exception | None,
+        close_error: Exception | None,
+    ) -> None:
+        self._lines = iter(lines)
+        self._iteration_error = iteration_error
+        self._close_error = close_error
+        self.closed = False
+        self.close_calls = 0
+
+    def __iter__(self) -> RecordingLineStream:
+        return self
+
+    def __next__(self) -> str:
+        if self.closed:
+            raise StopIteration
+        try:
+            return next(self._lines)
+        except StopIteration:
+            if self._iteration_error is None:
+                raise
+            error = self._iteration_error
+            self._iteration_error = None
+            raise error from None
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.closed = True
+        if self._close_error is not None:
+            error = self._close_error
+            self._close_error = None
+            raise error from None
+
+
 class RecordingStreamRunner:
     def __init__(
         self,
         *,
         lines: tuple[str, ...] = (),
         iteration_error: Exception | None = None,
+        close_error: Exception | None = None,
     ) -> None:
         self.argvs: list[list[str]] = []
         self.lines = lines
         self.iteration_error = iteration_error
-        self.closed = False
-        self.opened_stream: Generator[str, None, None] | None = None
+        self.close_error = close_error
+        self.opened_stream: RecordingLineStream | None = None
 
-    def __call__(self, argv: list[str]) -> Generator[str, None, None]:
+    def __call__(self, argv: list[str]) -> RecordingLineStream:
         self.argvs.append(list(argv))
-
-        def iterate() -> Generator[str, None, None]:
-            try:
-                yield from self.lines
-                if self.iteration_error is not None:
-                    raise self.iteration_error
-            finally:
-                self.closed = True
-
-        self.opened_stream = iterate()
+        self.opened_stream = RecordingLineStream(
+            lines=self.lines,
+            iteration_error=self.iteration_error,
+            close_error=self.close_error,
+        )
         return self.opened_stream
+
+    @property
+    def closed(self) -> bool:
+        return self.opened_stream is not None and self.opened_stream.closed
+
+    @property
+    def close_calls(self) -> int:
+        return 0 if self.opened_stream is None else self.opened_stream.close_calls
 
 
 def make_manager(
     runner: RecordingRunner | None = None,
     *,
-    stream_runner: RecordingStreamRunner | None = None,
+    stream_runner: JournalStreamRunner | None = None,
 ) -> SystemdUserManager:
     return SystemdUserManager(
         make_config(),
@@ -108,6 +151,23 @@ def make_manager(
         run=runner or RecordingRunner(),
         stream=stream_runner,
     )
+
+
+def assert_sanitized_operation_error(
+    error: SystemdOperationError,
+    sentinel: str,
+) -> None:
+    assert sentinel not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    rendered = "".join(
+        traceback.format_exception(
+            type(error),
+            error,
+            error.__traceback__,
+        )
+    )
+    assert sentinel not in rendered
 
 
 def test_start_argv_is_fixed_and_uses_the_sanitized_environment() -> None:
@@ -430,6 +490,7 @@ def test_stream_journal_follow_uses_injected_line_stream_and_fixed_argv() -> Non
         ]
     ]
     assert lines == ["first\n", "second\n"]
+    assert stream_runner.close_calls == 1
 
 
 def test_stream_journal_accepts_the_declared_positional_follow_parameter() -> None:
@@ -451,10 +512,26 @@ def test_stream_journal_follow_requires_configured_stream_runner() -> None:
         )
 
 
+def test_stream_journal_open_failure_has_no_secret_exception_chain() -> None:
+    sentinel = "traceback-open-secret"
+
+    def fail_open(argv: list[str]) -> RecordingLineStream:
+        raise OSError(sentinel)
+
+    with pytest.raises(SystemdOperationError) as caught:
+        make_manager(stream_runner=fail_open).stream_journal(
+            "loom-staging-rollout-req-alpha-1.service",
+            follow=True,
+        )
+
+    assert_sanitized_operation_error(caught.value, sentinel)
+
+
 def test_stream_journal_wraps_iteration_failure_without_exposing_output() -> None:
+    sentinel = "traceback-iteration-secret"
     stream_runner = RecordingStreamRunner(
         lines=("safe line\n",),
-        iteration_error=OSError("TOKEN=iteration-secret"),
+        iteration_error=OSError(sentinel),
     )
     lines = make_manager(stream_runner=stream_runner).stream_journal(
         "loom-staging-rollout-req-alpha-1.service",
@@ -465,7 +542,7 @@ def test_stream_journal_wraps_iteration_failure_without_exposing_output() -> Non
     with pytest.raises(SystemdOperationError) as caught:
         next(lines)
 
-    assert "secret" not in str(caught.value)
+    assert_sanitized_operation_error(caught.value, sentinel)
 
 
 def test_stream_journal_rewraps_source_operation_error_without_exposing_output() -> None:
@@ -495,6 +572,44 @@ def test_stream_journal_closes_underlying_follow_stream_on_early_stop() -> None:
     lines.close()
 
     assert stream_runner.closed
+    assert stream_runner.close_calls == 1
+    lines.close()
+    assert stream_runner.close_calls == 1
+
+
+def test_stream_journal_close_before_first_line_closes_underlying_stream_once() -> None:
+    stream_runner = RecordingStreamRunner(lines=("first\n",))
+    lines = make_manager(stream_runner=stream_runner).stream_journal(
+        "loom-staging-rollout-req-alpha-1.service",
+        follow=True,
+    )
+
+    lines.close()
+
+    assert stream_runner.closed
+    assert stream_runner.close_calls == 1
+    lines.close()
+    assert stream_runner.close_calls == 1
+
+
+def test_stream_journal_close_failure_is_sanitized_without_double_close() -> None:
+    sentinel = "traceback-close-secret"
+    stream_runner = RecordingStreamRunner(
+        lines=("first\n",),
+        close_error=OSError(sentinel),
+    )
+    lines = make_manager(stream_runner=stream_runner).stream_journal(
+        "loom-staging-rollout-req-alpha-1.service",
+        follow=True,
+    )
+
+    with pytest.raises(SystemdOperationError) as caught:
+        lines.close()
+
+    assert_sanitized_operation_error(caught.value, sentinel)
+    assert stream_runner.close_calls == 1
+    lines.close()
+    assert stream_runner.close_calls == 1
 
 
 def test_stream_journal_rejects_non_boolean_follow_without_running_a_command() -> None:
