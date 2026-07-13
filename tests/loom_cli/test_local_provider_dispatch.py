@@ -256,9 +256,9 @@ def test_run_cmd_parses_local_model_spec(tmp_xdg_home) -> None:  # type: ignore[
     """End-to-end shape: `--model local/vllm/llama-3.1-8b` parses into
     a ModelSpec(provider='local', name='vllm/llama-3.1-8b'). Catches
     regressions in the model-spec parser when adding new providers."""
-    from loom_cli.run_cmd import _parse_model
+    from loom_cli.model_spec import parse_model
 
-    spec = _parse_model("local/vllm/llama-3.1-8b")
+    spec = parse_model("local/vllm/llama-3.1-8b")
     assert spec.provider == "local"
     assert spec.name == "vllm/llama-3.1-8b"
 
@@ -272,8 +272,8 @@ def test_run_cmd_parses_local_model_spec_with_slashes_in_id(
     name = `vllm/meta-llama/Llama-3.1-8B-Instruct`. _call_local then
     splits on the FIRST `/` so server='vllm',
     model_id='meta-llama/Llama-3.1-8B-Instruct'."""
-    from loom_cli.run_cmd import _parse_model
+    from loom_cli.model_spec import parse_model
 
-    spec = _parse_model("local/vllm/meta-llama/Llama-3.1-8B-Instruct")
+    spec = parse_model("local/vllm/meta-llama/Llama-3.1-8B-Instruct")
     assert spec.provider == "local"
     assert spec.name == "vllm/meta-llama/Llama-3.1-8B-Instruct"
