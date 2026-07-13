@@ -1,13 +1,20 @@
 """`python -m loom_benchmark_tool register <benchmark>` — per-deploy
 counterpart to `publish`.
 
-Reads the manifest from `{hf_org}/loom-benchmark-{benchmark}` on HF
-Hub, upserts the Benchmark row, and upserts a Task row per entry. By
-default task rows point at `hf://{repo_id}@{revision}/{hf_path}` for
-back-compat. In protected deployments, pass `mirror_to_object_store`
-with an object store so the operator process downloads the exact HF
-revision, mirrors bundles into internal S3/MinIO, and stores `s3://...`
-runtime sources while retaining HF provenance in tags.
+Two sources are supported:
+
+- `source="hf"` (legacy): reads the manifest from
+  `{hf_org}/loom-benchmark-{benchmark}` on HF Hub. Task rows point at
+  `hf://{repo_id}@{revision}/{hf_path}`; pass `mirror_to_object_store`
+  to also copy every bundle into internal S3/MinIO and rewrite the
+  source URLs to `s3://…`.
+
+- `source="object-store"`: reads the manifest straight from
+  `s3://{bucket}/{benchmark_id}/{revision}/manifest.json` — the layout
+  produced by `publish --target=object-store`. Task rows point at
+  `s3://{bucket}/{benchmark_id}/{revision}/{hf_path}` with no HF hop or
+  mirror step, because the bytes are already where the worker will
+  materialize them.
 
 New manifests carry validated per-task `TaskConfig` payloads, so
 registered rows are runnable immediately after this command commits.
@@ -19,10 +26,11 @@ runnable until republished or backfilled.
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from loom_benchmarks.util import sha256_of_dir
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -35,9 +43,12 @@ from loom.trajectory.storage import ObjectStore
 from loom_benchmark_tool.db_url import normalize_db_url
 from loom_benchmark_tool.dockerfile_safety import validate_task_dir_dockerfiles
 from loom_benchmark_tool.manifest import (
+    MANIFEST_FILENAME,
     read_manifest_from_hf,
     repo_id_for,
 )
+
+RegisterSource = Literal["hf", "object-store"]
 
 
 def _hf_source_url(
@@ -50,6 +61,54 @@ def _hf_source_url(
     parses this exact shape; keep the format here in lockstep with
     `loom_worker.main_loop._materialize_hf_dir`."""
     return f"hf://{repo_id}@{revision}/{hf_path}"
+
+
+def _object_store_source_url(
+    *,
+    bucket: str,
+    benchmark_id: str,
+    revision: str,
+    hf_path: str,
+) -> str:
+    """Canonical `s3://` source URL for the direct-publish layout.
+
+    Matches the key prefix `publish_cmd._publish_to_object_store`
+    writes under and the `s3://{bucket}/{prefix}` shape the worker's
+    S3Materializer parses."""
+    return f"s3://{bucket}/{benchmark_id}/{revision}/{hf_path}"
+
+
+async def _read_manifest_from_object_store(
+    *,
+    object_store: ObjectStore,
+    bucket: str,
+    benchmark_id: str,
+    revision: str,
+) -> dict[str, Any]:
+    """Fetch and parse `manifest.json` from the direct-publish layout.
+
+    Raises FileNotFoundError-style exceptions if the object is missing,
+    ValueError if the payload isn't a JSON object or the embedded
+    `benchmark_id` doesn't match what we asked for."""
+    key = f"{benchmark_id}/{revision}/{MANIFEST_FILENAME}"
+    body = await object_store.get_object(bucket=bucket, key=key)
+    try:
+        manifest = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"manifest at s3://{bucket}/{key} is not valid JSON: {exc}",
+        ) from exc
+    if not isinstance(manifest, dict):
+        raise ValueError(
+            f"manifest at s3://{bucket}/{key} must be a JSON object, "
+            f"got {type(manifest).__name__}",
+        )
+    if manifest.get("benchmark_id") != benchmark_id:
+        raise ValueError(
+            f"manifest at s3://{bucket}/{key} declares benchmark_id="
+            f"{manifest.get('benchmark_id')!r}, expected {benchmark_id!r}",
+        )
+    return cast(dict[str, Any], manifest)
 
 
 @dataclass(frozen=True)
@@ -259,9 +318,10 @@ def task_config_from_manifest_entry(entry: dict[str, Any]) -> dict[str, Any]:
 async def run_register(
     *,
     benchmark: str,
-    hf_org: str,
-    hf_token: str | None,
     db_url: str,
+    source: RegisterSource = "hf",
+    hf_org: str = "",
+    hf_token: str | None = None,
     revision: str = "main",
     registered_by: str | None = None,
     mirror_to_object_store: bool = False,
@@ -270,20 +330,60 @@ async def run_register(
     chunk_size: int | None = None,
     chunk_sleep_secs: float = 300.0,
 ) -> dict[str, Any]:
-    """Read manifest from HF, upsert Benchmark + Task rows. Returns
-    `{"registered": N, "skipped": M, "repo_id": str, "revision": str}`.
+    """Read manifest from the selected source, upsert Benchmark + Task
+    rows. Returns `{"registered": N, "skipped": M, "source": str,
+    "repo_id": str, "revision": str, …}`.
 
     The manifest's `task_count` MUST match the length of `tasks`; the
-    publish path guarantees this. We trust it here rather than re-walking
-    the HF tree.
+    publish path guarantees this. We trust it here rather than
+    re-walking the source tree.
+
+    Source-specific requirements:
+
+    - `source="hf"` (default): `hf_org` is required. `mirror_to_object_store`
+      may be set to also mirror bundles into `object_store`+`bucket`.
+    - `source="object-store"`: `object_store`, `bucket`, and `revision` are
+      required. `mirror_to_object_store` is a no-op (the bundles are
+      already in the bucket).
     """
-    repo_id = repo_id_for(hf_org, benchmark)
-    manifest = read_manifest_from_hf(
-        hf_org=hf_org,
-        benchmark=benchmark,
-        hf_token=hf_token,
-        revision=revision,
-    )
+    if source == "hf":
+        if not hf_org:
+            raise ValueError("source='hf' requires hf_org")
+    elif source == "object-store":
+        if object_store is None:
+            raise ValueError("source='object-store' requires object_store")
+        if not revision or revision == "main":
+            raise ValueError(
+                "source='object-store' requires an explicit --revision "
+                "(the content-addressed revision emitted by publish)",
+            )
+        if mirror_to_object_store:
+            raise ValueError(
+                "source='object-store' + mirror_to_object_store is redundant "
+                "— the bundles are already in the target bucket",
+            )
+    else:  # pragma: no cover — argparse constrains this
+        raise ValueError(f"unknown register source: {source!r}")
+
+    benchmark_id_hint = benchmark  # publish uses adapter.name; matches for our built-in adapters
+    if source == "hf":
+        repo_id = repo_id_for(hf_org, benchmark)
+        manifest = read_manifest_from_hf(
+            hf_org=hf_org,
+            benchmark=benchmark,
+            hf_token=hf_token,
+            revision=revision,
+        )
+    else:
+        assert object_store is not None
+        manifest = await _read_manifest_from_object_store(
+            object_store=object_store,
+            bucket=bucket,
+            benchmark_id=benchmark_id_hint,
+            revision=revision,
+        )
+        repo_id = f"s3://{bucket}/{manifest['benchmark_id']}"
+
     manifest_tasks = list(manifest["tasks"])
 
     snapshot_root: Path | None = None
@@ -293,7 +393,7 @@ async def run_register(
     mirror_bytes_uploaded = 0
     mirror_bytes_skipped = 0
     mirrored_at = datetime.now(UTC).isoformat()
-    if mirror_to_object_store:
+    if source == "hf" and mirror_to_object_store:
         if object_store is None:
             raise ValueError("mirror_to_object_store requires object_store")
         snapshot_root = await _download_hf_bundle_snapshot(
@@ -369,18 +469,33 @@ async def run_register(
         # checksum drift (publish bumped → task row's checksum updated).
         async with session_factory() as session:
             for t in manifest_tasks:
-                source = _hf_source_url(
-                    repo_id=repo_id,
-                    revision=revision,
-                    hf_path=t["hf_path"],
-                )
+                if source == "hf":
+                    task_source = _hf_source_url(
+                        repo_id=repo_id,
+                        revision=revision,
+                        hf_path=t["hf_path"],
+                    )
+                else:
+                    task_source = _object_store_source_url(
+                        bucket=bucket,
+                        benchmark_id=manifest["benchmark_id"],
+                        revision=revision,
+                        hf_path=t["hf_path"],
+                    )
                 # PR-1: per-task tags from manifest v2. v1 manifests
                 # omit `tags`; treat absent + {} identically.
                 tags = dict(t.get("tags") or {})
                 config = task_config_from_manifest_entry(t)
                 if not config:
                     legacy_placeholders += 1
-                if mirror_to_object_store:
+                if source == "object-store":
+                    # No mirror step needed; publish already put bytes
+                    # at exactly the URL Task.source points to.
+                    tags.update({
+                        "runtime_source_kind": "internal_object_store",
+                        "runtime_source_mirrored_at": mirrored_at,
+                    })
+                if source == "hf" and mirror_to_object_store:
                     assert object_store is not None
                     assert snapshot_root is not None
                     mirror = await mirror_manifest_task_bundle(
@@ -393,7 +508,7 @@ async def run_register(
                         object_store=object_store,
                         bucket=bucket,
                     )
-                    source = mirror.source
+                    task_source = mirror.source
                     mirrored += 1
                     mirror_uploaded += mirror.uploaded
                     mirror_skipped += mirror.skipped
@@ -413,7 +528,7 @@ async def run_register(
                         id=t["task_id"],
                         checksum=t["checksum"],
                         config=config,
-                        source=source,
+                        source=task_source,
                         license=t.get(
                             "license_spdx",
                             manifest["license_spdx"],
@@ -425,7 +540,7 @@ async def run_register(
                         index_elements=["id"],
                         set_={
                             "checksum": t["checksum"],
-                            "source": source,
+                            "source": task_source,
                             "license": t.get(
                                 "license_spdx",
                                 manifest["license_spdx"],
@@ -450,6 +565,7 @@ async def run_register(
         "mirror_skipped": mirror_skipped,
         "mirror_bytes_uploaded": mirror_bytes_uploaded,
         "mirror_bytes_skipped": mirror_bytes_skipped,
+        "source": source,
         "repo_id": repo_id,
         "revision": revision,
     }

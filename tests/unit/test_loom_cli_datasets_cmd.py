@@ -331,6 +331,7 @@ def test_register_uses_service_db_url_env(
             "registered": 100,
             "legacy_placeholders": 0,
             "skipped": 0,
+            "source": "hf",
             "repo_id": "PRHW/loom-benchmark-skilllearnbench",
             "revision": "main",
         }
@@ -359,6 +360,7 @@ def test_register_db_url_precedence(
             "registered": 1,
             "legacy_placeholders": 0,
             "skipped": 0,
+            "source": "hf",
             "repo_id": "PRHW/loom-benchmark-skilllearnbench",
             "revision": "main",
         }
@@ -397,6 +399,7 @@ def test_register_mirror_to_object_store_passes_minio_target(
             "mirrored": 100,
             "mirror_uploaded": 200,
             "mirror_skipped": 0,
+            "source": "hf",
             "repo_id": "PRHW/loom-benchmark-skilllearnbench",
             "revision": "7908700",
         }
@@ -436,6 +439,128 @@ def test_register_mirror_to_object_store_passes_minio_target(
     out = capsys.readouterr().out
     assert "mirrored=100" in out
     assert "mirror_uploaded=200" in out
+
+
+def test_register_source_object_store_requires_minio_creds(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--source=object-store bails cleanly when MinIO creds are missing."""
+    for var in (
+        "LOOM_MINIO_ENDPOINT",
+        "LOOM_MINIO_ACCESS_KEY",
+        "LOOM_MINIO_SECRET_KEY",
+        "LOOM_SVC_MINIO_ENDPOINT",
+        "LOOM_SVC_MINIO_ACCESS_KEY",
+        "LOOM_SVC_MINIO_SECRET_KEY",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    rc = dispatch([
+        "register",
+        "aime-25",
+        "--source",
+        "object-store",
+        "--db-url",
+        "postgresql://target/db",
+        "--revision",
+        "abcd1234",
+    ])
+
+    assert rc == 2
+    assert "--source=object-store requires" in capsys.readouterr().err
+
+
+def test_register_source_object_store_requires_explicit_revision(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No --revision (falls back to 'main') is nonsensical for
+    content-addressed layouts; fail loud before touching the bucket."""
+    rc = dispatch([
+        "register",
+        "aime-25",
+        "--source",
+        "object-store",
+        "--db-url",
+        "postgresql://target/db",
+        "--minio-endpoint",
+        "http://minio.local:9000",
+        "--minio-access-key",
+        "minioadmin",
+        "--minio-secret-key",
+        "minioadmin123",
+    ])
+
+    assert rc == 2
+    assert "--revision" in capsys.readouterr().err
+
+
+def test_register_source_object_store_threads_flags_through(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--source=object-store instantiates MinIO client + forwards
+    every relevant flag to run_register without touching HF."""
+    captured: dict[str, object] = {}
+    stores: list[dict[str, object]] = []
+
+    class FakeObjectStore:
+        def __init__(self, **kwargs: object) -> None:
+            stores.append(kwargs)
+
+    async def fake_register(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "registered": 30,
+            "legacy_placeholders": 0,
+            "skipped": 0,
+            "mirrored": 0,
+            "mirror_uploaded": 0,
+            "mirror_skipped": 0,
+            "source": "object-store",
+            "repo_id": "s3://loom-benchmarks/aime-25",
+            "revision": "abcd1234",
+        }
+
+    monkeypatch.setattr("loom.trajectory.storage.MinioObjectStore", FakeObjectStore)
+    monkeypatch.setattr("loom_benchmark_tool.register_cmd.run_register", fake_register)
+
+    rc = dispatch([
+        "register",
+        "aime-25",
+        "--source",
+        "object-store",
+        "--db-url",
+        "postgresql://target/db",
+        "--revision",
+        "abcd1234",
+        "--minio-endpoint",
+        "http://minio.local:9000",
+        "--minio-access-key",
+        "minioadmin",
+        "--minio-secret-key",
+        "minioadmin123",
+        "--bucket",
+        "loom-benchmarks",
+    ])
+
+    assert rc == 0
+    assert captured["source"] == "object-store"
+    assert captured["revision"] == "abcd1234"
+    assert captured["bucket"] == "loom-benchmarks"
+    assert captured["object_store"] is not None
+    assert captured["mirror_to_object_store"] is False
+    assert stores == [
+        {
+            "endpoint_url": "http://minio.local:9000",
+            "access_key": "minioadmin",
+            "secret_key": "minioadmin123",
+        }
+    ]
+    out = capsys.readouterr().out
+    assert "source=object-store" in out
+    assert "rev=abcd1234" in out
 
 
 def test_verify_minio_env_precedence(

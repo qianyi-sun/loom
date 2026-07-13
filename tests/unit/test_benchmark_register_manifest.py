@@ -440,3 +440,259 @@ async def test_download_hf_bundle_snapshot_single_shot_when_chunk_size_none(
     assert len(calls) == 1
     assert calls[0] == ["task-000/*", "task-001/*", "task-002/*"]
     assert sleeps == []
+
+
+class ManifestFakeObjectStore:
+    """Object-store stub pre-seeded with manifest bytes; used to
+    exercise source='object-store' without pulling in the real S3 client."""
+
+    def __init__(self, objects: dict[tuple[str, str], bytes] | None = None) -> None:
+        self.objects: dict[tuple[str, str], bytes] = objects or {}
+
+    async def ensure_bucket(self, bucket: str) -> None:
+        return None
+
+    async def get_object(self, *, bucket: str, key: str) -> bytes:
+        try:
+            return self.objects[(bucket, key)]
+        except KeyError as exc:
+            raise FileNotFoundError(
+                f"missing object s3://{bucket}/{key}"
+            ) from exc
+
+    async def put_object(self, *, bucket: str, key: str, body: bytes) -> str:
+        self.objects[(bucket, key)] = body
+        return f"s3://{bucket}/{key}"
+
+
+@pytest.mark.asyncio
+async def test_read_manifest_from_object_store_returns_parsed_dict() -> None:
+    """Happy path: manifest at the expected key returns a dict."""
+    import json as _json
+
+    from loom_benchmark_tool.register_cmd import _read_manifest_from_object_store
+
+    manifest = {
+        "benchmark_id": "fake-bench",
+        "task_count": 0,
+        "tasks": [],
+    }
+    store = ManifestFakeObjectStore(
+        objects={
+            ("loom-benchmarks", "fake-bench/rev-abc/manifest.json"): _json.dumps(
+                manifest
+            ).encode(),
+        },
+    )
+    got = await _read_manifest_from_object_store(
+        object_store=store,
+        bucket="loom-benchmarks",
+        benchmark_id="fake-bench",
+        revision="rev-abc",
+    )
+    assert got == manifest
+
+
+@pytest.mark.asyncio
+async def test_read_manifest_from_object_store_rejects_benchmark_mismatch() -> None:
+    """Manifest whose embedded benchmark_id disagrees with what we
+    asked for is a red flag — someone published under the wrong slug."""
+    import json as _json
+
+    from loom_benchmark_tool.register_cmd import _read_manifest_from_object_store
+
+    store = ManifestFakeObjectStore(
+        objects={
+            ("loom-benchmarks", "fake-bench/rev-abc/manifest.json"): _json.dumps(
+                {"benchmark_id": "OTHER-BENCH", "tasks": []}
+            ).encode(),
+        },
+    )
+    with pytest.raises(ValueError, match="benchmark_id"):
+        await _read_manifest_from_object_store(
+            object_store=store,
+            bucket="loom-benchmarks",
+            benchmark_id="fake-bench",
+            revision="rev-abc",
+        )
+
+
+@pytest.mark.asyncio
+async def test_read_manifest_from_object_store_rejects_non_json() -> None:
+    from loom_benchmark_tool.register_cmd import _read_manifest_from_object_store
+
+    store = ManifestFakeObjectStore(
+        objects={
+            ("loom-benchmarks", "fake-bench/rev-abc/manifest.json"): b"not json",
+        },
+    )
+    with pytest.raises(ValueError, match="not valid JSON"):
+        await _read_manifest_from_object_store(
+            object_store=store,
+            bucket="loom-benchmarks",
+            benchmark_id="fake-bench",
+            revision="rev-abc",
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_register_source_object_store_writes_s3_task_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--source=object-store reads manifest from the bucket, task rows
+    point at s3://<bucket>/<bench>/<rev>/<hf_path>, no HF fetch, no
+    mirror step."""
+    import json as _json
+
+    manifest = {
+        "schema_version": 3,
+        "benchmark_id": "fake-bench",
+        "display_name": "Fake Bench",
+        "series": "fake",
+        "license_spdx": "MIT",
+        "license_url": "https://example/license",
+        "upstream_kind": "huggingface",
+        "upstream_locator": "example/fake",
+        "upstream_revision": "upstream-abc",
+        "splits": ["test"],
+        "task_count": 1,
+        "tasks": [
+            {
+                "task_id": "fake-bench/task-001",
+                "instance_id": "task-001",
+                "hf_path": "task-001/",
+                "checksum": "aa" * 32,
+                "license_spdx": "MIT",
+                "split": "test",
+                "tags": {"split": "test"},
+                "task_config": _valid_task_config("fake-bench/task-001"),
+            }
+        ],
+    }
+    store = ManifestFakeObjectStore(
+        objects={
+            ("loom-benchmarks", "fake-bench/rev-content/manifest.json"): _json.dumps(
+                manifest
+            ).encode(),
+        },
+    )
+
+    class FakeExcluded:
+        def __getattr__(self, name: str) -> str:
+            return f"excluded.{name}"
+
+    class FakeInsert:
+        def __init__(self, model: object) -> None:
+            self.model = model
+            self.payload: dict[str, object] = {}
+            self.excluded = FakeExcluded()
+
+        def values(self, **kwargs: object) -> FakeInsert:
+            self.payload = kwargs
+            return self
+
+        def on_conflict_do_update(self, **_kwargs: object) -> FakeInsert:
+            return self
+
+    class FakeEngine:
+        async def dispose(self) -> None:
+            return None
+
+    class FakeSession:
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def execute(self, statement: FakeInsert) -> None:
+            executed.append(statement)
+
+        async def commit(self) -> None:
+            return None
+
+    executed: list[FakeInsert] = []
+
+    def _fake_read_manifest_from_hf(**_kwargs: object) -> dict[str, object]:
+        raise AssertionError("source=object-store must not touch HF")
+
+    monkeypatch.setattr(
+        "loom_benchmark_tool.register_cmd.read_manifest_from_hf",
+        _fake_read_manifest_from_hf,
+    )
+    monkeypatch.setattr(
+        "loom_benchmark_tool.register_cmd.create_async_engine",
+        lambda _db_url: FakeEngine(),
+    )
+    monkeypatch.setattr(
+        "loom_benchmark_tool.register_cmd.async_sessionmaker",
+        lambda *_args, **_kwargs: lambda: FakeSession(),
+    )
+    monkeypatch.setattr(
+        "loom_benchmark_tool.register_cmd.pg_insert",
+        lambda model: FakeInsert(model),
+    )
+
+    result = await run_register(
+        benchmark="fake-bench",
+        source="object-store",
+        db_url="postgresql://target/db",
+        revision="rev-content",
+        registered_by="operator",
+        object_store=store,
+        bucket="loom-benchmarks",
+    )
+
+    assert result["source"] == "object-store"
+    assert result["registered"] == 1
+    assert result["mirrored"] == 0
+    assert result["repo_id"] == "s3://loom-benchmarks/fake-bench"
+    assert result["revision"] == "rev-content"
+
+    task_insert = executed[-1]
+    assert task_insert.payload["source"] == (
+        "s3://loom-benchmarks/fake-bench/rev-content/task-001/"
+    )
+    tags = task_insert.payload["tags"]
+    assert isinstance(tags, dict)
+    assert tags["split"] == "test"
+    assert tags["runtime_source_kind"] == "internal_object_store"
+
+
+@pytest.mark.asyncio
+async def test_run_register_source_object_store_requires_object_store() -> None:
+    with pytest.raises(ValueError, match="object_store"):
+        await run_register(
+            benchmark="fake-bench",
+            source="object-store",
+            db_url="postgresql://x/y",
+            revision="rev-content",
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_register_source_object_store_requires_explicit_revision() -> None:
+    """The HF default of 'main' isn't meaningful for content-addressed
+    revisions; force operators to pass the one publish emitted."""
+    with pytest.raises(ValueError, match="explicit --revision"):
+        await run_register(
+            benchmark="fake-bench",
+            source="object-store",
+            db_url="postgresql://x/y",
+            object_store=ManifestFakeObjectStore(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_register_source_object_store_rejects_mirror_flag() -> None:
+    """--mirror-to-object-store on top of --source=object-store is
+    redundant and a sign of operator confusion; refuse loudly."""
+    with pytest.raises(ValueError, match="redundant"):
+        await run_register(
+            benchmark="fake-bench",
+            source="object-store",
+            db_url="postgresql://x/y",
+            revision="rev-content",
+            object_store=ManifestFakeObjectStore(),
+            mirror_to_object_store=True,
+        )

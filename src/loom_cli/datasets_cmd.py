@@ -161,6 +161,18 @@ def _add_publish_args(p: argparse.ArgumentParser) -> None:
 def _add_register_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("benchmark")
     p.add_argument(
+        "--source",
+        choices=("hf", "object-store"),
+        default="hf",
+        help=(
+            "Where to read the manifest from: 'hf' (default, HuggingFace "
+            "dataset repo) or 'object-store' (direct read from MinIO/R2/S3, "
+            "no HF hop). With 'object-store' the operator must pass the "
+            "explicit --revision emitted by `publish --target=object-store`. "
+            "See #804."
+        ),
+    )
+    p.add_argument(
         "--hf-org", default=os.environ.get("LOOM_HF_ORG", "PRHW"),
     )
     p.add_argument(
@@ -854,8 +866,12 @@ def _cmd_register(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+
+    needs_object_store = (
+        args.source == "object-store" or args.mirror_to_object_store
+    )
     object_store = None
-    if args.mirror_to_object_store:
+    if needs_object_store:
         missing = [
             f for f, v in (
                 (
@@ -876,15 +892,32 @@ def _cmd_register(args: argparse.Namespace) -> int:
             ) if not v
         ]
         if missing:
-            print(f"error: register mirror requires: {', '.join(missing)}", file=sys.stderr)
+            reason = (
+                "--source=object-store"
+                if args.source == "object-store"
+                else "register mirror"
+            )
+            print(f"error: {reason} requires: {', '.join(missing)}", file=sys.stderr)
             return 2
         object_store = MinioObjectStore(
             endpoint_url=args.minio_endpoint,
             access_key=args.minio_access_key,
             secret_key=args.minio_secret_key,
         )
+
+    if args.source == "object-store" and (
+        not args.revision or args.revision == "main"
+    ):
+        print(
+            "error: --source=object-store requires --revision "
+            "(the content-addressed revision emitted by publish)",
+            file=sys.stderr,
+        )
+        return 2
+
     result = asyncio.run(run_register(
         benchmark=args.benchmark,
+        source=args.source,
         hf_org=args.hf_org,
         hf_token=args.hf_token,
         db_url=args.db_url,
@@ -898,6 +931,7 @@ def _cmd_register(args: argparse.Namespace) -> int:
     ))
     parts = [
         f"register {args.benchmark}:",
+        f"source={result['source']}",
         f"registered={result['registered']}",
         f"legacy_placeholders={result['legacy_placeholders']}",
         f"skipped={result['skipped']}",
