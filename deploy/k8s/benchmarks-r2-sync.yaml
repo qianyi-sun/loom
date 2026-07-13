@@ -1,0 +1,97 @@
+# Nightly MinIO → Cloudflare R2 sync for public benchmark distribution.
+#
+# Runs `loom datasets sync-mirror` in-cluster once per day, copying any
+# newly-published task-bundle objects from the in-cluster MinIO
+# (`loom-benchmarks`) to the public-facing R2 bucket. Existing objects
+# with matching size are skipped, so daily runs are cheap once steady
+# state is reached.
+#
+# Prereqs (operator, one-time):
+#   1. Create an R2 bucket (default name `loom-benchmarks-public`) and
+#      an R2 API token scoped Object Read/Write on that bucket.
+#   2. `kubectl -n <ns> create secret generic loom-r2-credentials \
+#        --from-literal=endpoint='https://<account-id>.r2.cloudflarestorage.com' \
+#        --from-literal=access-key='<r2 access key>' \
+#        --from-literal=secret-key='<r2 secret>' \
+#        --from-literal=bucket='loom-benchmarks-public'`
+#   3. `kubectl apply -f deploy/k8s/benchmarks-r2-sync.yaml`
+#
+# Refs #804.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: loom-benchmarks-r2-sync
+  labels:
+    app: loom-benchmarks-r2-sync
+spec:
+  # 03:15 UTC nightly — off-peak for both MinIO (workers) and HF-style
+  # external benchmark consumers.
+  schedule: "15 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # Retry a failed sync a couple times before giving up until next
+      # night. Sync is idempotent so partial-progress runs cost nothing.
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: loom-benchmarks-r2-sync
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: sync
+            image: loom-service:0.7
+            command:
+            - loom
+            - datasets
+            - sync-mirror
+            env:
+            # Source: in-cluster MinIO (reuse the loom-service creds).
+            - name: LOOM_MINIO_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: svc-minio-endpoint
+            - name: LOOM_MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: svc-minio-access-key
+            - name: LOOM_MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: svc-minio-secret-key
+            - name: LOOM_BENCHMARK_BUCKET
+              value: loom-benchmarks
+            # Destination: Cloudflare R2 (dedicated secret).
+            - name: LOOM_R2_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: loom-r2-credentials
+                  key: endpoint
+            - name: LOOM_R2_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-r2-credentials
+                  key: access-key
+            - name: LOOM_R2_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-r2-credentials
+                  key: secret-key
+            - name: LOOM_R2_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: loom-r2-credentials
+                  key: bucket
+            resources:
+              requests:
+                cpu: "100m"
+                memory: "256Mi"
+              limits:
+                cpu: "1"
+                memory: "1Gi"

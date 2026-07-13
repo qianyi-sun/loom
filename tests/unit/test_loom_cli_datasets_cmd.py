@@ -815,3 +815,105 @@ def test_top_level_main_routes_to_datasets(
     rc = main(["datasets", "list", "--json"])
     assert rc == 0
     assert "ROUTED:list --json" in capsys.readouterr().out
+
+
+def test_sync_mirror_requires_source_and_dest_creds(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """sync-mirror bails cleanly when either side's creds are missing."""
+    for var in (
+        "LOOM_MINIO_ENDPOINT", "LOOM_MINIO_ACCESS_KEY", "LOOM_MINIO_SECRET_KEY",
+        "LOOM_SVC_MINIO_ENDPOINT", "LOOM_SVC_MINIO_ACCESS_KEY", "LOOM_SVC_MINIO_SECRET_KEY",
+        "LOOM_R2_ENDPOINT", "LOOM_R2_ACCESS_KEY", "LOOM_R2_SECRET_KEY",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    rc = dispatch(["sync-mirror"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "sync-mirror requires" in err
+    assert "--source-endpoint" in err
+    assert "--dest-endpoint" in err
+
+
+def test_sync_mirror_threads_flags_and_prints_stats(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """sync-mirror forwards every flag to run_sync_mirror and formats
+    the returned SyncStats deterministically."""
+    from loom_benchmark_tool.sync_cmd import SyncStats
+
+    captured: dict[str, object] = {}
+
+    async def fake_run_sync_mirror(**kwargs: object) -> SyncStats:
+        captured.update(kwargs)
+        return SyncStats(
+            listed=10,
+            uploaded=7,
+            skipped_size_match=3,
+            bytes_uploaded=1024,
+            bytes_skipped=512,
+        )
+
+    monkeypatch.setattr(
+        "loom_benchmark_tool.sync_cmd.run_sync_mirror", fake_run_sync_mirror,
+    )
+
+    rc = dispatch([
+        "sync-mirror",
+        "--source-endpoint", "http://minio.local:9000",
+        "--source-access-key", "src-a",
+        "--source-secret-key", "src-s",
+        "--source-bucket", "loom-benchmarks",
+        "--dest-endpoint", "https://acct.r2.cloudflarestorage.com",
+        "--dest-access-key", "dst-a",
+        "--dest-secret-key", "dst-s",
+        "--dest-bucket", "loom-benchmarks-public",
+        "--prefix", "aime-25/",
+    ])
+
+    assert rc == 0
+    assert captured["source_endpoint"] == "http://minio.local:9000"
+    assert captured["dest_endpoint"] == "https://acct.r2.cloudflarestorage.com"
+    assert captured["source_bucket"] == "loom-benchmarks"
+    assert captured["dest_bucket"] == "loom-benchmarks-public"
+    assert captured["prefix"] == "aime-25/"
+    assert captured["dry_run"] is False
+    out = capsys.readouterr().out
+    assert "sync-mirror:" in out
+    assert "listed=10" in out
+    assert "uploaded=7" in out
+    assert "skipped=3" in out
+    assert "[dry-run]" not in out
+
+
+def test_sync_mirror_dry_run_marker_in_output(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--dry-run appears in the header so operators can spot no-op runs."""
+    from loom_benchmark_tool.sync_cmd import SyncStats
+
+    async def fake_run_sync_mirror(**_kwargs: object) -> SyncStats:
+        return SyncStats(
+            listed=1, uploaded=1, skipped_size_match=0,
+            bytes_uploaded=100, bytes_skipped=0,
+        )
+
+    monkeypatch.setattr(
+        "loom_benchmark_tool.sync_cmd.run_sync_mirror", fake_run_sync_mirror,
+    )
+
+    dispatch([
+        "sync-mirror",
+        "--source-endpoint", "http://minio.local:9000",
+        "--source-access-key", "src-a",
+        "--source-secret-key", "src-s",
+        "--dest-endpoint", "https://acct.r2.cloudflarestorage.com",
+        "--dest-access-key", "dst-a",
+        "--dest-secret-key", "dst-s",
+        "--dry-run",
+    ])
+    assert "[dry-run]" in capsys.readouterr().out

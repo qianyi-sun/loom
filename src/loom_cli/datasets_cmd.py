@@ -13,6 +13,7 @@ Subcommands:
 - verify <slug> [--limit --minio-* --bucket --seed]
 - audit [--all | <slug>] [--db-url] [--json]
 - hf-boundary-evidence <slug> --environment staging --output PATH
+- sync-mirror [--source-* ...] [--dest-* ...] [--prefix ...] [--dry-run]
 
 The {import, publish, register, verify} subcommands were previously
 shipped as `python -m loom_benchmark_tool <cmd>`. Folded into
@@ -528,6 +529,71 @@ def _resolve_secret_source_or_env(
         return None
 
 
+def _add_sync_mirror_args(p: argparse.ArgumentParser) -> None:
+    """`sync-mirror` args: source + destination S3-compatible endpoints
+    + optional prefix. R2 is the intended destination; any S3-compatible
+    store works (public S3, another MinIO, etc.)."""
+    p.add_argument(
+        "--source-endpoint",
+        default=_target_minio_env("ENDPOINT"),
+        help=(
+            "Source object-store endpoint. Defaults to "
+            "LOOM_MINIO_ENDPOINT / LOOM_SVC_MINIO_ENDPOINT (in-cluster MinIO)."
+        ),
+    )
+    p.add_argument(
+        "--source-access-key",
+        default=_target_minio_env("ACCESS_KEY"),
+        help="Source object-store access key (env LOOM_MINIO_ACCESS_KEY / SVC).",
+    )
+    p.add_argument(
+        "--source-secret-key",
+        default=_target_minio_env("SECRET_KEY"),
+        help="Source object-store secret key (env LOOM_MINIO_SECRET_KEY / SVC).",
+    )
+    p.add_argument(
+        "--source-bucket",
+        default=os.environ.get("LOOM_BENCHMARK_BUCKET", "loom-benchmarks"),
+        help="Source bucket. Defaults to LOOM_BENCHMARK_BUCKET or loom-benchmarks.",
+    )
+    p.add_argument(
+        "--dest-endpoint",
+        default=os.environ.get("LOOM_R2_ENDPOINT"),
+        help=(
+            "Destination object-store endpoint. For Cloudflare R2, use "
+            "https://<account>.r2.cloudflarestorage.com (env LOOM_R2_ENDPOINT)."
+        ),
+    )
+    p.add_argument(
+        "--dest-access-key",
+        default=os.environ.get("LOOM_R2_ACCESS_KEY"),
+        help="Destination access key (env LOOM_R2_ACCESS_KEY).",
+    )
+    p.add_argument(
+        "--dest-secret-key",
+        default=os.environ.get("LOOM_R2_SECRET_KEY"),
+        help="Destination secret key (env LOOM_R2_SECRET_KEY).",
+    )
+    p.add_argument(
+        "--dest-bucket",
+        default=os.environ.get("LOOM_R2_BUCKET", "loom-benchmarks-public"),
+        help="Destination bucket (env LOOM_R2_BUCKET).",
+    )
+    p.add_argument(
+        "--prefix",
+        default="",
+        help=(
+            "Restrict the sync to keys under this prefix (e.g. a single "
+            "benchmark_id). Empty means the whole bucket."
+        ),
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List + count what would be copied without issuing PUTs.",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="loom datasets")
     sub = p.add_subparsers(dest="subcmd", required=True)
@@ -599,6 +665,16 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_publish_local_args(sub.add_parser(
         "publish-local",
         help="Upload a validated local benchmark folder to object storage and register it.",
+    ))
+
+    _add_sync_mirror_args(sub.add_parser(
+        "sync-mirror",
+        help=(
+            "One-way sync every object from a source object-store bucket "
+            "(e.g. in-cluster MinIO) to a destination bucket (e.g. Cloudflare R2). "
+            "Idempotent: skips objects already present at the destination with "
+            "matching size. See #804."
+        ),
     ))
 
     p_sync = sub.add_parser(
@@ -1335,6 +1411,52 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_sync_mirror(args: argparse.Namespace) -> int:
+    from loom_benchmark_tool.sync_cmd import run_sync_mirror
+
+    missing = [
+        flag for flag, value in (
+            ("--source-endpoint / LOOM_MINIO_ENDPOINT", args.source_endpoint),
+            ("--source-access-key / LOOM_MINIO_ACCESS_KEY", args.source_access_key),
+            ("--source-secret-key / LOOM_MINIO_SECRET_KEY", args.source_secret_key),
+            ("--dest-endpoint / LOOM_R2_ENDPOINT", args.dest_endpoint),
+            ("--dest-access-key / LOOM_R2_ACCESS_KEY", args.dest_access_key),
+            ("--dest-secret-key / LOOM_R2_SECRET_KEY", args.dest_secret_key),
+        ) if not value
+    ]
+    if missing:
+        print(f"error: sync-mirror requires: {', '.join(missing)}", file=sys.stderr)
+        return 2
+
+    try:
+        stats = asyncio.run(run_sync_mirror(
+            source_endpoint=args.source_endpoint,
+            source_access_key=args.source_access_key,
+            source_secret_key=args.source_secret_key,
+            source_bucket=args.source_bucket,
+            dest_endpoint=args.dest_endpoint,
+            dest_access_key=args.dest_access_key,
+            dest_secret_key=args.dest_secret_key,
+            dest_bucket=args.dest_bucket,
+            prefix=args.prefix,
+            dry_run=args.dry_run,
+        ))
+    except Exception as exc:
+        print(f"error: sync-mirror failed: {exc}", file=sys.stderr)
+        return 1
+
+    dry_marker = " [dry-run]" if args.dry_run else ""
+    print(
+        f"sync-mirror{dry_marker}: "
+        f"listed={stats.listed} "
+        f"uploaded={stats.uploaded} "
+        f"skipped={stats.skipped_size_match} "
+        f"bytes_uploaded={stats.bytes_uploaded} "
+        f"bytes_skipped={stats.bytes_skipped}",
+    )
+    return 0
+
+
 def _cmd_sync_config(args: argparse.Namespace) -> int:
     from loom_benchmarks.registry import REGISTRY
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -1451,6 +1573,7 @@ _DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "validate": _cmd_validate_local,
     "publish-local": _cmd_publish_local,
     "sync-config": _cmd_sync_config,
+    "sync-mirror": _cmd_sync_mirror,
 }
 
 
