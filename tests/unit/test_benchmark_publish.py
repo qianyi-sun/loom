@@ -106,7 +106,8 @@ def test_manifest_schema_version_is_int() -> None:
     assert MANIFEST_SCHEMA_VERSION >= 3
 
 
-def test_run_publish_includes_valid_task_config_in_manifest(
+@pytest.mark.asyncio
+async def test_run_publish_includes_valid_task_config_in_manifest(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -182,7 +183,7 @@ def test_run_publish_includes_valid_task_config_in_manifest(
     )
     monkeypatch.setattr(publish_cmd, "HfApi", FakeHfApi)
 
-    stats = publish_cmd.run_publish(
+    stats = await publish_cmd.run_publish(
         benchmark="fake-bench",
         hf_org="fake-org",
         hf_token="fake-token",
@@ -268,15 +269,19 @@ def test_run_publish_rejects_unsafe_converted_dockerfile(
     monkeypatch.setattr(publish_cmd, "HfApi", FakeHfApi)
 
     with pytest.raises(ValueError, match="package-specific pip index"):
-        publish_cmd.run_publish(
-            benchmark="fake-bench",
-            hf_org="fake-org",
-            hf_token="fake-token",
-            cache_dir=tmp_path / "cache",
+        import asyncio
+        asyncio.run(
+            publish_cmd.run_publish(
+                benchmark="fake-bench",
+                hf_org="fake-org",
+                hf_token="fake-token",
+                cache_dir=tmp_path / "cache",
+            )
         )
 
 
-def test_run_publish_filters_specific_instance_ids(
+@pytest.mark.asyncio
+async def test_run_publish_filters_specific_instance_ids(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -346,7 +351,7 @@ def test_run_publish_filters_specific_instance_ids(
     )
     monkeypatch.setattr(publish_cmd, "HfApi", FakeHfApi)
 
-    stats = publish_cmd.run_publish(
+    stats = await publish_cmd.run_publish(
         benchmark="fake-bench",
         hf_org="fake-org",
         hf_token="fake-token",
@@ -355,8 +360,176 @@ def test_run_publish_filters_specific_instance_ids(
     )
 
     assert stats["published"] == 1
+    assert stats["target"] == "hf"
     assert captured_manifest["task_count"] == 1
     task = cast(dict[str, Any], captured_manifest["tasks"][0])
     assert task["instance_id"] == "task-002"
     assert task["task_id"] == "fake-bench/task-002"
     assert task["task_config"]["task"]["id"] == "fake-bench/task-002"
+
+
+class FakeObjectStore:
+    """Minimal ObjectStore stub for publish tests."""
+
+    def __init__(self) -> None:
+        self.buckets: set[str] = set()
+        self.objects: dict[tuple[str, str], bytes] = {}
+
+    async def ensure_bucket(self, bucket: str) -> None:
+        self.buckets.add(bucket)
+
+    async def put_object(self, *, bucket: str, key: str, body: bytes) -> str:
+        self.objects[(bucket, key)] = body
+        return f"s3://{bucket}/{key}"
+
+
+def test_object_store_revision_is_stable_across_reorderings() -> None:
+    """Sorted-checksum digest — reordering the task list doesn't change
+    the revision. This is what makes publish idempotent across re-runs
+    that iterate instances in a different order."""
+    from loom_benchmark_tool.publish_cmd import _object_store_revision
+
+    entries = [
+        {"task_id": "fake/a", "checksum": "aa" * 32},
+        {"task_id": "fake/b", "checksum": "bb" * 32},
+        {"task_id": "fake/c", "checksum": "cc" * 32},
+    ]
+    rev1 = _object_store_revision(entries)
+    rev2 = _object_store_revision(list(reversed(entries)))
+    assert rev1 == rev2
+    assert len(rev1) == 16
+
+
+def test_object_store_revision_differs_on_content_change() -> None:
+    """Perturbing any per-task checksum must change the revision."""
+    from loom_benchmark_tool.publish_cmd import _object_store_revision
+
+    base = [
+        {"task_id": "fake/a", "checksum": "aa" * 32},
+        {"task_id": "fake/b", "checksum": "bb" * 32},
+    ]
+    perturbed = [
+        {"task_id": "fake/a", "checksum": "aa" * 32},
+        {"task_id": "fake/b", "checksum": "cc" * 32},
+    ]
+    assert _object_store_revision(base) != _object_store_revision(perturbed)
+
+
+@pytest.mark.asyncio
+async def test_run_publish_target_object_store_uploads_manifest_and_bundles(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """--target=object-store writes manifest.json + every bundle file
+    under {bucket}/{benchmark_id}/{revision}/... and never touches HF."""
+    from loom_benchmark_tool import publish_cmd
+
+    class FakeAdapter:
+        name = "fake-bench"
+        display_name = "Fake Bench"
+        upstream_source = UpstreamSource(kind="huggingface", locator="fake/source")
+        license_spdx = "MIT"
+        license_url = ""
+        splits = ("test",)
+        series = "fake"
+
+        def list_instances(
+            self,
+            *,
+            source_dir: Path,
+            split: str,
+        ) -> list[BenchmarkInstance]:
+            return [
+                BenchmarkInstance(instance_id="task-001", split=split, raw={}),
+                BenchmarkInstance(instance_id="task-002", split=split, raw={}),
+            ]
+
+        def convert_instance(
+            self,
+            instance: BenchmarkInstance,
+            *,
+            out_dir: Path,
+        ) -> ConvertedTask:
+            task_id = f"fake-bench/{instance.instance_id}"
+            (out_dir / "task.toml").write_text(_task_toml(task_id))
+            (out_dir / "solution.py").write_text("print(1)\n")
+            return ConvertedTask(
+                task_id=task_id,
+                checksum=_bundle_checksum(out_dir),
+                license_spdx="MIT",
+                warnings=(),
+            )
+
+    class ExplodingHfApi:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise AssertionError("HF should not be touched with target=object-store")
+
+    monkeypatch.setitem(publish_cmd.REGISTRY, "fake-bench", FakeAdapter())
+    monkeypatch.setattr(
+        publish_cmd,
+        "fetch_upstream",
+        lambda *_args, **_kwargs: tmp_path,
+    )
+    monkeypatch.setattr(publish_cmd, "HfApi", ExplodingHfApi)
+
+    store = FakeObjectStore()
+    result = await publish_cmd.run_publish(
+        benchmark="fake-bench",
+        target="object-store",
+        cache_dir=tmp_path / "cache",
+        object_store=store,
+        bucket="loom-benchmarks",
+    )
+
+    assert result["target"] == "object-store"
+    assert result["published"] == 2
+    assert result["repo_id"] == "s3://loom-benchmarks/fake-bench"
+    revision = result["revision"]
+    assert len(revision) == 16
+    assert "loom-benchmarks" in store.buckets
+
+    # Manifest lands at the revision root.
+    manifest_key = f"fake-bench/{revision}/manifest.json"
+    assert (
+        ("loom-benchmarks", manifest_key) in store.objects
+    ), f"expected manifest at {manifest_key}, got {sorted(store.objects)}"
+    manifest = json.loads(store.objects[("loom-benchmarks", manifest_key)])
+    assert manifest["task_count"] == 2
+    assert manifest["schema_version"] == MANIFEST_SCHEMA_VERSION
+
+    # Each task's bundle files land under {benchmark_id}/{revision}/{safe_id}/.
+    for task_entry in manifest["tasks"]:
+        safe = task_entry["hf_path"].rstrip("/")
+        for filename in ("task.toml", "solution.py"):
+            key = f"fake-bench/{revision}/{safe}/{filename}"
+            assert (
+                ("loom-benchmarks", key) in store.objects
+            ), f"expected {key} in uploaded objects"
+
+
+@pytest.mark.asyncio
+async def test_run_publish_target_object_store_requires_object_store() -> None:
+    """Missing object_store surfaces a clear ValueError before staging."""
+    from loom_benchmark_tool import publish_cmd
+
+    with pytest.raises(ValueError, match="object_store"):
+        await publish_cmd.run_publish(
+            benchmark="fake-bench",
+            target="object-store",
+            cache_dir=Path("/tmp/nowhere"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_publish_target_hf_still_requires_token() -> None:
+    """Legacy default target keeps its token requirement — backwards compat."""
+    from loom_benchmark_tool import publish_cmd
+
+    with pytest.raises(ValueError, match="hf_token"):
+        await publish_cmd.run_publish(
+            benchmark="fake-bench",
+            target="hf",
+            hf_org="fake-org",
+            hf_token=None,
+            cache_dir=Path("/tmp/nowhere"),
+        )

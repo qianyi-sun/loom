@@ -540,11 +540,12 @@ def test_publish_passes_instance_ids_to_benchmark_tool(
 ) -> None:
     captured: dict[str, object] = {}
 
-    def fake_run_publish(**kwargs: object) -> dict[str, object]:
+    async def fake_run_publish(**kwargs: object) -> dict[str, object]:
         captured.update(kwargs)
         return {
             "published": 1,
             "warnings": 0,
+            "target": "hf",
             "repo_id": "fake-org/loom-benchmark-humaneval",
             "revision": "fake-rev",
         }
@@ -564,7 +565,87 @@ def test_publish_passes_instance_ids_to_benchmark_tool(
 
     assert rc == 0
     assert captured["instance_ids"] == {"HumanEval/1"}
+    assert captured["target"] == "hf"
     assert "published=1" in capsys.readouterr().out
+
+
+def test_publish_target_object_store_requires_minio_flags(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--target=object-store bails cleanly when MinIO creds are missing."""
+    for var in (
+        "LOOM_MINIO_ENDPOINT",
+        "LOOM_MINIO_ACCESS_KEY",
+        "LOOM_MINIO_SECRET_KEY",
+        "LOOM_SVC_MINIO_ENDPOINT",
+        "LOOM_SVC_MINIO_ACCESS_KEY",
+        "LOOM_SVC_MINIO_SECRET_KEY",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    rc = dispatch([
+        "publish",
+        "humaneval",
+        "--target",
+        "object-store",
+    ])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "requires:" in captured.err
+
+
+def test_publish_target_object_store_builds_minio_client(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--target=object-store instantiates MinIO client + threads flags through."""
+    captured: dict[str, object] = {}
+    minio_ctor_kwargs: dict[str, object] = {}
+
+    class FakeMinio:
+        def __init__(self, **kwargs: object) -> None:
+            minio_ctor_kwargs.update(kwargs)
+
+    async def fake_run_publish(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "published": 5,
+            "warnings": 0,
+            "target": "object-store",
+            "repo_id": "s3://loom-benchmarks/humaneval",
+            "revision": "abc123",
+        }
+
+    monkeypatch.setattr("loom.trajectory.storage.MinioObjectStore", FakeMinio)
+    monkeypatch.setattr("loom_benchmark_tool.publish_cmd.run_publish", fake_run_publish)
+
+    rc = dispatch([
+        "publish",
+        "humaneval",
+        "--target",
+        "object-store",
+        "--minio-endpoint",
+        "http://minio.local:9000",
+        "--minio-access-key",
+        "minioadmin",
+        "--minio-secret-key",
+        "minioadmin123",
+        "--bucket",
+        "loom-benchmarks",
+    ])
+
+    assert rc == 0
+    assert captured["target"] == "object-store"
+    assert captured["object_store"] is not None
+    assert captured["bucket"] == "loom-benchmarks"
+    assert minio_ctor_kwargs == {
+        "endpoint_url": "http://minio.local:9000",
+        "access_key": "minioadmin",
+        "secret_key": "minioadmin123",
+    }
+    assert "target=object-store" in capsys.readouterr().out
 
 
 def test_publish_failure_redacts_hf_token_from_cli_error(
@@ -573,7 +654,7 @@ def test_publish_failure_redacts_hf_token_from_cli_error(
 ) -> None:
     hf_token = "hf_1234567890abcdef1234"
 
-    def fake_run_publish(**kwargs: object) -> dict[str, object]:
+    async def fake_run_publish(**kwargs: object) -> dict[str, object]:
         raise RuntimeError(f"403 Forbidden for token {kwargs['hf_token']}")
 
     monkeypatch.setattr("loom_benchmark_tool.publish_cmd.run_publish", fake_run_publish)
