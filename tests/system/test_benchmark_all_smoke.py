@@ -39,6 +39,11 @@ _FIXTURE_ROOT = (
     / "packages/loom-benchmarks/tests/fixtures"
 )
 
+_TB2_FIXTURE_ROOT = (
+    Path(__file__).resolve().parents[2]
+    / "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10"
+)
+
 pytestmark = pytest.mark.skipif(
     os.environ.get("LOOM_RUN_ALL_BENCHMARKS_SMOKE") != "1",
     reason="set LOOM_RUN_ALL_BENCHMARKS_SMOKE=1 to run the "
@@ -55,7 +60,7 @@ class BenchmarkCase:
     ``adapter_import_path`` + ``adapter_class_name`` locate the class
     whose ``list_instances`` gets monkey-patched.
 
-    Three record-sourcing modes; set exactly one:
+    Four record-sourcing modes; set exactly one:
 
     * ``fixture_path`` (relative to ``_FIXTURE_ROOT``): load JSON rows,
       filter by ``str(row[id_field]) in instance_ids``. Used when the
@@ -70,6 +75,11 @@ class BenchmarkCase:
       files) that the raw records reference. Used by adapters whose
       ``convert_instance`` copies files from a ``source_root`` path in
       the raw dict (e.g. tau2-bench).
+    * ``override_source_dir``: do NOT patch ``list_instances`` at all;
+      patch ``fetch_upstream`` to return this path so the adapter's
+      real walk runs against local files. Used by adapters (e.g.
+      terminal-bench-2) whose ``list_instances`` traverses a task-dir
+      tree that already ships as an in-tree fixture.
 
     ``id_field`` is only consulted for ``fixture_path`` mode.
     """
@@ -81,6 +91,7 @@ class BenchmarkCase:
     fixture_path: str | None = None
     raw_records: tuple[dict[str, object], ...] | None = None
     records_factory: Callable[[Path], tuple[dict[str, object], ...]] | None = None
+    override_source_dir: Path | None = None
     id_field: str = "task_id"
     # ``run_import`` calls list_instances once per split declared on the
     # adapter (see ``benchmarks.json`` -> ``splits``). The fake yields
@@ -95,11 +106,12 @@ class BenchmarkCase:
             self.fixture_path is not None,
             self.raw_records is not None,
             self.records_factory is not None,
+            self.override_source_dir is not None,
         ]
         if sum(sources) != 1:
             raise ValueError(
                 f"{self.benchmark_id}: set exactly one of fixture_path, "
-                "raw_records, records_factory",
+                "raw_records, records_factory, override_source_dir",
             )
         if self.raw_records is not None and len(self.raw_records) != len(
             self.instance_ids,
@@ -463,6 +475,25 @@ CASES: tuple[BenchmarkCase, ...] = (
         records_factory=lambda tmp: _tau2_records_factory(tmp),
         timeout_sec=1200,
     ),
+    # Bucket D: terminal-bench-2 lives in its own package. Real
+    # list_instances walks a task-directory tree; the package already
+    # ships ``tb2-subset-10`` fixture with 10 pinned upstream tasks, so
+    # we point fetch_upstream at it and let the real walk run against
+    # local files. 3 representative task shapes: single-service compose
+    # (hello-world), test-heavy (chess-best-move), multi-step
+    # interactive (blind-maze-explorer-5x5).
+    BenchmarkCase(
+        benchmark_id="terminal-bench-2",
+        adapter_import_path="loom_benchmark_terminal_bench_2.adapter",
+        adapter_class_name="TerminalBench2Adapter",
+        override_source_dir=_TB2_FIXTURE_ROOT,
+        instance_ids=(
+            "blind-maze-explorer-5x5",
+            "chess-best-move",
+            "hello-world",
+        ),
+        timeout_sec=3600,
+    ),
 )
 
 
@@ -548,26 +579,34 @@ async def test_benchmark_smoke(
     from loom_benchmarks.base import BenchmarkInstance
 
     adapter_cls = _load_adapter_class(case)
-    rows = _resolve_rows(case, tmp_path)
 
-    def _fake_list(
-        self: object, *, source_dir: Path, split: str,
-    ) -> Iterator[BenchmarkInstance]:
-        # Adapter.splits may be multi-valued (e.g. gaia = validation +
-        # test); yield only on the target split to avoid double-import.
-        if split != case.target_split:
-            return
-        for instance_id, raw in rows:
-            yield BenchmarkInstance(
-                instance_id=instance_id,
-                split=split,
-                raw=raw,
-            )
+    if case.override_source_dir is not None:
+        # Real list_instances walks the pre-materialized fixture tree.
+        # ``instance_ids`` is passed to run_import for explicit filtering.
+        source_dir = case.override_source_dir
+    else:
+        rows = _resolve_rows(case, tmp_path)
 
-    monkeypatch.setattr(adapter_cls, "list_instances", _fake_list)
+        def _fake_list(
+            self: object, *, source_dir: Path, split: str,
+        ) -> Iterator[BenchmarkInstance]:
+            # Adapter.splits may be multi-valued (e.g. gaia = validation
+            # + test); yield only on target_split to avoid double-import.
+            if split != case.target_split:
+                return
+            for instance_id, raw in rows:
+                yield BenchmarkInstance(
+                    instance_id=instance_id,
+                    split=split,
+                    raw=raw,
+                )
+
+        monkeypatch.setattr(adapter_cls, "list_instances", _fake_list)
+        source_dir = tmp_path / "stub-source"
+
     monkeypatch.setattr(
         "loom_benchmark_tool.import_cmd.fetch_upstream",
-        lambda *a, **kw: tmp_path / "stub-source",
+        lambda *a, **kw: source_dir,
     )
 
     minio_store = MinioObjectStore(
@@ -586,12 +625,15 @@ async def test_benchmark_smoke(
         object_store=minio_store,
         bucket="loom-benchmarks",
         cache_dir=tmp_path / "cache",
-        limit=len(rows),
+        # Filter by instance_ids (not limit) so cases that use the
+        # real list_instances (override_source_dir mode) don't pull
+        # extraneous rows from the fixture tree.
+        instance_ids=list(case.instance_ids),
         imported_by="all-benchmarks-smoke",
     )
-    assert stats["converted"] == len(rows), (
-        f"{case.benchmark_id}: expected {len(rows)} converted, "
-        f"got {stats}"
+    assert stats["converted"] == len(case.instance_ids), (
+        f"{case.benchmark_id}: expected {len(case.instance_ids)} "
+        f"converted, got {stats}"
     )
 
     cp = compose_stack["control_plane"]
