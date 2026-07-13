@@ -58,10 +58,13 @@ def trusted_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir(mode=0o755)
     (repo / ".git").mkdir(mode=0o700)
+    git_config = repo / ".git" / "config"
+    git_config.write_text("[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
     config_path = tmp_path / "staging-rollout.toml"
     config_path.write_text("schema_version = 1\n", encoding="utf-8")
     repo.chmod(0o755)
     (repo / ".git").chmod(0o700)
+    git_config.chmod(0o600)
     config_path.chmod(0o600)
     monkeypatch.setattr(
         candidate.pwd,
@@ -341,6 +344,7 @@ def test_binding_rejects_symlinked_git_directory_before_git(
     tmp_path: Path,
 ) -> None:
     git_dir = trusted_repo / ".git"
+    (git_dir / "config").unlink()
     git_dir.rmdir()
     external_git = tmp_path / "external-git"
     external_git.mkdir(mode=0o700)
@@ -406,12 +410,98 @@ def test_binding_rejects_wrong_path_owner_before_git(
 
 def test_binding_rejects_non_directory_git_path_before_git(trusted_repo: Path) -> None:
     git_dir = trusted_repo / ".git"
+    (git_dir / "config").unlink()
     git_dir.rmdir()
     git_dir.write_text("gitdir: attacker-controlled\n", encoding="utf-8")
     git_dir.chmod(0o600)
     runner = FakeRunner(trusted_repo)
 
     with pytest.raises(candidate.CandidateBindingError, match="directory"):
+        candidate.bind_fresh_origin_dev(
+            make_config(trusted_repo),
+            run=runner,
+            now=fixed_now,
+        )
+
+    assert runner.argvs == []
+
+
+def test_binding_rejects_symlinked_git_config_before_git(
+    trusted_repo: Path,
+    tmp_path: Path,
+) -> None:
+    git_config = trusted_repo / ".git" / "config"
+    git_config.unlink()
+    target = tmp_path / "attacker-git-config"
+    target.write_text("[core]\n\tfsmonitor = /tmp/hook\n", encoding="utf-8")
+    git_config.symlink_to(target)
+    runner = FakeRunner(trusted_repo)
+
+    with pytest.raises(candidate.CandidateBindingError, match=r"git config.*symlink"):
+        candidate.bind_fresh_origin_dev(
+            make_config(trusted_repo),
+            run=runner,
+            now=fixed_now,
+        )
+
+    assert runner.argvs == []
+
+
+def test_binding_rejects_non_regular_git_config_before_git(trusted_repo: Path) -> None:
+    git_config = trusted_repo / ".git" / "config"
+    git_config.unlink()
+    git_config.mkdir(mode=0o700)
+    runner = FakeRunner(trusted_repo)
+
+    with pytest.raises(candidate.CandidateBindingError, match=r"git config.*regular file"):
+        candidate.bind_fresh_origin_dev(
+            make_config(trusted_repo),
+            run=runner,
+            now=fixed_now,
+        )
+
+    assert runner.argvs == []
+
+
+def test_binding_rejects_wrong_git_config_owner_before_git(
+    trusted_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    git_config = trusted_repo / ".git" / "config"
+    trusted_lstat = candidate.os.lstat
+
+    def wrong_git_config_owner_lstat(path: os.PathLike[str] | str) -> object:
+        metadata = trusted_lstat(path)
+        if Path(path) == git_config:
+            return SimpleNamespace(st_mode=metadata.st_mode, st_uid=os.getuid() + 1000)
+        return metadata
+
+    monkeypatch.setattr(candidate.os, "lstat", wrong_git_config_owner_lstat)
+    runner = FakeRunner(trusted_repo)
+
+    with pytest.raises(candidate.CandidateBindingError, match=r"git config owner UID"):
+        candidate.bind_fresh_origin_dev(
+            make_config(trusted_repo),
+            run=runner,
+            now=fixed_now,
+        )
+
+    assert runner.argvs == []
+
+
+@pytest.mark.parametrize("mode", [0o620, 0o602])
+def test_binding_rejects_group_or_world_writable_git_config_before_git(
+    trusted_repo: Path,
+    mode: int,
+) -> None:
+    git_config = trusted_repo / ".git" / "config"
+    git_config.chmod(mode)
+    runner = FakeRunner(trusted_repo)
+
+    with pytest.raises(
+        candidate.CandidateBindingError,
+        match=r"git config.*group/world writable",
+    ):
         candidate.bind_fresh_origin_dev(
             make_config(trusted_repo),
             run=runner,

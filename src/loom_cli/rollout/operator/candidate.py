@@ -84,6 +84,23 @@ def _validate_trusted_directory(path: Path, *, service_uid: int) -> None:
         raise CandidateBindingError(f"trusted checkout path is group/world writable: {path}")
 
 
+def _validate_trusted_git_config(path: Path, *, service_uid: int) -> None:
+    try:
+        metadata = os.lstat(path)
+    except OSError as exc:
+        raise CandidateBindingError(f"trusted git config is unavailable: {path}") from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        raise CandidateBindingError(f"trusted git config must not be a symlink: {path}")
+    if not stat.S_ISREG(metadata.st_mode):
+        raise CandidateBindingError(f"trusted git config must be a regular file: {path}")
+    if metadata.st_uid not in {0, service_uid}:
+        raise CandidateBindingError(
+            f"trusted git config owner UID {metadata.st_uid} is neither root nor the service account"
+        )
+    if stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise CandidateBindingError(f"trusted git config is group/world writable: {path}")
+
+
 def _git_argv(repo: Path, *args: str) -> list[str]:
     return ["git", "-C", str(repo), *args]
 
@@ -121,6 +138,10 @@ def bind_fresh_origin_dev(
     service_uid = _service_uid(config)
     _validate_trusted_directory(config.runner_repo, service_uid=service_uid)
     _validate_trusted_directory(config.runner_repo / ".git", service_uid=service_uid)
+    _validate_trusted_git_config(
+        config.runner_repo / ".git" / "config",
+        service_uid=service_uid,
+    )
 
     remote_result = _invoke(
         run,
