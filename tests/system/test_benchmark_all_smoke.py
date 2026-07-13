@@ -614,10 +614,18 @@ async def test_benchmark_smoke(
         access_key=compose_stack["minio_access_key"],
         secret_key=compose_stack["minio_secret_key"],
     )
-    # Idempotent: the humaneval/swe-bench smokes create the same
-    # bucket in the same session — subsequent create_bucket calls
-    # against MinIO succeed as no-op for the same-region owner.
-    minio_store._client.create_bucket(Bucket="loom-benchmarks")
+    # compose_stack is session-scoped, so the humaneval/swe-bench smokes
+    # in the same test module create the same bucket first. Boto3 raises
+    # BucketAlreadyOwnedByYou / BucketAlreadyExists on repeat; treat both
+    # as no-op since ownership is uniform for a single-tenant test MinIO.
+    try:
+        minio_store._client.create_bucket(Bucket="loom-benchmarks")
+    except minio_store._client.exceptions.ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code not in {
+            "BucketAlreadyOwnedByYou", "BucketAlreadyExists",
+        }:
+            raise
 
     stats = await run_import(
         benchmark=case.benchmark_id,
