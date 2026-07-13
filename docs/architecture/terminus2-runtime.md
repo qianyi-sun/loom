@@ -118,10 +118,12 @@ Evidence checklist:
 | Mode | Status | Source |
 |---|---|---|
 | `raw-harbor-tb2-v1` | Shipped | Provider logs + reward joins |
-| `raw-harbor-tb2-v2` | Planned (not wired in delivery API yet) | Checkpoint bridge / typed `terminus2_*` events via `Terminus2TrajectoryMapper` |
+| `raw-harbor-tb2-v2` | Shipped framework (`[Needs validation]` for live staging proof) | Checkpoint bridge / typed `terminus2_*` events via `Terminus2TrajectoryMapper` |
 
-Until `raw-harbor-tb2-v2` ships in the delivery API, TB2-facing delivery
-continues to use `raw-harbor-tb2-v1`.
+`raw-harbor-tb2-v2` is wired in the delivery API and CLI. Use it when the
+trial trajectory contains typed `terminus2_*` events and native Harbor
+artifacts. Live staging validation is still pending; use `raw-harbor-tb2-v1`
+for provider-log-based exports until typed-event batches are available.
 
 ## Related code
 
@@ -132,5 +134,6 @@ continues to use `raw-harbor-tb2-v1`.
 | `src/loom/agent/terminus2/checkpoint_bridge.py` | Harbor JSON → typed events |
 | `src/loom/agent/terminus2/gateway_ledger.py` | CP `llm_calls` join |
 | `src/loom/agent/terminus2/mapper.py` | TB2 v2 projection |
+| `src/loom_service/delivery_export_tb2_v2.py` | TB2 v2 export framework |
 | `packages/loom-launcher/loom_launcher/terminus_2_runner.py` | Deprecated stub |
 | `tests/conformance/terminus2/README.md` | Local conformance notes |
