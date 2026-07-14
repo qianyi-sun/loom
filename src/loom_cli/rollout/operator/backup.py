@@ -270,7 +270,7 @@ class _BackupResourceBudget:
             )
 
     def release_entry(self, account: _WriterAccount) -> None:
-        """Release only reservations whose filesystem creation never happened."""
+        """Release a zero-byte reservation after failed creation or confirmed removal."""
         with self._lock:
             if not account.active:
                 return
@@ -390,6 +390,13 @@ class _LatestStageError(BackupError):
     def __init__(self, *, rollback_confirmed: bool) -> None:
         super().__init__("latest_publish_failed")
         self.rollback_confirmed = rollback_confirmed
+
+
+@dataclass(slots=True)
+class _LatestRollback:
+    name: str
+    account: _WriterAccount
+    exists: bool = True
 
 
 class _OnceCloser:
@@ -635,6 +642,17 @@ def _open_directory_no_follow(path: Path) -> int:
             os.close(current_fd)
 
 
+def _existing_backups_directory_is_approved(
+    metadata: os.stat_result,
+    *,
+    service_uid: int,
+) -> bool:
+    mode = stat.S_IMODE(metadata.st_mode)
+    return (metadata.st_uid == service_uid and mode == _PRIVATE_DIRECTORY_MODE) or (
+        metadata.st_uid != service_uid and mode == 0o770
+    )
+
+
 def _create_bundle_root(
     rollout_root: Path,
     bundle_name: str,
@@ -669,12 +687,18 @@ def _create_bundle_root(
             resources.reconcile_writer(backups_account)
         if backups_fd is None:
             raise ValueError("backups directory is unavailable")
+        backups_metadata = os.fstat(backups_fd)
+        backups_mode = stat.S_IMODE(backups_metadata.st_mode)
         if backups_created:
-            backups_metadata = os.fstat(backups_fd)
             if backups_metadata.st_uid != service_uid:
                 raise ValueError("backups owner UID does not match service account")
-            if stat.S_IMODE(backups_metadata.st_mode) != _PRIVATE_DIRECTORY_MODE:
+            if backups_mode != _PRIVATE_DIRECTORY_MODE:
                 raise ValueError("backups mode must be 0700")
+        elif not _existing_backups_directory_is_approved(
+            backups_metadata,
+            service_uid=service_uid,
+        ):
+            raise ValueError("existing backups directory metadata is not approved")
         bundle_path = backups_path / bundle_name
         bundle_account = resources.reserve_entry(bundle_path, component="directory")
         try:
@@ -825,30 +849,39 @@ def _read_previous_latest_target(directory_fd: int) -> str | None:
     return target
 
 
-def _restore_latest(directory_fd: int, previous_target: str | None) -> None:
+def _restore_latest(
+    directory_fd: int,
+    previous_target: str | None,
+    *,
+    rollback: _LatestRollback | None,
+) -> None:
     if previous_target is None:
         os.unlink("latest", dir_fd=directory_fd)
         os.fsync(directory_fd)
         return
-    rollback_name = f".latest.{uuid4().hex}.rollback"
-    rollback_exists = False
-    try:
-        os.symlink(previous_target, rollback_name, dir_fd=directory_fd)
-        rollback_exists = True
-        os.replace(
-            rollback_name,
-            "latest",
-            src_dir_fd=directory_fd,
-            dst_dir_fd=directory_fd,
-        )
-        rollback_exists = False
-        os.fsync(directory_fd)
-    finally:
-        if rollback_exists:
-            try:
-                os.unlink(rollback_name, dir_fd=directory_fd)
-            except OSError:
-                pass
+    if rollback is None or not rollback.exists:
+        raise ValueError("latest rollback reservation is unavailable")
+    os.replace(
+        rollback.name,
+        "latest",
+        src_dir_fd=directory_fd,
+        dst_dir_fd=directory_fd,
+    )
+    rollback.exists = False
+    os.fsync(directory_fd)
+
+
+def _discard_latest_rollback(
+    directory_fd: int,
+    rollback: _LatestRollback,
+    *,
+    resources: _BackupResourceBudget,
+) -> None:
+    os.unlink(rollback.name, dir_fd=directory_fd)
+    rollback.exists = False
+    resources.release_entry(rollback.account)
+    os.fsync(directory_fd)
+    resources.check_live()
 
 
 def _latest_matches(directory_fd: int, target: str | None) -> bool:
@@ -876,9 +909,24 @@ def _publish_latest(
         raise _LatestPublicationError(rollback_confirmed=True) from None
     temp_name = f".latest.{uuid4().hex}.tmp"
     temp_exists = False
+    rollback: _LatestRollback | None = None
     try:
         try:
             previous_target = _read_previous_latest_target(directory_fd)
+            if previous_target is not None:
+                rollback_name = f".latest.{uuid4().hex}.rollback"
+                rollback_account = resources.reserve_entry(
+                    bundle_root.parent / rollback_name,
+                    component="publication-rollback",
+                )
+                try:
+                    os.symlink(previous_target, rollback_name, dir_fd=directory_fd)
+                except BaseException:
+                    resources.release_entry(rollback_account)
+                    raise
+                rollback = _LatestRollback(rollback_name, rollback_account)
+                resources.reconcile_writer(rollback_account)
+                os.fsync(directory_fd)
             latest_account = resources.reserve_entry(
                 bundle_root.parent / temp_name,
                 component="publication",
@@ -903,13 +951,38 @@ def _publish_latest(
             resources.check_live()
         except Exception:
             try:
-                _restore_latest(directory_fd, previous_target)
+                _restore_latest(
+                    directory_fd,
+                    previous_target,
+                    rollback=rollback,
+                )
                 if not _latest_matches(directory_fd, previous_target):
                     raise OSError("latest rollback verification failed")
             except Exception:
                 raise _LatestPublicationError(rollback_confirmed=False) from None
             raise _LatestPublicationError(rollback_confirmed=True) from None
+        if rollback is not None:
+            try:
+                _discard_latest_rollback(
+                    directory_fd,
+                    rollback,
+                    resources=resources,
+                )
+            except Exception:
+                raise _LatestPublicationError(rollback_confirmed=False) from None
     finally:
+        if rollback is not None and rollback.exists:
+            try:
+                os.unlink(rollback.name, dir_fd=directory_fd)
+            except OSError:
+                pass
+            else:
+                rollback.exists = False
+                resources.release_entry(rollback.account)
+                try:
+                    os.fsync(directory_fd)
+                except OSError:
+                    pass
         if temp_exists:
             try:
                 os.unlink(temp_name, dir_fd=directory_fd)
@@ -1102,35 +1175,40 @@ def _stream_s3_object(
 ) -> None:
     budget.check_deadline()
     response = client.get_object(Bucket=bucket, Key=key)
-    budget.check_deadline()
-    cancellation.raise_if_expired()
-    if not isinstance(response, dict):
-        raise ValueError("object response is malformed")
-    body = response.get("Body")
-    read = getattr(body, "read", None)
-    close = getattr(body, "close", None)
-    body_closer = _OnceCloser(close) if callable(close) else None
-    if body_closer is not None:
-        cancellation.bind_body(body_closer)
+    body: object | None = None
+    read: object | None = None
+    body_closer: _OnceCloser | None = None
+    if isinstance(response, dict):
+        body = response.get("Body")
+        close = getattr(body, "close", None)
+        if callable(close):
+            body_closer = _OnceCloser(close)
+            cancellation.bind_body(body_closer)
 
-    temp_path = destination.parent / f".{destination.name}.{uuid4().hex}.part"
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
     fd: int | None = None
     temp_exists = False
     temp_account: _WriterAccount | None = None
+    temp_path: Path | None = None
     try:
+        budget.check_deadline()
+        cancellation.raise_if_expired()
+        if not isinstance(response, dict):
+            raise ValueError("object response is malformed")
+        read = getattr(body, "read", None)
         expected_size = response.get("ContentLength")
         if type(expected_size) is not int or expected_size < 0:
             raise ValueError("object content length is malformed")
         if not callable(read) or body_closer is None:
             raise ValueError("object body is malformed")
         budget.reserve_bytes(expected_size)
+        temp_path = destination.parent / f".{destination.name}.{uuid4().hex}.part"
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
         temp_account = resources.reserve_entry(temp_path, component="minio")
         resources.prepare_write(temp_account, expected_size)
         try:
@@ -1192,7 +1270,7 @@ def _stream_s3_object(
             if body_closer is not None:
                 cancellation.release_body(body_closer)
         finally:
-            if temp_exists:
+            if temp_exists and temp_path is not None:
                 try:
                     temp_path.unlink()
                 except OSError:
@@ -1382,6 +1460,7 @@ class Boto3MinioMirror:
                 capacity_provider=legacy_capacity,
                 max_entries=min(self._max_entries, inode_capacity),
             )
+        budget.check_deadline()
         client = self._client_factory(
             "s3",
             endpoint_url=endpoint_url,
@@ -1402,19 +1481,19 @@ class Boto3MinioMirror:
         if self._monotonic() >= deadline:
             client_closer()
             raise ValueError("MinIO mirror exceeded total deadline")
-        cancellation = _MirrorCancellationScope(
-            deadline=deadline,
-            monotonic=self._monotonic,
-            waiter=self._deadline_waiter,
-            cancellation_grace_seconds=self._cancellation_grace_seconds,
-            cancel_external=(
-                cancel_on_timeout
-                if isinstance(cancel_on_timeout, _OnceCloser)
-                else _OnceCloser(cancel_on_timeout)
-            ),
-        )
-        cancellation.bind_client(client_closer)
         try:
+            cancellation = _MirrorCancellationScope(
+                deadline=deadline,
+                monotonic=self._monotonic,
+                waiter=self._deadline_waiter,
+                cancellation_grace_seconds=self._cancellation_grace_seconds,
+                cancel_external=(
+                    cancel_on_timeout
+                    if isinstance(cancel_on_timeout, _OnceCloser)
+                    else _OnceCloser(cancel_on_timeout)
+                ),
+            )
+            cancellation.bind_client(client_closer)
             cancellation.start()
         except BaseException:
             try:
@@ -1568,23 +1647,31 @@ class SubprocessBackupCommandRunner:
             stderr=subprocess.DEVNULL,
             env=dict(env),
         )
-        if process.stdout is None:
+        completed: threading.Event | None = None
+        try:
+            if process.stdout is None:
+                raise RuntimeError("backup command stdout is unavailable")
+            completed = threading.Event()
+            timed_out = threading.Event()
+
+            def enforce_timeout() -> None:
+                assert completed is not None
+                if completed.wait(timeout_seconds):
+                    return
+                timed_out.set()
+                try:
+                    process.kill()
+                except BaseException:
+                    pass
+
+            watchdog = threading.Thread(target=enforce_timeout, daemon=True)
+            watchdog.start()
+        except BaseException:
+            if completed is not None:
+                completed.set()
             _reap_unwrapped_process(process)
-            raise RuntimeError("backup command stdout is unavailable")
-        completed = threading.Event()
-        timed_out = threading.Event()
-
-        def enforce_timeout() -> None:
-            if completed.wait(timeout_seconds):
-                return
-            timed_out.set()
-            try:
-                process.kill()
-            except BaseException:
-                pass
-
-        watchdog = threading.Thread(target=enforce_timeout, daemon=True)
-        watchdog.start()
+            raise
+        assert completed is not None
         failed = True
         try:
             while True:

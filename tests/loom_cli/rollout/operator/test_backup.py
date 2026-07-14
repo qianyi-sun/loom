@@ -1497,9 +1497,49 @@ def test_latest_directory_fsync_failure_restores_previous_relative_pointer(
     latest.symlink_to(old.name)
     original_replace = backup_module.os.replace
     original_fsync = backup_module.os.fsync
-    state = {"latest_replaced": False, "failed": False}
+    original_symlink = backup_module.os.symlink
+    original_reserve = backup_module._BackupResourceBudget.reserve_entry
+    state = {
+        "rollback_reserved": False,
+        "rollback_created": False,
+        "rollback_durable": False,
+        "latest_replaced": False,
+        "failed": False,
+    }
+
+    def recording_reserve(
+        resources: object,
+        path: Path,
+        *,
+        component: str,
+        inode: bool = True,
+    ) -> object:
+        account = original_reserve(
+            resources,  # type: ignore[arg-type]
+            path,
+            component=component,
+            inode=inode,
+        )
+        if component == "publication-rollback":
+            state["rollback_reserved"] = True
+        return account
+
+    def tracking_symlink(
+        target: object,
+        link_name: object,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        original_symlink(target, link_name, *args, **kwargs)  # type: ignore[arg-type]
+        if isinstance(link_name, str) and link_name.endswith(".rollback"):
+            assert state["rollback_reserved"]
+            assert os.readlink(backups_root / link_name) == old.name
+            state["rollback_created"] = True
 
     def tracking_replace(*args: object, **kwargs: object) -> None:
+        assert state["rollback_reserved"]
+        assert state["rollback_created"]
+        assert state["rollback_durable"]
         original_replace(*args, **kwargs)  # type: ignore[arg-type]
         state["latest_replaced"] = True
 
@@ -1508,9 +1548,66 @@ def test_latest_directory_fsync_failure_restores_previous_relative_pointer(
             state["failed"] = True
             raise OSError("untrusted-stage-detail")
         original_fsync(fd)
+        if state["rollback_created"] and not state["latest_replaced"]:
+            state["rollback_durable"] = True
 
+    monkeypatch.setattr(backup_module.os, "symlink", tracking_symlink)
     monkeypatch.setattr(backup_module.os, "replace", tracking_replace)
     monkeypatch.setattr(backup_module.os, "fsync", fail_first_post_replace_fsync)
+    monkeypatch.setattr(
+        backup_module._BackupResourceBudget,
+        "reserve_entry",
+        recording_reserve,
+    )
+    block_size = 4096
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        minio=Boto3MinioMirror(
+            client_factory=lambda *_args, **_kwargs: OneObjectS3(),
+            disk_reserve_bytes=0,
+            inode_reserve=0,
+        ),
+        now=lambda: FIXED_NOW,
+        max_postgres_bytes=len(POSTGRES_BYTES),
+        max_total_bytes=17 * block_size,
+        disk_reserve_bytes=0,
+        inode_reserve=0,
+        capacity_provider=lambda _path: backup_module._CapacitySnapshot(
+            free_bytes=1_000_000,
+            free_inodes=1_000_000,
+            block_size=block_size,
+        ),
+    )
+
+    with pytest.raises(BackupError, match="latest_publish_failed"):
+        creator.create(make_request())
+
+    failed_root = backups_root / "20260713T200000Z-stg-20260713-abcdef12"
+    assert state == {
+        "rollback_reserved": True,
+        "rollback_created": True,
+        "rollback_durable": True,
+        "latest_replaced": True,
+        "failed": True,
+    }
+    assert latest.is_symlink()
+    assert latest.readlink() == Path(old.name)
+    assert not (failed_root / "backup-manifest.json").exists()
+    assert list(backups_root.glob(".latest.*")) == []
+
+
+def test_successful_latest_replacement_removes_precreated_rollback(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    backups_root = config.rollout_root / "backups"
+    backups_root.mkdir(mode=0o700)
+    old = backups_root / "20260712T120000Z-old-request"
+    old.mkdir(mode=0o700)
+    latest = backups_root / "latest"
+    latest.symlink_to(old.name)
     creator = BackupCreator(
         config,
         service_uid=os.getuid(),
@@ -1519,15 +1616,10 @@ def test_latest_directory_fsync_failure_restores_previous_relative_pointer(
         now=lambda: FIXED_NOW,
     )
 
-    with pytest.raises(BackupError, match="latest_publish_failed"):
-        creator.create(make_request())
+    backup = creator.create(make_request())
 
-    failed_root = backups_root / "20260713T200000Z-stg-20260713-abcdef12"
-    assert state == {"latest_replaced": True, "failed": True}
-    assert latest.is_symlink()
-    assert latest.readlink() == Path(old.name)
-    assert not (failed_root / "backup-manifest.json").exists()
-    assert list(backups_root.glob(".latest.*.tmp")) == []
+    assert latest.readlink() == Path(backup.manifest_path.parent.name)
+    assert list(backups_root.glob(".latest.*")) == []
 
 
 def test_uncertain_latest_rollback_preserves_verified_canonical_manifest(
@@ -1558,7 +1650,7 @@ def test_uncertain_latest_rollback_preserves_verified_canonical_manifest(
             raise OSError("untrusted-stage-detail")
         original_fsync(fd)
 
-    def fail_restore(_directory_fd: int, _previous_target: str | None) -> None:
+    def fail_restore(*_args: object, **_kwargs: object) -> None:
         raise OSError("untrusted-rollback-detail")
 
     monkeypatch.setattr(backup_module.os, "replace", tracking_replace)
@@ -1708,6 +1800,71 @@ def test_subprocess_port_forward_wrapper_failure_reaps_child(
         SubprocessBackupCommandRunner().start(
             ["kubectl", "port-forward"],
             env={"PATH": "/usr/bin"},
+        )
+
+    assert events == ["terminate", "wait:5.0", "kill", "wait:5.0"]
+    assert process.poll() == -9
+    assert process.stdout.closed
+
+
+@pytest.mark.parametrize("failure", ["constructor", "start"])
+def test_subprocess_stream_watchdog_setup_failure_reaps_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    events: list[str] = []
+
+    class UnwatchedProcess:
+        def __init__(self) -> None:
+            self.stdout = (tmp_path / "postgres.dump").open("w+b")
+            self.running = True
+
+        def terminate(self) -> None:
+            events.append("terminate")
+
+        def wait(self, *, timeout: float) -> int:
+            events.append(f"wait:{timeout}")
+            if self.running:
+                raise subprocess.TimeoutExpired("pg_dump", timeout)
+            return -9
+
+        def kill(self) -> None:
+            events.append("kill")
+            self.running = False
+
+        def poll(self) -> int | None:
+            return None if self.running else -9
+
+    process = UnwatchedProcess()
+
+    monkeypatch.setattr(
+        backup_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: process,
+    )
+
+    def fail_thread_constructor(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("thread resources exhausted")
+
+    def fail_thread_start(_thread: object) -> None:
+        raise RuntimeError("thread resources exhausted")
+
+    if failure == "constructor":
+        monkeypatch.setattr(
+            backup_module.threading,
+            "Thread",
+            fail_thread_constructor,
+        )
+    else:
+        monkeypatch.setattr(backup_module.threading.Thread, "start", fail_thread_start)
+
+    with pytest.raises(RuntimeError, match="thread resources exhausted"):
+        SubprocessBackupCommandRunner().stream_stdout(
+            ["pg_dump"],
+            io.BytesIO(),
+            env={"PATH": "/usr/bin"},
+            timeout_seconds=600.0,
         )
 
     assert events == ["terminate", "wait:5.0", "kill", "wait:5.0"]
@@ -2215,6 +2372,46 @@ def test_minio_rejects_deadline_exhausted_during_client_setup(tmp_path: Path) ->
     assert client.events == ["client_close"]
 
 
+def test_minio_does_not_create_client_after_capacity_work_exhausts_deadline(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    client_factory_calls: list[str] = []
+    client = LifecycleS3([])
+
+    def expire_while_reading_inodes(_path: Path) -> int:
+        now[0] = 160.0
+        return 1_000_000
+
+    def create_client(*_args: object, **_kwargs: object) -> LifecycleS3:
+        client_factory_calls.append("create_client")
+        return client
+
+    destination = tmp_path / "minio"
+    destination.mkdir(mode=0o700)
+    mirror = Boto3MinioMirror(
+        client_factory=create_client,
+        timeout_seconds=60.0,
+        disk_reserve_bytes=0,
+        inode_reserve=0,
+        available_bytes=lambda _path: 1_000_000,
+        available_inodes=expire_while_reading_inodes,
+        monotonic=lambda: now[0],
+    )
+
+    with pytest.raises(ValueError, match="total deadline"):
+        mirror.mirror(
+            endpoint_url="http://127.0.0.1:19000",
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            buckets=("loom-staging-trajectories", "loom-staging-artifacts"),
+            destination=destination,
+        )
+
+    assert client_factory_calls == []
+    assert client.events == []
+
+
 @pytest.mark.parametrize("stage", ["list", "get", "read"])
 def test_minio_rechecks_absolute_deadline_after_final_blocking_call(
     tmp_path: Path,
@@ -2273,6 +2470,68 @@ def test_minio_rechecks_absolute_deadline_after_final_blocking_call(
         )
 
     assert client.closed
+
+
+def test_minio_closes_body_returned_by_get_after_absolute_deadline(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    events: list[str] = []
+
+    class LateBody(FakeStreamingBody):
+        def close(self) -> None:
+            if not self.closed:
+                events.append("body_close")
+            super().close()
+
+    class LateGetS3:
+        def __init__(self) -> None:
+            self.list_calls = 0
+            self.body = LateBody(b"")
+            self.closed = False
+
+        def list_objects_v2(self, **_kwargs: str) -> dict[str, object]:
+            self.list_calls += 1
+            if self.list_calls == 1:
+                return {"Contents": [], "IsTruncated": False}
+            return {"Contents": [{"Key": "object.bin"}], "IsTruncated": False}
+
+        def get_object(self, **_kwargs: str) -> dict[str, object]:
+            now[0] += 61.0
+            return {"Body": self.body, "ContentLength": 0}
+
+        def close(self) -> None:
+            events.append("client_close")
+            self.closed = True
+
+    client = LateGetS3()
+    port_forward = DeadlinePortForward(events)
+    mirror = Boto3MinioMirror(
+        client_factory=lambda *_args, **_kwargs: client,
+        timeout_seconds=60.0,
+        monotonic=lambda: now[0],
+        deadline_waiter=lambda stop, _timeout: stop.wait(1.0),
+    )
+    config = make_config(tmp_path)
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(port_forward=port_forward),
+        minio=mirror,
+        now=lambda: FIXED_NOW,
+    )
+
+    with pytest.raises(BackupError, match="minio_snapshot_failed"):
+        creator.create(make_request())
+
+    assert client.body.closed
+    assert client.closed
+    assert events.index("body_close") < events.index("client_close")
+    assert events.index("client_close") < events.index("terminate")
+    assert events[-3:] == ["terminate", "wait:5.0", "port_forward_close"]
+    backups_root = config.rollout_root / "backups"
+    assert not (backups_root / "latest").exists()
+    assert not list(backups_root.glob("*/backup-manifest.json"))
 
 
 def test_boto_client_closes_before_port_forward_cleanup(tmp_path: Path) -> None:
@@ -2344,6 +2603,36 @@ def test_boto_watchdog_start_failure_still_closes_client(
     assert events == ["client_close"]
 
 
+def test_boto_watchdog_constructor_failure_still_closes_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    client = LifecycleS3(events)
+    destination = tmp_path / "minio"
+    destination.mkdir(mode=0o700)
+
+    def fail_thread_constructor(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("thread resources exhausted")
+
+    monkeypatch.setattr(
+        backup_module.threading,
+        "Thread",
+        fail_thread_constructor,
+    )
+
+    with pytest.raises(RuntimeError, match="thread resources exhausted"):
+        Boto3MinioMirror(client_factory=lambda *_args, **_kwargs: client).mirror(
+            endpoint_url="http://127.0.0.1:19000",
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            buckets=("loom-staging-trajectories", "loom-staging-artifacts"),
+            destination=destination,
+        )
+
+    assert events == ["client_close"]
+
+
 def test_boto_closes_body_when_content_length_is_malformed(tmp_path: Path) -> None:
     events: list[str] = []
 
@@ -2373,6 +2662,62 @@ def test_boto_closes_body_when_content_length_is_malformed(tmp_path: Path) -> No
 
     assert client.body.closed
     assert events == ["client_close"]
+
+
+def test_boto_closes_body_when_read_accessor_raises(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    class RaisingReadBody:
+        def __init__(self) -> None:
+            self.closed = False
+
+        @property
+        def read(self) -> object:
+            raise RuntimeError("malformed read accessor")
+
+        def close(self) -> None:
+            if not self.closed:
+                events.append("body_close")
+                self.closed = True
+
+    class RaisingReadS3:
+        def __init__(self) -> None:
+            self.body = RaisingReadBody()
+
+        def list_objects_v2(self, **_kwargs: str) -> dict[str, object]:
+            return {"Contents": [{"Key": "object.bin"}], "IsTruncated": False}
+
+        def get_object(self, **_kwargs: str) -> dict[str, object]:
+            return {"Body": self.body, "ContentLength": 0}
+
+        def close(self) -> None:
+            events.append("client_close")
+
+    client = RaisingReadS3()
+    port_forward = DeadlinePortForward(events)
+    config = make_config(tmp_path)
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(port_forward=port_forward),
+        minio=Boto3MinioMirror(
+            client_factory=lambda *_args, **_kwargs: client,
+        ),
+        now=lambda: FIXED_NOW,
+    )
+
+    with pytest.raises(BackupError, match="minio_snapshot_failed"):
+        creator.create(make_request())
+
+    assert client.body.closed
+    assert events.index("body_close") < events.index("client_close")
+    assert events.index("client_close") < events.index("terminate")
+    assert events[-3:] == ["terminate", "wait:5.0", "port_forward_close"]
+    backups_root = config.rollout_root / "backups"
+    assert not (backups_root / "latest").exists()
+    assert not list(backups_root.glob("*/backup-manifest.json"))
 
 
 def test_deadline_rejects_nominal_success_returned_after_expiry(
@@ -2606,7 +2951,7 @@ def test_boto_mirror_has_total_deadline(tmp_path: Path) -> None:
             destination=destination,
         )
 
-    assert events == ["client_close"]
+    assert events == []
 
 
 def test_boto_mirror_rejects_declared_bytes_over_disk_aware_budget(
@@ -2973,15 +3318,12 @@ def test_existing_acl_managed_backups_parent_preserves_owner_and_mode(
     backups_root.mkdir(mode=0o770)
     backups_root.chmod(0o770)
     original_fstat = backup_module.os.fstat
+    backups_identity = backups_root.stat()
     trusted_owner_uid = os.getuid() + 1000
 
     def trusted_parent_fstat(fd: int) -> os.stat_result:
         metadata = original_fstat(fd)
-        try:
-            target = Path(os.readlink(f"/dev/fd/{fd}"))
-        except OSError:
-            return metadata
-        if target != backups_root:
+        if metadata.st_dev != backups_identity.st_dev or metadata.st_ino != backups_identity.st_ino:
             return metadata
         values = list(metadata)
         values[0] = (metadata.st_mode & ~0o777) | 0o770
@@ -3002,6 +3344,56 @@ def test_existing_acl_managed_backups_parent_preserves_owner_and_mode(
     assert backups_root.stat().st_mode & 0o777 == 0o770
     assert backup.manifest_path.parent.stat().st_mode & 0o777 == 0o700
     assert backup.manifest_path.parent.stat().st_uid == os.getuid()
+
+
+def test_existing_world_writable_backups_parent_is_rejected_before_commands(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    backups_root = config.rollout_root / "backups"
+    backups_root.mkdir(mode=0o777)
+    backups_root.chmod(0o777)
+    runner = RecordingRunner()
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=runner,
+        minio=SuccessfulMinioMirror(),
+        now=lambda: FIXED_NOW,
+    )
+
+    with pytest.raises(BackupError, match="backup_root_create_failed"):
+        creator.create(make_request())
+
+    assert backups_root.stat().st_mode & 0o777 == 0o777
+    assert list(backups_root.iterdir()) == []
+    assert runner.argvs == []
+
+
+@pytest.mark.parametrize("mode", [0o770, 0o755, 0o775])
+def test_existing_service_owned_unapproved_backups_parent_is_rejected(
+    tmp_path: Path,
+    mode: int,
+) -> None:
+    config = make_config(tmp_path)
+    backups_root = config.rollout_root / "backups"
+    backups_root.mkdir(mode=mode)
+    backups_root.chmod(mode)
+    runner = RecordingRunner()
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=runner,
+        minio=SuccessfulMinioMirror(),
+        now=lambda: FIXED_NOW,
+    )
+
+    with pytest.raises(BackupError, match="backup_root_create_failed"):
+        creator.create(make_request())
+
+    assert backups_root.stat().st_mode & 0o777 == mode
+    assert list(backups_root.iterdir()) == []
+    assert runner.argvs == []
 
 
 def test_new_backups_parent_is_forced_to_private_mode(
