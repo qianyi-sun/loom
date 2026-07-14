@@ -500,7 +500,9 @@ belongs to production, staging/dev has `staging_slots = 0`, and any staging borr
 be explicit, bounded to at most one slot per host, and drained back before the
 borrow window ends. The v1.0 GB10 baseline is all 15 GB10 hosts at 10 slots
 each; the repo-owned `deploy/worker-pools/gb10/ssh_config` routes
-`trt-gb10-14` through `ProxyJump trt-gb10-1`.
+the private `trt-gb10-2..15` addresses on port `22` through
+`ProxyJump trt-gb10-1`; `trt-gb10-1` is the only public entrypoint and uses
+port `2221`.
 The manifest can still represent future `staging_draining`, `host_draining`,
 and `unreachable` host states when live evidence proves a host is unavailable.
 

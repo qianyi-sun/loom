@@ -713,9 +713,11 @@ knob you need.
    pools, mint tokens, or read live credentials. The default manifest assigns
    every eligible GB10/OLDLAB slot to production and leaves staging/dev at zero
    borrowed slots. The v1.0 GB10 baseline is all 15 GB10 hosts at 10 slots
-   each; the repo-owned GB10 SSH topology reaches `trt-gb10-14` through
-   `ProxyJump trt-gb10-1`. When an observed worker registration/status artifact is
-   available, pass it with `--observed-json` so the report fails on prod/dev
+   each; the repo-owned GB10 SSH topology uses `trt-gb10-1` as its sole public
+   entrypoint on port `2221` and reaches private `trt-gb10-2..15` on port `22`
+   through `ProxyJump trt-gb10-1`. When an observed worker
+   registration/status artifact is available, pass it with `--observed-json`
+   so the report fails on prod/dev
    environment, API URL, image tag, source commit, compose service, Kubernetes
    deployment, slot-count, or worker-identity drift:
 

@@ -13,8 +13,9 @@ the node-agent remains the host-local convergence mechanism.
 - Worker hosts: `trt-gb10-1` through `trt-gb10-15`.
 - Slurm partition and Loom pool: `gb10` and `gb10-arm64`.
 - Release-managed SSH topology:
-  `deploy/worker-pools/gb10/ssh_config`. `trt-gb10-14` must use
-  `ProxyJump trt-gb10-1`.
+  `deploy/worker-pools/gb10/ssh_config`. `trt-gb10-1` is the only public
+  entrypoint on port `2221`; `trt-gb10-2` through `trt-gb10-15` use their
+  private addresses on port `22` through `ProxyJump trt-gb10-1`.
 - Host checkout and Compose root:
   `/home/qianyi/loom-worker-build-staging`.
 - Host runtime env: `/home/qianyi/loom-worker-build-staging/.env`, mode 0600.
