@@ -29,6 +29,7 @@ RequestEventType = Literal[
     "attempt_done",
     "attempt_failed",
     "cancel_requested",
+    "cancel_failed",
     "cancelled",
 ]
 EventStatus = Literal["pending", "preview", "running", "done", "failed", "cancelled"]
@@ -57,6 +58,7 @@ _REQUEST_EVENTS = frozenset(
         "attempt_done",
         "attempt_failed",
         "cancel_requested",
+        "cancel_failed",
         "cancelled",
     }
 )
