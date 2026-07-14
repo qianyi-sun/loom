@@ -53,7 +53,7 @@ class RenderStep(BaseStep):
             cwd = candidate_loom_cwd(step_dir)
             env = candidate_loom_env(step_dir)
         except CandidateToolingError as exc:
-            step_dir.stderr_path().write_text(str(exc) + "\n")
+            self.write_stderr(step_dir, str(exc) + "\n")
             return RunResult(exit_code=2, error=str(exc))
         result = run_captured(
             candidate_loom_argv(
@@ -67,7 +67,7 @@ class RenderStep(BaseStep):
             env=env,
         )
         if result.returncode != 0:
-            step_dir.stdout_path().write_text(result.stdout)
+            self.write_stdout(step_dir, result.stdout)
             return RunResult(
                 exit_code=result.returncode,
                 error=(
@@ -77,8 +77,9 @@ class RenderStep(BaseStep):
                 ),
             )
         rendered.write_text(result.stdout)
-        step_dir.stdout_path().write_text(
-            f"rendered {rendered.stat().st_size} bytes to {rendered.name}\n"
+        self.write_stdout(
+            step_dir,
+            f"rendered {rendered.stat().st_size} bytes to {rendered.name}\n",
         )
         return RunResult(
             exit_code=0,

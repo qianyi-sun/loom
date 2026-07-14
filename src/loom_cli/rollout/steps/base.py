@@ -33,6 +33,10 @@ from typing import Any, Protocol, runtime_checkable
 
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import EvidenceDirectory, StepDir
+from loom_cli.rollout.operator.redaction import (
+    redact_rollout_mapping,
+    redact_rollout_text,
+)
 
 
 class VerifyOutcome(Enum):
@@ -60,6 +64,11 @@ class RunResult:
     summary: str = ""
     artifacts: dict[str, str] = field(default_factory=dict)
     error: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "summary", redact_rollout_text(self.summary))
+        if self.error is not None:
+            object.__setattr__(self, "error", redact_rollout_text(self.error))
 
     def is_success(self) -> bool:
         return self.exit_code == 0
@@ -135,7 +144,9 @@ class BaseStep:
     # -------- verify --------
 
     def _verify_impl(
-        self, ctx: RolloutContext, step_dir: StepDir,
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
     ) -> VerifyOutcome:
         """Default: UNKNOWN. Subclasses that can cheaply observe the
         world override this."""
@@ -147,9 +158,7 @@ class BaseStep:
     # -------- run --------
 
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:
-        raise NotImplementedError(
-            f"step {self.name!r}: subclass must implement _run_impl"
-        )
+        raise NotImplementedError(f"step {self.name!r}: subclass must implement _run_impl")
 
     def run(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:
         return self._run_impl(ctx, step_dir)
@@ -157,13 +166,16 @@ class BaseStep:
     # -------- helpers subclasses use --------
 
     def write_stdout(self, step_dir: StepDir, text: str) -> None:
-        step_dir.stdout_path().write_text(text)
+        step_dir.stdout_path().write_text(redact_rollout_text(text))
 
     def write_stderr(self, step_dir: StepDir, text: str) -> None:
-        step_dir.stderr_path().write_text(text)
+        step_dir.stderr_path().write_text(redact_rollout_text(text))
 
     def write_artifact(
-        self, step_dir: StepDir, name: str, data: str | bytes,
+        self,
+        step_dir: StepDir,
+        name: str,
+        data: str | bytes,
     ) -> None:
         path = step_dir.artifact_path(name)
         if isinstance(data, bytes):
@@ -185,7 +197,7 @@ def step_result_dict(
     artifacts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the canonical result.json shape."""
-    return {
+    payload = {
         "number": step.number,
         "name": step.name,
         "state": state,
@@ -197,6 +209,10 @@ def step_result_dict(
         "summary": summary,
         "artifacts": artifacts or {},
     }
+    redacted = redact_rollout_mapping(payload)
+    if not isinstance(redacted, dict):  # pragma: no cover - mapping contract
+        raise TypeError("redacted step result must remain a mapping")
+    return redacted
 
 
 def get_evidence(ctx: RolloutContext) -> EvidenceDirectory | None:

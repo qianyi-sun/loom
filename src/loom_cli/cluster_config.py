@@ -10,6 +10,7 @@ keep dot-access (`cfg.image_tag`, `cfg.replicas.service`).
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, make_dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -191,14 +192,8 @@ _DEPRECATED_TOP_LEVEL_KEYS: dict[str, str] = {
 }
 
 
-def load_cluster_config(path: Path | None) -> ClusterConfig:
-    """Same semantics as before #146: empty/missing path → defaults;
-    unknown top-level or nested keys raise loudly."""
-    if path is None:
-        return ClusterConfig()
-    if not path.exists():
-        raise FileNotFoundError(f"cluster config not found: {path}")
-    raw = tomllib.loads(path.read_text(encoding="utf-8"))
+def cluster_config_from_mapping(raw: Mapping[str, Any]) -> ClusterConfig:
+    """Build one immutable cluster config from an already parsed snapshot."""
     deprecated = set(raw) & set(_DEPRECATED_TOP_LEVEL_KEYS)
     if deprecated:
         messages = [_DEPRECATED_TOP_LEVEL_KEYS[key] for key in sorted(deprecated)]
@@ -248,3 +243,14 @@ def load_cluster_config(path: Path | None) -> ClusterConfig:
             else:
                 kwargs[name] = val
     return ClusterConfig(**kwargs)
+
+
+def load_cluster_config(path: Path | None) -> ClusterConfig:
+    """Same semantics as before #146: empty/missing path → defaults;
+    unknown top-level or nested keys raise loudly."""
+    if path is None:
+        return ClusterConfig()
+    if not path.exists():
+        raise FileNotFoundError(f"cluster config not found: {path}")
+    raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    return cluster_config_from_mapping(raw)

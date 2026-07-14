@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -214,13 +215,13 @@ class TestRolloutCLIDryRun:
                 "--ref",
                 "origin/dev",
                 "--image-tag",
-                "staging-aaaaaaa",
+                "test-aaaaaaa",
                 "--cluster-name",
-                "loom-staging",
+                "loom-test",
                 "--namespace",
-                "loom-staging",
+                "loom",
                 "--environment",
-                "staging",
+                "test",
                 "--cp-url",
                 "http://control-node.lan:18081",
                 "--cluster-config",
@@ -276,13 +277,13 @@ class TestRolloutCLIDryRun:
                 "--ref",
                 "origin/dev",
                 "--image-tag",
-                "staging-aaaaaaa",
+                "test-aaaaaaa",
                 "--cluster-name",
-                "loom-staging",
+                "loom-test",
                 "--namespace",
-                "loom-staging",
+                "loom",
                 "--environment",
-                "staging",
+                "test",
                 "--cp-url",
                 "http://control-node.lan:18081",
                 "--cluster-config",
@@ -333,13 +334,13 @@ class TestRolloutCLIDryRun:
                 "--ref",
                 "origin/dev",
                 "--image-tag",
-                "staging-aaaaaaa",
+                "test-aaaaaaa",
                 "--cluster-name",
-                "loom-staging",
+                "loom-test",
                 "--namespace",
-                "loom-staging",
+                "loom",
                 "--environment",
-                "staging",
+                "test",
                 "--cp-url",
                 "http://control-node.lan:18081",
                 "--cluster-config",
@@ -927,13 +928,13 @@ class TestRolloutCLIRealRun:
                 "--ref",
                 "origin/dev",
                 "--image-tag",
-                "staging-aaaaaaa",
+                "test-aaaaaaa",
                 "--cluster-name",
-                "loom-staging",
+                "loom-test",
                 "--namespace",
-                "loom-staging",
+                "loom",
                 "--environment",
-                "staging",
+                "test",
                 "--cp-url",
                 "http://control-node.lan:18081",
                 "--cluster-config",
@@ -974,13 +975,13 @@ class TestRolloutCLIRealRun:
                 "--ref",
                 "origin/dev",
                 "--image-tag",
-                "staging-aaaaaaa",
+                "test-aaaaaaa",
                 "--cluster-name",
-                "loom-staging",
+                "loom-test",
                 "--namespace",
-                "loom-staging",
+                "loom",
                 "--environment",
-                "staging",
+                "test",
                 "--cp-url",
                 "http://control-node.lan:18081",
                 "--cluster-config",
@@ -1047,13 +1048,13 @@ class TestRolloutCLIRealRun:
                 "--ref",
                 "origin/dev",
                 "--image-tag",
-                "staging-aaaaaaa",
+                "test-aaaaaaa",
                 "--cluster-name",
-                "loom-staging",
+                "loom-test",
                 "--namespace",
-                "loom-staging",
+                "loom",
                 "--environment",
-                "staging",
+                "test",
                 "--cp-url",
                 "http://control-node.lan:18081",
                 "--cluster-config",
@@ -1076,6 +1077,10 @@ class TestRolloutCLIRealRun:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        cfg = tmp_path / "cluster-config.toml"
+        cfg.write_text("image_tag = 'x'\n")
+        backup = tmp_path / "backup-manifest.json"
+        backup.write_text("{}")
         monkeypatch.setattr(subprocess, "run", _FakeSubprocess())
         captured = {}
 
@@ -1089,11 +1094,22 @@ class TestRolloutCLIRealRun:
             [
                 "cluster",
                 "rollout",
-                "staging",
                 "--ref",
                 "origin/dev",
                 "--image-tag",
-                "staging-aaaaaaa",
+                "test-aaaaaaa",
+                "--cluster-name",
+                "loom-test",
+                "--namespace",
+                "loom",
+                "--environment",
+                "test",
+                "--cp-url",
+                "http://control-node.lan:18081",
+                "--cluster-config",
+                str(cfg),
+                "--backup-manifest",
+                str(backup),
                 "--rollout-root",
                 str(tmp_path),
                 "--gb10-prep-concurrency",
@@ -1130,13 +1146,13 @@ class TestRolloutCLIRealRun:
                 "--ref",
                 "origin/dev",
                 "--image-tag",
-                "staging-aaaaaaa",
+                "test-aaaaaaa",
                 "--cluster-name",
-                "loom-staging",
+                "loom-test",
                 "--namespace",
-                "loom-staging",
+                "loom",
                 "--environment",
-                "staging",
+                "test",
                 "--cp-url",
                 "http://control-node.lan:18081",
                 "--admin-token",
@@ -1181,13 +1197,13 @@ class TestRolloutCLIRealRun:
                 "--ref",
                 "origin/dev",
                 "--image-tag",
-                "staging-aaaaaaa",
+                "test-aaaaaaa",
                 "--cluster-name",
-                "loom-staging",
+                "loom-test",
                 "--namespace",
-                "loom-staging",
+                "loom",
                 "--environment",
-                "staging",
+                "test",
                 "--cp-url",
                 "http://control-node.lan:18081",
                 "--worker-token",
@@ -1232,13 +1248,13 @@ class TestRolloutCLIRealRun:
                 "--ref",
                 "origin/dev",
                 "--image-tag",
-                "staging-aaaaaaa",
+                "test-aaaaaaa",
                 "--cluster-name",
-                "loom-staging",
+                "loom-test",
                 "--namespace",
-                "loom-staging",
+                "loom",
                 "--environment",
-                "staging",
+                "test",
                 "--cp-url",
                 "http://control-node.lan:18081",
                 "--service-token",
@@ -1264,22 +1280,22 @@ class TestRolloutCLIRealRun:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         cfg = tmp_path / "cluster-config.toml"
-        cfg.write_text("image_tag = 'staging-948f6e8'\n")
+        cfg.write_text("image_tag = 'rollout-948f6e8'\n")
         backup = tmp_path / "backup-manifest.json"
         backup.write_text("{}")
-        rollout_id = "20260707t000020z-staging-948f6e8"
+        rollout_id = "20260707t000020z-rollout-948f6e8"
         evidence = EvidenceDirectory(tmp_path, rollout_id)
         evidence.ensure()
         old_sha = "948f6e8d17815b24e6df3af05e456658e8daa386"
         new_sha = "468c23f9ca1a9484eb0f522bb3f75f1b8ff2b56c"
         evidence.write_inputs(
             {
-                "image_tag": "staging-948f6e8",
+                "image_tag": "rollout-948f6e8",
                 "target_ref": "origin/dev",
                 "resolved_sha": old_sha,
-                "cluster_name": "loom-staging",
-                "namespace": "loom-staging",
-                "environment": "staging",
+                "cluster_name": "loom-test",
+                "namespace": "loom",
+                "environment": "test",
                 "cp_url": "http://control-node.lan:18081",
                 "admin_token_source": "env:LOOM_CP_ADMIN_TOKEN",
                 "expect_admin_token_fingerprint": None,
@@ -1327,13 +1343,13 @@ class TestRolloutCLIRealRun:
                 "--ref",
                 "origin/dev",
                 "--image-tag",
-                "staging-948f6e8",
+                "rollout-948f6e8",
                 "--cluster-name",
-                "loom-staging",
+                "loom-test",
                 "--namespace",
-                "loom-staging",
+                "loom",
                 "--environment",
-                "staging",
+                "test",
                 "--cp-url",
                 "http://control-node.lan:18081",
                 "--cluster-config",
@@ -1350,6 +1366,80 @@ class TestRolloutCLIRealRun:
         assert captured["ctx"].target_ref == "origin/dev"
         assert captured["ctx"].resolved_sha == old_sha
         assert captured["evidence"].rollout_id == rollout_id
+
+    def test_resume_refuses_symlinked_inputs_without_git_or_driver(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cfg = tmp_path / "cluster-config.toml"
+        cfg.write_text("image_tag = 'rollout-948f6e8'\n", encoding="utf-8")
+        backup = tmp_path / "backup-manifest.json"
+        backup.write_text("{}\n", encoding="utf-8")
+        rollout_id = "20260707t000020z-rollout-948f6e8"
+        evidence = EvidenceDirectory(tmp_path, rollout_id)
+        evidence.ensure()
+        state = RolloutState.new(
+            rollout_id=rollout_id,
+            steps=[(13, "production-defaults")],
+        )
+        state.mark_step_failed(
+            13,
+            finished_at="2026-07-07T00:12:00Z",
+            error="planned failure",
+        )
+        state.save(evidence.state_path())
+        outside_inputs = tmp_path / "outside-inputs.json"
+        outside_inputs.write_text(
+            json.dumps(
+                {
+                    "image_tag": "rollout-948f6e8",
+                    "target_ref": "origin/dev",
+                    "resolved_sha": "948f6e8d17815b24e6df3af05e456658e8daa386",
+                }
+            ),
+            encoding="utf-8",
+        )
+        evidence.inputs_path().symlink_to(outside_inputs)
+
+        monkeypatch.setattr(
+            "loom_cli.rollout.cli.resolve_ref_to_sha",
+            lambda *_args, **_kwargs: pytest.fail("Git must not run for unsafe resume inputs"),
+        )
+        monkeypatch.setattr(
+            "loom_cli.rollout.cli.run_rollout",
+            lambda *_args, **_kwargs: pytest.fail("driver must not run for unsafe resume inputs"),
+        )
+
+        rc = main(
+            [
+                "cluster",
+                "rollout",
+                "--ref",
+                "origin/dev",
+                "--image-tag",
+                "rollout-948f6e8",
+                "--cluster-name",
+                "loom-test",
+                "--namespace",
+                "loom",
+                "--environment",
+                "test",
+                "--cp-url",
+                "http://control-node.lan:18081",
+                "--cluster-config",
+                str(cfg),
+                "--backup-manifest",
+                str(backup),
+                "--rollout-root",
+                str(tmp_path),
+                "--resume",
+            ]
+        )
+
+        assert rc == 2
+        assert "resume inputs are unavailable or unsafe" in capsys.readouterr().err
 
     def test_refuses_without_matching_cluster_config(
         self,

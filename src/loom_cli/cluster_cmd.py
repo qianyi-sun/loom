@@ -20,7 +20,10 @@ import argparse
 import hashlib
 import ipaddress
 import json
+import os
+import stat
 import sys
+import tomllib
 from dataclasses import dataclass, field
 from datetime import UTC
 from importlib import resources
@@ -35,7 +38,11 @@ from loom_cli.cluster_backup_guard import (
     validate_backup_manifest,
     write_backup_manifest,
 )
-from loom_cli.cluster_config import ClusterConfig, load_cluster_config
+from loom_cli.cluster_config import (
+    ClusterConfig,
+    cluster_config_from_mapping,
+    load_cluster_config,
+)
 from loom_cli.cluster_release_gate import (
     collect_release_gate_report,
     format_release_gate_json,
@@ -80,6 +87,7 @@ from loom_cli.minio_storage_preflight import (
 )
 from loom_cli.rollout_lock import (
     DEFAULT_ROLLOUT_LOCK_TTL_SECONDS,
+    RolloutAttribution,
     RolloutLease,
     RolloutLeaseError,
     RolloutLeaseManager,
@@ -145,11 +153,76 @@ _COMPONENT_DESCRIPTIONS: dict[str, str] = {
     "minio": "Object store (trajectories + ATIF)",
 }
 
+_EXPLICIT_ROLLOUT_LOCK_OPTIONS_ATTR = "_explicit_rollout_lock_options"
+_BROKER_LOCK_OPTIONS = frozenset(
+    {
+        "--rollout-id",
+        "--rollout-lock-dir",
+        "--rollout-lock-ttl-seconds",
+        "--rollout-lock-evidence",
+        "--force-rollout-lock",
+    }
+)
+
+
+def _record_explicit_rollout_lock_option(
+    namespace: argparse.Namespace,
+    option_string: str | None,
+) -> None:
+    options = set(getattr(namespace, _EXPLICIT_ROLLOUT_LOCK_OPTIONS_ATTR, ()))
+    if option_string is not None:
+        options.add(option_string)
+    setattr(namespace, _EXPLICIT_ROLLOUT_LOCK_OPTIONS_ATTR, options)
+
+
+class _ExplicitRolloutLockStore(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        del parser
+        setattr(namespace, self.dest, values)
+        _record_explicit_rollout_lock_option(namespace, option_string)
+
+
+class _ExplicitRolloutLockStoreTrue(argparse.Action):
+    def __init__(
+        self,
+        option_strings: list[str],
+        dest: str,
+        default: object = False,
+        required: bool = False,
+        help: str | None = None,
+    ) -> None:
+        super().__init__(
+            option_strings=option_strings,
+            dest=dest,
+            nargs=0,
+            default=default,
+            required=required,
+            help=help,
+        )
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        del parser, values
+        setattr(namespace, self.dest, True)
+        _record_explicit_rollout_lock_option(namespace, option_string)
+
 
 def _add_rollout_lock_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--rollout-id",
         default=None,
+        action=_ExplicitRolloutLockStore,
         help=(
             "Operator-visible protected rollout owner id. Defaults to "
             "environment-hostname-pid when a lock is required."
@@ -159,6 +232,7 @@ def _add_rollout_lock_args(parser: argparse.ArgumentParser) -> None:
         "--rollout-lock-dir",
         type=Path,
         default=None,
+        action=_ExplicitRolloutLockStore,
         help=(
             "Directory for per-environment rollout mutation leases. Defaults "
             "to $LOOM_ROLLOUT_LOCK_DIR or ~/.loom/rollout-locks for protected "
@@ -169,6 +243,7 @@ def _add_rollout_lock_args(parser: argparse.ArgumentParser) -> None:
         "--rollout-lock-ttl-seconds",
         type=int,
         default=DEFAULT_ROLLOUT_LOCK_TTL_SECONDS,
+        action=_ExplicitRolloutLockStore,
         help=(
             "Protected rollout mutation lease TTL in seconds "
             f"(default: {DEFAULT_ROLLOUT_LOCK_TTL_SECONDS})."
@@ -178,11 +253,12 @@ def _add_rollout_lock_args(parser: argparse.ArgumentParser) -> None:
         "--rollout-lock-evidence",
         type=Path,
         default=None,
+        action=_ExplicitRolloutLockStore,
         help="Optional JSON evidence path for rollout lock acquire/release events.",
     )
     parser.add_argument(
         "--force-rollout-lock",
-        action="store_true",
+        action=_ExplicitRolloutLockStoreTrue,
         help=(
             "Replace an active protected rollout mutation lease. Use only "
             "after preserving evidence that the recorded owner is stale."
@@ -190,10 +266,278 @@ def _add_rollout_lock_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _BrokerRolloutLockBinding:
+    environment: str
+    owner_id: str
+    lock_dir: Path
+    evidence_path: Path
+    attribution: RolloutAttribution
+    operator_config: Any
+    envelope: Any
+
+
+@dataclass(frozen=True, slots=True)
+class _ClusterUpConfigSnapshot:
+    path: Path | None
+    config: ClusterConfig
+    workload_contract_profile: object
+    protected_target: str | None
+
+
+class _ClusterConfigSnapshotRenderError(ValueError):
+    """Typed config construction failed before the immutable up snapshot."""
+
+
+class _ClusterConfigSnapshotTomlError(ValueError):
+    """The single cluster-config snapshot is not syntactically valid TOML."""
+
+
+def _load_broker_rollout_envelope(path: Path) -> tuple[Any, Any]:
+    from loom_cli.rollout.operator.config import OperatorConfig
+    from loom_cli.rollout.operator.envelope import (
+        fixed_operator_config_path,
+        load_validated_envelope,
+    )
+
+    config = OperatorConfig.load(fixed_operator_config_path())
+    envelope = load_validated_envelope(
+        path,
+        config,
+        effective_uid=os.geteuid(),
+    )
+    return config, envelope
+
+
+def _require_real_directory(
+    path: Path,
+    *,
+    label: str,
+    expected_owner_uid: int | None = None,
+) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ValueError(f"{label} is unavailable") from exc
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError(f"{label} must be a real directory, not a symlink")
+    if expected_owner_uid is not None and metadata.st_uid != expected_owner_uid:
+        raise ValueError(f"{label} must be service-owned")
+
+
+def _require_real_file(
+    path: Path,
+    *,
+    label: str,
+    expected_owner_uid: int | None = None,
+) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ValueError(f"{label} is unavailable") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"{label} must be a regular file, not a symlink")
+    if expected_owner_uid is not None and metadata.st_uid != expected_owner_uid:
+        raise ValueError(f"{label} must be service-owned")
+
+
+def _fixed_rollout_lock_evidence_path(
+    config: Any,
+    envelope: Any,
+    *,
+    step_directory: str,
+) -> Path:
+    root = Path(config.rollout_root)
+    if not root.is_absolute() or ".." in root.parts:
+        raise ValueError("rollout lock evidence root must be an absolute fixed path")
+    rollout_parent = root / "rollouts"
+    rollout_dir = rollout_parent / str(envelope.rollout_id)
+    evidence_parent = rollout_dir / step_directory
+    service_uid = os.geteuid()
+    for path, label, owner_uid in (
+        (root, "rollout lock evidence root", None),
+        (rollout_parent, "rollout lock evidence rollouts directory", None),
+        (rollout_dir, "rollout lock evidence rollout directory", service_uid),
+        (evidence_parent, "rollout lock evidence parent", service_uid),
+    ):
+        _require_real_directory(path, label=label, expected_owner_uid=owner_uid)
+    evidence_path = evidence_parent / "rollout-lock.json"
+    try:
+        metadata = evidence_path.lstat()
+    except FileNotFoundError:
+        return evidence_path
+    except OSError as exc:
+        raise ValueError("rollout lock evidence path is unavailable") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("rollout lock evidence path must not be a symlink")
+    if metadata.st_uid != service_uid:
+        raise ValueError("rollout lock evidence path must be service-owned")
+    return evidence_path
+
+
+def _validate_broker_cluster_args(
+    args: argparse.Namespace,
+    config: Any,
+    envelope: Any,
+) -> None:
+    if envelope.environment != "staging" or envelope.namespace != "loom-staging":
+        raise ValueError("broker envelope does not target fixed staging")
+    if args.namespace != envelope.namespace:
+        raise ValueError("cluster namespace does not match broker envelope")
+    if args.environment not in (None, envelope.environment):
+        raise ValueError("cluster environment does not match broker envelope")
+    args.environment = envelope.environment
+    if args.context is not None:
+        raise ValueError("cluster context override is forbidden in broker mode")
+    if os.environ.get("KUBECONFIG") != str(config.kubeconfig_path):
+        raise ValueError("candidate KUBECONFIG does not match fixed broker config")
+    _require_real_file(Path(config.kubeconfig_path), label="fixed broker kubeconfig")
+
+    rollout_dir = Path(config.rollout_root) / "rollouts" / str(envelope.rollout_id)
+    expected_config = rollout_dir / "rollout-cluster-config.toml"
+    if args.config is None or Path(args.config) != expected_config:
+        raise ValueError("cluster config path does not match broker rollout")
+    _require_real_file(expected_config, label="broker rollout cluster config")
+
+    if args.backup_manifest is None or Path(args.backup_manifest) != Path(
+        envelope.backup_manifest_path
+    ):
+        raise ValueError("backup manifest path does not match broker envelope")
+    if args.skip_preflight or args.no_wait:
+        raise ValueError("protected rollout gates cannot be skipped in broker mode")
+    if not args.recover_sandbox_deadlines or args.sandbox_deadline_max_pods != 4:
+        raise ValueError("sandbox recovery policy does not match broker rollout")
+
+
+def _validate_broker_cluster_snapshot(
+    binding: _BrokerRolloutLockBinding,
+    snapshot: _ClusterUpConfigSnapshot,
+) -> None:
+    rendered = snapshot.config
+    envelope = binding.envelope
+    expected_root = str(Path(binding.operator_config.rollout_root))
+    configured_root = str(rendered.persistent_storage_host_path_root)
+    if (
+        rendered.namespace != envelope.namespace
+        or rendered.runtime_environment != envelope.environment
+        or rendered.image_tag != envelope.image_tag
+        or rendered.persistent_storage_backend != "static-host-path"
+        or configured_root != expected_root
+    ):
+        raise ValueError("broker rollout cluster config does not match fixed staging fields")
+    try:
+        if Path(configured_root).resolve(strict=False) != Path(expected_root).resolve(strict=False):
+            raise ValueError("broker rollout cluster config does not match fixed staging root")
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("broker rollout cluster config root could not be resolved safely") from exc
+
+
+def _prepare_broker_rollout_lock(
+    args: argparse.Namespace,
+    *,
+    environment: str,
+) -> _BrokerRolloutLockBinding | None:
+    if environment != "staging":
+        return None
+    envelope_path = getattr(args, "rollout_request_envelope", None)
+    if envelope_path is None:
+        raise ValueError("broker-created request envelope is required for staging cluster up")
+    explicit = set(getattr(args, _EXPLICIT_ROLLOUT_LOCK_OPTIONS_ATTR, ()))
+    if explicit & _BROKER_LOCK_OPTIONS:
+        raise ValueError("manual rollout lock overrides are forbidden in broker mode")
+    config, envelope = _load_broker_rollout_envelope(Path(envelope_path))
+    _validate_broker_cluster_args(args, config, envelope)
+    evidence_path = _fixed_rollout_lock_evidence_path(
+        config,
+        envelope,
+        step_directory="10-cluster-up",
+    )
+    return _BrokerRolloutLockBinding(
+        environment=envelope.environment,
+        owner_id=envelope.rollout_id,
+        lock_dir=Path(config.runtime_root) / "mutation-locks",
+        evidence_path=evidence_path,
+        attribution=RolloutAttribution(
+            request_id=envelope.request_id,
+            initiating_operator=envelope.initiating_operator,
+            initiating_uid=envelope.initiating_uid,
+            attempt_number=envelope.attempt_number,
+            attempt_operator=envelope.attempt_operator,
+            attempt_uid=envelope.attempt_uid,
+        ),
+        operator_config=config,
+        envelope=envelope,
+    )
+
+
+_PROTECTED_CLUSTER_NAMESPACES = {
+    "loom-staging": "staging",
+    "loom-prod": "production",
+    "loom-production": "production",
+}
+_PROTECTED_CLUSTER_HOST_ROOTS = {
+    "staging": Path("/data/loom-staging"),
+    "production": Path("/data/loom-prod"),
+}
+
+
+def _protected_cluster_config_target(raw: dict[str, Any]) -> str | None:
+    targets: set[str] = set()
+    if "runtime_environment" in raw:
+        runtime_environment = str(raw.get("runtime_environment") or "").strip()
+        if runtime_environment in PROTECTED_ENVIRONMENTS:
+            targets.add(runtime_environment)
+    if "namespace" in raw:
+        namespace = str(raw.get("namespace") or "").strip()
+        namespace_target = _PROTECTED_CLUSTER_NAMESPACES.get(namespace)
+        if namespace_target is not None:
+            targets.add(namespace_target)
+    if "persistent_storage_host_path_root" in raw:
+        host_root_raw = str(raw.get("persistent_storage_host_path_root") or "").strip()
+        host_root = Path(host_root_raw)
+        if host_root_raw and host_root.is_absolute():
+            try:
+                resolved_root = host_root.resolve(strict=False)
+                for environment, protected_root in _PROTECTED_CLUSTER_HOST_ROOTS.items():
+                    if resolved_root.is_relative_to(protected_root.resolve(strict=False)):
+                        targets.add(environment)
+            except (OSError, RuntimeError) as exc:
+                raise ValueError(
+                    "persistent_storage_host_path_root could not be resolved safely"
+                ) from exc
+    if len(targets) > 1:
+        raise ValueError(
+            "conflicting protected cluster config targets: " + ", ".join(sorted(targets))
+        )
+    return next(iter(targets), None)
+
+
+def _load_cluster_up_config_snapshot(path: Path | None) -> _ClusterUpConfigSnapshot:
+    raw: dict[str, Any]
+    if path is None:
+        raw = {}
+    else:
+        try:
+            raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        except tomllib.TOMLDecodeError as exc:
+            raise _ClusterConfigSnapshotTomlError(str(exc)) from exc
+    try:
+        config = cluster_config_from_mapping(raw)
+    except ValueError as exc:
+        raise _ClusterConfigSnapshotRenderError(str(exc)) from exc
+    return _ClusterUpConfigSnapshot(
+        path=path,
+        config=config,
+        workload_contract_profile=raw.get("workload_contract"),
+        protected_target=_protected_cluster_config_target(raw),
+    )
+
+
 def _acquire_protected_rollout_lock(
     args: argparse.Namespace,
     *,
     command: list[str],
+    broker_binding: _BrokerRolloutLockBinding | None = None,
 ) -> RolloutLease | None:
     if not is_protected_environment(
         environment=args.environment,
@@ -204,15 +548,32 @@ def _acquire_protected_rollout_lock(
         environment=args.environment,
         namespace=args.namespace,
     )
-    manager = RolloutLeaseManager(args.rollout_lock_dir or default_rollout_lock_dir())
+    manager = RolloutLeaseManager(
+        broker_binding.lock_dir
+        if broker_binding is not None
+        else args.rollout_lock_dir or default_rollout_lock_dir()
+    )
     try:
         lease = manager.acquire(
             environment=environment,
-            owner_id=rollout_owner_id(environment, args.rollout_id),
-            ttl_seconds=args.rollout_lock_ttl_seconds,
+            owner_id=(
+                broker_binding.owner_id
+                if broker_binding is not None
+                else rollout_owner_id(environment, args.rollout_id)
+            ),
+            ttl_seconds=(
+                DEFAULT_ROLLOUT_LOCK_TTL_SECONDS
+                if broker_binding is not None
+                else args.rollout_lock_ttl_seconds
+            ),
             command=command,
-            evidence_path=args.rollout_lock_evidence,
-            force=args.force_rollout_lock,
+            evidence_path=(
+                broker_binding.evidence_path
+                if broker_binding is not None
+                else args.rollout_lock_evidence
+            ),
+            force=False if broker_binding is not None else args.force_rollout_lock,
+            attribution=(broker_binding.attribution if broker_binding is not None else None),
         )
     except (RolloutLeaseError, ValueError) as exc:
         sys.stderr.write(f"error: {exc}\n")
@@ -3742,12 +4103,6 @@ def recover_sandbox_deadline_pods(
 
 
 def _up(args: argparse.Namespace) -> int:
-    try:
-        cfg_path = Path(args.config).resolve() if args.config else None
-        workload_contract_profile = workload_contract_profile_from_file(cfg_path)
-    except (OSError, ValueError) as exc:
-        sys.stderr.write(f"error: preflight config invalid: {exc}\n")
-        return 2
     environment, target_environment_failure = _resolve_target_environment(
         environment=args.environment,
         namespace=args.namespace,
@@ -3767,9 +4122,78 @@ def _up(args: argparse.Namespace) -> int:
         )
         return 1
     assert environment is not None
+    try:
+        broker_binding = _prepare_broker_rollout_lock(
+            args,
+            environment=environment,
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
+    try:
+        cfg_path = Path(args.config).resolve() if args.config else None
+        snapshot = _load_cluster_up_config_snapshot(cfg_path)
+    except _ClusterConfigSnapshotTomlError as exc:
+        if environment in PROTECTED_WORKLOAD_TRUST_ENVIRONMENTS:
+            sys.stderr.write(
+                "error: workload-trust-contract preflight failed — refusing to apply.\n"
+            )
+            sys.stderr.write(
+                _format_preflight_table(
+                    PreflightReport(
+                        namespace=args.namespace,
+                        context=args.context,
+                        checks=[
+                            PreflightCheck(
+                                name="workload-trust-contract",
+                                outcome="fail",
+                                detail=(
+                                    f"protected environment {environment!r} has "
+                                    f"invalid cluster config TOML: {exc}"
+                                ),
+                                remediation=(
+                                    "Repair the cluster config TOML and declare the "
+                                    "exact v1 [workload_contract] tuple before applying."
+                                ),
+                            )
+                        ],
+                    )
+                )
+            )
+            return 1
+        sys.stderr.write(f"error: preflight config invalid: {exc}\n")
+        return 2
+    except _ClusterConfigSnapshotRenderError as exc:
+        sys.stderr.write(f"error: render failed: {exc}\n")
+        return 2
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"error: preflight config invalid: {exc}\n")
+        return 2
+    if snapshot.protected_target == "staging" and broker_binding is None:
+        try:
+            broker_binding = _prepare_broker_rollout_lock(
+                args,
+                environment="staging",
+            )
+        except ValueError as exc:
+            sys.stderr.write(f"error: {exc}\n")
+            return 1
+    if snapshot.protected_target == "production" and environment != "production":
+        sys.stderr.write(
+            "error: protected cluster config target production conflicts with "
+            f"command target {environment}\n"
+        )
+        return 1
+    if broker_binding is not None:
+        try:
+            _validate_broker_cluster_snapshot(broker_binding, snapshot)
+        except ValueError as exc:
+            sys.stderr.write(f"error: {exc}\n")
+            return 1
+    effective_environment = snapshot.protected_target or environment
     workload_contract_check = _protected_workload_trust_contract_check(
-        environment=environment,
-        workload_contract_profile=workload_contract_profile,
+        environment=effective_environment,
+        workload_contract_profile=snapshot.workload_contract_profile,
     )
     if workload_contract_check is not None and workload_contract_check.outcome == "fail":
         sys.stderr.write(
@@ -3806,20 +4230,24 @@ def _up(args: argparse.Namespace) -> int:
         lease = _acquire_protected_rollout_lock(
             args,
             command=command,
+            broker_binding=broker_binding,
         )
     except (RolloutLeaseError, ValueError):
         return 1
 
     rc = 1
     try:
-        rc = _up_impl(args)
+        rc = _up_impl(args, snapshot)
         return rc
     finally:
         if lease is not None:
             lease.release(status="released" if rc == 0 else "failed")
 
 
-def _up_impl(args: argparse.Namespace) -> int:
+def _up_impl(
+    args: argparse.Namespace,
+    snapshot: _ClusterUpConfigSnapshot,
+) -> int:
     if args.sandbox_deadline_max_pods <= 0:
         sys.stderr.write("error: --sandbox-deadline-max-pods must be > 0\n")
         return 2
@@ -3835,13 +4263,8 @@ def _up_impl(args: argparse.Namespace) -> int:
         )
         return 2
 
-    try:
-        cfg_path = Path(args.config).resolve() if args.config else None
-        workload_contract_profile = workload_contract_profile_from_file(cfg_path)
-        config = load_cluster_config(cfg_path)
-    except (FileNotFoundError, ValueError) as exc:
-        sys.stderr.write(f"error: render failed: {exc}\n")
-        return 2
+    config = snapshot.config
+    workload_contract_profile = snapshot.workload_contract_profile
 
     try:
         manifests = render_manifests(config)
@@ -4922,6 +5345,12 @@ def dispatch(argv: list[str]) -> int:
             "Maximum classified pod sandbox deadline pods to delete during "
             "the bounded recovery retry (default: 4)."
         ),
+    )
+    p_up.add_argument(
+        "--rollout-request-envelope",
+        type=Path,
+        default=None,
+        help=argparse.SUPPRESS,
     )
     _add_rollout_lock_args(p_up)
     p_up.set_defaults(handler=_up)

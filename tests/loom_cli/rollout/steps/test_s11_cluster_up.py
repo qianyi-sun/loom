@@ -24,10 +24,9 @@ class TestClusterUpStepArgv:
         argv = list(ClusterUpStep().argv(ctx, step_dir))
         config_path = Path(argv[argv.index("--config") + 1])
 
-        assert argv[:8] == [
-            sys.executable,
-            "-m",
-            "loom_cli",
+        assert argv[:3] == [sys.executable, "-I", "-c"]
+        assert "run_module('loom_cli'" in argv[3]
+        assert argv[4:9] == [
             "cluster",
             "up",
             "--namespace",
@@ -73,3 +72,31 @@ class TestClusterUpStepArgv:
         argv = list(ClusterUpStep().argv(ctx, step_dir))
 
         assert argv[argv.index("--backup-manifest") + 1] == str(backup_manifest)
+
+    def test_broker_attempt_passes_only_the_private_request_envelope(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        envelope_path = tmp_path / "private" / "envelope.json"
+        ctx = make_ctx(
+            tmp_path,
+            namespace="loom-staging",
+            request_envelope_path=envelope_path,
+            request_id="request-20260713-hongjian",
+            initiating_operator="hongjian",
+            initiating_uid=2011,
+            attempt_number=2,
+            attempt_operator="devansh",
+            attempt_uid=2501,
+        )
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        ev.ensure()
+        step_dir = ev.step_dir(10, "cluster-up")
+
+        argv = list(ClusterUpStep().argv(ctx, step_dir))
+
+        assert argv[argv.index("--rollout-request-envelope") + 1] == str(envelope_path)
+        assert "--rollout-id" not in argv
+        assert "--rollout-lock-dir" not in argv
+        assert "--rollout-lock-evidence" not in argv
+        assert "--force-rollout-lock" not in argv

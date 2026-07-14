@@ -1359,10 +1359,22 @@ mode = "all"
     )
 
 
+@pytest.fixture
+def _environment_state_unit_without_rollout_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise env-state payload/diff logic independently of staging admission."""
+    monkeypatch.setattr(
+        "loom_cli.admin_cmd.is_protected_environment",
+        lambda **_kwargs: False,
+    )
+
+
 def test_environment_state_apply_puts_profile_resources(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    _environment_state_unit_without_rollout_guard: None,
 ) -> None:
     profile_path = tmp_path / "staging.state.toml"
     _write_environment_state_profile(profile_path)
@@ -1409,6 +1421,7 @@ def test_environment_state_check_fails_with_actionable_drift(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    _environment_state_unit_without_rollout_guard: None,
 ) -> None:
     profile_path = tmp_path / "staging.state.toml"
     _write_environment_state_profile(profile_path)
@@ -1491,6 +1504,7 @@ def test_environment_state_check_json_reports_autoscaler_blockers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    _environment_state_unit_without_rollout_guard: None,
 ) -> None:
     profile_path = tmp_path / "staging.state.toml"
     _write_environment_state_profile(profile_path)
@@ -1612,6 +1626,7 @@ def test_environment_state_check_fetches_slurm_jobs_and_reports_external_prereq_
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    _environment_state_unit_without_rollout_guard: None,
 ) -> None:
     profile_path = tmp_path / "staging.state.toml"
     _write_environment_state_profile(profile_path)
@@ -1713,6 +1728,7 @@ def test_environment_state_check_fails_before_cp_when_admin_token_fingerprint_dr
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    _environment_state_unit_without_rollout_guard: None,
 ) -> None:
     profile_path = tmp_path / "staging.state.toml"
     _write_environment_state_profile(profile_path)
@@ -1759,6 +1775,7 @@ def test_environment_state_check_passes_worker_token_without_leaking_secret(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    _environment_state_unit_without_rollout_guard: None,
 ) -> None:
     profile_path = tmp_path / "staging.state.toml"
     _write_environment_state_profile(profile_path)

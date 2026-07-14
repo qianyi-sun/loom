@@ -1482,17 +1482,17 @@ def test_cli_up_threads_kind_node_mounts_for_static_host_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    namespace = "loom-staging"
+    namespace = "loom-prod"
     manifest = _write_recent_manifest(
         tmp_path,
-        environment="staging",
+        environment="production",
         namespace=namespace,
     )
     cfg = tmp_path / "cluster.toml"
     cfg.write_text(
-        'namespace = "loom-staging"\n'
+        'namespace = "loom-prod"\n'
         'persistent_storage_backend = "static-host-path"\n'
-        'persistent_storage_host_path_root = "/data/loom-staging"\n'
+        'persistent_storage_host_path_root = "/data/loom-prod"\n'
         "[workload_contract]\n"
         'workload_trust_mode = "internal_trusted"\n'
         "taskset_transforms_enabled = false\n"
@@ -1503,8 +1503,8 @@ def test_cli_up_threads_kind_node_mounts_for_static_host_path(
     mounts = [
         {
             "Type": "bind",
-            "Source": "/data/loom-staging",
-            "Destination": "/data/loom-staging",
+            "Source": "/data/loom-prod",
+            "Destination": "/data/loom-prod",
         },
     ]
     captures: dict[str, Any] = {}
@@ -1520,7 +1520,7 @@ def test_cli_up_threads_kind_node_mounts_for_static_host_path(
     )
     monkeypatch.setattr(
         "loom_cli.cluster_cmd._effective_kube_context",
-        lambda context: "kind-loom-staging",
+        lambda context: "kind-loom-prod",
     )
     monkeypatch.setattr(
         "loom_cli.cluster_cmd._read_kind_node_mounts",
@@ -1551,6 +1551,7 @@ def test_cli_up_threads_kind_node_mounts_for_static_host_path(
         )
 
     monkeypatch.setattr("loom_cli.cluster_cmd.collect_preflight", _collect_preflight)
+    monkeypatch.setenv("LOOM_ROLLOUT_LOCK_DIR", str(tmp_path / "rollout-locks"))
 
     rc = main(
         [
@@ -1559,7 +1560,7 @@ def test_cli_up_threads_kind_node_mounts_for_static_host_path(
             "--namespace",
             namespace,
             "--environment",
-            "staging",
+            "production",
             "--backup-manifest",
             str(manifest),
             "--config",
@@ -1569,7 +1570,7 @@ def test_cli_up_threads_kind_node_mounts_for_static_host_path(
     )
 
     assert rc == 0
-    assert captures["preflight_kwargs"]["context"] == "kind-loom-staging"
+    assert captures["preflight_kwargs"]["context"] == "kind-loom-prod"
     assert captures["preflight_kwargs"]["kind_node_mounts"] == mounts
 
 
@@ -1578,8 +1579,8 @@ def test_cli_up_skip_preflight_cannot_bypass_protected_workload_contract(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    config_path = tmp_path / "staging.cluster.toml"
-    config_path.write_text('namespace = "loom-staging"\n', encoding="utf-8")
+    config_path = tmp_path / "production.cluster.toml"
+    config_path.write_text('namespace = "loom-prod"\n', encoding="utf-8")
     applied: list[str] = []
     _patch_clients(
         monkeypatch,
@@ -1591,8 +1592,7 @@ def test_cli_up_skip_preflight_cannot_bypass_protected_workload_contract(
     monkeypatch.setattr(
         "loom_cli.cluster_cmd.apply_manifests",
         lambda *_args, **_kwargs: (
-            applied.append("called")
-            or _Spec(returncode=0, summary_lines=[], stderr="")
+            applied.append("called") or _Spec(returncode=0, summary_lines=[], stderr="")
         ),
     )
 
@@ -1601,9 +1601,9 @@ def test_cli_up_skip_preflight_cannot_bypass_protected_workload_contract(
             "cluster",
             "up",
             "--namespace",
-            "loom-staging",
+            "loom-prod",
             "--environment",
-            "staging",
+            "production",
             "--config",
             str(config_path),
             "--skip-preflight",
@@ -1623,9 +1623,9 @@ def test_cli_up_protected_malformed_workload_contract_is_a_named_preflight_failu
     tmp_path: Path,
     skip_args: list[str],
 ) -> None:
-    config_path = tmp_path / "staging.cluster.toml"
+    config_path = tmp_path / "production.cluster.toml"
     config_path.write_text(
-        'namespace = "loom-staging"\n[workload_contract\n',
+        'namespace = "loom-prod"\n[workload_contract\n',
         encoding="utf-8",
     )
     _patch_clients(
@@ -1641,9 +1641,9 @@ def test_cli_up_protected_malformed_workload_contract_is_a_named_preflight_failu
             "cluster",
             "up",
             "--namespace",
-            "loom-staging",
+            "loom-prod",
             "--environment",
-            "staging",
+            "production",
             "--config",
             str(config_path),
             "--no-wait",

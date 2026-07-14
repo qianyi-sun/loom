@@ -17,9 +17,15 @@ from typing import Any
 import pytest
 
 from loom_cli.rollout.base_context_fixture import make_ctx
+from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import EvidenceDirectory
 from loom_cli.rollout.steps.base import VerifyOutcome
-from loom_cli.rollout.steps.candidate_source import rollout_cluster_config
+from loom_cli.rollout.steps.candidate_source import (
+    candidate_loom_argv,
+    candidate_loom_env,
+    candidate_relative_path,
+    rollout_cluster_config,
+)
 from loom_cli.rollout.steps.s03_kind_load_images import KindLoadImagesStep
 from loom_cli.rollout.steps.s04_gb10_prep import (
     GB10Host,
@@ -44,6 +50,15 @@ from loom_cli.rollout.steps.subprocess_util import SubprocessResult
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
+def _is_candidate_invocation(argv: list[str]) -> bool:
+    return argv[:3] == [sys.executable, "-I", "-c"]
+
+
+def _candidate_args(argv: list[str]) -> list[str]:
+    assert _is_candidate_invocation(argv)
+    return argv[4:]
+
+
 @pytest.fixture(autouse=True)
 def _control_plane_ready(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
@@ -60,6 +75,85 @@ def _prepare_candidate_worktree(ev: EvidenceDirectory) -> Path:
     return worktree
 
 
+def test_candidate_environment_is_fixed_and_contains_no_pythonpath_or_injection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    step_dir = ev.step_dir(7, "render")
+    for name in (
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "GIT_CONFIG_GLOBAL",
+        "LD_PRELOAD",
+        "AWS_SECRET_ACCESS_KEY",
+        "SSH_AUTH_SOCK",
+        "HTTPS_PROXY",
+        "DOCKER_CONFIG",
+        "LOOM_CP_ADMIN_TOKEN",
+    ):
+        monkeypatch.setenv(name, f"unsafe-{name}")
+
+    env = candidate_loom_env(step_dir)
+
+    assert "PYTHONPATH" not in env
+    assert "PYTHONHOME" not in env
+    assert "GIT_CONFIG_GLOBAL" not in env
+    assert "LD_PRELOAD" not in env
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert "SSH_AUTH_SOCK" not in env
+    assert "HTTPS_PROXY" not in env
+    assert "DOCKER_CONFIG" not in env
+    assert "LOOM_CP_ADMIN_TOKEN" not in env
+    assert env["PATH"] == f"{Path(sys.executable).parent}:/usr/local/bin:/usr/bin:/bin"
+
+
+def test_candidate_argv_uses_isolated_fixed_runpy_launcher() -> None:
+    argv = candidate_loom_argv("cluster", "status")
+
+    assert argv[:3] == [sys.executable, "-I", "-c"]
+    assert "run_module('loom_cli'" in argv[3]
+    assert argv[4:] == ["cluster", "status"]
+    assert "PYTHONPATH" not in " ".join(argv)
+
+
+def test_candidate_path_git_probe_uses_fixed_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    candidate = _prepare_candidate_worktree(ev)
+    step_dir = ev.step_dir(7, "render")
+    repo = tmp_path / "source"
+    source = repo / "deploy" / "config.toml"
+    source.parent.mkdir(parents=True)
+    source.write_text("x = 1\n", encoding="utf-8")
+    mapped = candidate / "deploy" / "config.toml"
+    mapped.parent.mkdir(parents=True)
+    mapped.write_text("x = 1\n", encoding="utf-8")
+    seen: dict[str, Any] = {}
+
+    class Completed:
+        returncode = 0
+        stdout = str(repo) + "\n"
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        seen["env"] = kwargs.get("env")
+        return Completed()
+
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/tmp/evil")
+    monkeypatch.setenv("LD_PRELOAD", "/tmp/evil.so")
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert candidate_relative_path(source, step_dir) == mapped
+    assert "GIT_CONFIG_GLOBAL" not in seen["env"]
+    assert "LD_PRELOAD" not in seen["env"]
+
+
 @pytest.fixture(autouse=True)
 def _control_plane_readiness_is_out_of_scope(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
@@ -73,10 +167,10 @@ def _assert_candidate_invocation(
     *,
     worktree: Path,
 ) -> None:
-    assert call["argv"][:3] == [sys.executable, "-m", "loom_cli"]
+    assert call["argv"][:3] == [sys.executable, "-I", "-c"]
+    assert "run_module('loom_cli'" in call["argv"][3]
     assert call["cwd"] == worktree
-    pythonpath = call["env"].get("PYTHONPATH", "")
-    assert pythonpath.split(os.pathsep)[0] == str(worktree / "src")
+    assert "PYTHONPATH" not in call["env"]
 
 
 def _write_rendered_service(
@@ -250,7 +344,11 @@ def test_kind_load_images_resolves_loom_cli_without_global_executable(
     assert result.exit_code == 0
     assert calls, "expected step to invoke check-only subcommand"
     _assert_candidate_invocation(calls[0], worktree=worktree)
-    assert calls[0]["argv"][3:6] == ["cluster", "load-images", "--cluster-name"]
+    assert _candidate_args(calls[0]["argv"])[:3] == [
+        "cluster",
+        "load-images",
+        "--cluster-name",
+    ]
 
 
 def test_migrate_render_migration_resolves_loom_cli_without_global_executable(
@@ -273,7 +371,7 @@ def test_migrate_render_migration_resolves_loom_cli_without_global_executable(
                 "env": kwargs.get("env"),
             }
         )
-        if list(argv)[:3] == [sys.executable, "-m", "loom_cli"]:
+        if _is_candidate_invocation(list(argv)):
             return SubprocessResult(
                 argv=list(argv),
                 returncode=0,
@@ -293,7 +391,7 @@ def test_migrate_render_migration_resolves_loom_cli_without_global_executable(
 
     assert result.exit_code == 0
     _assert_candidate_invocation(calls[0], worktree=worktree)
-    assert calls[0]["argv"][3:5] == ["cluster", "render-migration"]
+    assert _candidate_args(calls[0]["argv"])[:2] == ["cluster", "render-migration"]
 
 
 def test_env_state_resolves_loom_cli_without_global_executable(
@@ -325,8 +423,8 @@ def test_env_state_resolves_loom_cli_without_global_executable(
         )
 
     monkeypatch.setattr(
-        "loom_cli.rollout.steps.s10_env_state._profile_path_for",
-        lambda ctx: str(profile),
+        "loom_cli.rollout.steps.s10_env_state._candidate_profile_path",
+        lambda _ctx, _step_dir: Path(profile),
     )
     monkeypatch.setattr("loom_cli.rollout.steps.s10_env_state.run_captured", fake_run)
 
@@ -336,8 +434,16 @@ def test_env_state_resolves_loom_cli_without_global_executable(
     assert len(calls) == 2
     for call in calls:
         _assert_candidate_invocation(call, worktree=worktree)
-    assert calls[0]["argv"][3:6] == ["admin", "environment-state", "apply"]
-    assert calls[1]["argv"][3:6] == ["admin", "environment-state", "check"]
+    assert _candidate_args(calls[0]["argv"])[:3] == [
+        "admin",
+        "environment-state",
+        "apply",
+    ]
+    assert _candidate_args(calls[1]["argv"])[:3] == [
+        "admin",
+        "environment-state",
+        "check",
+    ]
     for call in calls:
         assert call["argv"][call["argv"].index("--environment") + 1] == ctx.environment
         assert call["argv"][call["argv"].index("--admin-token") + 1] == ("env:LOOM_CP_ADMIN_TOKEN")
@@ -349,10 +455,12 @@ def test_env_state_passes_pinned_admin_token_source_and_fingerprint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    envelope = tmp_path / "requests" / "request-a" / "attempts" / "1" / "envelope.json"
     ctx = make_ctx(
         tmp_path,
         admin_token_source="file:/secure/path/staging-admin-token",
         expect_admin_token_fingerprint="sha256:abc123def456 len=64",
+        request_envelope_path=envelope,
     )
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
@@ -372,8 +480,8 @@ def test_env_state_passes_pinned_admin_token_source_and_fingerprint(
         )
 
     monkeypatch.setattr(
-        "loom_cli.rollout.steps.s10_env_state._profile_path_for",
-        lambda ctx: str(profile),
+        "loom_cli.rollout.steps.s10_env_state._candidate_profile_path",
+        lambda _ctx, _step_dir: Path(profile),
     )
     monkeypatch.setattr("loom_cli.rollout.steps.s10_env_state.run_captured", fake_run)
 
@@ -386,6 +494,10 @@ def test_env_state_passes_pinned_admin_token_source_and_fingerprint(
         assert argv[argv.index("--expect-admin-token-fingerprint") + 1] == (
             "sha256:abc123def456 len=64"
         )
+        assert argv[argv.index("--rollout-request-envelope") + 1] == str(envelope)
+        assert "--rollout-id" not in argv
+        assert "--rollout-lock-evidence" not in argv
+        assert "--force-rollout-lock" not in argv
         assert "raw-secret-token" not in argv
 
 
@@ -416,8 +528,8 @@ def test_env_state_passes_worker_token_source_to_check_only(
         )
 
     monkeypatch.setattr(
-        "loom_cli.rollout.steps.s10_env_state._profile_path_for",
-        lambda ctx: str(profile),
+        "loom_cli.rollout.steps.s10_env_state._candidate_profile_path",
+        lambda _ctx, _step_dir: Path(profile),
     )
     monkeypatch.setattr("loom_cli.rollout.steps.s10_env_state.run_captured", fake_run)
 
@@ -426,8 +538,8 @@ def test_env_state_passes_worker_token_source_to_check_only(
     assert result.exit_code == 0
     assert len(calls) == 2
     apply_argv, check_argv = calls
-    assert apply_argv[3:6] == ["admin", "environment-state", "apply"]
-    assert check_argv[3:6] == ["admin", "environment-state", "check"]
+    assert _candidate_args(apply_argv)[:3] == ["admin", "environment-state", "apply"]
+    assert _candidate_args(check_argv)[:3] == ["admin", "environment-state", "check"]
     assert "--worker-token" not in apply_argv
     assert check_argv[check_argv.index("--worker-token") + 1] == (
         "file:/secure/path/staging-worker-token"
@@ -463,8 +575,8 @@ def test_env_state_materializes_current_profile_under_rollout_root(
         )
 
     monkeypatch.setattr(
-        "loom_cli.rollout.steps.s10_env_state._profile_path_for",
-        lambda ctx: str(source_profile),
+        "loom_cli.rollout.steps.s10_env_state._candidate_profile_path",
+        lambda _ctx, _step_dir: Path(source_profile),
     )
     monkeypatch.setattr("loom_cli.rollout.steps.s10_env_state.run_captured", fake_run)
 
@@ -540,7 +652,11 @@ PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"
             "env": kwargs.get("env"),
         }
         calls.append(call)
-        if list(argv)[3:6] == ["admin", "environment-state", "apply"]:
+        if _is_candidate_invocation(list(argv)) and _candidate_args(list(argv))[:3] == [
+            "admin",
+            "environment-state",
+            "apply",
+        ]:
             return SubprocessResult(
                 argv=list(argv),
                 returncode=0,
@@ -561,7 +677,11 @@ PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"
                 stdout=f"catalog ok {hf_token} {db_url}\n",
                 stderr=f"warning access {kwargs['env']['LOOM_SVC_MINIO_ACCESS_KEY']}\n",
             )
-        if list(argv)[3:6] == ["admin", "environment-state", "check"]:
+        if _is_candidate_invocation(list(argv)) and _candidate_args(list(argv))[:3] == [
+            "admin",
+            "environment-state",
+            "check",
+        ]:
             return SubprocessResult(
                 argv=list(argv),
                 returncode=0,
@@ -571,8 +691,8 @@ PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"
         raise AssertionError(f"unexpected argv: {argv}")
 
     monkeypatch.setattr(
-        "loom_cli.rollout.steps.s10_env_state._profile_path_for",
-        lambda ctx: str(profile),
+        "loom_cli.rollout.steps.s10_env_state._candidate_profile_path",
+        lambda _ctx, _step_dir: Path(profile),
     )
     monkeypatch.setattr("loom_cli.rollout.steps.s10_env_state.run_captured", fake_run)
 
@@ -580,9 +700,9 @@ PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"
 
     assert result.exit_code == 0
     assert [
-        call["argv"][3:6]
+        _candidate_args(call["argv"])[:3]
         for call in calls
-        if call["argv"][:3] == [sys.executable, "-m", "loom_cli"]
+        if _is_candidate_invocation(call["argv"])
     ] == [
         ["admin", "environment-state", "apply"],
         ["admin", "environment-state", "check"],
@@ -609,7 +729,8 @@ PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"
     assert "[REDACTED:LOOM_SVC_DB_URL]" in combined
     evidence = json.loads(artifact)
     assert evidence["returncode"] == 0
-    assert evidence["env_file"]["path"] == str(env_file)
+    assert evidence["env_file"]["source_identity"].startswith("sha256:")
+    assert str(env_file) not in artifact
     assert evidence["required_env"] == [
         "PUBLISHED_SHA",
         "HF_TOKEN",
@@ -702,7 +823,11 @@ minio_remote_port = 9000
                 "env": kwargs.get("env"),
             }
         )
-        if list(argv)[3:6] == ["admin", "environment-state", "apply"]:
+        if _is_candidate_invocation(list(argv)) and _candidate_args(list(argv))[:3] == [
+            "admin",
+            "environment-state",
+            "apply",
+        ]:
             return SubprocessResult(
                 argv=list(argv),
                 returncode=0,
@@ -721,7 +846,11 @@ minio_remote_port = 9000
                 stdout="catalog ok\n",
                 stderr="",
             )
-        if list(argv)[3:6] == ["admin", "environment-state", "check"]:
+        if _is_candidate_invocation(list(argv)) and _candidate_args(list(argv))[:3] == [
+            "admin",
+            "environment-state",
+            "check",
+        ]:
             return SubprocessResult(
                 argv=list(argv),
                 returncode=0,
@@ -731,8 +860,8 @@ minio_remote_port = 9000
         raise AssertionError(f"unexpected argv: {argv}")
 
     monkeypatch.setattr(
-        "loom_cli.rollout.steps.s10_env_state._profile_path_for",
-        lambda ctx: str(profile),
+        "loom_cli.rollout.steps.s10_env_state._candidate_profile_path",
+        lambda _ctx, _step_dir: Path(profile),
     )
     monkeypatch.setattr("loom_cli.rollout.steps.s10_env_state.run_captured", fake_run)
     monkeypatch.setattr(
@@ -795,8 +924,8 @@ required_env = ["HF_TOKEN"]
 
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setattr(
-        "loom_cli.rollout.steps.s10_env_state._profile_path_for",
-        lambda ctx: str(profile),
+        "loom_cli.rollout.steps.s10_env_state._candidate_profile_path",
+        lambda _ctx, _step_dir: Path(profile),
     )
     monkeypatch.setattr(
         "loom_cli.rollout.steps.s10_env_state.run_captured",
@@ -861,8 +990,8 @@ def test_env_state_defers_gb10_node_status_drift_to_release_gate(
         raise AssertionError(argv)
 
     monkeypatch.setattr(
-        "loom_cli.rollout.steps.s10_env_state._profile_path_for",
-        lambda ctx: str(profile),
+        "loom_cli.rollout.steps.s10_env_state._candidate_profile_path",
+        lambda _ctx, _step_dir: Path(profile),
     )
     monkeypatch.setattr("loom_cli.rollout.steps.s10_env_state.run_captured", fake_run)
 
@@ -963,21 +1092,21 @@ rate_card_provider = "yibuapi"
                 "env": kwargs.get("env"),
             }
         )
-        if list(argv)[3:6] == ["admin", "rate-cards", "sync-yibuapi"]:
+        if _candidate_args(list(argv))[:3] == ["admin", "rate-cards", "sync-yibuapi"]:
             return SubprocessResult(
                 argv=list(argv),
                 returncode=0,
                 stdout='{"id":"yibuapi-pricing-v1","entry_count":128}\n',
                 stderr="",
             )
-        if list(argv)[3:5] == ["providers", "update"]:
+        if _candidate_args(list(argv))[:2] == ["providers", "update"]:
             return SubprocessResult(
                 argv=list(argv),
                 returncode=0,
                 stdout="updated\n",
                 stderr="",
             )
-        if list(argv)[3:5] == ["providers", "show"]:
+        if _candidate_args(list(argv))[:2] == ["providers", "show"]:
             return SubprocessResult(
                 argv=list(argv),
                 returncode=0,
@@ -1008,7 +1137,7 @@ rate_card_provider = "yibuapi"
     for call in calls:
         _assert_candidate_invocation(call, worktree=worktree)
         assert call["env"]["XDG_CONFIG_HOME"] != os.environ.get("XDG_CONFIG_HOME")
-    assert calls[0]["argv"][3:] == [
+    assert _candidate_args(calls[0]["argv"]) == [
         "admin",
         "rate-cards",
         "sync-yibuapi",
@@ -1017,7 +1146,7 @@ rate_card_provider = "yibuapi"
         "--format",
         "json",
     ]
-    assert calls[1]["argv"][3:] == [
+    assert _candidate_args(calls[1]["argv"]) == [
         "providers",
         "update",
         "mz_tn_canada_qianyi",
@@ -1028,7 +1157,7 @@ rate_card_provider = "yibuapi"
         "--admin-actor",
         "rollout-production-defaults",
     ]
-    assert calls[2]["argv"][3:] == [
+    assert _candidate_args(calls[2]["argv"]) == [
         "providers",
         "show",
         "mz_tn_canada_qianyi",
@@ -1191,7 +1320,7 @@ def test_subcommand_step_resolves_loom_cli_without_global_executable(
 
     assert result.exit_code == 0
     _assert_candidate_invocation(seen, worktree=worktree)
-    assert seen["argv"][3:6] == ["cluster", "audit", "--config"]
+    assert _candidate_args(seen["argv"])[:3] == ["cluster", "audit", "--config"]
 
 
 def test_backup_resolves_loom_cli_without_global_executable(
@@ -1224,7 +1353,7 @@ def test_backup_resolves_loom_cli_without_global_executable(
 
     assert result.exit_code == 0
     _assert_candidate_invocation(seen, worktree=worktree)
-    assert seen["argv"][3:6] == ["cluster", "backup", "check"]
+    assert _candidate_args(seen["argv"])[:3] == ["cluster", "backup", "check"]
 
 
 def test_preflight_resolves_loom_cli_with_rollout_cluster_config(
@@ -1530,6 +1659,200 @@ def test_rollout_cluster_config_migrates_existing_relative_gb10_paths_on_resume(
     assert Path(rendered_raw["gb10_pool"]["ssh_config"]) == candidate_ssh_config
 
 
+def _gb10_candidate_config_fixture(
+    tmp_path: Path,
+) -> tuple[RolloutContext, EvidenceDirectory, Path, Path]:
+    runner_root = tmp_path / "runner"
+    runner_config = runner_root / "deploy" / "environments" / "staging.cluster.toml"
+    runner_config.parent.mkdir(parents=True)
+    subprocess.run(["git", "init", "--quiet", str(runner_root)], check=True)
+    ctx = replace(make_ctx(tmp_path), cluster_config_path=runner_config)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    worktree = _prepare_candidate_worktree(ev)
+    candidate_config = worktree / "deploy" / "environments" / "staging.cluster.toml"
+    candidate_config.parent.mkdir(parents=True)
+    return ctx, ev, runner_config, candidate_config
+
+
+def test_gb10_prep_uses_candidate_hosts_and_ssh_when_runner_is_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, ev, runner_config, candidate_config = _gb10_candidate_config_fixture(tmp_path)
+    identity = _write_dummy_identity(tmp_path / "gb10-rollout-ed25519")
+    runner_ssh = tmp_path / "runner-ssh-config"
+    runner_ssh.write_text("Host stale-runner\n", encoding="utf-8")
+    runner_config.write_text(
+        "[gb10_pool]\n"
+        f'ssh_config = "{runner_ssh}"\n'
+        f'ssh_identity_file = "{identity}"\n'
+        "hosts = [\n"
+        '  { ssh_target = "stale-runner", repo_path = "/srv/stale", '
+        'env_file_path = "/srv/stale/.env" },\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    candidate_ssh = candidate_config.parent.parent / "worker-pools" / "gb10" / "ssh_config"
+    candidate_ssh.parent.mkdir(parents=True)
+    candidate_ssh.write_text("Host candidate-host\n", encoding="utf-8")
+    candidate_config.write_text(
+        "[gb10_pool]\n"
+        'ssh_config = "../worker-pools/gb10/ssh_config"\n'
+        f'ssh_identity_file = "{identity}"\n'
+        "hosts = [\n"
+        '  { ssh_target = "candidate-host", repo_path = "/srv/candidate", '
+        'env_file_path = "/srv/candidate/.env" },\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    seen: list[GB10Host] = []
+
+    def fake_prep(
+        _ctx: RolloutContext,
+        host: GB10Host,
+        _host_dir: Path,
+    ) -> tuple[bool, str]:
+        seen.append(host)
+        return True, f"prepped {host.ssh_target}"
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._prep_one_host", fake_prep)
+
+    result = GB10PrepStep().run(ctx, ev.step_dir(12, "gb10-prep"))
+
+    assert result.exit_code == 0
+    assert [host.ssh_target for host in seen] == ["candidate-host"]
+    assert seen[0].repo_path == "/srv/candidate"
+    assert seen[0].ssh_config_path == str(candidate_ssh)
+
+
+def test_gb10_prep_fails_closed_when_candidate_config_is_missing(tmp_path: Path) -> None:
+    ctx, ev, runner_config, _candidate_config = _gb10_candidate_config_fixture(tmp_path)
+    runner_config.write_text("image_tag = 'stale-runner'\n", encoding="utf-8")
+
+    result = GB10PrepStep().run(ctx, ev.step_dir(12, "gb10-prep"))
+
+    assert result.exit_code == 2
+    assert "candidate cluster config" in (result.error or "")
+
+
+def test_gb10_prep_fails_closed_when_candidate_config_is_symlink(tmp_path: Path) -> None:
+    ctx, ev, runner_config, candidate_config = _gb10_candidate_config_fixture(tmp_path)
+    runner_config.write_text("image_tag = 'stale-runner'\n", encoding="utf-8")
+    candidate_config.symlink_to(runner_config)
+
+    result = GB10PrepStep().run(ctx, ev.step_dir(12, "gb10-prep"))
+
+    assert result.exit_code == 2
+    assert "candidate cluster config" in (result.error or "")
+    assert "symlink" in (result.error or "")
+
+
+def test_gb10_prep_fails_closed_when_candidate_config_mapping_escapes(
+    tmp_path: Path,
+) -> None:
+    ctx = replace(make_ctx(tmp_path), cluster_config_path=Path("../escape.cluster.toml"))
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+
+    result = GB10PrepStep().run(ctx, ev.step_dir(12, "gb10-prep"))
+
+    assert result.exit_code == 2
+    assert "candidate cluster config" in (result.error or "")
+    assert "outside" in (result.error or "")
+
+
+def test_gb10_prep_fails_closed_when_candidate_ssh_config_is_missing(
+    tmp_path: Path,
+) -> None:
+    ctx, ev, runner_config, candidate_config = _gb10_candidate_config_fixture(tmp_path)
+    runner_config.write_text("image_tag = 'stale-runner'\n", encoding="utf-8")
+    candidate_config.write_text(
+        '[gb10_pool]\nssh_config = "../worker-pools/gb10/missing-ssh-config"\n',
+        encoding="utf-8",
+    )
+
+    result = GB10PrepStep().run(ctx, ev.step_dir(12, "gb10-prep"))
+
+    assert result.exit_code == 2
+    assert "candidate GB10 SSH config" in (result.error or "")
+    assert "unavailable" in (result.error or "")
+
+
+def test_gb10_prep_fails_closed_when_candidate_profile_is_symlink(
+    tmp_path: Path,
+) -> None:
+    ctx, ev, runner_config, candidate_config = _gb10_candidate_config_fixture(tmp_path)
+    runner_config.write_text("image_tag = 'stale-runner'\n", encoding="utf-8")
+    stale_profile = tmp_path / "stale-runner-profile.toml"
+    stale_profile.write_text('environment = "staging"\n', encoding="utf-8")
+    candidate_profile = candidate_config.parent.parent / "environment-state" / "staging.toml"
+    candidate_profile.parent.mkdir(parents=True)
+    candidate_profile.symlink_to(stale_profile)
+    candidate_config.write_text(
+        'env_state_profile = "../environment-state/staging.toml"\n',
+        encoding="utf-8",
+    )
+
+    result = GB10PrepStep().run(ctx, ev.step_dir(12, "gb10-prep"))
+
+    assert result.exit_code == 2
+    assert "candidate environment-state profile" in (result.error or "")
+    assert "symlink" in (result.error or "")
+
+
+def test_gb10_prep_fails_closed_when_materialized_config_is_symlink(
+    tmp_path: Path,
+) -> None:
+    ctx, ev, runner_config, candidate_config = _gb10_candidate_config_fixture(tmp_path)
+    runner_config.write_text("image_tag = 'stale-runner'\n", encoding="utf-8")
+    candidate_config.write_text("image_tag = 'candidate'\n", encoding="utf-8")
+    (ev.path / "rollout-cluster-config.toml").symlink_to(runner_config)
+
+    result = GB10PrepStep().run(ctx, ev.step_dir(12, "gb10-prep"))
+
+    assert result.exit_code == 2
+    assert "rollout-local cluster config" in (result.error or "")
+    assert "symlink" in (result.error or "")
+
+
+def test_gb10_prep_uses_candidate_profile_for_missing_host_failure(
+    tmp_path: Path,
+) -> None:
+    ctx, ev, runner_config, candidate_config = _gb10_candidate_config_fixture(tmp_path)
+    runner_config.write_text("image_tag = 'stale-runner'\n", encoding="utf-8")
+    candidate_profile = candidate_config.parent.parent / "environment-state" / "staging.toml"
+    candidate_profile.parent.mkdir(parents=True)
+    candidate_profile.write_text(
+        """
+environment = "staging"
+
+[[gb10_worker_pool_desired_states]]
+pool_name = "gb10-arm64"
+image_tag = "${IMAGE_TAG}"
+max_concurrent = 1
+env_config_version = "${ENV_CONFIG_VERSION}"
+source_git_commit = "${GIT_SHA}"
+target_slots = 1
+
+[gb10_worker_pool_desired_states.host_intents]
+candidate-host = "active"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    candidate_config.write_text(
+        'env_state_profile = "../environment-state/staging.toml"\n',
+        encoding="utf-8",
+    )
+
+    result = GB10PrepStep().run(ctx, ev.step_dir(12, "gb10-prep"))
+
+    assert result.exit_code == 1
+    assert "declares GB10 desired state" in (result.error or "")
+
+
 def test_gb10_prep_reads_hosts_from_cluster_config(tmp_path: Path) -> None:
     ctx = make_ctx(tmp_path)
     ssh_config = tmp_path / "deploy" / "worker-pools" / "gb10" / "ssh_config"
@@ -1608,8 +1931,18 @@ def test_gb10_prep_ssh_uses_declared_config(
     assert argv[-2:] == ["trt-gb10-1", "hostname >/dev/null"]
 
 
+@pytest.fixture
+def _runner_backed_gb10_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep non-candidate unit cases focused on their original GB10 behavior."""
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s04_gb10_prep._gb10_prep_config_paths",
+        lambda ctx, _step_dir: (ctx.cluster_config_path, ctx.cluster_config_path),
+    )
+
+
 def test_gb10_prep_fails_when_current_gb10_profile_has_no_hosts(
     tmp_path: Path,
+    _runner_backed_gb10_config: None,
 ) -> None:
     ctx = make_ctx(tmp_path, image_tag="staging-abc123")
     state_dir = tmp_path / "environment-state"
@@ -1649,6 +1982,7 @@ trt-gb10-1 = "active"
 
 def test_gb10_prep_requires_platform_dev_identity_file(
     tmp_path: Path,
+    _runner_backed_gb10_config: None,
 ) -> None:
     ctx = make_ctx(tmp_path, image_tag="staging-abc123")
     ctx.cluster_config_path.write_text(
@@ -1673,6 +2007,7 @@ def test_gb10_prep_requires_platform_dev_identity_file(
 
 def test_gb10_prep_rejects_group_readable_identity_file(
     tmp_path: Path,
+    _runner_backed_gb10_config: None,
 ) -> None:
     ctx = make_ctx(tmp_path, image_tag="staging-abc123")
     identity = tmp_path / "gb10-rollout-ed25519"
@@ -1701,6 +2036,7 @@ def test_gb10_prep_rejects_group_readable_identity_file(
 def test_gb10_prep_verify_treats_missing_target_env_as_retryable_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    _runner_backed_gb10_config: None,
 ) -> None:
     ctx = make_ctx(tmp_path, image_tag="staging-abc123")
     identity = _write_dummy_identity(tmp_path / "gb10-rollout-ed25519")
@@ -1734,6 +2070,7 @@ def test_gb10_prep_verify_treats_missing_target_env_as_retryable_mismatch(
 def test_gb10_prep_verify_keeps_ssh_auth_failure_unknown(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    _runner_backed_gb10_config: None,
 ) -> None:
     ctx = make_ctx(tmp_path, image_tag="staging-abc123")
     identity = _write_dummy_identity(tmp_path / "gb10-rollout-ed25519")
@@ -1767,6 +2104,7 @@ def test_gb10_prep_verify_keeps_ssh_auth_failure_unknown(
 def test_gb10_prep_verify_checks_checkout_env_version_and_node_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    _runner_backed_gb10_config: None,
 ) -> None:
     ctx = make_ctx(
         tmp_path,
@@ -1828,6 +2166,7 @@ def test_gb10_prep_verify_checks_checkout_env_version_and_node_agent(
 def test_gb10_prep_verify_accepts_successful_oneshot_node_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    _runner_backed_gb10_config: None,
 ) -> None:
     ctx = make_ctx(
         tmp_path,
@@ -1882,6 +2221,7 @@ def test_gb10_prep_verify_accepts_successful_oneshot_node_agent(
 def test_gb10_prep_verify_retries_when_legacy_worker_unit_is_enabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    _runner_backed_gb10_config: None,
 ) -> None:
     ctx = make_ctx(
         tmp_path,
@@ -1945,6 +2285,7 @@ def test_gb10_prep_verify_retries_when_legacy_worker_unit_is_enabled(
 def test_gb10_prep_clones_preserves_env_and_starts_node_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    _runner_backed_gb10_config: None,
 ) -> None:
     ctx = make_ctx(
         tmp_path,
@@ -2001,6 +2342,7 @@ def test_gb10_prep_clones_preserves_env_and_starts_node_agent(
 def test_gb10_prep_runs_hosts_with_bounded_parallelism(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    _runner_backed_gb10_config: None,
 ) -> None:
     ctx = make_ctx(tmp_path, image_tag="staging-abc123")
     identity = _write_dummy_identity(tmp_path / "gb10-rollout-ed25519")
@@ -2049,6 +2391,7 @@ def test_gb10_prep_runs_hosts_with_bounded_parallelism(
 def test_gb10_prep_slow_failing_host_does_not_block_other_hosts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    _runner_backed_gb10_config: None,
 ) -> None:
     ctx = make_ctx(tmp_path, image_tag="staging-abc123")
     identity = _write_dummy_identity(tmp_path / "gb10-rollout-ed25519")
@@ -2106,6 +2449,7 @@ def test_gb10_prep_slow_failing_host_does_not_block_other_hosts(
 def test_gb10_prep_retry_count_is_per_host_and_reported(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    _runner_backed_gb10_config: None,
 ) -> None:
     ctx = make_ctx(tmp_path, image_tag="staging-abc123")
     identity = _write_dummy_identity(tmp_path / "gb10-rollout-ed25519")
@@ -2191,7 +2535,7 @@ def test_release_gate_run_generates_manifest_then_gates(
         if "release-manifest" in argv:
             output = Path(argv[argv.index("--output") + 1])
             output.write_text(_release_manifest_with_gb10_contract())
-        if argv[3:6] == ["admin", "environment-state", "check"]:
+        if _candidate_args(argv)[:3] == ["admin", "environment-state", "check"]:
             stdout = json.dumps(
                 {
                     "environment": "production",
@@ -2231,14 +2575,28 @@ def test_release_gate_run_generates_manifest_then_gates(
     assert calls[0]["argv"][:3] == ["docker", "image", "inspect"]
     for call in calls[1:]:
         _assert_candidate_invocation(call, worktree=worktree)
-    assert calls[1]["argv"][3:5] == ["cluster", "release-manifest"]
-    assert calls[2]["argv"][3:5] == ["cluster", "minio-storage-preflight"]
+    assert _candidate_args(calls[1]["argv"])[:2] == ["cluster", "release-manifest"]
+    assert _candidate_args(calls[2]["argv"])[:2] == [
+        "cluster",
+        "minio-storage-preflight",
+    ]
     assert calls[2]["argv"][calls[2]["argv"].index("--namespace") + 1] == ctx.namespace
-    assert calls[3]["argv"][3:6] == ["admin", "gb10-workers", "status"]
+    assert _candidate_args(calls[3]["argv"])[:3] == [
+        "admin",
+        "gb10-workers",
+        "status",
+    ]
     assert calls[3]["argv"][calls[3]["argv"].index("--environment") + 1] == "production"
-    assert calls[4]["argv"][3:6] == ["admin", "environment-state", "check"]
-    assert calls[5]["argv"][3:5] == ["datasets", "hf-boundary-evidence"]
-    assert calls[6]["argv"][3:5] == ["cluster", "release-gate"]
+    assert _candidate_args(calls[4]["argv"])[:3] == [
+        "admin",
+        "environment-state",
+        "check",
+    ]
+    assert _candidate_args(calls[5]["argv"])[:2] == [
+        "datasets",
+        "hf-boundary-evidence",
+    ]
+    assert _candidate_args(calls[6]["argv"])[:2] == ["cluster", "release-gate"]
     manifest = step_dir.artifact_path("release-manifest-staging-abc123.json")
     storage = step_dir.artifact_path("minio-storage-preflight-staging-abc123.json")
     env_state_check = step_dir.artifact_path("environment-state-check.json")
@@ -2412,7 +2770,7 @@ def test_release_gate_run_fails_fast_when_gb10_status_hard_fails(
     assert result.exit_code == 1
     assert result.error == "error: CP returned 500: internal error"
     non_docker_calls = [call for call in calls if call[:3] != ["docker", "image", "inspect"]]
-    assert [call[3:6] for call in non_docker_calls] == [
+    assert [_candidate_args(call)[:3] for call in non_docker_calls] == [
         ["cluster", "release-manifest", "--config"],
         ["cluster", "minio-storage-preflight", "--namespace"],
         ["admin", "gb10-workers", "status"],
@@ -2467,7 +2825,7 @@ def test_release_gate_current_gb10_requires_manifest_desired_state(
     assert result.summary == "release manifest lacks GB10 desired state"
     assert "env_state_profile" in (result.error or "")
     non_docker_calls = [call for call in calls if call[:3] != ["docker", "image", "inspect"]]
-    assert [call[3:6] for call in non_docker_calls] == [
+    assert [_candidate_args(call)[:3] for call in non_docker_calls] == [
         ["cluster", "release-manifest", "--config"],
     ]
 
@@ -2593,7 +2951,7 @@ def test_release_gate_retries_transient_gb10_status_cp_unreachable(
     assert result.exit_code == 0
     assert gb10_attempts == 3
     non_docker_calls = [call for call in calls if call[:3] != ["docker", "image", "inspect"]]
-    assert [call[3:6] for call in non_docker_calls] == [
+    assert [_candidate_args(call)[:3] for call in non_docker_calls] == [
         ["cluster", "release-manifest", "--config"],
         ["cluster", "minio-storage-preflight", "--namespace"],
         ["admin", "gb10-workers", "status"],
@@ -2703,7 +3061,7 @@ def test_release_gate_retries_gb10_status_release_target_mismatch(
     assert result.exit_code == 0
     assert gb10_attempts == 2
     non_docker_calls = [call for call in calls if call[:3] != ["docker", "image", "inspect"]]
-    assert [call[3:6] for call in non_docker_calls] == [
+    assert [_candidate_args(call)[:3] for call in non_docker_calls] == [
         ["cluster", "release-manifest", "--config"],
         ["cluster", "minio-storage-preflight", "--namespace"],
         ["admin", "gb10-workers", "status"],

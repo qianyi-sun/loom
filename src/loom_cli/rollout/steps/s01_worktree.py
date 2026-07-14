@@ -33,7 +33,9 @@ class WorktreeStep(BaseStep):
         }
 
     def _verify_impl(
-        self, ctx: RolloutContext, step_dir: StepDir,
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
     ) -> VerifyOutcome:
         wt = worktree_path(step_dir)
         # Cheap check: is there a HEAD at the expected sha?
@@ -57,28 +59,35 @@ class WorktreeStep(BaseStep):
         # Ignore removal failures — if the dir didn't exist, git errors;
         # if it did and remove worked, all good; either way, proceed.
 
-        result = run_captured([
-            "git", "worktree", "add", "-B", branch, wt, ctx.resolved_sha,
-        ])
-        stdout_log = step_dir.stdout_path()
-        stderr_log = step_dir.stderr_path()
+        result = run_captured(
+            [
+                "git",
+                "worktree",
+                "add",
+                "-B",
+                branch,
+                wt,
+                ctx.resolved_sha,
+            ]
+        )
         # Combine both git invocations' logs for the operator.
-        stdout_log.write_text(
+        self.write_stdout(
+            step_dir,
             f"# git worktree remove\n{remove.stdout}\n"
             f"# git worktree add -B {branch} {wt} {ctx.resolved_sha}\n"
-            f"{result.stdout}\n"
+            f"{result.stdout}\n",
         )
-        stderr_log.write_text(
-            f"# git worktree remove\n{remove.stderr}\n"
-            f"# git worktree add ...\n{result.stderr}\n"
+        self.write_stderr(
+            step_dir,
+            f"# git worktree remove\n{remove.stderr}\n# git worktree add ...\n{result.stderr}\n",
         )
         if result.returncode != 0:
             return RunResult(
                 exit_code=result.returncode,
                 error=(
                     result.stderr.strip().splitlines()[-1]
-                    if result.stderr.strip() else
-                    f"git worktree add exited {result.returncode}"
+                    if result.stderr.strip()
+                    else f"git worktree add exited {result.returncode}"
                 ),
             )
         return RunResult(

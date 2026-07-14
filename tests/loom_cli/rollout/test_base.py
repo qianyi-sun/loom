@@ -8,6 +8,7 @@ import pytest
 
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.evidence import EvidenceDirectory
+from loom_cli.rollout.operator.redaction import rollout_redaction_scope
 from loom_cli.rollout.steps.base import (
     BaseStep,
     RunResult,
@@ -28,6 +29,7 @@ class _NoOpStep(BaseStep):
 
 class _MatchStep(BaseStep):
     """Overrides verify to MATCH — used by driver tests."""
+
     number = 43
     name = "matcher"
 
@@ -82,10 +84,13 @@ class TestBaseStepIsDone:
         ev = EvidenceDirectory(tmp_path, "rid")
         ev.ensure()
         step_dir = ev.step_dir(42, "noop")
-        ev.write_step_result(step_dir, {
-            "state": "done",
-            "inputs_hash": step.inputs_hash(ctx),
-        })
+        ev.write_step_result(
+            step_dir,
+            {
+                "state": "done",
+                "inputs_hash": step.inputs_hash(ctx),
+            },
+        )
         assert step.is_done(ctx, step_dir)
 
     def test_returns_false_when_hash_stale(self, tmp_path: Path) -> None:
@@ -94,10 +99,13 @@ class TestBaseStepIsDone:
         ev = EvidenceDirectory(tmp_path, "rid")
         ev.ensure()
         step_dir = ev.step_dir(42, "noop")
-        ev.write_step_result(step_dir, {
-            "state": "done",
-            "inputs_hash": "wrong-hash",
-        })
+        ev.write_step_result(
+            step_dir,
+            {
+                "state": "done",
+                "inputs_hash": "wrong-hash",
+            },
+        )
         assert not step.is_done(ctx, step_dir)
 
     def test_returns_false_when_state_not_done(self, tmp_path: Path) -> None:
@@ -106,10 +114,13 @@ class TestBaseStepIsDone:
         ev = EvidenceDirectory(tmp_path, "rid")
         ev.ensure()
         step_dir = ev.step_dir(42, "noop")
-        ev.write_step_result(step_dir, {
-            "state": "running",
-            "inputs_hash": step.inputs_hash(ctx),
-        })
+        ev.write_step_result(
+            step_dir,
+            {
+                "state": "running",
+                "inputs_hash": step.inputs_hash(ctx),
+            },
+        )
         assert not step.is_done(ctx, step_dir)
 
 
@@ -136,6 +147,7 @@ class TestBaseStepDefaults:
         class NoImpl(BaseStep):
             number = 1
             name = "no-impl"
+
         step = NoImpl()
         ctx = make_ctx(tmp_path)
         ev = EvidenceDirectory(tmp_path, "rid")
@@ -143,6 +155,40 @@ class TestBaseStepDefaults:
         step_dir = ev.step_dir(1, "no-impl")
         with pytest.raises(NotImplementedError, match="no-impl"):
             step.run(ctx, step_dir)
+
+    def test_diagnostic_text_helpers_redact_exact_known_secret(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        secret = "opaque-base-step-secret"
+        step = _NoOpStep()
+        ev = EvidenceDirectory(tmp_path, "rid")
+        ev.ensure()
+        step_dir = ev.step_dir(42, "noop")
+
+        with rollout_redaction_scope((secret,)):
+            step.write_stdout(step_dir, f"stdout {secret}\n")
+            step.write_stderr(step_dir, f"stderr {secret}\n")
+
+        persisted = step_dir.stdout_path().read_text() + step_dir.stderr_path().read_text()
+        assert secret not in persisted
+
+    def test_functional_text_and_binary_artifacts_are_not_rewritten(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        payload = "functional-artifact-payload"
+        step = _NoOpStep()
+        ev = EvidenceDirectory(tmp_path, "rid")
+        ev.ensure()
+        step_dir = ev.step_dir(42, "noop")
+
+        with rollout_redaction_scope((payload,)):
+            step.write_artifact(step_dir, "rendered.yaml", payload)
+            step.write_artifact(step_dir, "archive.bin", payload.encode())
+
+        assert step_dir.artifact_path("rendered.yaml").read_text() == payload
+        assert step_dir.artifact_path("archive.bin").read_bytes() == payload.encode()
 
 
 class TestBaseStepConformsToProtocol:
@@ -174,3 +220,29 @@ class TestStepResultDict:
             "summary": "ok",
             "artifacts": {},
         }
+
+    def test_run_result_and_payload_redact_diagnostic_fields(self) -> None:
+        secret = "opaque-result-secret"
+        step = _NoOpStep()
+
+        with rollout_redaction_scope((secret,)):
+            run_result = RunResult(
+                exit_code=1,
+                summary=f"summary {secret}",
+                error=f"error {secret}",
+            )
+            result = step_result_dict(
+                step=step,
+                state="failed",
+                inputs_hash="abc",
+                started_at="t0",
+                finished_at="t1",
+                exit_code=1,
+                error=f"error {secret}",
+                summary=f"summary {secret}",
+                artifacts={"diagnostic": f"artifact {secret}"},
+            )
+
+        assert secret not in run_result.summary
+        assert secret not in (run_result.error or "")
+        assert secret not in str(result)

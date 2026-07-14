@@ -30,7 +30,101 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-STATE_VERSION = 1
+from loom_cli.rollout.operator.redaction import (
+    redact_rollout_mapping,
+    redact_rollout_text,
+)
+
+STATE_VERSION = 2
+
+_ATTRIBUTION_FIELDS = (
+    "request_id",
+    "initiating_operator",
+    "initiating_uid",
+    "attempt_number",
+    "attempt_operator",
+    "attempt_uid",
+)
+
+
+def _strict_positive_int(value: object, *, field_name: str) -> int:
+    if type(value) is not int or value < 1:
+        raise ValueError(f"{field_name} must be a positive integer")
+    return value
+
+
+def _strict_uid(value: object, *, field_name: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer")
+    return value
+
+
+def _strict_nonempty_string(value: object, *, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty string")
+    return value
+
+
+def _validate_attempt_attribution(
+    attempt_number: object,
+    attempt_operator: object,
+    attempt_uid: object,
+) -> tuple[int | None, str | None, int | None]:
+    values = (attempt_number, attempt_operator, attempt_uid)
+    if all(value is None for value in values):
+        return None, None, None
+    if any(value is None for value in values):
+        raise ValueError("attempt attribution must be present all-or-none")
+    try:
+        return (
+            _strict_positive_int(attempt_number, field_name="attempt_number"),
+            _strict_nonempty_string(
+                attempt_operator,
+                field_name="attempt_operator",
+            ),
+            _strict_uid(attempt_uid, field_name="attempt_uid"),
+        )
+    except ValueError as exc:
+        raise ValueError(f"invalid attempt attribution: {exc}") from None
+
+
+def _validate_rollout_attribution(
+    request_id: object,
+    initiating_operator: object,
+    initiating_uid: object,
+    attempt_number: object,
+    attempt_operator: object,
+    attempt_uid: object,
+) -> tuple[str | None, str | None, int | None, int | None, str | None, int | None]:
+    values = (
+        request_id,
+        initiating_operator,
+        initiating_uid,
+        attempt_number,
+        attempt_operator,
+        attempt_uid,
+    )
+    if all(value is None for value in values):
+        return None, None, None, None, None, None
+    if any(value is None for value in values):
+        raise ValueError("rollout attribution must be present all-or-none")
+    try:
+        checked_attempt = _validate_attempt_attribution(
+            attempt_number,
+            attempt_operator,
+            attempt_uid,
+        )
+        return (
+            _strict_nonempty_string(request_id, field_name="request_id"),
+            _strict_nonempty_string(
+                initiating_operator,
+                field_name="initiating_operator",
+            ),
+            _strict_uid(initiating_uid, field_name="initiating_uid"),
+            *checked_attempt,
+        )
+    except ValueError as exc:
+        raise ValueError(f"invalid rollout attribution: {exc}") from None
 
 
 class StepState(enum.StrEnum):
@@ -76,6 +170,17 @@ class DriverRecord:
     boot_id: str | None
     started_at: str
     updated_at: str
+    attempt_number: int | None = None
+    attempt_operator: str | None = None
+    attempt_uid: int | None = None
+
+    def __post_init__(self) -> None:
+        checked = _validate_attempt_attribution(
+            self.attempt_number,
+            self.attempt_operator,
+            self.attempt_uid,
+        )
+        self.attempt_number, self.attempt_operator, self.attempt_uid = checked
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -84,6 +189,9 @@ class DriverRecord:
             "boot_id": self.boot_id,
             "started_at": self.started_at,
             "updated_at": self.updated_at,
+            "attempt_number": self.attempt_number,
+            "attempt_operator": self.attempt_operator,
+            "attempt_uid": self.attempt_uid,
         }
 
     @classmethod
@@ -94,6 +202,9 @@ class DriverRecord:
             boot_id=data.get("boot_id"),
             started_at=str(data["started_at"]),
             updated_at=str(data["updated_at"]),
+            attempt_number=data.get("attempt_number"),
+            attempt_operator=data.get("attempt_operator"),
+            attempt_uid=data.get("attempt_uid"),
         )
 
 
@@ -108,6 +219,10 @@ class StepRecord:
     started_at: str | None = None
     finished_at: str | None = None
     error: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.error is not None:
+            self.error = redact_rollout_text(self.error)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -155,12 +270,72 @@ class RolloutState:
     status: str = "running"  # "running" | "done" | "failed"
     current_step: int | None = None  # number of the last step marked running
     driver: DriverRecord | None = None
+    request_id: str | None = None
+    initiating_operator: str | None = None
+    initiating_uid: int | None = None
+    attempt_number: int | None = None
+    attempt_operator: str | None = None
+    attempt_uid: int | None = None
+
+    def __post_init__(self) -> None:
+        checked = _validate_rollout_attribution(
+            self.request_id,
+            self.initiating_operator,
+            self.initiating_uid,
+            self.attempt_number,
+            self.attempt_operator,
+            self.attempt_uid,
+        )
+        (
+            self.request_id,
+            self.initiating_operator,
+            self.initiating_uid,
+            self.attempt_number,
+            self.attempt_operator,
+            self.attempt_uid,
+        ) = checked
+        self._validate_driver_attempt_attribution()
+
+    def _validate_driver_attempt_attribution(self) -> None:
+        if self.request_id is None or self.driver is None:
+            return
+        state_attempt = (
+            self.attempt_number,
+            self.attempt_operator,
+            self.attempt_uid,
+        )
+        driver_attempt = (
+            self.driver.attempt_number,
+            self.driver.attempt_operator,
+            self.driver.attempt_uid,
+        )
+        if driver_attempt != state_attempt:
+            raise ValueError(
+                "driver current attempt attribution must match rollout attempt attribution"
+            )
 
     @classmethod
-    def new(cls, *, rollout_id: str, steps: list[tuple[int, str]]) -> RolloutState:
+    def new(
+        cls,
+        *,
+        rollout_id: str,
+        steps: list[tuple[int, str]],
+        request_id: str | None = None,
+        initiating_operator: str | None = None,
+        initiating_uid: int | None = None,
+        attempt_number: int | None = None,
+        attempt_operator: str | None = None,
+        attempt_uid: int | None = None,
+    ) -> RolloutState:
         return cls(
             rollout_id=rollout_id,
             steps=[StepRecord(number=n, name=name) for n, name in steps],
+            request_id=request_id,
+            initiating_operator=initiating_operator,
+            initiating_uid=initiating_uid,
+            attempt_number=attempt_number,
+            attempt_operator=attempt_operator,
+            attempt_uid=attempt_uid,
         )
 
     def _find(self, number: int) -> StepRecord:
@@ -219,10 +394,18 @@ class RolloutState:
         record = self._find(number)
         record.state = StepState.FAILED
         record.finished_at = finished_at
-        record.error = error
+        record.error = redact_rollout_text(error)
         self.status = "failed"
 
     def mark_driver_active(self, record: DriverRecord) -> None:
+        if self.request_id is not None and (
+            record.attempt_number,
+            record.attempt_operator,
+            record.attempt_uid,
+        ) != (self.attempt_number, self.attempt_operator, self.attempt_uid):
+            raise ValueError(
+                "driver current attempt attribution must match rollout attempt attribution"
+            )
         self.driver = record
 
     def clear_driver(self) -> None:
@@ -237,21 +420,55 @@ class RolloutState:
         return None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        self._validate_driver_attempt_attribution()
+        payload = {
             "version": STATE_VERSION,
             "rollout_id": self.rollout_id,
             "status": self.status,
             "current_step": self.current_step,
             "driver": self.driver.to_dict() if self.driver else None,
+            "request_id": self.request_id,
+            "initiating_operator": self.initiating_operator,
+            "initiating_uid": self.initiating_uid,
+            "attempt_number": self.attempt_number,
+            "attempt_operator": self.attempt_operator,
+            "attempt_uid": self.attempt_uid,
             "steps": [r.to_dict() for r in self.steps],
         }
+        redacted = redact_rollout_mapping(payload)
+        if not isinstance(redacted, dict):  # pragma: no cover - mapping contract
+            raise TypeError("redacted rollout state must remain a mapping")
+        return redacted
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RolloutState:
-        version = int(data.get("version", 0))
-        if version != STATE_VERSION:
+        version = data.get("version", 0)
+        if type(version) is not int:
+            raise ValueError("state.json version must be an integer")
+        if version not in {1, STATE_VERSION}:
             raise ValueError(
-                f"unsupported state.json version {version}; driver expects {STATE_VERSION}"
+                f"unsupported state.json version {version}; driver expects 1 or {STATE_VERSION}"
+            )
+        attribution: tuple[
+            str | None,
+            str | None,
+            int | None,
+            int | None,
+            str | None,
+            int | None,
+        ]
+        if version == 1:
+            attribution = (None, None, None, None, None, None)
+        else:
+            if not set(_ATTRIBUTION_FIELDS).issubset(data):
+                raise ValueError("state.json version 2 attribution fields are required")
+            attribution = _validate_rollout_attribution(
+                data.get("request_id"),
+                data.get("initiating_operator"),
+                data.get("initiating_uid"),
+                data.get("attempt_number"),
+                data.get("attempt_operator"),
+                data.get("attempt_uid"),
             )
         return cls(
             rollout_id=str(data["rollout_id"]),
@@ -263,6 +480,12 @@ class RolloutState:
                 if isinstance(data.get("driver"), dict)
                 else None
             ),
+            request_id=attribution[0],
+            initiating_operator=attribution[1],
+            initiating_uid=attribution[2],
+            attempt_number=attribution[3],
+            attempt_operator=attribution[4],
+            attempt_uid=attribution[5],
         )
 
     def save(self, path: Path) -> None:

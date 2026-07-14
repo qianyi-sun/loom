@@ -12,32 +12,38 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import io
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
+import stat
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import dotenv_values
 
 from loom.security.redaction import (
     is_sensitive_environment_key,
-    redact_environment_mapping,
-    redact_text,
 )
 from loom.worker_token import DEFAULT_WORKER_TOKEN_ENV_KEY, worker_token_fingerprint
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
+from loom_cli.rollout.operator.redaction import (
+    redact_rollout_text,
+    rollout_redaction_scope,
+)
 from loom_cli.rollout.steps.base import BaseStep, RunResult
 from loom_cli.rollout.steps.candidate_source import (
     CandidateToolingError,
@@ -65,6 +71,51 @@ class ControlPlaneReadinessError(RuntimeError):
 
 _CONTROL_PLANE_READY_TIMEOUT_SECONDS = 60.0
 _CONTROL_PLANE_READY_INTERVAL_SECONDS = 0.5
+_MAX_CATALOG_SOURCE_BYTES = 1024 * 1024
+_MAX_PORT_FORWARD_LOG_CHARS = 64 * 1024
+_OVERSIZED_PORT_FORWARD_OUTPUT = "[REDACTED:oversized-port-forward-output]\n"
+_PORT_FORWARD_ENV_KEYS = frozenset(
+    {
+        "DBUS_SESSION_BUS_ADDRESS",
+        "HOME",
+        "KUBECONFIG",
+        "LANG",
+        "LC_ALL",
+        "LOGNAME",
+        "PATH",
+        "USER",
+        "XDG_RUNTIME_DIR",
+    }
+)
+
+
+def _safe_text(value: object, *, known_values: Sequence[str] = ()) -> str:
+    return redact_rollout_text(str(value), known_secrets=known_values)
+
+
+def _write_safe_text(
+    path: Path,
+    value: object,
+    *,
+    known_values: Sequence[str] = (),
+) -> None:
+    path.write_text(
+        _safe_text(value, known_values=known_values),
+        encoding="utf-8",
+    )
+
+
+def _write_safe_json(
+    path: Path,
+    value: object,
+    *,
+    known_values: Sequence[str] = (),
+) -> None:
+    _write_safe_text(
+        path,
+        json.dumps(value, indent=2, sort_keys=True) + "\n",
+        known_values=known_values,
+    )
 
 
 @dataclass(frozen=True)
@@ -74,6 +125,51 @@ class CatalogKubernetesPortForward:
     postgres_remote_port: int
     minio_service: str
     minio_remote_port: int
+
+
+@dataclass
+class _BoundedRedactedCapture:
+    """Drain a child pipe without ever redacting a structurally truncated value."""
+
+    stream: IO[str]
+    known_values: tuple[str, ...] = field(repr=False)
+    limit: int = _MAX_PORT_FORWARD_LOG_CHARS
+    _buffer: str = field(default="", init=False, repr=False)
+    _oversized: bool = field(default=False, init=False, repr=False)
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        init=False,
+        repr=False,
+    )
+    _thread: threading.Thread = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._thread = threading.Thread(target=self._drain, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _drain(self) -> None:
+        while True:
+            chunk = self.stream.read(8192)
+            if not chunk:
+                return
+            with self._lock:
+                if self._oversized:
+                    continue
+                if len(self._buffer) + len(chunk) > self.limit:
+                    self._buffer = ""
+                    self._oversized = True
+                    continue
+                self._buffer += chunk
+
+    def rendered(self) -> str:
+        self._thread.join(timeout=5)
+        with self._lock:
+            if self._oversized or self._thread.is_alive():
+                return _OVERSIZED_PORT_FORWARD_OUTPUT
+            raw = self._buffer
+        return _safe_text(raw, known_values=self.known_values)
 
 
 @dataclass(frozen=True)
@@ -88,16 +184,26 @@ class CatalogPortForwardHandle:
     process: subprocess.Popen[str] | None = None
     stdout_handle: Any = None
     stderr_handle: Any = None
+    known_values: tuple[str, ...] = field(default=(), repr=False)
+    stdout_capture: _BoundedRedactedCapture | None = field(
+        default=None,
+        repr=False,
+    )
+    stderr_capture: _BoundedRedactedCapture | None = field(
+        default=None,
+        repr=False,
+    )
 
 
 @dataclass(frozen=True)
 class CatalogProvisioningPlan:
-    command: str
-    env: dict[str, str]
+    command: str = field(repr=False)
+    env: dict[str, str] = field(repr=False)
     required_env: list[str]
     env_file: dict[str, Any] | None
     env_sources: dict[str, str]
     kubernetes_port_forward: CatalogKubernetesPortForward | None
+    protected_values: tuple[str, ...] = field(default=(), repr=False)
 
 
 def _is_gb10_node_status_drift_only(stdout: str) -> bool:
@@ -122,14 +228,26 @@ def _is_gb10_node_status_drift_only(stdout: str) -> bool:
     return True
 
 
+def _broker_mutation_args(ctx: RolloutContext) -> list[str]:
+    if ctx.request_envelope_path is None:
+        return []
+    return [
+        "--rollout-request-envelope",
+        str(ctx.request_envelope_path),
+    ]
+
+
 def environment_state_check_argv(
     ctx: RolloutContext,
     step_dir: StepDir,
+    *,
+    profile_path: Path | None = None,
 ) -> Sequence[str] | None:
-    profile = _profile_path_for(ctx)
-    if profile is None:
-        return None
-    profile_path = candidate_relative_path(Path(profile), step_dir)
+    if profile_path is None:
+        profile = _profile_path_for(ctx)
+        if profile is None:
+            return None
+        profile_path = candidate_relative_path(Path(profile), step_dir)
     release_vars = [
         "--var",
         f"IMAGE_TAG={ctx.image_tag}",
@@ -168,6 +286,7 @@ def environment_state_check_argv(
         str(profile_path),
         "--environment",
         ctx.environment,
+        *_broker_mutation_args(ctx),
         *release_vars,
         *worker_check_args,
         "--format",
@@ -196,6 +315,75 @@ def _profile_path_for(ctx: RolloutContext, config_path: Path | None = None) -> s
     if not profile_path.is_absolute():
         profile_path = source_config_path.parent / profile_path
     return str(profile_path.resolve(strict=False))
+
+
+def _candidate_profile_path(ctx: RolloutContext, step_dir: StepDir) -> Path | None:
+    """Resolve env-state input only from the pinned candidate cluster config."""
+    from loom_cli.cluster_config import load_cluster_config
+
+    candidate_root = candidate_worktree(step_dir).resolve(strict=False)
+    mapped_config = candidate_relative_path(ctx.cluster_config_path, step_dir)
+    candidate_config = mapped_config
+    if not candidate_config.is_absolute():
+        candidate_config = candidate_root / candidate_config
+    candidate_config = Path(os.path.normpath(candidate_config))
+    try:
+        candidate_config.relative_to(candidate_root)
+    except ValueError as exc:
+        raise CandidateToolingError(
+            "pinned candidate cluster config is outside the candidate worktree"
+        ) from exc
+    try:
+        config_metadata = candidate_config.lstat()
+    except (OSError, ValueError) as exc:
+        raise CandidateToolingError(
+            "pinned candidate cluster config is unavailable or outside the candidate worktree"
+        ) from exc
+    if not stat.S_ISREG(config_metadata.st_mode):
+        raise CandidateToolingError(
+            "pinned candidate cluster config must be a regular file, not a symlink"
+        )
+    candidate_config = candidate_config.resolve(strict=False)
+    try:
+        candidate_config.relative_to(candidate_root)
+        config = load_cluster_config(candidate_config)
+    except (OSError, ValueError) as exc:
+        raise CandidateToolingError(
+            "pinned candidate cluster config is invalid or outside the candidate worktree"
+        ) from exc
+
+    profile_value = getattr(config, "env_state_profile", None)
+    if not profile_value:
+        return None
+    profile_path = Path(str(profile_value)).expanduser()
+    if not profile_path.is_absolute():
+        profile_path = candidate_config.parent / profile_path
+    profile_path = Path(os.path.normpath(profile_path))
+    try:
+        profile_path.relative_to(candidate_root)
+    except ValueError as exc:
+        raise CandidateToolingError(
+            "pinned candidate environment-state profile is outside the candidate worktree"
+        ) from exc
+    try:
+        profile_metadata = profile_path.lstat()
+    except (OSError, ValueError) as exc:
+        raise CandidateToolingError(
+            "pinned candidate environment-state profile is unavailable or outside "
+            "the candidate worktree"
+        ) from exc
+    if not stat.S_ISREG(profile_metadata.st_mode):
+        raise CandidateToolingError(
+            "pinned candidate environment-state profile must be a regular file, not a symlink"
+        )
+    resolved_profile = profile_path.resolve(strict=False)
+    try:
+        resolved_profile.relative_to(candidate_root)
+    except ValueError as exc:
+        raise CandidateToolingError(
+            "pinned candidate environment-state profile is outside the candidate worktree"
+        ) from exc
+    return resolved_profile
 
 
 def _release_vars(ctx: RolloutContext) -> dict[str, str]:
@@ -237,9 +425,9 @@ def _materialize_rollout_root_profile(
         "target_path": str(target),
         "target_sha256": _sha256_bytes(target.read_bytes()),
     }
-    step_dir.artifact_path("environment-state-profile-materialization.json").write_text(
-        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    _write_safe_json(
+        step_dir.artifact_path("environment-state-profile-materialization.json"),
+        evidence,
     )
     return evidence
 
@@ -257,37 +445,98 @@ def _string_list(value: object, field: str) -> list[str]:
     return out
 
 
-def _catalog_env_file(catalog: dict[str, Any]) -> tuple[dict[str, str], dict[str, Any] | None]:
+def _catalog_source_identity(value: str) -> str:
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _read_private_catalog_source(path: Path, *, label: str) -> str:
+    if not path.is_absolute() or ".." in path.parts:
+        raise CatalogProvisioningError(f"{label} must be an absolute protected path")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        raise CatalogProvisioningError(f"{label} is unavailable or unsafe") from None
+    try:
+        metadata = os.fstat(descriptor)
+        mode = stat.S_IMODE(metadata.st_mode)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise CatalogProvisioningError(f"{label} must be a regular file")
+        if mode & 0o027:
+            raise CatalogProvisioningError(
+                f"{label} must not be group-writable/executable or world-accessible"
+            )
+        if metadata.st_size > _MAX_CATALOG_SOURCE_BYTES:
+            raise CatalogProvisioningError(f"{label} exceeds the bounded size limit")
+        payload = bytearray()
+        while len(payload) <= _MAX_CATALOG_SOURCE_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(65536, _MAX_CATALOG_SOURCE_BYTES + 1 - len(payload)),
+            )
+            if not chunk:
+                break
+            payload.extend(chunk)
+        if len(payload) > _MAX_CATALOG_SOURCE_BYTES:
+            raise CatalogProvisioningError(f"{label} exceeds the bounded size limit")
+        after = os.fstat(descriptor)
+        if (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise CatalogProvisioningError(f"{label} changed while it was read")
+        try:
+            return bytes(payload).decode("utf-8")
+        except UnicodeDecodeError:
+            raise CatalogProvisioningError(f"{label} must be valid UTF-8") from None
+    finally:
+        os.close(descriptor)
+
+
+def _catalog_env_file(
+    catalog: dict[str, Any],
+) -> tuple[dict[str, str], dict[str, Any] | None, tuple[str, ...]]:
     raw_path = catalog.get("env_file")
     if raw_path is None:
-        return {}, None
+        return {}, None, ()
     if not isinstance(raw_path, str) or not raw_path.strip():
         raise CatalogProvisioningError("catalog_provisioning.env_file must be a non-empty string")
     path = Path(raw_path).expanduser()
-    if not path.is_file():
-        raise CatalogProvisioningError(
-            f"catalog provisioning env_file does not exist: {path}",
-        )
+    decoded = _read_private_catalog_source(
+        path,
+        label="catalog provisioning env_file",
+    )
     values = {
-        key: str(value) for key, value in dotenv_values(path).items() if key and value is not None
+        key: str(value)
+        for key, value in dotenv_values(stream=io.StringIO(decoded)).items()
+        if key and value is not None
     }
     evidence = {
-        "path": str(path),
-        "mode": oct(path.stat().st_mode & 0o777),
+        "source_identity": _catalog_source_identity(str(path)),
         "key_count": len(values),
         "keys": sorted(values),
     }
-    return values, evidence
+    return values, evidence, (str(path), f"file:{path}")
 
 
-def _catalog_env_sources(catalog: dict[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
+def _catalog_env_sources(
+    catalog: dict[str, Any],
+) -> tuple[dict[str, str], dict[str, str], tuple[str, ...]]:
     raw_sources = catalog.get("env_sources", {})
     if raw_sources is None:
-        return {}, {}
+        return {}, {}, ()
     if not isinstance(raw_sources, dict):
         raise CatalogProvisioningError("catalog_provisioning.env_sources must be a table")
     resolved: dict[str, str] = {}
     evidence: dict[str, str] = {}
+    protected: list[str] = []
     for raw_key, raw_source in raw_sources.items():
         key = str(raw_key).strip()
         if not key:
@@ -305,14 +554,34 @@ def _catalog_env_sources(catalog: dict[str, Any]) -> tuple[dict[str, str], dict[
                 "during unattended rollout; use env:VAR or file:PATH",
             )
         try:
-            resolved[key] = resolve_secret_source(
-                source,
-                flag_name=f"catalog_provisioning.env_sources.{key}",
+            if source.startswith("file:"):
+                rendered_path = source.removeprefix("file:")
+                value = _read_private_catalog_source(
+                    Path(rendered_path).expanduser(),
+                    label=f"catalog_provisioning.env_sources.{key}",
+                ).strip()
+                protected.append(rendered_path)
+            elif source.startswith("env:"):
+                value = resolve_secret_source(
+                    source,
+                    flag_name=f"catalog_provisioning.env_sources.{key}",
+                )
+            else:
+                raise CatalogProvisioningError(
+                    f"catalog_provisioning.env_sources.{key} must use env:VAR or file:PATH"
+                )
+        except (CatalogProvisioningError, SecretSourceError):
+            raise CatalogProvisioningError(
+                f"catalog_provisioning.env_sources.{key} could not be resolved safely"
+            ) from None
+        if not value:
+            raise CatalogProvisioningError(
+                f"catalog_provisioning.env_sources.{key} resolved to an empty value"
             )
-        except SecretSourceError as exc:
-            raise CatalogProvisioningError(str(exc)) from exc
-        evidence[key] = redact_text(source)
-    return resolved, evidence
+        resolved[key] = value
+        protected.extend((source, value))
+        evidence[key] = _catalog_source_identity(source)
+    return resolved, evidence, tuple(protected)
 
 
 def _catalog_literal_env(catalog: dict[str, Any]) -> dict[str, str]:
@@ -417,8 +686,8 @@ def _catalog_provisioning_plan(
             variables=_release_vars(ctx),
             expected_environment=ctx.environment,
         )
-    except Exception as exc:
-        raise CatalogProvisioningError(str(exc)) from exc
+    except Exception:
+        raise CatalogProvisioningError("catalog provisioning profile is invalid") from None
 
     catalog = profile.catalog_provisioning
     if catalog.get("required") is not True:
@@ -430,9 +699,9 @@ def _catalog_provisioning_plan(
         )
 
     env = dict(base_env)
-    env_file_values, env_file_evidence = _catalog_env_file(catalog)
+    env_file_values, env_file_evidence, env_file_protected = _catalog_env_file(catalog)
     env.update(env_file_values)
-    env_sources, env_source_evidence = _catalog_env_sources(catalog)
+    env_sources, env_source_evidence, env_source_protected = _catalog_env_sources(catalog)
     env.update(env_sources)
     env.update(_catalog_literal_env(catalog))
 
@@ -449,6 +718,12 @@ def _catalog_provisioning_plan(
         env_file=env_file_evidence,
         env_sources=env_source_evidence,
         kubernetes_port_forward=_catalog_kubernetes_port_forward(ctx, catalog),
+        protected_values=(
+            command.strip(),
+            *env_file_protected,
+            *env_source_protected,
+            *tuple(value for value in env.values() if value),
+        ),
     )
 
 
@@ -458,14 +733,16 @@ def _redact_catalog_output(
     env: dict[str, str],
     required_env: Sequence[str],
 ) -> str:
+    del required_env
     redacted = text
-    for name in required_env:
-        value = env.get(name)
-        if not value:
-            continue
-        if is_sensitive_environment_key(name) or redact_text(value) != value:
-            redacted = redacted.replace(value, f"[REDACTED:{name}]")
-    return redact_text(redacted)
+    values = sorted(
+        ((name, value) for name, value in env.items() if value),
+        key=lambda item: len(item[1]),
+        reverse=True,
+    )
+    for name, value in values:
+        redacted = redacted.replace(value, f"[REDACTED:{name}]")
+    return redact_rollout_text(redacted, known_secrets=env.values())
 
 
 def _reserve_local_port() -> int:
@@ -474,26 +751,59 @@ def _reserve_local_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _bounded_port_forward_env(source: dict[str, str]) -> dict[str, str]:
+    return {key: source[key] for key in sorted(_PORT_FORWARD_ENV_KEYS) if source.get(key)}
+
+
+def _flush_port_forward_output(
+    handle: CatalogPortForwardHandle,
+) -> tuple[str, str]:
+    stdout = handle.stdout_capture.rendered() if handle.stdout_capture else ""
+    stderr = handle.stderr_capture.rendered() if handle.stderr_capture else ""
+    _write_safe_text(
+        handle.stdout_log,
+        stdout,
+        known_values=handle.known_values,
+    )
+    _write_safe_text(
+        handle.stderr_log,
+        stderr,
+        known_values=handle.known_values,
+    )
+    return stdout, stderr
+
+
+def _terminate_port_forward(process: subprocess.Popen[str]) -> None:
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
 def _wait_for_local_tcp(
     *,
-    process: subprocess.Popen[str],
+    handle: CatalogPortForwardHandle,
     local_port: int,
-    stderr_log: Path,
     timeout_seconds: float = 10.0,
 ) -> None:
+    process = handle.process
+    if process is None:
+        raise CatalogProvisioningError("kubectl port-forward did not start")
     deadline = time.monotonic() + timeout_seconds
     last_error = ""
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            stderr_tail = ""
-            if stderr_log.is_file():
-                stderr_tail = stderr_log.read_text(
-                    encoding="utf-8",
-                    errors="replace",
-                )[-500:]
+            process.wait(timeout=1)
+            stdout, stderr = _flush_port_forward_output(handle)
+            safe_tail = _safe_text(
+                stderr or stdout or f"exit={process.returncode}",
+                known_values=handle.known_values,
+            )[-500:]
             raise CatalogProvisioningError(
-                "kubectl port-forward exited before becoming ready: "
-                + redact_text(stderr_tail.strip() or f"exit={process.returncode}"),
+                "kubectl port-forward exited before becoming ready: " + safe_tail,
             )
         try:
             with socket.create_connection(("127.0.0.1", local_port), timeout=0.2):
@@ -514,12 +824,13 @@ def _start_catalog_port_forward(
     local_port: int,
     step_dir: StepDir,
     name: str,
+    child_env: dict[str, str],
+    known_values: Sequence[str],
 ) -> CatalogPortForwardHandle:
     stdout_log = step_dir.artifact_path(f"catalog-port-forward-{name}.stdout")
     stderr_log = step_dir.artifact_path(f"catalog-port-forward-{name}.stderr")
-    stdout_handle = stdout_log.open("w", encoding="utf-8")
-    stderr_handle = stderr_log.open("w", encoding="utf-8")
     process: subprocess.Popen[str] | None = None
+    handle: CatalogPortForwardHandle | None = None
     try:
         process = subprocess.Popen(
             [
@@ -530,10 +841,23 @@ def _start_catalog_port_forward(
                 resource,
                 f"{local_port}:{remote_port}",
             ],
-            stdout=stdout_handle,
-            stderr=stderr_handle,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
+            env=dict(child_env),
         )
+        if process.stdout is None or process.stderr is None:
+            raise CatalogProvisioningError("kubectl port-forward capture pipes are unavailable")
+        stdout_capture = _BoundedRedactedCapture(
+            process.stdout,
+            tuple(known_values),
+        )
+        stderr_capture = _BoundedRedactedCapture(
+            process.stderr,
+            tuple(known_values),
+        )
+        stdout_capture.start()
+        stderr_capture.start()
         handle = CatalogPortForwardHandle(
             name=name,
             namespace=namespace,
@@ -543,39 +867,41 @@ def _start_catalog_port_forward(
             stdout_log=stdout_log,
             stderr_log=stderr_log,
             process=process,
-            stdout_handle=stdout_handle,
-            stderr_handle=stderr_handle,
+            known_values=tuple(known_values),
+            stdout_capture=stdout_capture,
+            stderr_capture=stderr_capture,
         )
         _wait_for_local_tcp(
-            process=process,
+            handle=handle,
             local_port=local_port,
-            stderr_log=stderr_log,
         )
         return handle
-    except Exception:
-        if process is not None and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-        stdout_handle.close()
-        stderr_handle.close()
+    except CatalogProvisioningError:
+        if process is not None:
+            _terminate_port_forward(process)
+        if handle is not None:
+            _flush_port_forward_output(handle)
+        else:
+            _write_safe_text(stdout_log, "", known_values=known_values)
+            _write_safe_text(stderr_log, "", known_values=known_values)
         raise
+    except Exception:
+        if process is not None:
+            _terminate_port_forward(process)
+        if handle is not None:
+            _flush_port_forward_output(handle)
+        else:
+            _write_safe_text(stdout_log, "", known_values=known_values)
+            _write_safe_text(stderr_log, "", known_values=known_values)
+        raise CatalogProvisioningError("kubectl port-forward could not start safely") from None
 
 
 def _stop_catalog_port_forward(handle: CatalogPortForwardHandle) -> None:
-    if handle.process is not None and handle.process.poll() is None:
-        handle.process.terminate()
-        try:
-            handle.process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            handle.process.kill()
-            handle.process.wait(timeout=5)
-    for stream in (handle.stdout_handle, handle.stderr_handle):
-        if stream is not None:
-            stream.close()
+    process = handle.process
+    if process is None:
+        return
+    _terminate_port_forward(process)
+    _flush_port_forward_output(handle)
 
 
 def _replace_url_host_port(value: str, *, host: str, port: int) -> str:
@@ -601,7 +927,7 @@ def _control_plane_health_url(cp_url: str) -> str:
     parsed = urlsplit(cp_url)
     if not parsed.scheme or not parsed.netloc:
         raise ControlPlaneReadinessError(
-            f"control-plane URL must include scheme and host: {redact_text(cp_url)}",
+            f"control-plane URL must include scheme and host: {_safe_text(cp_url)}",
         )
     return urlunsplit((parsed.scheme, parsed.netloc, "/healthz", "", ""))
 
@@ -628,20 +954,15 @@ def _wait_for_control_plane(
                 body = response.read(256)
                 body_len = len(body.strip())
                 if status == 200 and body_len > 0:
-                    step_dir.artifact_path("control-plane-readiness.json").write_text(
-                        json.dumps(
-                            {
-                                "attempts": attempts,
-                                "duration_seconds": round(time.monotonic() - started, 3),
-                                "health_url": redact_text(health_url),
-                                "ready": True,
-                                "status": status,
-                            },
-                            indent=2,
-                            sort_keys=True,
-                        )
-                        + "\n",
-                        encoding="utf-8",
+                    _write_safe_json(
+                        step_dir.artifact_path("control-plane-readiness.json"),
+                        {
+                            "attempts": attempts,
+                            "duration_seconds": round(time.monotonic() - started, 3),
+                            "health_url": _safe_text(health_url),
+                            "ready": True,
+                            "status": status,
+                        },
                     )
                     return
                 last_error = f"HTTP {status} with empty health body"
@@ -655,18 +976,18 @@ def _wait_for_control_plane(
     evidence = {
         "attempts": attempts,
         "duration_seconds": round(time.monotonic() - started, 3),
-        "health_url": redact_text(health_url),
-        "last_error": redact_text(last_error),
+        "health_url": _safe_text(health_url),
+        "last_error": _safe_text(last_error),
         "ready": False,
         "status": status,
     }
-    step_dir.artifact_path("control-plane-readiness.json").write_text(
-        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    _write_safe_json(
+        step_dir.artifact_path("control-plane-readiness.json"),
+        evidence,
     )
     raise ControlPlaneReadinessError(
         "control-plane did not become ready at "
-        f"{redact_text(health_url)} within {timeout_seconds:g}s: {redact_text(last_error)}",
+        f"{_safe_text(health_url)} within {timeout_seconds:g}s: {_safe_text(last_error)}",
     )
 
 
@@ -698,6 +1019,11 @@ def _catalog_effective_env(
         return
 
     handles: list[CatalogPortForwardHandle] = []
+    known_values = (
+        *plan.protected_values,
+        *tuple(value for value in plan.env.values() if value),
+    )
+    port_forward_env = _bounded_port_forward_env(plan.env)
     try:
         postgres = _start_catalog_port_forward(
             namespace=config.namespace,
@@ -706,6 +1032,8 @@ def _catalog_effective_env(
             local_port=_reserve_local_port(),
             step_dir=step_dir,
             name="postgres",
+            child_env=port_forward_env,
+            known_values=known_values,
         )
         handles.append(postgres)
         minio = _start_catalog_port_forward(
@@ -715,6 +1043,8 @@ def _catalog_effective_env(
             local_port=_reserve_local_port(),
             step_dir=step_dir,
             name="minio",
+            child_env=port_forward_env,
+            known_values=known_values,
         )
         handles.append(minio)
         for name in ("LOOM_DB_URL", "LOOM_SVC_DB_URL"):
@@ -744,47 +1074,78 @@ def _catalog_effective_env(
             _stop_catalog_port_forward(handle)
 
 
+def _catalog_known_values(
+    plan: CatalogProvisioningPlan,
+    effective_env: dict[str, str] | None = None,
+) -> tuple[str, ...]:
+    values = [
+        *plan.protected_values,
+        *tuple(value for value in plan.env.values() if value),
+    ]
+    if plan.env_file is not None:
+        values.extend(
+            value
+            for key, value in plan.env_file.items()
+            if "path" in key and isinstance(value, str) and value
+        )
+    values.extend(
+        value for value in plan.env_sources.values() if value and not value.startswith("sha256:")
+    )
+    if effective_env is not None:
+        values.extend(value for value in effective_env.values() if value)
+    try:
+        command_tokens = shlex.split(plan.command)
+    except ValueError:
+        command_tokens = []
+    values.extend(token for token in command_tokens if token.startswith(("/", "file:", "env:")))
+    return tuple(dict.fromkeys(value for value in values if value))
+
+
 def _run_catalog_provisioning(
     plan: CatalogProvisioningPlan,
     *,
     cwd: Path,
     step_dir: StepDir,
 ) -> RunResult | None:
+    known_values = _catalog_known_values(plan)
     try:
-        with _catalog_effective_env(plan, step_dir=step_dir) as (
-            effective_env,
-            port_forward_evidence,
-        ):
-            result = run_captured(
-                ["bash", "-euo", "pipefail", "-c", plan.command],
-                cwd=cwd,
-                env=effective_env,
-            )
-    except CatalogProvisioningError as exc:
-        message = redact_text(str(exc))
+        with rollout_redaction_scope(known_values):
+            with _catalog_effective_env(plan, step_dir=step_dir) as (
+                effective_env,
+                port_forward_evidence,
+            ):
+                effective_known_values = _catalog_known_values(plan, effective_env)
+                with rollout_redaction_scope(effective_known_values):
+                    result = run_captured(
+                        ["bash", "-euo", "pipefail", "-c", plan.command],
+                        cwd=cwd,
+                        env=effective_env,
+                    )
+    except Exception as exc:
+        message = _safe_text(exc, known_values=known_values)
         stdout_log = step_dir.artifact_path("catalog-provisioning.stdout")
         stderr_log = step_dir.artifact_path("catalog-provisioning.stderr")
-        stdout_log.write_text("", encoding="utf-8")
-        stderr_log.write_text(message + "\n", encoding="utf-8")
+        _write_safe_text(stdout_log, "", known_values=known_values)
+        _write_safe_text(
+            stderr_log,
+            message + "\n",
+            known_values=known_values,
+        )
         evidence_path = step_dir.artifact_path("catalog-provisioning.json")
-        evidence_path.write_text(
-            json.dumps(
-                {
-                    "required": True,
-                    "command": plan.command,
-                    "returncode": 1,
-                    "required_env": plan.required_env,
-                    "env_file": plan.env_file,
-                    "env_sources": plan.env_sources,
-                    "kubernetes_port_forward": {"enabled": True, "error": message},
-                    "stdout_log": str(stdout_log),
-                    "stderr_log": str(stderr_log),
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
-            encoding="utf-8",
+        _write_safe_json(
+            evidence_path,
+            {
+                "required": True,
+                "command_sha256": _sha256_bytes(plan.command.encode("utf-8")),
+                "returncode": 1,
+                "required_env": plan.required_env,
+                "env_file": plan.env_file,
+                "env_sources": plan.env_sources,
+                "kubernetes_port_forward": {"enabled": True, "error": message},
+                "stdout_log": str(stdout_log),
+                "stderr_log": str(stderr_log),
+            },
+            known_values=known_values,
         )
         return RunResult(
             exit_code=1,
@@ -803,33 +1164,33 @@ def _run_catalog_provisioning(
     )
     stdout_log = step_dir.artifact_path("catalog-provisioning.stdout")
     stderr_log = step_dir.artifact_path("catalog-provisioning.stderr")
-    stdout_log.write_text(redacted_stdout, encoding="utf-8")
-    stderr_log.write_text(redacted_stderr, encoding="utf-8")
-    env_evidence = {
-        name: effective_env[name] for name in plan.required_env if name in effective_env
-    }
+    known_values = _catalog_known_values(plan, effective_env)
+    _write_safe_text(stdout_log, redacted_stdout, known_values=known_values)
+    _write_safe_text(stderr_log, redacted_stderr, known_values=known_values)
     evidence = {
         "required": True,
-        "command": plan.command,
+        "command_sha256": _sha256_bytes(plan.command.encode("utf-8")),
         "returncode": result.returncode,
         "required_env": plan.required_env,
         "env_file": plan.env_file,
         "env_sources": plan.env_sources,
         "kubernetes_port_forward": port_forward_evidence,
-        "environment": [entry.to_json() for entry in redact_environment_mapping(env_evidence)],
+        "environment_keys": sorted(effective_env),
         "stdout_log": str(stdout_log),
         "stderr_log": str(stderr_log),
     }
     evidence_path = step_dir.artifact_path("catalog-provisioning.json")
-    evidence_path.write_text(
-        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    _write_safe_json(
+        evidence_path,
+        evidence,
+        known_values=known_values,
     )
     if result.returncode == 0:
         return None
     message = (redacted_stderr or redacted_stdout).strip() or (
         f"catalog provisioning exited {result.returncode}"
     )
+    message = _safe_text(message, known_values=known_values)
     return RunResult(
         exit_code=result.returncode,
         error=f"catalog provisioning failed: {message[:200]}",
@@ -953,7 +1314,7 @@ def _git_stdout(argv: list[str]) -> str:
         raw_message = (result.stderr or result.stdout).strip() or (
             f"{' '.join(argv)} exited {result.returncode}"
         )
-        raise ExternalSlurmPrereqMaterializationError(redact_text(raw_message))
+        raise ExternalSlurmPrereqMaterializationError(_safe_text(raw_message))
     return result.stdout.strip()
 
 
@@ -1137,7 +1498,7 @@ def _materialize_external_slurm_runner_prerequisites(
                 flag_name="--worker-token",
             )
         except SecretSourceError as exc:
-            raise ExternalSlurmPrereqMaterializationError(str(exc)) from exc
+            raise ExternalSlurmPrereqMaterializationError(_safe_text(exc)) from None
 
     records: list[dict[str, Any]] = []
     source_repo = candidate_worktree(step_dir)
@@ -1179,9 +1540,9 @@ def _materialize_external_slurm_runner_prerequisites(
         records.append(record)
 
     if records:
-        step_dir.artifact_path("external-slurm-runner-prerequisites.json").write_text(
-            json.dumps({"records": records}, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
+        _write_safe_json(
+            step_dir.artifact_path("external-slurm-runner-prerequisites.json"),
+            {"records": records},
         )
     return records
 
@@ -1191,10 +1552,19 @@ class EnvStateStep(BaseStep):
     name = "env-state"
 
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:
-        profile = _profile_path_for(ctx)
-        if profile is None:
-            step_dir.stdout_path().write_text(
-                "no env_state_profile declared in cluster-config; skipping.\n"
+        try:
+            cwd = candidate_loom_cwd(step_dir)
+            env = candidate_loom_env(step_dir)
+            profile_path = _candidate_profile_path(ctx, step_dir)
+        except CandidateToolingError as exc:
+            message = _safe_text(exc)
+            _write_safe_text(step_dir.stderr_path(), message + "\n")
+            return RunResult(exit_code=2, error=message)
+
+        if profile_path is None:
+            _write_safe_text(
+                step_dir.stdout_path(),
+                "no env_state_profile declared in candidate cluster-config; skipping.\n",
             )
             return RunResult(
                 exit_code=0,
@@ -1202,18 +1572,10 @@ class EnvStateStep(BaseStep):
             )
 
         try:
-            cwd = candidate_loom_cwd(step_dir)
-            env = candidate_loom_env(step_dir)
-        except CandidateToolingError as exc:
-            step_dir.stderr_path().write_text(str(exc) + "\n")
-            return RunResult(exit_code=2, error=str(exc))
-
-        profile_path = candidate_relative_path(Path(profile), step_dir)
-        try:
             catalog_plan = _catalog_provisioning_plan(ctx, profile_path, env)
         except CatalogProvisioningError as exc:
-            message = redact_text(str(exc))
-            step_dir.stderr_path().write_text(message + "\n", encoding="utf-8")
+            message = _safe_text(exc)
+            _write_safe_text(step_dir.stderr_path(), message + "\n")
             return RunResult(exit_code=2, error=message)
         _materialize_rollout_root_profile(
             ctx,
@@ -1247,21 +1609,22 @@ class EnvStateStep(BaseStep):
                 step_dir,
             )
         except ExternalSlurmPrereqMaterializationError as exc:
-            step_dir.stderr_path().write_text(str(exc) + "\n")
-            return RunResult(exit_code=2, error=str(exc))
+            message = _safe_text(exc)
+            _write_safe_text(step_dir.stderr_path(), message + "\n")
+            return RunResult(exit_code=2, error=message)
         try:
             _wait_for_control_plane(ctx, step_dir)
         except ControlPlaneReadinessError as exc:
-            message = redact_text(str(exc), limit=200)
-            step_dir.stdout_path().write_text(
+            message = _safe_text(exc)[:200]
+            _write_safe_text(
+                step_dir.stdout_path(),
                 "# external-slurm-runner-prerequisites\n"
                 f"materialized {len(materialized)} external runner prerequisite set(s)\n"
                 "# control-plane-readiness\n",
-                encoding="utf-8",
             )
-            step_dir.stderr_path().write_text(
+            _write_safe_text(
+                step_dir.stderr_path(),
                 f"# control-plane-readiness\n{message}\n",
-                encoding="utf-8",
             )
             return RunResult(
                 exit_code=2,
@@ -1287,25 +1650,26 @@ class EnvStateStep(BaseStep):
                 str(profile_path),
                 "--environment",
                 ctx.environment,
+                *_broker_mutation_args(ctx),
                 *release_vars,
             ),
             cwd=cwd,
             env=env,
         )
         if apply_.returncode != 0:
-            step_dir.stdout_path().write_text(
+            _write_safe_text(
+                step_dir.stdout_path(),
                 "# external-slurm-runner-prerequisites\n"
                 f"materialized {len(materialized)} external runner prerequisite set(s)\n"
                 f"# apply\n{apply_.stdout}\n",
-                encoding="utf-8",
             )
-            step_dir.stderr_path().write_text(
+            _write_safe_text(
+                step_dir.stderr_path(),
                 f"# apply\n{apply_.stderr}\n",
-                encoding="utf-8",
             )
             return RunResult(
                 exit_code=apply_.returncode,
-                error=f"env-state apply failed: {redact_text(apply_.stderr, limit=200).strip()}",
+                error=f"env-state apply failed: {_safe_text(apply_.stderr)[:200].strip()}",
             )
 
         catalog_summary = "catalog provisioning not required"
@@ -1326,26 +1690,30 @@ class EnvStateStep(BaseStep):
             ).read_text(encoding="utf-8")
             catalog_artifact = str(step_dir.artifact_path("catalog-provisioning.json"))
             if catalog_result is not None:
-                step_dir.stdout_path().write_text(
+                _write_safe_text(
+                    step_dir.stdout_path(),
                     "# external-slurm-runner-prerequisites\n"
                     f"materialized {len(materialized)} external runner prerequisite set(s)\n"
                     f"# apply\n{apply_.stdout}\n"
                     f"# catalog-provisioning\n{catalog_stdout}\n",
-                    encoding="utf-8",
                 )
-                step_dir.stderr_path().write_text(
+                _write_safe_text(
+                    step_dir.stderr_path(),
                     f"# apply\n{apply_.stderr}\n# catalog-provisioning\n{catalog_stderr}\n",
-                    encoding="utf-8",
                 )
                 return catalog_result
             catalog_summary = "catalog provisioning exited 0"
 
-        check_argv = environment_state_check_argv(ctx, step_dir)
+        check_argv = environment_state_check_argv(
+            ctx,
+            step_dir,
+            profile_path=profile_path,
+        )
         assert check_argv is not None
         check = run_captured(check_argv, cwd=cwd, env=env)
-        step_dir.artifact_path("environment-state-check-attempt-1.json").write_text(
+        _write_safe_text(
+            step_dir.artifact_path("environment-state-check-attempt-1.json"),
             check.stdout,
-            encoding="utf-8",
         )
         deferred_gb10_status = check.returncode != 0 and _is_gb10_node_status_drift_only(
             check.stdout
@@ -1357,24 +1725,24 @@ class EnvStateStep(BaseStep):
                 "gb10-prep runs after env-state and starts node-agent apply\n"
             )
         retry_log = step_dir.artifact_path("environment-state-check.retries.log")
-        retry_log.write_text(check_log, encoding="utf-8")
-        step_dir.artifact_path("environment-state-check.json").write_text(
+        _write_safe_text(retry_log, check_log)
+        _write_safe_text(
+            step_dir.artifact_path("environment-state-check.json"),
             check.stdout,
-            encoding="utf-8",
         )
-        step_dir.stdout_path().write_text(
+        _write_safe_text(
+            step_dir.stdout_path(),
             "# external-slurm-runner-prerequisites\n"
             f"materialized {len(materialized)} external runner prerequisite set(s)\n"
             f"# apply\n{apply_.stdout}\n"
             f"# catalog-provisioning\n{catalog_stdout}\n"
             f"# check\n{check.stdout}\n",
-            encoding="utf-8",
         )
-        step_dir.stderr_path().write_text(
+        _write_safe_text(
+            step_dir.stderr_path(),
             f"# apply\n{apply_.stderr}\n"
             f"# catalog-provisioning\n{catalog_stderr}\n"
             f"# check\n{check.stderr}\n",
-            encoding="utf-8",
         )
         artifacts = {
             "environment_state_check": str(step_dir.artifact_path("environment-state-check.json")),
@@ -1396,7 +1764,7 @@ class EnvStateStep(BaseStep):
                 )
             return RunResult(
                 exit_code=check.returncode,
-                error=f"env-state check reported drift: {check.stdout.strip()[:200]}",
+                error=("env-state check reported drift: " + _safe_text(check.stdout).strip()[:200]),
             )
         return RunResult(
             exit_code=0,

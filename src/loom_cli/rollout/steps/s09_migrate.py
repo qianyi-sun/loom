@@ -17,6 +17,7 @@ import yaml  # type: ignore[import-untyped]
 
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
+from loom_cli.rollout.operator.redaction import redact_rollout_text
 from loom_cli.rollout.steps.base import BaseStep, RunResult
 from loom_cli.rollout.steps.candidate_source import (
     CandidateToolingError,
@@ -40,6 +41,10 @@ def _deterministic_job_suffix(ctx: RolloutContext) -> str:
 
 def _rendered_manifest_path(step_dir: StepDir) -> Path:
     return step_dir.path.parent / "07-render" / "rendered.yaml"
+
+
+def _error_excerpt(value: str) -> str:
+    return redact_rollout_text(value, limit=200).strip()
 
 
 def _resource_name(doc: dict[Any, Any]) -> str | None:
@@ -146,7 +151,7 @@ class MigrateStep(BaseStep):
             cwd = candidate_loom_cwd(step_dir)
             env = candidate_loom_env(step_dir)
         except CandidateToolingError as exc:
-            step_dir.stderr_path().write_text(str(exc) + "\n")
+            self.write_stderr(step_dir, str(exc) + "\n")
             return RunResult(exit_code=2, error=str(exc))
 
         # Render the migration manifest.
@@ -165,10 +170,10 @@ class MigrateStep(BaseStep):
             env=env,
         )
         if render.returncode != 0:
-            step_dir.stderr_path().write_text(render.stderr)
+            self.write_stderr(step_dir, render.stderr)
             return RunResult(
                 exit_code=render.returncode,
-                error=f"render-migration failed: {render.stderr.strip()[:200]}",
+                error=f"render-migration failed: {_error_excerpt(render.stderr)}",
             )
         manifest = step_dir.artifact_path("migration.yaml")
         manifest.write_text(render.stdout)
@@ -181,19 +186,19 @@ class MigrateStep(BaseStep):
                 namespace=ctx.namespace,
             )
         except RuntimeError as exc:
-            step_dir.stderr_path().write_text(str(exc) + "\n")
+            self.write_stderr(step_dir, str(exc) + "\n")
             return RunResult(exit_code=2, error=str(exc))
 
         apply_substrate = run_captured(
             ["kubectl", "-n", ctx.namespace, "apply", "-f", str(substrate_manifest)],
         )
         if apply_substrate.returncode != 0:
-            step_dir.stderr_path().write_text(apply_substrate.stderr)
+            self.write_stderr(step_dir, apply_substrate.stderr)
             return RunResult(
                 exit_code=apply_substrate.returncode,
                 error=(
                     "kubectl apply stateful substrate failed: "
-                    f"{apply_substrate.stderr.strip()[:200]}"
+                    f"{_error_excerpt(apply_substrate.stderr)}"
                 ),
             )
 
@@ -212,12 +217,12 @@ class MigrateStep(BaseStep):
             )
             wait_outputs.append((statefulset, wait_statefulset.stdout))
             if wait_statefulset.returncode != 0:
-                step_dir.stderr_path().write_text(wait_statefulset.stderr)
+                self.write_stderr(step_dir, wait_statefulset.stderr)
                 return RunResult(
                     exit_code=wait_statefulset.returncode,
                     error=(
                         f"stateful substrate {statefulset} did not become ready: "
-                        f"{wait_statefulset.stderr.strip()[:200]}"
+                        f"{_error_excerpt(wait_statefulset.stderr)}"
                     ),
                 )
 
@@ -226,10 +231,10 @@ class MigrateStep(BaseStep):
             ["kubectl", "-n", ctx.namespace, "apply", "-f", str(manifest)],
         )
         if apply_.returncode != 0:
-            step_dir.stderr_path().write_text(apply_.stderr)
+            self.write_stderr(step_dir, apply_.stderr)
             return RunResult(
                 exit_code=apply_.returncode,
-                error=f"kubectl apply migration failed: {apply_.stderr.strip()[:200]}",
+                error=f"kubectl apply migration failed: {_error_excerpt(apply_.stderr)}",
             )
 
         # Wait for the Job to complete or fail.
@@ -246,7 +251,9 @@ class MigrateStep(BaseStep):
                 "job",
             ]
         )
-        step_dir.stdout_path().write_text(
+        render_excerpt = redact_rollout_text(render.stdout, limit=2000)
+        self.write_stdout(
+            step_dir,
             "# stateful-substrate resources\n"
             + "\n".join(substrate_resources)
             + "\n# kubectl apply stateful substrate\n"
@@ -255,15 +262,15 @@ class MigrateStep(BaseStep):
                 f"# kubectl rollout status statefulset/{name}\n{stdout}\n"
                 for name, stdout in wait_outputs
             )
-            + f"# render-migration\n{render.stdout[:2000]}\n"
+            + f"# render-migration\n{render_excerpt}\n"
             + f"# kubectl apply\n{apply_.stdout}\n"
-            + f"# kubectl wait\n{wait.stdout}\n"
+            + f"# kubectl wait\n{wait.stdout}\n",
         )
         if wait.returncode != 0:
-            step_dir.stderr_path().write_text(wait.stderr)
+            self.write_stderr(step_dir, wait.stderr)
             return RunResult(
                 exit_code=wait.returncode,
-                error=(f"migration Job did not complete: {wait.stderr.strip()[:200]}"),
+                error=(f"migration Job did not complete: {_error_excerpt(wait.stderr)}"),
             )
         return RunResult(
             exit_code=0,

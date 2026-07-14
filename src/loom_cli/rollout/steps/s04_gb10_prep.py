@@ -19,7 +19,9 @@ reasons; step imports the Python wrapper).
 
 from __future__ import annotations
 
+import os
 import shlex
+import stat
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -27,7 +29,19 @@ from pathlib import Path
 
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
+from loom_cli.rollout.operator.redaction import (
+    known_secrets_from_sources,
+    redact_rollout_text,
+    rollout_redaction_scope,
+)
 from loom_cli.rollout.steps.base import BaseStep, RunResult, VerifyOutcome
+from loom_cli.rollout.steps.candidate_source import (
+    CandidateToolingError,
+    candidate_relative_path,
+    rollout_cluster_config,
+    rollout_cluster_config_path,
+    validate_candidate_loom_source,
+)
 from loom_cli.rollout.steps.subprocess_util import (
     SubprocessResult,
     run_captured,
@@ -60,7 +74,11 @@ class HostPrepResult:
     attempts: int
 
 
-def gb10_hosts_for(ctx: RolloutContext) -> list[GB10Host]:
+def gb10_hosts_for(
+    ctx: RolloutContext,
+    *,
+    config_path: Path | None = None,
+) -> list[GB10Host]:
     """Look up the GB10 hosts for the target scope.
 
     Reads from cluster-config's ``[gb10_pool]`` section. Returns an
@@ -72,9 +90,14 @@ def gb10_hosts_for(ctx: RolloutContext) -> list[GB10Host]:
     # avoid duplicating TOML plumbing here.
     from loom_cli.cluster_config import load_cluster_config
 
+    source_config = config_path or ctx.cluster_config_path
     try:
-        cfg = load_cluster_config(ctx.cluster_config_path)
-    except Exception:
+        cfg = load_cluster_config(source_config)
+    except Exception as exc:
+        if config_path is not None:
+            raise CandidateToolingError(
+                f"failed to load rollout-local GB10 cluster config: {exc}"
+            ) from exc
         return []
     pool = getattr(cfg, "gb10_pool", None)
     if pool is None:
@@ -84,14 +107,14 @@ def gb10_hosts_for(ctx: RolloutContext) -> list[GB10Host]:
     if ssh_config:
         path = Path(str(ssh_config)).expanduser()
         if not path.is_absolute():
-            path = ctx.cluster_config_path.parent / path
+            path = source_config.parent / path
         ssh_config_path = str(path.resolve(strict=False))
     ssh_identity_file = _resolve_optional_pool_path(
-        ctx,
+        source_config,
         getattr(pool, "ssh_identity_file", "") or "",
     )
     ssh_certificate_file = _resolve_optional_pool_path(
-        ctx,
+        source_config,
         getattr(pool, "ssh_certificate_file", "") or "",
     )
     hosts_raw = getattr(pool, "hosts", None) or ()
@@ -112,13 +135,99 @@ def gb10_hosts_for(ctx: RolloutContext) -> list[GB10Host]:
     return [h for h in result if h.ssh_target and h.repo_path and h.env_file_path]
 
 
-def _resolve_optional_pool_path(ctx: RolloutContext, value: str) -> str | None:
+def _resolve_optional_pool_path(config_path: Path, value: str) -> str | None:
     if not value:
         return None
     path = Path(value).expanduser()
     if not path.is_absolute():
-        path = ctx.cluster_config_path.parent / path
+        path = config_path.parent / path
     return str(path.resolve(strict=False))
+
+
+def _require_candidate_regular_file(
+    path: Path,
+    *,
+    candidate_root: Path,
+    label: str,
+) -> Path:
+    lexical = Path(os.path.normpath(path))
+    try:
+        lexical.relative_to(candidate_root)
+    except ValueError as exc:
+        raise CandidateToolingError(f"{label} is outside the candidate worktree") from exc
+    try:
+        metadata = lexical.lstat()
+    except OSError as exc:
+        raise CandidateToolingError(f"{label} is unavailable in the candidate worktree") from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        raise CandidateToolingError(f"{label} must be a regular file, not a symlink")
+    if not stat.S_ISREG(metadata.st_mode):
+        raise CandidateToolingError(f"{label} must be a regular file")
+    resolved = lexical.resolve(strict=True)
+    try:
+        resolved.relative_to(candidate_root)
+    except ValueError as exc:
+        raise CandidateToolingError(f"{label} resolves outside the candidate worktree") from exc
+    return resolved
+
+
+def _gb10_prep_config_paths(
+    ctx: RolloutContext,
+    step_dir: StepDir,
+) -> tuple[Path, Path]:
+    """Bind GB10 host/SSH/profile inputs to the pinned candidate checkout."""
+    from loom_cli.cluster_config import load_cluster_config
+
+    candidate_root = validate_candidate_loom_source(step_dir).resolve(strict=True)
+    mapped = candidate_relative_path(ctx.cluster_config_path, step_dir)
+    if not mapped.is_absolute():
+        mapped = candidate_root / mapped
+    candidate_config = _require_candidate_regular_file(
+        mapped,
+        candidate_root=candidate_root,
+        label="candidate cluster config",
+    )
+
+    try:
+        candidate_cfg = load_cluster_config(candidate_config)
+    except Exception as exc:
+        raise CandidateToolingError(f"candidate cluster config is invalid: {exc}") from exc
+
+    profile_value = getattr(candidate_cfg, "env_state_profile", None)
+    if profile_value:
+        profile = Path(str(profile_value)).expanduser()
+        if not profile.is_absolute():
+            profile = candidate_config.parent / profile
+        _require_candidate_regular_file(
+            profile,
+            candidate_root=candidate_root,
+            label="candidate environment-state profile",
+        )
+
+    pool = getattr(candidate_cfg, "gb10_pool", None)
+    ssh_config_value = getattr(pool, "ssh_config", None) if pool is not None else None
+    if ssh_config_value:
+        ssh_config = Path(str(ssh_config_value)).expanduser()
+        if not ssh_config.is_absolute():
+            ssh_config = candidate_config.parent / ssh_config
+            _require_candidate_regular_file(
+                ssh_config,
+                candidate_root=candidate_root,
+                label="candidate GB10 SSH config",
+            )
+
+    materialized_target = rollout_cluster_config_path(step_dir)
+    if os.path.lexists(materialized_target):
+        metadata = materialized_target.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise CandidateToolingError(
+                "rollout-local cluster config must be a regular file, not a symlink"
+            )
+    materialized = rollout_cluster_config(ctx, step_dir)
+    metadata = materialized.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise CandidateToolingError("rollout-local cluster config is not a regular file")
+    return candidate_config, materialized
 
 
 def _gb10_ssh_auth_preflight(hosts: list[GB10Host]) -> str | None:
@@ -147,12 +256,21 @@ def _gb10_ssh_auth_preflight(hosts: list[GB10Host]) -> str | None:
     return None
 
 
-def _env_state_profile_path_for(ctx: RolloutContext) -> Path | None:
+def _env_state_profile_path_for(
+    ctx: RolloutContext,
+    *,
+    config_path: Path | None = None,
+) -> Path | None:
     from loom_cli.cluster_config import load_cluster_config
 
+    source_config = config_path or ctx.cluster_config_path
     try:
-        cfg = load_cluster_config(ctx.cluster_config_path)
-    except Exception:
+        cfg = load_cluster_config(source_config)
+    except Exception as exc:
+        if config_path is not None:
+            raise CandidateToolingError(
+                f"failed to load candidate cluster config for GB10 desired state: {exc}"
+            ) from exc
         return None
     profile = getattr(cfg, "env_state_profile", None)
     if not profile:
@@ -160,13 +278,17 @@ def _env_state_profile_path_for(ctx: RolloutContext) -> Path | None:
     path = Path(str(profile))
     if path.is_absolute():
         return path
-    return ctx.cluster_config_path.parent / path
+    return source_config.parent / path
 
 
-def _gb10_desired_state_declared(ctx: RolloutContext) -> bool:
+def _gb10_desired_state_declared(
+    ctx: RolloutContext,
+    *,
+    config_path: Path | None = None,
+) -> bool:
     from loom_cli.environment_state import load_environment_state_profile
 
-    profile_path = _env_state_profile_path_for(ctx)
+    profile_path = _env_state_profile_path_for(ctx, config_path=config_path)
     if profile_path is None:
         return False
     try:
@@ -179,15 +301,23 @@ def _gb10_desired_state_declared(ctx: RolloutContext) -> bool:
             },
             expected_environment=ctx.environment,
         )
-    except Exception:
+    except Exception as exc:
+        if config_path is not None:
+            raise CandidateToolingError(
+                f"candidate environment-state profile is invalid: {exc}"
+            ) from exc
         return False
     return bool(profile.gb10_desired_states)
 
 
-def _no_gb10_hosts_error(ctx: RolloutContext) -> str | None:
+def _no_gb10_hosts_error(
+    ctx: RolloutContext,
+    *,
+    config_path: Path | None = None,
+) -> str | None:
     if ctx.scope != "current-gb10":
         return None
-    if not _gb10_desired_state_declared(ctx):
+    if not _gb10_desired_state_declared(ctx, config_path=config_path):
         return None
     return (
         "current-gb10 rollout declares GB10 desired state, but the cluster "
@@ -329,13 +459,16 @@ PY"""
 
 
 def _host_evidence_dir(step_dir: StepDir, host: GB10Host) -> Path:
-    safe = (
-        host.ssh_target
-        .replace("@", "_at_")
-        .replace("/", "_")
-        .replace(":", "_")
-    )
+    safe = host.ssh_target.replace("@", "_at_").replace("/", "_").replace(":", "_")
     return step_dir.path / f"host-{safe}"
+
+
+def _write_prep_log(host_dir: Path, text: str) -> None:
+    """Persist a host diagnostic under the worker's explicit redaction scope."""
+    (host_dir / "prep.log").write_text(
+        redact_rollout_text(text),
+        encoding="utf-8",
+    )
 
 
 def _prep_one_host(
@@ -393,9 +526,9 @@ def _prep_one_host(
         if result.returncode != 0:
             log_lines.append(f"# {label} exited {result.returncode}")
             log_lines.append(result.stderr.rstrip())
-            (host_dir / "prep.log").write_text("\n".join(log_lines))
+            _write_prep_log(host_dir, "\n".join(log_lines))
             return False, f"{label} failed on {host.ssh_target}: rc={result.returncode}"
-    (host_dir / "prep.log").write_text("\n".join(log_lines))
+    _write_prep_log(host_dir, "\n".join(log_lines))
     return True, f"prepped {host.ssh_target}"
 
 
@@ -406,23 +539,29 @@ def _prep_host_with_retries(
     host_dir: Path,
     max_retries: int,
     backoff_sec: float,
+    known_secrets: tuple[str, ...] = (),
 ) -> HostPrepResult:
-    ok = False
-    last_summary = ""
-    attempts = 0
-    host_dir.mkdir(exist_ok=True)
-    for attempt in range(1, max_retries + 1):
-        attempts = attempt
-        try:
-            ok, last_summary = _prep_one_host(ctx, host, host_dir)
-        except Exception as exc:  # pragma: no cover - defensive evidence path
-            ok = False
-            last_summary = f"gb10-prep crashed on {host.ssh_target}: {exc!r}"
-            (host_dir / "prep.log").write_text(last_summary + "\n")
-        if ok:
-            break
-        if attempt < max_retries:
-            time.sleep(backoff_sec * attempt)
+    # ContextVars are not copied into ThreadPoolExecutor workers. Install the
+    # values derived by the parent thread explicitly before any worker sink.
+    with rollout_redaction_scope(known_secrets):
+        ok = False
+        last_summary = ""
+        attempts = 0
+        host_dir.mkdir(exist_ok=True)
+        for attempt in range(1, max_retries + 1):
+            attempts = attempt
+            try:
+                ok, last_summary = _prep_one_host(ctx, host, host_dir)
+            except Exception as exc:  # pragma: no cover - defensive evidence path
+                ok = False
+                last_summary = redact_rollout_text(
+                    f"gb10-prep crashed on {host.ssh_target}: {exc!r}"
+                )
+                _write_prep_log(host_dir, last_summary + "\n")
+            if ok:
+                break
+            if attempt < max_retries:
+                time.sleep(backoff_sec * attempt)
     return HostPrepResult(
         host=host.ssh_target,
         ok=ok,
@@ -466,9 +605,18 @@ class GB10PrepStep(BaseStep):
         ctx: RolloutContext,
         step_dir: StepDir,
     ) -> VerifyOutcome:
-        hosts = gb10_hosts_for(ctx)
+        try:
+            candidate_config, materialized_config = _gb10_prep_config_paths(ctx, step_dir)
+            hosts = gb10_hosts_for(ctx, config_path=materialized_config)
+            no_hosts_error = (
+                _no_gb10_hosts_error(ctx, config_path=candidate_config) if not hosts else None
+            )
+        except CandidateToolingError as exc:
+            message = redact_rollout_text(str(exc))
+            step_dir.stderr_path().write_text(message + "\n", encoding="utf-8")
+            return VerifyOutcome.UNKNOWN
         if not hosts:
-            if _no_gb10_hosts_error(ctx):
+            if no_hosts_error:
                 return VerifyOutcome.MISMATCH
             return VerifyOutcome.MATCH
         auth_error = _gb10_ssh_auth_preflight(hosts)
@@ -536,9 +684,18 @@ class GB10PrepStep(BaseStep):
         return VerifyOutcome.MATCH
 
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:
-        hosts = gb10_hosts_for(ctx)
+        try:
+            candidate_config, materialized_config = _gb10_prep_config_paths(ctx, step_dir)
+            hosts = gb10_hosts_for(ctx, config_path=materialized_config)
+            no_hosts_error = (
+                _no_gb10_hosts_error(ctx, config_path=candidate_config) if not hosts else None
+            )
+        except CandidateToolingError as exc:
+            message = redact_rollout_text(str(exc))
+            step_dir.stderr_path().write_text(message + "\n", encoding="utf-8")
+            return RunResult(exit_code=2, error=message)
         if not hosts:
-            error = _no_gb10_hosts_error(ctx)
+            error = no_hosts_error
             if error:
                 step_dir.stderr_path().write_text(error + "\n")
                 return RunResult(exit_code=1, error=error)
@@ -558,6 +715,23 @@ class GB10PrepStep(BaseStep):
             host_count=len(hosts),
             default=self.host_concurrency,
         )
+        known_secrets = known_secrets_from_sources(
+            (
+                ctx.admin_token_source,
+                ctx.worker_token_source,
+                ctx.service_token_source,
+                ctx.smoke_api_token_source,
+            )
+        )
+        known_secrets = (
+            *known_secrets,
+            *(
+                path
+                for host in hosts
+                for path in (host.ssh_identity_file, host.ssh_certificate_file)
+                if path
+            ),
+        )
         ordered_results: list[HostPrepResult | None] = [None] * len(hosts)
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             future_to_index = {
@@ -568,6 +742,7 @@ class GB10PrepStep(BaseStep):
                     host_dir=_host_evidence_dir(step_dir, host),
                     max_retries=self.max_retries,
                     backoff_sec=self.backoff_sec,
+                    known_secrets=known_secrets,
                 ): index
                 for index, host in enumerate(hosts)
             }

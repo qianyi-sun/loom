@@ -132,7 +132,7 @@ def test_migrate_bootstraps_stateful_substrate_before_migration_job(
 
     def fake_run(argv, **kwargs: Any) -> SubprocessResult:
         calls.append(list(argv))
-        if list(argv)[:3] == [sys.executable, "-m", "loom_cli"]:
+        if list(argv)[:3] == [sys.executable, "-I", "-c"]:
             return SubprocessResult(
                 argv=list(argv),
                 returncode=0,
