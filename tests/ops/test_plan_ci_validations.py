@@ -210,6 +210,7 @@ def test_planner_change_selects_every_heavy_gate() -> None:
         "deploy/environments/staging.cluster.toml",
         "deploy/environment-state/staging.toml",
         "deploy/staging-rollout/loom-staging-rollout.sudoers",
+        "deploy/worker-pools/gb10/known_hosts",
         "deploy/worker-pools/gb10/ssh_config",
         "scripts/ops/staging_rollout_host.py",
         "scripts/ops/verify_staging_rollout_secret_boundary.py",
@@ -221,9 +222,7 @@ def test_planner_change_selects_every_heavy_gate() -> None:
     ],
 )
 def test_protected_staging_rollout_paths_select_every_heavy_gate(path: str) -> None:
-    plan = plan_validations(
-        changed_paths=[path], labels=set(), event_name="pull_request"
-    )
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
 
     assert plan.unowned_runtime is False
     assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
@@ -251,9 +250,7 @@ def test_nearby_rollout_module_does_not_gain_protected_staging_authority() -> No
     ],
 )
 def test_runtime_inputs_fail_safe_to_every_heavy_check(path: str) -> None:
-    plan = plan_validations(
-        changed_paths=[path], labels=set(), event_name="pull_request"
-    )
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
 
     assert plan.docs_only is False
     assert plan.unowned_runtime is True
@@ -318,9 +315,7 @@ def test_every_docker_marked_integration_module_selects_docker() -> None:
 
 
 def test_merge_group_selects_every_heavy_gate() -> None:
-    plan = plan_validations(
-        changed_paths=[], labels=set(), event_name="merge_group"
-    )
+    plan = plan_validations(changed_paths=[], labels=set(), event_name="merge_group")
     assert plan.selected_heavy_checks() == {
         "integration",
         "integration_docker",

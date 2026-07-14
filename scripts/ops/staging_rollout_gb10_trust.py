@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import contextlib
 import errno
+import fcntl
 import fnmatch
 import hashlib
 import ipaddress
@@ -18,15 +20,19 @@ import stat
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 SSH_CONFIG_PATH = Path("/opt/loom-staging-runner/repo/deploy/worker-pools/gb10/ssh_config")
+KNOWN_HOSTS_PATH = Path("/etc/loom/staging-rollout-gb10-known-hosts")
+SSH_BINARY = Path("/usr/bin/ssh")
 SERVICE_PRIVATE_KEY_PATH = Path("/var/lib/loom-staging-rollout/gb10-deploy-ed25519")
 SERVICE_PUBLIC_KEY_PATH = Path("/var/lib/loom-staging-rollout/gb10-deploy-ed25519.pub")
 REVOCATION_LEDGER_PATH = Path("/etc/loom/staging-rollout-gb10-trust-revocation.json")
+LIFECYCLE_LOCK_PATH = Path("/etc/loom/staging-rollout-gb10-trust.lock")
+_INHERITED_LOCK_FD_ENV = "LOOM_GB10_TRUST_LOCK_FD"
 _EXPECTED_HOSTS = tuple(f"trt-gb10-{number}" for number in range(1, 16))
 _EXCLUDED_HOSTS = frozenset({"trt-gb10-7"})
 _ACTIVE_HOSTS = tuple(host for host in _EXPECTED_HOSTS if host not in _EXCLUDED_HOSTS)
@@ -38,8 +44,9 @@ _EXPECTED_PORTS = (2221,) + (22,) * 14
 _EXPECTED_REMOTE_USER = "qianyi"
 _SAFE_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,63}$")
 _PUBLIC_KEY_MAX_BYTES = 16 * 1024
+_KNOWN_HOSTS_MAX_BYTES = 64 * 1024
 _LEDGER_MAX_BYTES = 64 * 1024
-_LEDGER_SCHEMA_VERSION = 1
+_LEDGER_SCHEMA_VERSION = 2
 _SSH_TIMEOUT_SECONDS = 30
 
 
@@ -71,6 +78,7 @@ class SshInventory:
     ports: tuple[int, ...]
     proxy_jumps: tuple[str | None, ...]
     identity_file: Path
+    known_hosts_file: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,12 +101,14 @@ class _HostBlock:
 class RevocationLedger:
     key_fingerprint: str
     topology_sha256: str
+    active_policy_sha256: str
     revocation_hosts: tuple[str, ...]
 
     def to_bytes(self) -> bytes:
         return (
             json.dumps(
                 {
+                    "active_policy_sha256": self.active_policy_sha256,
                     "key_fingerprint": self.key_fingerprint,
                     "revocation_hosts": list(self.revocation_hosts),
                     "schema_version": _LEDGER_SCHEMA_VERSION,
@@ -117,6 +127,7 @@ class RevocationLedger:
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise TrustConfigurationError("GB10 trust revocation ledger is invalid") from exc
         required = {
+            "active_policy_sha256",
             "key_fingerprint",
             "revocation_hosts",
             "schema_version",
@@ -126,6 +137,7 @@ class RevocationLedger:
             raise TrustConfigurationError("GB10 trust revocation ledger schema is invalid")
         fingerprint = raw["key_fingerprint"]
         topology_sha256 = raw["topology_sha256"]
+        active_policy_sha256 = raw["active_policy_sha256"]
         hosts = raw["revocation_hosts"]
         if (
             type(raw["schema_version"]) is not int
@@ -134,6 +146,8 @@ class RevocationLedger:
             or re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}", fingerprint) is None
             or not isinstance(topology_sha256, str)
             or re.fullmatch(r"[0-9a-f]{64}", topology_sha256) is None
+            or not isinstance(active_policy_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", active_policy_sha256) is None
             or not isinstance(hosts, list)
             or any(not isinstance(host, str) for host in hosts)
             or len(hosts) != len(set(hosts))
@@ -146,6 +160,7 @@ class RevocationLedger:
         return cls(
             key_fingerprint=fingerprint,
             topology_sha256=topology_sha256,
+            active_policy_sha256=active_policy_sha256,
             revocation_hosts=ordered,
         )
 
@@ -240,6 +255,63 @@ class RevocationLedgerStore:
             raise
 
 
+@contextlib.contextmanager
+def _trust_lifecycle_lock(
+    path: Path,
+    *,
+    expected_uid: int,
+    expected_gid: int,
+    inherited_fd: int | None = None,
+) -> Iterator[int]:
+    if not path.is_absolute() or ".." in path.parts:
+        raise TrustConfigurationError("GB10 trust lifecycle lock path is unsafe")
+    try:
+        parent_metadata = os.lstat(path.parent)
+    except OSError as exc:
+        raise TrustConfigurationError("GB10 trust lifecycle lock directory is unavailable") from exc
+    if (
+        not stat.S_ISDIR(parent_metadata.st_mode)
+        or stat.S_ISLNK(parent_metadata.st_mode)
+        or parent_metadata.st_uid != expected_uid
+        or parent_metadata.st_gid != expected_gid
+        or stat.S_IMODE(parent_metadata.st_mode) != 0o755
+    ):
+        raise TrustConfigurationError("GB10 trust lifecycle lock directory is unsafe")
+    owned_fd = inherited_fd is None
+    if inherited_fd is None:
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags, 0o600)
+        except OSError as exc:
+            raise TrustConfigurationError("GB10 trust lifecycle lock is unavailable") from exc
+    else:
+        fd = inherited_fd
+    try:
+        try:
+            metadata = os.fstat(fd)
+            current = os.lstat(path)
+        except OSError as exc:
+            raise TrustConfigurationError("GB10 trust lifecycle lock changed") from exc
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != expected_uid
+            or metadata.st_gid != expected_gid
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino)
+        ):
+            raise TrustConfigurationError("GB10 trust lifecycle lock metadata is unsafe")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield fd
+    except OSError as exc:
+        raise TrustConfigurationError("GB10 trust lifecycle lock failed") from exc
+    finally:
+        if owned_fd:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
+
 def _tokens(raw_line: str) -> list[str]:
     try:
         return shlex.split(raw_line, comments=True, posix=True)
@@ -258,7 +330,11 @@ def _block_matches(patterns: Sequence[str], host: str) -> bool:
     return positive
 
 
-def parse_ssh_inventory(text: str) -> SshInventory:
+def parse_ssh_inventory(
+    text: str,
+    *,
+    require_strict_host_key_policy: bool = True,
+) -> SshInventory:
     """Resolve and validate the fixed concrete GB10 SSH topology."""
     blocks: list[_HostBlock] = []
     current_patterns: tuple[str, ...] = ("*",)
@@ -328,6 +404,10 @@ def parse_ssh_inventory(text: str) -> SshInventory:
                 "identitiesonly",
                 "pubkeyauthentication",
                 "passwordauthentication",
+                "stricthostkeychecking",
+                "userknownhostsfile",
+                "globalknownhostsfile",
+                "updatehostkeys",
             ):
                 values = block.options.get(key, ())
                 if values and key not in effective:
@@ -371,6 +451,13 @@ def parse_ssh_inventory(text: str) -> SshInventory:
             or effective.get("passwordauthentication", "").lower() != "no"
         ):
             raise TrustConfigurationError("GB10 SSH authentication policy is not approved")
+        if require_strict_host_key_policy and (
+            effective.get("stricthostkeychecking", "").lower() != "yes"
+            or effective.get("userknownhostsfile") != str(KNOWN_HOSTS_PATH)
+            or effective.get("globalknownhostsfile") != "/dev/null"
+            or effective.get("updatehostkeys", "").lower() != "no"
+        ):
+            raise TrustConfigurationError("GB10 SSH host-key policy is not approved")
         expected_jump = None if host == _EXPECTED_HOSTS[0] else "trt-gb10-1"
         proxy_jump = effective.get("proxyjump")
         if proxy_jump != expected_jump:
@@ -392,18 +479,18 @@ def parse_ssh_inventory(text: str) -> SshInventory:
         ports=tuple(ports),
         proxy_jumps=tuple(proxy_jumps),
         identity_file=SERVICE_PRIVATE_KEY_PATH,
+        known_hosts_file=KNOWN_HOSTS_PATH,
     )
 
 
 def _topology_sha256(inventory: SshInventory) -> str:
-    active_hosts = set(inventory.active_hosts)
     payload = json.dumps(
         [
             {
-                "active": host in active_hosts,
                 "host": host,
                 "hostname": inventory.hostnames[index],
                 "identity_file": str(inventory.identity_file),
+                "known_hosts_file": str(inventory.known_hosts_file),
                 "port": inventory.ports[index],
                 "proxy_jump": inventory.proxy_jumps[index],
                 "remote_user": inventory.remote_user,
@@ -414,6 +501,25 @@ def _topology_sha256(inventory: SshInventory) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _active_policy_sha256(inventory: SshInventory) -> str:
+    payload = json.dumps(
+        {"active_hosts": list(inventory.active_hosts)},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _validate_legacy_topology(
+    current: SshInventory,
+    previous: SshInventory,
+) -> None:
+    if _topology_sha256(current) != _topology_sha256(previous):
+        raise TrustConfigurationError(
+            "legacy GB10 trust topology drifted from the previous installed source"
+        )
 
 
 def _read_bounded_regular_file(path: Path) -> bytes:
@@ -439,6 +545,80 @@ def _read_bounded_regular_file(path: Path) -> bytes:
         return payload
     finally:
         os.close(fd)
+
+
+def _read_known_hosts_authority(
+    path: Path,
+    *,
+    expected_uid: int,
+    expected_gid: int,
+) -> bytes:
+    if not path.is_absolute() or ".." in path.parts:
+        raise TrustConfigurationError("GB10 known-hosts path is unsafe")
+    try:
+        parent = os.lstat(path.parent)
+    except OSError as exc:
+        raise TrustConfigurationError("GB10 known-hosts directory is unavailable") from exc
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or stat.S_ISLNK(parent.st_mode)
+        or parent.st_uid != expected_uid
+        or parent.st_gid != expected_gid
+        or stat.S_IMODE(parent.st_mode) != 0o755
+    ):
+        raise TrustConfigurationError("GB10 known-hosts directory is unsafe")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise TrustConfigurationError("GB10 known-hosts authority is unavailable") from exc
+    try:
+        metadata = os.fstat(fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != expected_uid
+            or metadata.st_gid != expected_gid
+            or stat.S_IMODE(metadata.st_mode) != 0o644
+            or metadata.st_size <= 0
+            or metadata.st_size > _KNOWN_HOSTS_MAX_BYTES
+        ):
+            raise TrustConfigurationError("GB10 known-hosts authority metadata is unsafe")
+        payload = os.read(fd, _KNOWN_HOSTS_MAX_BYTES + 1)
+        if len(payload) != metadata.st_size:
+            raise TrustConfigurationError("GB10 known-hosts authority changed while read")
+        try:
+            current = os.lstat(path)
+        except OSError as exc:
+            raise TrustConfigurationError("GB10 known-hosts authority changed while read") from exc
+        if (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise TrustConfigurationError("GB10 known-hosts authority changed while read")
+    finally:
+        os.close(fd)
+    _validate_known_hosts_authority(payload)
+    return payload
+
+
+def _validate_known_hosts_authority(payload: bytes) -> None:
+    try:
+        lines = payload.decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise TrustConfigurationError("GB10 known-hosts authority must be ASCII") from exc
+    entries = [line for line in lines if line and not line.startswith("#")]
+    expected_hosts = (
+        "[207.35.188.227]:2221,trt-gb10-1",
+        *(f"192.168.20.{number + 10},trt-gb10-{number}" for number in range(2, 16)),
+    )
+    if len(entries) != len(expected_hosts):
+        raise TrustConfigurationError("GB10 known-hosts authority must contain exactly 15 hosts")
+    observed: list[str] = []
+    for line in entries:
+        fields = line.split()
+        if len(fields) != 3 or fields[1] != "ssh-ed25519":
+            raise TrustConfigurationError("GB10 known-hosts authority contains an invalid entry")
+        _decoded_ed25519_blob((fields[1] + " " + fields[2] + "\n").encode("ascii"))
+        observed.append(fields[0])
+    if tuple(observed) != expected_hosts:
+        raise TrustConfigurationError("GB10 known-hosts authority host coverage is invalid")
 
 
 def _decoded_ed25519_blob(payload: bytes) -> bytes:
@@ -502,6 +682,8 @@ import tempfile
 from pathlib import Path
 
 COMMENT = "loom-staging-rollout"
+TOMBSTONE_COMMENT = "loom-staging-rollout-revoked"
+REVOKED_RECEIPT = '{"status":"revoked"}'
 
 def fail(message, code=2):
     print(json.dumps({"status": message}, sort_keys=True, separators=(",", ":")))
@@ -536,6 +718,17 @@ def decoded_blob(payload):
 def fingerprint(blob):
     digest = base64.b64encode(hashlib.sha256(blob).digest()).decode("ascii").rstrip("=")
     return "SHA256:" + digest
+
+def quote_authorized_option(value):
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+def normal_line(key_base64):
+    return "ssh-ed25519 " + key_base64 + " " + COMMENT
+
+def tombstone_line(key_base64):
+    command = "/usr/bin/printf '%s\\n' '" + REVOKED_RECEIPT + "'"
+    options = "restrict,command=" + quote_authorized_option(command)
+    return options + " ssh-ed25519 " + key_base64 + " " + TOMBSTONE_COMMENT
 
 def authorized_key_fields(line):
     fields = []
@@ -657,7 +850,7 @@ for index, line in enumerate(lines):
     line_fingerprint, key_end = identity
     if line_fingerprint == target_fingerprint:
         matches.append((index, key_end))
-    if line[key_end:].strip() == COMMENT:
+    if line[key_end:].strip() in {COMMENT, TOMBSTONE_COMMENT}:
         marked.append((index, line_fingerprint))
 if len(matches) > 1:
     fail("ambiguous-fingerprint", 3)
@@ -665,6 +858,8 @@ if any(line_fingerprint != target_fingerprint for _, line_fingerprint in marked)
     fail("ambiguous-marker", 3)
 if len(marked) > 1:
     fail("ambiguous-marker", 3)
+expected_normal = normal_line(target_base64)
+expected_tombstone = tombstone_line(target_base64)
 
 if operation == "check":
     if not os.path.lexists(ssh_dir) or stat.S_IMODE(ssh_dir.stat().st_mode) != 0o700:
@@ -673,8 +868,10 @@ if operation == "check":
         fail("incorrect-authorized-keys-mode", 4)
     if not matches:
         fail("absent", 4)
-    index, key_end = matches[0]
-    if lines[index][key_end:].strip() != COMMENT:
+    index, _ = matches[0]
+    if lines[index].strip() == expected_tombstone:
+        fail("revoked", 4)
+    if lines[index].strip() != expected_normal:
         fail("incorrect-comment", 4)
     print(json.dumps({"status": "present"}, sort_keys=True, separators=(",", ":")))
     raise SystemExit(0)
@@ -682,13 +879,14 @@ if operation == "check":
 if operation == "bootstrap":
     ensure_ssh_directory(ssh_dir)
     if matches:
-        index, key_end = matches[0]
-        replacement = lines[index][:key_end].rstrip() + " " + COMMENT
+        index, _ = matches[0]
+        was_tombstoned = lines[index].strip() == expected_tombstone
+        replacement = expected_normal
         changed = replacement != lines[index]
         lines[index] = replacement
-        status_value = "updated" if changed else "already-present"
+        status_value = "restored" if was_tombstoned else ("updated" if changed else "already-present")
     else:
-        lines.append("ssh-ed25519 " + target_base64 + " " + COMMENT)
+        lines.append(expected_normal)
         changed = True
         status_value = "installed"
     rendered = "\n".join(lines) + "\n"
@@ -702,16 +900,21 @@ if not matches:
     print(json.dumps({"status": "absent"}, sort_keys=True, separators=(",", ":")))
     raise SystemExit(0)
 index, _ = matches[0]
-del lines[index]
+if lines[index].strip() == expected_tombstone:
+    print(json.dumps({"status": "revoked"}, sort_keys=True, separators=(",", ":")))
+    raise SystemExit(0)
+if lines[index].strip() != expected_normal:
+    fail("incorrect-managed-key", 4)
+lines[index] = expected_tombstone
 ensure_ssh_directory(ssh_dir)
-atomic_write(authorized_keys, ("\n".join(lines) + "\n") if lines else "")
+atomic_write(authorized_keys, "\n".join(lines) + "\n")
 authorized_keys.chmod(0o600)
 print(json.dumps({"status": "revoked"}, sort_keys=True, separators=(",", ":")))
 """
 
 
 _SUCCESS_STATUSES = {
-    "bootstrap": frozenset({"installed", "updated", "already-present"}),
+    "bootstrap": frozenset({"installed", "updated", "restored", "already-present"}),
     "check": frozenset({"present"}),
     "revoke": frozenset({"revoked", "absent"}),
 }
@@ -748,7 +951,7 @@ def _ssh_argv(
 ) -> list[str]:
     remote_command = shlex.join(["python3", "-c", _REMOTE_SCRIPT, operation])
     argv = [
-        "ssh",
+        str(SSH_BINARY),
         "-F",
         str(ssh_config),
         "-o",
@@ -759,6 +962,14 @@ def _ssh_argv(
         "ControlMaster=no",
         "-o",
         "ConnectTimeout=10",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={KNOWN_HOSTS_PATH}",
+        "-o",
+        "GlobalKnownHostsFile=/dev/null",
+        "-o",
+        "UpdateHostKeys=no",
     ]
     if bootstrap_identity is not None:
         argv.extend(["-i", str(bootstrap_identity)])
@@ -812,11 +1023,16 @@ def _validate_ledger_binding(
     *,
     inventory: SshInventory,
     key_fingerprint: str,
+    require_active_policy: bool = True,
 ) -> None:
     if ledger.key_fingerprint != key_fingerprint:
         raise TrustConfigurationError("GB10 trust revocation ledger key binding is invalid")
     if ledger.topology_sha256 != _topology_sha256(inventory):
         raise TrustConfigurationError("GB10 trust revocation ledger topology binding is invalid")
+    if require_active_policy and ledger.active_policy_sha256 != _active_policy_sha256(inventory):
+        raise TrustConfigurationError(
+            "GB10 trust revocation ledger active-policy binding is invalid"
+        )
 
 
 def _initialize_ledger(
@@ -830,6 +1046,7 @@ def _initialize_ledger(
         ledger = RevocationLedger(
             key_fingerprint=key_fingerprint,
             topology_sha256=_topology_sha256(inventory),
+            active_policy_sha256=_active_policy_sha256(inventory),
             revocation_hosts=(),
         )
         store.write(ledger)
@@ -839,6 +1056,30 @@ def _initialize_ledger(
         key_fingerprint=key_fingerprint,
     )
     return ledger
+
+
+def _migrate_active_policy(
+    store: RevocationLedgerStore,
+    *,
+    ledger: RevocationLedger,
+    inventory: SshInventory,
+    key_fingerprint: str,
+) -> RevocationLedger:
+    _validate_ledger_binding(
+        ledger,
+        inventory=inventory,
+        key_fingerprint=key_fingerprint,
+        require_active_policy=False,
+    )
+    updated = RevocationLedger(
+        key_fingerprint=ledger.key_fingerprint,
+        topology_sha256=ledger.topology_sha256,
+        active_policy_sha256=_active_policy_sha256(inventory),
+        revocation_hosts=ledger.revocation_hosts,
+    )
+    if updated != ledger:
+        store.write(updated)
+    return updated
 
 
 def _load_bound_ledger(
@@ -871,6 +1112,7 @@ def _register_revocation_hosts(
     updated = RevocationLedger(
         key_fingerprint=ledger.key_fingerprint,
         topology_sha256=ledger.topology_sha256,
+        active_policy_sha256=ledger.active_policy_sha256,
         revocation_hosts=tuple(host for host in _EXPECTED_HOSTS if host in requested),
     )
     if updated != ledger:
@@ -905,6 +1147,7 @@ def revoke_trust(
         ledger = RevocationLedger(
             key_fingerprint=ledger.key_fingerprint,
             topology_sha256=ledger.topology_sha256,
+            active_policy_sha256=ledger.active_policy_sha256,
             revocation_hosts=tuple(
                 candidate for candidate in ledger.revocation_hosts if candidate != host
             ),
@@ -928,6 +1171,7 @@ def revoke_trust(
                 RevocationLedger(
                     key_fingerprint=ledger.key_fingerprint,
                     topology_sha256=ledger.topology_sha256,
+                    active_policy_sha256=ledger.active_policy_sha256,
                     revocation_hosts=(),
                 )
             )
@@ -944,7 +1188,13 @@ def _parser() -> argparse.ArgumentParser:
     subparsers.add_parser("initialize-ledger", allow_abbrev=False)
     subparsers.add_parser("register-legacy-ledger", allow_abbrev=False)
     subparsers.add_parser("validate-ledger", allow_abbrev=False)
+    subparsers.add_parser("migrate-active-policy", allow_abbrev=False)
     subparsers.add_parser("finalize-check", allow_abbrev=False)
+    legacy_topology = subparsers.add_parser(
+        "validate-legacy-topology",
+        allow_abbrev=False,
+    )
+    legacy_topology.add_argument("--previous-config", type=Path, required=True)
     return parser
 
 
@@ -957,15 +1207,75 @@ def main(
     *,
     run: Runner = _subprocess_runner,
     ssh_config_path: Path = SSH_CONFIG_PATH,
+    known_hosts_path: Path = KNOWN_HOSTS_PATH,
     public_key_path: Path = SERVICE_PUBLIC_KEY_PATH,
     ledger_path: Path = REVOCATION_LEDGER_PATH,
+    lock_path: Path = LIFECYCLE_LOCK_PATH,
     expected_uid: int = 0,
     expected_gid: int = 0,
+    _lock_held: bool = False,
+    _installer_lock_authority: bool = False,
 ) -> int:
     args = _parser().parse_args(argv)
+    if not _lock_held:
+        raw_inherited_fd = os.environ.get(_INHERITED_LOCK_FD_ENV)
+        inherited_fd: int | None = None
+        if raw_inherited_fd is not None:
+            if not raw_inherited_fd.isdigit():
+                print("error: inherited GB10 trust lifecycle lock is invalid", file=sys.stderr)
+                return 2
+            inherited_fd = int(raw_inherited_fd)
+        try:
+            with _trust_lifecycle_lock(
+                lock_path,
+                expected_uid=expected_uid,
+                expected_gid=expected_gid,
+                inherited_fd=inherited_fd,
+            ):
+                return main(
+                    argv,
+                    run=run,
+                    ssh_config_path=ssh_config_path,
+                    known_hosts_path=known_hosts_path,
+                    public_key_path=public_key_path,
+                    ledger_path=ledger_path,
+                    lock_path=lock_path,
+                    expected_uid=expected_uid,
+                    expected_gid=expected_gid,
+                    _lock_held=True,
+                    _installer_lock_authority=inherited_fd is not None,
+                )
+        except TrustConfigurationError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     try:
         config_payload = _read_bounded_regular_file(ssh_config_path)
         inventory = parse_ssh_inventory(config_payload.decode("utf-8"))
+        if args.operation in {"bootstrap", "check", "revoke"}:
+            _read_known_hosts_authority(
+                known_hosts_path,
+                expected_uid=expected_uid,
+                expected_gid=expected_gid,
+            )
+        if args.operation == "validate-legacy-topology":
+            previous_payload = _read_bounded_regular_file(args.previous_config)
+            previous_inventory = parse_ssh_inventory(
+                previous_payload.decode("utf-8"),
+                require_strict_host_key_policy=False,
+            )
+            _validate_legacy_topology(inventory, previous_inventory)
+            print(
+                json.dumps(
+                    {
+                        "action": args.operation,
+                        "ok": True,
+                        "topology_sha256": _topology_sha256(inventory),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            return 0
         public_key = _read_bounded_regular_file(public_key_path)
         key_fingerprint = _key_fingerprint(public_key)
         store = RevocationLedgerStore(
@@ -998,6 +1308,21 @@ def main(
         elif args.operation == "validate-ledger":
             ledger = _load_bound_ledger(
                 store,
+                inventory=inventory,
+                key_fingerprint=key_fingerprint,
+            )
+            results = ()
+        elif args.operation == "migrate-active-policy":
+            if not _installer_lock_authority:
+                raise TrustConfigurationError(
+                    "active-policy migration requires merged installer authority"
+                )
+            ledger = store.load(allow_absent=False)
+            if ledger is None:  # pragma: no cover - allow_absent=False owns this invariant
+                raise TrustConfigurationError("GB10 trust revocation ledger is unavailable")
+            ledger = _migrate_active_policy(
+                store,
+                ledger=ledger,
                 inventory=inventory,
                 key_fingerprint=key_fingerprint,
             )

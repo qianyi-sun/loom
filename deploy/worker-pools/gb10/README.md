@@ -56,7 +56,7 @@ The driver preserves this order for every active host:
 3. prepare the host checkout and generated private env;
 4. retire the legacy direct-worker service;
 5. start the node-agent with bounded host concurrency;
-6. require all 14 active host reports and fresh linked worker registrations;
+6. require all 14 declared active-host reports and fresh linked worker registrations;
 7. pass environment-state, release-gate, and smoke.
 
 Use only the public broker interface:
@@ -84,9 +84,16 @@ The broker uses the service-owned
 `/var/lib/loom-staging-rollout/gb10-deploy-ed25519`; operators never receive or
 forward that private key. The fixed trust command validates the exact 15
 checked-in aliases, literal host addresses, remote user, service identity,
-auth flags, and jump topology. Bootstrap and normal checks target the 14-host
-active set; the full inventory remains authoritative for topology validation,
-legacy trust cleanup, and later #822 re-admission.
+auth flags, and jump topology. SSH host authentication is pinned to the
+checked-in `known_hosts` authority, installed root-owned at
+`/etc/loom/staging-rollout-gb10-known-hosts`; ambient user or global
+known-hosts state and `accept-new` are not permitted. The fixed physical
+inventory remains all 15 hosts, while the active-host policy may temporarily
+exclude a quarantined host such as `trt-gb10-7` without weakening revocation
+coverage for trust granted under an earlier policy.
+Bootstrap and normal checks target the 14-host active set; the full inventory
+remains authoritative for topology validation, legacy trust cleanup, and later
+#822 re-admission.
 
 Use an existing root-held admin identity to bootstrap the service public key
 once per new service-key lifecycle, or as controlled recovery when `check`
@@ -100,10 +107,18 @@ sudo /opt/loom-staging-runner/venv/bin/python \
 loom-staging-rollout start --dry-run
 ```
 
-Any missing active host, ambiguous authorized-key match, wrong topology, or
-failed SSH probe fails closed. Uninstall revokes only this service public key
-from every host recorded in the root-owned revocation ledger; a legacy ledger
-may include all 15 inventory hosts. Do not delete the local key or ledger first.
+Any missing active host, missing pinned host key, ambiguous authorized-key
+match, wrong topology, or failed SSH probe fails closed. Uninstall revokes only
+this service public key on every
+host recorded in the durable revocation ledger before deleting locally
+generated key material; do not delete or replace the local key or install
+ledger first. Trust bootstrap, check, revocation, installer migration, and
+uninstall share one root-owned lifecycle lock. Revocation converts the managed
+remote key into an inert `restrict` plus fixed-command tombstone so an
+interrupted local ledger update can reconnect with the same key and finish
+safely. Bootstrap with the approved admin identity restores that tombstone;
+uninstall intentionally leaves it in `authorized_keys` for later controlled
+admin cleanup.
 
 ## Tunnel Recovery
 

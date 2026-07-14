@@ -327,13 +327,16 @@ def _no_gb10_hosts_error(
     )
 
 
+_GB10_KNOWN_HOSTS = "/etc/loom/staging-rollout-gb10-known-hosts"
+
+
 def _ssh(host: GB10Host, remote_cmd: str) -> SubprocessResult:
     """Run a remote command over SSH with reasonable options.
 
     ``BatchMode=yes`` disables password prompts (fails fast if key
     auth isn't set up). ``ConnectTimeout=10`` bounds hang-on-connect.
     """
-    argv = ["ssh"]
+    argv = ["/usr/bin/ssh"]
     if host.ssh_config_path:
         argv.extend(["-F", host.ssh_config_path])
     if host.ssh_identity_file:
@@ -347,7 +350,13 @@ def _ssh(host: GB10Host, remote_cmd: str) -> SubprocessResult:
             "-o",
             "ConnectTimeout=10",
             "-o",
-            "StrictHostKeyChecking=accept-new",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={_GB10_KNOWN_HOSTS}",
+            "-o",
+            "GlobalKnownHostsFile=/dev/null",
+            "-o",
+            "UpdateHostKeys=no",
             host.ssh_target,
             remote_cmd,
         ]

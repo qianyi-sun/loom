@@ -61,6 +61,20 @@ def test_installed_gb10_trust_tool_uses_the_root_owned_candidate_inventory() -> 
     assert "Path(__file__).resolve().parents[2]" not in source
 
 
+def test_gb10_ssh_authority_is_strict_and_repo_owned() -> None:
+    ssh_config = (REPO_ROOT / "deploy/worker-pools/gb10/ssh_config").read_text(encoding="utf-8")
+    known_hosts = (REPO_ROOT / "deploy/worker-pools/gb10/known_hosts").read_text(encoding="ascii")
+
+    assert "StrictHostKeyChecking yes" in ssh_config
+    assert "UserKnownHostsFile /etc/loom/staging-rollout-gb10-known-hosts" in ssh_config
+    assert "GlobalKnownHostsFile /dev/null" in ssh_config
+    assert "UpdateHostKeys no" in ssh_config
+    assert "accept-new" not in ssh_config
+    entries = [line for line in known_hosts.splitlines() if line and not line.startswith("#")]
+    assert len(entries) == 15
+    assert all(" ssh-ed25519 " in entry for entry in entries)
+
+
 def test_privileged_runner_paths_have_advisory_owner_and_full_ci_selection() -> None:
     owners = (REPO_ROOT / ".github/CODEOWNERS").read_text(encoding="utf-8")
     assert "* @qianyi-sun" in owners.splitlines()

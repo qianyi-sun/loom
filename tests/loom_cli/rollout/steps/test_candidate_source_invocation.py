@@ -2144,13 +2144,17 @@ def test_gb10_prep_ssh_uses_declared_config(
     _ssh(host, "hostname >/dev/null")
 
     argv = captured["argv"]
-    assert argv[:3] == ["ssh", "-F", str(ssh_config)]
+    assert argv[:3] == ["/usr/bin/ssh", "-F", str(ssh_config)]
     assert "-i" in argv
     assert str(identity) in argv
     assert "IdentitiesOnly=yes" in argv
     assert f"CertificateFile={cert}" in argv
     assert "-o" in argv
     assert "BatchMode=yes" in argv
+    assert "StrictHostKeyChecking=yes" in argv
+    assert "UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts" in argv
+    assert "GlobalKnownHostsFile=/dev/null" in argv
+    assert "UpdateHostKeys=no" in argv
     assert argv[-2:] == ["trt-gb10-1", "hostname >/dev/null"]
 
 
