@@ -33,7 +33,9 @@ from loom_cli.secret_source import (
     secret_source_argparse_type,
 )
 
-DEFAULT_HOSTS = tuple(f"trt-gb10-{i}" for i in range(1, 16))
+FULL_GB10_HOSTS = tuple(f"trt-gb10-{i}" for i in range(1, 16))
+TEMPORARILY_EXCLUDED_HOSTS = frozenset({"trt-gb10-7"})
+DEFAULT_HOSTS = tuple(host for host in FULL_GB10_HOSTS if host not in TEMPORARILY_EXCLUDED_HOSTS)
 DEFAULT_NODE_AGENT_SERVICE = "loom-gb10-node-agent.service"
 SECRET_PATTERNS = (
     re.compile(r"\b[Bb]earer\s+[A-Za-z0-9._~+/=-]{8,}"),
@@ -112,6 +114,24 @@ def _host_list(value: str | None) -> tuple[str, ...]:
     hosts = tuple(host.strip() for host in value.split(",") if host.strip())
     if not hosts:
         raise argparse.ArgumentTypeError("--hosts must contain at least one host")
+    if len(hosts) != len(set(hosts)):
+        raise argparse.ArgumentTypeError("--hosts must not contain duplicate hosts")
+    unknown = sorted(set(hosts) - set(FULL_GB10_HOSTS))
+    if unknown:
+        raise argparse.ArgumentTypeError(
+            f"--hosts contains hosts outside the fixed GB10 inventory: {', '.join(unknown)}"
+        )
+    excluded = sorted(set(hosts) & TEMPORARILY_EXCLUDED_HOSTS)
+    if excluded:
+        raise argparse.ArgumentTypeError(
+            "--hosts contains temporarily excluded hosts that require merged re-admission: "
+            + ", ".join(excluded)
+        )
+    if hosts != DEFAULT_HOSTS:
+        raise argparse.ArgumentTypeError(
+            "--hosts must match the exact merged active GB10 host set; runtime host skips "
+            "or reordering are not allowed"
+        )
     return hosts
 
 
@@ -150,13 +170,33 @@ def desired_state_payload(
     env = dict(current.get("env") or {})
     if adjust_idle_exit and intent == "active":
         env["LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS"] = str(ttl_seconds)
+    raw_host_intents = current.get("host_intents") or {}
+    if not isinstance(raw_host_intents, Mapping):
+        raise ValueError("current desired state host_intents must be an object")
+    host_intents = {str(host): str(value) for host, value in raw_host_intents.items()}
+    unknown_intents = sorted(set(host_intents) - set(FULL_GB10_HOSTS))
+    if unknown_intents:
+        raise ValueError(
+            "current desired state contains hosts outside the fixed GB10 inventory: "
+            + ", ".join(unknown_intents)
+        )
+    selected = set(hosts)
+    excluded_selected = sorted(selected & TEMPORARILY_EXCLUDED_HOSTS)
+    if excluded_selected:
+        raise ValueError(
+            "temporarily excluded hosts require merged re-admission: "
+            + ", ".join(excluded_selected)
+        )
+    for host in TEMPORARILY_EXCLUDED_HOSTS:
+        host_intents[host] = "stopped"
+    host_intents.update({host: intent for host in hosts})
     return {
         "image_tag": current["image_tag"],
         "max_concurrent": max_concurrent,
         "env_config_version": current["env_config_version"],
         "source_git_commit": current.get("source_git_commit"),
         "target_slots": _target_slots(hosts, max_concurrent, intent),
-        "host_intents": {host: intent for host in hosts},
+        "host_intents": host_intents,
         "rollout_policy": current.get("rollout_policy") or {},
         "env": env,
         "force": bool(current.get("force") or False),
@@ -190,7 +230,9 @@ def _http_json(
             payload = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"{method} {path} failed HTTP {exc.code}: {redact_text(detail)}") from exc
+        raise RuntimeError(
+            f"{method} {path} failed HTTP {exc.code}: {redact_text(detail)}"
+        ) from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"{method} {path} failed: {redact_text(str(exc.reason))}") from exc
     if not payload:
@@ -331,7 +373,9 @@ def start_node_agents(
             (run_dir / f"{host}.log").write_text(
                 "dry_run=true\n"
                 + "command="
-                + shlex.join([*_ssh_base(args), host, _node_agent_start_command(args.node_agent_service)])
+                + shlex.join(
+                    [*_ssh_base(args), host, _node_agent_start_command(args.node_agent_service)]
+                )
                 + "\n",
                 encoding="utf-8",
             )
@@ -433,7 +477,9 @@ def wait_for_status(
 
 def run_validation_command(args: argparse.Namespace, evidence_dir: Path) -> PhaseResult:
     if not args.validation_command:
-        return PhaseResult(phase="validation-command", ok=True, detail="no validation command supplied")
+        return PhaseResult(
+            phase="validation-command", ok=True, detail="no validation command supplied"
+        )
     log_path = evidence_dir / "validation-command.log"
     if args.dry_run:
         log_path.write_text(
@@ -604,7 +650,10 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument("--environment", default="staging")
     parser.add_argument("--pool-name", default="gb10-arm64")
-    parser.add_argument("--hosts", help="Comma-separated GB10 SSH aliases.")
+    parser.add_argument(
+        "--hosts",
+        help="Exact comma-separated merged active GB10 set; runtime host skips are rejected.",
+    )
     parser.add_argument("--ssh-config", required=True, type=Path)
     parser.add_argument("--ssh-identity", type=Path)
     parser.add_argument("--ssh-connect-timeout", type=int, default=10)

@@ -14,6 +14,10 @@ def test_active_payload_sets_host_intents_slots_and_idle_ttl() -> None:
         "max_concurrent": 10,
         "env_config_version": "staging-abc1234",
         "source_git_commit": "a" * 40,
+        "host_intents": {
+            "trt-gb10-7": "stopped",
+            "trt-gb10-8": "active",
+        },
         "rollout_policy": {"mode": "all"},
         "env": {"LOOM_WORKER_BLOCKING_IO_MAX_WORKERS": "40"},
     }
@@ -30,6 +34,8 @@ def test_active_payload_sets_host_intents_slots_and_idle_ttl() -> None:
     assert payload["host_intents"] == {
         "trt-gb10-1": "active",
         "trt-gb10-2": "active",
+        "trt-gb10-7": "stopped",
+        "trt-gb10-8": "active",
     }
     assert payload["env"]["LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS"] == "14400"
     assert payload["env"]["LOOM_WORKER_BLOCKING_IO_MAX_WORKERS"] == "40"
@@ -52,7 +58,10 @@ def test_release_payload_zeroes_slots_and_does_not_extend_idle_ttl() -> None:
     )
 
     assert payload["target_slots"] == 0
-    assert payload["host_intents"] == {"trt-gb10-1": "stopped"}
+    assert payload["host_intents"] == {
+        "trt-gb10-1": "stopped",
+        "trt-gb10-7": "stopped",
+    }
     assert payload["env"]["LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS"] == "14400"
 
 
@@ -214,6 +223,81 @@ def test_parse_ttl_suffixes() -> None:
     assert runner._parse_ttl("45m") == 2700
     with pytest.raises(argparse.ArgumentTypeError):
         runner._parse_ttl("forever")
+
+
+def test_default_hosts_exclude_only_registered_blocker() -> None:
+    assert len(runner.FULL_GB10_HOSTS) == 15
+    assert len(runner.DEFAULT_HOSTS) == 14
+    assert "trt-gb10-7" not in runner.DEFAULT_HOSTS
+    assert set(runner.FULL_GB10_HOSTS) - set(runner.DEFAULT_HOSTS) == {"trt-gb10-7"}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "trt-gb10-7",
+        "trt-gb10-1,trt-gb10-7",
+        "trt-gb10-1,trt-gb10-1",
+        "unregistered-host",
+    ],
+)
+def test_host_list_rejects_excluded_duplicate_or_unknown_hosts(value: str) -> None:
+    with pytest.raises(argparse.ArgumentTypeError):
+        runner._host_list(value)
+
+
+def test_host_list_accepts_only_exact_merged_active_set() -> None:
+    rendered = ",".join(runner.DEFAULT_HOSTS)
+
+    assert runner._host_list(rendered) == runner.DEFAULT_HOSTS
+    with pytest.raises(argparse.ArgumentTypeError, match="exact merged active"):
+        runner._host_list(",".join(reversed(runner.DEFAULT_HOSTS)))
+    with pytest.raises(argparse.ArgumentTypeError, match="exact merged active"):
+        runner._host_list(",".join(runner.DEFAULT_HOSTS[:-1]))
+
+
+def test_payload_forces_excluded_host_stopped_and_preserves_other_intents() -> None:
+    current = {
+        "image_tag": "staging-abc1234",
+        "max_concurrent": 10,
+        "env_config_version": "staging-abc1234",
+        "host_intents": {
+            "trt-gb10-7": "active",
+            "trt-gb10-8": "draining",
+        },
+    }
+
+    payload = runner.desired_state_payload(
+        current,
+        hosts=("trt-gb10-1",),
+        intent="active",
+        ttl_seconds=14400,
+        adjust_idle_exit=False,
+    )
+
+    assert payload["target_slots"] == 10
+    assert payload["host_intents"] == {
+        "trt-gb10-1": "active",
+        "trt-gb10-7": "stopped",
+        "trt-gb10-8": "draining",
+    }
+
+
+def test_payload_rejects_runtime_readdition_of_excluded_host() -> None:
+    current = {
+        "image_tag": "staging-abc1234",
+        "max_concurrent": 10,
+        "env_config_version": "staging-abc1234",
+    }
+
+    with pytest.raises(ValueError, match="merged re-admission"):
+        runner.desired_state_payload(
+            current,
+            hosts=("trt-gb10-7",),
+            intent="active",
+            ttl_seconds=14400,
+            adjust_idle_exit=False,
+        )
 
 
 def _node_agent_args(tmp_path: Path, *, dry_run: bool = False) -> argparse.Namespace:

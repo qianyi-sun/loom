@@ -498,13 +498,16 @@ GB10/OLDLAB machines remain shared physical capacity. The release contract is
 `deploy/worker-capacity/prod-first.toml`: by default every eligible host slot
 belongs to production, staging/dev has `staging_slots = 0`, and any staging borrow must
 be explicit, bounded to at most one slot per host, and drained back before the
-borrow window ends. The v1.0 GB10 baseline is all 15 GB10 hosts at 10 slots
-each; the repo-owned `deploy/worker-pools/gb10/ssh_config` routes
+borrow window ends. The physical v1.0 GB10 inventory remains all 15 hosts at 10
+slots each, but #822 marks node 7 unreachable and assigns it zero production or
+staging slots. Staging's current fail-closed active set is the other 14 hosts /
+140 slots. The repo-owned `deploy/worker-pools/gb10/ssh_config` routes
 the private `trt-gb10-2..15` addresses on port `22` through
 `ProxyJump trt-gb10-1`; `trt-gb10-1` is the only public entrypoint and uses
 port `2221`.
-The manifest can still represent future `staging_draining`, `host_draining`,
-and `unreachable` host states when live evidence proves a host is unavailable.
+The manifest represents node 7 as `unreachable` until its separate merged
+re-admission gate passes; it can also represent future `staging_draining` and
+`host_draining` states when live evidence requires them.
 
 Generate the secret-safe desired-vs-observed evidence before a production
 promotion:
@@ -968,7 +971,7 @@ Recommended idle-exit values:
 |---|---:|---|
 | Fixed Kubernetes worker | unset | Keep baseline capacity online. |
 | Dev or staging elastic Slurm | 300 seconds | Release idle allocations quickly while preserving short queue bursts. |
-| Staging GB10 release-managed Compose | 7200 seconds | Keep all 15 hosts fresh through bounded-parallel prep, release-gate, and smoke validation. |
+| Staging GB10 release-managed Compose | 7200 seconds | Keep all 14 active hosts fresh through bounded-parallel prep, release-gate, and smoke validation while #822 excludes node 7. |
 | Production OLDLAB elastic Slurm | 600-900 seconds | Avoid churn during real batch bursts; use 900 seconds when submissions are bursty. |
 
 Keep Slurm `--time` as a hard upper bound even when idle-exit is enabled.
@@ -1287,15 +1290,15 @@ cluster credentials exist and only for the intended pool.
 For GB10, use the same Slurm actuator rather than the legacy `gb10` actuator
 for normal capacity. The backend remains `docker` because each worker runs
 Docker sandboxes, while the autoscaler actuator is `slurm` because capacity is
-requested and released through the GB10 Slurm partition. A 15-node, 10-slot
-per node policy has a theoretical ceiling of 150 slots:
+requested and released through the GB10 Slurm partition. While #822 excludes
+node 7, the active 14-node, 10-slot policy has a ceiling of 140 slots:
 
 ```json
 {
   "actuator": "slurm",
   "enabled": true,
   "min_slots": 0,
-  "max_slots": 150,
+  "max_slots": 140,
   "actuator_config": {
     "backend": "docker",
     "cpu_arch": "arm64",
@@ -1307,7 +1310,6 @@ per node policy has a theoretical ceiling of 150 slots:
       "trt-gb10-4",
       "trt-gb10-5",
       "trt-gb10-6",
-      "trt-gb10-7",
       "trt-gb10-8",
       "trt-gb10-9",
       "trt-gb10-10",
@@ -1322,7 +1324,7 @@ per node policy has a theoretical ceiling of 150 slots:
     "requested_cpus": 20,
     "requested_memory_mib": 115000,
     "requested_concurrency": 10,
-    "max_jobs": 15,
+    "max_jobs": 14,
     "pending_job_cap": 2,
     "time_limit": "2-00:00:00",
     "exclusive": true

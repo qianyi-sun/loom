@@ -68,6 +68,12 @@ Existing accepted evidence includes:
 This evidence remains useful only where its scope matches a matrix row. It does
 not substitute for a fresh final-candidate matrix run.
 
+Current operational amendment: #822 temporarily removes `trt-gb10-7` from the
+staging rollout target. Fresh candidate evidence must cover all 14 active hosts
+and 140 slots, while preserving node 7 as stopped/unreachable; the historical
+15-host HF-boundary evidence above remains historical rather than a current
+reachability claim.
+
 ## Program Structure
 
 The program uses independently reviewable PRs rather than one stabilization

@@ -6,6 +6,12 @@ Date: 2026-07-13
 
 Tracking: [#803](https://github.com/qianyi-sun/loom/issues/803)
 
+Temporary amendment (2026-07-14): [#822](https://github.com/qianyi-sun/loom/issues/822)
+keeps the full 15-host SSH/trust inventory but excludes `trt-gb10-7` from the
+active staging target. Until a separate merged re-admission change passes, the
+acceptance boundary is all 14 active GB10 hosts and 140 slots, with node 7
+persistently stopped/unreachable and no runtime override.
+
 ## Context
 
 The rollout driver was restartable, but the supported staging procedure still
@@ -108,9 +114,11 @@ an arbitrary driver argv, or a newly selected candidate.
 
 Uninstall is fail-closed: remove admission, acquire maintenance under the same
 launch lock, prove no request is active, revoke the exact service public key on
-all 15 GB10 hosts, remove only installer-recorded ACLs/memberships/linger/key
-material, and retain request and rollout evidence. A failed upgrade carries a
-durable revocation ledger bit so uninstall cannot leave stale remote trust.
+every host in the root-owned revocation ledger, remove only installer-recorded
+ACLs/memberships/linger/key material, and retain request and rollout evidence.
+A legacy ledger can contain all 15 inventory hosts; a #822-era install records
+the 14 active hosts. A failed upgrade retains that durable ledger so uninstall
+cannot leave stale remote trust.
 
 ## Alternatives considered
 
@@ -144,9 +152,11 @@ or private key. A new rollout may take longer because backup creation is now a
 required broker-owned phase. Only one full staging rollout can be active.
 
 The service and audit boundary remains operational rather than adversarial
-while the operators retain root/Docker access. Production authority, GitHub
-Environment approval, and the existing all-15-GB10, backup, protected
-preflight, environment-state, release-gate, and smoke gates are unchanged.
+while the operators retain root/Docker access. Production authority and GitHub
+Environment approval are unchanged. The backup, protected preflight,
+environment-state, release-gate, and smoke gates apply to all 14 active GB10
+hosts under #822; the full 15-host inventory remains validated and cannot be
+changed through a runtime host override.
 
 ## Validation and acceptance
 
@@ -160,7 +170,8 @@ Repository verification is necessary but not live acceptance. Installation on
 shared `platform-dev` is allowed only after the implementation has merged into
 `dev`. Live acceptance must then prove both Hongjian and Devansh dry-run with
 distinct authenticated identities and the same fresh merged SHA, unauthorized
-and concurrent-start rejection, detached cross-operator observation, all 15
-GB10 hosts converged, every existing release gate and smoke passed, and zero
+and concurrent-start rejection, detached cross-operator observation, all 14
+active GB10 hosts converged, node 7 stopped/unreachable, every existing release
+gate and smoke passed, and zero
 raw secret matches. #803 remains open for its broader identity inventory and
 rotation scope after this operator-independence slice lands.

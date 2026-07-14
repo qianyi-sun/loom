@@ -69,7 +69,8 @@ state = "eligible"
 name = "trt-gb10-7"
 pool = "gb10-arm64"
 total_slots = 10
-state = "eligible"
+state = "unreachable"
+reason = "Temporarily excluded pending #822 re-admission evidence"
 
 [[hosts]]
 name = "trt-gb10-8"

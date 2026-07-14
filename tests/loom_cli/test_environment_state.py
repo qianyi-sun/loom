@@ -154,11 +154,7 @@ def test_staging_gb10_desired_state_sets_two_hour_worker_idle_ttl() -> None:
         expected_environment="staging",
     )
 
-    gb10 = next(
-        row
-        for row in profile.gb10_desired_states
-        if row["pool_name"] == "gb10-arm64"
-    )
+    gb10 = next(row for row in profile.gb10_desired_states if row["pool_name"] == "gb10-arm64")
 
     assert gb10["env"]["LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS"] == "7200"
 
@@ -1537,11 +1533,14 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert profile.control_plane_environment == environment
     assert gb10_policy["environment"] == environment
     assert gb10_policy["actuator"] == "slurm"
-    assert gb10_policy["max_slots"] == 150
+    assert gb10_policy["max_slots"] == 140
     assert gb10_policy["actuator_config"]["backend"] == "docker"
     assert gb10_policy["actuator_config"]["cpu_arch"] == "arm64"
     assert gb10_policy["actuator_config"]["partition"] == "gb10"
-    assert len(gb10_policy["actuator_config"]["allowed_nodes"]) == 15
+    assert gb10_policy["actuator_config"]["allowed_nodes"] == [
+        f"trt-gb10-{index}" for index in range(1, 16) if index != 7
+    ]
+    assert gb10_policy["actuator_config"]["max_jobs"] == 14
     assert (
         gb10_policy["actuator_config"]["env_file"]
         == "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-test.env"
@@ -1557,10 +1556,11 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert gb10_state["env_config_version"] == "staging-test"
     assert gb10_state["source_git_commit"] == ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     assert gb10_state["max_concurrent"] == 10
-    assert gb10_state["target_slots"] == 150
+    assert gb10_state["target_slots"] == 140
     assert gb10_state["host_intents"]["trt-gb10-1"] == "active"
     assert gb10_state["host_intents"]["trt-gb10-14"] == "active"
-    assert set(gb10_state["host_intents"].values()) == {"active"}
+    assert gb10_state["host_intents"]["trt-gb10-7"] == "stopped"
+    assert set(gb10_state["host_intents"].values()) == {"active", "stopped"}
     assert gb10_state["rollout_policy"] == {"mode": "all"}
     assert profile.catalog_provisioning["required"] is True
     command = profile.catalog_provisioning["command"]
@@ -1625,4 +1625,5 @@ def test_staging_profile_is_gb10_only_for_first_prod_validation() -> None:
         state for state in profile.gb10_desired_states if state["pool_name"] == "gb10-arm64"
     )
     assert len(gb10_state["host_intents"]) == 15
-    assert set(gb10_state["host_intents"].values()) == {"active"}
+    assert gb10_state["host_intents"]["trt-gb10-7"] == "stopped"
+    assert sum(intent == "active" for intent in gb10_state["host_intents"].values()) == 14

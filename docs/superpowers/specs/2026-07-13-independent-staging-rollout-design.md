@@ -5,6 +5,13 @@
 Status: approved for implementation on 2026-07-13. Repository implementation
 does not authorize shared-staging use before merge and live acceptance.
 
+Temporary amendment (2026-07-14): #822 supersedes this document's active
+all-15-host statements while `trt-gb10-7` is unreachable. The checked-in SSH
+and legacy trust inventory remains 15 hosts, but broker bootstrap, preflight,
+rollout, capacity, release-gate, and smoke require every one of the other 14
+active hosts / 140 slots. Node 7 stays stopped and cannot be restored by a
+runtime flag; re-admission requires a separate merged change and fresh evidence.
+
 This design implements the operator-independence portion of #803. Hongjian and
 Devansh must each be able to update Loom staging after code has merged without
 asking Qianyi to provide credentials, start a process, refresh a backup, or
@@ -19,9 +26,10 @@ or alternate remote. A resume continues the SHA already pinned by the original
 request even if `origin/dev` advances later.
 
 This slice does not grant production promotion authority, change GitHub
-Environment policy, or weaken all-15-GB10, backup, protected preflight,
-environment-state, release-gate, or smoke acceptance. Production authority
-remains governed by #757.
+Environment policy, or weaken the merged active-GB10, backup, protected
+preflight, environment-state, release-gate, or smoke acceptance. Under #822
+that means all 14 active hosts while the full 15-host topology remains fixed.
+Production authority remains governed by #757.
 
 ## Root cause
 
@@ -371,7 +379,7 @@ Live acceptance on `platform-dev` must prove:
 
 1. The service preflight passes for checkout ownership, clean/fresh remote,
    dependencies, Docker, kube context, data paths, credentials, backup tools,
-   and all 15 GB10 connections.
+   all 14 active GB10 connections, and exact full-15 topology validation.
 2. Hongjian and Devansh each run `start --dry-run`; evidence records the correct
    distinct OS user and the same fresh merged `origin/dev` SHA.
 3. An unauthorized user is rejected, and an intentional simultaneous request
@@ -382,9 +390,9 @@ Live acceptance on `platform-dev` must prove:
    a real failure or cancellation occurs. Repository and isolated integration
    tests prove the resume path when the live rollout completes normally; the
    live acceptance does not manufacture a driver/pod failure or edit state.
-6. The rollout completes every existing step, all 15 GB10 hosts converge, the
-   release gate and smoke pass, and request/attempt/rollout correlation is
-   complete.
+6. The rollout completes every existing step, all 14 active GB10 hosts
+   converge, node 7 remains stopped/unreachable, the release gate and smoke
+   pass, and request/attempt/rollout correlation is complete.
 7. No raw secret appears in argv, journald, request evidence, rollout evidence,
    or the final summary.
 

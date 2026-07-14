@@ -744,8 +744,11 @@ knob you need.
    This is a repo-only desired-state/evidence check: it does not mutate worker
    pools, mint tokens, or read live credentials. The default manifest assigns
    every eligible GB10/OLDLAB slot to production and leaves staging/dev at zero
-   borrowed slots. The v1.0 GB10 baseline is all 15 GB10 hosts at 10 slots
-   each; the repo-owned GB10 SSH topology uses `trt-gb10-1` as its sole public
+   borrowed slots. The physical v1.0 inventory remains all 15 GB10 hosts at 10
+   slots each. While #822 is open, node 7 is `unreachable`, production receives
+   zero slots from it, and staging declares the other 14 hosts / 140 slots as
+   its fail-closed active set. The repo-owned GB10 SSH topology uses
+   `trt-gb10-1` as its sole public
    entrypoint on port `2221` and reaches private `trt-gb10-2..15` on port `22`
    through `ProxyJump trt-gb10-1`. When an observed worker
    registration/status artifact is available, pass it with `--observed-json`
@@ -841,8 +844,9 @@ knob you need.
    because it proves no external worker target was declared. A GB10 desired
    state without `[gb10_pool]` hosts is also a release-contract error because
    rollout step 12 would have no actual hosts to prepare. For the v1.0 staging
-   gate, `deploy/environments/staging.cluster.toml` enumerates all 15 GB10
-   hosts and points `[gb10_pool].ssh_config` at the repo-owned GB10 SSH config
+   gate, the current profile enumerates all 14 active GB10 hosts while the
+   repo-owned SSH config retains the full 15-host inventory.
+   `deploy/environments/staging.cluster.toml` points `[gb10_pool].ssh_config` at that config
    plus `[gb10_pool].ssh_identity_file` at a platform-dev-local deploy
    identity. Step 12 therefore does not depend on `platform-dev` having
    operator-local `trt-gb10-*` aliases or a Mac forwarded-agent session. Step
@@ -1529,8 +1533,9 @@ construct that argv from a validated private envelope.
 The broker intentionally does not use `ssh -A`. Step 12 authenticates with the
 service-owned `/var/lib/loom-staging-rollout/gb10-deploy-ed25519` declared by
 the candidate-bound cluster config. The private file is mode 0600, is never
-shared with operators, and is not committed or printed. Every rollout keeps the
-existing all-15-host fail-closed gate. Host checkout, env update, legacy worker
+shared with operators, and is not committed or printed. While #822 is open,
+every rollout keeps the merged 14-active-host fail-closed gate and refuses a
+runtime re-addition of node 7. Host checkout, env update, legacy worker
 retirement, and node-agent start remain ordered per host while the fixed broker
 policy bounds concurrency across independent hosts.
 
@@ -1551,11 +1556,13 @@ sudo ./scripts/ops/staging_rollout_host.py uninstall --retain-ledger
 ```
 
 Uninstall removes admission, takes the maintenance/launch lock, refuses an
-active request, revokes only the recorded service public key on all 15 GB10
-hosts, removes only installer-recorded ACLs/memberships/linger and generated
-key/runtime state, and retains request plus rollout evidence. If any revocation
-or reconciliation step fails, stop and repair it; do not delete the local key
-or ledger first.
+active request, and revokes only the recorded service public key from every
+host in the root-owned revocation ledger. New #822-era installs record the 14
+active hosts; a legacy ledger can retain all 15 until node 7 is reachable and
+its old trust is removed. Only installer-recorded ACLs/memberships/linger and
+generated key/runtime state are removed, while request and rollout evidence are
+retained. If any revocation or reconciliation step fails, stop and repair it;
+do not delete the local key or ledger first.
 
 For `--environment staging`, the driver intentionally refuses legacy physical
 targets. Use `--cluster-name loom-staging`, `--namespace loom-staging`, and
@@ -5365,8 +5372,10 @@ link it from #217; do not merge incomplete evidence.
   summaries and metrics group the hosts together. Keep Docker data-root, worker
   trajectory cache, benchmark cache, and trial scratch on each node's local
   ext4 disk; do not put those hot paths on `/shared_work`. Current staging
-  validation uses `trt-gb10-1..15` at `LOOM_WORKER_MAX_CONCURRENT=10`, for 150
-  configured ARM64 slots. Every shared-staging rollout must use the broker,
+  validation uses 14 active hosts (all of `trt-gb10-1..15` except node 7) at
+  `LOOM_WORKER_MAX_CONCURRENT=10`, for 140 configured ARM64 slots. Node 7
+  remains stopped under #822 until merged re-admission. Every shared-staging
+  rollout must use the broker,
   which applies and checks the versioned environment profile, verifies the
   OLDLAB tunnel and Slurm prerequisites, prepares all declared GB10 hosts, and
   evaluates the release gate inside the candidate-bound request envelope.
