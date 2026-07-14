@@ -52,7 +52,8 @@ TMPFILES_PATH = Path("/etc/tmpfiles.d/loom-staging-rollout.conf")
 KUBECONFIG_PATH = STATE_ROOT / "kubeconfig"
 SERVICE_KEY = STATE_ROOT / "gb10-deploy-ed25519"
 INSTALL_RECORD = Path("/etc/loom/staging-rollout.install.json")
-SYSTEM_PYTHON = Path("/usr/bin/python3.11")
+SYSTEM_PYTHON = Path("/usr/bin/python3")
+UV_BINARY = Path("/usr/local/bin/uv")
 
 PROTECTED_INPUTS = (
     Path("/shared_work/qianyi/loom-worker-capacity/staging-admin-token"),
@@ -304,7 +305,7 @@ def _validate_owned_tree(
         raise InstallError(f"authority tree root is unsafe: {root}")
     root_resolved = root.resolve()
     try:
-        allowed = {path.resolve(strict=True) for path in allowed_external_symlink_targets}
+        allowed = {path.resolve(strict=False) for path in allowed_external_symlink_targets}
     except OSError as exc:
         raise InstallError(f"authority tree external target is unavailable: {root}") from exc
 
@@ -329,6 +330,25 @@ def _validate_owned_tree(
                 raise InstallError(f"authority tree contains a special file: {root}")
             if stat.S_IMODE(metadata.st_mode) & 0o022:
                 raise InstallError(f"authority tree is group/world writable: {root}")
+
+
+def _safe_root_executable(path: Path, *, label: str) -> Path:
+    """Resolve one fixed root-owned executable without trusting caller PATH state."""
+    try:
+        resolved = path.resolve(strict=True)
+        metadata = resolved.stat()
+    except OSError as exc:
+        raise InstallError(f"installer requires fixed {label} at {path}") from exc
+    if (
+        not resolved.is_relative_to(Path("/usr"))
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+        or not os.access(resolved, os.X_OK)
+    ):
+        raise InstallError(f"fixed {label} authority is unsafe")
+    return resolved
 
 
 def _runtime_identity(root: Path, *, service_uid: int, service_gid: int) -> None:
@@ -437,6 +457,23 @@ class HostSystem:
     def _probe(self, argv: Sequence[str]) -> CommandResult:
         return self.runner.run(argv, check=False)
 
+    def _validate_system_python_version(self, python: Path) -> None:
+        result = self._probe(
+            [
+                str(python),
+                "-I",
+                "-S",
+                "-c",
+                "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+            ]
+        )
+        match = re.fullmatch(r"([0-9]+)\.([0-9]+)\n?", result.stdout)
+        if result.returncode != 0 or match is None:
+            raise InstallError("fixed system Python version probe failed")
+        version = (int(match.group(1)), int(match.group(2)))
+        if version[0] != 3 or version < (3, 11):
+            raise InstallError("installer requires system Python 3.11 or newer")
+
     def validate_prerequisites(self) -> None:
         required = (
             "bash",
@@ -445,11 +482,9 @@ class HostSystem:
             "git",
             "kubectl",
             "loginctl",
-            "python3.11",
             "setfacl",
             "ssh-keygen",
             "systemctl",
-            "uv",
             "visudo",
         )
         missing = [name for name in required if shutil.which(name, path=_ROOT_PATH) is None]
@@ -460,20 +495,9 @@ class HostSystem:
             raise InstallError("installer requires Ubuntu")
         if not Path("/run/systemd/system").is_dir():
             raise InstallError("installer requires systemd")
-        try:
-            python = SYSTEM_PYTHON.resolve(strict=True)
-            metadata = python.stat()
-        except OSError as exc:
-            raise InstallError("installer requires the fixed system Python 3.11") from exc
-        if (
-            not python.is_relative_to(Path("/usr"))
-            or not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != 0
-            or metadata.st_gid != 0
-            or stat.S_IMODE(metadata.st_mode) & 0o022
-            or not os.access(python, os.X_OK)
-        ):
-            raise InstallError("fixed system Python 3.11 authority is unsafe")
+        python = _safe_root_executable(SYSTEM_PYTHON, label="system Python")
+        _safe_root_executable(UV_BINARY, label="uv")
+        self._validate_system_python_version(python)
 
     def _validate_repo_contract(self, repo: Path, *, root_owned: bool) -> None:
         remotes = self.runner.run(["git", "-C", str(repo), "remote"]).stdout.splitlines()
@@ -853,41 +877,65 @@ class HostSystem:
     def venv_ready(self) -> bool:
         if not os.path.lexists(VENV):
             return False
+        system_python = _safe_root_executable(SYSTEM_PYTHON, label="system Python")
+        self._validate_system_python_version(system_python)
         metadata = self._probe(["stat", "-c", "%F:%U:%G:%a", str(VENV)])
         if metadata.stdout.strip() != "directory:root:root:755":
             raise InstallError("root venv metadata is unsafe")
+        python = VENV / "bin/python"
+        allowed_external_targets: tuple[Path, ...] = ()
+        if os.path.lexists(python) and python.is_symlink():
+            try:
+                target = (python.parent / os.readlink(python)).resolve(strict=False)
+            except OSError as exc:
+                raise InstallError("root venv Python link is unreadable") from exc
+            if (
+                target.parent != Path("/usr/bin")
+                or re.fullmatch(r"python3(?:\.[0-9]+)?", target.name) is None
+            ):
+                raise InstallError("root venv Python link is unsafe")
+            allowed_external_targets = (target,)
         _validate_owned_tree(
             VENV,
             expected_uid=0,
             expected_gid=0,
-            allowed_external_symlink_targets=(SYSTEM_PYTHON,),
+            allowed_external_symlink_targets=allowed_external_targets,
         )
-        python = VENV / "bin/python"
+        if not os.path.lexists(python):
+            return False
         try:
-            resolved_python = python.resolve(strict=True)
-        except OSError as exc:
-            raise InstallError("root venv Python is unavailable") from exc
-        if resolved_python != SYSTEM_PYTHON.resolve(strict=True) or not os.access(python, os.X_OK):
+            resolved_python = _safe_root_executable(python, label="root venv Python")
+        except InstallError:
+            try:
+                python.resolve(strict=True)
+            except OSError:
+                return False
+            raise
+        if resolved_python != system_python:
+            return False
+        if not os.access(python, os.X_OK):
             raise InstallError("root venv Python authority is unsafe")
         return True
 
     def sync_venv(self, source_root: Path) -> None:
+        system_python = _safe_root_executable(SYSTEM_PYTHON, label="system Python")
+        uv = _safe_root_executable(UV_BINARY, label="uv")
+        self._validate_system_python_version(system_python)
         environment = {"PATH": _ROOT_PATH, "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
         environment["UV_PROJECT_ENVIRONMENT"] = str(VENV)
         self.runner.run(
             [
-                "uv",
+                str(uv),
                 "sync",
                 "--project",
                 str(source_root),
                 "--no-editable",
-                "--frozen",
                 "--extra",
                 "cluster",
                 "--extra",
                 "rollout",
                 "--python",
-                str(SYSTEM_PYTHON),
+                str(system_python),
             ],
             env=environment,
         )

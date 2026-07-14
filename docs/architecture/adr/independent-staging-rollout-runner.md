@@ -65,6 +65,14 @@ a dedicated Ed25519 GB10 deploy identity. Only that public key is bootstrapped
 to the exact 15 checked-in GB10 hosts. The private key remains mode 0600 and is
 never shared with an operator.
 
+The root venv is built only with a fixed root-owned `/usr/local/bin/uv` and the
+safe resolved target of `/usr/bin/python3`, which must be Python 3.11 or newer
+and remain under `/usr`. Because the repository intentionally treats
+`pyproject.toml` rather than a tracked `uv.lock` as its cross-environment
+dependency authority, the installer synchronizes the freshly selected merged
+candidate without editable installs and without the inapplicable `--frozen`
+flag. A source-SHA change forces another synchronization.
+
 The service account receives named ACLs only for the declared staging token,
 catalog, and data paths. Secret values stay in protected file sources and are
 excluded from argv, request/status JSON, journals, rollout evidence, and
