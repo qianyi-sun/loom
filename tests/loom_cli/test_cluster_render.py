@@ -802,16 +802,17 @@ def test_staging_profile_declares_repo_owned_gb10_ssh_config() -> None:
     )
 
     assert cfg.gb10_pool.ssh_config == "../worker-pools/gb10/ssh_config"
-    assert (
-        cfg.gb10_pool.ssh_identity_file
-        == "/var/lib/loom-staging-rollout/gb10-deploy-ed25519"
-    )
+    assert cfg.gb10_pool.ssh_identity_file == "/var/lib/loom-staging-rollout/gb10-deploy-ed25519"
     assert len(cfg.gb10_pool.hosts) == 15
-    assert (
-        "IdentityFile /var/lib/loom-staging-rollout/gb10-deploy-ed25519"
-        in ssh_config
-    )
+    assert "IdentityFile /var/lib/loom-staging-rollout/gb10-deploy-ed25519" in ssh_config
     assert "IdentitiesOnly yes" in ssh_config
+    expected_private_hosts = {
+        f"trt-gb10-{index}": f"192.168.20.{index + 10}" for index in range(2, 16)
+    }
+    assert "Host trt-gb10-1\n  HostName 207.35.188.227\n  Port 2221\n" in ssh_config
+    for host, address in expected_private_hosts.items():
+        assert (f"Host {host}\n  HostName {address}\n  ProxyJump trt-gb10-1\n") in ssh_config
+    assert "Host trt-gb10-*\n  User qianyi\n  Port 22\n" in ssh_config
 
 
 def test_render_custom_storage_sizes() -> None:
@@ -1335,9 +1336,7 @@ def test_container_registry_default_leaves_images_unprefixed() -> None:
     assert loom_images, "expected at least one loom-* image in default render"
     for img in loom_images:
         assert not img.startswith("192.168."), f"bare loom-* image expected, got {img!r}"
-        assert "/" not in img.split(":")[0], (
-            f"unprefixed image expected, got {img!r}"
-        )
+        assert "/" not in img.split(":")[0], f"unprefixed image expected, got {img!r}"
 
 
 def test_container_registry_prefixes_all_locally_built_images() -> None:

@@ -29,14 +29,18 @@ def _public_key(seed: int, comment: str = "test-only-public-key") -> bytes:
 def _ssh_config() -> str:
     entries = []
     for number in range(1, 16):
-        entries.extend([f"Host trt-gb10-{number}", f"  HostName 192.0.2.{number}"])
-        if number >= 11:
+        hostname = "207.35.188.227" if number == 1 else f"192.168.20.{number + 10}"
+        entries.extend([f"Host trt-gb10-{number}", f"  HostName {hostname}"])
+        if number == 1:
+            entries.append("  Port 2221")
+        else:
             entries.append("  ProxyJump trt-gb10-1")
         entries.append("")
     entries.extend(
         [
             "Host trt-gb10-*",
             "  User qianyi",
+            "  Port 22",
             "  IdentityFile /var/lib/loom-staging-rollout/gb10-deploy-ed25519",
             "  IdentitiesOnly yes",
             "  PubkeyAuthentication yes",
@@ -80,8 +84,12 @@ def test_inventory_expands_exactly_all_15_targets_and_checked_in_user() -> None:
 
     assert inventory.hosts == tuple(f"trt-gb10-{number}" for number in range(1, 16))
     assert inventory.remote_user == "qianyi"
-    assert inventory.hostnames == tuple(f"192.0.2.{number}" for number in range(1, 16))
-    assert inventory.proxy_jumps == (None,) * 10 + ("trt-gb10-1",) * 5
+    assert inventory.hostnames == (
+        "207.35.188.227",
+        *(f"192.168.20.{number}" for number in range(12, 26)),
+    )
+    assert inventory.ports == (2221,) + (22,) * 14
+    assert inventory.proxy_jumps == (None,) + ("trt-gb10-1",) * 14
     assert inventory.identity_file == trust.SERVICE_PRIVATE_KEY_PATH
 
 
@@ -95,22 +103,10 @@ def test_checked_in_inventory_contract_is_exact() -> None:
     assert inventory.remote_user == "qianyi"
     assert inventory.hostnames == (
         "207.35.188.227",
-        "207.35.188.228",
-        "207.35.188.229",
-        "207.35.188.230",
-        "207.35.188.231",
-        "207.35.188.232",
-        "207.35.188.233",
-        "207.35.188.234",
-        "207.35.188.235",
-        "207.35.188.236",
-        "10.42.0.10",
-        "10.42.0.86",
-        "10.42.0.88",
-        "10.42.0.12",
-        "10.42.0.71",
+        *(f"192.168.20.{number}" for number in range(12, 26)),
     )
-    assert inventory.proxy_jumps == (None,) * 10 + ("trt-gb10-1",) * 5
+    assert inventory.ports == (2221,) + (22,) * 14
+    assert inventory.proxy_jumps == (None,) + ("trt-gb10-1",) * 14
     assert inventory.identity_file == trust.SERVICE_PRIVATE_KEY_PATH
 
 
@@ -125,10 +121,15 @@ def test_checked_in_inventory_contract_is_exact() -> None:
             "/tmp/operator-key",
         ),
         _ssh_config().replace("  ProxyJump trt-gb10-1\n", "", 1),
-        _ssh_config().replace("HostName 192.0.2.1", "HostName dynamic.example"),
+        _ssh_config().replace("  Port 2221\n", "", 1),
+        _ssh_config().replace("  Port 22\n", "", 1),
+        _ssh_config().replace("  Port 22\n", "  Port 2200\n", 1),
+        _ssh_config().replace("  User qianyi", "  User hongjian"),
+        _ssh_config().replace("HostName 207.35.188.227", "HostName 203.0.113.99"),
+        _ssh_config().replace("HostName 207.35.188.227", "HostName dynamic.example"),
     ],
 )
-def test_inventory_fails_closed_on_missing_host_or_ambiguous_dynamic_user(
+def test_inventory_fails_closed_on_unapproved_topology_or_auth(
     bad_config: str,
 ) -> None:
     with pytest.raises(trust.TrustConfigurationError):
@@ -214,6 +215,62 @@ def test_check_continues_after_partial_host_failure_without_echoing_remote_outpu
     report = json.loads(captured.out)
     failed = [entry for entry in report["hosts"] if not entry["ok"]]
     assert failed == [{"host": "trt-gb10-7", "ok": False, "status": "remote-failed"}]
+
+
+def test_revoke_processes_private_hosts_before_jump_host(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config, public_path, _identity, public_key = _write_inputs(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        assert kwargs["input"] == public_key
+        return subprocess.CompletedProcess(argv, 0, b'{"status":"revoked"}\n', b"")
+
+    rc = trust.main(
+        ["revoke"],
+        run=fake_run,
+        ssh_config_path=config,
+        public_key_path=public_path,
+    )
+
+    assert rc == 0
+    expected_hosts = [f"trt-gb10-{number}" for number in range(2, 16)] + ["trt-gb10-1"]
+    assert [argv[-2] for argv in calls] == expected_hosts
+    report = json.loads(capsys.readouterr().out)
+    assert [entry["host"] for entry in report["hosts"]] == expected_hosts
+
+
+def test_revoke_preserves_jump_host_when_private_host_fails(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config, public_path, _identity, _public_key_bytes = _write_inputs(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        if argv[-2] == "trt-gb10-7":
+            return subprocess.CompletedProcess(argv, 255, b"", b"")
+        return subprocess.CompletedProcess(argv, 0, b'{"status":"revoked"}\n', b"")
+
+    rc = trust.main(
+        ["revoke"],
+        run=fake_run,
+        ssh_config_path=config,
+        public_key_path=public_path,
+    )
+
+    assert rc == 1
+    assert [argv[-2] for argv in calls] == [f"trt-gb10-{number}" for number in range(2, 16)]
+    report = json.loads(capsys.readouterr().out)
+    assert report["hosts"][-1] == {
+        "host": "trt-gb10-1",
+        "ok": False,
+        "status": "dependency-failed",
+    }
 
 
 def test_remote_bootstrap_is_idempotent_and_preserves_unrelated_lines(tmp_path: Path) -> None:

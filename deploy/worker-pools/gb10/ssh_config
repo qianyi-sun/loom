@@ -1,55 +1,66 @@
 Host trt-gb10-1
   HostName 207.35.188.227
+  Port 2221
 
 Host trt-gb10-2
-  HostName 207.35.188.228
+  HostName 192.168.20.12
+  ProxyJump trt-gb10-1
 
 Host trt-gb10-3
-  HostName 207.35.188.229
+  HostName 192.168.20.13
+  ProxyJump trt-gb10-1
 
 Host trt-gb10-4
-  HostName 207.35.188.230
+  HostName 192.168.20.14
+  ProxyJump trt-gb10-1
 
 Host trt-gb10-5
-  HostName 207.35.188.231
+  HostName 192.168.20.15
+  ProxyJump trt-gb10-1
 
 Host trt-gb10-6
-  HostName 207.35.188.232
+  HostName 192.168.20.16
+  ProxyJump trt-gb10-1
 
 Host trt-gb10-7
-  HostName 207.35.188.233
+  HostName 192.168.20.17
+  ProxyJump trt-gb10-1
 
 Host trt-gb10-8
-  HostName 207.35.188.234
+  HostName 192.168.20.18
+  ProxyJump trt-gb10-1
 
 Host trt-gb10-9
-  HostName 207.35.188.235
+  HostName 192.168.20.19
+  ProxyJump trt-gb10-1
 
 Host trt-gb10-10
-  HostName 207.35.188.236
+  HostName 192.168.20.20
+  ProxyJump trt-gb10-1
 
 Host trt-gb10-11
-  HostName 10.42.0.10
+  HostName 192.168.20.21
   ProxyJump trt-gb10-1
 
 Host trt-gb10-12
-  HostName 10.42.0.86
+  HostName 192.168.20.22
   ProxyJump trt-gb10-1
 
 Host trt-gb10-13
-  HostName 10.42.0.88
+  HostName 192.168.20.23
   ProxyJump trt-gb10-1
 
 Host trt-gb10-14
-  HostName 10.42.0.12
+  HostName 192.168.20.24
   ProxyJump trt-gb10-1
 
 Host trt-gb10-15
-  HostName 10.42.0.71
+  HostName 192.168.20.25
   ProxyJump trt-gb10-1
 
 Host trt-gb10-*
   User qianyi
+  Port 22
   IdentityFile /var/lib/loom-staging-rollout/gb10-deploy-ed25519
   IdentitiesOnly yes
   PubkeyAuthentication yes
