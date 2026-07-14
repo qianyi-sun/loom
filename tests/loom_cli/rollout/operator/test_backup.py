@@ -2112,6 +2112,169 @@ def test_minio_wall_clock_deadline_interrupts_blocking_io_and_cleans_everything(
     assert list(backups_root.rglob("*.part")) == []
 
 
+def test_minio_watchdog_uses_remaining_absolute_deadline_after_client_setup(
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+    now = [100.0]
+    waiter_timeouts: list[float] = []
+
+    class ReturnsAfterCloseS3:
+        def __init__(self) -> None:
+            self.released = threading.Event()
+            self.closed = False
+
+        def list_objects_v2(self, **_kwargs: str) -> dict[str, object]:
+            entered.set()
+            assert self.released.wait(1.0)
+            return {"Contents": [], "IsTruncated": False}
+
+        def close(self) -> None:
+            self.closed = True
+            self.released.set()
+
+    client = ReturnsAfterCloseS3()
+
+    def create_client(*_args: object, **_kwargs: object) -> ReturnsAfterCloseS3:
+        now[0] += 55.0
+        return client
+
+    def expire_after_call_starts(stop: threading.Event, timeout: float) -> bool:
+        waiter_timeouts.append(timeout)
+        assert entered.wait(1.0)
+        return stop.is_set()
+
+    config = make_config(tmp_path)
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        minio=Boto3MinioMirror(
+            client_factory=create_client,
+            timeout_seconds=60.0,
+            monotonic=lambda: now[0],
+            deadline_waiter=expire_after_call_starts,
+            cancellation_grace_seconds=0.5,
+        ),
+        now=lambda: FIXED_NOW,
+    )
+
+    with pytest.raises(BackupError, match="minio_snapshot_failed"):
+        creator.create(make_request())
+
+    assert waiter_timeouts == [pytest.approx(5.0)]
+    assert client.closed
+    backups_root = config.rollout_root / "backups"
+    assert not (backups_root / "latest").exists()
+    assert not list(backups_root.glob("*/backup-manifest.json"))
+
+
+def test_minio_rejects_deadline_exhausted_during_client_setup(tmp_path: Path) -> None:
+    now = [100.0]
+    waiter_timeouts: list[float] = []
+
+    class NeverListedS3(LifecycleS3):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.list_calls = 0
+
+        def list_objects_v2(self, **_kwargs: str) -> dict[str, object]:
+            self.list_calls += 1
+            return {"Contents": [], "IsTruncated": False}
+
+    client = NeverListedS3()
+
+    def create_client(*_args: object, **_kwargs: object) -> NeverListedS3:
+        now[0] += 60.0
+        return client
+
+    def wait_for_stop(stop: threading.Event, timeout: float) -> bool:
+        waiter_timeouts.append(timeout)
+        return stop.wait(1.0)
+
+    destination = tmp_path / "minio"
+    destination.mkdir(mode=0o700)
+    mirror = Boto3MinioMirror(
+        client_factory=create_client,
+        timeout_seconds=60.0,
+        monotonic=lambda: now[0],
+        deadline_waiter=wait_for_stop,
+    )
+
+    with pytest.raises(ValueError, match="total deadline"):
+        mirror.mirror(
+            endpoint_url="http://127.0.0.1:19000",
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            buckets=("loom-staging-trajectories", "loom-staging-artifacts"),
+            destination=destination,
+        )
+
+    assert client.list_calls == 0
+    assert waiter_timeouts == []
+    assert client.events == ["client_close"]
+
+
+@pytest.mark.parametrize("stage", ["list", "get", "read"])
+def test_minio_rechecks_absolute_deadline_after_final_blocking_call(
+    tmp_path: Path,
+    stage: str,
+) -> None:
+    now = [100.0]
+
+    class DeadlineAdvancingBody:
+        def read(self, _amount: int) -> bytes:
+            if stage == "read":
+                now[0] += 61.0
+            return b""
+
+        def close(self) -> None:
+            return None
+
+    class DeadlineAdvancingS3:
+        def __init__(self) -> None:
+            self.list_calls = 0
+            self.closed = False
+
+        def list_objects_v2(self, **_kwargs: str) -> dict[str, object]:
+            self.list_calls += 1
+            if self.list_calls == 1:
+                return {"Contents": [], "IsTruncated": False}
+            if stage == "list":
+                now[0] += 61.0
+                return {"Contents": [], "IsTruncated": False}
+            return {"Contents": [{"Key": "object.bin"}], "IsTruncated": False}
+
+        def get_object(self, **_kwargs: str) -> dict[str, object]:
+            if stage == "get":
+                now[0] += 61.0
+            return {"Body": DeadlineAdvancingBody(), "ContentLength": 0}
+
+        def close(self) -> None:
+            self.closed = True
+
+    client = DeadlineAdvancingS3()
+    destination = tmp_path / "minio"
+    destination.mkdir(mode=0o700)
+    mirror = Boto3MinioMirror(
+        client_factory=lambda *_args, **_kwargs: client,
+        timeout_seconds=60.0,
+        monotonic=lambda: now[0],
+        deadline_waiter=lambda stop, _timeout: stop.wait(1.0),
+    )
+
+    with pytest.raises(ValueError, match="total deadline"):
+        mirror.mirror(
+            endpoint_url="http://127.0.0.1:19000",
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            buckets=("loom-staging-trajectories", "loom-staging-artifacts"),
+            destination=destination,
+        )
+
+    assert client.closed
+
+
 def test_boto_client_closes_before_port_forward_cleanup(tmp_path: Path) -> None:
     events: list[str] = []
     client = LifecycleS3(events)

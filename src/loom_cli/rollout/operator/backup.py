@@ -452,12 +452,14 @@ class _MirrorCancellationScope:
     def __init__(
         self,
         *,
-        timeout_seconds: float,
+        deadline: float,
+        monotonic: Callable[[], float],
         waiter: DeadlineWaiter,
         cancellation_grace_seconds: float,
         cancel_external: _OnceCloser,
     ) -> None:
-        self._timeout_seconds = timeout_seconds
+        self._deadline = deadline
+        self._monotonic = monotonic
         self._waiter = waiter
         self._cancellation_grace_seconds = cancellation_grace_seconds
         self._cancel_external = cancel_external
@@ -503,7 +505,12 @@ class _MirrorCancellationScope:
 
     def _watch(self) -> None:
         try:
-            stopped = self._waiter(self._stop, self._timeout_seconds)
+            remaining_seconds = self._deadline - self._monotonic()
+            stopped = (
+                self._stop.is_set()
+                if remaining_seconds <= 0
+                else self._waiter(self._stop, remaining_seconds)
+            )
         except BaseException:
             stopped = False
         if stopped:
@@ -1047,7 +1054,7 @@ class _MirrorBudget:
     entries: int = 0
 
     def check_deadline(self) -> None:
-        if self.monotonic() > self.deadline:
+        if self.monotonic() >= self.deadline:
             raise ValueError("MinIO mirror exceeded total deadline")
 
     def consume_page(self) -> None:
@@ -1095,6 +1102,7 @@ def _stream_s3_object(
 ) -> None:
     budget.check_deadline()
     response = client.get_object(Bucket=bucket, Key=key)
+    budget.check_deadline()
     cancellation.raise_if_expired()
     if not isinstance(response, dict):
         raise ValueError("object response is malformed")
@@ -1145,6 +1153,7 @@ def _stream_s3_object(
             while True:
                 budget.check_deadline()
                 chunk = read(1024 * 1024)
+                budget.check_deadline()
                 cancellation.raise_if_expired()
                 if not isinstance(chunk, bytes):
                     raise ValueError("object body returned non-bytes data")
@@ -1210,6 +1219,7 @@ def _mirror_s3_bucket(
         if token is not None:
             kwargs["ContinuationToken"] = token
         page = client.list_objects_v2(**kwargs)
+        budget.check_deadline()
         cancellation.raise_if_expired()
         if not isinstance(page, dict):
             raise ValueError("object listing response is malformed")
@@ -1321,6 +1331,7 @@ class Boto3MinioMirror:
         cancel_on_timeout: Callable[[], None] = _do_nothing,
         resources: _BackupResourceBudget | None = None,
     ) -> None:
+        deadline = self._monotonic() + self._timeout_seconds
         if endpoint_url != f"http://{_MINIO_LOCAL_HOST}:{_MINIO_LOCAL_PORT}":
             raise ValueError("MinIO endpoint is not approved")
         if buckets != _MINIO_BUCKETS:
@@ -1343,7 +1354,7 @@ class Boto3MinioMirror:
             max_objects=self._max_objects,
             max_total_bytes=min(self._max_total_bytes, capacity),
             max_entries=min(self._max_entries, inode_capacity),
-            deadline=self._monotonic() + self._timeout_seconds,
+            deadline=deadline,
             monotonic=self._monotonic,
         )
         if resources is None:
@@ -1388,8 +1399,12 @@ class Boto3MinioMirror:
         if not callable(close):
             raise ValueError("object client does not provide bounded cleanup")
         client_closer = _OnceCloser(close)
+        if self._monotonic() >= deadline:
+            client_closer()
+            raise ValueError("MinIO mirror exceeded total deadline")
         cancellation = _MirrorCancellationScope(
-            timeout_seconds=self._timeout_seconds,
+            deadline=deadline,
+            monotonic=self._monotonic,
             waiter=self._deadline_waiter,
             cancellation_grace_seconds=self._cancellation_grace_seconds,
             cancel_external=(
@@ -1419,6 +1434,7 @@ class Boto3MinioMirror:
                     cancellation=cancellation,
                     resources=resources,
                 )
+            budget.check_deadline()
             cancellation.raise_if_expired()
         finally:
             try:
