@@ -24,6 +24,12 @@ SSH_CONFIG_PATH = Path("/opt/loom-staging-runner/repo/deploy/worker-pools/gb10/s
 SERVICE_PRIVATE_KEY_PATH = Path("/var/lib/loom-staging-rollout/gb10-deploy-ed25519")
 SERVICE_PUBLIC_KEY_PATH = Path("/var/lib/loom-staging-rollout/gb10-deploy-ed25519.pub")
 _EXPECTED_HOSTS = tuple(f"trt-gb10-{number}" for number in range(1, 16))
+_EXPECTED_HOSTNAMES = (
+    "207.35.188.227",
+    *(f"192.168.20.{number}" for number in range(12, 26)),
+)
+_EXPECTED_PORTS = (2221,) + (22,) * 14
+_EXPECTED_REMOTE_USER = "qianyi"
 _SAFE_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,63}$")
 _PUBLIC_KEY_MAX_BYTES = 16 * 1024
 _SSH_TIMEOUT_SECONDS = 30
@@ -53,6 +59,7 @@ class SshInventory:
     hosts: tuple[str, ...]
     remote_user: str
     hostnames: tuple[str, ...]
+    ports: tuple[int, ...]
     proxy_jumps: tuple[str | None, ...]
     identity_file: Path
 
@@ -92,7 +99,7 @@ def _block_matches(patterns: Sequence[str], host: str) -> bool:
 
 
 def parse_ssh_inventory(text: str) -> SshInventory:
-    """Resolve the exact concrete GB10 aliases and their effective SSH User."""
+    """Resolve and validate the fixed concrete GB10 SSH topology."""
     blocks: list[_HostBlock] = []
     current_patterns: tuple[str, ...] = ("*",)
     current_options: dict[str, list[str]] = {}
@@ -142,9 +149,10 @@ def parse_ssh_inventory(text: str) -> SshInventory:
 
     users: list[str] = []
     hostnames: list[str] = []
+    ports: list[int] = []
     proxy_jumps: list[str | None] = []
     identity_files: list[str] = []
-    for host in _EXPECTED_HOSTS:
+    for index, host in enumerate(_EXPECTED_HOSTS):
         effective: dict[str, str] = {}
         all_identity_files: list[str] = []
         for block in blocks:
@@ -153,6 +161,7 @@ def parse_ssh_inventory(text: str) -> SshInventory:
             for key in (
                 "user",
                 "hostname",
+                "port",
                 "proxyjump",
                 "identitiesonly",
                 "pubkeyauthentication",
@@ -171,6 +180,8 @@ def parse_ssh_inventory(text: str) -> SshInventory:
             raise TrustConfigurationError(
                 "every GB10 SSH target must resolve one safe User from the checked-in config"
             )
+        if effective_user != _EXPECTED_REMOTE_USER:
+            raise TrustConfigurationError("GB10 SSH User policy is not approved")
         hostname = effective.get("hostname")
         try:
             if hostname is None:
@@ -180,6 +191,12 @@ def parse_ssh_inventory(text: str) -> SshInventory:
             raise TrustConfigurationError(
                 "every GB10 SSH target must resolve one literal IP HostName"
             ) from exc
+        if hostname != _EXPECTED_HOSTNAMES[index]:
+            raise TrustConfigurationError("GB10 SSH HostName policy is not approved")
+        expected_port = _EXPECTED_PORTS[index]
+        port_value = effective.get("port")
+        if port_value != str(expected_port):
+            raise TrustConfigurationError("GB10 SSH Port policy is not approved")
         if len(all_identity_files) != 1:
             raise TrustConfigurationError(
                 "every GB10 SSH target must resolve exactly one IdentityFile"
@@ -192,12 +209,13 @@ def parse_ssh_inventory(text: str) -> SshInventory:
             or effective.get("passwordauthentication", "").lower() != "no"
         ):
             raise TrustConfigurationError("GB10 SSH authentication policy is not approved")
-        expected_jump = None if host in _EXPECTED_HOSTS[:10] else "trt-gb10-1"
+        expected_jump = None if host == _EXPECTED_HOSTS[0] else "trt-gb10-1"
         proxy_jump = effective.get("proxyjump")
         if proxy_jump != expected_jump:
             raise TrustConfigurationError("GB10 SSH ProxyJump policy is not approved")
         users.append(effective_user)
         hostnames.append(hostname)
+        ports.append(expected_port)
         proxy_jumps.append(proxy_jump)
         identity_files.append(all_identity_files[0])
     if len(set(users)) != 1:
@@ -208,6 +226,7 @@ def parse_ssh_inventory(text: str) -> SshInventory:
         hosts=_EXPECTED_HOSTS,
         remote_user=users[0],
         hostnames=tuple(hostnames),
+        ports=tuple(ports),
         proxy_jumps=tuple(proxy_jumps),
         identity_file=SERVICE_PRIVATE_KEY_PATH,
     )
@@ -569,7 +588,15 @@ def converge_trust(
     if operation not in _SUCCESS_STATUSES:
         raise ValueError("unsupported trust operation")
     results: list[HostResult] = []
-    for host in inventory.hosts:
+    hosts = (*inventory.hosts[1:], inventory.hosts[0]) if operation == "revoke" else inventory.hosts
+    for host in hosts:
+        if (
+            operation == "revoke"
+            and host == inventory.hosts[0]
+            and not all(result.ok for result in results)
+        ):
+            results.append(HostResult(host=host, ok=False, status="dependency-failed"))
+            continue
         argv = _ssh_argv(
             host=host,
             operation=operation,
