@@ -36,6 +36,7 @@ from loom_cli.secret_source import (
 FULL_GB10_HOSTS = tuple(f"trt-gb10-{i}" for i in range(1, 16))
 TEMPORARILY_EXCLUDED_HOSTS = frozenset({"trt-gb10-7"})
 DEFAULT_HOSTS = tuple(host for host in FULL_GB10_HOSTS if host not in TEMPORARILY_EXCLUDED_HOSTS)
+EXPECTED_MAX_CONCURRENT = 10
 DEFAULT_NODE_AGENT_SERVICE = "loom-gb10-node-agent.service"
 SECRET_PATTERNS = (
     re.compile(r"\b[Bb]earer\s+[A-Za-z0-9._~+/=-]{8,}"),
@@ -164,9 +165,15 @@ def desired_state_payload(
     ttl_seconds: int,
     adjust_idle_exit: bool,
 ) -> dict[str, Any]:
-    max_concurrent = int(current.get("max_concurrent") or 0)
-    if max_concurrent <= 0:
-        raise ValueError("current desired state lacks positive max_concurrent")
+    try:
+        max_concurrent = int(current.get("max_concurrent") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("current desired state max_concurrent is invalid") from exc
+    if max_concurrent != EXPECTED_MAX_CONCURRENT:
+        raise ValueError(
+            "current desired state max_concurrent must match the exact merged "
+            f"GB10 value {EXPECTED_MAX_CONCURRENT}"
+        )
     env = dict(current.get("env") or {})
     if adjust_idle_exit and intent == "active":
         env["LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS"] = str(ttl_seconds)
@@ -316,6 +323,10 @@ def status_mismatches(
             errors.append(f"{host}: desired_intent={node.get('desired_intent')!r}")
         if node.get("current_intent") != intent:
             errors.append(f"{host}: current_intent={node.get('current_intent')!r}")
+        if node.get("desired_max_concurrent") != EXPECTED_MAX_CONCURRENT:
+            errors.append(f"{host}: desired_max_concurrent={node.get('desired_max_concurrent')!r}")
+        if node.get("current_max_concurrent") != EXPECTED_MAX_CONCURRENT:
+            errors.append(f"{host}: current_max_concurrent={node.get('current_max_concurrent')!r}")
         expected_apply_state = {
             "active": "applied",
             "draining": "draining",

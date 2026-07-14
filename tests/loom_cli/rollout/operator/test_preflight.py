@@ -16,6 +16,8 @@ from loom_cli.rollout.operator.preflight import (
     collect_preflight,
 )
 
+REPO_ROOT = Path(__file__).resolve().parents[4]
+
 
 def test_preflight_report_contains_only_named_checks_and_safe_remediation() -> None:
     report = PreflightReport(
@@ -82,10 +84,12 @@ def make_config(tmp_path: Path) -> OperatorConfig:
     identity.write_text("private-key-placeholder", encoding="utf-8")
     identity.chmod(0o600)
     ssh_config = runner / "deploy/worker-pools/gb10/ssh_config"
-    ssh_config.write_text("Host trt-gb10-*\n  User rollout\n", encoding="utf-8")
+    ssh_config.write_bytes((REPO_ROOT / "deploy/worker-pools/gb10/ssh_config").read_bytes())
     ssh_config.chmod(0o644)
     cluster = runner / "deploy/environments/staging.cluster.toml"
-    hosts = ",\n".join(f'  {{ ssh_target = "trt-gb10-{number}" }}' for number in range(1, 16))
+    hosts = ",\n".join(
+        f'  {{ ssh_target = "trt-gb10-{number}" }}' for number in range(1, 16) if number != 7
+    )
     cluster.write_text(
         "\n".join(
             [
@@ -164,6 +168,19 @@ def successful_command(argv: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(argv, 0, stdout, "")
 
 
+def replace_gb10_hosts(config: OperatorConfig, hosts: tuple[str, ...]) -> None:
+    cluster = config.cluster_config_path
+    prefix, marker, remainder = cluster.read_text(encoding="utf-8").partition("hosts = [\n")
+    assert marker
+    _old_hosts, closing, suffix = remainder.partition("]\n")
+    assert closing
+    rendered = ",\n".join(f'  {{ ssh_target = "{host}" }}' for host in hosts)
+    cluster.write_text(
+        prefix + marker + rendered + "\n" + closing + suffix,
+        encoding="utf-8",
+    )
+
+
 def test_collect_preflight_accepts_trusted_readable_repo_configs(tmp_path: Path) -> None:
     config = make_config(tmp_path)
 
@@ -176,6 +193,101 @@ def test_collect_preflight_accepts_trusted_readable_repo_configs(tmp_path: Path)
     )
 
     assert report.passed, report.to_dict()
+
+
+def test_collect_preflight_probes_only_exact_merged_active_gb10_set(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    calls: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return successful_command(argv)
+
+    report = collect_preflight(
+        config,
+        service_uid=os.geteuid(),
+        run=run,
+        which=lambda name: f"/usr/bin/{name}",
+        importer=lambda name: object(),
+    )
+
+    assert report.passed, report.to_dict()
+    probed_hosts = tuple(argv[-2] for argv in calls if argv[:1] == ["ssh"])
+    assert probed_hosts == preflight_module.ACTIVE_GB10_HOSTS
+    assert len(probed_hosts) == 14
+    assert "trt-gb10-7" not in probed_hosts
+    assert len(preflight_module.FULL_GB10_HOSTS) == 15
+    assert set(preflight_module.FULL_GB10_HOSTS) - set(probed_hosts) == {"trt-gb10-7"}
+    topology = next(check for check in report.checks if check.name == "gb10-topology")
+    assert topology.passed is True
+
+
+@pytest.mark.parametrize(
+    "configured_hosts",
+    [
+        preflight_module.FULL_GB10_HOSTS,
+        preflight_module.ACTIVE_GB10_HOSTS[:-1],
+        tuple(reversed(preflight_module.ACTIVE_GB10_HOSTS)),
+        (*preflight_module.ACTIVE_GB10_HOSTS[:-1], preflight_module.ACTIVE_GB10_HOSTS[0]),
+        ("trt-gb10-7", *preflight_module.ACTIVE_GB10_HOSTS[1:]),
+    ],
+)
+def test_collect_preflight_rejects_non_authoritative_gb10_target_without_ssh(
+    tmp_path: Path,
+    configured_hosts: tuple[str, ...],
+) -> None:
+    config = make_config(tmp_path)
+    replace_gb10_hosts(config, configured_hosts)
+    calls: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return successful_command(argv)
+
+    report = collect_preflight(
+        config,
+        service_uid=os.geteuid(),
+        run=run,
+        which=lambda name: f"/usr/bin/{name}",
+        importer=lambda name: object(),
+    )
+
+    check = next(check for check in report.checks if check.name == "gb10-batch-mode")
+    assert check.passed is False
+    assert not any(argv[:1] == ["ssh"] for argv in calls)
+
+
+def test_collect_preflight_rejects_full_topology_digest_drift_without_ssh(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    ssh_config = config.runner_repo / "deploy/worker-pools/gb10/ssh_config"
+    ssh_config.write_text(
+        ssh_config.read_text(encoding="utf-8").replace(
+            "HostName 192.168.20.17",
+            "HostName 192.168.20.117",
+        ),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return successful_command(argv)
+
+    report = collect_preflight(
+        config,
+        service_uid=os.geteuid(),
+        run=run,
+        which=lambda name: f"/usr/bin/{name}",
+        importer=lambda name: object(),
+    )
+
+    topology = next(check for check in report.checks if check.name == "gb10-topology")
+    batch_mode = next(check for check in report.checks if check.name == "gb10-batch-mode")
+    assert topology.passed is False
+    assert batch_mode.passed is False
+    assert not any(argv[:1] == ["ssh"] for argv in calls)
 
 
 def test_collect_preflight_rejects_wrong_origin_url(tmp_path: Path) -> None:

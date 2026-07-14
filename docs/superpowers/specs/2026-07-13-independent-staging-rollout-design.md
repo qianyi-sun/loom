@@ -123,11 +123,12 @@ only for that account. Its root-managed installation consists of:
   point that operators cannot modify.
 
 Generate a new service-owned GB10 deploy key instead of copying Qianyi's
-private key. Install only its public key or certificate trust on the 15 GB10
-hosts. The private file remains owner-only so the existing GB10 identity
-preflight continues to fail closed on group/world exposure. A broker-owned
-cluster-config materialization supplies that key path; users cannot override
-it.
+private key. A fresh #822-era install bootstraps its public key only on the
+exact 14-host active set; the fixed 15-host topology remains the authority for
+validation and legacy-key revocation. The private file remains owner-only so
+the existing GB10 identity preflight continues to fail closed on group/world
+exposure. A broker-owned cluster-config materialization supplies that key
+path; users cannot override it.
 
 The service account receives the Docker, kubeconfig, staging data-root, token,
 catalog, and worker-env access needed by the existing driver. Values remain in
@@ -282,7 +283,7 @@ Hongjian or Devansh
   -> create and verify protected backup
   -> detached loom-rollout systemd user unit
   -> existing rollout driver with broker envelope
-  -> all protected steps, 15 GB10 hosts, release gate, smoke
+  -> all protected steps, exact 14-host active GB10 set, release gate, smoke
   -> request/attempt/state/summary evidence
   -> status and redacted logs available to every operator
 ```
@@ -304,8 +305,9 @@ Hongjian or Devansh
   only after terminal bookkeeping; allow explicit resume.
 - Cancellation: preserve resumable state and record the cancelling operator and
   reason.
-- Any of the 15 GB10 hosts unreachable or unconverged: retain the existing
-  fail-closed prep/release-gate result.
+- Any active GB10 host unreachable or unconverged, or any drift in the fixed
+  15-host topology authority: retain the existing fail-closed
+  prep/release-gate result. Node 7 remains stopped/unreachable under #822.
 
 ## Alternatives rejected
 

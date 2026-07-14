@@ -85,6 +85,8 @@ def test_status_mismatches_require_fresh_active_docker_worker() -> None:
                 "hostname": "trt-gb10-1",
                 "desired_intent": "active",
                 "current_intent": "active",
+                "desired_max_concurrent": 10,
+                "current_max_concurrent": 10,
                 "apply_state": "applied",
                 "current_image_tag": "staging-abc1234",
                 "current_env_config_version": "staging-abc1234",
@@ -112,6 +114,8 @@ def test_status_mismatches_accept_stopped_nonfresh_worker() -> None:
                 "hostname": "trt-gb10-1",
                 "desired_intent": "stopped",
                 "current_intent": "stopped",
+                "desired_max_concurrent": 10,
+                "current_max_concurrent": 10,
                 "apply_state": "stopped",
                 "current_image_tag": "staging-abc1234",
                 "current_env_config_version": "staging-abc1234",
@@ -140,6 +144,8 @@ def test_status_mismatches_accept_draining_nonfresh_worker() -> None:
                 "hostname": "trt-gb10-1",
                 "desired_intent": "draining",
                 "current_intent": "draining",
+                "desired_max_concurrent": 10,
+                "current_max_concurrent": 10,
                 "apply_state": "draining",
                 "current_image_tag": "staging-abc1234",
                 "current_env_config_version": "staging-abc1234",
@@ -168,6 +174,8 @@ def test_status_mismatches_require_nonfresh_draining_worker() -> None:
                 "hostname": "trt-gb10-1",
                 "desired_intent": "draining",
                 "current_intent": "draining",
+                "desired_max_concurrent": 10,
+                "current_max_concurrent": 10,
                 "apply_state": "draining",
                 "current_image_tag": "staging-abc1234",
                 "current_env_config_version": "staging-abc1234",
@@ -230,6 +238,55 @@ def test_default_hosts_exclude_only_registered_blocker() -> None:
     assert len(runner.DEFAULT_HOSTS) == 14
     assert "trt-gb10-7" not in runner.DEFAULT_HOSTS
     assert set(runner.FULL_GB10_HOSTS) - set(runner.DEFAULT_HOSTS) == {"trt-gb10-7"}
+    assert runner.EXPECTED_MAX_CONCURRENT == 10
+
+
+@pytest.mark.parametrize("max_concurrent", [8, 11, 0, None, "invalid"])
+def test_payload_rejects_max_concurrent_drift(max_concurrent: object) -> None:
+    current = {
+        "image_tag": "staging-abc1234",
+        "max_concurrent": max_concurrent,
+        "env_config_version": "staging-abc1234",
+    }
+
+    with pytest.raises(ValueError, match="max_concurrent"):
+        runner.desired_state_payload(
+            current,
+            hosts=runner.DEFAULT_HOSTS,
+            intent="active",
+            ttl_seconds=14400,
+            adjust_idle_exit=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("desired_max_concurrent", 11), ("current_max_concurrent", 8)],
+)
+def test_status_mismatches_reject_concurrency_drift(field: str, value: int) -> None:
+    node = {
+        "hostname": "trt-gb10-1",
+        "desired_intent": "active",
+        "current_intent": "active",
+        "desired_max_concurrent": 10,
+        "current_max_concurrent": 10,
+        "apply_state": "applied",
+        "current_image_tag": "staging-abc1234",
+        "current_env_config_version": "staging-abc1234",
+        "worker_fresh": True,
+        "worker_backend_names": ["docker"],
+    }
+    node[field] = value
+
+    errors = runner.status_mismatches(
+        {"nodes": [node]},
+        hosts=("trt-gb10-1",),
+        intent="active",
+        image_tag="staging-abc1234",
+        env_config_version="staging-abc1234",
+    )
+
+    assert errors == [f"trt-gb10-1: {field}={value!r}"]
 
 
 @pytest.mark.parametrize(

@@ -54,7 +54,9 @@ Create the focused package `src/loom_cli/rollout/operator/`:
 - `lifecycle.py`: launch mutex, full-driver singleton, active-pointer reconciliation, and safe conflict details.
 - `systemd.py`: fixed transient-unit launch/show/kill/journal interface for the `loom-rollout` user manager.
 - `backup.py`: Postgres dump, MinIO bucket mirror, Secret export, metadata manifest, immutable verification, and `latest` publication.
-- `preflight.py`: redacted installation, Docker/Buildx, kube, data path, credential fingerprint, backup-tool, and 15-host GB10 checks.
+- `preflight.py`: redacted installation, Docker/Buildx, kube, data path,
+  credential fingerprint, backup-tool, fixed 15-host GB10 topology validation,
+  and SSH checks for the exact merged 14-host active set under #822.
 - `redaction.py`: exact-known-secret plus central Loom redaction for operator-visible logs/status.
 - `broker.py`: the five public commands and `start --dry-run`.
 - `worker.py`: detached driver execution from a finalized envelope, terminal bookkeeping, and lock release.
@@ -826,9 +828,19 @@ Implement command execution behind an injected runner and filesystem/passwd/grou
 
 - [ ] **Step 4: Implement service public-key trust bootstrap and revocation**
 
-Bootstrap reads the service `.pub` file and sends it over stdin to a fixed remote script for the 15 checked-in targets; it never prints the key. The remote script inserts one comment-marked key idempotently, preserves other `authorized_keys` entries, and enforces directory/file modes. Revocation removes only the line whose decoded key fingerprint matches the service public key and fails on ambiguity.
+Bootstrap reads the service `.pub` file and sends it over stdin to a fixed
+remote script for the exact 14-host active set under #822; it never prints the
+key. The full 15-host topology remains fixed for validation and legacy-ledger
+revocation/migration. The remote script inserts one comment-marked key
+idempotently, preserves other `authorized_keys` entries, and enforces
+directory/file modes. Revocation removes only the line whose decoded key
+fingerprint matches the service public key and fails on ambiguity.
 
-Test all 15 target expansions, a repeated bootstrap, preservation of unrelated keys/comments, partial-host failure reporting, ambiguous fingerprint refusal, and exact-key revocation with fake SSH transports. No test fixture contains a real private key.
+Test the exact active-14 bootstrap/check expansion, full-15 topology and legacy
+revocation expansion, a repeated bootstrap, preservation of unrelated
+keys/comments, partial-host failure reporting, ambiguous fingerprint refusal,
+and exact-key revocation with fake SSH transports. No test fixture contains a
+real private key.
 
 - [ ] **Step 5: Implement safe uninstall and secret-boundary verification**
 
@@ -1002,7 +1014,13 @@ Run the metadata-only verifier against process argv, journald export, request le
 
 - [ ] **Step 8: Record the result without closing #803**
 
-Comment on #803 with merged SHA, request/rollout IDs, both dry-run identities, singleton rejection, 15-host convergence, release-gate/smoke result, and zero-match secret scan. Remove `[WIP]` and return the Project card to the correct non-active state if the broader identity inventory/rotation work is not immediately continuing. Keep #803 open and name its remaining OLDLAB/GB10 identity/bootstrap scope.
+Comment on #803 with merged SHA, request/rollout IDs, both dry-run identities,
+singleton rejection, exact active-14 convergence plus the fixed full-15
+topology digest, node 7 stopped/unreachable evidence, release-gate/smoke
+result, and zero-match secret scan. Remove `[WIP]` and return the Project card
+to the correct non-active state if the broader identity inventory/rotation
+work is not immediately continuing. Keep #803 open and name its remaining
+OLDLAB/GB10 identity/bootstrap scope.
 
 - [ ] **Step 9: Cleanup review**
 

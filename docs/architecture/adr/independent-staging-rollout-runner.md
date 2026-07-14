@@ -67,9 +67,10 @@ deployment of an older SHA is not an operational rollback mechanism.
 The root installation owns the runner source, venv, client, broker, sudoers,
 policy config, and install ledger. The service account owns the candidate
 checkout, request ledger, kubeconfig, generated worker env, runtime locks, and
-a dedicated Ed25519 GB10 deploy identity. Only that public key is bootstrapped
-to the exact 15 checked-in GB10 hosts. The private key remains mode 0600 and is
-never shared with an operator.
+a dedicated Ed25519 GB10 deploy identity. Under #822, that public key is
+bootstrapped to the exact 14-host active set; the full 15-host checked-in
+topology remains validated and is retained for legacy-ledger revocation. The
+private key remains mode 0600 and is never shared with an operator.
 
 The root venv is built only with a fixed root-owned `/usr/local/bin/uv` and the
 safe resolved target of `/usr/bin/python3`, which must be Python 3.11 or newer
