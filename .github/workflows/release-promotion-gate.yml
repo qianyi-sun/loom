@@ -61,7 +61,7 @@ jobs:
       CANDIDATE_SHA: ${{ inputs.candidate_sha }}
       IMAGE_SELECTOR: ${{ inputs.image_tag }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           ref: ${{ inputs.candidate_sha }}
           fetch-depth: 0
@@ -76,7 +76,7 @@ jobs:
             exit 1
           fi
 
-      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           enable-cache: true
           cache-dependency-glob: |
@@ -142,7 +142,7 @@ jobs:
             --image-tag "${IMAGE_SELECTOR}"
 
       - name: Upload release gate evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-gate-evidence
           path: |

@@ -56,12 +56,12 @@ jobs:
       github.event_name != 'push' ||
       github.ref != 'refs/heads/dev'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
 
       - name: Plan required validations
         id: plan
@@ -131,10 +131,10 @@ jobs:
     timeout-minutes: 12
     if: needs.workflow-plan.outputs.docs_only != 'true'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           enable-cache: true
           cache-dependency-glob: |
@@ -147,7 +147,7 @@ jobs:
 
       - name: Cache .venv
         id: cache-venv
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .venv
           key: venv-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'packages/*/pyproject.toml', 'uv.lock') }}
@@ -166,7 +166,7 @@ jobs:
         run: uv run ruff check src tests packages migrations
 
       - name: Cache mypy
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .mypy_cache
           key: mypy-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'uv.lock', 'src/**/*.py', 'tests/**/*.py', 'packages/**/*.py') }}
@@ -183,6 +183,9 @@ jobs:
       - name: Verify agent install_scripts are pinned (#317)
         run: uv run python scripts/check_install_scripts_pinned.py
 
+      - name: Verify GitHub Action SHA lock
+        run: uv run python scripts/check_ci_action_pins.py
+
   tests-root:
     name: tests-root
     runs-on: ubuntu-latest
@@ -190,10 +193,10 @@ jobs:
     timeout-minutes: 15
     if: needs.workflow-plan.outputs.docs_only != 'true'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           enable-cache: true
           cache-dependency-glob: |
@@ -206,7 +209,7 @@ jobs:
 
       - name: Cache .venv
         id: cache-venv
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .venv
           key: venv-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'packages/*/pyproject.toml', 'uv.lock') }}
@@ -230,7 +233,7 @@ jobs:
 
       - name: Upload root coverage data
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-data-root
           path: .coverage
@@ -244,10 +247,10 @@ jobs:
     timeout-minutes: 10
     if: needs.workflow-plan.outputs.docs_only != 'true'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           enable-cache: true
           cache-dependency-glob: |
@@ -260,7 +263,7 @@ jobs:
 
       - name: Cache .venv
         id: cache-venv
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .venv
           key: venv-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'packages/*/pyproject.toml', 'uv.lock') }}
@@ -286,7 +289,7 @@ jobs:
 
       - name: Upload package coverage data
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-data-packages
           path: .coverage
@@ -312,7 +315,7 @@ jobs:
       integration: ${{ needs.workflow-plan.outputs.integration }}
       integration_docker: ${{ needs.workflow-plan.outputs.integration_docker }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Validate parallel check results
         run: |
@@ -340,14 +343,14 @@ jobs:
 
       - name: Download root coverage
         if: needs.workflow-plan.outputs.docs_only != 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: coverage-data-root
           path: cov-root
 
       - name: Download package coverage
         if: needs.workflow-plan.outputs.docs_only != 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: coverage-data-packages
           path: cov-packages
@@ -362,7 +365,7 @@ jobs:
 
       - name: Upload coverage.xml
         if: always() && needs.workflow-plan.outputs.docs_only != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-xml-fast
           path: coverage.xml
@@ -372,7 +375,7 @@ jobs:
       # job to combine with integration-tier coverage.
       - name: Upload fast-tier coverage data
         if: always() && needs.workflow-plan.outputs.docs_only != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-data-fast
           path: .coverage
@@ -413,9 +416,9 @@ jobs:
     name: go-checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.23'
           cache-dependency-path: go.sum
@@ -444,10 +447,10 @@ jobs:
     timeout-minutes: 20
     if: needs.fast-checks.outputs.integration == 'true'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           enable-cache: true
           cache-dependency-glob: |
@@ -460,7 +463,7 @@ jobs:
 
       - name: Cache .venv
         id: cache-venv
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .venv
           key: venv-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'packages/*/pyproject.toml', 'uv.lock') }}
@@ -485,7 +488,7 @@ jobs:
       # collecting combined-tier baseline first (Phase 3 of #260).
       - name: Upload integration coverage data
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-data-integration
           path: .coverage
@@ -503,10 +506,10 @@ jobs:
     timeout-minutes: 40
     if: needs.fast-checks.outputs.integration_docker == 'true'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           enable-cache: true
           cache-dependency-glob: |
@@ -519,7 +522,7 @@ jobs:
 
       - name: Cache .venv
         id: cache-venv
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .venv
           key: venv-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'packages/*/pyproject.toml', 'uv.lock') }}
@@ -556,10 +559,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           enable-cache: true
 
@@ -572,14 +575,14 @@ jobs:
           uv pip install 'coverage>=7'
 
       - name: Download fast-tier coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: coverage-data-fast
           path: cov-fast
 
       - name: Download integration coverage
         if: needs.integration.result == 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: coverage-data-integration
           path: cov-integration

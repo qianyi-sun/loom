@@ -27,6 +27,9 @@ The new repository has these settings recreated from `carinrc/loom`:
 - Wiki disabled;
 - GitHub Actions enabled with selected Actions only;
 - selected Actions allowlist: GitHub-owned Actions and `astral-sh/setup-uv@*`;
+- every workflow Action reference pinned to the upstream-verified full commit SHA in
+  [`config/ci-actions-lock.json`](../../config/ci-actions-lock.json), enforced
+  recursively by `scripts/check_ci_action_pins.py` in the static CI gate;
 - `dev` branch protection requiring strict `repository-checks`;
 - `main` branch protection requiring strict `repository-checks`, code-owner
   review, one approval, conversation resolution, and linear history;

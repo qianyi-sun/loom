@@ -58,8 +58,8 @@ jobs:
       LOOM_DRY_RUN: ${{ inputs.dry_run }}
       LOOM_ROLLOUT_EVIDENCE_DIR: rollout-evidence
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           enable-cache: true
           cache-dependency-glob: |
@@ -69,7 +69,7 @@ jobs:
         run: bash scripts/ops/deploy_environment.sh
       - name: Upload rollout evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rollout-evidence-${{ inputs.environment }}-${{ inputs.image_tag }}
           path: rollout-evidence/
@@ -96,8 +96,8 @@ jobs:
       LOOM_ROLLOUT_EVIDENCE_DIR: rollout-evidence
       LOOM_ROLLOUT_LOCK_DIR: ${{ vars.LOOM_ROLLOUT_LOCK_DIR }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           enable-cache: true
           cache-dependency-glob: |
@@ -107,7 +107,7 @@ jobs:
         run: bash scripts/ops/deploy_environment.sh
       - name: Upload rollout evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rollout-evidence-${{ inputs.environment }}-${{ inputs.image_tag }}
           path: rollout-evidence/
@@ -136,14 +136,14 @@ jobs:
       LOOM_ROLLOUT_EVIDENCE_DIR: rollout-evidence
       LOOM_ROLLOUT_LOCK_DIR: ${{ vars.LOOM_ROLLOUT_LOCK_DIR }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           fetch-depth: 0
       - name: Verify release gate evidence
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/ops/verify_production_release_gate.sh
-      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           enable-cache: true
           cache-dependency-glob: |
@@ -153,7 +153,7 @@ jobs:
         run: bash scripts/ops/deploy_environment.sh
       - name: Upload rollout evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rollout-evidence-${{ inputs.environment }}-${{ inputs.image_tag }}
           path: rollout-evidence/
