@@ -1,5 +1,10 @@
 # Independent Staging Rollout Implementation Plan
 
+> **Governance note (2026-07-14):** The CODEOWNERS entries and assertions in
+> this historical implementation plan now provide advisory ownership routing
+> only on `dev`; they are not a human approval or merge gate. The protected
+> staging paths continue to select full CI through the planner.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give Qianyi, Hongjian, and Devansh a supported, attributable command that independently deploys only the freshly fetched merged `origin/dev` head to Loom staging.

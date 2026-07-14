@@ -103,19 +103,26 @@ GHCR, and do not use a publication cache; manual dispatch is build-only. Only
 the `publish` job on a push to `dev` or `main` requests job-scoped
 `packages: write` authority. This protects the normal workflow path, but it is
 not a hard ceiling for a same-repository writer because branch workflow code
-runs before CODEOWNERS review. A fork-only autonomous-agent boundary or an
-external trusted workflow/App is still required for that stronger guarantee.
+runs under the PR-controlled definition and advisory CODEOWNERS on `dev` does
+not block it. A fork-only autonomous-agent boundary or an external trusted
+workflow/App is still required for that stronger guarantee.
 The required `staging-smoke-gate` is likewise credential-free and depends only
 on the kind smoke. Real AWS validation belongs to a separately protected,
 trusted post-merge/release lane and a skipped cloud run cannot count as cloud
 evidence.
 
-Codex enables squash auto-merge immediately after opening each normal `dev`
-PR. GitHub queues the merge until every required gate is visible and successful
-on the current head SHA and any applicable repository protection passes.
-Promotion PRs from `dev` to `main` remain explicitly owner-managed and do not
-use the routine `dev` auto-merge path. This is a Codex operational rule, not a
-contributor-specific review policy.
+Every normal `dev` PR uses squash auto-merge immediately after opening. GitHub
+queues the merge until every required gate is visible and successful
+on the current head SHA. These four strict, GitHub-Actions-app-bound checks are
+the only merge authority: `dev` requires no human approval, no CODEOWNER
+approval, and no conversation resolution. CODEOWNERS remains advisory routing
+on `dev`, while its changes still select full CI.
+
+`main` accepts only a production release promotion from `dev`. Qianyi
+(`@qianyi-sun`) personally reviews the fixed candidate and evidence and then
+performs the manual squash merge. Never enable auto-merge for a promotion PR.
+The repository-wide `allow_auto_merge` capability cannot express a `main`-only
+prohibition, so this remains an operator-enforced release rule.
 
 The design covers at least:
 
@@ -141,19 +148,31 @@ generated from one source.
 
 GitHub settings are part of the acceptance evidence:
 
-- `dev` has no repository-wide approval count; Codex-authored routine `dev`
-  PRs auto-merge after current-head CI, while the narrow CI/release trust root
-  requires a CODEOWNER because it defines that merge authority;
-- conversation resolution is required;
+- `dev` requires the four strict, app-bound current-head checks and no other
+  merge authority: no human approval, no CODEOWNER approval, and no
+  conversation resolution;
+- `main` retains the four strict checks, generic one-approval, CODEOWNER-review,
+  conversation-resolution, admin-enforcement, and linear-history controls;
 - production-capable environments restrict deployment branches;
 - `production` requires owner approval;
 - secret-bearing `ci-aws` and `huggingface-publish` environments no longer have
   empty protection policy.
 
-The targeted CODEOWNERS boundary is a personal-repository bootstrap, not the
-ideal final trust root. An organization-required workflow or separate GitHub
-App with a distinct app identity should eventually emit merge authority so a
-PR cannot redefine its own judge.
+CODEOWNERS is advisory on `dev` and uses a catch-all `* @qianyi-sun` so it can
+protect `main` promotion. GitHub evaluates the target branch's CODEOWNERS, so
+the first promotion carrying this change still uses current `main`'s invalid
+legacy `@carinrc` owners. That bootstrap can rely only on `main`'s generic
+one-approval rule plus Qianyi's personal review and manual squash. A
+non-Qianyi identity or future restricted bot should open the PR because GitHub
+users cannot approve their own pull requests. After the catch-all reaches
+`main`, Qianyi CODEOWNER approval protects every subsequent promotion.
+
+Neither CODEOWNERS nor the four same-repository workflow checks form an ideal
+autonomous-agent trust root. An organization-required workflow or separate
+GitHub App with a distinct app identity should eventually emit merge authority
+so a PR cannot redefine its own judge. The manifest's
+`release_owner_approval`, GitHub PR review, and Production Environment approval
+are separate controls and are not interchangeable.
 
 ### Workstream B: Workload Trust Contract
 
@@ -381,8 +400,9 @@ or acceptance of the current design.
 
 Repository and GitHub governance changes are applied incrementally and verified
 after each mutation. Required CI gates are never weakened while a replacement
-gate is unproven; routine `dev` approval policy follows the owner governance
-decision. Production secrets are referenced, never printed. Staging capacity
+gate is unproven; routine `dev` uses CI-only auto-merge with no human,
+CODEOWNER, or conversation-resolution gate. Production secrets are referenced,
+never printed. Staging capacity
 changes use leases and preserve in-flight work. The #88 killed-driver drill is
 post-v1; no `main` merge, tag creation, production rollout, or production
 capacity mutation occurs without explicit authority.
@@ -403,7 +423,9 @@ state rather than relying on issue prose or this design:
 7. confirm there are no unowned or untracked release blockers;
 8. confirm the working tree and generated files are clean;
 9. publish the final readiness comment on #715 and the draft promotion PR;
-10. leave #39 open for the separately authorized release and post-deploy
+10. confirm auto-merge is disabled for the promotion and record Qianyi's
+    candidate/evidence review and manual squash responsibility;
+11. leave #39 open for the separately authorized release and post-deploy
     production validation.
 
-Only after all ten checks pass is the Goal eligible to be marked complete.
+Only after all eleven checks pass is the Goal eligible to be marked complete.

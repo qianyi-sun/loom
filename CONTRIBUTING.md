@@ -13,15 +13,17 @@
 > contexts: `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
 > `staging-smoke-gate`. The shared planner selects the applicable validation
 > work from changed paths, while labels can request additional validation.
-> Labels may add validation but cannot remove path-inferred validation. Codex
-> enables GitHub auto-merge with squash immediately after opening each normal
-> `dev` PR. This queues the merge; GitHub waits for every required gate on the
-> current head SHA and any applicable repository protection before merging.
+> Labels may add validation but cannot remove path-inferred validation. Every
+> normal `dev` PR uses GitHub squash auto-merge immediately after opening. This
+> queues the merge; GitHub waits for every required gate on the
+> current head SHA before merging.
 > Static documentation is a location-and-format allowlist; unknown runtime
 > paths fail safe to the full validation set. Manual runs report `*-manual`
-> contexts and cannot satisfy protected PR contexts. Changes to the CI/release
-> trust root require a CODEOWNER, while routine source changes keep the
-> zero-review auto-merge path.
+> contexts and cannot satisfy protected PR contexts. These four strict,
+> GitHub-Actions-app-bound current-head checks are the only merge authority for
+> `dev`: it requires no human approval, no CODEOWNER approval, and no
+> conversation resolution. CODEOWNERS is advisory routing on `dev`; changing
+> CI or release authority still selects full CI but adds no human merge gate.
 > External pull requests are accepted for issue-scoped work that follows
 > the templates below. Workflows that need publish or deployment secrets
 > must use protected GitHub Environments and must not expose secrets to
@@ -150,10 +152,12 @@ secrets.
   their validation work from changed paths; labels request additional work but
   cannot turn off path-inferred work. A new non-document path without a known
   owner selects every heavy lane until its ownership is declared.
-- Codex enables GitHub auto-merge with squash immediately after opening a
-  normal `dev` PR. It remains queued until every required gate is visible and
-  successful on the current head SHA and any applicable repository protection
-  passes. Do not hand-merge an eligible `dev` PR just because CI is green.
+- Every normal `dev` PR uses GitHub squash auto-merge immediately after
+  opening. It remains queued until every required gate is visible and
+  successful on the current head SHA. The four strict, app-bound checks are the
+  only merge authority: `dev` requires no human approval, no CODEOWNER
+  approval, and no conversation resolution. Do not hand-merge an eligible
+  `dev` PR just because CI is green.
 - Do not assume labels are the only way to select validation. For example,
   relevant image paths select `images-gate` automatically; `ci:images` adds
   multi-arch image validation when the changed paths do not already require it.
@@ -162,23 +166,23 @@ secrets.
   use a shared publication cache. Manual dispatch is build-only. Only the
   `publish` job on a push to `dev` or `main` requests `packages: write` and
   publishes deployable images. This is not a repository-wide sandbox for
-  same-repository writers: branch workflow code runs before CODEOWNERS review.
-  Autonomous agents need a fork-only execution boundary or an external trusted
-  workflow/App before this can be treated as a hard token ceiling.
+  same-repository writers: CODEOWNERS is advisory on `dev` and cannot prevent
+  branch workflow code from running. Autonomous agents need a fork-only
+  execution boundary or an external trusted workflow/App before this can be
+  treated as a hard token ceiling.
 - `staging-smoke-gate` is a credential-free kind validation lane. It does not
   request the `ci-aws` environment and does not treat a skipped real-AWS check
   as successful cloud evidence. Real AWS validation is a separate trusted,
   post-merge/release activity and cannot satisfy this protected PR context.
-- Release-promotion PRs to `main` remain explicitly owner-managed and never
-  use the routine `dev` auto-merge path.
-- This operational rule governs Codex-created PRs only; contributor-specific
-  review practices are managed independently. If repository or environment
-  protection requires review, GitHub enforces it while the auto-merge request
-  remains queued.
-- Changes to `.github/**`, CI planning/test policy, and production release
-  verification are a narrow exception: they require a declared code owner
-  because those files define the authority that permits zero-review routine
-  changes. Manual dispatches use distinct `*-manual` check names.
+- `main` accepts only an explicit production release promotion from `dev`.
+  Qianyi (`@qianyi-sun`) personally reviews the fixed candidate and evidence,
+  then performs the manual squash merge. Never enable auto-merge on a
+  promotion PR. GitHub's repository-wide `allow_auto_merge` setting cannot be
+  disabled for `main` alone, so this is an operator-enforced release rule.
+- CODEOWNERS is advisory owner routing on `dev`; it is not a human merge gate.
+  Changes to `.github/**`, CI planning/test policy, and production release
+  verification still select full CI. Manual dispatches use distinct
+  `*-manual` check names.
 - Squash merge is the only allowed merge method, keeping `dev` linear
 - Do not add credentials, private endpoints, local environment files, or
   generated run artifacts
@@ -202,8 +206,11 @@ secrets.
    section with the candidate SHA, immutable prod tag, staging URL, image
    digests, gate workflow run, gate artifact, frontend route evidence, worker
    isolation evidence, raw-delivery/export status, and rollback notes
-5. Merge the release PR only after the release owner confirms the staging
-   evidence; production release PRs do not rely on routine `dev` auto-merge
+5. Have Qianyi (`@qianyi-sun`) personally review the immutable candidate and
+   evidence, then manually squash merge the PR. Never enable auto-merge for a
+   `main` promotion. Keep the manifest's `release_owner_approval`, GitHub PR
+   review, and Production Environment approval separate: they are distinct
+   controls and are not interchangeable.
 6. Deploy production from `main` with `candidate_sha`, `image_tag`, and
    `release_gate_run_id`. The production deployment workflow rejects missing
    or mismatched gate evidence before it can use production environment
@@ -224,11 +231,27 @@ have one place to audit them.
 - **Publish and deploy workflows use protected GitHub Environments.**
   Secrets for benchmark-bundle publish or infrastructure deploy live in
   protected Environments so they are not available to pull request code.
-- **Target branch-protection policy for `main` and `dev`** must require
-  `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
-  `staging-smoke-gate`, block direct pushes, and enforce squash-only merges.
-  `dev` additionally requires CODEOWNER review only for the narrow CI/release
-  trust root; it does not impose a repository-wide approval count.
+- **Target branch-protection policy for `dev`** requires the strict,
+  GitHub-Actions-app-bound current-head contexts `repository-checks`,
+  `images-gate`, `cluster-smoke-gate`, and `staging-smoke-gate`, blocks direct
+  pushes, and enforces squash-only merges. It requires zero human approvals,
+  zero CODEOWNER approvals, and zero conversation resolution; these four CI
+  checks are its only merge authority.
+- **Target branch-protection policy for `main`** retains the four strict
+  contexts, one generic approval, CODEOWNER review, conversation resolution,
+  admin enforcement, and linear history. `main` accepts only a `dev` release
+  promotion that Qianyi reviews and manually squash merges.
+  The first promotion is a bootstrap exception because GitHub evaluates the
+  target branch's CODEOWNERS: current `main` still has invalid `@carinrc`
+  owners. Its generic one-approval rule plus Qianyi's manual process are the
+  only available controls until the Qianyi-only catch-all lands. A non-Qianyi
+  identity or future restricted bot should open the promotion PR because
+  GitHub users cannot approve their own pull requests. The catch-all makes
+  Qianyi's approval mandatory for subsequent promotions.
+- **Auto-merge is configured repository-wide.** `allow_auto_merge=true` cannot
+  encode a branch-specific prohibition. Never enable it for `main`; this
+  remains a procedural release constraint until an independent controller can
+  enforce it.
   Task 6 verifies the remote GitHub settings and check contexts; this policy
   description is not evidence that those settings are already applied.
 - **Merge queue readiness**: all four stable gate contexts run on GitHub's
@@ -242,6 +265,6 @@ have one place to audit them.
   Action.
 - **Secret scanning** is enabled at the repo level.
 
-External pull requests for issue-scoped work go through the same review
+External pull requests for issue-scoped work go through the same CI
 gate; they cannot reach publish/deploy secrets because those live in
 protected Environments rather than as repository secrets.

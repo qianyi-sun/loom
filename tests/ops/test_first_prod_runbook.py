@@ -120,3 +120,20 @@ def test_first_prod_runbook_dispatches_production_from_main_only() -> None:
     assert '--ref "$PROD_TAG"' not in text
     assert '--ref "$PREVIOUS_PROD_TAG"' not in text
     assert "uses `main` or an immutable `vX.Y.Z` tag" not in text
+
+
+def test_first_prod_runbook_requires_qianyi_manual_promotion_and_bootstrap() -> None:
+    text = _runbook_text()
+    normalized = " ".join(text.split()).lower()
+
+    assert "@qianyi-sun" in normalized
+    assert "never enable auto-merge" in normalized
+    assert "manual squash" in normalized
+    assert "target branch's codeowners" in normalized
+    assert "@carinrc" in normalized
+    assert "generic one-approval" in normalized
+    assert "cannot approve their own pull request" in normalized
+    assert "non-qianyi identity" in normalized
+    assert "release_owner_approval" in normalized
+    assert "production environment approval" in normalized
+    assert "not interchangeable" in normalized

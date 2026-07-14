@@ -1,5 +1,13 @@
 # CI Trust Boundary Design
 
+> **Superseded governance note (2026-07-14):** This document preserves the
+> original targeted-CODEOWNER design as history. The active policy uses only
+> the four strict, app-bound current-head checks as `dev` merge authority and
+> requires no human approval, no CODEOWNER approval, and no conversation
+> resolution. CODEOWNERS is advisory on `dev`; `main` promotion is reviewed and
+> manually squash-merged by Qianyi. The implementation text below must not be
+> treated as current branch-protection instructions.
+
 ## Status and scope
 
 This design is the first implementation slice of #787. Loom intentionally lets
