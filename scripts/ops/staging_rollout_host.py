@@ -1195,7 +1195,7 @@ class HostSystem:
         uid = self.runner.run(["id", "-u", SERVICE_USER]).stdout.strip()
         if not uid.isdigit():
             raise InstallError("service UID is unavailable")
-        self.runner.run(
+        manager_version = self.runner.run(
             [
                 "sudo",
                 "-n",
@@ -1209,9 +1209,13 @@ class HostSystem:
                 "PATH=/usr/bin:/bin",
                 "/usr/bin/systemctl",
                 "--user",
-                "is-system-running",
+                "show",
+                "--property=Version",
+                "--value",
             ]
-        )
+        ).stdout.strip()
+        if re.fullmatch(r"[0-9]+(?:[.][0-9]+)*(?:[-+~.A-Za-z0-9]*)?", manager_version) is None:
+            raise InstallError("service user manager version is invalid")
 
     def install_owner(self, path: Path, owner: str, mode: int) -> bool:
         if self.file_owner_ready(path, owner=owner, mode=mode):

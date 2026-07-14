@@ -937,7 +937,7 @@ def test_venv_lock_hardening_converts_close_failure_without_masking_authority_er
         host.HostSystem(RecordingRunner()).harden_venv_lock()
 
 
-def test_verify_user_manager_places_clean_environment_inside_sudo() -> None:
+def test_verify_user_manager_places_clean_connectivity_probe_inside_sudo() -> None:
     class UserManagerRunner:
         def __init__(self) -> None:
             self.calls: list[tuple[list[str], dict[str, object]]] = []
@@ -947,7 +947,7 @@ def test_verify_user_manager_places_clean_environment_inside_sudo() -> None:
             self.calls.append((call, kwargs))
             if call == ["id", "-u", host.SERVICE_USER]:
                 return host.CommandResult(0, "1001\n")
-            return host.CommandResult(0)
+            return host.CommandResult(0, "255.4-1ubuntu8.14\n")
 
     runner = UserManagerRunner()
 
@@ -969,11 +969,26 @@ def test_verify_user_manager_places_clean_environment_inside_sudo() -> None:
                 "PATH=/usr/bin:/bin",
                 "/usr/bin/systemctl",
                 "--user",
-                "is-system-running",
+                "show",
+                "--property=Version",
+                "--value",
             ],
             {},
         ),
     ]
+
+
+@pytest.mark.parametrize("version", ["", "degraded\n", "255\nunexpected\n"])
+def test_verify_user_manager_rejects_invalid_manager_version(version: str) -> None:
+    class UserManagerRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            if list(argv) == ["id", "-u", host.SERVICE_USER]:
+                return host.CommandResult(0, "1001\n")
+            return host.CommandResult(0, version)
+
+    with pytest.raises(host.InstallError, match="manager version is invalid"):
+        host.HostSystem(UserManagerRunner()).verify_user_manager()
 
 
 def test_installer_fixes_system_python_and_uv_authority_paths() -> None:

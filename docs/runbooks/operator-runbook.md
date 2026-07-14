@@ -1468,7 +1468,13 @@ The service user-manager probe also constructs its clean
 `XDG_RUNTIME_DIR`/D-Bus/`PATH` environment *after* `sudo -u loom-rollout` via
 fixed `/usr/bin/env -i` and `/usr/bin/systemctl` paths. Ubuntu `sudo` may reset
 an environment attached to the outer `sudo` process, so moving those values
-outside the sudo boundary is unsupported and makes the probe fail closed.
+outside the sudo boundary is unsupported and makes the probe fail closed. The
+probe reads the user manager's `Version` property and validates its restricted
+version shape. It deliberately does not require `is-system-running=running`:
+Ubuntu can report the whole user manager as `degraded` because an unrelated
+globally enabled desktop or snap unit failed, even while the D-Bus connection
+and Loom transient-unit boundary are healthy. Loom's own runtime units remain
+subject to the installer check and broker status gates below.
 
 ```bash
 sudo ./scripts/ops/staging_rollout_host.py plan
