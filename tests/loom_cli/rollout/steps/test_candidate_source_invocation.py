@@ -19,6 +19,7 @@ import pytest
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import EvidenceDirectory
+from loom_cli.rollout.steps import candidate_source
 from loom_cli.rollout.steps.base import VerifyOutcome
 from loom_cli.rollout.steps.candidate_source import (
     candidate_loom_argv,
@@ -152,6 +153,228 @@ def test_candidate_path_git_probe_uses_fixed_environment(
     assert candidate_relative_path(source, step_dir) == mapped
     assert "GIT_CONFIG_GLOBAL" not in seen["env"]
     assert "LD_PRELOAD" not in seen["env"]
+
+
+def test_candidate_worktree_from_context_uses_rollout_evidence_identity(
+    tmp_path: Path,
+) -> None:
+    rollout_root = tmp_path / "evidence"
+    rollout_root.mkdir(mode=0o700)
+    ctx = make_ctx(tmp_path, rollout_root=rollout_root)
+    evidence = EvidenceDirectory(rollout_root, "test-rid")
+    evidence.ensure()
+    expected = _prepare_candidate_worktree(evidence)
+
+    assert candidate_source.candidate_worktree_from_context(ctx) == expected
+
+
+def test_candidate_worktree_from_context_requires_rollout_id(tmp_path: Path) -> None:
+    ctx = replace(make_ctx(tmp_path), metadata={})
+
+    with pytest.raises(candidate_source.CandidateToolingError, match="rollout_id"):
+        candidate_source.candidate_worktree_from_context(ctx)
+
+
+def test_candidate_worktree_from_context_requires_existing_candidate(
+    tmp_path: Path,
+) -> None:
+    ctx = make_ctx(tmp_path)
+
+    with pytest.raises(
+        candidate_source.CandidateToolingError,
+        match="candidate worktree does not exist",
+    ):
+        candidate_source.candidate_worktree_from_context(ctx)
+
+
+def test_materialize_candidate_blob_is_commit_bound_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    rollout_root = tmp_path / "evidence"
+    rollout_root.mkdir(mode=0o700)
+    ctx = make_ctx(tmp_path, rollout_root=rollout_root)
+    evidence = EvidenceDirectory(rollout_root, "test-rid")
+    evidence.ensure()
+    worktree = evidence.step_dir(1, "worktree").path / "src"
+    source = worktree / "deploy" / "k8s" / "ingress.yaml"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"candidate-v1\n")
+    subprocess.run(["git", "init", "--quiet"], cwd=worktree, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "rollout-tests@example.invalid"],
+        cwd=worktree,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Rollout Tests"],
+        cwd=worktree,
+        check=True,
+    )
+    subprocess.run(["git", "add", "."], cwd=worktree, check=True)
+    subprocess.run(
+        ["git", "commit", "--quiet", "-m", "candidate v1"],
+        cwd=worktree,
+        check=True,
+    )
+    first_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    ctx = replace(ctx, resolved_sha=first_head)
+    target = evidence.step_dir(3, "kind-cluster").artifact_path("candidate.yaml")
+
+    first_blob = candidate_source.materialize_candidate_blob(
+        ctx,
+        Path("deploy/k8s/ingress.yaml"),
+        target,
+    )
+    assert first_blob.evidence_path == target.resolve()
+    assert first_blob.data == b"candidate-v1\n"
+    assert target.read_bytes() == b"candidate-v1\n"
+
+    target.write_bytes(b"tampered evidence\n")
+    candidate_source.materialize_candidate_blob(
+        ctx,
+        Path("deploy/k8s/ingress.yaml"),
+        target,
+    )
+    assert target.read_bytes() == b"candidate-v1\n"
+
+    source.write_bytes(b"dirty worktree\n")
+    with pytest.raises(
+        candidate_source.CandidateToolingError,
+        match="candidate worktree is dirty",
+    ):
+        candidate_source.materialize_candidate_blob(
+            ctx,
+            Path("deploy/k8s/ingress.yaml"),
+            target,
+        )
+
+    subprocess.run(["git", "add", "."], cwd=worktree, check=True)
+    subprocess.run(
+        ["git", "commit", "--quiet", "-m", "candidate v2"],
+        cwd=worktree,
+        check=True,
+    )
+    second_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    with pytest.raises(
+        candidate_source.CandidateToolingError,
+        match="HEAD does not match resolved rollout SHA",
+    ):
+        candidate_source.materialize_candidate_blob(
+            ctx,
+            Path("deploy/k8s/ingress.yaml"),
+            target,
+        )
+
+    second_blob = candidate_source.materialize_candidate_blob(
+        replace(ctx, resolved_sha=second_head),
+        Path("deploy/k8s/ingress.yaml"),
+        target,
+    )
+    assert second_blob.data == b"dirty worktree\n"
+    assert target.read_bytes() == b"dirty worktree\n"
+
+
+def test_materialize_candidate_blob_ignores_replace_refs_and_git_env_injection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rollout_root = tmp_path / "evidence"
+    rollout_root.mkdir(mode=0o700)
+    ctx = make_ctx(tmp_path, rollout_root=rollout_root)
+    evidence = EvidenceDirectory(rollout_root, "test-rid")
+    evidence.ensure()
+    worktree = evidence.step_dir(1, "worktree").path / "src"
+    source = worktree / "deploy" / "k8s" / "ingress.yaml"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"trusted-v1\n")
+    subprocess.run(["git", "init", "--quiet"], cwd=worktree, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "rollout-tests@example.invalid"],
+        cwd=worktree,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Rollout Tests"],
+        cwd=worktree,
+        check=True,
+    )
+    subprocess.run(["git", "add", "."], cwd=worktree, check=True)
+    subprocess.run(
+        ["git", "commit", "--quiet", "-m", "trusted v1"],
+        cwd=worktree,
+        check=True,
+    )
+    first_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    source.write_bytes(b"replacement-v2\n")
+    subprocess.run(["git", "add", "."], cwd=worktree, check=True)
+    subprocess.run(
+        ["git", "commit", "--quiet", "-m", "replacement v2"],
+        cwd=worktree,
+        check=True,
+    )
+    second_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "checkout", "--detach", "--quiet", first_head],
+        cwd=worktree,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "replace", first_head, second_head],
+        cwd=worktree,
+        check=True,
+    )
+    replaced = subprocess.run(
+        ["git", "show", f"{first_head}:deploy/k8s/ingress.yaml"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    assert replaced.stdout == b"replacement-v2\n"
+
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "injected-git-dir"))
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", str(tmp_path / "injected-objects"))
+    monkeypatch.setenv(
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        str(tmp_path / "injected-alternates"),
+    )
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.repositoryformatversion")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "999")
+    target = evidence.step_dir(3, "kind-cluster").artifact_path("candidate.yaml")
+
+    blob = candidate_source.materialize_candidate_blob(
+        replace(ctx, resolved_sha=first_head),
+        Path("deploy/k8s/ingress.yaml"),
+        target,
+    )
+
+    assert blob.data == b"trusted-v1\n"
+    assert target.read_bytes() == b"trusted-v1\n"
 
 
 @pytest.fixture(autouse=True)

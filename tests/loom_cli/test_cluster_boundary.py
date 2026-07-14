@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+import yaml  # type: ignore[import-untyped]
 
 from loom_cli.__main__ import main
 from loom_cli.cluster_boundary import (
@@ -351,6 +352,133 @@ spec:
     - secretName: loom-ip-tls
 """
     assert audit_boundary(yaml_text, require_network_policies=False) == []
+
+
+@pytest.mark.parametrize("prefix", ["dev", "prod"])
+def test_audit_accepts_exact_canonical_prefixed_ingress_routes(prefix: str) -> None:
+    api_path = f"/(?-i:{prefix})/(api/v1((/[^/%]+)*/?))$"
+    spa_path = f"/(?-i:{prefix})/(([^/%]+/)*[^/%]+/?)?$"
+    redirect_path = f"/(?-i:{prefix})$"
+    documents = [
+        {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "Ingress",
+            "metadata": {"name": "loom-ingress"},
+            "spec": {
+                "rules": [{
+                    "host": "loom.example.com",
+                    "http": {
+                        "paths": [
+                            {
+                                "path": api_path,
+                                "pathType": "ImplementationSpecific",
+                                "backend": {
+                                    "service": {
+                                        "name": "loom-service",
+                                        "port": {"number": 8090},
+                                    },
+                                },
+                            },
+                            {
+                                "path": spa_path,
+                                "pathType": "ImplementationSpecific",
+                                "backend": {
+                                    "service": {
+                                        "name": "loom-web",
+                                        "port": {"number": 80},
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                }],
+                "tls": [{
+                    "hosts": ["loom.example.com"],
+                    "secretName": "loom-tls",
+                }],
+            },
+        },
+        {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "Ingress",
+            "metadata": {"name": "loom-frontend-prefix-redirect"},
+            "spec": {
+                "rules": [{
+                    "host": "loom.example.com",
+                    "http": {
+                        "paths": [{
+                            "path": redirect_path,
+                            "pathType": "ImplementationSpecific",
+                            "backend": {
+                                "service": {
+                                    "name": "loom-web",
+                                    "port": {"number": 80},
+                                },
+                            },
+                        }],
+                    },
+                }],
+                "tls": [{
+                    "hosts": ["loom.example.com"],
+                    "secretName": "loom-tls",
+                }],
+            },
+        },
+    ]
+    yaml_text = "---\n".join(yaml.safe_dump(document) for document in documents)
+
+    assert audit_boundary(yaml_text, require_network_policies=False) == []
+
+
+@pytest.mark.parametrize(
+    ("service_name", "path"),
+    [
+        ("loom-service", "/dev(/|$)(api/v1.*)"),
+        ("loom-service", "/(?i:dev)/(api/v1((/[^/%]+)*/?))$"),
+        ("loom-service", "/(?-i:dev)/(api/v1.*)$"),
+        ("loom-web", "/dev(/|$)(.*)"),
+        ("loom-web", "/(?i:dev)/(([^/%]+/)*[^/%]+/?)?$"),
+        ("loom-web", "/(?i:dev)$"),
+    ],
+)
+def test_audit_rejects_noncanonical_prefixed_ingress_routes(
+    service_name: str,
+    path: str,
+) -> None:
+    document = {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "Ingress",
+        "metadata": {"name": "noncanonical-prefix"},
+        "spec": {
+            "rules": [{
+                "host": "loom.example.com",
+                "http": {
+                    "paths": [{
+                        "path": path,
+                        "pathType": "ImplementationSpecific",
+                        "backend": {
+                            "service": {
+                                "name": service_name,
+                                "port": {"number": 8090},
+                            },
+                        },
+                    }],
+                },
+            }],
+            "tls": [{
+                "hosts": ["loom.example.com"],
+                "secretName": "loom-tls",
+            }],
+        },
+    }
+
+    violations = audit_boundary(
+        yaml.safe_dump(document),
+        require_network_policies=False,
+    )
+
+    assert len(violations) == 1
+    assert violations[0].kind == "ingress-path"
 
 
 def test_audit_flags_api_backend_on_non_api_path() -> None:

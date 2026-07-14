@@ -17,6 +17,10 @@
       "sha": "40f1582b2485089dde7abd97c1529aa768e1baff",
       "version": "v5"
     },
+    "actions/setup-node": {
+      "sha": "249970729cb0ef3589644e2896645e5dc5ba9c38",
+      "version": "v6"
+    },
     "actions/upload-artifact": {
       "sha": "ea165f8d65b6e75b540449e92b4886f43607fa02",
       "version": "v4"

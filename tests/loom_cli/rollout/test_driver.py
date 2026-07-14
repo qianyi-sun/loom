@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -36,6 +37,60 @@ class _AlwaysOKStep(BaseStep):
         self.run_calls += 1
         self.write_stdout(step_dir, f"ran {self.name}\n")
         return RunResult(exit_code=0, summary=f"{self.name} ok")
+
+
+class _DoneRevalidatingStep(_AlwaysOKStep):
+    def __init__(
+        self,
+        number: int,
+        name: str,
+        outcome: VerifyOutcome,
+    ) -> None:
+        super().__init__(number, name)
+        self.outcome = outcome
+        self.verify_done_calls = 0
+
+    def verify_done(self, ctx, step_dir):
+        self.verify_done_calls += 1
+        return self.outcome
+
+
+class _StrictLiveStep(_AlwaysOKStep):
+    SUMMARY = "strict candidate applied"
+    ARTIFACTS: ClassVar[dict[str, str]] = {
+        "candidate_sha": "a" * 40,
+        "ingress_nginx_manifest_sha256": "b" * 64,
+    }
+
+    def __init__(
+        self,
+        number: int,
+        name: str,
+        outcome: VerifyOutcome,
+    ) -> None:
+        super().__init__(number, name)
+        self.outcome = outcome
+        self.verify_calls = 0
+
+    def _run_impl(self, ctx, step_dir):
+        self.run_calls += 1
+        return RunResult(
+            exit_code=0,
+            summary=self.SUMMARY,
+            artifacts=dict(self.ARTIFACTS),
+        )
+
+    def _verify_impl(self, ctx, step_dir):
+        self.verify_calls += 1
+        return self.outcome
+
+    def requires_strict_live_verification(self) -> bool:
+        return True
+
+
+class _RaisingDoneArtifactValidatorStep(_StrictLiveStep):
+    def validate_done_artifacts(self, ctx, step_dir, artifacts):
+        raise RuntimeError("SECRET_VALIDATOR_EXCEPTION_SHOULD_NOT_APPEAR")
 
 
 class _AlwaysFailStep(BaseStep):
@@ -1045,6 +1100,480 @@ class TestResume:
         assert rc2 == 0
         assert step_a2.run_calls == 0
         assert step_b2.run_calls == 0
+
+    def test_done_revalidation_match_skips_without_mutation(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        assert (
+            run_rollout(
+                ctx,
+                [_AlwaysOKStep(0, "a")],
+                ev,
+                io.StringIO(),
+            )
+            == 0
+        )
+        step = _DoneRevalidatingStep(0, "a", VerifyOutcome.MATCH)
+
+        rc = run_rollout(ctx, [step], ev, io.StringIO())
+
+        assert rc == 0
+        assert step.verify_done_calls == 1
+        assert step.run_calls == 0
+
+    @pytest.mark.parametrize(
+        ("outcome", "diagnostic"),
+        [
+            (VerifyOutcome.MISMATCH, "live state has drifted"),
+            (VerifyOutcome.UNKNOWN, "state can't be confirmed"),
+        ],
+    )
+    def test_done_revalidation_refuses_mutation_when_not_match(
+        self,
+        tmp_path: Path,
+        outcome: VerifyOutcome,
+        diagnostic: str,
+    ) -> None:
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        assert (
+            run_rollout(
+                ctx,
+                [_AlwaysOKStep(0, "a")],
+                ev,
+                io.StringIO(),
+            )
+            == 0
+        )
+        step = _DoneRevalidatingStep(0, "a", outcome)
+        stream = io.StringIO()
+
+        rc = run_rollout(ctx, [step], ev, stream)
+
+        assert rc == 2
+        assert step.verify_done_calls == 1
+        assert step.run_calls == 0
+        assert outcome.value.upper() in stream.getvalue()
+        assert diagnostic in stream.getvalue()
+        loaded = RolloutState.load(ev.state_path())
+        assert loaded.steps[0].state is StepState.DONE
+        assert loaded.status == "done"
+        assert loaded.driver is None
+
+    def test_stale_done_result_hash_runs_without_live_revalidation(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        assert (
+            run_rollout(
+                ctx,
+                [_AlwaysOKStep(0, "a")],
+                ev,
+                io.StringIO(),
+            )
+            == 0
+        )
+        step_dir = ev.step_dir(0, "a")
+        result = ev.read_step_result(step_dir)
+        assert result is not None
+        result["inputs_hash"] = "stale-result-hash"
+        ev.write_step_result(step_dir, result)
+        step = _DoneRevalidatingStep(0, "a", VerifyOutcome.UNKNOWN)
+
+        rc = run_rollout(ctx, [step], ev, io.StringIO())
+
+        assert rc == 0
+        assert step.verify_done_calls == 0
+        assert step.run_calls == 1
+
+    @pytest.mark.parametrize(
+        "corruption",
+        [
+            "missing",
+            "invalid-json",
+            "hash-mismatch",
+            "identity-number",
+            "identity-name",
+        ],
+    )
+    def test_strict_done_invalid_result_evidence_never_runs_or_verifies(
+        self,
+        tmp_path: Path,
+        corruption: str,
+    ) -> None:
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        assert (
+            run_rollout(
+                ctx,
+                [_StrictLiveStep(0, "strict", VerifyOutcome.MATCH)],
+                ev,
+                io.StringIO(),
+            )
+            == 0
+        )
+        step_dir = ev.step_dir(0, "strict")
+        result_path = step_dir.result_path()
+        if corruption == "missing":
+            result_path.unlink()
+        elif corruption == "invalid-json":
+            result_path.write_text("{not-json\n", encoding="utf-8")
+        else:
+            result = ev.read_step_result(step_dir)
+            assert result is not None
+            if corruption == "hash-mismatch":
+                result["inputs_hash"] = "SECRET_SHOULD_NOT_APPEAR"
+            elif corruption == "identity-number":
+                result["number"] = 999
+            else:
+                result["name"] = "SECRET_STEP_NAME_SHOULD_NOT_APPEAR"
+            ev.write_step_result(step_dir, result)
+        resumed = _StrictLiveStep(0, "strict", VerifyOutcome.MATCH)
+        stream = io.StringIO()
+
+        rc = run_rollout(ctx, [resumed], ev, stream)
+
+        assert rc == 2
+        assert resumed.run_calls == 0
+        assert resumed.verify_calls == 0
+        diagnostic = stream.getvalue()
+        assert "persisted DONE result evidence" in diagnostic
+        assert "explicitly reset" in diagnostic
+        assert "SECRET_SHOULD_NOT_APPEAR" not in diagnostic
+        assert "SECRET_STEP_NAME_SHOULD_NOT_APPEAR" not in diagnostic
+        state = RolloutState.load(ev.state_path())
+        assert state.steps[0].state is StepState.DONE
+        assert state.status == "done"
+        assert state.driver is None
+
+    @pytest.mark.parametrize(
+        ("field", "tampered"),
+        [
+            ("exit_code", True),
+            ("exit_code", 1),
+            ("error", "SECRET_ERROR_SHOULD_NOT_APPEAR"),
+            ("summary", ["SECRET_SUMMARY_SHOULD_NOT_APPEAR"]),
+            ("artifacts", ["SECRET_ARTIFACTS_SHOULD_NOT_APPEAR"]),
+            (
+                "artifacts",
+                {"candidate_sha": "a" * 40, "bad": 7},
+            ),
+            ("started_at", ""),
+            ("started_at", "SECRET_TIMESTAMP_SHOULD_NOT_APPEAR"),
+            ("started_at", "2000-01-01T00:00:00Z"),
+            ("finished_at", ""),
+            ("finished_at", "2026-07-14 12:00:00Z"),
+            ("finished_at", "2999-01-01T00:00:00Z"),
+            ("unexpected", "SECRET_EXTRA_FIELD_SHOULD_NOT_APPEAR"),
+        ],
+    )
+    def test_strict_done_requires_canonical_success_result_before_verify(
+        self,
+        tmp_path: Path,
+        field: str,
+        tampered: object,
+    ) -> None:
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        assert (
+            run_rollout(
+                ctx,
+                [_StrictLiveStep(0, "strict", VerifyOutcome.MATCH)],
+                ev,
+                io.StringIO(),
+            )
+            == 0
+        )
+        step_dir = ev.step_dir(0, "strict")
+        result = ev.read_step_result(step_dir)
+        assert result is not None
+        result[field] = tampered
+        ev.write_step_result(step_dir, result)
+        resumed = _StrictLiveStep(0, "strict", VerifyOutcome.MATCH)
+        stream = io.StringIO()
+
+        rc = run_rollout(ctx, [resumed], ev, stream)
+
+        assert rc == 2
+        assert resumed.run_calls == 0
+        assert resumed.verify_calls == 0
+        diagnostic = stream.getvalue()
+        assert "persisted DONE result evidence" in diagnostic
+        assert "explicitly reset" in diagnostic
+        assert "SECRET_" not in diagnostic
+        state = RolloutState.load(ev.state_path())
+        assert state.steps[0].state is StepState.DONE
+        assert state.status == "done"
+        assert state.driver is None
+
+    def test_strict_done_artifact_validator_exception_is_sanitized_and_fail_closed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        assert (
+            run_rollout(
+                ctx,
+                [_StrictLiveStep(0, "strict", VerifyOutcome.MATCH)],
+                ev,
+                io.StringIO(),
+            )
+            == 0
+        )
+        resumed = _RaisingDoneArtifactValidatorStep(
+            0,
+            "strict",
+            VerifyOutcome.MATCH,
+        )
+        stream = io.StringIO()
+
+        rc = run_rollout(ctx, [resumed], ev, stream)
+
+        assert rc == 2
+        assert resumed.run_calls == 0
+        assert resumed.verify_calls == 0
+        diagnostic = stream.getvalue()
+        assert "persisted DONE result evidence" in diagnostic
+        assert "SECRET_VALIDATOR_EXCEPTION_SHOULD_NOT_APPEAR" not in diagnostic
+        state = RolloutState.load(ev.state_path())
+        assert state.steps[0].state is StepState.DONE
+        assert state.status == "done"
+        assert state.driver is None
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [VerifyOutcome.UNKNOWN, VerifyOutcome.MISMATCH],
+    )
+    def test_strict_post_run_non_match_pauses_with_evidence(
+        self,
+        tmp_path: Path,
+        outcome: VerifyOutcome,
+    ) -> None:
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        strict = _StrictLiveStep(0, "strict", outcome)
+        later = _AlwaysOKStep(1, "later")
+
+        rc = run_rollout(ctx, [strict, later], ev, io.StringIO())
+
+        assert rc == 2
+        assert strict.run_calls == 1
+        assert strict.verify_calls == 1
+        assert later.run_calls == 0
+        state = RolloutState.load(ev.state_path())
+        assert state.steps[0].state is StepState.VERIFYING
+        assert state.steps[1].state is StepState.NOT_STARTED
+        assert state.driver is None
+        result = ev.read_step_result(ev.step_dir(0, "strict"))
+        assert result is not None
+        assert result["state"] == "verifying"
+        assert result["summary"] == _StrictLiveStep.SUMMARY
+        assert result["artifacts"] == _StrictLiveStep.ARTIFACTS
+        assert result["exit_code"] == 0
+        assert result["error"] is None
+
+    def test_strict_resume_match_finalizes_preserved_run_evidence(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        first = _StrictLiveStep(0, "strict", VerifyOutcome.UNKNOWN)
+        first_later = _AlwaysOKStep(1, "later")
+        assert run_rollout(ctx, [first, first_later], ev, io.StringIO()) == 2
+        pending = ev.read_step_result(ev.step_dir(0, "strict"))
+        assert pending is not None
+
+        resumed = _StrictLiveStep(0, "strict", VerifyOutcome.MATCH)
+        resumed_later = _AlwaysOKStep(1, "later")
+        rc = run_rollout(ctx, [resumed, resumed_later], ev, io.StringIO())
+
+        assert rc == 0
+        assert resumed.run_calls == 0
+        assert resumed.verify_calls == 1
+        assert resumed_later.run_calls == 1
+        result = ev.read_step_result(ev.step_dir(0, "strict"))
+        assert result is not None
+        assert result["state"] == "done"
+        assert result["summary"] == pending["summary"] == _StrictLiveStep.SUMMARY
+        assert result["artifacts"] == pending["artifacts"] == _StrictLiveStep.ARTIFACTS
+        assert result["started_at"] == pending["started_at"]
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [VerifyOutcome.UNKNOWN, VerifyOutcome.MISMATCH],
+    )
+    def test_strict_resume_non_match_never_repeats_mutation(
+        self,
+        tmp_path: Path,
+        outcome: VerifyOutcome,
+    ) -> None:
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        assert (
+            run_rollout(
+                ctx,
+                [_StrictLiveStep(0, "strict", VerifyOutcome.UNKNOWN)],
+                ev,
+                io.StringIO(),
+            )
+            == 2
+        )
+        resumed = _StrictLiveStep(0, "strict", outcome)
+
+        rc = run_rollout(ctx, [resumed], ev, io.StringIO())
+
+        assert rc == 2
+        assert resumed.run_calls == 0
+        assert resumed.verify_calls == 1
+        state = RolloutState.load(ev.state_path())
+        assert state.steps[0].state is StepState.VERIFYING
+        assert state.driver is None
+
+    @pytest.mark.parametrize(
+        ("field", "tampered"),
+        [
+            ("number", 999),
+            ("name", "other-step"),
+            ("state", "done"),
+            ("inputs_hash", "0" * 64),
+        ],
+    )
+    def test_strict_resume_match_rejects_tampered_pending_identity(
+        self,
+        tmp_path: Path,
+        field: str,
+        tampered: object,
+    ) -> None:
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        assert (
+            run_rollout(
+                ctx,
+                [_StrictLiveStep(0, "strict", VerifyOutcome.UNKNOWN)],
+                ev,
+                io.StringIO(),
+            )
+            == 2
+        )
+        step_dir = ev.step_dir(0, "strict")
+        result = ev.read_step_result(step_dir)
+        assert result is not None
+        result[field] = tampered
+        ev.write_step_result(step_dir, result)
+        resumed = _StrictLiveStep(0, "strict", VerifyOutcome.MATCH)
+        stream = io.StringIO()
+
+        rc = run_rollout(ctx, [resumed], ev, stream)
+
+        assert rc == 2
+        assert resumed.run_calls == 0
+        assert resumed.verify_calls == 0
+        assert "failed identity validation" in stream.getvalue()
+        state = RolloutState.load(ev.state_path())
+        assert state.steps[0].state is StepState.VERIFYING
+        assert state.driver is None
+
+    @pytest.mark.parametrize(
+        ("field", "tampered"),
+        [
+            ("exit_code", True),
+            ("exit_code", 7),
+            ("error", "SECRET_PENDING_ERROR"),
+            ("summary", ["SECRET_PENDING_SUMMARY"]),
+            ("artifacts", ["SECRET_PENDING_ARTIFACTS"]),
+            ("artifacts", {"candidate_sha": 7}),
+            ("started_at", ""),
+            ("started_at", "SECRET_PENDING_STARTED_AT"),
+            ("started_at", "2000-01-01T00:00:00Z"),
+            ("finished_at", ""),
+            ("finished_at", "SECRET_PENDING_FINISHED_AT"),
+            ("finished_at", "1999-01-01T00:00:00Z"),
+            ("unexpected", "SECRET_PENDING_EXTRA_FIELD"),
+        ],
+    )
+    def test_strict_resume_match_rejects_noncanonical_pending_success(
+        self,
+        tmp_path: Path,
+        field: str,
+        tampered: object,
+    ) -> None:
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        assert (
+            run_rollout(
+                ctx,
+                [
+                    _StrictLiveStep(0, "strict", VerifyOutcome.UNKNOWN),
+                    _AlwaysOKStep(1, "later"),
+                ],
+                ev,
+                io.StringIO(),
+            )
+            == 2
+        )
+        step_dir = ev.step_dir(0, "strict")
+        result = ev.read_step_result(step_dir)
+        assert result is not None
+        result[field] = tampered
+        ev.write_step_result(step_dir, result)
+        resumed = _StrictLiveStep(0, "strict", VerifyOutcome.MATCH)
+        later = _AlwaysOKStep(1, "later")
+        stream = io.StringIO()
+
+        rc = run_rollout(ctx, [resumed, later], ev, stream)
+
+        assert rc == 2
+        assert resumed.run_calls == 0
+        assert resumed.verify_calls == 0
+        assert later.run_calls == 0
+        diagnostic = stream.getvalue()
+        assert "strict VERIFYING result" in diagnostic
+        assert "SECRET_" not in diagnostic
+        state = RolloutState.load(ev.state_path())
+        assert state.steps[0].state is StepState.VERIFYING
+        assert state.steps[1].state is StepState.NOT_STARTED
+        assert state.driver is None
+
+    def test_strict_pending_artifact_validator_exception_is_sanitized_and_fail_closed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        assert (
+            run_rollout(
+                ctx,
+                [_StrictLiveStep(0, "strict", VerifyOutcome.UNKNOWN)],
+                ev,
+                io.StringIO(),
+            )
+            == 2
+        )
+        resumed = _RaisingDoneArtifactValidatorStep(
+            0,
+            "strict",
+            VerifyOutcome.MATCH,
+        )
+        stream = io.StringIO()
+
+        rc = run_rollout(ctx, [resumed], ev, stream)
+
+        assert rc == 2
+        assert resumed.run_calls == 0
+        assert resumed.verify_calls == 0
+        diagnostic = stream.getvalue()
+        assert "artifact contract could not be validated" in diagnostic
+        assert "SECRET_VALIDATOR_EXCEPTION_SHOULD_NOT_APPEAR" not in diagnostic
+        state = RolloutState.load(ev.state_path())
+        assert state.steps[0].state is StepState.VERIFYING
+        assert state.driver is None
 
     def test_resumes_a_step_left_running(self, tmp_path: Path) -> None:
         """Simulate an interrupt: state.json says RUNNING; verify → MATCH."""

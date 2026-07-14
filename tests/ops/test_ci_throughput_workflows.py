@@ -24,6 +24,16 @@ def _locked_action_sha(action: str) -> str:
     return str(lock["actions"][action]["sha"])
 
 
+def _yaml_documents(path: str) -> list[dict[str, Any]]:
+    return [
+        document
+        for document in yaml.safe_load_all(
+            (REPO_ROOT / path).read_text(encoding="utf-8"),
+        )
+        if document is not None
+    ]
+
+
 def _workflow_on(workflow: dict[str, Any]) -> dict[str, Any]:
     # PyYAML treats unquoted GitHub Actions key `on` as YAML 1.1 bool.
     return workflow.get("on", workflow.get(True))
@@ -694,6 +704,224 @@ def test_opt_in_pr_smokes_cancel_superseded_pr_runs() -> None:
         assert "github.event.pull_request.number || github.ref" in workflow[
             "concurrency"
         ]["group"]
+
+
+def test_pinned_ingress_controller_config_has_trusted_raw_path_guard() -> None:
+    manifest_path = "deploy/k8s/ingress-nginx-kind.yaml"
+    documents = _yaml_documents(manifest_path)
+    controller_config = next(
+        document
+        for document in documents
+        if document.get("kind") == "ConfigMap"
+        and document["metadata"]["name"] == "ingress-nginx-controller"
+    )
+    data = controller_config["data"]
+
+    assert data["allow-snippet-annotations"] == "false"
+    assert data["http-snippet"] == (
+        "map $request_uri $loom_ambiguous_path {\n"
+        "  default 0;\n"
+        "  ~*^[^?]*(?:%2f|%5c|\\x5c|//) 1;\n"
+        '  "~*^/[^/?]*%[0-9a-f]{2}[^/?]*(?:/|[?]|$)" 1;\n'
+        "  ~^/(?:dev|prod)(?:/|\\?|$) 0;\n"
+        "  ~*^/(?:dev|prod)(?:/|\\?|$) 1;\n"
+        "}\n"
+    )
+    assert data["server-snippet"] == (
+        "merge_slashes off;\n"
+        "if ($loom_ambiguous_path) {\n"
+        "  return 404;\n"
+        "}\n"
+    )
+    manifest = (REPO_ROOT / manifest_path).read_text(encoding="utf-8")
+    assert "nginx.ingress.kubernetes.io/server-snippet" not in manifest
+    assert "nginx.ingress.kubernetes.io/configuration-snippet" not in manifest
+
+
+def test_staging_route_smoke_locks_exact_ingress_boundary_probes() -> None:
+    workflow = _workflow(".github/workflows/staging-smoke.yml")
+    steps = workflow["jobs"]["smoke"]["steps"]
+    step_names = [step.get("name") or step.get("uses") for step in steps]
+    route_contract_steps = [
+        "Install ingress-nginx (so preflight's IngressClass check passes)",
+        "loom cluster up (wait for components Ready)",
+        "Route kind ingress hosts to the local controller",
+        "Set up browser smoke Node",
+        "Install pinned browser smoke dependencies",
+        "Verify prefixed frontend routes through ingress-nginx",
+        "Verify prefixed frontend routes mount in Chromium",
+        "Upload frontend route browser trace",
+        "Verify /healthz on every service via port-forward",
+    ]
+    route_contract_indices = [step_names.index(name) for name in route_contract_steps]
+    assert route_contract_indices == sorted(route_contract_indices)
+
+    route_step = next(
+        step
+        for step in steps
+        if step.get("name") == "Verify prefixed frontend routes through ingress-nginx"
+    )
+    script = route_step["run"]
+    syntax = subprocess.run(
+        ["bash", "-n"],
+        input=script,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert syntax.returncode == 0, syntax.stderr
+
+    probes = (
+        "/devil",
+        "/devapi",
+        "/prodfoo",
+        "/DEV",
+        "/Dev/",
+        "/dEv/monitor",
+        "/PROD",
+        "/Prod/api/v1/health",
+        "/D%45V/monitor",
+        "/d%45v/api/v1/health",
+        "/d%65v/monitor",
+        "/PR%4fD/",
+        "/pr%4Fd/",
+        "/dev%2Fmonitor",
+        "/dev/%2Fmonitor",
+        "/dev%5Cmonitor",
+        "/dev/%5cmonitor",
+        r"/dev\monitor",
+        r"/dev/\monitor",
+        "/dev//monitor",
+        "/dev/monitor//details",
+        "/dev/api/v1/%2Fhealth",
+        "/dev/api/v1/%5Chealth",
+        r"/dev/api/v1\health",
+        "/dev/api/v1//health",
+        "/dev/api/v1/health//",
+    )
+    for probe in probes:
+        assert probe in script
+    assert '--path-as-is --no-location --max-redirs 0' in script
+    assert 'if [[ "$status" != "404" ]]' in script
+    assert "grep -qi '^location:' \"$headers\"" in script
+    assert 'if [[ "$root_asset_status" != "404" ]]' in script
+    assert "grep -qi '^location:' \"$root_asset_headers\"" in script
+    assert 'if [[ "$health_status" != "200" ]]' in script
+    assert "require_singleton_header" in script
+    assert '"$health_headers" content-type mime application/json' in script
+    assert '! require_singleton_header "$www_headers" location exact \\' in script
+    assert "'https://yylx.world/dev?next=%2Fmonitor&x=1'; then" in script
+    assert '! require_singleton_header "$canonical_headers" location exact \\' in script
+    assert "'/dev/?next=%2Fmonitor&x=1'; then" in script
+    assert "head -n 1" not in script
+    assert "^content-type:.*application/json" not in script
+    assert "folded response headers are not accepted" in script
+    assert 'name.decode("ascii", errors="strict")' in script
+    assert "port-forward \\\n  svc/loom-web 18081:80" in script
+    assert "http://127.0.0.1:18081${path}" in script
+    assert "https://yylx.world/dev/api/v1/health" in script
+    assert "https://www.yylx.world/dev?next=%2Fmonitor&x=1" in script
+
+
+def test_web_nginx_has_same_raw_path_and_case_guard_as_controller() -> None:
+    config = (REPO_ROOT / "deploy/nginx-spa.conf").read_text(encoding="utf-8")
+    expected_map = (
+        "map $request_uri $loom_ambiguous_path {\n"
+        "    default 0;\n"
+        "    ~*^[^?]*(?:%2f|%5c|\\x5c|//) 1;\n"
+        '    "~*^/[^/?]*%[0-9a-f]{2}[^/?]*(?:/|[?]|$)" 1;\n'
+        "    ~^/(?:dev|prod)(?:/|\\?|$) 0;\n"
+        "    ~*^/(?:dev|prod)(?:/|\\?|$) 1;\n"
+        "}\n"
+    )
+
+    assert expected_map in config
+    assert "merge_slashes off;" in config
+    assert "if ($loom_ambiguous_path) {\n        return 404;\n    }" in config
+    assert "location ~ ^/(?:prod|dev)/assets/(.+)$" in config
+    assert (
+        "location ~* ^/(?:prod|dev)(?:/|$) {\n"
+        "        return 404;\n"
+        "    }"
+        in config
+    )
+
+
+def test_staging_browser_route_smoke_uses_pinned_bundled_chromium() -> None:
+    workflow = _workflow(".github/workflows/staging-smoke.yml")
+    steps = workflow["jobs"]["smoke"]["steps"]
+
+    setup = next(
+        step for step in steps if step.get("name") == "Set up browser smoke Node"
+    )
+    install = next(
+        step
+        for step in steps
+        if step.get("name") == "Install pinned browser smoke dependencies"
+    )
+    browser = next(
+        step
+        for step in steps
+        if step.get("name") == "Verify prefixed frontend routes mount in Chromium"
+    )
+    upload = next(
+        step
+        for step in steps
+        if step.get("name") == "Upload frontend route browser trace"
+    )
+
+    assert setup["uses"] == (
+        f"actions/setup-node@{_locked_action_sha('actions/setup-node')}"
+    )
+    assert str(setup["with"]["node-version"]) == "20"
+    assert setup["with"]["cache-dependency-path"] == "web/package-lock.json"
+    assert install["working-directory"] == "web"
+    assert "npm ci" in install["run"]
+    assert "npx --no-install playwright install --with-deps chromium" in install["run"]
+    assert "CI=true npm --prefix web run smoke:routes --" in browser["run"]
+    assert "--route https://yylx.world/dev" in browser["run"]
+    assert "--insecure-for-kind" in browser["run"]
+    assert "--trace /tmp/loom-frontend-route-browser-trace.zip" in browser["run"]
+    assert upload["if"] == "always()"
+    assert upload["uses"] == (
+        f"actions/upload-artifact@{_locked_action_sha('actions/upload-artifact')}"
+    )
+    assert upload["with"]["path"] == "/tmp/loom-frontend-route-browser-trace.zip"
+    assert upload["with"]["if-no-files-found"] == "ignore"
+
+    package = json.loads((REPO_ROOT / "web/package.json").read_text(encoding="utf-8"))
+    lock = json.loads(
+        (REPO_ROOT / "web/package-lock.json").read_text(encoding="utf-8")
+    )
+    assert package["devDependencies"]["@playwright/test"] == "1.61.1"
+    assert lock["packages"]["node_modules/@playwright/test"]["version"] == "1.61.1"
+    assert lock["packages"]["node_modules/playwright"]["version"] == "1.61.1"
+    assert lock["packages"]["node_modules/playwright-core"]["version"] == "1.61.1"
+
+
+def test_staging_browser_route_smoke_waits_for_explicit_settled_state() -> None:
+    main = (REPO_ROOT / "web/src/main.tsx").read_text(encoding="utf-8")
+    smoke = (
+        REPO_ROOT / "web/scripts/frontend-route-browser-smoke.mjs"
+    ).read_text(encoding="utf-8")
+
+    assert 'data-loom-mounted", "true"' in main
+    assert 'data-loom-auth-settled", "true"' in main
+    assert 'isAuthenticated ? "authenticated" : "anonymous"' in main
+    assert 'waitUntil: "domcontentloaded"' in smoke
+    assert "BLOCKING_ACTIVITY_QUIET_WINDOW_MS" in smoke
+    assert "requestBlocksQuiescence" in smoke
+    assert 'resourceType === "script"' in smoke
+    assert "activeRequests.size === 0" in smoke
+    assert "blocking browser activity did not become quiet" in smoke
+    assert smoke.index("await page.close();") < smoke.index(
+        "const initialAnonymousAuthValid"
+    )
+    assert smoke.index("await page.close();") < smoke.index(
+        "const observation = {"
+    )
+    assert 'window.history.replaceState(null, "", directUrl)' in smoke
+    assert "waitForTimeout(250)" not in smoke
 
 
 def test_real_aws_s3_storage_smoke_is_not_a_pull_request_gate() -> None:

@@ -54,9 +54,24 @@ preflight validates live Secrets, but it checks env-var drift against the
 manifest that will be applied rather than stale pods from the previous rollout.
 For kind-backed staging, the ingress substrate is part of the same protected
 rerun boundary: rollout recovery labels the control-plane node
-`ingress-ready=true`, waits for the pinned ingress-nginx controller pod to be
-Ready, and verifies the validating admission Service has an endpoint before any
-step applies Loom Ingress resources.
+`ingress-ready=true` and declaratively reapplies the repository-pinned
+ingress-nginx manifest from the rollout's fixed-SHA `01-worktree/src`, never
+from the operator's ambient checkout, even when an existing controller is
+healthy. It then
+reads back `configmap/ingress-nginx-controller`, requires the three trusted
+configuration values to match the pinned manifest exactly, waits for the
+controller pod to be Ready, and verifies the validating admission Service has
+an endpoint before any step applies Loom Ingress resources. The rollout step's
+input fingerprint includes the resolved candidate SHA and that same candidate
+manifest's SHA-256 under the
+`node-label-admission-and-commit-bound-controller-config-v4` contract, so changing
+the controller contract invalidates earlier
+completed-step evidence instead of silently reusing it. Run artifacts report
+`installed` only when the controller Deployment was absent before apply;
+an existing Deployment is `reconciled` even if its IngressClass had drifted.
+The step artifacts also record the candidate SHA, commit-bound evidence path,
+candidate source path, and manifest SHA-256 so the reconciled contract is
+directly auditable.
 
 The SPA (`loom-web`) ships in the manifest set with `replicas: 0`; operators scale up when SPA work resumes.
 
@@ -258,6 +273,67 @@ buckets, worker tokens, provider namespaces, SecretStore keys, and database
 names. First-prod `development` and `production` intentionally share
 `ingress_host = "yylx.world"` and split traffic by `/dev` and `/prod` path
 prefixes.
+The prefixed API and SPA regexes overlap, and ingress-nginx v1.10.1 sorts regex
+locations by descending raw path length before applying first-match semantics.
+The API regex is therefore deliberately longer than the SPA regex; YAML path
+declaration order is documentation, not precedence.
+
+Route acceptance has both HTTP and browser layers. The HTTP smoke validates
+canonical redirects, runtime metadata, generated asset URLs, MIME types, and
+fail-closed path boundaries. Staging then launches the lockfile-pinned
+Playwright Chromium in a fresh logged-out context, enters the exact prefix,
+slash-canonical URL, and supported deep SPA routes directly, and reloads each
+page. React marks the root only after its tree commits; the browser gate waits
+for that marker, an explicit settled anonymous/authenticated state, a non-empty
+root, and a bounded quiet window with no active same-origin requests or
+cross-origin scripts. It uses `DOMContentLoaded`, so a slow or failed
+cross-origin font cannot hold the gate open, while a pending cross-origin script
+remains blocking until it succeeds or its failure is observed. The main
+document response must retain the requested route after the
+expected exact-prefix `308`; once authentication settles, the client URL must
+remain that route. The sole fallback is canonical `${routePath}/settings` when
+the root explicitly reports `anonymous` and that same browser phase observed
+exactly one exact `${routePath}/api/v1/auth/me` fetch/XHR response with status
+`401`, with no unpaired network failure or competing response for that URL. If
+Chromium reports `ERR_ABORTED` because the application intentionally does not
+consume that delivered `401` body, it is tolerated only when its request
+identity matches the one observed response. A `204`,
+malformed `200`, `5xx`, or network failure instead produces an explicit root
+authentication-error marker and fails the gate. Before reload the smoke
+restores the original direct URL, so anonymous redirects cannot weaken
+bookmark-refresh coverage.
+
+All failed same-origin requests, cross-origin scripts, application console
+errors, page errors, non-2xx same-origin scripts/styles, and script/style URLs
+outside the active `/dev/assets/` or `/prod/assets/` prefix fail the gate. Two
+browser-generated network messages are narrowly attributable and ignored: an
+exact cross-origin non-script resource already observed by Playwright as a
+failed request or `4xx`/`5xx` response,
+and the exact anonymous `${routePath}/api/v1/auth/me` fetch/XHR when that phase's
+complete response set is one exact `401` and the root settles as `anonymous`.
+Query variants, mixed statuses for the same URL, other same-origin failures,
+authenticated sessions, and application errors from the bundle are never
+covered by those exceptions. CI uploads the logged-out
+Playwright trace as short-lived rollout diagnostic evidence.
+
+The repository-pinned ingress-nginx controller also rejects ambiguous raw path
+separators before Nginx normalizes them. Its trusted ConfigMap uses a global
+`http-snippet` map over `$request_uri` plus a `server-snippet` with
+`merge_slashes off` to return 404 for path-side `%2F`, `%5C`, a literal
+backslash, or `//`, and for any percent-encoded byte in the first path segment.
+Because ingress-nginx emits case-insensitive `location ~*` blocks for regex
+Ingress paths, rendered prefix expressions also use an inline case-sensitive
+`/(?-i:dev)` or `/(?-i:prod)` group; the controller map rejects mixed-case raw
+forms before location selection as an independent guard. The web image carries
+the same raw map, keeps valid prefixed locations case-sensitive, and places a
+normalized mixed-case rejection after them so direct Service/pod traffic cannot
+bypass the public contract after percent-decoding. The raw-path rules stop at
+`?`, so encoded values such as `?next=%2Fmonitor` remain valid. Per-Ingress snippet annotations stay disabled
+with `allow-snippet-annotations: "false"`; the guard is controller-owned rather
+than tenant-controlled. Staging verifies redirect `Location` and health
+`Content-Type` as exact singleton fields; the health MIME essence must be
+`application/json`.
+
 When `ingress_host` is an IP literal for a lab or invite-only staging
 entrypoint, the renderer omits `spec.rules[].host` and `tls.hosts` because the
 Kubernetes API rejects IP literals in those fields. Operators must still

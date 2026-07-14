@@ -8,6 +8,7 @@ tries to load images or apply jobs.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 from pathlib import Path
@@ -18,6 +19,12 @@ from loom_cli.cluster_config import load_cluster_config
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
 from loom_cli.rollout.steps.base import BaseStep, RunResult, VerifyOutcome
+from loom_cli.rollout.steps.candidate_source import (
+    CandidateToolingError,
+    MaterializedCandidateBlob,
+    materialize_candidate_blob,
+    persist_materialized_candidate_blob,
+)
 from loom_cli.rollout.steps.subprocess_util import run_captured
 
 INGRESS_NGINX_KIND_MANIFEST = Path("deploy/k8s/ingress-nginx-kind.yaml")
@@ -25,6 +32,17 @@ INGRESS_NGINX_CONTROLLER_SELECTOR = (
     "app.kubernetes.io/component=controller,"
     "app.kubernetes.io/instance=ingress-nginx,"
     "app.kubernetes.io/name=ingress-nginx"
+)
+INGRESS_NGINX_CANDIDATE_ARTIFACT = "candidate-ingress-nginx-kind.yaml"
+INGRESS_NGINX_CONTROLLER_CONFIG_GET = (
+    "kubectl",
+    "-n",
+    "ingress-nginx",
+    "get",
+    "configmap",
+    "ingress-nginx-controller",
+    "-o",
+    "json",
 )
 _LAST_APPLIED_ANNOTATION = "kubectl.kubernetes.io/last-applied-configuration"
 _RUNTIME_METADATA_KEYS = frozenset(
@@ -35,6 +53,21 @@ _RUNTIME_METADATA_KEYS = frozenset(
         "resourceVersion",
         "selfLink",
         "uid",
+    },
+)
+_DONE_ARTIFACT_KEYS = frozenset(
+    {
+        "cluster_name",
+        "namespace",
+        "candidate_sha",
+        "ingress_nginx",
+        "ingress_nginx_manifest_path",
+        "ingress_nginx_manifest_source",
+        "ingress_nginx_manifest_sha256",
+        "worker_trajectories_storage",
+        "worker_trajectories_storage_manifest",
+        "secret_count",
+        "secrets_dir",
     },
 )
 
@@ -99,8 +132,7 @@ def _static_host_path_root(ctx: RolloutContext) -> str | None:
         return None
     if backend != "static-host-path":
         raise RuntimeError(
-            "persistent_storage_backend must be 'dynamic' or 'static-host-path'; "
-            f"got {backend!r}",
+            f"persistent_storage_backend must be 'dynamic' or 'static-host-path'; got {backend!r}",
         )
     if config.namespace != ctx.namespace:
         raise RuntimeError(
@@ -229,26 +261,220 @@ def _last_error(result: object, default: str) -> str:
     return stderr.strip().splitlines()[-1] if stderr.strip() else default
 
 
+def _candidate_ingress_manifest_target(ctx: RolloutContext) -> Path:
+    rollout_id = ctx.metadata.get("rollout_id", "").strip()
+    if not rollout_id:
+        raise CandidateToolingError(
+            "rollout metadata is missing required rollout_id for candidate source",
+        )
+    return (
+        ctx.rollout_root
+        / "rollouts"
+        / rollout_id
+        / "03-kind-cluster"
+        / INGRESS_NGINX_CANDIDATE_ARTIFACT
+    )
+
+
+def _materialize_candidate_ingress_manifest(
+    ctx: RolloutContext,
+    step_dir: StepDir | None = None,
+) -> MaterializedCandidateBlob:
+    target = _candidate_ingress_manifest_target(ctx)
+    if step_dir is not None and step_dir.path.resolve() != target.parent.resolve():
+        raise CandidateToolingError(
+            "kind-cluster step directory is not bound to the rollout identity",
+        )
+    return materialize_candidate_blob(ctx, INGRESS_NGINX_KIND_MANIFEST, target)
+
+
+def _candidate_ingress_manifest_text(blob: MaterializedCandidateBlob) -> str:
+    try:
+        return blob.data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(
+            "candidate ingress-nginx manifest is not valid UTF-8",
+        ) from exc
+
+
+def _expected_ingress_controller_config_data(
+    manifest_text: str,
+) -> dict[str, str]:
+    try:
+        documents = yaml.safe_load_all(manifest_text)
+        for document in documents:
+            if not isinstance(document, dict) or document.get("kind") != "ConfigMap":
+                continue
+            metadata = document.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            if (
+                metadata.get("name") != "ingress-nginx-controller"
+                or metadata.get(
+                    "namespace",
+                )
+                != "ingress-nginx"
+            ):
+                continue
+            data = document.get("data")
+            if not isinstance(data, dict):
+                raise RuntimeError(
+                    "pinned ingress-nginx controller ConfigMap data is malformed",
+                )
+            expected: dict[str, str] = {}
+            for key, value in data.items():
+                if not isinstance(key, str) or not isinstance(value, str):
+                    raise RuntimeError(
+                        "pinned ingress-nginx controller ConfigMap data must be "
+                        "a string-to-string mapping",
+                    )
+                expected[key] = value
+            return expected
+    except yaml.YAMLError as exc:
+        raise RuntimeError(
+            f"could not read pinned ingress-nginx controller ConfigMap contract: {str(exc)[:240]}",
+        ) from exc
+    raise RuntimeError(
+        "pinned ingress-nginx manifest is missing configmap/ingress-nginx-controller",
+    )
+
+
+def _read_ingress_controller_config_contract(
+    expected: dict[str, str],
+    *,
+    stdout_log: Path | None = None,
+    stderr_log: Path | None = None,
+) -> tuple[bool, str]:
+    live = run_captured(
+        INGRESS_NGINX_CONTROLLER_CONFIG_GET,
+        stdout_log=stdout_log,
+        stderr_log=stderr_log,
+    )
+    if live.returncode != 0:
+        detail = _last_error(
+            live,
+            "configmap/ingress-nginx-controller is missing",
+        )[:240]
+        return False, f"ingress-nginx controller ConfigMap read-back failed: {detail}"
+    try:
+        document = json.loads(live.stdout)
+    except json.JSONDecodeError:
+        return False, "ingress-nginx controller ConfigMap read-back was not valid JSON"
+    if not isinstance(document, dict) or not isinstance(document.get("data"), dict):
+        return False, "ingress-nginx controller ConfigMap read-back data is malformed"
+    data = document["data"]
+    if not all(isinstance(key, str) and isinstance(value, str) for key, value in data.items()):
+        return False, "ingress-nginx controller ConfigMap read-back data is malformed"
+    missing = sorted(expected.keys() - data.keys())
+    extra = sorted(data.keys() - expected.keys())
+    mismatched = sorted(key for key in expected.keys() & data.keys() if data[key] != expected[key])
+    if missing or extra or mismatched:
+        details: list[str] = []
+        if missing:
+            details.append("missing keys: " + ", ".join(missing))
+        if extra:
+            details.append("extra keys: " + ", ".join(extra))
+        if mismatched:
+            details.append("mismatched values: " + ", ".join(mismatched))
+        return (
+            False,
+            "ingress-nginx controller ConfigMap contract mismatch (" + "; ".join(details) + ")",
+        )
+    return True, ""
+
+
 class KindClusterStep(BaseStep):
     number = 3
     name = "kind-cluster"
 
     def _inputs_fingerprint(self, ctx: RolloutContext) -> dict[str, object]:
+        ingress_blob = _materialize_candidate_ingress_manifest(ctx)
         return {
+            "resolved_sha": ctx.resolved_sha,
             "cluster_name": ctx.cluster_name,
             "namespace": ctx.namespace,
             "rollout_root": str(ctx.rollout_root),
             "cluster_config_path": str(ctx.cluster_config_path),
             "cluster_config_sha256": ctx.cluster_config_sha256,
-            "ingress_nginx_recovery_contract": "node-label-and-admission-endpoint-v1",
+            "ingress_nginx_manifest_sha256": hashlib.sha256(
+                ingress_blob.data,
+            ).hexdigest(),
+            "ingress_nginx_recovery_contract": (
+                "node-label-admission-and-commit-bound-controller-config-v4"
+            ),
             "backup_manifest_path": str(ctx.backup_manifest_path),
         }
+
+    def verify_done(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+    ) -> VerifyOutcome:
+        """Revalidate the complete live cluster contract before DONE skip."""
+        return self._verify_impl(ctx, step_dir)
+
+    def requires_strict_live_verification(self) -> bool:
+        """Require MATCH before finalizing or repeating destructive recovery."""
+        return True
+
+    def validate_done_artifacts(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+        artifacts: dict[str, str],
+    ) -> bool:
+        """Bind strict DONE evidence to this candidate and step contract."""
+        if set(artifacts) != _DONE_ARTIFACT_KEYS:
+            return False
+        try:
+            ingress_blob = _materialize_candidate_ingress_manifest(ctx, step_dir)
+            ingress_manifest_sha256 = hashlib.sha256(ingress_blob.data).hexdigest()
+            if ingress_blob.evidence_path.read_bytes() != ingress_blob.data:
+                return False
+
+            storage_docs = _worker_trajectories_storage_docs(ctx)
+            storage_manifest = step_dir.artifact_path("worker-trajectories-storage.yaml")
+            expected_storage_state = "applied" if storage_docs else "skipped"
+            if storage_docs:
+                persisted_storage_docs = list(
+                    yaml.safe_load_all(storage_manifest.read_text(encoding="utf-8")),
+                )
+                if persisted_storage_docs != storage_docs:
+                    return False
+
+            secrets_dir = _backup_secrets_dir(ctx)
+            secret_count = int(artifacts["secret_count"])
+        except (OSError, RuntimeError, ValueError, yaml.YAMLError):
+            return False
+
+        return (
+            artifacts["cluster_name"] == ctx.cluster_name
+            and artifacts["namespace"] == ctx.namespace
+            and artifacts["candidate_sha"] == ctx.resolved_sha
+            and artifacts["ingress_nginx"] in {"installed", "reconciled"}
+            and artifacts["ingress_nginx_manifest_path"] == str(ingress_blob.evidence_path)
+            and artifacts["ingress_nginx_manifest_source"] == str(INGRESS_NGINX_KIND_MANIFEST)
+            and artifacts["ingress_nginx_manifest_sha256"] == ingress_manifest_sha256
+            and artifacts["worker_trajectories_storage"] == expected_storage_state
+            and artifacts["worker_trajectories_storage_manifest"] == str(storage_manifest)
+            and secret_count >= 0
+            and artifacts["secret_count"] == str(secret_count)
+            and artifacts["secrets_dir"] == str(secrets_dir)
+        )
 
     def _verify_impl(
         self,
         ctx: RolloutContext,
         step_dir: StepDir,
     ) -> VerifyOutcome:
+        try:
+            ingress_blob = _materialize_candidate_ingress_manifest(ctx, step_dir)
+            ingress_manifest_text = _candidate_ingress_manifest_text(ingress_blob)
+            expected_controller_config = _expected_ingress_controller_config_data(
+                ingress_manifest_text,
+            )
+        except RuntimeError:
+            return VerifyOutcome.MISMATCH
         clusters = run_captured(["kind", "get", "clusters"])
         if clusters.returncode != 0:
             return VerifyOutcome.UNKNOWN
@@ -267,10 +493,7 @@ class KindClusterStep(BaseStep):
                 "jsonpath={.metadata.labels.ingress-ready}",
             ],
         )
-        if (
-            ingress_node_label.returncode != 0
-            or ingress_node_label.stdout.strip() != "true"
-        ):
+        if ingress_node_label.returncode != 0 or ingress_node_label.stdout.strip() != "true":
             return VerifyOutcome.MISMATCH
         secrets = run_captured(
             [
@@ -315,6 +538,11 @@ class KindClusterStep(BaseStep):
             ],
         )
         if admission_endpoint.returncode != 0 or not admission_endpoint.stdout.strip():
+            return VerifyOutcome.MISMATCH
+        config_matches, _ = _read_ingress_controller_config_contract(
+            expected_controller_config,
+        )
+        if not config_matches:
             return VerifyOutcome.MISMATCH
         try:
             storage_docs = _worker_trajectories_storage_docs(ctx)
@@ -363,8 +591,14 @@ class KindClusterStep(BaseStep):
             )
         return None
 
-    def _ensure_ingress_nginx(self, step_dir: StepDir) -> tuple[RunResult | None, str]:
-        ingress_class = run_captured(
+    def _ensure_ingress_nginx(
+        self,
+        step_dir: StepDir,
+        *,
+        ingress_manifest_text: str,
+        expected_controller_config: dict[str, str],
+    ) -> tuple[RunResult | None, str]:
+        run_captured(
             ["kubectl", "get", "ingressclass", "nginx"],
             stdout_log=step_dir.artifact_path("ingressclass-get.stdout"),
             stderr_log=step_dir.artifact_path("ingressclass-get.stderr"),
@@ -382,22 +616,21 @@ class KindClusterStep(BaseStep):
             stderr_log=step_dir.artifact_path("ingress-controller-get.stderr"),
         )
 
-        installed = False
-        if ingress_class.returncode != 0 or ingress_controller.returncode != 0:
-            apply = run_captured(
-                ["kubectl", "apply", "-f", str(INGRESS_NGINX_KIND_MANIFEST)],
-                stdout_log=step_dir.artifact_path("ingress-nginx-apply.stdout"),
-                stderr_log=step_dir.artifact_path("ingress-nginx-apply.stderr"),
+        controller_existed = ingress_controller.returncode == 0
+        apply = run_captured(
+            ["kubectl", "apply", "-f", "-"],
+            stdin_text=ingress_manifest_text,
+            stdout_log=step_dir.artifact_path("ingress-nginx-apply.stdout"),
+            stderr_log=step_dir.artifact_path("ingress-nginx-apply.stderr"),
+        )
+        if apply.returncode != 0:
+            return (
+                RunResult(
+                    exit_code=apply.returncode,
+                    error=_last_error(apply, "kubectl apply ingress-nginx failed"),
+                ),
+                "failed",
             )
-            if apply.returncode != 0:
-                return (
-                    RunResult(
-                        exit_code=apply.returncode,
-                        error=_last_error(apply, "kubectl apply ingress-nginx failed"),
-                    ),
-                    "failed",
-                )
-            installed = True
 
         wait_pod = run_captured(
             [
@@ -461,9 +694,26 @@ class KindClusterStep(BaseStep):
                 ),
                 "failed",
             )
-        return None, "installed" if installed else "reused"
+        config_matches, config_error = _read_ingress_controller_config_contract(
+            expected_controller_config,
+            stdout_log=step_dir.artifact_path("ingress-controller-config.stdout"),
+            stderr_log=step_dir.artifact_path("ingress-controller-config.stderr"),
+        )
+        if not config_matches:
+            return RunResult(exit_code=1, error=config_error), "failed"
+        return None, "reconciled" if controller_existed else "installed"
 
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:
+        try:
+            ingress_blob = _materialize_candidate_ingress_manifest(ctx, step_dir)
+            ingress_manifest_text = _candidate_ingress_manifest_text(ingress_blob)
+            ingress_manifest_sha256 = hashlib.sha256(ingress_blob.data).hexdigest()
+            expected_controller_config = _expected_ingress_controller_config_data(
+                ingress_manifest_text,
+            )
+        except RuntimeError as exc:
+            step_dir.stderr_path().write_text(str(exc) + "\n", encoding="utf-8")
+            return RunResult(exit_code=2, error=str(exc))
         try:
             secrets_dir = _backup_secrets_dir(ctx)
         except RuntimeError as exc:
@@ -524,7 +774,14 @@ class KindClusterStep(BaseStep):
         if label_result is not None:
             return label_result
 
-        ingress_result, ingress_state = self._ensure_ingress_nginx(step_dir)
+        try:
+            ingress_result, ingress_state = self._ensure_ingress_nginx(
+                step_dir,
+                ingress_manifest_text=ingress_manifest_text,
+                expected_controller_config=expected_controller_config,
+            )
+        finally:
+            persist_materialized_candidate_blob(ingress_blob)
         if ingress_result is not None:
             return ingress_result
 
@@ -626,7 +883,11 @@ class KindClusterStep(BaseStep):
             artifacts={
                 "cluster_name": ctx.cluster_name,
                 "namespace": ctx.namespace,
+                "candidate_sha": ctx.resolved_sha,
                 "ingress_nginx": ingress_state,
+                "ingress_nginx_manifest_path": str(ingress_blob.evidence_path),
+                "ingress_nginx_manifest_source": str(INGRESS_NGINX_KIND_MANIFEST),
+                "ingress_nginx_manifest_sha256": ingress_manifest_sha256,
                 "worker_trajectories_storage": storage_state,
                 "worker_trajectories_storage_manifest": str(storage_manifest),
                 "secret_count": str(secret_count),

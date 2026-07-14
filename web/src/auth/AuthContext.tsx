@@ -57,6 +57,7 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
       setCsrfToken(null);
       setMe(null);
       if (isUnauthorized(err)) {
+        setAuthError(null);
         queryClient.clear();
       } else {
         setAuthError(`Could not load session: ${errorDetail(err)}`);

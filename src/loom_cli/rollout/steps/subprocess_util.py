@@ -53,6 +53,7 @@ def _write_diagnostic(path: Path | None, text: str) -> None:
 def run_captured(
     argv: Sequence[str],
     *,
+    stdin_text: str | None = None,
     stdout_log: Path | None = None,
     stderr_log: Path | None = None,
     cwd: Path | None = None,
@@ -60,7 +61,7 @@ def run_captured(
     timeout_sec: float | None = None,
     sanitize_return: bool = False,
 ) -> SubprocessResult:
-    """Run ``argv``, capture stdout/stderr, optionally tee to log files.
+    """Run ``argv``, capture output, and optionally provide UTF-8 text stdin.
 
     Every step should call this rather than :func:`subprocess.run`
     directly so that (1) evidence log files are consistently populated
@@ -68,15 +69,28 @@ def run_captured(
     """
     command = list(argv)
     try:
-        proc = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            check=False,
-            cwd=str(cwd) if cwd else None,
-            env=env,
-            timeout=timeout_sec,
-        )
+        if stdin_text is None:
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=str(cwd) if cwd else None,
+                env=env,
+                timeout=timeout_sec,
+            )
+        else:
+            proc = subprocess.run(
+                command,
+                input=stdin_text,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+                cwd=str(cwd) if cwd else None,
+                env=env,
+                timeout=timeout_sec,
+            )
     except subprocess.TimeoutExpired as exc:
         stdout = _output_text(exc.stdout)
         stderr = _output_text(exc.stderr)

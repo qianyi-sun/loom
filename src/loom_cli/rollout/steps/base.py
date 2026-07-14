@@ -8,6 +8,11 @@ calls the methods in this order per invocation:
     - state == "done"
     - inputs_hash matches the current context's hash
 
+* ``verify_done()`` — optional non-mutating revalidation before a persisted
+  DONE step is skipped. ``None`` preserves the default cheap-skip behavior;
+  steps with live safety contracts may return the same three-state outcome as
+  ``verify()``.
+
 * ``verify()`` — non-mutating observation of the world. Called on
   resume when the persisted state is RUNNING/VERIFYING and we need to
   decide whether the interrupted run actually finished, needs a retry,
@@ -85,6 +90,21 @@ class Step(Protocol):
 
     def is_done(self, ctx: RolloutContext, step_dir: StepDir) -> bool: ...
 
+    def verify_done(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+    ) -> VerifyOutcome | None: ...
+
+    def requires_strict_live_verification(self) -> bool: ...
+
+    def validate_done_artifacts(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+        artifacts: dict[str, str],
+    ) -> bool: ...
+
     def verify(self, ctx: RolloutContext, step_dir: StepDir) -> VerifyOutcome: ...
 
     def run(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult: ...
@@ -135,10 +155,46 @@ class BaseStep:
             result = json.loads(result_path.read_text())
         except (json.JSONDecodeError, OSError):
             return False
+        if not isinstance(result, dict):
+            return False
+        if type(result.get("number")) is not int or result.get("number") != self.number:
+            return False
+        if not isinstance(result.get("name"), str) or result.get("name") != self.name:
+            return False
         if result.get("state") != "done":
             return False
         if result.get("inputs_hash") != self.inputs_hash(ctx):
             return False
+        return True
+
+    def verify_done(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+    ) -> VerifyOutcome | None:
+        """Optionally revalidate a hash-matching DONE step before skip.
+
+        ``None`` keeps the historical skip behavior. Subclasses should opt in
+        only when a persisted success depends on live state that can drift.
+        """
+        return None
+
+    def requires_strict_live_verification(self) -> bool:
+        """Require conclusive MATCH before finalizing a successful run.
+
+        The default preserves the historical behavior where UNKNOWN after a
+        successful ``run()`` is accepted. Live safety-critical steps may opt in
+        so UNKNOWN or MISMATCH pauses in VERIFYING without another mutation.
+        """
+        return False
+
+    def validate_done_artifacts(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+        artifacts: dict[str, str],
+    ) -> bool:
+        """Validate strict DONE artifact semantics beyond the generic schema."""
         return True
 
     # -------- verify --------

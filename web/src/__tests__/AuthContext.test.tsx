@@ -38,6 +38,7 @@ function Display(): JSX.Element {
     loginPassword,
     switchTeam,
     logout,
+    refreshMe,
   } = useAuth();
   return (
     <div>
@@ -53,6 +54,7 @@ function Display(): JSX.Element {
       <button onClick={() => void loginPassword("Owner", "long-passphrase-1")}>password</button>
       <button onClick={() => void switchTeam("team-b")}>switch</button>
       <button onClick={() => void logout()}>logout</button>
+      <button onClick={() => void refreshMe()}>refresh</button>
     </div>
   );
 }
@@ -108,6 +110,35 @@ describe("AuthContext", () => {
     expect(screen.getByTestId("err").textContent).toBe("no-error");
   });
 
+  it("clears a prior auth error when refresh resolves to an exact 401", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ detail: "service unavailable" }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response("", { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(
+      withQueryClient(
+        <AuthProvider>
+          <Display />
+        </AuthProvider>,
+      ),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("err").textContent).toContain("service unavailable"),
+    );
+    await user.click(screen.getByRole("button", { name: "refresh" }));
+    await waitFor(() => expect(screen.getByTestId("err").textContent).toBe("no-error"));
+    expect(screen.getByTestId("auth").textContent).toBe("out");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("preserves cached page data when /auth/me fails for a non-auth reason", async () => {
     vi.stubGlobal(
       "fetch",
@@ -133,6 +164,44 @@ describe("AuthContext", () => {
     expect(screen.getByTestId("auth").textContent).toBe("out");
     expect(screen.getByTestId("err").textContent).toContain("service unavailable");
     expect(qc.getQueryData(["tasks"])).toEqual({ items: [{ id: "existing" }] });
+  });
+
+  it.each([
+    ["204", () => Promise.resolve(new Response(null, { status: 204 }))],
+    [
+      "malformed 200",
+      () =>
+        Promise.resolve(
+          new Response("not-json", {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+    ],
+    [
+      "500",
+      () =>
+        Promise.resolve(
+          new Response(JSON.stringify({ detail: "service unavailable" }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+    ],
+    ["network failure", () => Promise.reject(new TypeError("network failed"))],
+  ])("marks %s auth/me outcomes as errors rather than anonymous", async (_, reply) => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(reply));
+    render(
+      withQueryClient(
+        <AuthProvider>
+          <Display />
+        </AuthProvider>,
+      ),
+    );
+
+    await waitFor(() => expect(screen.getByTestId("loading").textContent).toBe("ready"));
+    expect(screen.getByTestId("auth").textContent).toBe("out");
+    expect(screen.getByTestId("err").textContent).not.toBe("no-error");
   });
 
   it("loginComplete stores the returned session state and clears cached team data", async () => {

@@ -38,12 +38,14 @@ _EXPECTED_INGRESS_ROUTES: dict[str, str] = {
 }
 _EXPECTED_PREFIXED_INGRESS_ROUTES: dict[str, frozenset[str]] = {
     "loom-service": frozenset({
-        "/prod(/|$)(api/v1.*)",
-        "/dev(/|$)(api/v1.*)",
+        "/(?-i:prod)/(api/v1((/[^/%]+)*/?))$",
+        "/(?-i:dev)/(api/v1((/[^/%]+)*/?))$",
     }),
     "loom-web": frozenset({
-        "/prod(/|$)(.*)",
-        "/dev(/|$)(.*)",
+        "/(?-i:prod)/(([^/%]+/)*[^/%]+/?)?$",
+        "/(?-i:dev)/(([^/%]+/)*[^/%]+/?)?$",
+        "/(?-i:prod)$",
+        "/(?-i:dev)$",
     }),
 }
 

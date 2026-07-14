@@ -7,12 +7,21 @@ invocation stopped. Refuses conflicting operator flags early.
 The resume algorithm is documented on the design comment in the issue.
 Summary:
 
-1. ``is_done()`` → skip (with an inputs-hash gate against stale runs).
+1. ``is_done()`` gates persisted DONE records by their inputs hash. A step may
+   then opt into ``verify_done()``: MATCH skips, MISMATCH or UNKNOWN refuses to
+   mutate, and the default ``None`` preserves the historical skip. Operators
+   must explicitly handle/reset a strict DONE step whose result evidence is no
+   longer valid or whose live state no longer matches.
 2. Persisted state ``RUNNING`` or ``VERIFYING`` → call ``verify()``.
      MATCH   → mark done, continue.
-     MISMATCH → reset to RUNNING, call ``run()``.
+     MISMATCH → reset to RUNNING and call ``run()`` for default steps; strict
+                live-contract steps stop in VERIFYING pending explicit reset.
      UNKNOWN → refuse to advance; print a diagnostic.
 3. Persisted state ``NOT_STARTED`` or ``FAILED`` → call ``run()``.
+
+After a successful ``run()``, strict live-contract steps also require MATCH
+before DONE. Their successful-run evidence is persisted in ``result.json``
+while VERIFYING so a later MATCH can finalize without repeating mutation.
 
 Every step's ``run()`` writes its evidence dir before returning; the
 driver writes the top-level ``state.json`` after each transition.
@@ -24,10 +33,12 @@ is single-writer for the evidence tree.
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
@@ -53,6 +64,188 @@ class DriverError(RuntimeError):
 
 _INPUTS_HASH_UNAVAILABLE_AFTER_CALLBACK = "unavailable-after-callback-exception"
 _INPUTS_HASH_UNAVAILABLE_AFTER_STEP_FAILURE = "unavailable-after-step-failure"
+_CANONICAL_RESULT_KEYS = frozenset(
+    {
+        "number",
+        "name",
+        "state",
+        "inputs_hash",
+        "started_at",
+        "finished_at",
+        "exit_code",
+        "error",
+        "summary",
+        "artifacts",
+    },
+)
+_CANONICAL_UTC_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingRunEvidence:
+    """Validated successful-run evidence awaiting conclusive live verify."""
+
+    summary: str
+    artifacts: dict[str, object]
+    started_at: str
+    inputs_hash: str
+
+
+def _load_pending_run_evidence(
+    step: Step,
+    ctx: RolloutContext,
+    step_dir: StepDir,
+    *,
+    expected_started_at: str | None,
+) -> _PendingRunEvidence:
+    """Read and fully validate a strict step's successful pending result."""
+    try:
+        payload = json.loads(step_dir.result_path().read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise DriverError(
+            "strict VERIFYING result evidence is missing or invalid JSON",
+        ) from exc
+    if not isinstance(payload, dict) or set(payload) != _CANONICAL_RESULT_KEYS:
+        raise DriverError(
+            "strict VERIFYING result evidence does not use the canonical schema",
+        )
+    try:
+        expected_inputs_hash = step.inputs_hash(ctx)
+    except Exception as exc:
+        raise DriverError(
+            "strict VERIFYING result inputs hash could not be recomputed",
+        ) from exc
+    field_checks = {
+        "number": type(payload.get("number")) is int and payload.get("number") == step.number,
+        "name": isinstance(payload.get("name"), str) and payload.get("name") == step.name,
+        "state": isinstance(payload.get("state"), str) and payload.get("state") == "verifying",
+        "inputs_hash": isinstance(payload.get("inputs_hash"), str)
+        and payload.get("inputs_hash") == expected_inputs_hash,
+        "exit_code": type(payload.get("exit_code")) is int and payload.get("exit_code") == 0,
+        "error": "error" in payload and payload.get("error") is None,
+    }
+    mismatched = [key for key, valid in field_checks.items() if not valid]
+    if mismatched:
+        raise DriverError(
+            "strict VERIFYING result evidence failed identity validation for: "
+            + ", ".join(sorted(mismatched)),
+        )
+    summary = payload.get("summary")
+    artifacts = payload.get("artifacts")
+    started_at = payload.get("started_at")
+    finished_at = payload.get("finished_at")
+    if not isinstance(summary, str):
+        raise DriverError("strict VERIFYING result summary is malformed")
+    if not isinstance(artifacts, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in artifacts.items()
+    ):
+        raise DriverError("strict VERIFYING result artifacts are malformed")
+    parsed_started_at = _parse_canonical_utc_timestamp(started_at)
+    parsed_finished_at = _parse_canonical_utc_timestamp(finished_at)
+    if (
+        not isinstance(started_at, str)
+        or not isinstance(finished_at, str)
+        or parsed_started_at is None
+        or parsed_finished_at is None
+        or parsed_started_at > parsed_finished_at
+        or started_at != expected_started_at
+    ):
+        raise DriverError("strict VERIFYING result timestamps are malformed")
+    validated_artifacts: dict[str, str] = dict(artifacts)
+    try:
+        artifacts_match = step.validate_done_artifacts(
+            ctx,
+            step_dir,
+            validated_artifacts,
+        )
+    except Exception as exc:
+        raise DriverError(
+            "strict VERIFYING result artifact contract could not be validated",
+        ) from exc
+    if artifacts_match is not True:
+        raise DriverError(
+            "strict VERIFYING result artifacts do not match the step contract",
+        )
+    pending_artifacts: dict[str, object] = dict(validated_artifacts)
+    return _PendingRunEvidence(
+        summary=summary,
+        artifacts=pending_artifacts,
+        started_at=started_at,
+        inputs_hash=expected_inputs_hash,
+    )
+
+
+def _parse_canonical_utc_timestamp(value: object) -> datetime | None:
+    """Return a UTC timestamp only for the driver's exact persisted format."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.strptime(value, _CANONICAL_UTC_FORMAT).replace(tzinfo=UTC)
+    except ValueError:
+        return None
+    if parsed.strftime(_CANONICAL_UTC_FORMAT) != value:
+        return None
+    return parsed
+
+
+def _strict_done_result_is_canonical(
+    step: Step,
+    ctx: RolloutContext,
+    step_dir: StepDir,
+    *,
+    expected_started_at: str | None,
+    expected_finished_at: str | None,
+) -> bool:
+    """Validate strict DONE evidence before any live observation or mutation."""
+    try:
+        payload = json.loads(step_dir.result_path().read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict) or set(payload) != _CANONICAL_RESULT_KEYS:
+        return False
+    try:
+        expected_inputs_hash = step.inputs_hash(ctx)
+    except Exception:
+        return False
+    if not (
+        type(payload["number"]) is int
+        and payload["number"] == step.number
+        and isinstance(payload["name"], str)
+        and payload["name"] == step.name
+        and payload["state"] == "done"
+        and isinstance(payload["inputs_hash"], str)
+        and payload["inputs_hash"] == expected_inputs_hash
+        and type(payload["exit_code"]) is int
+        and payload["exit_code"] == 0
+        and payload["error"] is None
+        and isinstance(payload["summary"], str)
+    ):
+        return False
+
+    artifacts_raw = payload["artifacts"]
+    if not isinstance(artifacts_raw, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in artifacts_raw.items()
+    ):
+        return False
+    artifacts: dict[str, str] = dict(artifacts_raw)
+
+    started_at = payload["started_at"]
+    finished_at = payload["finished_at"]
+    parsed_started_at = _parse_canonical_utc_timestamp(started_at)
+    parsed_finished_at = _parse_canonical_utc_timestamp(finished_at)
+    if (
+        parsed_started_at is None
+        or parsed_finished_at is None
+        or parsed_started_at > parsed_finished_at
+        or started_at != expected_started_at
+        or finished_at != expected_finished_at
+    ):
+        return False
+
+    try:
+        return step.validate_done_artifacts(ctx, step_dir, artifacts) is True
+    except Exception:
+        return False
 
 
 def _utc_now_iso() -> str:
@@ -413,6 +606,37 @@ def _record_step_callback_failure(
     return 1
 
 
+def _record_strict_callback_stop(
+    *,
+    state: RolloutState,
+    step: Step,
+    step_dir: StepDir,
+    evidence: EvidenceDirectory,
+    stream: TextIO,
+    callback: str,
+    exc: Exception,
+) -> int:
+    """Contain a strict verification callback without losing trusted evidence.
+
+    A strict step may already have mutated the live environment and persisted a
+    canonical VERIFYING or DONE result. Converting a verifier exception into
+    FAILED would make the next invocation eligible to repeat that mutation.
+    Preserve the strict state/result, redact the diagnostic, and require an
+    explicit operator reset instead.
+    """
+    _scrub_step_diagnostics(step_dir)
+    safe_error = _safe_exception_text(exc)
+    _emit(
+        evidence,
+        stream,
+        f"[stop ] {step.number:02d}-{step.name}: {callback} exception: "
+        f"{safe_error}. Strict evidence was preserved and no mutation was "
+        "attempted; investigate before an explicit reset.\n",
+    )
+    _clear_driver_and_save(state, evidence)
+    return 2
+
+
 def run_rollout(
     ctx: RolloutContext,
     steps: Sequence[Step],
@@ -494,12 +718,37 @@ def _run_rollout_scoped(
                 "state.json. The step sequence changed between runs."
             )
 
-        # Fast path — already done and inputs match.
+        # Fast path — already done and inputs match. A strict step must never
+        # turn missing/malformed DONE evidence into an implicit mutation.
         step_dir = evidence.step_dir(step.number, step.name)
+        try:
+            strict_live_verify = step.requires_strict_live_verification()
+        except Exception as exc:
+            return _record_step_callback_failure(
+                state=state,
+                step=step,
+                ctx=ctx,
+                step_dir=step_dir,
+                evidence=evidence,
+                stream=stream,
+                callback="requires_strict_live_verification",
+                exc=exc,
+                started_at=record.started_at or _utc_now_iso(),
+            )
         if record.state is StepState.DONE:
             try:
-                already_done = step.is_done(ctx, step_dir)
+                done_evidence_matches = step.is_done(ctx, step_dir)
             except Exception as exc:
+                if strict_live_verify:
+                    return _record_strict_callback_stop(
+                        state=state,
+                        step=step,
+                        step_dir=step_dir,
+                        evidence=evidence,
+                        stream=stream,
+                        callback="is_done",
+                        exc=exc,
+                    )
                 return _record_step_callback_failure(
                     state=state,
                     step=step,
@@ -511,12 +760,98 @@ def _run_rollout_scoped(
                     exc=exc,
                     started_at=record.started_at or _utc_now_iso(),
                 )
-            if already_done:
-                _emit(evidence, stream, f"[skip ] {step.number:02d}-{step.name}\n")
-                continue
+            if done_evidence_matches and strict_live_verify:
+                done_evidence_matches = _strict_done_result_is_canonical(
+                    step,
+                    ctx,
+                    step_dir,
+                    expected_started_at=record.started_at,
+                    expected_finished_at=record.finished_at,
+                )
+            if not done_evidence_matches and strict_live_verify:
+                _emit(
+                    evidence,
+                    stream,
+                    f"[stop ] {step.number:02d}-{step.name}: persisted DONE "
+                    "result evidence is missing, malformed, or no longer matches "
+                    "the canonical success and artifact contract. No live verify "
+                    "or mutation was attempted. Investigate the sanitized evidence "
+                    "and explicitly reset the step before any new run.\n",
+                )
+                _clear_driver_and_save(state, evidence)
+                return 2
+            if done_evidence_matches:
+                try:
+                    done_outcome = step.verify_done(ctx, step_dir)
+                except Exception as exc:
+                    if strict_live_verify:
+                        return _record_strict_callback_stop(
+                            state=state,
+                            step=step,
+                            step_dir=step_dir,
+                            evidence=evidence,
+                            stream=stream,
+                            callback="verify_done",
+                            exc=exc,
+                        )
+                    return _record_step_callback_failure(
+                        state=state,
+                        step=step,
+                        ctx=ctx,
+                        step_dir=step_dir,
+                        evidence=evidence,
+                        stream=stream,
+                        callback="verify_done",
+                        exc=exc,
+                        started_at=record.started_at or _utc_now_iso(),
+                    )
+                if done_outcome is None or done_outcome is VerifyOutcome.MATCH:
+                    _emit(evidence, stream, f"[skip ] {step.number:02d}-{step.name}\n")
+                    continue
+                if done_outcome in (VerifyOutcome.MISMATCH, VerifyOutcome.UNKNOWN):
+                    outcome_label = done_outcome.value.upper()
+                    diagnostic = (
+                        "The completed step's live state has drifted from its "
+                        "recorded contract. Explicitly investigate and reset the "
+                        "step before allowing mutation."
+                        if done_outcome is VerifyOutcome.MISMATCH
+                        else (
+                            "The world's state can't be confirmed. Investigate "
+                            "before explicitly resetting or re-running the step."
+                        )
+                    )
+                    _emit(
+                        evidence,
+                        stream,
+                        f"[stop ] {step.number:02d}-{step.name}: completed-step "
+                        f"revalidation returned {outcome_label}. No mutation was "
+                        f"attempted. {diagnostic}\n",
+                    )
+                    _clear_driver_and_save(state, evidence)
+                    return 2
 
         # Recovery path — persisted state says something was running.
         if record.state in (StepState.RUNNING, StepState.VERIFYING):
+            pending: _PendingRunEvidence | None = None
+            if strict_live_verify:
+                try:
+                    pending = _load_pending_run_evidence(
+                        step,
+                        ctx,
+                        step_dir,
+                        expected_started_at=record.started_at,
+                    )
+                except DriverError as exc:
+                    _emit(
+                        evidence,
+                        stream,
+                        f"[stop ] {step.number:02d}-{step.name}: {exc}. "
+                        "No live verification or mutation was attempted; "
+                        "investigate the pending evidence before an explicit "
+                        "reset.\n",
+                    )
+                    _clear_driver_and_save(state, evidence)
+                    return 2
             _emit(
                 evidence,
                 stream,
@@ -527,6 +862,16 @@ def _run_rollout_scoped(
             try:
                 outcome = step.verify(ctx, step_dir)
             except Exception as exc:
+                if strict_live_verify:
+                    return _record_strict_callback_stop(
+                        state=state,
+                        step=step,
+                        step_dir=step_dir,
+                        evidence=evidence,
+                        stream=stream,
+                        callback="verify",
+                        exc=exc,
+                    )
                 return _record_step_callback_failure(
                     state=state,
                     step=step,
@@ -539,19 +884,47 @@ def _run_rollout_scoped(
                     started_at=record.started_at or _utc_now_iso(),
                 )
             if outcome is VerifyOutcome.MATCH:
-                failure_rc = _finalise_done(
-                    state,
-                    step,
-                    ctx,
-                    step_dir,
-                    evidence,
-                    driver,
-                    stream=stream,
-                )
+                if strict_live_verify:
+                    if pending is None:  # Defensive: strict validation set it above.
+                        raise DriverError("strict pending evidence was not validated")
+                    failure_rc = _finalise_done(
+                        state,
+                        step,
+                        ctx,
+                        step_dir,
+                        evidence,
+                        driver,
+                        stream=stream,
+                        summary=pending.summary,
+                        started_at=pending.started_at,
+                        artifacts=pending.artifacts,
+                        inputs_hash=pending.inputs_hash,
+                    )
+                else:
+                    failure_rc = _finalise_done(
+                        state,
+                        step,
+                        ctx,
+                        step_dir,
+                        evidence,
+                        driver,
+                        stream=stream,
+                    )
                 if failure_rc is not None:
                     return failure_rc
                 _emit(evidence, stream, f"[done ] {step.number:02d}-{step.name}\n")
                 continue
+            if strict_live_verify:
+                _emit(
+                    evidence,
+                    stream,
+                    f"[stop ] {step.number:02d}-{step.name}: strict recovery "
+                    f"verification returned {outcome.value.upper()}. The step "
+                    "remains VERIFYING and no mutation was attempted. Investigate "
+                    "and explicitly reset it if another run is required.\n",
+                )
+                _clear_driver_and_save(state, evidence)
+                return 2
             if outcome is VerifyOutcome.UNKNOWN:
                 _emit(
                     evidence,
@@ -626,12 +999,54 @@ def _run_rollout_scoped(
             )
             return result.exit_code
 
-        # Step run() succeeded. Move to VERIFYING → DONE.
+        # Step run() succeeded. Strict live-contract steps persist the run's
+        # summary/artifacts before observation so an UNKNOWN pause can resume
+        # without losing candidate-bound evidence or repeating mutation.
+        strict_inputs_hash: str | None = None
+        if strict_live_verify:
+            try:
+                strict_inputs_hash = step.inputs_hash(ctx)
+            except Exception as exc:
+                return _record_step_callback_failure(
+                    state=state,
+                    step=step,
+                    ctx=ctx,
+                    step_dir=step_dir,
+                    evidence=evidence,
+                    stream=stream,
+                    callback="inputs_hash",
+                    exc=exc,
+                    started_at=record.started_at or _utc_now_iso(),
+                )
+            _write_step_result(
+                step,
+                step_dir,
+                evidence,
+                state="verifying",
+                exit_code=0,
+                error=None,
+                summary=result.summary,
+                started_at=record.started_at or _utc_now_iso(),
+                artifacts=dict(result.artifacts),
+                inputs_hash=strict_inputs_hash,
+            )
+
+        # Move to VERIFYING and observe the live contract.
         state.mark_step_verifying(step.number)
         _save_state(state, evidence, driver)
         try:
             outcome = step.verify(ctx, step_dir)
         except Exception as exc:
+            if strict_live_verify:
+                return _record_strict_callback_stop(
+                    state=state,
+                    step=step,
+                    step_dir=step_dir,
+                    evidence=evidence,
+                    stream=stream,
+                    callback="verify",
+                    exc=exc,
+                )
             return _record_step_callback_failure(
                 state=state,
                 step=step,
@@ -643,6 +1058,18 @@ def _run_rollout_scoped(
                 exc=exc,
                 started_at=record.started_at or _utc_now_iso(),
             )
+        if strict_live_verify and outcome is not VerifyOutcome.MATCH:
+            _emit(
+                evidence,
+                stream,
+                f"[stop ] {step.number:02d}-{step.name}: strict post-run "
+                f"verification returned {outcome.value.upper()}. Successful-run "
+                "evidence was preserved, the step remains VERIFYING, and no "
+                "further mutation was attempted. Investigate and explicitly "
+                "reset it if another run is required.\n",
+            )
+            _clear_driver_and_save(state, evidence)
+            return 2
         if outcome is VerifyOutcome.MISMATCH:
             # Rare — the run reported success but verify says the
             # observable state doesn't match. Refuse without retrying
@@ -660,10 +1087,8 @@ def _run_rollout_scoped(
             )
             _clear_driver_and_save(state, evidence)
             return 2
-        # UNKNOWN or MATCH both accept the success from run(). MATCH is
-        # the ideal; UNKNOWN means "we didn't verify but the step self-
-        # reported success" — this is the norm for steps whose observable
-        # state is expensive/impossible to poll (e.g. write to disk).
+        # Non-strict steps retain the historical UNKNOWN-accept behavior.
+        # Strict steps reach here only on MATCH.
         failure_rc = _finalise_done(
             state,
             step,
@@ -675,6 +1100,7 @@ def _run_rollout_scoped(
             summary=result.summary,
             started_at=record.started_at or _utc_now_iso(),
             artifacts=dict(result.artifacts),
+            inputs_hash=strict_inputs_hash,
         )
         if failure_rc is not None:
             return failure_rc
@@ -696,32 +1122,29 @@ def _finalise_done(
     summary: str = "",
     started_at: str | None = None,
     artifacts: dict[str, object] | None = None,
+    inputs_hash: str | None = None,
 ) -> int | None:
     effective_started_at = started_at or _utc_now_iso()
-    try:
-        inputs_hash = step.inputs_hash(ctx)
-    except Exception as exc:
-        return _record_step_callback_failure(
-            state=state,
-            step=step,
-            ctx=ctx,
-            step_dir=step_dir,
-            evidence=evidence,
-            stream=stream,
-            callback="inputs_hash",
-            exc=exc,
-            started_at=effective_started_at,
-        )
+    effective_inputs_hash = inputs_hash
+    if effective_inputs_hash is None:
+        try:
+            effective_inputs_hash = step.inputs_hash(ctx)
+        except Exception as exc:
+            return _record_step_callback_failure(
+                state=state,
+                step=step,
+                ctx=ctx,
+                step_dir=step_dir,
+                evidence=evidence,
+                stream=stream,
+                callback="inputs_hash",
+                exc=exc,
+                started_at=effective_started_at,
+            )
     finished_at = _utc_now_iso()
-    state.mark_step_done(
-        step.number,
-        finished_at=finished_at,
-        inputs_hash=inputs_hash,
-    )
-    if state.status == "done":
-        _clear_driver_and_save(state, evidence)
-    else:
-        _save_state(state, evidence, driver)
+    # Persist the completed result before advancing state to DONE. A crash can
+    # therefore leave an observable non-DONE state, but never a DONE state that
+    # points at stale VERIFYING evidence and could trigger an implicit rerun.
     _write_step_result(
         step,
         step_dir,
@@ -733,8 +1156,17 @@ def _finalise_done(
         started_at=effective_started_at,
         finished_at=finished_at,
         artifacts=artifacts or {},
-        inputs_hash=inputs_hash,
+        inputs_hash=effective_inputs_hash,
     )
+    state.mark_step_done(
+        step.number,
+        finished_at=finished_at,
+        inputs_hash=effective_inputs_hash,
+    )
+    if state.status == "done":
+        _clear_driver_and_save(state, evidence)
+    else:
+        _save_state(state, evidence, driver)
     return None
 
 

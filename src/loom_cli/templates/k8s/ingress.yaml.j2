@@ -8,7 +8,7 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-body-size: "100m"
 {% if frontend_prefixed_route %}
     nginx.ingress.kubernetes.io/use-regex: "true"
-    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/rewrite-target: /$1
 {% endif %}
 {% if ingress_redirect_hosts %}
     nginx.ingress.kubernetes.io/from-to-www-redirect: "true"
@@ -35,17 +35,22 @@ spec:
   rules:
     # On `{{ ingress_host }}`{% if frontend_route_path %} under `{{ frontend_route_path }}`{% endif %}:
 {% if frontend_prefixed_route %}
-    #   {{ frontend_route_path }}/api/v1/*  → loom_service (rewritten to /api/v1/*)
-    #   {{ frontend_route_path }}/*         → loom_web (rewritten before nginx fallback)
+    #   {{ frontend_route_path }}/api/v1[/segments]  → loom_service (rewritten to /api/v1[/segments])
+    #   {{ frontend_route_path }}/[/segments]        → loom_web (rewritten before nginx fallback)
+    #   {{ frontend_route_path }}           → loom_web unchanged for canonical redirect
 {% else %}
     #   /api/v1/*  → loom_service (REST surface mounted at /api/v1/*)
     #   anything else → loom_web (React SPA; nginx falls back to
     #                   index.html for client-side React Router paths)
 {% endif %}
     #
-    # Path order matters: more-specific `/api/v1` MUST precede the
-    # catch-all `/`. Nginx ingress evaluates Prefix paths longest-first
-    # by default, but listing in this order keeps it obvious to humans.
+{% if frontend_prefixed_route %}
+    # ingress-nginx sorts regex locations by raw path length before applying
+    # first-regex-match semantics. The API regex is intentionally longer than
+    # the overlapping SPA regex; YAML declaration order does not set precedence.
+{% else %}
+    # Prefix paths are evaluated longest-first, so `/api/v1` wins over `/`.
+{% endif %}
 {% if ingress_host_is_ip %}
     - http:
 {% else %}
@@ -54,14 +59,14 @@ spec:
 {% endif %}
         paths:
 {% if frontend_prefixed_route %}
-          - path: {{ frontend_route_path }}(/|$)(api/v1.*)
+          - path: /(?-i:{{ frontend_route_path[1:] }})/(api/v1((/[^/%]+)*/?))$
             pathType: ImplementationSpecific
             backend:
               service:
                 name: loom-service
                 port:
                   number: 8090
-          - path: {{ frontend_route_path }}(/|$)(.*)
+          - path: /(?-i:{{ frontend_route_path[1:] }})/(([^/%]+/)*[^/%]+/?)?$
             pathType: ImplementationSpecific
             backend:
               service:
@@ -97,3 +102,41 @@ spec:
   # Ingress. Sandboxes reach it through the internal gateway-router /
   # singleton path; public browser and CLI traffic goes through
   # `loom-service` under `/api/v1`.
+{% if frontend_prefixed_route %}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: loom-frontend-prefix-redirect
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+spec:
+  ingressClassName: {{ ingress_class_name }}
+  tls:
+{% if ingress_host_is_ip %}
+    - secretName: {{ ingress_tls_secret_name }}
+{% else %}
+    - hosts:
+        - {{ ingress_host }}
+{% for host in ingress_redirect_hosts %}
+        - {{ host }}
+{% endfor %}
+      secretName: {{ ingress_tls_secret_name }}
+{% endif %}
+  rules:
+{% if ingress_host_is_ip %}
+    - http:
+{% else %}
+    - host: {{ ingress_host }}
+      http:
+{% endif %}
+        paths:
+          - path: /(?-i:{{ frontend_route_path[1:] }})$
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: loom-web
+                port:
+                  number: 80
+{% endif %}

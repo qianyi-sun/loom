@@ -9,7 +9,9 @@
     "preview": "vite preview",
     "lint": "eslint . --ext ts,tsx --max-warnings=0",
     "gen-api": "openapi-typescript http://localhost:8090/openapi.json -o src/api/schema.d.ts",
+    "smoke:routes": "node scripts/frontend-route-browser-smoke.mjs",
     "test": "vitest run",
+    "test:route-browser-unit": "vitest run scripts/frontend-route-browser-smoke.test.mjs",
     "test:watch": "vitest"
   },
   "dependencies": {
@@ -21,6 +23,7 @@
     "react-router-dom": "^6.26.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.61.1",
     "@testing-library/jest-dom": "^6.4.0",
     "@testing-library/react": "^16.0.0",
     "@testing-library/user-event": "^14.5.2",
