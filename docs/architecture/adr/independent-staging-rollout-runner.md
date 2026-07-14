@@ -145,8 +145,8 @@ preflight, environment-state, release-gate, and smoke gates are unchanged.
 Repository tests cover fixed merged-only candidate selection, immutable
 envelopes, caller attribution, lifecycle locking, backup-before-launch,
 redaction, cancellation/resume, installer idempotence and recovery, exact GB10
-trust bootstrap/revocation, secret-boundary scanning, CODEOWNERS, and full CI
-selection.
+trust bootstrap/revocation, secret-boundary scanning, advisory CODEOWNERS
+routing, and full CI selection.
 
 Repository verification is necessary but not live acceptance. Installation on
 shared `platform-dev` is allowed only after the implementation has merged into

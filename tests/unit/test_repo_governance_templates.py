@@ -20,14 +20,33 @@ def test_contributing_and_pr_template_accept_issue_scoped_external_prs() -> None
     assert "pull request code must not rely on protected secrets" in pr_template
 
 
-def test_codex_normal_dev_prs_queue_auto_merge_immediately() -> None:
+def test_normal_dev_prs_use_ci_only_squash_auto_merge() -> None:
     contributing = _read("CONTRIBUTING.md")
     quickstart = _read("docs/contributing/contributor-quickstart.md")
     pr_template = _read(".github/PULL_REQUEST_TEMPLATE.md")
 
-    assert "Codex\n> enables GitHub auto-merge with squash immediately" in contributing
-    assert "Codex turns on squash auto-merge immediately" in quickstart
-    assert "For this Codex-authored normal `dev` PR" in pr_template
+    assert "Every\n> normal `dev` PR uses GitHub squash auto-merge" in contributing
+    assert "Every normal `dev` PR uses squash auto-merge" in quickstart
+    assert "For this normal `dev` PR" in pr_template
+
+    for document in (contributing, quickstart, pr_template):
+        normalized_document = " ".join(document.split()).lower()
+        for gate in (
+            "repository-checks",
+            "images-gate",
+            "cluster-smoke-gate",
+            "staging-smoke-gate",
+        ):
+            assert gate in normalized_document
+        assert "no human approval" in normalized_document
+        assert "no codeowner approval" in normalized_document
+        assert "no conversation resolution" in normalized_document
+        for stale_review_gate in (
+            "need platform-admin review",
+            "require platform-admin review",
+            "requires platform-admin review",
+        ):
+            assert stale_review_gate not in normalized_document
 
 
 def test_governance_docs_define_path_inferred_validation_gates() -> None:
@@ -45,19 +64,49 @@ def test_governance_docs_define_path_inferred_validation_gates() -> None:
         assert gate in quickstart
 
     assert "Labels may add validation but cannot remove path-inferred validation" in contributing
-    assert "Codex enabled GitHub auto-merge" in pr_template
+    assert "GitHub squash auto-merge was enabled" in pr_template
 
     for document in (contributing, quickstart):
         normalized_document = " ".join(document.split())
         assert "visible and successful on the current head SHA" in normalized_document
-        assert "release-promotion prs to `main`" in normalized_document.lower()
-        assert (
-            "owner-managed" in normalized_document
-            or "managed by the release owner" in normalized_document
-        )
+        assert "main` accepts only" in normalized_document.lower()
+        assert "manual squash merge" in normalized_document.lower()
+        assert "never enable auto-merge" in normalized_document.lower()
 
     assert "succeed on the current head SHA" in pr_template
-    assert "explicitly owner-managed" in pr_template
+    assert "Qianyi (`@qianyi-sun`) reviews" in pr_template
+    assert "manual squash merge" in pr_template
+
+
+def test_main_promotion_requires_qianyi_manual_squash_and_separates_approvals() -> None:
+    contributing = _read("CONTRIBUTING.md")
+    quickstart = _read("docs/contributing/contributor-quickstart.md")
+    operator_runbook = _read("docs/runbooks/operator-runbook.md")
+    first_prod_runbook = _read("docs/runbooks/first-prod-release-runbook.md")
+    pr_template = _read(".github/PULL_REQUEST_TEMPLATE.md")
+    release_template = _read(".github/ISSUE_TEMPLATE/release.yml")
+
+    for document in (
+        contributing,
+        quickstart,
+        operator_runbook,
+        first_prod_runbook,
+        pr_template,
+        release_template,
+    ):
+        normalized_document = " ".join(document.split()).lower()
+        assert "@qianyi-sun" in normalized_document
+        assert "manual squash" in normalized_document
+        assert "never enable auto-merge" in normalized_document
+
+    for document in (contributing, operator_runbook, first_prod_runbook, pr_template):
+        normalized_document = " ".join(document.split()).lower()
+        assert "release_owner_approval" in normalized_document
+        assert "production environment approval" in normalized_document
+        assert "not interchangeable" in normalized_document
+
+    assert "allow_auto_merge" in contributing
+    assert "repository-wide" in contributing
 
 
 def test_release_promotion_template_requires_first_prod_evidence() -> None:
@@ -100,57 +149,20 @@ def test_issue_templates_use_current_loom_language() -> None:
     assert "vX.Y.Z` tag exists on the merged `main` commit" in template_text
 
 
-def test_codeowners_is_narrow_ci_and_release_trust_root() -> None:
-    owners = "@qianyi-sun @Hongjian-Gu"
+def test_codeowners_routes_all_paths_to_qianyi_but_is_advisory_on_dev() -> None:
+    codeowners = _read(".github/CODEOWNERS")
     entries = {
         line.strip()
-        for line in _read(".github/CODEOWNERS").splitlines()
+        for line in codeowners.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     }
-    authority_paths = {
-        "/.github/",
-        "/scripts/plan_ci_validations.py",
-        "/scripts/check_install_scripts_pinned.py",
-        "/scripts/validate_environment_isolation.py",
-        "/tests/ops/test_plan_ci_validations.py",
-        "/tests/ops/test_ci_throughput_workflows.py",
-        "/tests/ops/test_ci_secret_isolation.py",
-        "/pyproject.toml",
-        "/src/loom_cli/rollout/operator/",
-        "/tests/loom_cli/rollout/operator/",
-        "/deploy/staging-rollout/",
-        "/deploy/environments/staging.cluster.toml",
-        "/deploy/environment-state/staging.toml",
-        "/deploy/worker-pools/gb10/ssh_config",
-        "/scripts/ops/staging_rollout_*",
-        "/scripts/ops/verify_staging_rollout_secret_boundary.py",
-        "/tests/ops/test_staging_rollout_*",
-        "/tests/loom_cli/test_cluster_render.py",
-        "/tests/loom_cli/test_environment_state.py",
-        "/scripts/ops/release_gate.py",
-        "/scripts/ops/release_identity.py",
-        "/scripts/ops/verify_production_release_gate.sh",
-        "/scripts/ops/deploy_environment.sh",
-        "/deploy/environments/production.toml",
-        "/tests/ops/test_release_identity.py",
-        "/tests/ops/test_release_promotion_gate.py",
-        "/tests/ops/test_first_prod_runbook.py",
-        "/tests/ops/test_environment_isolation.py",
-        "/tests/unit/test_repo_governance_templates.py",
-        "/docs/runbooks/first-prod-release-runbook.md",
-        "/docs/runbooks/operator-runbook.md",
-        "/CONTRIBUTING.md",
-        "/SECURITY.md",
-        "/LICENSE",
-    }
 
-    assert f"* {owners}" not in entries
-    for broad_path in ("/src/", "/packages/", "/web/", "/deploy/", "/docs/"):
-        assert not any(
-            entry == f"{broad_path} {owners}" or entry.startswith(f"{broad_path} ")
-            for entry in entries
-        )
-    assert entries == {f"{path} {owners}" for path in authority_paths}
+    assert entries == {"* @qianyi-sun"}
+    assert "@carinrc" not in codeowners
+    normalized = " ".join(codeowners.split()).lower()
+    assert "advisory" in normalized
+    assert "not a `dev` merge gate" in normalized
+    assert "subsequent `main` promotion" in normalized
 
 
 def test_ci_docs_only_fast_path_includes_repo_metadata_not_workflows() -> None:

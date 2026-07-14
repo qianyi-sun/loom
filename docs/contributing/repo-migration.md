@@ -17,9 +17,10 @@ development.
 - Normal PR target: `dev`
 - Merge policy: squash merge only, delete branch after merge
 
-## Migrated Repository Settings
+## Current Repository Settings (verified 2026-07-14)
 
-The new repository has these settings recreated from `carinrc/loom`:
+The active repository retains the migrated baseline with the following current
+governance:
 
 - public visibility;
 - Issues enabled;
@@ -27,17 +28,39 @@ The new repository has these settings recreated from `carinrc/loom`:
 - Wiki disabled;
 - GitHub Actions enabled with selected Actions only;
 - selected Actions allowlist: GitHub-owned Actions and `astral-sh/setup-uv@*`;
+- repository Actions policy requires every Action to use a full commit SHA
+  (`sha_pinning_required: true`);
 - every workflow Action reference pinned to the upstream-verified full commit SHA in
   [`config/ci-actions-lock.json`](../../config/ci-actions-lock.json), enforced
   recursively by `scripts/check_ci_action_pins.py` in the static CI gate;
-- `dev` branch protection requiring strict `repository-checks`;
-- `main` branch protection requiring strict `repository-checks`, code-owner
-  review, one approval, conversation resolution, and linear history;
+- `dev` branch protection requiring strict, GitHub-Actions-app-bound
+  `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
+  `staging-smoke-gate` on the current head SHA, with no human approval, no
+  CODEOWNER approval, and no conversation resolution;
+- `main` branch protection retaining those four strict checks, code-owner
+  review, one generic approval, conversation resolution, admin enforcement,
+  and linear history;
 - repo labels copied from `carinrc/loom`;
 - repo milestones copied from `carinrc/loom`.
 
-`Hongjian-Gu` has been invited to the new repository with write access. GitHub
-reports effective read access until the invitation is accepted.
+Normal `dev` PRs use squash auto-merge, and the four checks above are their
+only merge authority. CODEOWNERS is advisory on `dev`. `main` accepts only a
+production release promotion from `dev`; Qianyi (`@qianyi-sun`) personally
+reviews the fixed candidate and evidence and performs the manual squash merge.
+Never enable auto-merge on a promotion PR. GitHub exposes
+`allow_auto_merge` repository-wide rather than per branch, so that `main`
+prohibition is an operator-enforced release rule.
+
+Bootstrap caveat: GitHub evaluates the target branch's CODEOWNERS. Current
+`main` still carries invalid legacy `@carinrc` owners, so the first promotion
+that introduces `* @qianyi-sun` can rely only on `main`'s generic one-approval
+rule plus Qianyi's manual process. Prefer a non-Qianyi identity or future
+restricted bot to open that PR because GitHub users cannot approve their own
+pull requests. Once merged, the catch-all requires Qianyi's CODEOWNER approval
+for every subsequent promotion.
+
+`Hongjian-Gu` and `Devansh8321` currently have collaborator write access;
+`qianyi-sun` is the personal-repository owner and administrator.
 
 ## Issue Tracker State
 

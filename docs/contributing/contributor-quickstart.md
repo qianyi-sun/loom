@@ -168,9 +168,9 @@ pull requests, merge groups, and manual dispatches use the checked-in read-only
 build path, do not log in to GHCR, and do not use a publication cache. Manual
 dispatch is build-only. Only the checked-in `publish` job on a push to `dev` or
 `main` requests job-scoped `packages: write` authority and publishes multi-arch
-images. CODEOWNERS does not stop a same-repository branch workflow from running
-before review; autonomous-agent hard isolation still requires fork-only
-execution or an external trusted workflow/App.
+images. Advisory CODEOWNERS on `dev` does not stop a same-repository branch
+workflow from running; autonomous-agent hard isolation still requires
+fork-only execution or an external trusted workflow/App.
 
 `staging-smoke-gate` proves the credential-free kind deployment smoke only. It
 never enters `ci-aws`, and a missing or skipped real-AWS run is not represented
@@ -230,25 +230,45 @@ and must link the issue they advance. Maintainers mark actively owned
 issues with a `[WIP] ` title prefix, keep the project status current,
 and follow the normal `dev` auto-merge policy.
 
-Codex turns on squash auto-merge immediately after opening every normal `dev`
-PR. GitHub keeps the merge queued until `repository-checks`, `images-gate`,
+Every normal `dev` PR uses squash auto-merge immediately after opening. GitHub
+keeps the merge queued until `repository-checks`, `images-gate`,
 `cluster-smoke-gate`, and `staging-smoke-gate` are visible and successful on
-the current head SHA, along with any applicable repository protection.
-Maintainers should not manually merge an eligible `dev` PR just because CI is
-green; release-promotion PRs to `main` remain explicitly owner-managed by the
-release owner. This is a Codex operational rule, not a contributor-specific
-review policy.
+the current head SHA. Those four strict, GitHub-Actions-app-bound checks are
+the only merge authority: `dev` requires no human approval, no CODEOWNER
+approval, and no conversation resolution. Maintainers should not manually
+merge an eligible `dev` PR just because CI is green.
+
+`main` accepts only a production release promotion from `dev`. Qianyi
+(`@qianyi-sun`) personally reviews the fixed candidate and evidence and
+performs the manual squash merge. Never enable auto-merge for that PR. The
+repository-wide `allow_auto_merge` capability cannot express a `main`-only
+prohibition, so the release operator enforces this rule.
 
 Current `dev` branch-protection settings (verified by Task 6):
 - Squash-only (no rebase merge, no merge commits)
 - `required_linear_history: true`
 - `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
   `staging-smoke-gate` are the required stable status checks
-- `allow_auto_merge: true`; Codex enables it immediately after opening normal
-  `dev` PRs, and GitHub holds the merge until the policy above passes
+- `allow_auto_merge: true`; normal `dev` PRs enable it immediately after
+  opening, and GitHub holds the merge until the policy above passes
 - `enforce_admins: true` on `dev` - admins go through the gate too
-- no repository-wide approval count; only CI/release trust-root paths declared
-  in CODEOWNERS require owner review, so routine code stays zero-review
+- no human approval, no CODEOWNER approval, and no conversation resolution;
+  CODEOWNERS is advisory routing on `dev`, not a merge gate
+
+Current `main` promotion policy:
+
+- the four strict current-head checks remain required, along with the existing
+  generic one-approval, CODEOWNER-review, conversation-resolution, admin, and
+  linear-history protections;
+- Qianyi reviews the candidate/evidence and manually squash merges; auto-merge
+  is never enabled;
+- GitHub evaluates the target branch's CODEOWNERS. The first promotion that
+  carries the Qianyi-only catch-all still sees `main`'s invalid legacy
+  `@carinrc` owners, so its generic one-approval rule and Qianyi's manual
+  process are the bootstrap controls. A non-Qianyi identity or future
+  restricted bot should author that PR because GitHub users cannot approve
+  their own pull requests. Later promotions require Qianyi's CODEOWNER
+  approval.
 
 Secrets and side-effect workflows:
 - Pull request workflows use read-only `GITHUB_TOKEN` permissions and
@@ -259,5 +279,7 @@ Secrets and side-effect workflows:
 - The benchmark publishing workflow uses the protected
   `huggingface-publish` environment and should only expose `HF_TOKEN`
   after branch restrictions and maintainer approval pass.
-- Deployment or publish workflow changes need platform-admin review
-  because they change the public-repository security boundary.
+- Deployment or publish workflow changes are public-repository security-boundary
+  changes, so the fail-closed planner must select the full CI validation set. A
+  platform-admin review may be requested for context, but it is not a `dev`
+  merge gate.

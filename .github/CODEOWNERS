@@ -1,41 +1,7 @@
-# Human-reviewed governance, CI, and release authority.
-/.github/ @qianyi-sun @Hongjian-Gu
-/CONTRIBUTING.md @qianyi-sun @Hongjian-Gu
-/SECURITY.md @qianyi-sun @Hongjian-Gu
-/LICENSE @qianyi-sun @Hongjian-Gu
-
-# CI planner, policy, and contract tests.
-/scripts/plan_ci_validations.py @qianyi-sun @Hongjian-Gu
-/scripts/check_install_scripts_pinned.py @qianyi-sun @Hongjian-Gu
-/scripts/validate_environment_isolation.py @qianyi-sun @Hongjian-Gu
-/tests/ops/test_plan_ci_validations.py @qianyi-sun @Hongjian-Gu
-/tests/ops/test_ci_throughput_workflows.py @qianyi-sun @Hongjian-Gu
-/tests/ops/test_ci_secret_isolation.py @qianyi-sun @Hongjian-Gu
-/pyproject.toml @qianyi-sun @Hongjian-Gu
-
-# Protected staging-rollout runtime, installation, and contract authority.
-/src/loom_cli/rollout/operator/ @qianyi-sun @Hongjian-Gu
-/tests/loom_cli/rollout/operator/ @qianyi-sun @Hongjian-Gu
-/deploy/staging-rollout/ @qianyi-sun @Hongjian-Gu
-/deploy/environments/staging.cluster.toml @qianyi-sun @Hongjian-Gu
-/deploy/environment-state/staging.toml @qianyi-sun @Hongjian-Gu
-/deploy/worker-pools/gb10/ssh_config @qianyi-sun @Hongjian-Gu
-/scripts/ops/staging_rollout_* @qianyi-sun @Hongjian-Gu
-/scripts/ops/verify_staging_rollout_secret_boundary.py @qianyi-sun @Hongjian-Gu
-/tests/ops/test_staging_rollout_* @qianyi-sun @Hongjian-Gu
-/tests/loom_cli/test_cluster_render.py @qianyi-sun @Hongjian-Gu
-/tests/loom_cli/test_environment_state.py @qianyi-sun @Hongjian-Gu
-
-# Production release verification and deployment entry points.
-/scripts/ops/release_gate.py @qianyi-sun @Hongjian-Gu
-/scripts/ops/release_identity.py @qianyi-sun @Hongjian-Gu
-/scripts/ops/verify_production_release_gate.sh @qianyi-sun @Hongjian-Gu
-/scripts/ops/deploy_environment.sh @qianyi-sun @Hongjian-Gu
-/deploy/environments/production.toml @qianyi-sun @Hongjian-Gu
-/tests/ops/test_release_identity.py @qianyi-sun @Hongjian-Gu
-/tests/ops/test_release_promotion_gate.py @qianyi-sun @Hongjian-Gu
-/tests/ops/test_first_prod_runbook.py @qianyi-sun @Hongjian-Gu
-/tests/ops/test_environment_isolation.py @qianyi-sun @Hongjian-Gu
-/tests/unit/test_repo_governance_templates.py @qianyi-sun @Hongjian-Gu
-/docs/runbooks/first-prod-release-runbook.md @qianyi-sun @Hongjian-Gu
-/docs/runbooks/operator-runbook.md @qianyi-sun @Hongjian-Gu
+# Advisory owner routing on `dev`: branch protection does not require
+# CODEOWNER approval, so this file is not a `dev` merge gate.
+#
+# `main` does require CODEOWNER review. After the first `dev` -> `main`
+# promotion carrying this file lands, this catch-all makes @qianyi-sun the
+# required owner for every subsequent `main` promotion.
+* @qianyi-sun

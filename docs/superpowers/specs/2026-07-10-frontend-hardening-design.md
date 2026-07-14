@@ -268,8 +268,8 @@ form primitives.
   worktree and uses the `codex/` prefix.
 - Each pull request targets `dev`, references one primary focused issue, and
   uses `Refs` or `Advances` until its issue acceptance is complete.
-- Squash auto-merge is enabled immediately for Codex-authored normal `dev`
-  pull requests.
+- Squash auto-merge is enabled immediately for every normal `dev` pull
+  request; the four required CI contexts are its only merge authority.
 - The actively implemented issue has a `[WIP]` title and Project Status
   `In Progress`; queued issues remain `Todo` without `[WIP]`.
 - An issue moves to `[Needs validation]` when merged code still requires live

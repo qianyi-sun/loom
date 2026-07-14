@@ -61,10 +61,10 @@ def test_installed_gb10_trust_tool_uses_the_root_owned_candidate_inventory() -> 
     assert "Path(__file__).resolve().parents[2]" not in source
 
 
-def test_privileged_runner_paths_have_codeowners_and_full_ci_selection() -> None:
+def test_privileged_runner_paths_have_advisory_owner_and_full_ci_selection() -> None:
     owners = (REPO_ROOT / ".github/CODEOWNERS").read_text(encoding="utf-8")
-    assert "/deploy/staging-rollout/" in owners
-    assert "/src/loom_cli/rollout/operator/" in owners
+    assert "* @qianyi-sun" in owners.splitlines()
+    assert "not a `dev` merge gate" in owners
     plan = plan_validations(
         changed_paths=["deploy/staging-rollout/loom-staging-rollout.sudoers"],
         labels=set(),

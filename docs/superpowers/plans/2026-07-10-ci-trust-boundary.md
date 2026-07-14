@@ -1,5 +1,13 @@
 # CI Trust Boundary Implementation Plan
 
+> **Superseded governance note (2026-07-14):** This historical plan records the
+> earlier targeted-CODEOWNER design. The current owner decision makes the four
+> strict, app-bound current-head checks the only `dev` merge authority, with no
+> human approval, no CODEOWNER approval, and no conversation resolution.
+> CODEOWNERS is advisory on `dev`; `main` promotion is Qianyi-reviewed and
+> manually squash-merged. Do not execute the live CODEOWNER-enablement steps
+> below.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make Loom's four auto-merge contexts event-specific, fail-closed, and protected by a narrow human-reviewed trust root while preserving zero-review routine PRs.

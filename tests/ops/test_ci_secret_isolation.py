@@ -382,9 +382,12 @@ def test_image_input_validation_accepts_actual_github_context_shapes(
     assert result.returncode == 0, result.stderr
 
 
-def test_secret_isolation_contract_is_code_owned() -> None:
+def test_secret_isolation_contract_is_covered_by_advisory_catch_all() -> None:
     codeowners = (REPO_ROOT / ".github/CODEOWNERS").read_text(encoding="utf-8")
-    assert (
-        "/tests/ops/test_ci_secret_isolation.py @qianyi-sun @Hongjian-Gu"
-        in codeowners.splitlines()
-    )
+    entries = {
+        line.strip()
+        for line in codeowners.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert entries == {"* @qianyi-sun"}
+    assert "not a `dev` merge gate" in codeowners
