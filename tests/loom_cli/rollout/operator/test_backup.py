@@ -7,9 +7,12 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 import traceback
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,7 +20,7 @@ from typing import BinaryIO
 
 import pytest
 
-from loom_cli.cluster_backup_guard import validate_backup_manifest
+from loom_cli.cluster_backup_guard import BackupTraversalLimits, validate_backup_manifest
 from loom_cli.rollout.operator import backup as backup_module
 from loom_cli.rollout.operator.backup import (
     BackupCreator,
@@ -201,6 +204,8 @@ class FailingMinioMirror:
         secret_key: str,
         buckets: tuple[str, ...],
         destination: Path,
+        cancel_on_timeout: Callable[[], None],
+        resources: backup_module._BackupResourceBudget,
     ) -> None:
         raise RuntimeError(f"mirror leaked {access_key} {secret_key}")
 
@@ -214,6 +219,8 @@ class SuccessfulMinioMirror:
         secret_key: str,
         buckets: tuple[str, ...],
         destination: Path,
+        cancel_on_timeout: Callable[[], None],
+        resources: backup_module._BackupResourceBudget,
     ) -> None:
         assert endpoint_url == "http://127.0.0.1:19000"
         assert buckets == (
@@ -224,8 +231,12 @@ class SuccessfulMinioMirror:
             bucket_dir = destination / bucket
             bucket_dir.mkdir(mode=0o700)
             object_path = bucket_dir / "object.bin"
-            object_path.write_bytes(f"object:{bucket}".encode())
-            object_path.chmod(0o600)
+            backup_module._write_private_bytes(
+                object_path,
+                f"object:{bucket}".encode(),
+                resources=resources,
+                component="minio",
+            )
 
 
 def test_partial_backup_never_publishes_latest_or_returns_manifest(tmp_path: Path) -> None:
@@ -300,6 +311,149 @@ def test_binary_dump_and_exact_secret_allowlist_never_expose_credentials(tmp_pat
     for value in (MINIO_ACCESS_KEY, MINIO_SECRET_KEY):
         assert value not in rendered_boundary
     assert runner.timeouts == [600.0, 30.0, 30.0, 30.0, 30.0]
+
+
+def test_oversized_postgres_dump_stops_before_crossing_component_cap(
+    tmp_path: Path,
+) -> None:
+    class OversizedPostgresRunner(RecordingRunner):
+        def stream_stdout(
+            self,
+            argv: Sequence[str],
+            sink: BinaryIO,
+            *,
+            env: Mapping[str, str],
+            timeout_seconds: float | None = None,
+        ) -> None:
+            self._record(argv, env)
+            self.timeouts.append(timeout_seconds)
+            sink.write(b"12345")
+
+    capacity = lambda _path: backup_module._CapacitySnapshot(  # noqa: E731
+        free_bytes=10_000,
+        free_inodes=10_000,
+        block_size=1,
+    )
+    config = make_config(tmp_path)
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=OversizedPostgresRunner(),
+        minio=SuccessfulMinioMirror(),
+        now=lambda: FIXED_NOW,
+        max_postgres_bytes=4,
+        max_total_bytes=1000,
+        disk_reserve_bytes=0,
+        inode_reserve=0,
+        capacity_provider=capacity,
+    )
+
+    with pytest.raises(BackupError, match="postgres_dump_failed"):
+        creator.create(make_request())
+
+    bundle_root = config.rollout_root / "backups" / "20260713T200000Z-stg-20260713-abcdef12"
+    assert (bundle_root / "postgres" / "loom.dump").read_bytes() == b""
+    assert not (bundle_root / "backup-manifest.json").exists()
+    assert not (bundle_root.parent / "latest").exists()
+
+
+def test_postgres_stream_rechecks_declining_host_free_space_between_chunks(
+    tmp_path: Path,
+) -> None:
+    state = {"free_bytes": 100}
+
+    class DecliningPostgresRunner(RecordingRunner):
+        def stream_stdout(
+            self,
+            argv: Sequence[str],
+            sink: BinaryIO,
+            *,
+            env: Mapping[str, str],
+            timeout_seconds: float | None = None,
+        ) -> None:
+            self._record(argv, env)
+            self.timeouts.append(timeout_seconds)
+            sink.write(b"a")
+            state["free_bytes"] = 1
+            sink.write(b"b")
+
+    def capacity(_path: Path) -> object:
+        return backup_module._CapacitySnapshot(
+            free_bytes=state["free_bytes"],
+            free_inodes=100,
+            block_size=1,
+        )
+
+    config = make_config(tmp_path)
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=DecliningPostgresRunner(),
+        minio=SuccessfulMinioMirror(),
+        now=lambda: FIXED_NOW,
+        max_postgres_bytes=100,
+        max_total_bytes=10_000,
+        disk_reserve_bytes=1,
+        inode_reserve=1,
+        capacity_provider=capacity,
+    )
+
+    with pytest.raises(BackupError, match="postgres_dump_failed"):
+        creator.create(make_request())
+
+    bundle_root = config.rollout_root / "backups" / "20260713T200000Z-stg-20260713-abcdef12"
+    assert (bundle_root / "postgres" / "loom.dump").read_bytes() == b"a"
+    assert not (bundle_root / "backup-manifest.json").exists()
+    assert not (bundle_root.parent / "latest").exists()
+
+
+def test_postgres_dump_succeeds_at_exact_component_byte_cap(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        minio=SuccessfulMinioMirror(),
+        now=lambda: FIXED_NOW,
+        max_postgres_bytes=len(POSTGRES_BYTES),
+        max_total_bytes=1_000_000,
+        disk_reserve_bytes=0,
+        inode_reserve=0,
+        capacity_provider=lambda _path: backup_module._CapacitySnapshot(
+            free_bytes=100_000,
+            free_inodes=100_000,
+            block_size=1,
+        ),
+    )
+
+    backup = creator.create(make_request())
+
+    assert backup.manifest_path.is_file()
+    assert (backup.manifest_path.parent / "postgres" / "loom.dump").read_bytes() == POSTGRES_BYTES
+
+
+def test_capacity_snapshot_uses_service_available_blocks_not_root_free_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = type(
+        "Statvfs",
+        (),
+        {
+            "f_bavail": 2,
+            "f_bfree": 999,
+            "f_frsize": 4096,
+            "f_bsize": 4096,
+            "f_favail": 7,
+        },
+    )()
+    monkeypatch.setattr(backup_module.os, "statvfs", lambda _path: values)
+
+    snapshot = backup_module._capacity_snapshot(tmp_path)
+
+    assert snapshot.free_bytes == 2 * 4096
+    assert snapshot.free_inodes == 7
+    assert backup_module._available_bytes(tmp_path) == 2 * 4096
 
 
 def test_success_returns_only_timestamped_verified_manifest_and_digest(tmp_path: Path) -> None:
@@ -395,6 +549,31 @@ class PaginatedS3:
         self.closed = True
 
 
+class OneObjectS3:
+    """Small client used by whole-bundle resource tests."""
+
+    def __init__(
+        self,
+        body: FakeStreamingBody | None = None,
+        *,
+        declared_size: int = 1,
+    ) -> None:
+        self.body = body or FakeStreamingBody(b"x")
+        self.declared_size = declared_size
+        self.closed = False
+
+    def list_objects_v2(self, **kwargs: str) -> dict[str, object]:
+        if kwargs["Bucket"] == "loom-staging-trajectories":
+            return {"Contents": [{"Key": "object.bin"}], "IsTruncated": False}
+        return {"Contents": [], "IsTruncated": False}
+
+    def get_object(self, **_kwargs: str) -> dict[str, object]:
+        return {"Body": self.body, "ContentLength": self.declared_size}
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def test_boto3_minio_mirror_paginates_both_buckets_with_bounded_client_config(
     tmp_path: Path,
 ) -> None:
@@ -447,6 +626,324 @@ def test_boto3_minio_mirror_paginates_both_buckets_with_bounded_client_config(
     assert client.closed
 
 
+def test_shared_budget_counts_block_rounded_tiny_minio_objects(tmp_path: Path) -> None:
+    class TwoTinyObjectsS3(OneObjectS3):
+        def list_objects_v2(self, **kwargs: str) -> dict[str, object]:
+            if kwargs["Bucket"] == "loom-staging-trajectories":
+                return {
+                    "Contents": [{"Key": "first.bin"}, {"Key": "second.bin"}],
+                    "IsTruncated": False,
+                }
+            return {"Contents": [], "IsTruncated": False}
+
+        def get_object(self, **_kwargs: str) -> dict[str, object]:
+            return {"Body": FakeStreamingBody(b"x"), "ContentLength": 1}
+
+    client = TwoTinyObjectsS3()
+    destination = tmp_path / "minio"
+    destination.mkdir(mode=0o700)
+    block_size = 4096
+    resources = backup_module._BackupResourceBudget(
+        tmp_path,
+        max_postgres_bytes=100_000,
+        max_total_bytes=(5 * block_size) - 1,
+        disk_reserve_bytes=0,
+        inode_reserve=0,
+        capacity_provider=lambda _path: backup_module._CapacitySnapshot(
+            free_bytes=1_000_000,
+            free_inodes=1_000_000,
+            block_size=block_size,
+        ),
+    )
+    mirror = Boto3MinioMirror(
+        client_factory=lambda *_args, **_kwargs: client,
+        disk_reserve_bytes=0,
+        inode_reserve=0,
+    )
+
+    with pytest.raises(ValueError, match="allocated-byte limit"):
+        mirror.mirror(
+            endpoint_url="http://127.0.0.1:19000",
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            buckets=("loom-staging-trajectories", "loom-staging-artifacts"),
+            destination=destination,
+            resources=resources,
+        )
+
+    assert (destination / "loom-staging-trajectories" / "first.bin").read_bytes() == b"x"
+    assert not (destination / "loom-staging-trajectories" / "second.bin").exists()
+    assert not list(destination.rglob("*.part"))
+    assert client.closed
+
+
+def test_standalone_mirror_counts_block_rounded_tiny_object_metadata(
+    tmp_path: Path,
+) -> None:
+    client = OneObjectS3()
+    destination = tmp_path / "minio"
+    destination.mkdir(mode=0o700)
+    values = os.statvfs(destination)
+    block_size = values.f_frsize or values.f_bsize
+    mirror = Boto3MinioMirror(
+        client_factory=lambda *_args, **_kwargs: client,
+        max_total_bytes=(3 * block_size) - 1,
+        disk_reserve_bytes=0,
+        inode_reserve=0,
+        available_bytes=lambda _path: 1_000_000,
+        available_inodes=lambda _path: 1_000_000,
+    )
+
+    with pytest.raises(ValueError, match="allocated-byte limit"):
+        mirror.mirror(
+            endpoint_url="http://127.0.0.1:19000",
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            buckets=("loom-staging-trajectories", "loom-staging-artifacts"),
+            destination=destination,
+        )
+
+    assert client.body.closed
+    assert client.closed
+    assert not (destination / "loom-staging-trajectories" / "object.bin").exists()
+    assert not list(destination.rglob("*.part"))
+
+
+def test_standalone_mirror_rechecks_declining_free_space_between_body_chunks(
+    tmp_path: Path,
+) -> None:
+    state = {"free_bytes": 1_000_000}
+
+    class DecliningBody(FakeStreamingBody):
+        def read(self, amount: int) -> bytes:
+            if self._offset == 1:
+                state["free_bytes"] = 0
+            return super().read(1 if self._offset < 2 else amount)
+
+    client = OneObjectS3(DecliningBody(b"ab"), declared_size=2)
+    destination = tmp_path / "minio"
+    destination.mkdir(mode=0o700)
+    mirror = Boto3MinioMirror(
+        client_factory=lambda *_args, **_kwargs: client,
+        max_total_bytes=100_000,
+        disk_reserve_bytes=1,
+        inode_reserve=0,
+        available_bytes=lambda _path: state["free_bytes"],
+        available_inodes=lambda _path: 100_000,
+    )
+
+    with pytest.raises(ValueError, match="free-space reserve"):
+        mirror.mirror(
+            endpoint_url="http://127.0.0.1:19000",
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            buckets=("loom-staging-trajectories", "loom-staging-artifacts"),
+            destination=destination,
+        )
+
+    assert client.body.closed
+    assert client.closed
+    assert not (destination / "loom-staging-trajectories" / "object.bin").exists()
+    assert not list(destination.rglob("*.part"))
+
+
+def test_shared_budget_reconciles_filesystem_blocks_above_logical_size(
+    tmp_path: Path,
+) -> None:
+    class AllocatedPath:
+        def stat(self, *, follow_symlinks: bool) -> object:
+            assert not follow_symlinks
+            return type("Metadata", (), {"st_size": 1, "st_blocks": 16})()
+
+    resources = backup_module._BackupResourceBudget(
+        tmp_path,
+        max_postgres_bytes=10_000,
+        max_total_bytes=8191,
+        disk_reserve_bytes=0,
+        inode_reserve=0,
+        capacity_provider=lambda _path: backup_module._CapacitySnapshot(
+            free_bytes=100_000,
+            free_inodes=100_000,
+            block_size=1,
+        ),
+    )
+    account = resources.reserve_entry(
+        AllocatedPath(),  # type: ignore[arg-type]
+        component="minio",
+    )
+    resources.prepare_write(account, 1)
+    resources.commit_write(account, 1)
+
+    with pytest.raises(ValueError, match="allocated-byte limit"):
+        resources.reconcile_writer(account)
+
+
+def test_minio_stream_rechecks_declining_shared_free_space(tmp_path: Path) -> None:
+    state = {"free_bytes": 100_000}
+
+    class DecliningBody(FakeStreamingBody):
+        def read(self, amount: int) -> bytes:
+            if self._offset == 1:
+                state["free_bytes"] = 1
+            return super().read(1 if self._offset < 2 else amount)
+
+    client = OneObjectS3(DecliningBody(b"ab"), declared_size=2)
+    config = make_config(tmp_path)
+    mirror = Boto3MinioMirror(
+        client_factory=lambda *_args, **_kwargs: client,
+        disk_reserve_bytes=0,
+        inode_reserve=0,
+    )
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        minio=mirror,
+        now=lambda: FIXED_NOW,
+        max_postgres_bytes=100_000,
+        max_total_bytes=1_000_000,
+        disk_reserve_bytes=1,
+        inode_reserve=1,
+        capacity_provider=lambda _path: backup_module._CapacitySnapshot(
+            free_bytes=state["free_bytes"],
+            free_inodes=100_000,
+            block_size=1,
+        ),
+    )
+
+    with pytest.raises(BackupError, match="minio_snapshot_failed"):
+        creator.create(make_request())
+
+    bundle_root = config.rollout_root / "backups" / "20260713T200000Z-stg-20260713-abcdef12"
+    assert client.body.closed
+    assert client.closed
+    assert not list(bundle_root.rglob("*.part"))
+    assert not (bundle_root / "backup-manifest.json").exists()
+    assert not (bundle_root.parent / "latest").exists()
+
+
+def test_minio_rechecks_declining_shared_inode_capacity_between_objects(
+    tmp_path: Path,
+) -> None:
+    state = {"free_inodes": 100_000}
+
+    class FirstBody(FakeStreamingBody):
+        def close(self) -> None:
+            super().close()
+            state["free_inodes"] = 1
+
+    class TwoObjectsS3(OneObjectS3):
+        def list_objects_v2(self, **kwargs: str) -> dict[str, object]:
+            if kwargs["Bucket"] == "loom-staging-trajectories":
+                return {
+                    "Contents": [{"Key": "first.bin"}, {"Key": "second.bin"}],
+                    "IsTruncated": False,
+                }
+            return {"Contents": [], "IsTruncated": False}
+
+        def get_object(self, *, Key: str, **_kwargs: str) -> dict[str, object]:  # noqa: N803
+            body: FakeStreamingBody
+            body = FirstBody(b"x") if Key == "first.bin" else FakeStreamingBody(b"y")
+            return {"Body": body, "ContentLength": 1}
+
+    client = TwoObjectsS3()
+    config = make_config(tmp_path)
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        minio=Boto3MinioMirror(
+            client_factory=lambda *_args, **_kwargs: client,
+            disk_reserve_bytes=0,
+            inode_reserve=0,
+        ),
+        now=lambda: FIXED_NOW,
+        max_postgres_bytes=100_000,
+        max_total_bytes=1_000_000,
+        disk_reserve_bytes=0,
+        inode_reserve=1,
+        capacity_provider=lambda _path: backup_module._CapacitySnapshot(
+            free_bytes=100_000,
+            free_inodes=state["free_inodes"],
+            block_size=1,
+        ),
+    )
+
+    with pytest.raises(BackupError, match="minio_snapshot_failed"):
+        creator.create(make_request())
+
+    bundle_root = config.rollout_root / "backups" / "20260713T200000Z-stg-20260713-abcdef12"
+    assert (bundle_root / "minio" / "loom-staging-trajectories" / "first.bin").is_file()
+    assert not (bundle_root / "minio" / "loom-staging-trajectories" / "second.bin").exists()
+    assert not (bundle_root / "backup-manifest.json").exists()
+    assert not (bundle_root.parent / "latest").exists()
+
+
+def test_whole_backup_succeeds_at_exact_block_accounted_total_cap(tmp_path: Path) -> None:
+    block_size = 4096
+    client = OneObjectS3()
+    config = make_config(tmp_path)
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        minio=Boto3MinioMirror(
+            client_factory=lambda *_args, **_kwargs: client,
+            disk_reserve_bytes=0,
+            inode_reserve=0,
+        ),
+        now=lambda: FIXED_NOW,
+        max_postgres_bytes=len(POSTGRES_BYTES),
+        max_total_bytes=16 * block_size,
+        disk_reserve_bytes=0,
+        inode_reserve=0,
+        capacity_provider=lambda _path: backup_module._CapacitySnapshot(
+            free_bytes=1_000_000,
+            free_inodes=1_000_000,
+            block_size=block_size,
+        ),
+    )
+
+    backup = creator.create(make_request())
+
+    assert backup.manifest_path.is_file()
+    assert (backup.manifest_path.parent.parent / "latest").is_symlink()
+
+
+def test_whole_backup_rejects_one_byte_below_block_accounted_total_cap(
+    tmp_path: Path,
+) -> None:
+    block_size = 4096
+    config = make_config(tmp_path)
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        minio=Boto3MinioMirror(
+            client_factory=lambda *_args, **_kwargs: OneObjectS3(),
+            disk_reserve_bytes=0,
+            inode_reserve=0,
+        ),
+        now=lambda: FIXED_NOW,
+        max_postgres_bytes=len(POSTGRES_BYTES),
+        max_total_bytes=(16 * block_size) - 1,
+        disk_reserve_bytes=0,
+        inode_reserve=0,
+        capacity_provider=lambda _path: backup_module._CapacitySnapshot(
+            free_bytes=1_000_000,
+            free_inodes=1_000_000,
+            block_size=block_size,
+        ),
+    )
+
+    with pytest.raises(BackupError):
+        creator.create(make_request())
+
+    backups_root = config.rollout_root / "backups"
+    assert not (backups_root / "latest").exists()
+    assert not list(backups_root.glob("*/backup-manifest.json"))
+
+
 def test_manifest_is_pending_until_validation_and_failure_cleans_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -481,6 +978,49 @@ def test_manifest_is_pending_until_validation_and_failure_cleans_it(
     assert list(bundle_root.glob(".backup-manifest.*")) == []
     assert not (bundle_root.parent / "latest").exists()
     assert "untrusted-value-that-must-not-escape" not in str(exc_info.value)
+
+
+def test_create_fails_closed_when_shared_manifest_traversal_limit_is_exceeded(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        minio=SuccessfulMinioMirror(),
+        now=lambda: FIXED_NOW,
+        traversal_limits=BackupTraversalLimits(max_files=5),
+    )
+
+    with pytest.raises(BackupError, match="manifest_write_failed"):
+        creator.create(make_request())
+
+    bundle_root = config.rollout_root / "backups" / "20260713T200000Z-stg-20260713-abcdef12"
+    assert not (bundle_root / "backup-manifest.json").exists()
+    assert not list(bundle_root.glob(".backup-manifest.*"))
+    assert not (bundle_root.parent / "latest").exists()
+
+
+def test_shared_entry_cap_stops_before_starting_postgres_command(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    runner = RecordingRunner()
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=runner,
+        minio=SuccessfulMinioMirror(),
+        now=lambda: FIXED_NOW,
+        traversal_limits=BackupTraversalLimits(max_entries=5),
+    )
+
+    with pytest.raises(BackupError, match="postgres_dump_failed"):
+        creator.create(make_request())
+
+    assert runner.argvs == []
+    backups_root = config.rollout_root / "backups"
+    assert not (backups_root / "latest").exists()
+    assert not list(backups_root.glob("*/backup-manifest.json"))
 
 
 class UnstoppablePortForward(RecordingPortForward):
@@ -557,6 +1097,92 @@ def test_resume_revalidates_exact_old_backup_without_creating_another(tmp_path: 
     assert sorted(path.name for path in backups_root.iterdir()) == roots_before
 
 
+def test_resume_fails_closed_when_shared_traversal_limit_is_exceeded(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    backup = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        minio=SuccessfulMinioMirror(),
+        now=lambda: FIXED_NOW,
+    ).create(make_request())
+    runner = RecordingRunner()
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=runner,
+        minio=SuccessfulMinioMirror(),
+        now=lambda: FIXED_NOW,
+        traversal_limits=BackupTraversalLimits(max_files=1),
+    )
+
+    with pytest.raises(BackupError, match="backup_revalidation_failed"):
+        creator.revalidate(backup, enforce_freshness=False)
+
+    assert runner.argvs == []
+    assert backup.manifest_path.is_file()
+
+
+def test_revalidate_detects_component_mutation_without_running_commands(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    backup = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        minio=SuccessfulMinioMirror(),
+        now=lambda: FIXED_NOW,
+    ).create(make_request())
+    object_path = backup.manifest_path.parent / "minio" / "loom-staging-trajectories" / "object.bin"
+    original = object_path.read_bytes()
+    object_path.write_bytes(b"x" * len(original))
+    object_path.chmod(0o600)
+    runner = RecordingRunner()
+
+    with pytest.raises(BackupError, match="backup_revalidation_failed"):
+        BackupCreator(
+            config,
+            service_uid=os.getuid(),
+            runner=runner,
+            minio=SuccessfulMinioMirror(),
+            now=lambda: FIXED_NOW,
+        ).revalidate(backup, enforce_freshness=False)
+
+    assert runner.argvs == []
+
+
+def test_revalidate_rejects_supplied_manifest_digest_mismatch_without_commands(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    backup = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        minio=SuccessfulMinioMirror(),
+        now=lambda: FIXED_NOW,
+    ).create(make_request())
+    mismatched = VerifiedBackup(
+        manifest_path=backup.manifest_path,
+        manifest_sha256="0" * 64,
+    )
+    runner = RecordingRunner()
+
+    with pytest.raises(BackupError, match="backup_manifest_digest_mismatch"):
+        BackupCreator(
+            config,
+            service_uid=os.getuid(),
+            runner=runner,
+            minio=SuccessfulMinioMirror(),
+            now=lambda: FIXED_NOW,
+        ).revalidate(mismatched, enforce_freshness=False)
+
+    assert runner.argvs == []
+
+
 def test_resume_rejects_symlinked_snapshot_ancestor_without_commands(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     backup = BackupCreator(
@@ -623,6 +1249,62 @@ def test_backup_root_parent_non_directory_is_rejected_before_commands(tmp_path: 
         creator.create(make_request())
 
     assert backups_path.read_bytes() == b"not-a-directory"
+    assert runner.argvs == []
+
+
+def test_new_backups_fd_is_closed_when_parent_fsync_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config(tmp_path)
+    real_open = backup_module.os.open
+    real_close = backup_module.os.close
+    real_fsync = backup_module.os.fsync
+    rollout_fd: int | None = None
+    backups_fd: int | None = None
+    closed: list[int] = []
+
+    def recording_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal rollout_fd, backups_fd
+        fd = real_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
+        if path == config.rollout_root.name:
+            rollout_fd = fd
+        elif path == "backups":
+            backups_fd = fd
+        return fd
+
+    def failing_fsync(fd: int) -> None:
+        if fd == rollout_fd and backups_fd is not None:
+            raise OSError("injected parent fsync failure")
+        real_fsync(fd)
+
+    def recording_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(backup_module.os, "open", recording_open)
+    monkeypatch.setattr(backup_module.os, "fsync", failing_fsync)
+    monkeypatch.setattr(backup_module.os, "close", recording_close)
+    runner = RecordingRunner()
+
+    with pytest.raises(BackupError, match="backup_root_create_failed"):
+        BackupCreator(
+            config,
+            service_uid=os.getuid(),
+            runner=runner,
+            minio=SuccessfulMinioMirror(),
+            now=lambda: FIXED_NOW,
+            disk_reserve_bytes=0,
+            inode_reserve=0,
+            capacity_provider=lambda _path: backup_module._CapacitySnapshot(
+                free_bytes=1_000_000,
+                free_inodes=1_000_000,
+                block_size=1,
+            ),
+        ).create(make_request())
+
+    assert backups_fd is not None
+    assert backups_fd in closed
     assert runner.argvs == []
 
 
@@ -1036,13 +1718,32 @@ def test_subprocess_port_forward_wrapper_failure_reaps_child(
 def test_subprocess_runner_applies_explicit_command_timeouts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[list[str], dict[str, object]]] = []
+    run_calls: list[tuple[list[str], dict[str, object]]] = []
+    popen_calls: list[tuple[list[str], dict[str, object]]] = []
+
+    class SuccessfulProcess:
+        def __init__(self) -> None:
+            self.stdout = io.BytesIO(b"streamed")
+
+        def wait(self, timeout: float) -> int:
+            assert timeout == 5.0
+            return 0
+
+        def kill(self) -> None:
+            raise AssertionError("successful process was killed")
+
+        def terminate(self) -> None:
+            raise AssertionError("successful process was terminated")
+
+    def fake_popen(argv: list[str], **kwargs: object) -> SuccessfulProcess:
+        popen_calls.append((argv, dict(kwargs)))
+        return SuccessfulProcess()
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        calls.append((argv, dict(kwargs)))
-        stdout = b"captured" if kwargs["stdout"] == subprocess.PIPE else None
-        return subprocess.CompletedProcess(argv, 0, stdout=stdout)
+        run_calls.append((argv, dict(kwargs)))
+        return subprocess.CompletedProcess(argv, 0, stdout=b"captured")
 
+    monkeypatch.setattr(backup_module.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(backup_module.subprocess, "run", fake_run)
     runner = SubprocessBackupCommandRunner()
     sink = io.BytesIO()
@@ -1059,19 +1760,66 @@ def test_subprocess_runner_applies_explicit_command_timeouts(
         timeout_seconds=30.0,
     )
 
+    assert sink.getvalue() == b"streamed"
     assert captured == b"captured"
-    assert [kwargs["timeout"] for _, kwargs in calls] == [600.0, 30.0]
-    assert all(kwargs["stderr"] == subprocess.DEVNULL for _, kwargs in calls)
+    assert popen_calls[0][1]["stdout"] == subprocess.PIPE
+    assert popen_calls[0][1]["stderr"] == subprocess.DEVNULL
+    assert run_calls[0][1]["timeout"] == 30.0
+    assert run_calls[0][1]["stderr"] == subprocess.DEVNULL
+
+
+def test_subprocess_stream_timeout_kills_and_reaps_child() -> None:
+    started = time.monotonic()
+
+    with pytest.raises(RuntimeError, match="backup command failed"):
+        SubprocessBackupCommandRunner().stream_stdout(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            io.BytesIO(),
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            timeout_seconds=0.01,
+        )
+
+    assert time.monotonic() - started < 1.0
+
+
+def test_subprocess_runner_pumps_stdout_through_budgetable_sink() -> None:
+    class NoDirectFileDescriptor(io.BytesIO):
+        def fileno(self) -> int:
+            raise AssertionError("subprocess stdout bypassed the guarded writer")
+
+    sink = NoDirectFileDescriptor()
+
+    SubprocessBackupCommandRunner().stream_stdout(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'chunked')"],
+        sink,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+        timeout_seconds=2.0,
+    )
+
+    assert sink.getvalue() == b"chunked"
 
 
 def test_subprocess_runner_rejects_nonzero_exit_without_stderr_capture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fail(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        assert kwargs["stderr"] == subprocess.DEVNULL
-        return subprocess.CompletedProcess(argv, 1)
+    class FailedProcess:
+        def __init__(self) -> None:
+            self.stdout = io.BytesIO(b"")
 
-    monkeypatch.setattr(backup_module.subprocess, "run", fail)
+        def wait(self, timeout: float) -> int:
+            return 1
+
+        def terminate(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            return None
+
+    def fail(argv: list[str], **kwargs: object) -> FailedProcess:
+        assert kwargs["stderr"] == subprocess.DEVNULL
+        return FailedProcess()
+
+    monkeypatch.setattr(backup_module.subprocess, "Popen", fail)
 
     with pytest.raises(RuntimeError, match="backup command failed"):
         SubprocessBackupCommandRunner().stream_stdout(
@@ -1246,6 +1994,124 @@ class LifecyclePortForward(RecordingPortForward):
         self.events = events
 
 
+class DeadlineBody:
+    def __init__(self, events: list[str], entered: threading.Event) -> None:
+        self.events = events
+        self.entered = entered
+        self.closed = False
+        self.read_calls = 0
+        self.released = threading.Event()
+
+    def read(self, _amount: int) -> bytes:
+        self.read_calls += 1
+        if self.read_calls == 1:
+            return b"x"
+        self.entered.set()
+        if not self.released.wait(1.0):
+            raise AssertionError("deadline did not asynchronously close the body")
+        raise OSError("body closed at deadline")
+
+    def close(self) -> None:
+        if not self.closed:
+            self.events.append("body_close")
+            self.closed = True
+            self.released.set()
+
+
+class DeadlineS3(LifecycleS3):
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        stage: str,
+        entered: threading.Event,
+    ) -> None:
+        super().__init__(events)
+        self.stage = stage
+        self.entered = entered
+        self.released = threading.Event()
+        self.closed = False
+        self.body = DeadlineBody(events, entered)
+
+    def _block(self) -> None:
+        self.entered.set()
+        if not self.released.wait(1.0):
+            raise AssertionError("deadline did not asynchronously close the client")
+        raise OSError("client closed at deadline")
+
+    def list_objects_v2(self, **_kwargs: str) -> dict[str, object]:
+        if self.stage == "list":
+            self._block()
+        return {"Contents": [{"Key": "object.bin"}], "IsTruncated": False}
+
+    def get_object(self, **_kwargs: str) -> dict[str, object]:
+        if self.stage == "get":
+            self._block()
+        return {"Body": self.body, "ContentLength": 4}
+
+    def close(self) -> None:
+        if not self.closed:
+            self.events.append("client_close")
+            self.closed = True
+            self.released.set()
+
+
+class DeadlinePortForward(RecordingPortForward):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self.events = events
+
+    def close(self) -> None:
+        self.events.append("port_forward_close")
+
+
+@pytest.mark.parametrize("stage", ["list", "get", "read"])
+def test_minio_wall_clock_deadline_interrupts_blocking_io_and_cleans_everything(
+    tmp_path: Path,
+    stage: str,
+) -> None:
+    events: list[str] = []
+    entered = threading.Event()
+    client = DeadlineS3(events, stage=stage, entered=entered)
+    port_forward = DeadlinePortForward(events)
+
+    def expire_after_block(stop: threading.Event, _timeout_seconds: float) -> bool:
+        assert entered.wait(1.0)
+        return stop.is_set()
+
+    mirror = Boto3MinioMirror(
+        client_factory=lambda *_args, **_kwargs: client,
+        timeout_seconds=0.01,
+        deadline_waiter=expire_after_block,
+        cancellation_grace_seconds=0.5,
+    )
+    config = make_config(tmp_path)
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(port_forward=port_forward),
+        minio=mirror,
+        now=lambda: FIXED_NOW,
+    )
+
+    started = time.monotonic()
+    with pytest.raises(BackupError, match="minio_snapshot_failed"):
+        creator.create(make_request())
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0
+    assert client.closed
+    if stage == "read":
+        assert client.body.closed
+        assert events.index("body_close") < events.index("client_close")
+    assert events.index("client_close") < events.index("terminate")
+    assert events[-3:] == ["terminate", "wait:5.0", "port_forward_close"]
+    backups_root = config.rollout_root / "backups"
+    assert not (backups_root / "latest").exists()
+    assert list(backups_root.glob("*/backup-manifest.json")) == []
+    assert list(backups_root.rglob("*.part")) == []
+
+
 def test_boto_client_closes_before_port_forward_cleanup(tmp_path: Path) -> None:
     events: list[str] = []
     client = LifecycleS3(events)
@@ -1289,6 +2155,225 @@ def test_boto_client_close_failure_is_fail_closed(tmp_path: Path) -> None:
     assert events == ["client_close"]
 
 
+def test_boto_watchdog_start_failure_still_closes_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    client = LifecycleS3(events)
+    destination = tmp_path / "minio"
+    destination.mkdir(mode=0o700)
+
+    def fail_start(_thread: object) -> None:
+        raise RuntimeError("thread resources exhausted")
+
+    monkeypatch.setattr(backup_module.threading.Thread, "start", fail_start)
+
+    with pytest.raises(RuntimeError, match="thread resources exhausted"):
+        Boto3MinioMirror(client_factory=lambda *_args, **_kwargs: client).mirror(
+            endpoint_url="http://127.0.0.1:19000",
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            buckets=("loom-staging-trajectories", "loom-staging-artifacts"),
+            destination=destination,
+        )
+
+    assert events == ["client_close"]
+
+
+def test_boto_closes_body_when_content_length_is_malformed(tmp_path: Path) -> None:
+    events: list[str] = []
+
+    class MalformedLengthS3(LifecycleS3):
+        def __init__(self) -> None:
+            super().__init__(events)
+            self.body = FakeStreamingBody(b"never-read")
+
+        def list_objects_v2(self, **_kwargs: str) -> dict[str, object]:
+            return {"Contents": [{"Key": "object.bin"}], "IsTruncated": False}
+
+        def get_object(self, **_kwargs: str) -> dict[str, object]:
+            return {"Body": self.body, "ContentLength": "secret-invalid"}
+
+    client = MalformedLengthS3()
+    destination = tmp_path / "minio"
+    destination.mkdir(mode=0o700)
+
+    with pytest.raises(ValueError, match="content length is malformed"):
+        Boto3MinioMirror(client_factory=lambda *_args, **_kwargs: client).mirror(
+            endpoint_url="http://127.0.0.1:19000",
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            buckets=("loom-staging-trajectories", "loom-staging-artifacts"),
+            destination=destination,
+        )
+
+    assert client.body.closed
+    assert events == ["client_close"]
+
+
+def test_deadline_rejects_nominal_success_returned_after_expiry(
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+
+    class ReturnsAfterCloseS3:
+        def __init__(self) -> None:
+            self.released = threading.Event()
+            self.closed = False
+
+        def list_objects_v2(self, **_kwargs: str) -> dict[str, object]:
+            entered.set()
+            assert self.released.wait(1.0)
+            return {"Contents": [], "IsTruncated": False}
+
+        def close(self) -> None:
+            self.closed = True
+            self.released.set()
+
+    client = ReturnsAfterCloseS3()
+
+    def expire_after_call_starts(stop: threading.Event, _timeout: float) -> bool:
+        assert entered.wait(1.0)
+        return stop.is_set()
+
+    destination = tmp_path / "minio"
+    destination.mkdir(mode=0o700)
+    mirror = Boto3MinioMirror(
+        client_factory=lambda *_args, **_kwargs: client,
+        deadline_waiter=expire_after_call_starts,
+        cancellation_grace_seconds=0.5,
+    )
+
+    with pytest.raises(ValueError, match="total deadline"):
+        mirror.mirror(
+            endpoint_url="http://127.0.0.1:19000",
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            buckets=("loom-staging-trajectories", "loom-staging-artifacts"),
+            destination=destination,
+        )
+
+    assert client.closed
+
+
+def test_deadline_cleanup_failure_is_fail_closed_without_publication(
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+
+    class ReturnsAfterCloseS3:
+        def __init__(self) -> None:
+            self.released = threading.Event()
+
+        def list_objects_v2(self, **_kwargs: str) -> dict[str, object]:
+            entered.set()
+            assert self.released.wait(1.0)
+            return {"Contents": [], "IsTruncated": False}
+
+        def close(self) -> None:
+            self.released.set()
+
+    class FailingCleanupPortForward(RecordingPortForward):
+        def wait(self, timeout_seconds: float) -> bool:
+            self.events.append(f"wait:{timeout_seconds}")
+            return False
+
+        def close(self) -> None:
+            self.events.append("port_forward_close")
+            raise RuntimeError("sensitive cleanup detail")
+
+    def expire_after_call_starts(stop: threading.Event, _timeout: float) -> bool:
+        assert entered.wait(1.0)
+        return stop.is_set()
+
+    client = ReturnsAfterCloseS3()
+    port_forward = FailingCleanupPortForward()
+    mirror = Boto3MinioMirror(
+        client_factory=lambda *_args, **_kwargs: client,
+        deadline_waiter=expire_after_call_starts,
+        cancellation_grace_seconds=0.5,
+    )
+    config = make_config(tmp_path)
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(port_forward=port_forward),
+        minio=mirror,
+        now=lambda: FIXED_NOW,
+    )
+
+    with pytest.raises(BackupError, match="minio_snapshot_failed") as exc_info:
+        creator.create(make_request())
+
+    assert "sensitive" not in str(exc_info.value)
+    assert port_forward.events[-5:] == [
+        "terminate",
+        "wait:5.0",
+        "kill",
+        "wait:5.0",
+        "port_forward_close",
+    ]
+    backups_root = config.rollout_root / "backups"
+    assert not (backups_root / "latest").exists()
+    assert not list(backups_root.glob("*/backup-manifest.json"))
+
+
+def test_deadline_waits_for_in_progress_exact_port_forward_cleanup(
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+
+    class ReturnsAfterCloseS3:
+        def __init__(self) -> None:
+            self.released = threading.Event()
+
+        def list_objects_v2(self, **_kwargs: str) -> dict[str, object]:
+            entered.set()
+            assert self.released.wait(1.0)
+            return {"Contents": [], "IsTruncated": False}
+
+        def close(self) -> None:
+            self.released.set()
+
+    class SlowCleanupPortForward(RecordingPortForward):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cleanup_complete = threading.Event()
+
+        def wait(self, timeout_seconds: float) -> bool:
+            self.events.append(f"wait:{timeout_seconds}")
+            time.sleep(0.2)
+            return True
+
+        def close(self) -> None:
+            self.cleanup_complete.set()
+
+    def expire_after_call_starts(stop: threading.Event, _timeout: float) -> bool:
+        assert entered.wait(1.0)
+        return stop.is_set()
+
+    port_forward = SlowCleanupPortForward()
+    config = make_config(tmp_path)
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(port_forward=port_forward),
+        minio=Boto3MinioMirror(
+            client_factory=lambda *_args, **_kwargs: ReturnsAfterCloseS3(),
+            deadline_waiter=expire_after_call_starts,
+            cancellation_grace_seconds=0.01,
+        ),
+        now=lambda: FIXED_NOW,
+    )
+
+    with pytest.raises(BackupError, match="minio_snapshot_failed"):
+        creator.create(make_request())
+
+    assert port_forward.cleanup_complete.is_set()
+    assert not (config.rollout_root / "backups" / "latest").exists()
+
+
 class EndlessListingS3(LifecycleS3):
     def __init__(self, events: list[str]) -> None:
         super().__init__(events)
@@ -1312,10 +2397,10 @@ def test_boto_mirror_has_total_page_bound(tmp_path: Path) -> None:
         client_factory=lambda *_args, **_kwargs: client,
         max_pages=2,
         max_objects=10,
-        max_total_bytes=100,
+        max_total_bytes=100_000,
         timeout_seconds=60.0,
         disk_reserve_bytes=0,
-        available_bytes=lambda _path: 1000,
+        available_bytes=lambda _path: 1_000_000,
         monotonic=lambda: 0.0,
     )
 
@@ -1365,26 +2450,28 @@ def test_boto_mirror_rejects_declared_bytes_over_disk_aware_budget(
     tmp_path: Path,
 ) -> None:
     events: list[str] = []
+    destination = tmp_path / "minio"
+    destination.mkdir(mode=0o700)
+    values = os.statvfs(destination)
+    block_size = values.f_frsize or values.f_bsize
 
     class OversizedDeclaredObjectS3(LifecycleS3):
         def __init__(self) -> None:
             super().__init__(events)
-            self.body = FakeStreamingBody(b"xx")
+            self.body = FakeStreamingBody(b"x")
 
         def list_objects_v2(self, **_kwargs: str) -> dict[str, object]:
             return {"Contents": [{"Key": "object.bin"}], "IsTruncated": False}
 
         def get_object(self, **_kwargs: str) -> dict[str, object]:
-            return {"Body": self.body, "ContentLength": 2}
+            return {"Body": self.body, "ContentLength": block_size + 1}
 
     client = OversizedDeclaredObjectS3()
-    destination = tmp_path / "minio"
-    destination.mkdir(mode=0o700)
     mirror = Boto3MinioMirror(
         client_factory=lambda *_args, **_kwargs: client,
-        max_total_bytes=1000,
-        disk_reserve_bytes=2,
-        available_bytes=lambda _path: 3,
+        max_total_bytes=100_000,
+        disk_reserve_bytes=block_size,
+        available_bytes=lambda _path: 2 * block_size,
     )
 
     with pytest.raises(ValueError, match="byte limit"):
@@ -1422,7 +2509,7 @@ def test_boto_mirror_has_total_object_bound(tmp_path: Path) -> None:
         client_factory=lambda *_args, **_kwargs: client,
         max_objects=1,
         disk_reserve_bytes=0,
-        available_bytes=lambda _path: 1000,
+        available_bytes=lambda _path: 100_000,
     )
 
     with pytest.raises(ValueError, match="object limit"):

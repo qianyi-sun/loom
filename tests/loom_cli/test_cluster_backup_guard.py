@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from loom_cli.__main__ import main
 from loom_cli.cluster_backup_guard import (
     REQUIRED_BACKUP_COMPONENTS,
+    BackupTraversalLimits,
+    backup_manifest_created_at,
+    backup_manifest_sha256,
     infer_environment,
     validate_backup_manifest,
     write_backup_manifest,
@@ -52,6 +57,45 @@ def _write_private_bundle(
         now=created_at,
     )
     return manifest_path
+
+
+def _write_bounded_components(root: Path) -> dict[str, Path]:
+    root.mkdir(mode=0o700)
+    postgres = root / "postgres.dump"
+    postgres.write_bytes(b"p")
+    postgres.chmod(0o600)
+    minio = root / "minio"
+    minio.mkdir(mode=0o700)
+    nested = minio / "a"
+    nested.mkdir(mode=0o700)
+    nested_object = nested / "x"
+    nested_object.write_bytes(b"x")
+    nested_object.chmod(0o600)
+    sibling_object = minio / "a-file"
+    sibling_object.write_bytes(b"a")
+    sibling_object.chmod(0o600)
+    secrets = root / "secrets.yaml"
+    secrets.write_bytes(b"s")
+    secrets.chmod(0o600)
+    return {
+        "postgres": postgres,
+        "minio": minio,
+        "k8s_secrets": secrets,
+    }
+
+
+def _bounded_limits(**overrides: Any) -> BackupTraversalLimits:
+    values: dict[str, Any] = {
+        "max_files": 4,
+        "max_entries": 6,
+        "max_total_bytes": 4,
+        "max_depth": 2,
+        "max_directory_entries": 2,
+        "max_elapsed_seconds": 60.0,
+        "max_manifest_bytes": 1024 * 1024,
+    }
+    values.update(overrides)
+    return BackupTraversalLimits(**values)
 
 
 @pytest.mark.parametrize(
@@ -516,6 +560,681 @@ def test_default_integrity_recomputes_directory_and_kind_metadata(
     )
 
     assert problems
+
+
+def test_backup_traversal_succeeds_at_every_exact_limit(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    components = _write_bounded_components(root)
+    limits = _bounded_limits()
+    manifest_path = root / "backup-manifest.json"
+
+    manifest = write_backup_manifest(
+        environment="staging",
+        namespace="loom-staging",
+        output_path=manifest_path,
+        components=components,
+        limits=limits,
+    )
+
+    assert manifest["components"]["minio"]["file_count"] == 2
+    assert (
+        validate_backup_manifest(
+            manifest_path,
+            environment="staging",
+            namespace="loom-staging",
+            expected_owner_uid=os.getuid(),
+            require_private_files=True,
+            limits=limits,
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize("duration", [float("inf"), float("nan")])
+def test_backup_traversal_limits_reject_non_finite_deadline(duration: float) -> None:
+    with pytest.raises(ValueError, match="max_elapsed_seconds"):
+        BackupTraversalLimits(max_elapsed_seconds=duration)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"max_files": 3}, "file count limit"),
+        ({"max_entries": 5}, "entry count limit"),
+        ({"max_total_bytes": 3}, "byte limit"),
+        ({"max_depth": 1}, "depth limit"),
+    ],
+    ids=("file-count", "entry-count", "byte-count", "depth"),
+)
+def test_write_backup_manifest_fails_closed_when_traversal_limit_is_exceeded(
+    tmp_path: Path,
+    overrides: dict[str, int],
+    expected: str,
+) -> None:
+    root = tmp_path / "bundle"
+    components = _write_bounded_components(root)
+    manifest_path = root / "backup-manifest.json"
+
+    with pytest.raises(ValueError, match=expected):
+        write_backup_manifest(
+            environment="staging",
+            namespace="loom-staging",
+            output_path=manifest_path,
+            components=components,
+            limits=_bounded_limits(**overrides),
+        )
+
+    assert not manifest_path.exists()
+
+
+def test_write_backup_manifest_fails_closed_when_deadline_is_exceeded(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundle"
+    components = _write_bounded_components(root)
+    readings = iter((0.0, 0.0, 2.0))
+
+    def monotonic() -> float:
+        return next(readings, 2.0)
+
+    with pytest.raises(ValueError, match="deadline"):
+        write_backup_manifest(
+            environment="staging",
+            namespace="loom-staging",
+            output_path=root / "backup-manifest.json",
+            components=components,
+            limits=_bounded_limits(
+                max_elapsed_seconds=1.0,
+                monotonic=monotonic,
+            ),
+        )
+
+
+def test_directory_window_stops_after_limit_plus_one_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "bundle"
+    components = _write_bounded_components(root)
+    minio = components["minio"]
+    for name in ("b", "c"):
+        path = minio / name
+        path.write_bytes(name.encode("utf-8"))
+        path.chmod(0o600)
+    real_scandir = os.scandir
+    yielded = 0
+
+    class CountingScandir:
+        def __init__(self, directory_fd: int) -> None:
+            self._iterator = real_scandir(directory_fd)
+
+        def __enter__(self) -> CountingScandir:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self._iterator.close()
+
+        def __iter__(self) -> CountingScandir:
+            return self
+
+        def close(self) -> None:
+            self._iterator.close()
+
+        def __next__(self) -> os.DirEntry[str]:
+            nonlocal yielded
+            entry = next(self._iterator)
+            yielded += 1
+            return entry
+
+    def counting_scandir(directory_fd: int) -> CountingScandir:
+        return CountingScandir(directory_fd)
+
+    def reject_unbounded_listdir(_path: object) -> list[str]:
+        raise AssertionError("unbounded directory inventory is not allowed")
+
+    monkeypatch.setattr(os, "scandir", counting_scandir)
+    monkeypatch.setattr(os, "listdir", reject_unbounded_listdir)
+
+    with pytest.raises(ValueError, match="directory entry limit"):
+        write_backup_manifest(
+            environment="staging",
+            namespace="loom-staging",
+            output_path=root / "backup-manifest.json",
+            components=components,
+            limits=_bounded_limits(
+                max_files=10,
+                max_entries=20,
+                max_total_bytes=10,
+                max_directory_entries=2,
+            ),
+        )
+
+    assert yielded == 3
+
+
+def test_nested_directory_windows_reserve_shared_entry_budget_while_retained(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "bundle"
+    components = _write_bounded_components(root)
+    minio = components["minio"]
+    nested = minio / "a"
+    for directory, names in (
+        (minio, ("z1", "z2")),
+        (nested, ("y1", "y2", "y3")),
+    ):
+        for name in names:
+            path = directory / name
+            path.write_bytes(name.encode("utf-8"))
+            path.chmod(0o600)
+    real_scandir = os.scandir
+    yielded = 0
+
+    class CountingScandir:
+        def __init__(self, directory_fd: int) -> None:
+            self._iterator = real_scandir(directory_fd)
+
+        def __enter__(self) -> CountingScandir:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self._iterator.close()
+
+        def __iter__(self) -> CountingScandir:
+            return self
+
+        def close(self) -> None:
+            self._iterator.close()
+
+        def __next__(self) -> os.DirEntry[str]:
+            nonlocal yielded
+            entry = next(self._iterator)
+            yielded += 1
+            return entry
+
+    monkeypatch.setattr(os, "scandir", CountingScandir)
+
+    with pytest.raises(ValueError, match="entry count limit"):
+        write_backup_manifest(
+            environment="staging",
+            namespace="loom-staging",
+            output_path=root / "backup-manifest.json",
+            components=components,
+            limits=_bounded_limits(
+                max_files=20,
+                max_entries=7,
+                max_total_bytes=20,
+                max_directory_entries=10,
+            ),
+        )
+
+    assert yielded == 6
+
+
+def test_component_wise_directory_order_matches_schema_one_digest_and_validator(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundle"
+    components = _write_bounded_components(root)
+    manifest_path = root / "backup-manifest.json"
+    manifest = write_backup_manifest(
+        environment="staging",
+        namespace="loom-staging",
+        output_path=manifest_path,
+        components=components,
+        limits=_bounded_limits(),
+    )
+    expected = hashlib.sha256()
+    for relative, payload in (("a/x", b"x"), ("a-file", b"a")):
+        expected.update(relative.encode("utf-8"))
+        expected.update(b"\0")
+        expected.update(hashlib.sha256(payload).digest())
+
+    assert manifest["components"]["minio"]["sha256"] == expected.hexdigest()
+    assert (
+        validate_backup_manifest(
+            manifest_path,
+            environment="staging",
+            namespace="loom-staging",
+            expected_owner_uid=os.getuid(),
+            require_private_files=True,
+            limits=_bounded_limits(),
+        )
+        == []
+    )
+
+
+def test_strict_validation_fails_closed_on_traversal_limit(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    components = _write_bounded_components(root)
+    manifest_path = root / "backup-manifest.json"
+    write_backup_manifest(
+        environment="staging",
+        namespace="loom-staging",
+        output_path=manifest_path,
+        components=components,
+    )
+
+    problems = validate_backup_manifest(
+        manifest_path,
+        environment="staging",
+        namespace="loom-staging",
+        expected_owner_uid=os.getuid(),
+        require_private_files=True,
+        limits=_bounded_limits(max_files=3),
+    )
+
+    assert any("file count limit" in problem for problem in problems)
+
+
+def test_strict_validation_rejects_directory_mutation_during_walk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "bundle"
+    components = _write_bounded_components(root)
+    manifest_path = root / "backup-manifest.json"
+    write_backup_manifest(
+        environment="staging",
+        namespace="loom-staging",
+        output_path=manifest_path,
+        components=components,
+    )
+    target = root / "minio" / "a-file"
+    target_inode = target.stat().st_ino
+    real_read = os.read
+    mutated = False
+
+    def mutating_read(fd: int, size: int) -> bytes:
+        nonlocal mutated
+        chunk = real_read(fd, size)
+        if chunk and not mutated and os.fstat(fd).st_ino == target_inode:
+            added = root / "minio" / "added-during-walk"
+            added.write_bytes(b"added")
+            added.chmod(0o600)
+            mutated = True
+        return chunk
+
+    monkeypatch.setattr(os, "read", mutating_read)
+
+    problems = validate_backup_manifest(
+        manifest_path,
+        environment="staging",
+        namespace="loom-staging",
+        expected_owner_uid=os.getuid(),
+        require_private_files=True,
+    )
+
+    assert mutated
+    assert any("changed during inspection" in problem for problem in problems)
+
+
+def test_manifest_writer_rejects_earlier_component_mutation_during_later_walk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "bundle"
+    components = _write_bounded_components(root)
+    earlier = components["k8s_secrets"]
+    target_inode = (components["minio"] / "a-file").stat().st_ino
+    real_read = os.read
+    mutated = False
+
+    def mutating_read(fd: int, size: int) -> bytes:
+        nonlocal mutated
+        chunk = real_read(fd, size)
+        if chunk and not mutated and os.fstat(fd).st_ino == target_inode:
+            earlier.write_bytes(b"n")
+            earlier.chmod(0o600)
+            mutated = True
+        return chunk
+
+    monkeypatch.setattr(os, "read", mutating_read)
+
+    with pytest.raises(ValueError, match="components changed during inspection"):
+        write_backup_manifest(
+            environment="staging",
+            namespace="loom-staging",
+            output_path=root / "backup-manifest.json",
+            components=components,
+        )
+
+    assert mutated
+
+
+def test_strict_validation_rejects_earlier_component_mutation_during_later_walk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "bundle"
+    components = _write_bounded_components(root)
+    manifest_path = root / "backup-manifest.json"
+    write_backup_manifest(
+        environment="staging",
+        namespace="loom-staging",
+        output_path=manifest_path,
+        components=components,
+    )
+    earlier = components["postgres"]
+    target_inode = (components["minio"] / "a-file").stat().st_ino
+    real_read = os.read
+    mutated = False
+
+    def mutating_read(fd: int, size: int) -> bytes:
+        nonlocal mutated
+        chunk = real_read(fd, size)
+        if chunk and not mutated and os.fstat(fd).st_ino == target_inode:
+            earlier.write_bytes(b"n")
+            earlier.chmod(0o600)
+            mutated = True
+        return chunk
+
+    monkeypatch.setattr(os, "read", mutating_read)
+
+    problems = validate_backup_manifest(
+        manifest_path,
+        environment="staging",
+        namespace="loom-staging",
+        expected_owner_uid=os.getuid(),
+        require_private_files=True,
+    )
+
+    assert mutated
+    assert any("components changed during inspection" in problem for problem in problems)
+
+
+@pytest.mark.parametrize("component", ["postgres", "minio", "k8s_secrets"])
+def test_strict_validation_rejects_manifest_root_replacement_during_component_walk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    component: str,
+) -> None:
+    root = tmp_path / "bundle"
+    components = _write_bounded_components(root)
+    manifest_path = root / "backup-manifest.json"
+    write_backup_manifest(
+        environment="staging",
+        namespace="loom-staging",
+        output_path=manifest_path,
+        components=components,
+    )
+    target = components[component]
+    if target.is_dir():
+        target = target / "a-file"
+    target_inode = target.stat().st_ino
+    manifest_payload = manifest_path.read_bytes()
+    real_read = os.read
+    mutated = False
+
+    def replacing_read(fd: int, size: int) -> bytes:
+        nonlocal mutated
+        chunk = real_read(fd, size)
+        if chunk and not mutated and os.fstat(fd).st_ino == target_inode:
+            root.rename(tmp_path / "original-bundle")
+            _write_bounded_components(root)
+            replacement_manifest = root / manifest_path.name
+            replacement_manifest.write_bytes(manifest_payload)
+            replacement_manifest.chmod(0o600)
+            mutated = True
+        return chunk
+
+    monkeypatch.setattr(os, "read", replacing_read)
+
+    problems = validate_backup_manifest(
+        manifest_path,
+        environment="staging",
+        namespace="loom-staging",
+        expected_owner_uid=os.getuid(),
+        require_private_files=True,
+    )
+
+    assert mutated
+    assert any("path changed during inspection" in problem for problem in problems)
+
+
+def test_strict_validation_rejects_manifest_mutation_during_component_walk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "bundle"
+    components = _write_bounded_components(root)
+    manifest_path = root / "backup-manifest.json"
+    write_backup_manifest(
+        environment="staging",
+        namespace="loom-staging",
+        output_path=manifest_path,
+        components=components,
+    )
+    target_inode = (components["minio"] / "a-file").stat().st_ino
+    original_payload = manifest_path.read_bytes()
+    changed_payload = original_payload.replace(b'"staging"', b'"STAGING"', 1)
+    assert len(changed_payload) == len(original_payload)
+    real_read = os.read
+    mutated = False
+
+    def mutating_read(fd: int, size: int) -> bytes:
+        nonlocal mutated
+        chunk = real_read(fd, size)
+        if chunk and not mutated and os.fstat(fd).st_ino == target_inode:
+            manifest_path.write_bytes(changed_payload)
+            manifest_path.chmod(0o600)
+            mutated = True
+        return chunk
+
+    monkeypatch.setattr(os, "read", mutating_read)
+
+    problems = validate_backup_manifest(
+        manifest_path,
+        environment="staging",
+        namespace="loom-staging",
+        expected_owner_uid=os.getuid(),
+        require_private_files=True,
+    )
+
+    assert mutated
+    assert any("manifest changed during inspection" in problem for problem in problems)
+
+
+@pytest.mark.parametrize("symlink_kind", ["component", "ancestor"])
+def test_manifest_writer_rejects_component_path_symlinks(
+    tmp_path: Path,
+    symlink_kind: str,
+) -> None:
+    real_root = tmp_path / "real-bundle"
+    components = _write_bounded_components(real_root)
+    if symlink_kind == "component":
+        target = components["minio"]
+        linked = real_root / "linked-minio"
+        linked.symlink_to(target.name)
+        components["minio"] = linked
+    else:
+        linked_root = tmp_path / "linked-bundle"
+        linked_root.symlink_to(real_root.name)
+        components = {
+            name: linked_root / path.relative_to(real_root) for name, path in components.items()
+        }
+
+    output_path = tmp_path / "backup-manifest.json"
+    with pytest.raises(ValueError, match="symlink"):
+        write_backup_manifest(
+            environment="staging",
+            namespace="loom-staging",
+            output_path=output_path,
+            components=components,
+        )
+
+    assert not output_path.exists()
+
+
+def test_manifest_encoding_is_bounded_before_output_callback(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    components = _write_bounded_components(root)
+    output_called = False
+
+    def write_output(_path: Path, _payload: bytes) -> None:
+        nonlocal output_called
+        output_called = True
+
+    with pytest.raises(ValueError, match="manifest size limit"):
+        write_backup_manifest(
+            environment="staging",
+            namespace="loom-staging",
+            output_path=root / "backup-manifest.json",
+            components=components,
+            limits=_bounded_limits(max_manifest_bytes=1),
+            write_output=write_output,
+        )
+
+    assert not output_called
+
+
+def test_manifest_output_callback_receives_single_bounded_payload(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    components = _write_bounded_components(root)
+    manifest_path = root / "backup-manifest.json"
+    payloads: list[bytes] = []
+
+    def write_output(path: Path, payload: bytes) -> None:
+        assert path == manifest_path
+        payloads.append(payload)
+        path.write_bytes(payload)
+
+    manifest = write_backup_manifest(
+        environment="staging",
+        namespace="loom-staging",
+        output_path=manifest_path,
+        components=components,
+        limits=_bounded_limits(),
+        write_output=write_output,
+    )
+
+    assert payloads == [manifest_path.read_bytes()]
+    assert json.loads(payloads[0]) == manifest
+    assert manifest_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_manifest_output_callback_cannot_persist_corrupted_payload(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    components = _write_bounded_components(root)
+    manifest_path = root / "backup-manifest.json"
+
+    def corrupt_output(path: Path, _payload: bytes) -> None:
+        path.write_bytes(b"{}")
+
+    with pytest.raises(ValueError, match="persisted payload does not match"):
+        write_backup_manifest(
+            environment="staging",
+            namespace="loom-staging",
+            output_path=manifest_path,
+            components=components,
+            write_output=corrupt_output,
+        )
+
+
+def test_manifest_output_callback_cannot_leave_symlink(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    components = _write_bounded_components(root)
+    manifest_path = root / "backup-manifest.json"
+    target = root / "manifest-target"
+
+    def symlink_output(path: Path, payload: bytes) -> None:
+        target.write_bytes(payload)
+        path.symlink_to(target.name)
+
+    with pytest.raises(ValueError, match="persisted safely"):
+        write_backup_manifest(
+            environment="staging",
+            namespace="loom-staging",
+            output_path=manifest_path,
+            components=components,
+            write_output=symlink_output,
+        )
+
+
+def test_manifest_output_parent_creation_does_not_follow_symlink_ancestor(
+    tmp_path: Path,
+) -> None:
+    components = _write_bounded_components(tmp_path / "bundle")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(outside.name)
+    output_path = linked / "missing" / "backup-manifest.json"
+
+    with pytest.raises(ValueError, match="symlink"):
+        write_backup_manifest(
+            environment="staging",
+            namespace="loom-staging",
+            output_path=output_path,
+            components=components,
+        )
+
+    assert not (outside / "missing").exists()
+
+
+def test_manifest_output_callback_returning_after_deadline_fails_closed(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundle"
+    components = _write_bounded_components(root)
+    manifest_path = root / "backup-manifest.json"
+    now = 0.0
+
+    def monotonic() -> float:
+        return now
+
+    def slow_output(path: Path, payload: bytes) -> None:
+        nonlocal now
+        path.write_bytes(payload)
+        now = 2.0
+
+    with pytest.raises(ValueError, match="deadline"):
+        write_backup_manifest(
+            environment="staging",
+            namespace="loom-staging",
+            output_path=manifest_path,
+            components=components,
+            limits=BackupTraversalLimits(
+                max_elapsed_seconds=1.0,
+                monotonic=monotonic,
+            ),
+            write_output=slow_output,
+        )
+
+
+def test_manifest_reads_and_digest_are_bounded(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    components = _write_bounded_components(root)
+    manifest_path = root / "backup-manifest.json"
+    write_backup_manifest(
+        environment="staging",
+        namespace="loom-staging",
+        output_path=manifest_path,
+        components=components,
+    )
+    limits = _bounded_limits(max_manifest_bytes=manifest_path.stat().st_size - 1)
+
+    problems = validate_backup_manifest(
+        manifest_path,
+        environment="staging",
+        namespace="loom-staging",
+        limits=limits,
+    )
+
+    assert any("manifest size limit" in problem for problem in problems)
+    with pytest.raises(ValueError, match="hashed safely"):
+        backup_manifest_sha256(
+            manifest_path,
+            expected_owner_uid=os.getuid(),
+            limits=limits,
+        )
+    with pytest.raises(ValueError, match="read safely"):
+        backup_manifest_created_at(
+            manifest_path,
+            expected_owner_uid=os.getuid(),
+            limits=limits,
+        )
 
 
 def test_directory_digest_is_independent_of_file_creation_order(tmp_path: Path) -> None:
