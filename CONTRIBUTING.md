@@ -235,8 +235,11 @@ have one place to audit them.
   `merge_group` event. Maintainers should prefer enabling GitHub merge queue
   over weakening strict required-check behavior when PR concurrency causes
   repeated behind-branch reruns.
-- **Selected Actions sources** restricts third-party actions to the
-  pinned allowlist; new actions are added by maintainer review.
+- **Selected Actions sources** restricts third-party actions to the repository
+  allowlist. Every remote `uses:` reference must also match the full commit SHA
+  and upstream version recorded in `config/ci-actions-lock.json`; run
+  `uv run python scripts/check_ci_action_pins.py` when adding or updating an
+  Action.
 - **Secret scanning** is enabled at the repo level.
 
 External pull requests for issue-scoped work go through the same review

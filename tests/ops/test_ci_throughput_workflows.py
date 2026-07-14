@@ -17,6 +17,13 @@ def _workflow(path: str) -> dict[str, Any]:
     return yaml.safe_load((REPO_ROOT / path).read_text(encoding="utf-8"))
 
 
+def _locked_action_sha(action: str) -> str:
+    lock = json.loads(
+        (REPO_ROOT / "config/ci-actions-lock.json").read_text(encoding="utf-8"),
+    )
+    return str(lock["actions"][action]["sha"])
+
+
 def _workflow_on(workflow: dict[str, Any]) -> dict[str, Any]:
     # PyYAML treats unquoted GitHub Actions key `on` as YAML 1.1 bool.
     return workflow.get("on", workflow.get(True))
@@ -738,5 +745,5 @@ def test_lint_and_static_caches_mypy() -> None:
     cache_step = steps[step_names.index("Cache mypy")]
 
     assert step_names.index("Cache mypy") < step_names.index("Mypy (strict)")
-    assert cache_step["uses"] == "actions/cache@v4"
+    assert cache_step["uses"] == f"actions/cache@{_locked_action_sha('actions/cache')}"
     assert cache_step["with"]["path"] == ".mypy_cache"

@@ -36,6 +36,13 @@ For public repository operation:
 - Keep GitHub Secret Scanning and Push Protection enabled.
 - Keep non-GitHub Actions explicitly allowed by policy instead of relying on
   unrestricted workflow sources.
+- Pin every remote workflow Action to an upstream-verified full commit SHA.
+  Keep the approved SHA and human-readable upstream version in
+  [`config/ci-actions-lock.json`](config/ci-actions-lock.json), retain the
+  version comment beside each `uses:` reference, and run
+  `uv run python scripts/check_ci_action_pins.py` when changing the lock.
+  New, mismatched, tag-based, expression-based, or stale Action references fail
+  the repository CI gate.
 - Scope environment secrets such as `HF_TOKEN` to protected environments, not
   broad repository secrets.
 - Keep external pull request workflows untrusted: no deployment, publishing,

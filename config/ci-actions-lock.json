@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "actions": {
+    "actions/cache": {
+      "sha": "0057852bfaa89a56745cba8c7296529d2fc39830",
+      "version": "v4"
+    },
+    "actions/checkout": {
+      "sha": "93cb6efe18208431cddfb8368fd83d5badbf9bfd",
+      "version": "v5"
+    },
+    "actions/download-artifact": {
+      "sha": "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+      "version": "v4"
+    },
+    "actions/setup-go": {
+      "sha": "40f1582b2485089dde7abd97c1529aa768e1baff",
+      "version": "v5"
+    },
+    "actions/upload-artifact": {
+      "sha": "ea165f8d65b6e75b540449e92b4886f43607fa02",
+      "version": "v4"
+    },
+    "astral-sh/setup-uv": {
+      "sha": "fac544c07dec837d0ccb6301d7b5580bf5edae39",
+      "version": "v8.2.0"
+    }
+  }
+}
