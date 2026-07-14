@@ -1454,7 +1454,21 @@ authority. The installer therefore resolves that candidate's declared
 constraints into the root-owned venv without editable installs. It does not
 use `--frozen`, which would always fail in a fresh checkout with no lockfile.
 A repeated install at the same source is a no-op; a newly merged source causes
-the service venv to be synchronized again.
+the service venv to be synchronized again. Immediately after `uv sync`, the
+installer opens uv's generated `/opt/loom-staging-runner/venv/.lock` without
+following symlinks, requires a regular root-owned file, converges it to mode
+`0600`, and only then validates the complete venv authority tree. A symlink,
+non-root owner, special file, or any other writable venv entry fails closed.
+An interrupted install is retried through the same boundary: the installer
+detects this exact root-owned regular lock-mode drift before full-tree readiness,
+enters its fail-closed install transaction, hardens the lock, and then resumes
+authority validation. It does not repair any other ownership or file-type drift.
+
+The service user-manager probe also constructs its clean
+`XDG_RUNTIME_DIR`/D-Bus/`PATH` environment *after* `sudo -u loom-rollout` via
+fixed `/usr/bin/env -i` and `/usr/bin/systemctl` paths. Ubuntu `sudo` may reset
+an environment attached to the outer `sudo` process, so moving those values
+outside the sudo boundary is unsupported and makes the probe fail closed.
 
 ```bash
 sudo ./scripts/ops/staging_rollout_host.py plan

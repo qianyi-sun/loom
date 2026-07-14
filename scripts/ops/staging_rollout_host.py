@@ -917,6 +917,98 @@ class HostSystem:
             raise InstallError("root venv Python authority is unsafe")
         return True
 
+    def _venv_lock_metadata(self, *, allow_absent: bool) -> os.stat_result | None:
+        """Return safe uv lock metadata without accepting a replaceable venv root."""
+        try:
+            venv_metadata = os.lstat(VENV)
+        except FileNotFoundError:
+            if allow_absent:
+                return None
+            raise InstallError("root venv lock is unavailable") from None
+        except OSError as exc:
+            raise InstallError("root venv metadata is unavailable") from exc
+        if (
+            not stat.S_ISDIR(venv_metadata.st_mode)
+            or stat.S_ISLNK(venv_metadata.st_mode)
+            or venv_metadata.st_uid != 0
+            or venv_metadata.st_gid != 0
+            or stat.S_IMODE(venv_metadata.st_mode) != 0o755
+        ):
+            raise InstallError("root venv metadata is unsafe")
+
+        lock_path = VENV / ".lock"
+        try:
+            path_metadata = os.lstat(lock_path)
+        except FileNotFoundError:
+            if allow_absent:
+                return None
+            raise InstallError("root venv lock is unavailable") from None
+        except OSError as exc:
+            raise InstallError("root venv lock is unavailable") from exc
+        if (
+            not stat.S_ISREG(path_metadata.st_mode)
+            or stat.S_ISLNK(path_metadata.st_mode)
+            or path_metadata.st_uid != 0
+            or path_metadata.st_gid != 0
+        ):
+            raise InstallError("root venv lock authority is unsafe")
+        return path_metadata
+
+    def venv_lock_requires_hardening(self) -> bool:
+        """Detect the one safe, installer-owned venv drift that may be repaired."""
+        metadata = self._venv_lock_metadata(allow_absent=True)
+        return bool(metadata is not None and stat.S_IMODE(metadata.st_mode) != 0o600)
+
+    def harden_venv_lock(self) -> None:
+        """Converge uv's synchronization lock before validating venv authority."""
+        path_metadata = self._venv_lock_metadata(allow_absent=False)
+        if path_metadata is None:  # pragma: no cover - allow_absent=False owns this invariant
+            raise InstallError("root venv lock is unavailable")
+
+        lock_path = VENV / ".lock"
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        try:
+            lock_fd = os.open(lock_path, flags)
+        except OSError as exc:
+            raise InstallError("root venv lock authority is unsafe") from exc
+        close_error: OSError | None = None
+        try:
+            opened_metadata = os.fstat(lock_fd)
+            if (
+                not stat.S_ISREG(opened_metadata.st_mode)
+                or opened_metadata.st_uid != 0
+                or opened_metadata.st_gid != 0
+                or (opened_metadata.st_dev, opened_metadata.st_ino)
+                != (path_metadata.st_dev, path_metadata.st_ino)
+            ):
+                raise InstallError("root venv lock authority is unsafe")
+            if stat.S_IMODE(opened_metadata.st_mode) != 0o600:
+                os.fchmod(lock_fd, 0o600)
+            hardened_metadata = os.fstat(lock_fd)
+            if (
+                not stat.S_ISREG(hardened_metadata.st_mode)
+                or hardened_metadata.st_uid != 0
+                or hardened_metadata.st_gid != 0
+                or stat.S_IMODE(hardened_metadata.st_mode) != 0o600
+                or (hardened_metadata.st_dev, hardened_metadata.st_ino)
+                != (path_metadata.st_dev, path_metadata.st_ino)
+            ):
+                raise InstallError("root venv lock hardening did not converge")
+        except OSError as exc:
+            raise InstallError("root venv lock hardening failed") from exc
+        finally:
+            try:
+                os.close(lock_fd)
+            except OSError as exc:
+                close_error = exc
+        if close_error is not None:
+            raise InstallError("root venv lock close failed") from close_error
+
     def sync_venv(self, source_root: Path) -> None:
         system_python = _safe_root_executable(SYSTEM_PYTHON, label="system Python")
         uv = _safe_root_executable(UV_BINARY, label="uv")
@@ -939,6 +1031,7 @@ class HostSystem:
             ],
             env=environment,
         )
+        self.harden_venv_lock()
         if not self.venv_ready():  # pragma: no cover - venv_ready either succeeds or raises
             raise InstallError("root venv installation did not converge")
 
@@ -1102,14 +1195,22 @@ class HostSystem:
         uid = self.runner.run(["id", "-u", SERVICE_USER]).stdout.strip()
         if not uid.isdigit():
             raise InstallError("service UID is unavailable")
-        environment = {
-            "XDG_RUNTIME_DIR": f"/run/user/{uid}",
-            "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{uid}/bus",
-            "PATH": "/usr/bin:/bin",
-        }
         self.runner.run(
-            ["sudo", "-n", "-u", SERVICE_USER, "--", "systemctl", "--user", "is-system-running"],
-            env=environment,
+            [
+                "sudo",
+                "-n",
+                "-u",
+                SERVICE_USER,
+                "--",
+                "/usr/bin/env",
+                "-i",
+                f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
+                "PATH=/usr/bin:/bin",
+                "/usr/bin/systemctl",
+                "--user",
+                "is-system-running",
+            ]
         )
 
     def install_owner(self, path: Path, owner: str, mode: int) -> bool:
@@ -1681,7 +1782,8 @@ class HostInstaller:
             )
         )
         candidate_ready = service_directories_ready and self.system.candidate_ready(source_sha)
-        venv_ready = self.system.venv_ready()
+        venv_lock_requires_hardening = self.system.venv_lock_requires_hardening()
+        venv_ready = not venv_lock_requires_hardening and self.system.venv_ready()
         installed_files_ready = all(
             self.filesystem.file_matches(destination, payload, mode)
             and self.system.file_owner_ready(destination, owner=owner, mode=mode)
@@ -1734,6 +1836,7 @@ class HostInstaller:
             or acl_plans
             or not service_directories_ready
             or not candidate_ready
+            or venv_lock_requires_hardening
             or not venv_ready
             or not installed_files_ready
             or not runtime_ready
@@ -1794,6 +1897,9 @@ class HostInstaller:
                 changes.append(f"directory:{directory}")
 
         self.system.ensure_candidate(source_sha, refresh=refresh_runtime)
+        if venv_lock_requires_hardening:
+            self.system.harden_venv_lock()
+            changes.append("venv-lock")
         if refresh_runtime or not self.system.venv_ready():
             self.system.sync_venv(self.source_root)
             changes.append("venv")
