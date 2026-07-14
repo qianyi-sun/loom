@@ -1476,6 +1476,16 @@ globally enabled desktop or snap unit failed, even while the D-Bus connection
 and Loom transient-unit boundary are healthy. Loom's own runtime units remain
 subject to the installer check and broker status gates below.
 
+The source kubeconfig is the fixed root-only `/root/.kube/config`. The
+installer validates the complete root-owned, non-writable parent chain, opens
+the source once with `O_NOFOLLOW`, and accepts only a root-owned, single-link,
+mode-0600 regular file. It copies the bytes read from that verified descriptor
+into a process-private snapshot and passes the snapshot to `kubectl` with an
+explicit `--kubeconfig` flag. This removes the check/use path race and remains
+deterministic when the installer's clean subprocess environment intentionally
+omits `HOME`; relying on kubectl's implicit home-directory lookup is
+unsupported and fails closed.
+
 ```bash
 sudo ./scripts/ops/staging_rollout_host.py plan
 sudo ./scripts/ops/staging_rollout_host.py install \
