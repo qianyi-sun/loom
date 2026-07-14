@@ -41,6 +41,12 @@ def test_normal_dev_prs_use_ci_only_squash_auto_merge() -> None:
         assert "no human approval" in normalized_document
         assert "no codeowner approval" in normalized_document
         assert "no conversation resolution" in normalized_document
+        for stale_review_gate in (
+            "need platform-admin review",
+            "require platform-admin review",
+            "requires platform-admin review",
+        ):
+            assert stale_review_gate not in normalized_document
 
 
 def test_governance_docs_define_path_inferred_validation_gates() -> None:

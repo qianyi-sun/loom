@@ -279,5 +279,7 @@ Secrets and side-effect workflows:
 - The benchmark publishing workflow uses the protected
   `huggingface-publish` environment and should only expose `HF_TOKEN`
   after branch restrictions and maintainer approval pass.
-- Deployment or publish workflow changes need platform-admin review
-  because they change the public-repository security boundary.
+- Deployment or publish workflow changes are public-repository security-boundary
+  changes, so the fail-closed planner must select the full CI validation set. A
+  platform-admin review may be requested for context, but it is not a `dev`
+  merge gate.
