@@ -194,6 +194,11 @@
     "default": "'minio'",
     "required": false
   },
+  "taskset_fence_canary_token": {
+    "annotation": "pydantic.types.SecretStr | None",
+    "default": "None",
+    "required": false
+  },
   "taskset_gc_poll_interval_sec": {
     "annotation": "<class 'int'>",
     "default": "3600",
