@@ -2,7 +2,8 @@
 
 ## Status and scope
 
-Status: approved for implementation planning on 2026-07-13.
+Status: approved for implementation on 2026-07-13. Repository implementation
+does not authorize shared-staging use before merge and live acceptance.
 
 This design implements the operator-independence portion of #803. Hongjian and
 Devansh must each be able to update Loom staging after code has merged without
@@ -319,7 +320,8 @@ kubeconfigs, and 15-host key distributions enlarge the failure surface.
 This is technically possible today because both users have broad sudo. It
 still records Qianyi as the unit/driver owner, depends on Qianyi's checkout and
 linger, permits stale refs and unbounded arguments, and has no whole-driver
-singleton. It remains emergency break-glass only after the broker is accepted.
+singleton. It is rejected for both normal operation and break-glass. Emergency
+recovery must preserve the service-owned envelope and exact pinned SHA.
 
 ### Reuse the existing mutation lock for the full driver
 
@@ -396,11 +398,13 @@ GB10 deploy identity, and rerun the full acceptance gate.
 
 Stop new broker requests, remove operators from `loom-staging-operators`, and
 retain the request/rollout evidence. Do not delete or edit an in-progress
-driver state. Emergency recovery uses the existing service-owned request
-envelope and exact pinned SHA to run the documented driver command as
-`loom-rollout` with `--resume`; it does not reintroduce arbitrary refs or a
-Qianyi-owned identity. Removing the service GB10 public key and credential ACLs
-after the rollout reaches a safe terminal state revokes the new runner without
+driver state. Emergency recovery disables admission, repairs or reinstalls the
+broker from clean merged `dev`, and then uses
+`loom-staging-rollout resume REQUEST_ID`. The broker reuses the existing
+service-owned envelope and exact pinned SHA while preserving identity checks,
+lifecycle locking, and attempt attribution; no operator invokes the lower-level
+driver directly. Removing the service GB10 public key and credential ACLs after
+the rollout reaches a safe terminal state revokes the new runner without
 changing Qianyi's existing emergency key.
 
 Rollback does not weaken cluster state, restore an older image directly, or

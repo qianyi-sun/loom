@@ -9,6 +9,15 @@ the executable operator path for first-prod bootstrap, temporary staging leases,
 frontend route checks, the production release gate, rollback preparation, and
 emergency staging drain. The sections below remain the detailed reference.
 
+> **Shared-staging invariant:** every code, image, cluster, host, desired-state,
+> catalog, protected-secret, or capacity mutation of `loom-staging` is owned by
+> `loom-staging-rollout` and a freshly fetched commit already merged to `dev`.
+> Direct low-level commands elsewhere in this reference are implementation
+> descriptions or development/custom/authorized-production procedures; they do
+> not create a shared-staging operator path. After a successful broker request,
+> operators may run disposable application-level staging smoke/tests, but may
+> not mutate the protected deployment boundary outside the broker.
+
 > **Cross-repo issue/PR refs:** bare `#N` in this document may point to
 > the pre-2026-06-26 `carinrc/loom` archive tracker (numbering was reset
 > on the new canonical repo `qianyi-sun/loom`). See
@@ -55,10 +64,11 @@ Set these GitHub Environment secrets independently in `development`,
 
 The workflow `.github/workflows/deploy-environment.yml` binds each job to the
 matching GitHub Environment. Because GitHub only exposes environment secrets
-after the selected job enters that environment, a `development` or `staging`
-deploy job cannot read production kubeconfig, database credentials,
-object-store credentials, provider secrets, SecretStore keys, or worker tokens.
-Configure the `production` GitHub Environment with required reviewer approval.
+after the selected job enters that environment, a development/staging-scoped
+job cannot read production credentials. The staging row remains an isolation
+contract and CI input, not authority to apply shared staging; the host broker is
+its sole mutation path. Configure the `production` GitHub Environment with
+required reviewer approval.
 
 Before a production release, run the static boundary validator:
 
@@ -109,8 +119,9 @@ Normal flow:
 2. Pick the immutable SemVer production tag, for example `v1.0.0`, and record
    it in the release issue. Do not reuse an existing tag.
 3. Build or identify the image tag/digests for that candidate.
-4. Deploy that exact image tag to `staging` using the staging GitHub
-   Environment.
+4. After the candidate has merged into `dev`, deploy that exact merged SHA to
+   shared `staging` with `loom-staging-rollout start`. The broker, not the
+   staging GitHub Environment workflow, owns that target's mutation path.
 5. Run the staging smoke checklist below, including migration dry-run,
    public API/SPA smoke, provider smoke, benchmark reward gate,
    score-positive canary gate before any full production benchmark batch,
@@ -185,18 +196,14 @@ Back-merge or cherry-pick the hotfix to `dev` after production is stable.
 
 ### Deploy, inspect, and rollback by environment
 
-Deploys run through the GitHub Actions workflow:
+Development and production deploys run through the GitHub Actions workflow.
+Shared staging is the exception: it is changed only by the broker after the
+candidate has merged to `dev`.
 
 ```bash
 gh workflow run deploy-environment.yml \
   --ref dev \
   -f environment=development \
-  -f image_tag="$IMAGE_TAG" \
-  -f dry_run=false
-
-gh workflow run deploy-environment.yml \
-  --ref dev \
-  -f environment=staging \
   -f image_tag="$IMAGE_TAG" \
   -f dry_run=false
 
@@ -209,8 +216,9 @@ gh workflow run deploy-environment.yml \
   -f dry_run=false
 ```
 
-Use `dry_run=true` to render and audit with the environment secret config
-without applying. Every deploy job writes `rollout-evidence/rendered.yaml` and
+For development/production, use `dry_run=true` to render and audit with the
+environment secret config without applying. Every deploy job writes
+`rollout-evidence/rendered.yaml` and
 `rollout-evidence/release-manifest-<image-tag>.json` before apply, then uploads
 that directory as a workflow artifact for the operator review trail. Production
 deploys from every ref except `main` are skipped by the workflow condition and
@@ -322,6 +330,10 @@ continues.
 
 ## At-a-glance: deploy a fresh cluster
 
+This bootstrap example is for a new local/custom cluster. It is not the shared
+`loom-staging` update path; that target is changed only through
+`loom-staging-rollout` after code has merged into `dev`.
+
 The fastest path uses the `loom cluster` CLI (shipped via #76). Install
 the optional `cluster` extra and point at your kubeconfig context. For
 staging/production rollout runners, use `uv sync --extra cluster --extra
@@ -360,7 +372,7 @@ loom cluster audit --config cluster-config.toml
 loom cluster up \
   --config cluster-config.toml \
   --context $YOUR_CTX \
-  --environment staging \
+  --environment development \
   --rollout-id "$IMAGE_TAG" \
   --rollout-lock-evidence "$ROLLOUT_DIR/rollout-mutation-lock-$IMAGE_TAG.json"
 
@@ -655,51 +667,21 @@ knob you need.
    prefix/fingerprint and rollout status in issues or PRs; never record the
    raw `LOOM_SVC_BATCH_RUNNER_CP_TOKEN` value.
 
-8. **Apply versioned environment state.** Kubernetes manifests do not own
-   every rollout-critical runtime row. After the images and secrets are live,
-   apply the repository profile for the target environment, then check for
-   drift before trusting Monitor capacity or benchmark validation evidence.
+8. **Verify versioned environment state.** Kubernetes manifests do not own
+   every rollout-critical runtime row. For shared staging, the candidate-bound
+   broker driver applies the repository profile after images and secrets are
+   live, then checks drift before Monitor capacity or benchmark evidence can
+   pass. Operators inspect the resulting `environment-state-check` artifact
+   with `loom-staging-rollout status` or `logs`; they do not run interactive
+   `environment-state apply/check` commands against shared staging.
+
    Staging cluster configs must render backend pods with `LOOM_ENV=staging`,
    and staging environment-state evidence must use the `staging` control-plane
    desired-state key. A `production/gb10-arm64` desired-state in staging
-   evidence is drift.
-   Run the check from the Slurm submit/shared-storage host when the profile
-   contains external Slurm runner pools; the gate also verifies runner env
-   files, worker-token fingerprints, shared git checkouts, clean git status,
-   and active Slurm job launch env:
-
-   ```bash
-   # Optional but recommended for protected environments: compute this from
-   # the canonical live secret source, not from the operator .env being tested.
-   ADMIN_TOKEN_FINGERPRINT="sha256:<12-hex> len=<N>"
-
-   loom admin environment-state apply \
-     --cp-url http://localhost:8080 \
-     --admin-token env:ADMIN_TOKEN \
-     --expect-admin-token-fingerprint "$ADMIN_TOKEN_FINGERPRINT" \
-     --environment staging \
-     --file deploy/environment-state/staging.toml \
-     --var IMAGE_TAG="$IMAGE_TAG" \
-     --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
-     --var GIT_SHA="$RELEASE_SHA" \
-     --rollout-id "$IMAGE_TAG" \
-     --rollout-lock-evidence "$ROLLOUT_DIR/environment-state-apply-lock-$IMAGE_TAG.json"
-
-   loom admin environment-state check \
-     --cp-url http://localhost:8080 \
-     --admin-token env:ADMIN_TOKEN \
-     --expect-admin-token-fingerprint "$ADMIN_TOKEN_FINGERPRINT" \
-     --environment staging \
-     --file deploy/environment-state/staging.toml \
-     --var IMAGE_TAG="$IMAGE_TAG" \
-     --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
-     --var GIT_SHA="$RELEASE_SHA" \
-     --worker-token file:/secure/path/worker-token \
-     --rollout-id "$IMAGE_TAG" \
-     --rollout-lock-evidence "$ROLLOUT_DIR/environment-state-check-lock-$IMAGE_TAG.json" \
-     --format json \
-     > "$ROLLOUT_DIR/environment-state-check-$IMAGE_TAG.json"
-   ```
+   evidence is drift. The broker runs the check from the Slurm submit/shared-
+   storage host when the profile contains external Slurm runner pools; the gate
+   also verifies runner env files, worker-token fingerprints, shared git
+   checkouts, clean git status, and active Slurm job launch env.
 
    For first prod, also generate the shared physical worker-capacity contract.
    This is a repo-only desired-state/evidence check: it does not mutate worker
@@ -731,135 +713,22 @@ knob you need.
    gate can prove prod uses production refs and staging uses
    development refs.
 
-   If a staging rollout smoke needs temporary shared capacity, create a
-   bounded staging lease in a separate desired-state file. First preview the
-   resulting state; the helper does not write anything unless `--apply` is
-   present:
-
-   ```bash
-   uv run python scripts/ops/worker_capacity_manifest.py lease-staging \
-     --manifest deploy/worker-capacity/prod-first.toml \
-     --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
-     --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
-     --var STAGING_IMAGE_TAG="$IMAGE_TAG" \
-     --var STAGING_SOURCE_COMMIT="$RELEASE_SHA" \
-     --reason "staging rollout smoke $IMAGE_TAG" \
-     --ttl 45m \
-     --slots-per-host 1 \
-     --max-total-slots 2 \
-     --preemptible
-   ```
-
-   After review, write the lease manifest and evidence:
-
-   ```bash
-   LEASE_MANIFEST="$ROLLOUT_DIR/worker-capacity-staging-lease.toml"
-
-   uv run python scripts/ops/worker_capacity_manifest.py lease-staging \
-     --manifest deploy/worker-capacity/prod-first.toml \
-     --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
-     --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
-     --var STAGING_IMAGE_TAG="$IMAGE_TAG" \
-     --var STAGING_SOURCE_COMMIT="$RELEASE_SHA" \
-     --reason "staging rollout smoke $IMAGE_TAG" \
-     --ttl 45m \
-     --slots-per-host 1 \
-     --max-total-slots 2 \
-     --preemptible \
-     --apply \
-     --output-manifest "$LEASE_MANIFEST" \
-     --evidence-out "$ROLLOUT_DIR/worker-capacity-staging-lease.json"
-   ```
-
-   Check the staging lease with the latest secret-free worker
-   registration/status artifact and the current prod-pressure summary. Any
-   nonzero `--prod-pending-count`, `--prod-active-count`, or
-   `--prod-capacity-shortfall` makes `status` stop new staging claims in the
-   desired state, immediately return idle staging slots to prod, and report
-   running staging slots as draining. TTL expiry still stops new staging claims even
-   when prod pressure is absent. Preemptible running staging tasks are reported as
-   retryable only after the configured grace period; this helper only writes
-   desired state and evidence, not live cancellations:
-
-   ```bash
-   uv run python scripts/ops/worker_capacity_manifest.py status \
-     --manifest "$LEASE_MANIFEST" \
-     --observed-json "$ROLLOUT_DIR/worker-registrations.json" \
-     --prod-pending-count "${PROD_PENDING_COUNT:-0}" \
-     --prod-active-count "${PROD_ACTIVE_COUNT:-0}" \
-     --prod-capacity-shortfall "${PROD_CAPACITY_SHORTFALL:-0}" \
-     --prod-pressure-source "control-plane prod queue summary" \
-     --preemptible-grace-period 10m \
-     --apply \
-     --output-manifest "$ROLLOUT_DIR/worker-capacity-staging-status.toml" \
-     --evidence-out "$ROLLOUT_DIR/worker-capacity-staging-status.json"
-   ```
+   Shared-staging capacity lease creation, application, drain/release, GB10
+   node-agent start/stop, and long-validation orchestration are broker-owned
+   mutations. Operators must not invoke `worker_capacity_manifest.py` with
+   staging `--apply`, impersonate `loom-rollout`, supply the service admin
+   token/SSH identity, or pass an arbitrary validation command. The
+   candidate-bound request records the bounded lease, prod-pressure decision,
+   worker convergence, validation, and release evidence. Inspect it through
+   `loom-staging-rollout status REQUEST_ID` and `logs REQUEST_ID`; repair a
+   bounded external failure and resume the original request rather than
+   constructing a new capacity operation.
 
    The status evidence includes `prod_pressure.cause=prod_capacity_pressure`
-   when the pause is prod-driven, which is distinct from drift/errors that
-   indicate staging rollout failure. If pressure clears before the lease TTL
-   expires, rerunning `status` with zero prod-pressure counts recovers the
-   bounded staging desired slots from the lease metadata and sets
-   `prod_pressure.recovered=true`.
-
-   Use an explicit manual drain only for operator-initiated pause scenarios
-   that are not represented by the prod-pressure counts:
-
-   ```bash
-   uv run python scripts/ops/worker_capacity_manifest.py drain-staging \
-     --manifest "$LEASE_MANIFEST" \
-     --observed-json "$ROLLOUT_DIR/worker-registrations.json" \
-     --reason "prod pressure before release gate" \
-     --apply \
-     --output-manifest "$ROLLOUT_DIR/worker-capacity-staging-draining.toml" \
-     --evidence-out "$ROLLOUT_DIR/worker-capacity-staging-drain.json"
-   ```
-
-   Immediately release staging capacity after validation. `release-staging` is safe
-   to rerun and returns staging desired slots to zero without changing prod slot
-   ownership on eligible hosts:
-
-   ```bash
-   uv run python scripts/ops/worker_capacity_manifest.py release-staging \
-     --manifest "$LEASE_MANIFEST" \
-     --reason "staging smoke complete" \
-     --apply \
-     --output-manifest "$ROLLOUT_DIR/worker-capacity-staging-released.toml" \
-     --evidence-out "$ROLLOUT_DIR/worker-capacity-staging-release.json"
-   ```
-
-   For long staging validation, do not rely on a human remembering that the
-   compose workers may idle-exit after the rollout smoke. Wrap the validation
-   command with the live capacity runner from `platform-dev`. It activates the
-   bounded staging lease, starts the host-local node-agent on the declared GB10
-   hosts, waits for fresh docker workers, runs the validation command, and then
-   stops workers on success or drains them on failure:
-
-   ```bash
-   uv run python scripts/ops/staging_validation_capacity_runner.py \
-     --cp-url http://127.0.0.1:18081 \
-     --admin-token file:/shared_work/qianyi/loom-worker-capacity/staging-admin-token \
-     --environment staging \
-     --pool-name gb10-arm64 \
-     --ssh-config deploy/worker-pools/gb10/ssh_config \
-     --ssh-identity /shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519 \
-     --lease-ttl 6h \
-     --evidence-dir "$ROLLOUT_DIR/staging-validation-capacity" \
-     --release-intent auto \
-     --wait-for-release \
-     --validation-command ./scripts/run-v1-staging-user-validation.sh
-   ```
-
-   The runner requires a replayable `env:` or `file:` admin-token source. It
-   rejects literal tokens and stdin sources, writes only redacted/source-ref
-   evidence, and adjusts the safe worker idle-exit env to the requested lease
-   TTL while validation is active.
-
-   The runner queues node-agent starts with `systemctl --no-block` and relies on
-   the Control Plane status gate to prove fresh worker convergence or release.
-   Per-host SSH start calls are bounded by `--node-agent-command-timeout`, so a
-   long-running `Type=oneshot` node-agent cannot block summary writing or
-   restartable validation resume.
+   when the pause is prod-driven, distinct from drift/errors that indicate a
+   staging rollout failure. Nonzero production pressure stops new staging
+   claims, immediately returns idle staging slots to production, and reports
+   running staging slots as draining. TTL expiry also stops new staging claims.
 
    A production promotion manifest must record the latest staging lease status in
    `checks.prod_staging_isolation.staging_capacity`. The release gate requires
@@ -867,16 +736,16 @@ knob you need.
    the same object includes an explicit override with `approved=true`, a
    non-empty reason, and an HTTPS evidence URL.
 
-   The `loom admin environment-state apply/check` commands above are
-   idempotent and use the existing Control Plane admin APIs for worker-pool
-   autoscaler policies, GB10 desired state, and Slurm worker job status. A
-   drift failure is actionable, for example desired `gb10-arm64` actuator
-   `slurm` but live `gb10`, or an active OLDLAB Slurm job still pointing at an
-   older `LOOM_REMOTE_WORKER_REPO_DIR`; fix it with the profile apply and by
-   draining/replacing stale Slurm jobs rather than a one-off SQL patch. If
-   `admin_token_fingerprint` fails, refresh the operator token source from the
-   canonical protected-environment secret before rerunning; do not work around
-   it by switching to an untracked token.
+   The candidate-bound driver invokes the idempotent environment-state APIs for
+   worker-pool autoscaler policies, GB10 desired state, and Slurm worker job
+   status. A drift failure is actionable, for example desired `gb10-arm64`
+   actuator `slurm` but live `gb10`, or an active OLDLAB Slurm job still
+   pointing at an older `LOOM_REMOTE_WORKER_REPO_DIR`. Fix repository-owned
+   drift in a commit merged to `dev`, then start a new broker request. If the
+   candidate is unchanged and only a bounded external prerequisite failed,
+   resume the same request after fixing that prerequisite. Do not apply an
+   interactive profile, patch SQL, substitute an untracked token, or create an
+   out-of-envelope retry against shared staging.
    Staging profiles must target the `staging` Control Plane desired-state
    environment. Evidence showing `production/gb10-arm64` for a staging rollout
    is drift, not a compatibility exception. Pass the resolved release commit as
@@ -887,7 +756,7 @@ knob you need.
    to `loom cluster release-gate --environment-state-check`; a missing artifact,
    `ok=false`, or non-empty `drift` array keeps the protected release gate red
    and blocks workload-validation anchors.
-   `loom cluster rollout` step 11 first materializes the candidate
+   The broker's candidate-bound rollout driver step 11 first materializes the candidate
    environment-state profile to
    `/data/loom-staging/environment-state/staging.toml` with mode `0600`,
    recording source/target sha256 evidence, then applies the candidate profile
@@ -926,17 +795,15 @@ knob you need.
    rollout lease as `loom cluster up`, defaulting to
    `$LOOM_ROLLOUT_LOCK_DIR` or `~/.loom/rollout-locks`. Set a shared
    `LOOM_ROLLOUT_LOCK_DIR` on hosts where multiple operators or Codex threads
-   can mutate the same staging target. If the command reports an
-   active owner, do not force it until the recorded owner is proven stale and
-   that evidence is saved in the rollout directory; then rerun with
-   `--force-rollout-lock` and keep the lock evidence JSON with the release
-   artifacts. The force flag replaces an abandoned durable record only when no
-   active process holds the advisory lock. For GitHub staging/production deploy
-   workflows, configure the environment variable `LOOM_ROLLOUT_LOCK_DIR` to the
-   same shared path; the deploy helper fails closed for protected environments
-   when it is unset.
+   can mutate the same protected target. For shared staging, this low-level
+   lease is broker-owned. If it reports an active owner, inspect the request
+   through `loom-staging-rollout status REQUEST_ID`; operators must not use
+   `--force-rollout-lock`. Resume only after the broker reconciles the prior
+   attempt as terminal. For GitHub production deploy workflows, configure the
+   environment variable `LOOM_ROLLOUT_LOCK_DIR`; the deploy helper fails closed
+   for protected environments when it is unset.
    Staging uses the same flow with `--environment staging` and
-   `deploy/environment-state/staging.toml`. `loom cluster rollout` step 11 now
+   `deploy/environment-state/staging.toml`. The broker driver step 11
    keeps the physical `/data/loom-staging/environment-state/staging.toml`
    copy in sync with the candidate profile before mutation, so rerun/resume
    evidence does not depend on a stale one-time manual copy. It then executes
@@ -1189,30 +1056,17 @@ would receive real traffic during rollout.
 
 ### Rendering the sanctioned migration Job
 
-```bash
-loom cluster render-migration \
-  --image-tag staging-05ab776 \
-  --namespace loom-staging \
-  | kubectl apply -f -
-```
+For shared staging, only candidate-bound broker step 09 renders, applies, waits
+for, and records this Job. The image tag and namespace come from the immutable
+request envelope; an operator must not render or apply a Job from an ambient
+checkout or chosen tag. Inspect migration results through broker status/logs
+and resume the same request after repairing a bounded external failure. Manual
+render/apply is limited to development or custom clusters that do not target
+`loom-staging`.
 
-By default the Job name gets a UTC-timestamp suffix so re-runs against
-the same image tag don't collide with a still-lingering previous Job
-(the previous one lingers for the `ttlSecondsAfterFinished` window even
-if it succeeded). Pass `--job-suffix TOKEN` if you want a deterministic
-name — useful when scripting an idempotent re-apply from a rollout
-evidence directory.
-
-Watch it complete:
-
-```bash
-kubectl -n loom-staging wait \
-  --for=condition=complete \
-  --timeout=300s \
-  job -l app=loom-migration,loom.image-tag=staging-05ab776
-kubectl -n loom-staging logs -l app=loom-migration \
-  --tail=-1 --prefix=true
-```
+The generated Job name gets a UTC-timestamp suffix so broker resume against the
+same image tag does not collide with a still-lingering previous Job. The prior
+Job remains for its `ttlSecondsAfterFinished` evidence window.
 
 The Job carries three self-cleaning settings:
 
@@ -1238,8 +1092,10 @@ The most common failure modes:
   (typically a partial prior migration). This is not a NetworkPolicy
   issue; see the release plan for the migration.
 - **Job already exists** — the Job's `spec.template` is immutable. Either
-  wait for `ttlSecondsAfterFinished` or `kubectl delete job -n <ns>
-  loom-migrate-<image-tag>-<suffix>`. Then re-render + re-apply.
+  wait for `ttlSecondsAfterFinished`. On shared staging, keep the evidence and
+  resume the original broker request; do not delete or re-apply the Job from an
+  operator shell. Development/custom-cluster operators may remove their own
+  stale Job before rerunning their separately scoped manual flow.
 
 ## Rollout build resilience (#199)
 
@@ -1350,13 +1206,15 @@ fail closed. Evidence is written through the validated rollout directory as a
 private fsynced temporary file, atomically published without replacement, and
 directory-fsynced; a partial private temporary file is discarded on retry.
 
-Before collection, provision the same new high-entropy capability in both
-operator-managed deployment locations: the protected staging
-`loom-secrets` key `taskset-fence-canary-token` (mounted only into
+The root-owned installation and merged staging profile provision the same
+high-entropy capability in both service-managed locations: the protected
+staging `loom-secrets` key `taskset-fence-canary-token` (mounted only into
 `loom-service` as `LOOM_SVC_TASKSET_FENCE_CANARY_TOKEN`) and the fixed
-platform-dev file source used by the rollout command. Keep the file private to
-the rollout identity. The runner fails closed if either side is absent or does
-not match; never pass, print, or attach this value.
+platform-dev source used by the candidate-bound command. Operators do not
+create, rotate, copy, or reconcile this secret. If either side is absent or
+mismatched, stop collection, repair it through the merged profile/root-owned
+maintenance path, and resume the original broker request. Never pass, print,
+or attach the value.
 
 Inside the selected service Pod, the deployment runner creates a fresh
 one-task disposable bundle under the fixed `loom-system-taskset-fence-canary`
@@ -1451,37 +1309,89 @@ or swap a protected physical target.
 For the decision and post-v1 boundary, see
 [`v1-workload-trust-contract.md`](../architecture/adr/v1-workload-trust-contract.md).
 
-### Invocation
+### Independent staging operator interface (#803)
+
+The supported `platform-dev` interface is the root-installed broker, not a
+personal checkout or user-owned systemd unit:
 
 ```bash
-ssh platform-dev '
-unit=loom-rollout-staging-abc1234
-systemd-run --user --unit "$unit" --collect \
-  /bin/bash -lc '"'"'
-    set -euo pipefail
-    export LOOM_SMOKE_ON_BEHALF_TEAM_ID="<agentic-rl-team-uuid>"
-    cd /home/qianyi/dev/loom
-    exec .venv/bin/loom cluster rollout staging \
-      --ref origin/dev \
-      --image-tag staging-abc1234 \
-      --expect-admin-token-fingerprint "sha256:<12-hex> len=<N>" \
-      --gb10-prep-concurrency 4
-  '"'"'
-'
+# Preview caller authorization and the freshly fetched merged dev candidate.
+loom-staging-rollout start --dry-run
+
+# Create a verified backup and launch one detached rollout.
+loom-staging-rollout start
+
+# Inspect the active request, or one known request.
+loom-staging-rollout status
+loom-staging-rollout status REQUEST_ID
+loom-staging-rollout logs REQUEST_ID
+loom-staging-rollout logs REQUEST_ID --follow
+
+# Continue the same immutable candidate after a real failed/cancelled attempt.
+loom-staging-rollout resume REQUEST_ID
+
+# Stop an abandoned or unsafe attempt; the reason is mandatory audit evidence.
+loom-staging-rollout cancel REQUEST_ID --reason "bounded operational reason"
 ```
 
-The `staging` preset is explicit and repo-owned. It supplies the stable
-non-secret and source-reference inputs for the current staging rollout:
-`cluster-name=loom-staging`, `namespace=loom-staging`,
-`environment=staging`, `cp-url=http://127.0.0.1:18081`,
-`cluster-config=deploy/environments/staging.cluster.toml`,
-`backup-manifest=/data/loom-staging/backups/latest/backup-manifest.json`,
-`rollout-root=/data/loom-staging`, current GB10 scope, staging admin/worker/
-service token file references, and admin-on-behalf smoke defaults for
-`devansh`. If `--image-tag` is omitted, the CLI derives `staging-<sha7>` from
-the resolved `--ref`. Use `loom cluster rollout staging --ref origin/dev
---dry-run` to inspect the resolved preset, rollout id, SHA, image tag, and
-redacted expanded inputs before launching a detached unit.
+`qianyi`, `hongjian`, and `devansh` are members of
+`loom-staging-operators`. The broker derives the authenticated OS caller from
+sudo rather than accepting an actor argument. Every new `start` fresh-fetches
+exactly `refs/heads/dev` from `https://github.com/qianyi-sun/loom.git`, pins
+that merged 40-character SHA, and derives `staging-<sha7>`. Unmerged pull
+requests, feature branches, tags, historical SHAs, local commits, custom image
+tags, alternate remotes, and target/config/secret overrides are forbidden.
+Rollback is a merged revert on `dev` followed by another normal `start`.
+
+`start --dry-run` writes a non-active preview but creates no backup, systemd
+unit, rollout directory, or staging mutation. A real `start` first writes and
+verifies a new immutable backup manifest, then publishes the private request
+envelope and launches a detached `loom-rollout` service unit. It never consumes
+a mutable `backups/latest` pointer. `resume` uses the original request's exact
+SHA, image tag, backup manifest and digest, rollout ID, and config binding even
+if `dev` has advanced.
+
+Only one full staging request may be pending or running. A second `start` or
+`resume` fails instead of queueing or preempting and reports only safe active
+request metadata. `status` and `logs` are available to every operator; a
+terminal disconnect does not stop the service-owned unit. Do not edit
+`active.json`, `state.json`, the request envelope, locks, or evidence to recover
+a run.
+
+#### Root installation and update
+
+Installation is a root maintenance action, not part of each rollout. Run it
+only from a clean merged checkout that is reachable from the freshly fetched
+current `origin/dev`. The installer takes its assets from that exact fresh
+`dev` head, never from unmerged working-tree content:
+
+```bash
+sudo ./scripts/ops/staging_rollout_host.py plan
+sudo ./scripts/ops/staging_rollout_host.py install \
+  --smoke-on-behalf-team-id "<agentic-rl-team-uuid>"
+```
+
+Once per newly generated service-key lifecycle, use an existing root-held admin
+identity as a bootstrap channel to add the new service public key to all 15
+GB10 hosts. The idempotent bootstrap is also the controlled repair when trust
+`check` reports drift. It reads the service `.pub` file and sends it over
+stdin; it never copies or prints the private service key:
+
+```bash
+sudo /opt/loom-staging-runner/venv/bin/python \
+  /usr/local/libexec/loom-staging-rollout-gb10-trust bootstrap \
+  --bootstrap-identity /root/<existing-admin-bootstrap-key>
+
+sudo ./scripts/ops/staging_rollout_host.py check --format json
+loom-staging-rollout start --dry-run
+```
+
+Repeated `install` is the supported update path and is a no-op when source,
+policy, files, ownership, ACLs, service state, and merged `dev` SHA already
+match. An update first disables broker admission under the shared launch lock
+and refuses while a rollout is active. A failed update keeps admission disabled
+and records an uninstall-safe recovery ledger rather than exposing a partially
+updated runner.
 
 The rollout-local cluster config is synthesized from the resolved candidate
 worktree's repo-local profile, rather than from the long-lived runner checkout,
@@ -1489,62 +1399,42 @@ then pins that candidate's image tag. This keeps new protected-profile fields
 in preflight/render/release-gate even while the fixed runner itself has not yet
 checked out the candidate.
 
-`prod` is also an explicit selector, but it fails closed until first-prod
-values are configured; it never falls back to staging values. Manual full-argv
-mode remains available for diagnostics, but normal staging rollouts should use
-the preset so rerun/resume commands do not depend on terminal history.
+`prod` is also an explicit lower-level selector, but it fails closed until
+first-prod values are configured; it never falls back to staging values. The
+lower-level full-argv driver is an implementation surface, not a supported
+staging operator or diagnostic interface. For staging, only the broker may
+construct that argv from a validated private envelope.
 
-The release invocation intentionally does not use `ssh -A`. `platform-dev` is
-the fixed rollout runner, and step 12 authenticates to GB10 through the
-platform-dev-local deploy identity declared by
-`[gb10_pool].ssh_identity_file`. That file is operator-managed secret material:
-it must exist on `platform-dev`, must not be group/world accessible, and must
-not be committed or printed. A public SSH certificate may be declared through
-`[gb10_pool].ssh_certificate_file` when the site uses short-lived certs.
+The broker intentionally does not use `ssh -A`. Step 12 authenticates with the
+service-owned `/var/lib/loom-staging-rollout/gb10-deploy-ed25519` declared by
+the candidate-bound cluster config. The private file is mode 0600, is never
+shared with operators, and is not committed or printed. Every rollout keeps the
+existing all-15-host fail-closed gate. Host checkout, env update, legacy worker
+retirement, and node-agent start remain ordered per host while the fixed broker
+policy bounds concurrency across independent hosts.
 
-Before rollout, verify the durable GB10 auth boundary from `platform-dev`
-without Mac agent forwarding:
+#### Root break-glass and revocation
 
-```bash
-ssh platform-dev '
-cd /home/qianyi/dev/loom
-test "$(stat -c %a /shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519)" = 600
-for i in $(seq 1 15); do
-  h=trt-gb10-$i
-  ssh -F deploy/worker-pools/gb10/ssh_config \
-    -i /shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519 \
-    -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 \
-    "$h" hostname >/dev/null
-done
-'
-```
+Break-glass is for repairing the installed service, not selecting a different
+candidate. Disable new admission, preserve the request/rollout ledger, and
+rerun the root installer from a clean freshly fetched merged `dev` checkout.
+Then use `loom-staging-rollout resume REQUEST_ID`, which revalidates the
+original service-owned envelope and pinned SHA. Do not fall back to a Qianyi
+user unit, forwarded agent, personal key, lower-level arbitrary argv, or manual
+evidence edits.
 
-If the deploy identity has not been provisioned yet, use the operator Mac's
-existing admin SSH access only as a one-time bootstrap channel to install the
-deploy identity's public key or SSH certificate trust on the GB10 hosts; do not
-run the release rollout itself through forwarded-agent authentication.
-
-To resume the same fixed version after a failed or disconnected run, start a
-new detached unit with the same preset command and append `--resume`. Do not
-edit `state.json` or manually repair host evidence. Step 12 (`gb10-prep`) uses
-bounded host-level parallelism: each host still runs checkout, env update,
-legacy worker retirement, and node-agent start in order, while independent
-hosts are submitted concurrently. The default is conservative; tune it with
-`--gb10-prep-concurrency N` after validating GB10 SSH and Git load for the
-current rollout.
-
-Inspect the systemd unit plus rollout evidence instead of relying on terminal
-history:
+For full revocation, wait for a safe terminal state and run:
 
 ```bash
-ssh platform-dev '
-systemctl --user status loom-rollout-staging-abc1234 --no-pager || true
-journalctl --user-unit loom-rollout-staging-abc1234 -n 100 --no-pager || true
-rid=$(ls -td /data/loom-staging/rollouts/*-staging-abc1234 | head -1)
-jq "{rollout_id,status,current_step,driver}" "$rid/state.json"
-tail -n 100 "$rid/logs/driver.log"
-'
+sudo ./scripts/ops/staging_rollout_host.py uninstall --retain-ledger
 ```
+
+Uninstall removes admission, takes the maintenance/launch lock, refuses an
+active request, revokes only the recorded service public key on all 15 GB10
+hosts, removes only installer-recorded ACLs/memberships/linger and generated
+key/runtime state, and retains request plus rollout evidence. If any revocation
+or reconciliation step fails, stop and repair it; do not delete the local key
+or ledger first.
 
 For `--environment staging`, the driver intentionally refuses legacy physical
 targets. Use `--cluster-name loom-staging`, `--namespace loom-staging`, and
@@ -1552,17 +1442,14 @@ targets. Use `--cluster-name loom-staging`, `--namespace loom-staging`, and
 a logical staging rollout against any older pre-production cluster, namespace,
 or data root.
 
-`--backup-manifest` is required. The driver does not create the backup
-itself — the operator produces the Postgres dump, MinIO snapshot, and
-secrets export per the runbook procedure (§ *Protected-environment
-backups*) and hands the resulting `backup-manifest.json` to the driver.
-Step 05 invokes `loom cluster backup check` and refuses to advance
-without a fresh, verified manifest. Protected rollouts also require the
-manifest to retain the `--backup-manifest-min-remaining-hours` freshness
-window at step 05. The default is 2 hours, which prevents the rollout from
-discovering backup expiry only when step 10 is ready to mutate the cluster. If
-the check fails, create a fresh backup bundle and manifest before
-rerunning or resuming; do not bypass protected preflight.
+The lower-level driver still requires `--backup-manifest`, but normal staging
+operators never supply it. The broker creates the Postgres dump, MinIO
+snapshot, and protected Secret backup, verifies the manifest and freshness
+window, and binds its immutable path and digest into the request envelope
+before unit launch. Step 05 rechecks that same manifest and refuses to advance
+without sufficient remaining freshness. A backup failure launches no driver
+and performs no staging mutation; inspect the safe request status and fix the
+backup subsystem before starting a new request.
 
 `ADMIN_TOKEN_SOURCE` is a secret source reference, not a raw token; use
 `env:VAR` or `file:PATH` so shell history, process listings, logs, JSON, and
@@ -1625,14 +1512,10 @@ selected worker pool. If the override must target a specific pool, set
 `--smoke-required-worker-pool` explicitly; the driver only injects the GB10
 pool for its built-in current-gb10 default.
 
-For a release canary where an operator must represent an active user/team and a
-user-owned smoke token is unavailable, use the admin-on-behalf smoke inputs.
-The staging preset already supplies the stable mode, username, task, required
-worker pool, and audit actor:
-
-```bash
-export LOOM_SMOKE_ON_BEHALF_TEAM_ID="<agentic-rl-team-uuid>"
-```
+For a release canary where the rollout must represent an active user/team and a
+user-owned smoke token is unavailable, the installed broker supplies the fixed
+admin-on-behalf smoke identity from root-owned configuration. Operators cannot
+override that team, username, task, required worker pool, or audit actor.
 
 The rollout driver resolves the admin credential only from `--admin-token`'s
 secret-source reference, validates `--expect-admin-token-fingerprint` before
@@ -1652,27 +1535,26 @@ reference, fingerprint, represented username/team id, batch id, and redacted
 response JSON. Do not record raw bearer values in shell history, argv evidence,
 issue comments, PR bodies, Markdown, or logs.
 
-Optional flags:
+Lower-level driver flags are broker-owned implementation details, not staging
+operator options:
 
-- `--exclude-oldlab` — take the OLDLAB pool out of scope. Refused when
-  `--scope=full-cluster` because you can't claim full-cluster acceptance
-  while excluding a release-managed pool.
-- `--resume` — explicit opt-in to resume the newest in-progress rollout
-  for this `--image-tag`. Without `--resume`, an existing in-progress
-  rollout for the same tag is a hard refusal (the driver won't start
-  a second run against the same target — either resume or remove the
-  state.json). When the persisted `target_ref` and `image_tag` match the
-  invocation, resume reuses the `resolved_sha` recorded in `inputs.json`;
-  moving refs such as `origin/dev` may advance after rollout launch without
-  rebinding an in-progress rollout to a different candidate SHA.
-- `--dry-run` — print the planned step list + resolved SHA and exit
-  without touching anything. Safe to run any time.
+- `--exclude-oldlab` is derived from the installed scope policy. Operators
+  cannot toggle it or claim full-cluster acceptance while excluding a
+  release-managed pool.
+- `--resume` is emitted only after `loom-staging-rollout resume REQUEST_ID`
+  validates the original envelope. Operators do not select an image tag or
+  remove `state.json`.
+- Driver `--dry-run` is internal. The public preview is
+  `loom-staging-rollout start --dry-run`, which performs broker authorization,
+  fresh-fetch, binding, singleton, and redaction checks without launching the
+  driver.
 
 ### Candidate-source tooling contract
 
-The one-command driver resolves `--ref` once, creates
-`01-worktree/src` at that exact SHA, and uses that candidate checkout for
-rollout-owned Loom subcommands whose output becomes release evidence.
+For protected staging, the broker resolves the fixed `dev` ref once and the
+driver validates the private envelope before creating `01-worktree/src` at
+that exact SHA. It uses that candidate checkout for rollout-owned Loom
+subcommands whose output becomes release evidence.
 Steps that delegate to `loom ...` run `python -m loom_cli` from the rollout
 runner venv with `01-worktree/src/src` first on `PYTHONPATH`, so child
 subprocesses do not depend on a globally installed `loom` executable or an
@@ -1683,12 +1565,11 @@ operator wrapper's ambient `PATH`. The runner venv must be synced with
 
 If the candidate checkout does not contain importable Loom CLI source at
 `01-worktree/src/src/loom_cli/__main__.py`, these steps fail instead of
-falling back to ambient tooling. Re-run step 01 by resuming after fixing
-the worktree, or choose a candidate ref that contains compatible rollout
-tooling. Prefer a repo-relative `--cluster-config` path when invoking
-the driver; repo-local absolute config paths are mapped back into the
-candidate worktree when the same path exists there, while operator-owned
-evidence paths such as backup manifests remain outside the worktree.
+falling back to ambient tooling. Fix the defect on a branch, merge it into
+`dev`, and start a new broker request; do not select a different ref. For an
+existing request whose candidate is intact, `loom-staging-rollout resume
+REQUEST_ID` revalidates the same candidate and envelope. The broker supplies
+the candidate-bound cluster-config path; operators do not pass one.
 
 For cluster render/apply/gate subcommands, the driver also writes a
 rollout-owned `rollout-cluster-config.toml` artifact under the rollout
@@ -1798,7 +1679,7 @@ are not included in that artifact.
 
 ## Kind cluster: loading local images before rollout (#96)
 
-When a staging cluster runs on top of `kind`, images built with
+When a cluster runs on top of `kind`, images built with
 host docker are **not automatically visible** to the kind node's containerd. A
 plain `kubectl apply` against a Deployment that references a local tag
 (`loom-worker:staging-<sha7>`) will hit `ErrImagePull` / `ImagePullBackOff`
@@ -1808,15 +1689,18 @@ finds nothing.
 The `loom cluster load-images` subcommand wraps `kind load docker-image` for
 each requested tag and gives a preflight-friendly `--check-only` mode.
 
-Load images explicitly:
+For shared staging, candidate-bound broker step 04 derives the complete image
+set from the rendered manifest and loads only the pinned merged candidate.
+Operators do not run this command against `kind-loom-staging` or select an
+image tag. The following examples are for a development/custom kind cluster:
 
 ```bash
 loom cluster load-images \
-  --cluster-name loom-staging \
-  --image loom-control-plane:staging-1bbc323 \
-  --image loom-service:staging-1bbc323 \
-  --image loom-llm-gateway:staging-1bbc323 \
-  --image loom-worker:staging-1bbc323
+  --cluster-name loom-dev-local \
+  --image loom-control-plane:dev-local \
+  --image loom-service:dev-local \
+  --image loom-llm-gateway:dev-local \
+  --image loom-worker:dev-local
 ```
 
 Or extract the image set directly from a rendered manifest so nothing drifts
@@ -1825,7 +1709,7 @@ between what `loom cluster render` emits and what gets loaded:
 ```bash
 loom cluster render > /tmp/rendered.yaml
 loom cluster load-images \
-  --cluster-name loom-staging \
+  --cluster-name loom-dev-local \
   --from-manifest /tmp/rendered.yaml
 ```
 
@@ -1838,7 +1722,7 @@ rollout driver before `kubectl apply`:
 
 ```bash
 loom cluster load-images \
-  --cluster-name loom-staging \
+  --cluster-name loom-dev-local \
   --from-manifest /tmp/rendered.yaml \
   --check-only
 ```
@@ -1877,18 +1761,10 @@ deletes at most four classified pods and retries readiness once. It does not
 delete PVCs, namespaces, kind clusters, Docker volumes, or arbitrary unready
 pods.
 
-For a manual retry, rerun the same protected command shape instead of deleting
-pods ad hoc:
-
-```bash
-loom cluster up \
-  --config "$CLUSTER_CONFIG" \
-  --namespace "$K8S_NAMESPACE" \
-  --environment staging \
-  --backup-manifest "$BACKUP_MANIFEST" \
-  --recover-sandbox-deadlines \
-  --sandbox-deadline-max-pods 4
-```
+For a staging retry, use `loom-staging-rollout resume REQUEST_ID`. The broker
+revalidates the original pinned candidate and backup envelope, and the driver
+replays the same bounded recovery flags. Do not invoke `loom cluster up`
+directly or delete pods ad hoc.
 
 If the bounded retry still fails, preserve the rollout evidence and inspect the
 kind node runtime directly (`kubelet`, `containerd`, node disk/I/O pressure).
@@ -1896,6 +1772,11 @@ Do not bypass protected preflight or storage/backup guards to continue the
 rollout.
 
 ## Upgrade
+
+Shared `loom-staging` upgrades follow the invariant at the top of this runbook:
+merge the config/schema/image change to `dev`, start the broker, and inspect or
+resume its request. The direct secret/image commands in this reference section
+are development/custom or separately authorized production procedures only.
 
 ### Breaking changes by release
 
@@ -1939,6 +1820,12 @@ Workers drain on SIGTERM (default 600 s); k8s sends SIGTERM during rollout.
 `loom-service`, Control Plane, and `loom-web` are stateless — restart-safe.
 
 ## Rollback
+
+For shared `loom-staging`, do not use the direct Kubernetes/image procedures
+below. Merge a revert into `dev` and launch a new `loom-staging-rollout`
+request, or resume the existing immutable request when no candidate change is
+needed. The direct procedures in this section are for separately authorized
+production/custom-cluster recovery and do not override the staging broker.
 
 For a single-component rollback (the new image is bad but everything
 else is fine):
@@ -2042,16 +1929,13 @@ env file fails fast instead of producing a zero-call benchmark result.
 worker_subprocess_gateway_url = "http://host.docker.internal:30444/openai/v1"
 ```
 
-and install a durable managed subprocess Gateway tunnel from `30444` to
-`svc/loom-llm-gateway:9100`:
-
-```bash
-scripts/ops/worker_service_tunnels.py install-systemd \
-  --namespace loom-staging \
-  --kubectl /usr/local/bin/kubectl \
-  --kubeconfig /secure/path/staging.kubeconfig \
-  --subprocess-gateway-local-port 30444
-```
+For shared staging, commit that config to `dev`; the broker rollout validates
+the already installed durable subprocess Gateway tunnel from `30444` to
+`svc/loom-llm-gateway:9100`. Missing tunnel installation is root-owned broker
+maintenance: disable admission, prove the active request terminal, repair the
+installed unit from clean merged `dev`, restore admission, and resume the
+original request. Do not invoke `worker_service_tunnels.py install-systemd`
+from an operator checkout.
 
 Bind only on an address/firewall boundary reachable by the local Docker
 sandbox containers. `DockerDriver` injects the Linux host-gateway alias for
@@ -2219,6 +2103,13 @@ but each worker pays the build cost once).
 
 ## Token rotation
 
+For shared staging, do not execute the direct Kubernetes or admin mutation
+examples in this section. Update the canonical protected token source through
+the approved configuration path, merge the corresponding change to `dev`, and
+start a broker rollout so every in-cluster, OLDLAB, and GB10 consumer changes
+inside one attributed envelope. The examples below are for development/custom
+clusters or separately authorized production maintenance.
+
 ### Worker tokens — `loom admin tokens worker`
 
 The CP admin surface (`/admin/worker-tokens`) is NOT exposed via
@@ -2247,17 +2138,8 @@ kubectl create secret generic loom-secrets \
   --dry-run=client -o yaml \
   | kubectl apply -f -
 kubectl rollout restart deploy/loom-worker
-# Distribute the same token to attached remote-worker env files
-# (GB10/OLDLAB) without printing it, restart those pools, then prove parity:
-loom admin environment-state check \
-  --cp-url http://localhost:8080 \
-  --admin-token env:LOOM_ADMIN_TOKEN \
-  --environment staging \
-  --file deploy/environment-state/staging.toml \
-  --var IMAGE_TAG="$IMAGE_TAG" \
-  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
-  --var GIT_SHA="$RELEASE_SHA" \
-  --worker-token file:/secure/path/worker-token
+# Reconcile attached remote-worker consumers through the target environment's
+# separately authorized maintenance path, then prove token parity there.
 # After in-cluster and remote workers re-register cleanly (no 401s),
 # revoke the old prefix:
 loom admin tokens worker revoke <OLD_PREFIX>
@@ -3341,7 +3223,9 @@ provider_egress_allowlist = [
 ]
 ```
 
-Then render, audit, and redeploy from the same config:
+Then render, audit, and redeploy from the same config. For shared staging,
+commit the allowlist, merge it to `dev`, and use `loom-staging-rollout start`;
+do not run the direct apply command below. The example is for a custom cluster:
 
 ```bash
 loom cluster render --config cluster-config.toml > /tmp/loom-rendered.yaml
@@ -3607,6 +3491,16 @@ subsequent rollout evidence dirs (per-SHA subdirectories under
 
 ## Backup + restore
 
+For normal shared-staging rollout, the broker performs the component backup,
+publishes the immutable manifest, and binds it into the private request
+envelope before mutation. Operators do not run the manual backup/apply commands
+below to start or resume shared staging. Broker unavailability does not grant
+authority to use those commands: repair or reinstall the root-owned service
+from clean, merged `dev`, then resume the original request and private envelope.
+The procedures below remain only for initial storage bootstrap or separately
+authorized production/custom recovery; they are not a shared-staging rollout or
+resume path.
+
 Staging and production are protected environments. Before any operation that
 can destroy or orphan cluster state, create a fresh backup bundle and metadata
 manifest. The first-phase guard is intentionally conservative: `loom cluster
@@ -3760,9 +3654,12 @@ loom cluster down \
 
 Do not use unbacked `kind delete cluster`, namespace deletion, PVC deletion,
 Docker volume cleanup, or `loom cluster down --with-volumes` for staging or
-production. Ordinary pod/service restarts and `loom cluster down --yes` without
-`--with-volumes` or `--delete-namespace` preserve PVCs and do not require the
-destructive-operation acknowledgement.
+production. On shared staging, operators also do not run the otherwise
+non-volume-destructive `loom cluster down --yes`; cluster recovery remains a
+broker resume or admission-disabled root-maintenance operation. For separately
+authorized production/custom recovery, ordinary pod/service restarts and
+non-volume teardown preserve PVCs and do not require the destructive-operation
+acknowledgement.
 
 Restore drill checklist:
 
@@ -3800,8 +3697,8 @@ separate product policy exists.
 
 ### Prereqs
 
-- A staging cluster deployed via `loom cluster up` against the
-  candidate image tag.
+- A successful `loom-staging-rollout` request for the merged candidate SHA;
+  direct `loom cluster up` is not a shared-staging prerequisite.
 - A public host with TLS enabled, for example `https://loom.example.com`.
 - Access to an operator/admin browser session that can create two teams and
   invite users.
@@ -3834,12 +3731,17 @@ separate product policy exists.
 
 ### Benchmark catalog provisioning
 
-Before inviting staging users or starting manual New Batch testing, restore the
-ready benchmark catalog through one of the official catalog paths below. Do not
-insert benchmark/task rows manually, patch JSON in SQL, or seed staging
-with `scripts/seed_test_data.py`; missing credentials or source artifacts are
-release blockers that should be fixed through the deployment Secret/profile and
-tracked in the launch issue.
+Before inviting staging users or starting manual New Batch testing, require the
+successful broker step 11 `catalog-provisioning` artifact. It proves the merged
+profile published/registered/mirrored the ready catalog with protected service
+sources. Shared-staging operators do not export DB, MinIO, or HF credentials or
+run the catalog commands below. Missing credentials or source artifacts are
+release blockers fixed through the merged profile and resumed original request.
+Do not insert benchmark/task rows manually, patch JSON in SQL, or seed staging
+with `scripts/seed_test_data.py`.
+
+The Path A/B commands below are development/custom-cluster examples only. They
+must not target the shared staging database or object store.
 
 **Path A: copy from a known-good source catalog and object store.** Use this
 when the source environment already has runnable task rows and bundle objects:
@@ -3850,17 +3752,17 @@ export LOOM_CATALOG_SOURCE_MINIO_ENDPOINT="$SOURCE_LOOM_MINIO_ENDPOINT"
 export LOOM_CATALOG_SOURCE_MINIO_ACCESS_KEY="$SOURCE_LOOM_MINIO_ACCESS_KEY"
 export LOOM_CATALOG_SOURCE_MINIO_SECRET_KEY="$SOURCE_LOOM_MINIO_SECRET_KEY"
 
-# Outside Kubernetes, provide the target values explicitly:
-export LOOM_DB_URL="$STAGING_DB_URL"
-export LOOM_MINIO_ENDPOINT="$STAGING_MINIO_ENDPOINT"
-export LOOM_MINIO_ACCESS_KEY="$STAGING_MINIO_ACCESS_KEY"
-export LOOM_MINIO_SECRET_KEY="$STAGING_MINIO_SECRET_KEY"
+# Development/custom target values only:
+export LOOM_DB_URL="$CUSTOM_DB_URL"
+export LOOM_MINIO_ENDPOINT="$CUSTOM_MINIO_ENDPOINT"
+export LOOM_MINIO_ACCESS_KEY="$CUSTOM_MINIO_ACCESS_KEY"
+export LOOM_MINIO_SECRET_KEY="$CUSTOM_MINIO_SECRET_KEY"
 
 # Inside a deployed loom-service pod, the command also accepts the service
 # Secret names LOOM_SVC_DB_URL and LOOM_SVC_MINIO_* for target values.
 loom datasets provision-catalog \
   --target-bucket loom-benchmarks \
-  --imported-by "release:${IMAGE_TAG:-manual}"
+  --imported-by "development:${IMAGE_TAG:-manual}"
 ```
 
 The command is idempotent. It upserts only benchmarks whose stored task rows are
@@ -3889,11 +3791,11 @@ sources.
 ```bash
 export LOOM_HF_ORG="${LOOM_HF_ORG:-PRHW}"
 
-# Outside Kubernetes, provide the target DB and object-store values explicitly:
-export LOOM_DB_URL="$STAGING_DB_URL"
-export LOOM_MINIO_ENDPOINT="$STAGING_MINIO_ENDPOINT"
-export LOOM_MINIO_ACCESS_KEY="$STAGING_MINIO_ACCESS_KEY"
-export LOOM_MINIO_SECRET_KEY="$STAGING_MINIO_SECRET_KEY"
+# Development/custom target DB and object-store values only:
+export LOOM_DB_URL="$CUSTOM_DB_URL"
+export LOOM_MINIO_ENDPOINT="$CUSTOM_MINIO_ENDPOINT"
+export LOOM_MINIO_ACCESS_KEY="$CUSTOM_MINIO_ACCESS_KEY"
+export LOOM_MINIO_SECRET_KEY="$CUSTOM_MINIO_SECRET_KEY"
 
 # Inside loom-service pods, the command also accepts LOOM_SVC_DB_URL from the
 # service Secret and LOOM_SVC_MINIO_* for target object storage. For gated
@@ -3902,7 +3804,7 @@ loom datasets register skilllearnbench \
   --revision "$PUBLISHED_SHA" \
   --mirror-to-object-store \
   --bucket loom-benchmarks \
-  --registered-by "release:${IMAGE_TAG:-manual}"
+  --registered-by "development:${IMAGE_TAG:-manual}"
 ```
 
 If the HF repo is private/gated and the pod lacks `HF_TOKEN`, the 401/403 is a
@@ -3913,9 +3815,10 @@ For protected current-GB10 rollout smoke, step 11 publishes the checked-in
 release smoke fixture through the same official local-benchmark path before
 step 15. This creates a real DB task row and internal `s3://` bundle source for
 `loom-smoke/gb10-oracle-hello-world`; it is idempotent and uses the same target
-DB/MinIO environment variables as the catalog commands above. Run the command
-manually only for diagnosis or repair outside `loom cluster rollout`; the
-normal rollout path should converge it automatically.
+DB/MinIO environment variables as the catalog commands above. For shared
+staging, fix catalog inputs in merged source and launch or resume the broker;
+do not run the command manually. The example below is only for a custom-cluster
+diagnosis or separately authorized production repair.
 
 ```bash
 loom datasets publish-local deploy/catalog/gb10-smoke \
@@ -4192,30 +4095,15 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    Both route documents must report the expected `environment`,
    `environmentLabel`, `routePath`, `apiBase`, and `apiRouteBase`; the response
    must be `no-store`. Production labels must not contain beta wording.
-5. **Remote-worker private tunnels hold.** If remote workers are attached,
-   collect watchdog evidence, then verify the exact worker-facing URLs from the
-   control node and at least one worker host. The evidence command resolves the
-   active `--env-file` path from the systemd unit without reading or printing
-   secret values, checks the watchdog script path, and records timer state. If
-   `LOOM_WORKER_SUBPROCESS_GATEWAY_URL` is set, this includes the
-   `subprocess-gateway` facade probe used by Docker sandboxes:
-   ```bash
-   scripts/ops/worker_service_tunnels.py watchdog-evidence \
-     --expected-script-path "$PWD/scripts/ops/worker_service_tunnels.py" \
-     | tee "$ROLLOUT_DIR/watchdog-evidence.json"
-
-   export REMOTE_WORKER_ENV_FILE="$(
-     jq -r '.env_file.path' "$ROLLOUT_DIR/watchdog-evidence.json"
-   )"
-
-   scripts/ops/worker_service_tunnels.py check \
-     --env-file "$REMOTE_WORKER_ENV_FILE"
-
-   scripts/ops/worker_service_tunnels.py check-remote worker-hosts.txt \
-     --env-file "$REMOTE_WORKER_ENV_FILE"
-   ```
-   This check is required after every rollout because a public ingress health
-   check can pass while private worker tunnels are down.
+5. **Remote-worker private tunnels hold.** If remote workers are attached, the
+   shared-staging broker collects watchdog evidence and verifies the exact
+   worker-facing URLs from the control node and declared worker hosts. Inspect
+   the redacted watchdog, local, remote, and optional subprocess-gateway probe
+   results through `loom-staging-rollout status REQUEST_ID` and
+   `loom-staging-rollout logs REQUEST_ID`; do not rerun the helper from an
+   interactive checkout or substitute env/kubeconfig/host inputs. This gate is
+   required after every rollout because public ingress can pass while private
+   worker tunnels are down.
 5. **Invite-only onboarding.** From the operator/admin browser session, confirm
    fixed teams such as Team A and Team B exist, then submit username requests
    for each team. Approve each request in Admin access -> Accounts, open the
@@ -4781,11 +4669,15 @@ is missing. Do not close them from local tests alone.
     artifact through the normal owner-team trial route; mutate Team A's original
     batch, such as cancelling it; or inspect/download private or blocked source
     artifacts. Denials should include safe reasons only.
-17. **Provider error surfaces.** Temporarily rotate the provider key
-    to an invalid value, re-run a trial, and confirm the SPA + API
+17. **Provider error surfaces.** Create a disposable smoke-team provider
+    connection backed by a dedicated invalid test secret (or use the approved
+    mock provider), re-run a trial, and confirm the SPA + API
     surface a clear `provider_error` reason rather than a generic 500. Confirm
     diagnostic text does not contain raw provider keys, bearer tokens, signed
     URL query parameters, or internal service hostnames.
+    Never rotate or overwrite a protected canonical shared-staging provider
+    secret for this negative test; remove only the disposable connection and
+    test secret when its evidence is complete.
     For transient provider/gateway transport drops, confirm diagnostics use
     `provider_transport_disconnect` rather than `internal_error` and that the
     trial retry budget is consumed before a terminal failure is recorded.
@@ -4852,11 +4744,13 @@ is missing. Do not close them from local tests alone.
     v1.1/full-cluster OLDLAB-required evidence, repeat the same pattern with an
     additional `--required-worker-pool oldlab` constraint so the gate is
     deterministic rather than a post-hoc DB distribution check.
-19. **Teardown clean.** `loom cluster down --yes` removes every applied
-    object; PVCs survive (verify via `kubectl get pvc -n loom`). For
-    staging, pass `--with-volumes` or `--delete-namespace` only
-    with a fresh `loom cluster backup manifest` and
-    `--acknowledge-data-loss <environment>`.
+19. **Teardown clean.** On shared staging, delete only the disposable smoke
+    teams, users, provider connections, runs, and test objects created by this
+    checklist through their supported application APIs. Never run `loom cluster
+    down`, delete the namespace/PVCs, or use destructive flags as smoke
+    teardown. If the shared cluster itself needs recovery, preserve the request
+    evidence and use broker resume or admission-disabled root maintenance. A
+    development/custom cluster may use its separately scoped cluster teardown.
 
 A staging release that fails any check is NOT eligible for `main`.
 Capture artifact links + a brief note for each pass in the
@@ -4918,8 +4812,12 @@ for issue #217 that cannot be covered by unit CI: real worker image builds,
 provider trials, MinIO mirroring, sidecar plumbing, and resource-budget
 profiling all need a deployed environment.
 
-Run them against `development` first; promote to `staging` and `production`
-by changing the target environment block at the top of each subsection.
+After a successful broker rollout of the merged candidate, disposable G3/G4/
+G6/G9 staging trials and smoke checks may run independently. Only G5 catalog
+publish/register/mirror is restricted: shared staging gets it from broker step
+11 and operators inspect the redacted `catalog-provisioning` artifact. The G5
+manual credentials and commands below are development/custom examples;
+production requires its separately authorized release path.
 
 Prerequisites:
 
@@ -4937,8 +4835,8 @@ The bundle is large enough that pulling it from Hugging Face at trial-time
 saturates the worker setup budget. Publish once, register, mirror, and audit:
 
 ```bash
-# Replace the env vars below with the target environment's values.
-export LOOM_HF_ORG=loom-staging
+# Development/custom example only; never substitute shared-staging secrets.
+export LOOM_HF_ORG=loom-development
 export LOOM_DB_URL="postgresql+psycopg://loom:$LOOM_DB_PASS@dev-db.yylx.world:5432/loom_dev"
 export LOOM_MINIO_ENDPOINT=https://minio.dev.yylx.world
 export LOOM_MINIO_ACCESS_KEY=...
@@ -5303,37 +5201,15 @@ link it from #217; do not merge incomplete evidence.
   trajectory cache, benchmark cache, and trial scratch on each node's local
   ext4 disk; do not put those hot paths on `/shared_work`. Current staging
   validation uses `trt-gb10-1..15` at `LOOM_WORKER_MAX_CONCURRENT=10`, for 150
-  configured ARM64 slots. After every rollout, first apply and check the
-  versioned environment profile so DB-backed policy converges with the image
-  rollout. Set `ADMIN_TOKEN_FINGERPRINT` from the canonical live admin secret
-  source for the protected environment before running these commands:
+  configured ARM64 slots. Every shared-staging rollout must use the broker,
+  which applies and checks the versioned environment profile, verifies the
+  OLDLAB tunnel and Slurm prerequisites, prepares all declared GB10 hosts, and
+  evaluates the release gate inside the candidate-bound request envelope.
+  Operators inspect `environment-state-check`, `gb10-workers-status`, tunnel,
+  and release-gate evidence through `loom-staging-rollout status` and `logs`;
+  they do not run the underlying admin or per-host apply commands directly.
 
-  ```bash
-  loom admin environment-state apply \
-    --cp-url http://control-node.lan:18081 \
-    --admin-token file:/secure/path/admin-token \
-    --expect-admin-token-fingerprint "$ADMIN_TOKEN_FINGERPRINT" \
-    --environment staging \
-    --file deploy/environment-state/staging.toml \
-    --var IMAGE_TAG="$IMAGE_TAG" \
-    --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
-    --var GIT_SHA="$RELEASE_SHA"
-  loom admin environment-state check \
-    --cp-url http://control-node.lan:18081 \
-    --admin-token file:/secure/path/admin-token \
-    --expect-admin-token-fingerprint "$ADMIN_TOKEN_FINGERPRINT" \
-    --environment staging \
-    --file deploy/environment-state/staging.toml \
-    --var IMAGE_TAG="$IMAGE_TAG" \
-    --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
-    --var GIT_SHA="$RELEASE_SHA" \
-    --worker-token file:/secure/path/worker-token
-  ```
-
-  Then confirm the OLDLAB-1 `loom-remote-worker-tunnel-watchdog.timer` is
-  active, run the local plus GB10 `check-remote` tunnel gates, verify Slurm
-  worker status, then gate the node-agent release target before treating the
-  pool as healthy. The GB10 gate checks image tag, env-config version, desired
+  The GB10 gate checks image tag, env-config version, desired
   source git commit, active-vs-draining host intent, worker-token/env drift,
   and clean source-checkout provenance. Active nodes with missing provenance,
   dirty source, or a git commit that does not match desired `source_git_commit`
@@ -5349,30 +5225,10 @@ link it from #217; do not merge incomplete evidence.
   heartbeats persist beyond the retry window, inspect whether the worker exited
   after registration rather than accepting node-agent metadata alone.
 
-  ```bash
-  loom admin slurm-workers status \
-    --cp-url http://control-node.lan:18081 \
-    --admin-token file:/secure/path/admin-token
-  loom admin gb10-workers status \
-    --cp-url http://control-node.lan:18081 \
-    --admin-token file:/secure/path/admin-token \
-    --environment staging \
-    --pool-name gb10-arm64 \
-    --release-image-tag "$IMAGE_TAG" \
-    --release-env-config-version "$ENV_CONFIG_VERSION"
-  # On each GB10 host during worker-token rotation:
-  loom worker gb10-agent apply \
-    --cp-url http://127.0.0.1:18081 \
-    --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
-    --environment staging \
-    --pool-name gb10-arm64 \
-    --env-file /home/qianyi/loom-worker-build-staging/.env \
-    --compose-file deploy/docker-compose.remote-worker.yml \
-    --compose-file deploy/worker-pools/gb10/docker-compose.gb10-hostnet.yml \
-    --source-dir /home/qianyi/loom-worker-build-staging \
-    --worker-token file:/secure/path/worker-token
-  loom resources status --json
-  ```
+  Worker-token rotation must update the protected canonical token source and
+  any repository-owned configuration through the approved change path, merge
+  that change to `dev`, and start a broker rollout. It must not be performed as
+  a per-host interactive apply against shared staging.
 
   Treat `/home/qianyi/loom-worker-build-staging/gb10-node-agent.env` and
   node-agent transient compose env files as host-local runtime material, not

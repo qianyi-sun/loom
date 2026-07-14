@@ -26,6 +26,10 @@ evidence needed before `dev` can be promoted to `main`.
 - Public deployment and private service boundary:
   [`docs/runbooks/operator-runbook.md`](operator-runbook.md) and
   [`docs/architecture/cluster-deploy.md`](../architecture/cluster-deploy.md).
+- Independent merged-only staging operation:
+  [`docs/architecture/adr/independent-staging-rollout-runner.md`](../architecture/adr/independent-staging-rollout-runner.md)
+  and the
+  [`loom-staging-rollout` operator interface](operator-runbook.md#independent-staging-operator-interface-803).
 - Browser and CLI onboarding:
   [`docs/user-guide.md#web-sessions-and-teams`](../user-guide.md#web-sessions-and-teams)
   and
@@ -48,6 +52,16 @@ evidence needed before `dev` can be promoted to `main`.
 
 Attach these to the release issue or release PR:
 
+- Broker request and attempt evidence showing the authenticated operator,
+  freshly fetched `refs/heads/dev`, exact merged SHA, derived image tag,
+  immutable backup manifest digest, detached unit, rollout ID, lifecycle-lock
+  events, and terminal summary. A pull-request ref, feature branch, tag,
+  historical/local SHA, custom tag, personal key/unit, or mutable
+  `backups/latest` manifest is not valid staging evidence. For the initial #803
+  live acceptance, retain Hongjian's and Devansh's separate `start --dry-run`
+  previews, unauthorized-caller rejection, and simultaneous-start rejection;
+  both previews must resolve the same current merged SHA when `dev` has not
+  moved.
 - Release promotion gate workflow run from
   `.github/workflows/release-promotion-gate.yml`, plus its
   `release-gate-evidence` artifact. Production deploys require the same
@@ -120,7 +134,7 @@ Attach these to the release issue or release PR:
   `direct_hf_egress_required=false`. Do not use `benchmarks.upstream_kind` as
   the HF mirror fact; it is adapter/source provenance and may legitimately be
   `git`.
-- Environment desired-state transcript showing
+- Broker-generated environment desired-state transcript showing the driver's
   `loom admin environment-state apply` and
   `loom admin environment-state check` against
   `deploy/environment-state/staging.toml`, with the rollout `IMAGE_TAG` and
@@ -221,53 +235,22 @@ Attach these to the release issue or release PR:
   coverage is delivered by the Slurm-managed `oldlab` pool, not by an
   in-cluster `k8s-worker` Deployment.
 
-Generate a rollout release manifest before the protected apply. It is the
-machine-readable expected-state anchor for image/render convergence, DB revision
-checks, and per-component release evidence:
+The broker-owned rollout generates the release manifest before protected
+apply. It is the machine-readable expected-state anchor for image/render
+convergence, DB revision checks, and per-component release evidence. The image
+identities JSON is keyed by Deployment and container and contains `image` plus
+at least one immutable `repo_digest` or `image_id` per release-managed
+container.
 
-```bash
-loom cluster release-manifest \
-  --config "$CLUSTER_CONFIG" \
-  --environment staging \
-  --image-tag "$IMAGE_TAG" \
-  --git-sha "$(git rev-parse HEAD)" \
-  --environment-state-file deploy/environment-state/staging.toml \
-  --env-config-version "${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
-  --expected-image-identities-json "$ROLLOUT_DIR/image-identities-$IMAGE_TAG.json" \
-  --output "$ROLLOUT_DIR/release-manifest-$IMAGE_TAG.json"
-```
-
-The image identities JSON is build evidence keyed by Deployment and container,
-with `image`, and at least one immutable `repo_digest` or `image_id` per
-release-managed container. Before the first release-managed mutation, choose a
-shared lock directory that every staging operator on the host uses:
-
-```bash
-export LOOM_ROLLOUT_LOCK_DIR=/data/loom-staging/rollout-locks
-
-loom cluster up \
-  --config "$CLUSTER_CONFIG" \
-  --namespace "$K8S_NAMESPACE" \
-  --environment staging \
-  --rollout-id "$IMAGE_TAG" \
-  --rollout-lock-dir "$LOOM_ROLLOUT_LOCK_DIR" \
-  --rollout-lock-evidence "$ROLLOUT_DIR/rollout-mutation-lock-$IMAGE_TAG.json" \
-  --recover-sandbox-deadlines \
-  --sandbox-deadline-max-pods 4 \
-  --timeout 900
-```
-
-The lease covers `loom cluster up` for Kubernetes release-managed components and
-`loom admin environment-state apply/check` for the external worker desired-state
-gate in this first slice. It does not stop manual `kubectl`, Slurm, or GB10 host
-commands that bypass Loom tooling; those remain detected by release-gate and
-environment-state convergence checks. A second Loom-protected mutation for the
-same environment fails with the active owner id and expiry. Use
-`--force-rollout-lock` only after preserving evidence that the recorded owner is
-stale, such as a dead terminal/session, no active rollout process for the owner
-PID/host, and no in-flight rollout issue comment claiming ownership. The force
-flag replaces an abandoned durable record; it does not bypass an active process
-that still holds the advisory lock.
+Operators do not run `loom cluster release-manifest`, `loom cluster up`,
+`environment-state apply`, or `--force-rollout-lock` directly for staging.
+Those are candidate-bound driver steps constructed from the immutable broker
+envelope. The full-lifecycle lock rejects another broker request, while the
+existing per-mutation lease covers Kubernetes apply and external worker
+desired-state steps. If a lock appears stale, inspect it through
+`loom-staging-rollout status REQUEST_ID`; resume the recorded request only
+after the broker proves the prior attempt terminal. Never force or replace the
+lease from an operator shell.
 
 The sandbox-deadline recovery flags are intentionally narrow. They only act
 after the protected preflight/apply path, only when pod events classify the
@@ -283,53 +266,23 @@ The disabled-worker profile removes only in-cluster worker compute/network
 resources; the retained trajectory PVC remains part of the protected storage
 boundary checked before rollout mutation.
 
-After `loom cluster up` reaches readiness, run the hard convergence gate against
-the same saved inputs:
-
-```bash
-loom datasets hf-boundary-evidence skilllearnbench \
-  --environment staging \
-  --namespace "$K8S_NAMESPACE" \
-  --cluster-config "$CLUSTER_CONFIG" \
-  --gb10-workers-status "$ROLLOUT_DIR/gb10-workers-status-$IMAGE_TAG.json" \
-  --output "$ROLLOUT_DIR/hf-mirror-boundary-evidence-$IMAGE_TAG.json"
-
-loom cluster release-gate \
-  --manifest "$ROLLOUT_DIR/release-manifest-$IMAGE_TAG.json" \
-  --config "$CLUSTER_CONFIG" \
-  --rendered-manifest "$ROLLOUT_DIR/rendered.yaml" \
-  --environment-state-check "$ROLLOUT_DIR/environment-state-check-$IMAGE_TAG.json" \
-  --hf-mirror-boundary-evidence "$ROLLOUT_DIR/hf-mirror-boundary-evidence-$IMAGE_TAG.json" \
-  --namespace "$K8S_NAMESPACE" \
-  --environment staging \
-  --format json \
-  > "$ROLLOUT_DIR/release-gate-$IMAGE_TAG.json"
-
-loom cluster release-gate \
-  --manifest "$ROLLOUT_DIR/release-manifest-$IMAGE_TAG.json" \
-  --config "$CLUSTER_CONFIG" \
-  --rendered-manifest "$ROLLOUT_DIR/rendered.yaml" \
-  --environment-state-check "$ROLLOUT_DIR/environment-state-check-$IMAGE_TAG.json" \
-  --hf-mirror-boundary-evidence "$ROLLOUT_DIR/hf-mirror-boundary-evidence-$IMAGE_TAG.json" \
-  --namespace "$K8S_NAMESPACE" \
-  --environment staging \
-  --format markdown \
-  > "$ROLLOUT_DIR/release-gate-$IMAGE_TAG.md"
-```
+After protected apply reaches readiness, the same detached driver generates HF
+boundary evidence and runs the hard convergence gate against its saved inputs.
+Operators attach the resulting JSON and Markdown artifacts from the request's
+rollout directory; they do not reconstruct or rerun the release-gate argv from
+an ambient checkout.
 
 This gate fails on rendered/config hash drift, unverifiable managed image
 identity convergence, classified node-runtime sandbox deadline stalls, live DB
 Alembic revision mismatch, and missing or failed environment-state convergence
 evidence when the release manifest records external-worker desired state.
-Generate the environment-state artifact with
-`loom admin environment-state check --format json` after the matching
-`environment-state apply`; `ok=false` or any non-empty `drift` array keeps the
-release-gate artifact red and blocks workload-validation anchors. When the
-manifest records GB10 desired state, also pass
-`loom admin gb10-workers status --format json` via
-`--gb10-workers-status`; stale, missing, unreachable, non-applied, dirty, or
-capacity-mismatched active GB10 nodes keep the release gate red. For staging
-and production, pass `--hf-mirror-boundary-evidence`; missing evidence,
+The driver generates the environment-state check after its matching apply;
+`ok=false` or any non-empty `drift` array keeps the release-gate artifact red
+and blocks workload-validation anchors. When the manifest records GB10 desired
+state, the driver also supplies its GB10 status artifact; stale, missing,
+unreachable, non-applied, dirty, or capacity-mismatched active GB10 nodes keep
+the release gate red. For staging and production it also supplies HF mirror
+boundary evidence; missing evidence,
 non-S3 SkillLearnBench runtime sources, missing HF provenance, worker
 `HF_TOKEN` presence, missing/failed GB10 token inspection, direct worker HF
 egress dependence, or raw secret-looking values keep the release gate red. For
@@ -573,33 +526,12 @@ run.
 
 ## Remote Worker Tunnel Gate
 
-If the staging uses extra remote workers outside the Kubernetes cluster,
-run this private gate after every rollout and before load testing:
-
-```bash
-scripts/ops/worker_service_tunnels.py watchdog-evidence \
-  --expected-script-path "$PWD/scripts/ops/worker_service_tunnels.py" \
-  | tee staging-watchdog-evidence.json
-
-export REMOTE_WORKER_ENV_FILE="$(
-  jq -r '.env_file.path' staging-watchdog-evidence.json
-)"
-
-scripts/ops/worker_service_tunnels.py check \
-  --env-file "$REMOTE_WORKER_ENV_FILE"
-
-scripts/ops/worker_service_tunnels.py check-remote worker-hosts.txt \
-  --env-file "$REMOTE_WORKER_ENV_FILE"
-```
-
-For Slurm-only worker hosts, use the same generated check script inside each
-worker allocation:
-
-```bash
-scripts/ops/worker_service_tunnels.py print-check-script \
-  --env-file .env.remote-worker \
-  | srun --jobid "$REMOTE_WORKER_JOB_ID" --overlap --ntasks=1 bash -s
-```
+If shared staging uses remote workers outside Kubernetes, the candidate-bound
+broker driver runs the watchdog, local tunnel, and remote/Slurm allocation
+checks before release-gate and load testing. Operators inspect the resulting
+redacted tunnel artifacts through `loom-staging-rollout status REQUEST_ID` and
+`loom-staging-rollout logs REQUEST_ID`; they do not rerun the helper from an
+interactive checkout or reconstruct its env, kubeconfig, host, or job inputs.
 
 The env file supplies the same worker-facing URLs used by remote workers:
 
@@ -611,31 +543,26 @@ LOOM_WORKER_MINIO_ENDPOINT=http://control-node.lan:19000
 # LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://host.docker.internal:30444/openai/v1
 ```
 
-The gate exits non-zero if any required tunnel is down. If
+The broker-owned gate exits non-zero if any required tunnel is down. If
 `LOOM_WORKER_SUBPROCESS_GATEWAY_URL` is set, the gate also prints and probes
 `subprocess-gateway`; `host.docker.internal` is checked through the equivalent
 host-side loopback URL. This gate is separate from the public API smoke test:
 `https://loom.example.com` can be healthy while the
 remote-worker pool is detached.
 
-When the subprocess gateway URL uses a different local port than
-`LOOM_WORKER_GATEWAY_URL`, install that port as a managed tunnel instead of an
-ad-hoc `kubectl port-forward`:
+Tunnel installation or repair is root-owned broker maintenance, not a staging
+operator gate. Disable admission, prove the active request terminal, repair the
+installed durable units from clean merged `dev`, restore admission, and resume
+the original request through `loom-staging-rollout resume REQUEST_ID`. Never
+substitute an ad-hoc `kubectl port-forward` or interactive
+`worker_service_tunnels.py install-systemd` invocation as rollout evidence.
 
-```bash
-scripts/ops/worker_service_tunnels.py install-systemd \
-  --namespace loom-staging \
-  --kubectl /usr/local/bin/kubectl \
-  --kubeconfig /secure/path/staging.kubeconfig \
-  --subprocess-gateway-local-port 30444
-```
-
-For GB10 and OLDLAB staging rollouts, gate the Slurm-managed capacity first
-and then gate node-agent convergence only for compose rollout compatibility.
-Run `environment-state check` from the Slurm submit/shared-storage host so it
-can validate external runner env files, shared worker checkouts, and local
-systemd user timers in addition to CP-backed state. Pass the active worker
-token through `--worker-token env:...` or `file:...`; the gate emits only
+For GB10 and OLDLAB staging rollouts, the detached driver gates Slurm-managed
+capacity first and then node-agent convergence for compose compatibility. Its
+candidate-owned environment-state step runs from the fixed
+submit/shared-storage host so it can validate external runner env files,
+shared worker checkouts, local systemd user timers, and CP-backed state. The
+broker supplies the protected worker-token source; evidence contains only
 redacted sha256-prefix fingerprints. The Slurm check catches pending/stale
 capacity requests, active jobs launched from stale `LOOM_REMOTE_WORKER_*`
 paths, stale remote env worker-token fingerprints, inactive OLDLAB autoscaler
@@ -657,61 +584,12 @@ If OLDLAB resource-aware scale-up has no safe allowed node, status reports
 `insufficient_memory`, `cpu_load_high`, `unsafe_state`, `active_loom_job`, or
 `missing_resource_snapshot`; fix the capacity condition or adjust the allowed
 node/resource policy before treating OLDLAB as a validation pool.
-`environment-state check --format json` includes these hard blockers under
-`autoscaler_blockers`, and `loom cluster release-gate` fails the
-environment-state convergence row while the blocker is active.
-
-```bash
-LIVE_ADMIN_TOKEN_FINGERPRINT="$(
-  kubectl -n loom-staging get secret loom-admin-secret \
-    -o jsonpath='{.data.secrets\.toml}' \
-    | base64 -d \
-    | python3 -c 'import hashlib,sys,tomllib; token=tomllib.loads(sys.stdin.read())["admin"]["token"]; print(f"sha256:{hashlib.sha256(token.encode()).hexdigest()[:12]} len={len(token)}")'
-)"
-
-loom admin environment-state apply \
-  --cp-url http://control-node.lan:18081 \
-  --admin-token file:/secure/path/admin-token \
-  --expect-admin-token-fingerprint "$LIVE_ADMIN_TOKEN_FINGERPRINT" \
-  --environment staging \
-  --file deploy/environment-state/staging.toml \
-  --var IMAGE_TAG="$IMAGE_TAG" \
-  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
-  --var GIT_SHA="$RELEASE_SHA" \
-  --rollout-id "$IMAGE_TAG" \
-  --rollout-lock-dir "$LOOM_ROLLOUT_LOCK_DIR" \
-  --rollout-lock-evidence "$ROLLOUT_DIR/environment-state-apply-lock-$IMAGE_TAG.json"
-
-loom admin environment-state check \
-  --cp-url http://control-node.lan:18081 \
-  --admin-token file:/secure/path/admin-token \
-  --expect-admin-token-fingerprint "$LIVE_ADMIN_TOKEN_FINGERPRINT" \
-  --environment staging \
-  --file deploy/environment-state/staging.toml \
-  --var IMAGE_TAG="$IMAGE_TAG" \
-  --var ENV_CONFIG_VERSION="${ENV_CONFIG_VERSION:-$IMAGE_TAG}" \
-  --var GIT_SHA="$RELEASE_SHA" \
-  --worker-token file:/secure/path/worker-token \
-  --rollout-id "$IMAGE_TAG" \
-  --rollout-lock-dir "$LOOM_ROLLOUT_LOCK_DIR" \
-  --rollout-lock-evidence "$ROLLOUT_DIR/environment-state-check-lock-$IMAGE_TAG.json" \
-  --format json \
-  > "$ROLLOUT_DIR/environment-state-check-$IMAGE_TAG.json"
-
-loom admin slurm-workers status \
-  --cp-url http://control-node.lan:18081 \
-  --admin-token file:/secure/path/admin-token
-
-loom admin gb10-workers status \
-  --cp-url http://control-node.lan:18081 \
-  --admin-token file:/secure/path/admin-token \
-  --environment staging \
-  --pool-name gb10-arm64 \
-  --release-image-tag "$IMAGE_TAG" \
-  --release-env-config-version "$ENV_CONFIG_VERSION" \
-  --format json \
-  > "$ROLLOUT_DIR/gb10-workers-status-$IMAGE_TAG.json"
-```
+The resulting environment-state JSON includes these hard blockers under
+`autoscaler_blockers`, and release-gate fails its convergence row while any
+blocker is active. Operators inspect the candidate-bound artifacts through
+`loom-staging-rollout logs REQUEST_ID` and the rollout evidence path reported
+by `status`; they do not read the live admin Secret or invoke apply/check from
+an interactive shell.
 
 For GB10 node-agent compatibility workers, `gb10-workers status` proves the
 non-secret desired image/env-config state and source-checkout provenance. The
@@ -726,12 +604,11 @@ passing nodes that applied env/source state but have no fresh worker available
 for `/api/v1/backends` and smoke submission. Rollout release-gate retries direct
 `gb10-workers status` release-target mismatches while newly started workers
 register and heartbeat; persistent stale worker evidence after the retry window
-means the host runtime needs repair. During worker-token rotation, also run
-`loom worker gb10-agent plan/apply --worker-token file:/...` on each GB10 host,
-then verify `loom resources status --json` shows fresh `gb10-arm64` active
-workers and the Control Plane logs no new `/workers/register` 401s. The
-`--worker-token` value is read locally on the host and is never stored in the
-Control Plane desired state.
+means the host runtime needs repair. Worker-token rotation is represented in
+the committed desired-state inputs and applied by a new merged broker rollout;
+do not run per-host `gb10-agent apply` as a staging-launch shortcut. The worker
+token is read from the protected service source and is never stored in Control
+Plane desired state or operator argv.
 
 For OLDLAB 1-5, use the committed staged files in
 `deploy/worker-pools/oldlab/` as the source of truth for included nodes,
@@ -745,6 +622,10 @@ nodes.
 The staging launch gate passes only when:
 
 - every required manual evidence item is attached;
+- the rollout was admitted by `loom-staging-rollout` from the freshly fetched
+  merged `dev` head, completed under one full-lifecycle owner, and can be
+  inspected by another staging operator without Qianyi's login session,
+  checkout, credential handoff, private key, or terminal;
 - any attached remote-worker pool has passing private tunnel checks from both
   the control node and a worker-host context;
 - the ready benchmark catalog has been provisioned with `missing=0`;
