@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,8 @@ class FakeSystem:
         self.trust_ready = False
         self.dry_runs = 0
         self.venv = False
+        self.venv_lock_mode: int | None = None
+        self.venv_lock_hardenings = 0
         self.admission_disabled_at_status = False
         self.maintenance = False
         self.maintenance_begins = 0
@@ -148,12 +151,23 @@ class FakeSystem:
         return self.candidate_sha == expected_sha
 
     def venv_ready(self) -> bool:
+        if self.venv_lock_mode not in {None, 0o600}:
+            raise host.InstallError("root venv authority is unsafe")
         return self.venv
+
+    def venv_lock_requires_hardening(self) -> bool:
+        return self.venv_lock_mode is not None and self.venv_lock_mode != 0o600
+
+    def harden_venv_lock(self) -> None:
+        assert self.venv_lock_mode is not None
+        self.venv_lock_mode = 0o600
+        self.venv_lock_hardenings += 1
 
     def sync_venv(self, source_root: Path) -> None:
         assert source_root == host.REPO_ROOT
         self.candidate_syncs += 1
         self.venv = True
+        self.venv_lock_mode = 0o600
 
     def ensure_service_key(self) -> bool:
         if self.key:
@@ -412,6 +426,37 @@ def test_update_failure_stays_fail_closed_with_maintenance_marker(tmp_path: Path
     installer.uninstall(retain_ledger=True)
     assert system.revoked is True
     assert not installer.filesystem.exists(host.INSTALL_RECORD)
+
+
+def test_interrupted_install_repairs_uv_lock_before_venv_readiness(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+
+    def fail_user_manager() -> None:
+        raise host.InstallError("injected user-manager failure")
+
+    system.verify_user_manager = fail_user_manager  # type: ignore[method-assign]
+    with pytest.raises(host.InstallError, match="user-manager failure"):
+        installer.install(TEAM_ID)
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    assert record["installation_state"] == "installing"
+
+    # Exact live interruption: uv left its root-owned regular lock at mode 0666.
+    system.venv_lock_mode = 0o666
+    system.verify_user_manager = lambda: None  # type: ignore[method-assign]
+
+    result = installer.install(TEAM_ID)
+
+    assert "venv-lock" in result["changed"]
+    assert system.venv_lock_mode == 0o600
+    assert system.venv_lock_hardenings == 1
+    assert system.candidate_syncs == 2
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    assert record["installation_state"] == "ready"
+    assert record["admission_enabled"] is True
 
 
 def test_successful_update_reenables_admission_only_after_ready(tmp_path: Path) -> None:
@@ -687,6 +732,8 @@ def test_system_python_version_probe_fails_closed(returncode: int, version: str)
 def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    events: list[str] = []
+
     class SyncRunner:
         def __init__(self) -> None:
             self.calls: list[tuple[list[str], dict[str, object]]] = []
@@ -696,6 +743,7 @@ def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
             self.calls.append((call, kwargs))
             if call[1:3] == ["-I", "-S"]:
                 return host.CommandResult(0, "3.12\n")
+            events.append("uv-sync")
             return host.CommandResult(0)
 
     resolved = {
@@ -709,7 +757,12 @@ def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
     )
     runner = SyncRunner()
     system = host.HostSystem(runner)
-    monkeypatch.setattr(system, "venv_ready", lambda: True)
+    monkeypatch.setattr(system, "harden_venv_lock", lambda: events.append("harden-lock"))
+    monkeypatch.setattr(
+        system,
+        "venv_ready",
+        lambda: events.append("validate-authority") or True,
+    )
     source_root = Path("/opt/loom-staging-runner/source")
 
     system.sync_venv(source_root)
@@ -735,6 +788,192 @@ def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
         "LC_ALL": "C.UTF-8",
         "UV_PROJECT_ENVIRONMENT": str(host.VENV),
     }
+    assert events == ["uv-sync", "harden-lock", "validate-authority"]
+
+
+def test_venv_lock_hardening_converges_root_regular_file_to_mode_0600(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mode = 0o666
+    descriptor = 41
+    identity = (17, 23)
+    calls: list[tuple[object, ...]] = []
+
+    def metadata(current_mode: int) -> os.stat_result:
+        return os.stat_result(
+            (stat.S_IFREG | current_mode, identity[1], identity[0], 1, 0, 0, 0, 0, 0, 0)
+        )
+
+    def fake_open(path: Path, flags: int) -> int:
+        calls.append(("open", path, flags))
+        return descriptor
+
+    def fake_fchmod(fd: int, requested_mode: int) -> None:
+        nonlocal mode
+        calls.append(("fchmod", fd, requested_mode))
+        mode = requested_mode
+
+    def fake_lstat(path: Path) -> os.stat_result:
+        if path == host.VENV:
+            return os.stat_result((stat.S_IFDIR | 0o755, 11, 7, 1, 0, 0, 0, 0, 0, 0))
+        assert path == host.VENV / ".lock"
+        return metadata(mode)
+
+    monkeypatch.setattr(host.os, "lstat", fake_lstat)
+    monkeypatch.setattr(host.os, "open", fake_open)
+    monkeypatch.setattr(host.os, "fstat", lambda fd: metadata(mode))
+    monkeypatch.setattr(host.os, "fchmod", fake_fchmod)
+    monkeypatch.setattr(host.os, "close", lambda fd: calls.append(("close", fd)))
+
+    host.HostSystem(RecordingRunner()).harden_venv_lock()
+
+    assert calls[0][0:2] == ("open", host.VENV / ".lock")
+    assert calls[0][2] & getattr(os, "O_NOFOLLOW", 0)
+    assert calls[1:] == [("fchmod", descriptor, 0o600), ("close", descriptor)]
+
+
+@pytest.mark.parametrize(
+    ("unsafe_mode", "unsafe_uid", "unsafe_gid"),
+    [
+        (stat.S_IFLNK | 0o777, 0, 0),
+        (stat.S_IFREG | 0o600, 1000, 0),
+        (stat.S_IFREG | 0o600, 0, 1000),
+        (stat.S_IFIFO | 0o600, 0, 0),
+    ],
+)
+def test_venv_lock_hardening_rejects_unsafe_authority_before_open(
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_mode: int,
+    unsafe_uid: int,
+    unsafe_gid: int,
+) -> None:
+    metadata = os.stat_result((unsafe_mode, 23, 17, 1, unsafe_uid, unsafe_gid, 0, 0, 0, 0))
+
+    def fake_lstat(path: Path) -> os.stat_result:
+        if path == host.VENV:
+            return os.stat_result((stat.S_IFDIR | 0o755, 11, 7, 1, 0, 0, 0, 0, 0, 0))
+        assert path == host.VENV / ".lock"
+        return metadata
+
+    monkeypatch.setattr(host.os, "lstat", fake_lstat)
+    monkeypatch.setattr(
+        host.os,
+        "open",
+        lambda path, flags: pytest.fail("unsafe lock must be rejected before open"),
+    )
+
+    with pytest.raises(host.InstallError, match="lock authority is unsafe"):
+        host.HostSystem(RecordingRunner()).harden_venv_lock()
+
+
+def test_venv_lock_hardening_rejects_identity_change_after_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = os.stat_result((stat.S_IFDIR | 0o755, 11, 7, 1, 0, 0, 0, 0, 0, 0))
+    before = os.stat_result((stat.S_IFREG | 0o666, 23, 17, 1, 0, 0, 0, 0, 0, 0))
+    after = os.stat_result((stat.S_IFREG | 0o666, 24, 17, 1, 0, 0, 0, 0, 0, 0))
+    closed: list[int] = []
+    monkeypatch.setattr(host.os, "lstat", lambda path: root if path == host.VENV else before)
+    monkeypatch.setattr(host.os, "open", lambda path, flags: 41)
+    monkeypatch.setattr(host.os, "fstat", lambda fd: after)
+    monkeypatch.setattr(host.os, "close", lambda fd: closed.append(fd))
+
+    with pytest.raises(host.InstallError, match="lock authority is unsafe"):
+        host.HostSystem(RecordingRunner()).harden_venv_lock()
+
+    assert closed == [41]
+
+
+def test_venv_lock_hardening_fails_if_mode_does_not_converge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = os.stat_result((stat.S_IFDIR | 0o755, 11, 7, 1, 0, 0, 0, 0, 0, 0))
+    lock = os.stat_result((stat.S_IFREG | 0o666, 23, 17, 1, 0, 0, 0, 0, 0, 0))
+    monkeypatch.setattr(host.os, "lstat", lambda path: root if path == host.VENV else lock)
+    monkeypatch.setattr(host.os, "open", lambda path, flags: 41)
+    monkeypatch.setattr(host.os, "fstat", lambda fd: lock)
+    monkeypatch.setattr(host.os, "fchmod", lambda fd, mode: None)
+    monkeypatch.setattr(host.os, "close", lambda fd: None)
+
+    with pytest.raises(host.InstallError, match="hardening did not converge"):
+        host.HostSystem(RecordingRunner()).harden_venv_lock()
+
+
+def test_venv_lock_hardening_converts_fchmod_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = os.stat_result((stat.S_IFDIR | 0o755, 11, 7, 1, 0, 0, 0, 0, 0, 0))
+    lock = os.stat_result((stat.S_IFREG | 0o666, 23, 17, 1, 0, 0, 0, 0, 0, 0))
+    monkeypatch.setattr(host.os, "lstat", lambda path: root if path == host.VENV else lock)
+    monkeypatch.setattr(host.os, "open", lambda path, flags: 41)
+    monkeypatch.setattr(host.os, "fstat", lambda fd: lock)
+    monkeypatch.setattr(
+        host.os,
+        "fchmod",
+        lambda fd, mode: (_ for _ in ()).throw(OSError("injected chmod failure")),
+    )
+    monkeypatch.setattr(host.os, "close", lambda fd: None)
+
+    with pytest.raises(host.InstallError, match="lock hardening failed"):
+        host.HostSystem(RecordingRunner()).harden_venv_lock()
+
+
+def test_venv_lock_hardening_converts_close_failure_without_masking_authority_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = os.stat_result((stat.S_IFDIR | 0o755, 11, 7, 1, 0, 0, 0, 0, 0, 0))
+    before = os.stat_result((stat.S_IFREG | 0o600, 23, 17, 1, 0, 0, 0, 0, 0, 0))
+    changed = os.stat_result((stat.S_IFREG | 0o600, 24, 17, 1, 0, 0, 0, 0, 0, 0))
+    monkeypatch.setattr(host.os, "lstat", lambda path: root if path == host.VENV else before)
+    monkeypatch.setattr(host.os, "open", lambda path, flags: 41)
+    monkeypatch.setattr(host.os, "close", lambda fd: (_ for _ in ()).throw(OSError("close")))
+
+    monkeypatch.setattr(host.os, "fstat", lambda fd: before)
+    with pytest.raises(host.InstallError, match="lock close failed"):
+        host.HostSystem(RecordingRunner()).harden_venv_lock()
+
+    monkeypatch.setattr(host.os, "fstat", lambda fd: changed)
+    with pytest.raises(host.InstallError, match="lock authority is unsafe"):
+        host.HostSystem(RecordingRunner()).harden_venv_lock()
+
+
+def test_verify_user_manager_places_clean_environment_inside_sudo() -> None:
+    class UserManagerRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            call = list(argv)
+            self.calls.append((call, kwargs))
+            if call == ["id", "-u", host.SERVICE_USER]:
+                return host.CommandResult(0, "1001\n")
+            return host.CommandResult(0)
+
+    runner = UserManagerRunner()
+
+    host.HostSystem(runner).verify_user_manager()
+
+    assert runner.calls == [
+        (["id", "-u", host.SERVICE_USER], {}),
+        (
+            [
+                "sudo",
+                "-n",
+                "-u",
+                host.SERVICE_USER,
+                "--",
+                "/usr/bin/env",
+                "-i",
+                "XDG_RUNTIME_DIR=/run/user/1001",
+                "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus",
+                "PATH=/usr/bin:/bin",
+                "/usr/bin/systemctl",
+                "--user",
+                "is-system-running",
+            ],
+            {},
+        ),
+    ]
 
 
 def test_installer_fixes_system_python_and_uv_authority_paths() -> None:
