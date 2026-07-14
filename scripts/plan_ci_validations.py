@@ -53,6 +53,23 @@ PLANNER_PATHS = {
     "tests/ops/test_plan_ci_validations.py",
 }
 
+PROTECTED_STAGING_ROLLOUT_EXACT = {
+    "deploy/environments/staging.cluster.toml",
+    "deploy/environment-state/staging.toml",
+    "deploy/worker-pools/gb10/ssh_config",
+    "scripts/ops/verify_staging_rollout_secret_boundary.py",
+    "tests/loom_cli/test_cluster_render.py",
+    "tests/loom_cli/test_environment_state.py",
+}
+
+PROTECTED_STAGING_ROLLOUT_PREFIXES = (
+    "deploy/staging-rollout/",
+    "scripts/ops/staging_rollout_",
+    "src/loom_cli/rollout/operator/",
+    "tests/loom_cli/rollout/operator/",
+    "tests/ops/test_staging_rollout_",
+)
+
 
 @dataclass(frozen=True)
 class ValidationPlan:
@@ -100,6 +117,14 @@ def _matches(path: str, *, exact: set[str], prefixes: tuple[str, ...]) -> bool:
     return path in exact or path.startswith(prefixes)
 
 
+def _is_protected_staging_rollout_path(path: str) -> bool:
+    return _matches(
+        path,
+        exact=PROTECTED_STAGING_ROLLOUT_EXACT,
+        prefixes=PROTECTED_STAGING_ROLLOUT_PREFIXES,
+    )
+
+
 def plan_validations(
     *,
     changed_paths: Sequence[str],
@@ -129,6 +154,10 @@ def plan_validations(
     if any(path in PLANNER_PATHS for path in paths):
         for name in HEAVY_CHECKS:
             select(name, "planner-change")
+
+    if any(_is_protected_staging_rollout_path(path) for path in paths):
+        for name in HEAVY_CHECKS:
+            select(name, "protected-staging-rollout")
 
     integration_exact = {
         ".github/workflows/ci.yml",
@@ -209,7 +238,7 @@ def plan_validations(
     for path in paths:
         if _is_documentation_path(path):
             continue
-        matched_owner = path in PLANNER_PATHS
+        matched_owner = path in PLANNER_PATHS or _is_protected_staging_rollout_path(path)
         if _matches(path, exact=integration_exact, prefixes=integration_prefixes):
             select("integration", f"path:{path}")
             matched_owner = True

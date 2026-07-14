@@ -79,6 +79,8 @@ class LifecycleCoordinator:
         systemd: SystemdManager,
         now: Clock | None = None,
         boot_id: BootIdReader | None = None,
+        maintenance_owner_uid: int = 0,
+        maintenance_owner_gid: int = 0,
     ) -> None:
         if store.root != config.state_root:
             raise LifecycleError("request store root does not match operator configuration")
@@ -87,6 +89,8 @@ class LifecycleCoordinator:
         self.systemd = systemd
         self._now = now or (lambda: datetime.now(UTC))
         self._boot_id = boot_id or _read_boot_id
+        self._maintenance_owner_uid = maintenance_owner_uid
+        self._maintenance_owner_gid = maintenance_owner_gid
         self._held_guards: ContextVar[frozenset[str]] = ContextVar(
             f"lifecycle_guards_{id(self)}",
             default=frozenset(),
@@ -207,6 +211,28 @@ class LifecycleCoordinator:
 
     def launch_guard(self) -> AbstractContextManager[None]:
         return self._guard("launch.lock")
+
+    def assert_admission_open(self) -> None:
+        if "launch.lock" not in self._held_guards.get():
+            raise LifecycleError("admission state must be checked under the launch lock")
+        marker = self.config.runtime_root / "maintenance"
+        try:
+            metadata = os.lstat(marker)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise LifecycleError("maintenance admission marker is unavailable") from exc
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != self._maintenance_owner_uid
+            or metadata.st_gid != self._maintenance_owner_gid
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise LifecycleError("maintenance admission marker is unsafe")
+        raise LifecycleBusyError(
+            "staging rollout admission is disabled for maintenance",
+            {"status": "busy", "reason": "maintenance"},
+        )
 
     def driver_guard(self) -> AbstractContextManager[None]:
         return self._guard("staging.driver.lock")

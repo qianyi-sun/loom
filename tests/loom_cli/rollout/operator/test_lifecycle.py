@@ -206,6 +206,8 @@ def make_coordinator(
         systemd=systemd or FakeSystemd(),
         now=lambda: NOW,
         boot_id=lambda: BOOT_ID,
+        maintenance_owner_uid=os.geteuid(),
+        maintenance_owner_gid=os.getegid(),
     )
 
 
@@ -437,6 +439,29 @@ def test_launch_and_driver_guards_use_independent_lock_files(tmp_path: Path) -> 
         with coordinator.driver_guard():
             assert (config.runtime_root / "launch.lock").is_file()
             assert (config.runtime_root / "staging.driver.lock").is_file()
+
+
+def test_maintenance_marker_blocks_admission_under_launch_guard(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    marker = config.runtime_root / "maintenance"
+    marker.touch(mode=0o600)
+    coordinator = make_coordinator(config)
+
+    with coordinator.launch_guard():
+        with pytest.raises(LifecycleBusyError) as caught:
+            coordinator.assert_admission_open()
+
+    assert caught.value.safe_status == {"status": "busy", "reason": "maintenance"}
+
+
+def test_admission_check_rejects_unsafe_maintenance_marker(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    (config.runtime_root / "maintenance").symlink_to(tmp_path / "outside")
+    coordinator = make_coordinator(config)
+
+    with coordinator.launch_guard():
+        with pytest.raises(LifecycleError, match="maintenance admission marker is unsafe"):
+            coordinator.assert_admission_open()
 
 
 def test_lifecycle_guard_never_follows_a_lock_symlink(tmp_path: Path) -> None:

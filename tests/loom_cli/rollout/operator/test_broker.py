@@ -17,7 +17,7 @@ from loom_cli.rollout.operator.backup import BackupError, VerifiedBackup
 from loom_cli.rollout.operator.broker import BrokerDependencies
 from loom_cli.rollout.operator.broker import main as broker_main
 from loom_cli.rollout.operator.config import OperatorConfig
-from loom_cli.rollout.operator.lifecycle import ReconciliationResult
+from loom_cli.rollout.operator.lifecycle import LifecycleBusyError, ReconciliationResult
 from loom_cli.rollout.operator.model import (
     ActivePointer,
     CallerIdentity,
@@ -179,6 +179,7 @@ class FakeLifecycle:
         self.order = order
         self.guard_depth = 0
         self.reconciled: ReconciliationResult | None = None
+        self.maintenance = False
 
     @contextmanager
     def launch_guard(self):  # type: ignore[no-untyped-def]
@@ -198,6 +199,14 @@ class FakeLifecycle:
             cleared=False,
             safe_status={} if pointer is None else {"request_id": pointer.request_id},
         )
+
+    def assert_admission_open(self) -> None:
+        assert self.guard_depth > 0
+        if self.maintenance:
+            raise LifecycleBusyError(
+                "staging rollout admission is disabled for maintenance",
+                {"status": "busy", "reason": "maintenance"},
+            )
 
     def launch(self, envelope: DriverEnvelope) -> ActivePointer:
         pointer = ActivePointer(
@@ -311,6 +320,17 @@ def test_dry_run_fetches_and_records_preview_without_backup_unit_or_rollout(
     assert deps.store.read_active() is None
     assert deps.store.read_request(REQUEST_ID).status == "preview"
     assert deps.store.read_events(REQUEST_ID)[-1].event == "preview"
+
+
+def test_maintenance_marker_blocks_start_before_preflight(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    deps.lifecycle.maintenance = True
+
+    rc = broker_main(["start", "--dry-run"], dependencies=deps.dependencies)
+
+    assert rc == 1
+    assert deps.order == []
+    assert '"reason":"maintenance"' in deps.stderr.getvalue()
 
 
 def test_start_reserves_before_launch_and_returns_detached_request(tmp_path: Path) -> None:

@@ -249,6 +249,7 @@ def _start(
     dry_run: bool,
 ) -> int:
     with dependencies.lifecycle.launch_guard():
+        dependencies.lifecycle.assert_admission_open()
         _assert_available(dependencies)
         report = dependencies.preflight()
         if not report.passed:
@@ -426,6 +427,7 @@ def _resume(
 ) -> int:
     validate_safe_identifier(request_id, "request_id")
     with dependencies.lifecycle.launch_guard():
+        dependencies.lifecycle.assert_admission_open()
         _assert_available(dependencies)
         report = dependencies.preflight()
         if not report.passed:

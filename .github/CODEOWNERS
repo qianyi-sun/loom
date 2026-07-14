@@ -13,6 +13,19 @@
 /tests/ops/test_ci_secret_isolation.py @qianyi-sun @Hongjian-Gu
 /pyproject.toml @qianyi-sun @Hongjian-Gu
 
+# Protected staging-rollout runtime, installation, and contract authority.
+/src/loom_cli/rollout/operator/ @qianyi-sun @Hongjian-Gu
+/tests/loom_cli/rollout/operator/ @qianyi-sun @Hongjian-Gu
+/deploy/staging-rollout/ @qianyi-sun @Hongjian-Gu
+/deploy/environments/staging.cluster.toml @qianyi-sun @Hongjian-Gu
+/deploy/environment-state/staging.toml @qianyi-sun @Hongjian-Gu
+/deploy/worker-pools/gb10/ssh_config @qianyi-sun @Hongjian-Gu
+/scripts/ops/staging_rollout_* @qianyi-sun @Hongjian-Gu
+/scripts/ops/verify_staging_rollout_secret_boundary.py @qianyi-sun @Hongjian-Gu
+/tests/ops/test_staging_rollout_* @qianyi-sun @Hongjian-Gu
+/tests/loom_cli/test_cluster_render.py @qianyi-sun @Hongjian-Gu
+/tests/loom_cli/test_environment_state.py @qianyi-sun @Hongjian-Gu
+
 # Production release verification and deployment entry points.
 /scripts/ops/release_gate.py @qianyi-sun @Hongjian-Gu
 /scripts/ops/release_identity.py @qianyi-sun @Hongjian-Gu
