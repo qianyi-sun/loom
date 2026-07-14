@@ -80,6 +80,7 @@ def test_release_intent_for_result(exit_code: int, configured: str, expected: st
 
 def test_status_mismatches_require_fresh_active_docker_worker() -> None:
     status = {
+        "unlinked_workers": [],
         "nodes": [
             {
                 "hostname": "trt-gb10-1",
@@ -109,6 +110,7 @@ def test_status_mismatches_require_fresh_active_docker_worker() -> None:
 
 def test_status_mismatches_accept_stopped_nonfresh_worker() -> None:
     status = {
+        "unlinked_workers": [],
         "nodes": [
             {
                 "hostname": "trt-gb10-1",
@@ -139,6 +141,7 @@ def test_status_mismatches_accept_stopped_nonfresh_worker() -> None:
 
 def test_status_mismatches_accept_draining_nonfresh_worker() -> None:
     status = {
+        "unlinked_workers": [],
         "nodes": [
             {
                 "hostname": "trt-gb10-1",
@@ -169,6 +172,7 @@ def test_status_mismatches_accept_draining_nonfresh_worker() -> None:
 
 def test_status_mismatches_require_nonfresh_draining_worker() -> None:
     status = {
+        "unlinked_workers": [],
         "nodes": [
             {
                 "hostname": "trt-gb10-1",
@@ -279,7 +283,7 @@ def test_status_mismatches_reject_concurrency_drift(field: str, value: int) -> N
     node[field] = value
 
     errors = runner.status_mismatches(
-        {"nodes": [node]},
+        {"nodes": [node], "unlinked_workers": []},
         hosts=("trt-gb10-1",),
         intent="active",
         image_tag="staging-abc1234",
@@ -287,6 +291,118 @@ def test_status_mismatches_reject_concurrency_drift(field: str, value: int) -> N
     )
 
     assert errors == [f"trt-gb10-1: {field}={value!r}"]
+
+
+@pytest.mark.parametrize(
+    ("excluded_worker_fresh", "expected"),
+    [
+        (False, []),
+        (True, ["trt-gb10-7: temporarily excluded host still has a fresh worker"]),
+    ],
+)
+def test_status_mismatches_fail_closed_on_fresh_excluded_worker(
+    excluded_worker_fresh: bool,
+    expected: list[str],
+) -> None:
+    active = {
+        "hostname": "trt-gb10-1",
+        "desired_intent": "active",
+        "current_intent": "active",
+        "desired_max_concurrent": 10,
+        "current_max_concurrent": 10,
+        "apply_state": "applied",
+        "current_image_tag": "staging-abc1234",
+        "current_env_config_version": "staging-abc1234",
+        "worker_fresh": True,
+        "worker_backend_names": ["docker"],
+    }
+    excluded = {
+        "hostname": "trt-gb10-7",
+        "desired_intent": "active",
+        "current_intent": "active",
+        "apply_state": "applied",
+        "worker_fresh": excluded_worker_fresh,
+        "worker_backend_names": ["docker"],
+    }
+
+    errors = runner.status_mismatches(
+        {"nodes": [active, excluded], "unlinked_workers": []},
+        hosts=("trt-gb10-1",),
+        intent="active",
+        image_tag="staging-abc1234",
+        env_config_version="staging-abc1234",
+    )
+
+    assert errors == expected
+
+
+def test_status_mismatches_rejects_fresh_undeclared_host() -> None:
+    active = {
+        "hostname": "trt-gb10-1",
+        "desired_intent": "active",
+        "current_intent": "active",
+        "desired_max_concurrent": 10,
+        "current_max_concurrent": 10,
+        "apply_state": "applied",
+        "current_image_tag": "staging-abc1234",
+        "current_env_config_version": "staging-abc1234",
+        "worker_fresh": True,
+        "worker_backend_names": ["docker"],
+    }
+    rogue = {
+        "hostname": "trt-gb10-16",
+        "desired_intent": "active",
+        "current_intent": "active",
+        "apply_state": "applied",
+        "worker_status": "active",
+        "worker_fresh": True,
+        "worker_backend_names": ["docker"],
+    }
+
+    errors = runner.status_mismatches(
+        {"nodes": [active, rogue], "unlinked_workers": []},
+        hosts=("trt-gb10-1",),
+        intent="active",
+        image_tag="staging-abc1234",
+        env_config_version="staging-abc1234",
+    )
+
+    assert errors == ["trt-gb10-16: undeclared host reports active worker state"]
+
+
+def test_status_mismatches_requires_unlinked_worker_inventory() -> None:
+    errors = runner.status_mismatches(
+        {"nodes": []},
+        hosts=(),
+        intent="active",
+        image_tag="staging-abc1234",
+        env_config_version="staging-abc1234",
+    )
+
+    assert errors == ["unlinked_workers: missing or invalid worker inventory"]
+
+
+@pytest.mark.parametrize("hostname", ["trt-gb10-7", "trt-gb10-1"])
+def test_status_mismatches_rejects_fresh_unlinked_worker(hostname: str) -> None:
+    errors = runner.status_mismatches(
+        {
+            "nodes": [],
+            "unlinked_workers": [
+                {
+                    "worker_id": f"duplicate-{hostname}",
+                    "hostname": hostname,
+                    "pool_name": "gb10-arm64",
+                    "worker_fresh": True,
+                }
+            ],
+        },
+        hosts=(),
+        intent="active",
+        image_tag="staging-abc1234",
+        env_config_version="staging-abc1234",
+    )
+
+    assert errors == [f"{hostname}: unlinked fresh worker duplicate-{hostname}"]
 
 
 @pytest.mark.parametrize(

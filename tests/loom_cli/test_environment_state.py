@@ -18,9 +18,8 @@ from loom_cli.environment_state import (
 )
 
 
-def _write_profile(path: Path) -> None:
-    path.write_text(
-        """
+def _write_profile(path: Path, *, host1_intent: str = "active") -> None:
+    payload = """
 environment = "staging"
 
 [[worker_pool_autoscaler_policies]]
@@ -73,7 +72,12 @@ name = "mz_tn_canada_qianyi"
 pricing_source = "rate-card"
 rate_card_provider = "yibuapi"
 """.strip()
-        + "\n",
+    payload = payload.replace(
+        'trt-gb10-1 = "active"',
+        f'trt-gb10-1 = "{host1_intent}"',
+    )
+    path.write_text(
+        payload + "\n",
         encoding="utf-8",
     )
 
@@ -419,7 +423,7 @@ def test_diff_environment_state_ignores_source_drift_on_stopped_gb10_node(
     """A node whose intent is 'stopped' or 'draining' is not part of
     active capacity — the release cannot demand it be fresh."""
     profile_path = tmp_path / "staging.state.toml"
-    _write_profile(profile_path)
+    _write_profile(profile_path, host1_intent="stopped")
     profile = load_environment_state_profile(
         profile_path,
         variables={
@@ -440,6 +444,63 @@ def test_diff_environment_state_ignores_source_drift_on_stopped_gb10_node(
     drift = diff_environment_state(profile, live)
     source_related = [item for item in drift if "source_git" in item.path]
     assert source_related == []
+
+
+def test_diff_environment_state_uses_authoritative_stopped_intent_over_stale_node(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "staging.state.toml"
+    _write_profile(profile_path, host1_intent="stopped")
+    profile = load_environment_state_profile(
+        profile_path,
+        variables={
+            "IMAGE_TAG": "staging-c72f50d",
+            "ENV_CONFIG_VERSION": "staging-c72f50d",
+            "GIT_SHA": "c72f50d67f0d571fef55a9abbbced4e37752ca0e",
+        },
+    )
+    live = _gb10_live_with_node_source(
+        image_tag="staging-c72f50d",
+        env_config_version="staging-c72f50d",
+        source_git_commit="stalesha11111111111111111111111111111111",
+        source_git_dirty=True,
+        intent="active",
+    )
+    live["gb10_status"]["desired_states"][0]["host_intents"]["trt-gb10-1"] = "stopped"
+
+    drift = diff_environment_state(profile, live)
+
+    assert [item for item in drift if "source_git" in item.path] == []
+
+
+def test_diff_environment_state_authoritative_active_intent_checks_stale_stopped_node(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "staging.state.toml"
+    _write_profile(profile_path)
+    profile = load_environment_state_profile(
+        profile_path,
+        variables={
+            "IMAGE_TAG": "staging-c72f50d",
+            "ENV_CONFIG_VERSION": "staging-c72f50d",
+            "GIT_SHA": "c72f50d67f0d571fef55a9abbbced4e37752ca0e",
+        },
+    )
+    live = _gb10_live_with_node_source(
+        image_tag="staging-c72f50d",
+        env_config_version="staging-c72f50d",
+        source_git_commit="stalesha11111111111111111111111111111111",
+        source_git_dirty=True,
+        intent="stopped",
+        apply_state="stopped",
+    )
+
+    drift = diff_environment_state(profile, live)
+
+    source_paths = [item.path for item in drift if "source_git" in item.path]
+    assert source_paths == [
+        "gb10_worker_node_status[staging/gb10-arm64/trt-gb10-1].source_git_commit",
+    ]
 
 
 def test_diff_environment_state_uses_explicit_source_when_image_tag_has_no_sha(

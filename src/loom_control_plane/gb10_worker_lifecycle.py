@@ -244,12 +244,14 @@ async def get_desired_state(
 ) -> GB10WorkerPoolDesiredState | None:
     environment = _clean_nonempty(environment, "environment")
     pool_name = _clean_nonempty(pool_name, "pool_name")
-    return (await session.execute(
-        select(GB10WorkerPoolDesiredState).where(
-            GB10WorkerPoolDesiredState.environment == environment,
-            GB10WorkerPoolDesiredState.pool_name == pool_name,
-        ),
-    )).scalar_one_or_none()
+    return (
+        await session.execute(
+            select(GB10WorkerPoolDesiredState).where(
+                GB10WorkerPoolDesiredState.environment == environment,
+                GB10WorkerPoolDesiredState.pool_name == pool_name,
+            ),
+        )
+    ).scalar_one_or_none()
 
 
 async def upsert_desired_state(
@@ -354,13 +356,15 @@ async def record_node_report(
         environment=environment,
         pool_name=pool_name,
     )
-    row = (await session.execute(
-        select(GB10WorkerNodeStatus).where(
-            GB10WorkerNodeStatus.environment == environment,
-            GB10WorkerNodeStatus.pool_name == pool_name,
-            GB10WorkerNodeStatus.hostname == hostname,
-        ),
-    )).scalar_one_or_none()
+    row = (
+        await session.execute(
+            select(GB10WorkerNodeStatus).where(
+                GB10WorkerNodeStatus.environment == environment,
+                GB10WorkerNodeStatus.pool_name == pool_name,
+                GB10WorkerNodeStatus.hostname == hostname,
+            ),
+        )
+    ).scalar_one_or_none()
     if row is None:
         row = GB10WorkerNodeStatus(
             environment=environment,
@@ -464,38 +468,65 @@ async def fetch_lifecycle_status(
             GB10WorkerPoolDesiredState.pool_name == pool_name,
         )
         node_stmt = node_stmt.where(GB10WorkerNodeStatus.pool_name == pool_name)
-    desired_rows = (await session.execute(
-        desired_stmt.order_by(
-            GB10WorkerPoolDesiredState.environment,
-            GB10WorkerPoolDesiredState.pool_name,
-        ),
-    )).scalars().all()
-    node_rows = (await session.execute(
-        node_stmt.order_by(
-            GB10WorkerNodeStatus.environment,
-            GB10WorkerNodeStatus.pool_name,
-            GB10WorkerNodeStatus.hostname,
-        ),
-    )).scalars().all()
+    desired_rows = (
+        (
+            await session.execute(
+                desired_stmt.order_by(
+                    GB10WorkerPoolDesiredState.environment,
+                    GB10WorkerPoolDesiredState.pool_name,
+                ),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    node_rows = (
+        (
+            await session.execute(
+                node_stmt.order_by(
+                    GB10WorkerNodeStatus.environment,
+                    GB10WorkerNodeStatus.pool_name,
+                    GB10WorkerNodeStatus.hostname,
+                ),
+            )
+        )
+        .scalars()
+        .all()
+    )
     now = datetime.now(UTC)
-    worker_by_id, workers_by_node = await _fetch_matching_workers(
+    worker_by_id, workers_by_node, worker_rows = await _fetch_matching_workers(
         session,
         node_rows=node_rows,
+        pool_names={
+            *(row.pool_name for row in desired_rows),
+            *(row.pool_name for row in node_rows),
+            *([pool_name] if pool_name else []),
+        },
     )
+    selected_workers = [
+        _worker_for_node(
+            row,
+            worker_by_id=worker_by_id,
+            workers_by_node=workers_by_node,
+            now=now,
+        )
+        for row in node_rows
+    ]
+    linked_worker_ids = {worker.id for worker in selected_workers if worker is not None}
     return {
         "desired_states": [desired_state_to_dict(row) for row in desired_rows],
         "nodes": [
             node_status_to_dict(
                 row,
-                worker=_worker_for_node(
-                    row,
-                    worker_by_id=worker_by_id,
-                    workers_by_node=workers_by_node,
-                    now=now,
-                ),
+                worker=worker,
                 now=now,
             )
-            for row in node_rows
+            for row, worker in zip(node_rows, selected_workers, strict=True)
+        ],
+        "unlinked_workers": [
+            _unlinked_worker_to_dict(worker, now=now)
+            for worker in worker_rows
+            if worker.id not in linked_worker_ids
         ],
     }
 
@@ -504,26 +535,50 @@ async def _fetch_matching_workers(
     session: AsyncSession,
     *,
     node_rows: Sequence[GB10WorkerNodeStatus],
-) -> tuple[dict[UUID, Worker], dict[tuple[str, str], list[Worker]]]:
-    if not node_rows:
-        return {}, {}
+    pool_names: set[str],
+) -> tuple[
+    dict[UUID, Worker],
+    dict[tuple[str, str], list[Worker]],
+    list[Worker],
+]:
     conditions: list[Any] = []
+    if pool_names:
+        conditions.append(Worker.pool_name.in_(sorted(pool_names)))
     for row in node_rows:
-        conditions.append(
-            (Worker.hostname == row.hostname) & (Worker.pool_name == row.pool_name),
-        )
         if row.worker_id is not None:
             conditions.append(Worker.id == row.worker_id)
-    worker_rows = (await session.execute(
-        select(Worker).where(or_(*conditions)),
-    )).scalars().all()
+    if not conditions:
+        return {}, {}, []
+    worker_rows = (
+        (
+            await session.execute(
+                select(Worker).where(or_(*conditions)),
+            )
+        )
+        .scalars()
+        .all()
+    )
     worker_by_id = {row.id: row for row in worker_rows}
     workers_by_node: dict[tuple[str, str], list[Worker]] = defaultdict(list)
     for worker_row in worker_rows:
         workers_by_node[(worker_row.hostname, worker_row.pool_name)].append(
             worker_row,
         )
-    return worker_by_id, dict(workers_by_node)
+    return worker_by_id, dict(workers_by_node), list(worker_rows)
+
+
+def _unlinked_worker_to_dict(worker: Worker, *, now: datetime) -> dict[str, object]:
+    return {
+        "worker_id": str(worker.id),
+        "hostname": worker.hostname,
+        "pool_name": worker.pool_name,
+        "worker_status": worker.status,
+        "worker_last_seen_at": _dt(_aware(worker.last_seen_at)),
+        "worker_fresh": _worker_is_fresh(worker, now=now),
+        "worker_backend_names": _worker_backend_names(worker.capabilities),
+        "worker_drain_state": worker.drain_state,
+        "max_concurrent": worker.max_concurrent,
+    }
 
 
 def _worker_for_node(
@@ -535,7 +590,11 @@ def _worker_for_node(
 ) -> Worker | None:
     if row.worker_id is not None:
         worker = worker_by_id.get(row.worker_id)
-        if worker is not None:
+        if (
+            worker is not None
+            and worker.hostname == row.hostname
+            and worker.pool_name == row.pool_name
+        ):
             return worker
     candidates = workers_by_node.get((row.hostname, row.pool_name), [])
     if not candidates:

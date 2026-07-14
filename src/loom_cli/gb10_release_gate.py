@@ -27,32 +27,84 @@ def gb10_release_target_mismatches(
     if release_image_tag is None and release_env_config_version is None:
         return []
 
-    desired_states = [
-        row for row in data.get("desired_states", [])
-        if isinstance(row, dict)
-    ]
-    nodes = [
-        node for node in data.get("nodes", [])
-        if isinstance(node, dict)
-    ]
-    nodes_by_key = {
-        (
+    mismatches: list[str] = []
+    desired_states = [row for row in data.get("desired_states", []) if isinstance(row, dict)]
+    raw_nodes_value = data.get("nodes", [])
+    raw_nodes = raw_nodes_value if isinstance(raw_nodes_value, list) else []
+    nodes = [node for node in raw_nodes if isinstance(node, dict)]
+    if not isinstance(raw_nodes_value, list):
+        mismatches.append("nodes must be a list")
+    elif len(nodes) != len(raw_nodes):
+        mismatches.append("nodes contains a non-object entry")
+    raw_unlinked_workers = data.get("unlinked_workers")
+    if not isinstance(raw_unlinked_workers, list):
+        mismatches.append("unlinked_workers must be a list")
+        raw_unlinked_workers = []
+    seen_unlinked_worker_ids: set[str] = set()
+    for index, worker in enumerate(raw_unlinked_workers):
+        if not isinstance(worker, dict):
+            mismatches.append(f"unlinked_workers[{index}] must be an object")
+            continue
+        worker_id_value = worker.get("worker_id")
+        hostname_value = worker.get("hostname")
+        pool_name_value = worker.get("pool_name")
+        unlinked_worker_id = worker_id_value if isinstance(worker_id_value, str) else ""
+        if not unlinked_worker_id:
+            mismatches.append(f"unlinked_workers[{index}].worker_id must be a non-empty string")
+        elif unlinked_worker_id in seen_unlinked_worker_ids:
+            mismatches.append(f"unlinked_workers contains duplicate worker_id {unlinked_worker_id}")
+        else:
+            seen_unlinked_worker_ids.add(unlinked_worker_id)
+        if not isinstance(hostname_value, str) or not hostname_value:
+            mismatches.append(f"unlinked_workers[{index}].hostname must be a non-empty string")
+        if not isinstance(pool_name_value, str) or not pool_name_value:
+            mismatches.append(f"unlinked_workers[{index}].pool_name must be a non-empty string")
+        worker_fresh = worker.get("worker_fresh")
+        if not isinstance(worker_fresh, bool):
+            mismatches.append(f"unlinked_workers[{index}].worker_fresh must be a boolean")
+        elif worker_fresh:
+            mismatches.append(
+                "unlinked fresh worker "
+                f"{unlinked_worker_id or '-'} host={worker.get('hostname') or '-'} "
+                f"pool={worker.get('pool_name') or '-'} "
+                f"status={worker.get('worker_status') or '-'} "
+                f"drain_state={worker.get('worker_drain_state') or '-'}"
+            )
+    nodes_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    node_key_by_worker_id: dict[str, tuple[str, str, str]] = {}
+    for index, node in enumerate(nodes):
+        key = (
             str(node.get("environment") or ""),
             str(node.get("pool_name") or ""),
             str(node.get("hostname") or ""),
-        ): node
-        for node in nodes
-    }
+        )
+        if not all(key):
+            mismatches.append(f"nodes[{index}] has an incomplete environment/pool/hostname key")
+            continue
+        if key in nodes_by_key:
+            mismatches.append(f"nodes contains duplicate {'/'.join(key)}")
+            continue
+        nodes_by_key[key] = node
+        node_worker_id = node.get("worker_id")
+        if isinstance(node_worker_id, str) and node_worker_id:
+            previous_key = node_key_by_worker_id.get(node_worker_id)
+            if previous_key is not None:
+                mismatches.append(
+                    f"nodes reuse worker_id {node_worker_id} for "
+                    f"{'/'.join(previous_key)} and {'/'.join(key)}"
+                )
+            else:
+                node_key_by_worker_id[node_worker_id] = key
+            if node_worker_id in seen_unlinked_worker_ids:
+                mismatches.append(
+                    f"worker_id {node_worker_id} appears in nodes and unlinked_workers"
+                )
 
-    mismatches: list[str] = []
     for row in desired_states:
         image = row.get("image_tag")
         env = row.get("env_config_version")
         image_bad = release_image_tag is not None and image != release_image_tag
-        env_bad = (
-            release_env_config_version is not None
-            and env != release_env_config_version
-        )
+        env_bad = release_env_config_version is not None and env != release_env_config_version
         if image_bad or env_bad:
             mismatches.append(
                 "desired "
@@ -87,19 +139,58 @@ def gb10_release_target_mismatches(
         for row in desired_states
     }
     for node in nodes:
-        intent = node.get("desired_intent") or node.get("current_intent")
-        apply_state = node.get("apply_state")
-        if intent in _IGNORED_INTENTS:
-            continue
-        if intent is None and apply_state in _IGNORED_APPLY_STATES:
-            continue
-        image = node.get("current_image_tag")
-        env = node.get("current_env_config_version")
         pool_key = (
             str(node.get("environment") or ""),
             str(node.get("pool_name") or ""),
         )
         desired = desired_by_pool.get(pool_key, {})
+        hostname = str(node.get("hostname") or "")
+        host_intents = desired.get("host_intents")
+        apply_state = node.get("apply_state")
+        worker_fresh = node.get("worker_fresh")
+        worker_status = node.get("worker_status")
+        worker_backend_names = node.get("worker_backend_names")
+        if not isinstance(worker_backend_names, list):
+            worker_backend_names = []
+        worker_backend_set = {
+            item for item in worker_backend_names if isinstance(item, str) and item
+        }
+        self_reported_intent = node.get("desired_intent") or node.get("current_intent")
+        host_is_declared = isinstance(host_intents, dict) and hostname in host_intents
+        if not host_is_declared:
+            if (
+                worker_fresh is True
+                or worker_status == "active"
+                or self_reported_intent == "active"
+                or apply_state == "applied"
+            ):
+                mismatches.append(
+                    "node "
+                    f"{node.get('hostname', '-')} is not declared by release host_intents "
+                    f"desired_intent={node.get('desired_intent') or '-'} "
+                    f"current_intent={node.get('current_intent') or '-'} "
+                    f"worker_status={worker_status or '-'} "
+                    f"worker_fresh={worker_fresh if worker_fresh is not None else '-'} "
+                    f"apply_state={apply_state or '-'}"
+                )
+            continue
+        assert isinstance(host_intents, dict)
+        intent = host_intents.get(hostname)
+        if intent in _IGNORED_INTENTS:
+            if worker_fresh is True:
+                mismatches.append(
+                    "node "
+                    f"{node.get('hostname', '-')} "
+                    f"desired_intent={intent} still has a fresh worker registration "
+                    f"worker_status={worker_status or '-'} "
+                    f"worker_backends={','.join(sorted(worker_backend_set)) or '-'} "
+                    f"apply_state={apply_state or '-'}"
+                )
+            continue
+        if intent is None and apply_state in _IGNORED_APPLY_STATES:
+            continue
+        image = node.get("current_image_tag")
+        env = node.get("current_env_config_version")
         desired_max = (
             node.get("desired_max_concurrent")
             if node.get("desired_max_concurrent") is not None
@@ -107,22 +198,10 @@ def gb10_release_target_mismatches(
         )
         current_max = node.get("current_max_concurrent")
         image_bad = release_image_tag is not None and image != release_image_tag
-        env_bad = (
-            release_env_config_version is not None
-            and env != release_env_config_version
-        )
+        env_bad = release_env_config_version is not None and env != release_env_config_version
         max_bad = desired_max is not None and current_max != desired_max
         apply_bad = apply_state != "applied"
         worker_id = node.get("worker_id")
-        worker_status = node.get("worker_status")
-        worker_fresh = node.get("worker_fresh")
-        worker_backend_names = node.get("worker_backend_names")
-        if not isinstance(worker_backend_names, list):
-            worker_backend_names = []
-        worker_backend_set = {
-            item for item in worker_backend_names
-            if isinstance(item, str) and item
-        }
         worker_bad = (
             not isinstance(worker_id, str)
             or not worker_id.strip()
@@ -131,19 +210,21 @@ def gb10_release_target_mismatches(
             or "docker" not in worker_backend_set
         )
         expected_source = desired.get("source_git_commit")
+        exact_source = isinstance(expected_source, str) and bool(expected_source.strip())
         if not isinstance(expected_source, str) or not expected_source.strip():
             expected_source = release_source_prefix(release_image_tag)
         if isinstance(expected_source, str):
             expected_source = expected_source.strip()
         source_commit = node.get("source_git_commit")
         source_dirty = node.get("source_git_dirty")
-        source_bad = (
-            expected_source is not None
-            and (
-                not isinstance(source_commit, str)
-                or not source_commit.startswith(expected_source)
-                or source_dirty is not False
+        source_bad = expected_source is not None and (
+            not isinstance(source_commit, str)
+            or (
+                source_commit != expected_source
+                if exact_source
+                else not source_commit.startswith(expected_source)
             )
+            or source_dirty is not False
         )
         if worker_bad:
             mismatches.append(

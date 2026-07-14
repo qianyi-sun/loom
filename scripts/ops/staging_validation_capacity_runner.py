@@ -21,7 +21,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -136,7 +136,7 @@ def _host_list(value: str | None) -> tuple[str, ...]:
     return hosts
 
 
-def replayable_secret_source_arg(flag_name: str):
+def replayable_secret_source_arg(flag_name: str) -> Callable[[str], str]:
     base = secret_source_argparse_type(flag_name)
 
     def _validate(value: str) -> str:
@@ -314,41 +314,82 @@ def status_mismatches(
 ) -> list[str]:
     nodes = _node_by_host(status)
     errors: list[str] = []
+    unlinked_workers = status.get("unlinked_workers")
+    if not isinstance(unlinked_workers, list):
+        errors.append("unlinked_workers: missing or invalid worker inventory")
+        unlinked_workers = []
+    for index, worker in enumerate(unlinked_workers):
+        if not isinstance(worker, Mapping):
+            errors.append(f"unlinked_workers[{index}]: invalid worker entry")
+            continue
+        worker_id = worker.get("worker_id")
+        hostname = worker.get("hostname")
+        pool_name = worker.get("pool_name")
+        worker_fresh = worker.get("worker_fresh")
+        if not isinstance(worker_id, str) or not worker_id:
+            errors.append(f"unlinked_workers[{index}]: invalid worker_id")
+        if not isinstance(hostname, str) or not hostname:
+            errors.append(f"unlinked_workers[{index}]: invalid hostname")
+        if not isinstance(pool_name, str) or not pool_name:
+            errors.append(f"unlinked_workers[{index}]: invalid pool_name")
+        if not isinstance(worker_fresh, bool):
+            errors.append(f"unlinked_workers[{index}]: invalid worker_fresh")
+        elif worker_fresh:
+            errors.append(f"{hostname or '-'}: unlinked fresh worker {worker_id or '-'}")
+    allowed_hosts = set(hosts) | set(TEMPORARILY_EXCLUDED_HOSTS)
+    for host in sorted(set(nodes) - allowed_hosts):
+        node = nodes[host]
+        self_reported_intent = node.get("desired_intent") or node.get("current_intent")
+        if (
+            node.get("worker_fresh") is True
+            or node.get("worker_status") == "active"
+            or self_reported_intent == "active"
+            or node.get("apply_state") == "applied"
+        ):
+            errors.append(f"{host}: undeclared host reports active worker state")
+    for host in sorted(TEMPORARILY_EXCLUDED_HOSTS):
+        excluded_node = nodes.get(host)
+        if excluded_node is not None and excluded_node.get("worker_fresh") is True:
+            errors.append(f"{host}: temporarily excluded host still has a fresh worker")
     for host in hosts:
-        node = nodes.get(host)
-        if node is None:
+        selected_node = nodes.get(host)
+        if selected_node is None:
             errors.append(f"{host}: missing node report")
             continue
-        if node.get("desired_intent") != intent:
-            errors.append(f"{host}: desired_intent={node.get('desired_intent')!r}")
-        if node.get("current_intent") != intent:
-            errors.append(f"{host}: current_intent={node.get('current_intent')!r}")
-        if node.get("desired_max_concurrent") != EXPECTED_MAX_CONCURRENT:
-            errors.append(f"{host}: desired_max_concurrent={node.get('desired_max_concurrent')!r}")
-        if node.get("current_max_concurrent") != EXPECTED_MAX_CONCURRENT:
-            errors.append(f"{host}: current_max_concurrent={node.get('current_max_concurrent')!r}")
+        if selected_node.get("desired_intent") != intent:
+            errors.append(f"{host}: desired_intent={selected_node.get('desired_intent')!r}")
+        if selected_node.get("current_intent") != intent:
+            errors.append(f"{host}: current_intent={selected_node.get('current_intent')!r}")
+        if selected_node.get("desired_max_concurrent") != EXPECTED_MAX_CONCURRENT:
+            errors.append(
+                f"{host}: desired_max_concurrent={selected_node.get('desired_max_concurrent')!r}"
+            )
+        if selected_node.get("current_max_concurrent") != EXPECTED_MAX_CONCURRENT:
+            errors.append(
+                f"{host}: current_max_concurrent={selected_node.get('current_max_concurrent')!r}"
+            )
         expected_apply_state = {
             "active": "applied",
             "draining": "draining",
             "stopped": "stopped",
         }[intent]
-        if node.get("apply_state") != expected_apply_state:
-            errors.append(f"{host}: apply_state={node.get('apply_state')!r}")
-        if node.get("current_image_tag") != image_tag:
-            errors.append(f"{host}: current_image_tag={node.get('current_image_tag')!r}")
-        if node.get("current_env_config_version") != env_config_version:
+        if selected_node.get("apply_state") != expected_apply_state:
+            errors.append(f"{host}: apply_state={selected_node.get('apply_state')!r}")
+        if selected_node.get("current_image_tag") != image_tag:
+            errors.append(f"{host}: current_image_tag={selected_node.get('current_image_tag')!r}")
+        if selected_node.get("current_env_config_version") != env_config_version:
             errors.append(
-                f"{host}: current_env_config_version={node.get('current_env_config_version')!r}",
+                f"{host}: current_env_config_version={selected_node.get('current_env_config_version')!r}",
             )
         if intent == "active":
-            if node.get("worker_fresh") is not True:
-                errors.append(f"{host}: worker_fresh={node.get('worker_fresh')!r}")
-            backend_names = node.get("worker_backend_names") or []
+            if selected_node.get("worker_fresh") is not True:
+                errors.append(f"{host}: worker_fresh={selected_node.get('worker_fresh')!r}")
+            backend_names = selected_node.get("worker_backend_names") or []
             if "docker" not in backend_names:
                 errors.append(f"{host}: docker backend missing")
-        elif intent == "draining" and node.get("worker_fresh") is True:
+        elif intent == "draining" and selected_node.get("worker_fresh") is True:
             errors.append(f"{host}: worker still fresh after draining intent")
-        elif intent == "stopped" and node.get("worker_fresh") is True:
+        elif intent == "stopped" and selected_node.get("worker_fresh") is True:
             errors.append(f"{host}: worker still fresh after stopped intent")
     return errors
 

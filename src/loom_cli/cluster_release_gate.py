@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -27,6 +28,24 @@ from loom_cli.gb10_release_gate import gb10_release_target_mismatches
 _Outcome = Literal["pass", "fail"]
 _HF_MIRROR_BOUNDARY_ENVIRONMENTS = frozenset({"staging", "production"})
 _HF_MIRROR_BENCHMARK_ID = "skilllearnbench"
+_GB10_ALLOWED_HOST_INTENTS = frozenset({"active", "draining", "stopped"})
+_GB10_DESIRED_CONTRACT_FIELDS = (
+    "environment",
+    "pool_name",
+    "image_tag",
+    "env_config_version",
+    "source_git_commit",
+    "max_concurrent",
+    "target_slots",
+    "host_intents",
+)
+_STAGING_GB10_HOST_INTENTS = {
+    **{f"trt-gb10-{index}": "active" for index in range(1, 16) if index != 7},
+    "trt-gb10-7": "stopped",
+}
+_STAGING_GB10_POOL_NAME = "gb10-arm64"
+_STAGING_GB10_MAX_CONCURRENT = 10
+_STAGING_GB10_TARGET_SLOTS = 140
 _SAFE_WORKLOAD_CONTRACT_ENV_VALUES = frozenset({"internal_trusted", "True", "False"})
 _RAW_SECRET_RE = re.compile(
     r"(?i)\b(?:HF_TOKEN|TOKEN|SECRET|API_KEY|ACCESS_KEY|SECRET_KEY)\s*[:=]\s*"
@@ -187,10 +206,7 @@ def _workload_contract_check(
     if loom_service is not None:
         live_env = _container_env_by_name(loom_service)
         actual.update(
-            {
-                name: _safe_workload_contract_actual(live_env.get(name))
-                for name in expected
-            }
+            {name: _safe_workload_contract_actual(live_env.get(name)) for name in expected}
         )
 
     if actual == expected:
@@ -388,7 +404,11 @@ def _image_identity_checks(
                 name="image-identities-recorded",
                 outcome="fail",
                 detail="release manifest does not record expected image digests or IDs",
-                evidence={"deployment_image_identities": identities if isinstance(identities, dict) else None},
+                evidence={
+                    "deployment_image_identities": identities
+                    if isinstance(identities, dict)
+                    else None
+                },
                 remediation="regenerate the release manifest with expected immutable image identities",
             )
         ]
@@ -439,9 +459,7 @@ def _image_identity_checks(
         )
         template_images = _container_image_by_name(pod_template_spec)
         matching_ready_pods = [
-            pod
-            for pod in pods
-            if _pod_matches_selector(pod, selector) and _pod_ready(pod)
+            pod for pod in pods if _pod_matches_selector(pod, selector) and _pod_ready(pod)
         ]
         sandbox_diagnostics = sandbox_deadline_diagnostics_for_deployment(
             deployment=deployment,
@@ -478,18 +496,13 @@ def _image_identity_checks(
                         ReleaseGateCheck(
                             name=f"image-identity:{deployment_name}/{container_name}",
                             outcome="fail",
-                            detail=(
-                                "node runtime sandbox deadline blocked "
-                                "Deployment rollout"
-                            ),
+                            detail=("node runtime sandbox deadline blocked Deployment rollout"),
                             evidence={
                                 **base_evidence,
                                 **rollout_evidence,
                                 "failure_class": SANDBOX_DEADLINE_FAILURE_CLASS,
                                 "runtime_recovery": SANDBOX_DEADLINE_RECOVERY_KIND,
-                                "sandbox_deadline_diagnostics": (
-                                    sandbox_diagnostic_evidence
-                                ),
+                                "sandbox_deadline_diagnostics": (sandbox_diagnostic_evidence),
                             },
                             remediation=(
                                 "rerun `loom cluster up "
@@ -566,7 +579,10 @@ def _image_identity_checks(
             saw_target_generation_pod = False
             for pod in matching_ready_pods:
                 pod_spec_images = _container_image_by_name(_get_field(pod, "spec"))
-                if pod_template_image and pod_spec_images.get(str(container_name)) != pod_template_image:
+                if (
+                    pod_template_image
+                    and pod_spec_images.get(str(container_name)) != pod_template_image
+                ):
                     continue
                 saw_target_generation_pod = True
                 statuses = _container_status_by_name(pod)
@@ -659,7 +675,10 @@ def _image_identity_checks(
                         )
                     )
                     continue
-                if candidate_evidence and candidate_evidence.get("runtime_identity_kind") == "missing":
+                if (
+                    candidate_evidence
+                    and candidate_evidence.get("runtime_identity_kind") == "missing"
+                ):
                     checks.append(
                         ReleaseGateCheck(
                             name=f"image-identity:{deployment_name}/{container_name}",
@@ -766,8 +785,7 @@ def _environment_state_manifest_evidence(manifest: dict[str, Any]) -> dict[str, 
     if isinstance(slurm_pools, list):
         evidence["slurm_pool_count"] = len(slurm_pools)
         evidence["slurm_pools"] = [
-            pool.get("pool_name") if isinstance(pool, dict) else None
-            for pool in slurm_pools
+            pool.get("pool_name") if isinstance(pool, dict) else None for pool in slurm_pools
         ]
     if isinstance(gb10_desired_states, list):
         evidence["gb10_desired_state_count"] = len(gb10_desired_states)
@@ -837,9 +855,7 @@ def _environment_state_check(
         "ok": ok,
         "drift_count": len(drift) if isinstance(drift, list) else None,
         "autoscaler_blocker_count": (
-            len(autoscaler_blockers)
-            if isinstance(autoscaler_blockers, list)
-            else None
+            len(autoscaler_blockers) if isinstance(autoscaler_blockers, list) else None
         ),
     }
     if manifest_environment and artifact_environment != manifest_environment:
@@ -984,8 +1000,7 @@ def _disabled_k8s_worker_check(
             detail="disabled k8s worker prune state is unverifiable",
             evidence={**evidence, "deployment_error": deployment_error},
             remediation=(
-                "restore Kubernetes Deployment/StatefulSet read access and "
-                "rerun release-gate"
+                "restore Kubernetes Deployment/StatefulSet read access and rerun release-gate"
             ),
         )
     if pod_list_error is not None:
@@ -1031,7 +1046,12 @@ def _gb10_worker_check(
     desired_states = external_workers.get("gb10_desired_states")
     if not isinstance(desired_states, list):
         desired_states = []
-    if not desired_states and artifact is None and artifact_error is None:
+    if (
+        not desired_states
+        and artifact is None
+        and artifact_error is None
+        and not _gb10_manifest_contract_required(manifest)
+    ):
         return None
 
     release = manifest.get("release", {})
@@ -1043,13 +1063,12 @@ def _gb10_worker_check(
         if isinstance(row, dict) and row.get("env_config_version")
     ]
     release_env_config_version = (
-        manifest_env_versions[0]
-        if len(set(manifest_env_versions)) == 1
-        else release_image_tag
+        manifest_env_versions[0] if len(set(manifest_env_versions)) == 1 else release_image_tag
     )
     evidence = {
         "artifact": artifact_path,
         "manifest_desired_state_count": len(desired_states),
+        "release_environment": release.get("environment"),
         "release_image_tag": release_image_tag,
         "release_env_config_version": release_env_config_version,
     }
@@ -1059,6 +1078,29 @@ def _gb10_worker_check(
         "<env-config-version>` for the release and pass the JSON artifact to "
         "`loom cluster release-gate --gb10-workers-status`"
     )
+    manifest_contract_mismatches = _gb10_desired_contract_mismatches(
+        manifest_states=desired_states,
+        artifact_states=desired_states,
+    )
+    manifest_policy_mismatches = _gb10_manifest_policy_mismatches(
+        manifest=manifest,
+        desired_states=desired_states,
+    )
+    if manifest_contract_mismatches or manifest_policy_mismatches:
+        return ReleaseGateCheck(
+            name="gb10-worker-convergence",
+            outcome="fail",
+            detail="release manifest declares an invalid GB10 desired-state policy",
+            evidence={
+                **evidence,
+                "manifest_contract_mismatches": manifest_contract_mismatches,
+                "manifest_policy_mismatches": manifest_policy_mismatches,
+            },
+            remediation=(
+                "rebuild the release manifest from the merged environment-state "
+                "profile and exact release identity"
+            ),
+        )
     if artifact_error is not None:
         return ReleaseGateCheck(
             name="gb10-worker-convergence",
@@ -1094,9 +1136,13 @@ def _gb10_worker_check(
                 "environment-state profile before accepting GB10 worker evidence"
             ),
         )
-    if not isinstance(artifact.get("desired_states"), list) or not isinstance(
-        artifact.get("nodes"),
-        list,
+    if (
+        not isinstance(artifact.get("desired_states"), list)
+        or not isinstance(
+            artifact.get("nodes"),
+            list,
+        )
+        or not isinstance(artifact.get("unlinked_workers"), list)
     ):
         return ReleaseGateCheck(
             name="gb10-worker-convergence",
@@ -1106,8 +1152,34 @@ def _gb10_worker_check(
                 **evidence,
                 "has_desired_states": isinstance(artifact.get("desired_states"), list),
                 "has_nodes": isinstance(artifact.get("nodes"), list),
+                "has_unlinked_workers": isinstance(
+                    artifact.get("unlinked_workers"),
+                    list,
+                ),
             },
             remediation=remediation,
+        )
+
+    artifact_desired_states = artifact["desired_states"]
+    contract_mismatches = _gb10_desired_contract_mismatches(
+        manifest_states=desired_states,
+        artifact_states=artifact_desired_states,
+    )
+    if contract_mismatches:
+        return ReleaseGateCheck(
+            name="gb10-worker-convergence",
+            outcome="fail",
+            detail="GB10 worker status desired state does not match release manifest",
+            evidence={
+                **evidence,
+                "artifact_desired_state_count": len(artifact_desired_states),
+                "contract_mismatches": contract_mismatches,
+            },
+            remediation=(
+                "reapply the candidate environment-state profile and collect a fresh "
+                "GB10 status artifact whose complete desired-state contract exactly "
+                "matches the release manifest"
+            ),
         )
 
     mismatches = gb10_release_target_mismatches(
@@ -1133,6 +1205,199 @@ def _gb10_worker_check(
             "node_count": len(artifact.get("nodes", [])),
         },
     )
+
+
+def _gb10_desired_contract_mismatches(
+    *,
+    manifest_states: list[Any],
+    artifact_states: list[Any],
+) -> list[str]:
+    """Compare the complete release-relevant GB10 desired-state contract."""
+
+    def _index(
+        states: list[Any],
+        *,
+        label: str,
+    ) -> tuple[dict[tuple[str, str], dict[str, Any]], list[str]]:
+        indexed: dict[tuple[str, str], dict[str, Any]] = {}
+        issues: list[str] = []
+        for index, row in enumerate(states):
+            if not isinstance(row, dict):
+                issues.append(f"{label}[{index}] must be an object")
+                continue
+            missing = [
+                contract_field
+                for contract_field in _GB10_DESIRED_CONTRACT_FIELDS
+                if contract_field not in row
+            ]
+            if missing:
+                issues.append(f"{label}[{index}] missing required fields: {','.join(missing)}")
+            environment = row.get("environment")
+            pool_name = row.get("pool_name")
+            if not isinstance(environment, str) or not environment.strip():
+                issues.append(f"{label}[{index}].environment must be non-empty")
+                continue
+            if not isinstance(pool_name, str) or not pool_name.strip():
+                issues.append(f"{label}[{index}].pool_name must be non-empty")
+                continue
+            key = (environment, pool_name)
+            if key in indexed:
+                issues.append(f"{label} contains duplicate {environment}/{pool_name}")
+                continue
+            indexed[key] = row
+
+            for contract_field in (
+                "image_tag",
+                "env_config_version",
+                "source_git_commit",
+            ):
+                value = row.get(contract_field)
+                if not isinstance(value, str) or not value.strip():
+                    issues.append(
+                        f"{label} {environment}/{pool_name} {contract_field} must be non-empty"
+                    )
+            for contract_field in ("max_concurrent", "target_slots"):
+                value = row.get(contract_field)
+                if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                    issues.append(
+                        f"{label} {environment}/{pool_name} {contract_field} "
+                        "must be a positive integer"
+                    )
+            host_intents = row.get("host_intents")
+            if not isinstance(host_intents, dict) or not host_intents:
+                issues.append(f"{label} {environment}/{pool_name} host_intents must be non-empty")
+            elif any(
+                not isinstance(host, str)
+                or not host.strip()
+                or not isinstance(intent, str)
+                or not intent.strip()
+                for host, intent in host_intents.items()
+            ):
+                issues.append(
+                    f"{label} {environment}/{pool_name} host_intents must map "
+                    "non-empty host names to non-empty intents"
+                )
+            elif any(intent not in _GB10_ALLOWED_HOST_INTENTS for intent in host_intents.values()):
+                issues.append(
+                    f"{label} {environment}/{pool_name} host_intents values must be "
+                    "active, draining, or stopped"
+                )
+            else:
+                max_concurrent = row.get("max_concurrent")
+                target_slots = row.get("target_slots")
+                if (
+                    isinstance(max_concurrent, int)
+                    and not isinstance(max_concurrent, bool)
+                    and isinstance(target_slots, int)
+                    and not isinstance(target_slots, bool)
+                ):
+                    active_slots = (
+                        sum(intent == "active" for intent in host_intents.values()) * max_concurrent
+                    )
+                    if target_slots != active_slots:
+                        issues.append(
+                            f"{label} {environment}/{pool_name} target_slots must equal "
+                            "active host count times max_concurrent"
+                        )
+        return indexed, issues
+
+    manifest_by_key, issues = _index(manifest_states, label="manifest desired_states")
+    artifact_by_key, artifact_issues = _index(
+        artifact_states,
+        label="artifact desired_states",
+    )
+    issues.extend(artifact_issues)
+
+    manifest_keys = set(manifest_by_key)
+    artifact_keys = set(artifact_by_key)
+    for environment, pool_name in sorted(manifest_keys - artifact_keys):
+        issues.append(f"artifact desired_states missing {environment}/{pool_name}")
+    for environment, pool_name in sorted(artifact_keys - manifest_keys):
+        issues.append(f"artifact desired_states has unexpected {environment}/{pool_name}")
+    for key in sorted(manifest_keys & artifact_keys):
+        expected = manifest_by_key[key]
+        actual = artifact_by_key[key]
+        for contract_field in _GB10_DESIRED_CONTRACT_FIELDS:
+            if actual.get(contract_field) != expected.get(contract_field):
+                issues.append(
+                    f"artifact desired_states {key[0]}/{key[1]} {contract_field} "
+                    f"does not match release manifest"
+                )
+    return issues
+
+
+def _gb10_manifest_policy_mismatches(
+    *,
+    manifest: dict[str, Any],
+    desired_states: list[Any],
+) -> list[str]:
+    if not desired_states:
+        return (
+            ["staging release manifest must declare the GB10 desired-state contract"]
+            if _gb10_manifest_contract_required(manifest)
+            else []
+        )
+    release = manifest.get("release")
+    if not isinstance(release, dict):
+        return ["release manifest release section must be an object"]
+    release_environment = release.get("environment")
+    release_image_tag = release.get("image_tag")
+    release_git_sha = release.get("git_sha")
+    issues: list[str] = []
+    if (
+        not isinstance(release_git_sha, str)
+        or re.fullmatch(r"[0-9a-f]{40}", release_git_sha) is None
+    ):
+        issues.append("release.git_sha must be a full lowercase 40-hex commit")
+    external_workers = manifest.get("external_workers")
+    if isinstance(external_workers, dict):
+        control_plane_environment = external_workers.get("control_plane_environment")
+        if (
+            control_plane_environment is not None
+            and control_plane_environment != release_environment
+        ):
+            issues.append(
+                "external_workers.control_plane_environment must match release.environment"
+            )
+    for index, desired in enumerate(desired_states):
+        if not isinstance(desired, dict):
+            continue
+        if desired.get("environment") != release_environment:
+            issues.append(
+                f"gb10_desired_states[{index}].environment must match release.environment"
+            )
+        if desired.get("image_tag") != release_image_tag:
+            issues.append(f"gb10_desired_states[{index}].image_tag must match release.image_tag")
+        if desired.get("env_config_version") != release_image_tag:
+            issues.append(
+                f"gb10_desired_states[{index}].env_config_version must match release.image_tag"
+            )
+        if desired.get("source_git_commit") != release_git_sha:
+            issues.append(
+                f"gb10_desired_states[{index}].source_git_commit must match release.git_sha"
+            )
+
+    if release_environment != "staging":
+        return issues
+    if len(desired_states) != 1 or not isinstance(desired_states[0], dict):
+        issues.append("staging release must declare exactly one GB10 desired state")
+        return issues
+    desired = desired_states[0]
+    if desired.get("pool_name") != _STAGING_GB10_POOL_NAME:
+        issues.append(f"staging GB10 pool_name must be {_STAGING_GB10_POOL_NAME}")
+    if desired.get("max_concurrent") != _STAGING_GB10_MAX_CONCURRENT:
+        issues.append(f"staging GB10 max_concurrent must be {_STAGING_GB10_MAX_CONCURRENT}")
+    if desired.get("target_slots") != _STAGING_GB10_TARGET_SLOTS:
+        issues.append(f"staging GB10 target_slots must be {_STAGING_GB10_TARGET_SLOTS}")
+    if desired.get("host_intents") != _STAGING_GB10_HOST_INTENTS:
+        issues.append("staging GB10 host_intents must be exact active14 with trt-gb10-7 stopped")
+    return issues
+
+
+def _gb10_manifest_contract_required(manifest: dict[str, Any]) -> bool:
+    release = manifest.get("release")
+    release_environment = release.get("environment") if isinstance(release, dict) else None
+    return release_environment == "staging"
 
 
 def _minio_storage_preflight_check(
@@ -1164,15 +1429,17 @@ def _minio_storage_preflight_check(
     if not isinstance(thresholds, dict):
         thresholds = {}
     outcome = str(artifact.get("outcome") or "unknown")
-    evidence.update({
-        "outcome": outcome,
-        "free_bytes": filesystem.get("free_bytes"),
-        "free_percent": filesystem.get("free_percent"),
-        "used_percent": filesystem.get("used_percent"),
-        "warn_free_percent": thresholds.get("warn_free_percent"),
-        "stop_free_percent": thresholds.get("stop_free_percent"),
-        "checks": checks if isinstance(checks, list) else [],
-    })
+    evidence.update(
+        {
+            "outcome": outcome,
+            "free_bytes": filesystem.get("free_bytes"),
+            "free_percent": filesystem.get("free_percent"),
+            "used_percent": filesystem.get("used_percent"),
+            "warn_free_percent": thresholds.get("warn_free_percent"),
+            "stop_free_percent": thresholds.get("stop_free_percent"),
+            "checks": checks if isinstance(checks, list) else [],
+        }
+    )
     if outcome == "stop":
         return ReleaseGateCheck(
             name="minio-storage-pressure",
@@ -1185,9 +1452,7 @@ def _minio_storage_preflight_check(
             ),
         )
     detail = (
-        "MinIO storage preflight warns"
-        if outcome == "warn"
-        else "MinIO storage preflight passed"
+        "MinIO storage preflight warns" if outcome == "warn" else "MinIO storage preflight passed"
     )
     return ReleaseGateCheck(
         name="minio-storage-pressure",
@@ -1223,6 +1488,49 @@ def _int_field(mapping: dict[str, Any], key: str) -> int | None:
 def _list_field(mapping: dict[str, Any], key: str) -> list[Any]:
     value = mapping.get(key)
     return list(value) if isinstance(value, list) else []
+
+
+def _canonical_json_sha256(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _manifest_active_gb10_hosts(manifest: dict[str, Any]) -> list[str]:
+    external_workers = manifest.get("external_workers")
+    if not isinstance(external_workers, dict):
+        return []
+    desired_states = external_workers.get("gb10_desired_states")
+    if not isinstance(desired_states, list):
+        return []
+    active_hosts: set[str] = set()
+    for desired in desired_states:
+        if not isinstance(desired, dict):
+            continue
+        host_intents = desired.get("host_intents")
+        if not isinstance(host_intents, dict):
+            continue
+        active_hosts.update(
+            str(host)
+            for host, intent in host_intents.items()
+            if isinstance(host, str) and host and intent == "active"
+        )
+    return sorted(active_hosts)
+
+
+def _canary_task_filter_matches_benchmark(value: Any, benchmark_id: str) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if value.get("benchmark_id") == benchmark_id:
+        return True
+    benchmark_ids = value.get("benchmark_ids")
+    if isinstance(benchmark_ids, list) and benchmark_id in benchmark_ids:
+        return True
+    task_ids = value.get("task_ids")
+    return isinstance(task_ids, list) and any(
+        isinstance(task_id, str)
+        and (task_id == benchmark_id or task_id.startswith(f"{benchmark_id}/"))
+        for task_id in task_ids
+    )
 
 
 def _secret_leak_paths(value: Any, *, path: str = "") -> list[str]:
@@ -1273,6 +1581,25 @@ def _hf_mirror_boundary_evidence(
     gb10_summary = worker_boundary.get("gb10_hf_token_check_summary")
     if not isinstance(gb10_summary, dict):
         gb10_summary = {}
+    required_gb10_list_fields = (
+        "checked_host_names",
+        "ssh_failed_hosts",
+        "docker_ps_failed_hosts",
+        "hosts_without_containers",
+        "env_file_missing_hosts",
+        "env_file_hf_token_present_hosts",
+        "hosts_with_container_hf_token_present",
+        "inspect_failed",
+    )
+    gb10_summary_schema_errors = [
+        f"{summary_field} must be a list"
+        for summary_field in required_gb10_list_fields
+        if not isinstance(gb10_summary.get(summary_field), list)
+    ]
+    for summary_field in ("checked_hosts", "containers_checked"):
+        value = gb10_summary.get(summary_field)
+        if isinstance(value, bool) or not isinstance(value, int):
+            gb10_summary_schema_errors.append(f"{summary_field} must be an integer")
     secret_scan = artifact.get("secret_scan")
     if not isinstance(secret_scan, dict):
         secret_scan = {}
@@ -1283,9 +1610,10 @@ def _hf_mirror_boundary_evidence(
     if not isinstance(requires_caps, dict):
         requires_caps = {}
 
-    total_sources = _int_field(runtime_sources, "total_task_sources")
-    internal_sources = _int_field(runtime_sources, "internal_s3_sources")
+    total_sources = runtime_sources.get("total_task_sources")
+    internal_sources = runtime_sources.get("internal_s3_sources")
     non_internal_sources = runtime_sources.get("non_internal_sources")
+    runtime_sources_schema_valid = isinstance(non_internal_sources, list)
     if not isinstance(non_internal_sources, list):
         non_internal_sources = []
     sample_source = runtime_sources.get("sample_s3_source")
@@ -1296,50 +1624,68 @@ def _hf_mirror_boundary_evidence(
     direct_hf_egress_required = worker_boundary.get("direct_hf_egress_required")
     secret_leaks = _secret_leak_paths(artifact)
 
-    evidence.update({
-        "environment": artifact.get("environment"),
-        "runnable_tasks": _int_field(catalog_evidence, "runnable_tasks"),
-        "requires_cpu_arch": requires_caps.get("cpu_arch"),
-        "total_task_sources": total_sources,
-        "internal_s3_sources": internal_sources,
-        "non_internal_source_count": len(non_internal_sources),
-        "sample_s3_source": sample_source,
-        "hf_upstream_kind": upstream_kind,
-        "hf_upstream_locator": upstream_locator,
-        "hf_upstream_revision": upstream_revision,
-        "hf_provenance_retained": (
-            upstream_kind == "huggingface"
-            and isinstance(upstream_locator, str)
-            and bool(upstream_locator.strip())
-            and isinstance(upstream_revision, str)
-            and bool(upstream_revision.strip())
-        ),
-        "canary_started": worker_boundary.get("canary_started"),
-        "terminal_state": worker_boundary.get("terminal_state"),
-        "worker_hf_token_present": worker_hf_token_present,
-        "direct_hf_egress_required": direct_hf_egress_required,
-        "materialized_from_internal_source": (
-            worker_boundary.get("materialized_from_internal_source")
-        ),
-        "gb10_checked_hosts": _int_field(gb10_summary, "checked_hosts"),
-        "gb10_ssh_failed_hosts": _list_field(gb10_summary, "ssh_failed_hosts"),
-        "gb10_containers_checked": _int_field(gb10_summary, "containers_checked"),
-        "gb10_inspect_failed": _list_field(gb10_summary, "inspect_failed"),
-        "gb10_env_file_missing_hosts": _list_field(gb10_summary, "env_file_missing_hosts"),
-        "gb10_env_file_hf_token_present_hosts": _list_field(
-            gb10_summary,
-            "env_file_hf_token_present_hosts",
-        ),
-        "gb10_hosts_with_container_hf_token_present": _list_field(
-            gb10_summary,
-            "hosts_with_container_hf_token_present",
-        ),
-        "secret_safe": (
-            not secret_leaks
-            and secret_scan.get("raw_secret_values_present") is False
-        ),
-        "secret_leak_paths": secret_leaks,
-    })
+    evidence.update(
+        {
+            "environment": artifact.get("environment"),
+            "runnable_tasks": catalog_evidence.get("runnable_tasks"),
+            "requires_cpu_arch": requires_caps.get("cpu_arch"),
+            "total_task_sources": total_sources,
+            "internal_s3_sources": internal_sources,
+            "runtime_sources_schema_valid": runtime_sources_schema_valid,
+            "non_internal_source_count": len(non_internal_sources),
+            "sample_s3_source": sample_source,
+            "hf_upstream_kind": upstream_kind,
+            "hf_upstream_locator": upstream_locator,
+            "hf_upstream_revision": upstream_revision,
+            "hf_provenance_retained": (
+                upstream_kind == "huggingface"
+                and isinstance(upstream_locator, str)
+                and bool(upstream_locator.strip())
+                and isinstance(upstream_revision, str)
+                and bool(upstream_revision.strip())
+            ),
+            "canary_started": worker_boundary.get("canary_started"),
+            "terminal_state": worker_boundary.get("terminal_state"),
+            "canary_task_filter": worker_boundary.get("canary_task_filter"),
+            "canary_worker_pools": worker_boundary.get("canary_worker_pools"),
+            "canary_expected_trial_count": worker_boundary.get("expected_trial_count"),
+            "canary_succeeded_trials": worker_boundary.get("succeeded_trials"),
+            "worker_hf_token_present": worker_hf_token_present,
+            "direct_hf_egress_required": direct_hf_egress_required,
+            "materialized_from_internal_source": (
+                worker_boundary.get("materialized_from_internal_source")
+            ),
+            "gb10_summary_schema_valid": not gb10_summary_schema_errors,
+            "gb10_summary_schema_errors": gb10_summary_schema_errors,
+            "gb10_expected_host_names": _manifest_active_gb10_hosts(manifest),
+            "gb10_checked_hosts": _int_field(gb10_summary, "checked_hosts"),
+            "gb10_checked_host_names": _list_field(gb10_summary, "checked_host_names"),
+            "gb10_ssh_failed_hosts": _list_field(gb10_summary, "ssh_failed_hosts"),
+            "gb10_docker_ps_failed_hosts": _list_field(
+                gb10_summary,
+                "docker_ps_failed_hosts",
+            ),
+            "gb10_hosts_without_containers": _list_field(
+                gb10_summary,
+                "hosts_without_containers",
+            ),
+            "gb10_containers_checked": _int_field(gb10_summary, "containers_checked"),
+            "gb10_inspect_failed": _list_field(gb10_summary, "inspect_failed"),
+            "gb10_env_file_missing_hosts": _list_field(gb10_summary, "env_file_missing_hosts"),
+            "gb10_env_file_hf_token_present_hosts": _list_field(
+                gb10_summary,
+                "env_file_hf_token_present_hosts",
+            ),
+            "gb10_hosts_with_container_hf_token_present": _list_field(
+                gb10_summary,
+                "hosts_with_container_hf_token_present",
+            ),
+            "secret_safe": (
+                not secret_leaks and secret_scan.get("raw_secret_values_present") is False
+            ),
+            "secret_leak_paths": secret_leaks,
+        }
+    )
     return evidence
 
 
@@ -1349,6 +1695,7 @@ def _hf_mirror_boundary_check(
     artifact: dict[str, Any] | None,
     artifact_path: str | None,
     artifact_error: str | None,
+    gb10_status_artifact: dict[str, Any] | None = None,
 ) -> ReleaseGateCheck | None:
     required = _hf_mirror_boundary_required(manifest)
     if not required and artifact is None and artifact_error is None:
@@ -1408,20 +1755,60 @@ def _hf_mirror_boundary_check(
         artifact_path=artifact_path,
     )
     release_environment = evidence.get("release_environment")
+    release = manifest.get("release")
+    if not isinstance(release, dict):
+        release = {}
+    candidate_binding = artifact.get("candidate_binding")
+    if not isinstance(candidate_binding, dict):
+        candidate_binding = {}
+    expected_status_sha256 = (
+        _canonical_json_sha256(gb10_status_artifact)
+        if isinstance(gb10_status_artifact, dict)
+        else None
+    )
+    evidence.update(
+        {
+            "candidate_binding_environment": candidate_binding.get("environment"),
+            "candidate_binding_image_tag": candidate_binding.get("release_image_tag"),
+            "candidate_binding_git_sha": candidate_binding.get("release_git_sha"),
+            "candidate_binding_status_sha256": candidate_binding.get("gb10_workers_status_sha256"),
+            "expected_candidate_image_tag": release.get("image_tag"),
+            "expected_candidate_git_sha": release.get("git_sha"),
+            "expected_gb10_status_sha256": expected_status_sha256,
+        }
+    )
     issues: list[str] = []
     if artifact.get("environment") != release_environment:
         issues.append("evidence environment must match the release manifest")
     if artifact.get("benchmark_id") != _HF_MIRROR_BENCHMARK_ID:
         issues.append("evidence benchmark_id must be skilllearnbench")
-    if not evidence.get("runnable_tasks"):
+    if (
+        candidate_binding.get("environment") != release_environment
+        or candidate_binding.get("release_image_tag") != release.get("image_tag")
+        or candidate_binding.get("release_git_sha") != release.get("git_sha")
+        or expected_status_sha256 is None
+        or candidate_binding.get("gb10_workers_status_sha256") != expected_status_sha256
+    ):
+        issues.append("HF boundary evidence must bind the exact candidate and GB10 status artifact")
+    runnable_tasks = evidence.get("runnable_tasks")
+    if (
+        isinstance(runnable_tasks, bool)
+        or not isinstance(runnable_tasks, int)
+        or runnable_tasks <= 0
+    ):
         issues.append("SkillLearnBench catalog must report runnable tasks")
     if evidence.get("requires_cpu_arch") != "any":
         issues.append("SkillLearnBench requires_caps.cpu_arch must remain any")
     total_sources = evidence.get("total_task_sources")
     internal_sources = evidence.get("internal_s3_sources")
+    if evidence.get("runtime_sources_schema_valid") is not True:
+        issues.append("runtime_sources.non_internal_sources must be a list")
     if (
         not isinstance(total_sources, int)
+        or isinstance(total_sources, bool)
         or total_sources <= 0
+        or not isinstance(internal_sources, int)
+        or isinstance(internal_sources, bool)
         or internal_sources != total_sources
         or evidence.get("non_internal_source_count") != 0
         or not str(evidence.get("sample_s3_source") or "").startswith("s3://")
@@ -1432,24 +1819,75 @@ def _hf_mirror_boundary_check(
     if evidence.get("worker_hf_token_present") is not False:
         issues.append("worker HF_TOKEN must be absent in canary evidence")
     checked_hosts = evidence.get("gb10_checked_hosts")
+    checked_host_names = evidence.get("gb10_checked_host_names")
+    expected_host_names = evidence.get("gb10_expected_host_names")
     containers_checked = evidence.get("gb10_containers_checked")
+    checked_host_name_list = checked_host_names if isinstance(checked_host_names, list) else []
+    checked_host_names_valid = isinstance(checked_host_names, list) and all(
+        isinstance(host, str) and bool(host) for host in checked_host_name_list
+    )
+    if evidence.get("gb10_summary_schema_valid") is not True:
+        issues.append("GB10 HF token check summary is incomplete or invalid")
     if (
-        not isinstance(checked_hosts, int)
-        or checked_hosts <= 0
+        not isinstance(expected_host_names, list)
+        or not expected_host_names
+        or not isinstance(checked_hosts, int)
+        or checked_hosts != len(expected_host_names)
+        or not checked_host_names_valid
+        or len(checked_host_name_list) != len(expected_host_names)
+        or sorted(checked_host_name_list) != expected_host_names
         or not isinstance(containers_checked, int)
-        or containers_checked <= 0
+        or containers_checked < len(expected_host_names)
     ):
-        issues.append("GB10 HF token checks must inspect active workers")
+        issues.append("GB10 HF token checks must inspect the exact manifest-active host set")
     if evidence.get("gb10_ssh_failed_hosts"):
         issues.append("GB10 HF token checks must reach every required host")
+    if evidence.get("gb10_docker_ps_failed_hosts"):
+        issues.append("GB10 HF token checks must list containers on every active host")
+    if evidence.get("gb10_hosts_without_containers"):
+        issues.append("GB10 HF token checks must find a worker container on every active host")
     if evidence.get("gb10_inspect_failed"):
         issues.append("GB10 HF token checks must inspect every worker container")
+    if evidence.get("gb10_env_file_missing_hosts"):
+        issues.append("GB10 HF token checks must inspect the worker env file on every active host")
+    if evidence.get("gb10_env_file_hf_token_present_hosts"):
+        issues.append("GB10 worker env files must not contain HF_TOKEN")
+    if evidence.get("gb10_hosts_with_container_hf_token_present"):
+        issues.append("GB10 worker containers must not contain HF_TOKEN")
     if evidence.get("direct_hf_egress_required") is not False:
         issues.append("canary must not require direct worker HF egress")
     if evidence.get("materialized_from_internal_source") is not True:
         issues.append("canary must materialize from the internal mirror source")
-    if evidence.get("canary_started") is not True or not evidence.get("terminal_state"):
-        issues.append("canary must reach started and terminal state")
+    expected_trials = evidence.get("canary_expected_trial_count")
+    succeeded_trials = evidence.get("canary_succeeded_trials")
+    canary_worker_pools = evidence.get("canary_worker_pools")
+    terminal_pools = (
+        canary_worker_pools.get("terminal") if isinstance(canary_worker_pools, dict) else None
+    )
+    active_pools = (
+        canary_worker_pools.get("active") if isinstance(canary_worker_pools, dict) else None
+    )
+    if (
+        evidence.get("canary_started") is not True
+        or evidence.get("terminal_state") != "succeeded"
+        or isinstance(expected_trials, bool)
+        or not isinstance(expected_trials, int)
+        or expected_trials <= 0
+        or isinstance(succeeded_trials, bool)
+        or not isinstance(succeeded_trials, int)
+        or succeeded_trials != expected_trials
+        or not _canary_task_filter_matches_benchmark(
+            evidence.get("canary_task_filter"),
+            _HF_MIRROR_BENCHMARK_ID,
+        )
+        or not isinstance(terminal_pools, dict)
+        or set(terminal_pools) != {_STAGING_GB10_POOL_NAME}
+        or isinstance(terminal_pools.get(_STAGING_GB10_POOL_NAME), bool)
+        or not isinstance(terminal_pools.get(_STAGING_GB10_POOL_NAME), int)
+        or terminal_pools.get(_STAGING_GB10_POOL_NAME) != expected_trials
+        or active_pools != {}
+    ):
+        issues.append("canary must be a fully succeeded SkillLearnBench GB10 batch")
     if not evidence.get("secret_safe"):
         issues.append("evidence must not contain raw HF/API/object-store secrets")
 
@@ -1573,6 +2011,7 @@ def collect_release_gate_report(
         artifact=hf_mirror_boundary_artifact,
         artifact_path=hf_mirror_boundary_path,
         artifact_error=hf_mirror_boundary_error,
+        gb10_status_artifact=gb10_workers_status_artifact,
     )
     if hf_mirror_boundary_check is not None:
         checks.append(hf_mirror_boundary_check)
@@ -1713,7 +2152,10 @@ def query_live_alembic_heads(
     return LiveAlembicHeads(
         heads=sorted(str(head) for head in heads),
         database_target=str(database_target),
-        evidence={"database_target": str(database_target), "heads": sorted(str(head) for head in heads)},
+        evidence={
+            "database_target": str(database_target),
+            "heads": sorted(str(head) for head in heads),
+        },
     )
 
 
@@ -1815,20 +2257,16 @@ def _environment_state_component_rows(check: ReleaseGateCheck) -> list[dict[str,
     if check.name != "environment-state-convergence":
         return []
     evidence = check.evidence
-    components = [
-        str(pool)
-        for pool in evidence.get("slurm_pools", []) or []
-        if pool is not None
-    ]
+    components = [str(pool) for pool in evidence.get("slurm_pools", []) or [] if pool is not None]
     components.extend(
-        str(pool)
-        for pool in evidence.get("gb10_pools", []) or []
-        if pool is not None
+        str(pool) for pool in evidence.get("gb10_pools", []) or [] if pool is not None
     )
     if not components:
         return []
 
-    drifts_by_component: dict[str, list[dict[str, Any]]] = {component: [] for component in components}
+    drifts_by_component: dict[str, list[dict[str, Any]]] = {
+        component: [] for component in components
+    }
     jobs_by_component: dict[str, set[str]] = {component: set() for component in components}
     for drift in evidence.get("drift", []) or []:
         if not isinstance(drift, dict):
@@ -1853,27 +2291,31 @@ def _environment_state_component_rows(check: ReleaseGateCheck) -> list[dict[str,
             row_evidence.append(str(evidence["artifact"]))
         if evidence.get("expected_profile"):
             row_evidence.append(str(evidence["expected_profile"]))
-        rows.append({
-            "surface": "external-worker",
-            "component": component,
-            "expected_release": _first_text(
-                evidence.get("expected_profile"),
-                evidence.get("expected_profile_sha256"),
-            ),
-            "expected_digest": _first_text(evidence.get("expected_profile_sha256")),
-            "live_release": _first_text(evidence.get("artifact"), evidence.get("profile")),
-            "live_digest": "",
-            "generation": ",".join(sorted(jobs_by_component.get(component, set()))),
-            "readiness": (
-                "environment-state converged"
-                if outcome == "pass"
-                else "environment-state drift"
-            ),
-            "restart_crash_reason": "" if outcome == "pass" else check.detail,
-            "evidence": row_evidence,
-            "outcome": outcome,
-            "detail": check.detail if outcome == "fail" else "live environment-state check passed",
-        })
+        rows.append(
+            {
+                "surface": "external-worker",
+                "component": component,
+                "expected_release": _first_text(
+                    evidence.get("expected_profile"),
+                    evidence.get("expected_profile_sha256"),
+                ),
+                "expected_digest": _first_text(evidence.get("expected_profile_sha256")),
+                "live_release": _first_text(evidence.get("artifact"), evidence.get("profile")),
+                "live_digest": "",
+                "generation": ",".join(sorted(jobs_by_component.get(component, set()))),
+                "readiness": (
+                    "environment-state converged"
+                    if outcome == "pass"
+                    else "environment-state drift"
+                ),
+                "restart_crash_reason": "" if outcome == "pass" else check.detail,
+                "evidence": row_evidence,
+                "outcome": outcome,
+                "detail": check.detail
+                if outcome == "fail"
+                else "live environment-state check passed",
+            }
+        )
     return rows
 
 
@@ -1917,9 +2359,7 @@ def _hf_mirror_boundary_component_row(check: ReleaseGateCheck) -> dict[str, Any]
     if evidence.get("sample_s3_source"):
         row_evidence.append(str(evidence["sample_s3_source"]))
     readiness = (
-        "s3 mirror, HF provenance, no worker HF_TOKEN"
-        if check.outcome == "pass"
-        else check.detail
+        "s3 mirror, HF provenance, no worker HF_TOKEN" if check.outcome == "pass" else check.detail
     )
     return {
         "surface": "catalog",
@@ -1999,17 +2439,19 @@ def format_release_gate_markdown(report: ReleaseGateReport) -> str:
         result = "PASS" if row.get("outcome") == "pass" else "FAIL"
         lines.append(
             "| "
-            + " | ".join([
-                _markdown_cell(row.get("surface")),
-                _markdown_cell(row.get("component")),
-                _code_cell(expected),
-                _code_cell(live),
-                _code_cell(row.get("generation")),
-                _markdown_cell(row.get("readiness")),
-                _markdown_cell(row.get("restart_crash_reason")),
-                _code_cell(row.get("evidence")),
-                result,
-            ])
+            + " | ".join(
+                [
+                    _markdown_cell(row.get("surface")),
+                    _markdown_cell(row.get("component")),
+                    _code_cell(expected),
+                    _code_cell(live),
+                    _code_cell(row.get("generation")),
+                    _markdown_cell(row.get("readiness")),
+                    _markdown_cell(row.get("restart_crash_reason")),
+                    _code_cell(row.get("evidence")),
+                    result,
+                ]
+            )
             + " |"
         )
     return "\n".join(lines) + "\n"

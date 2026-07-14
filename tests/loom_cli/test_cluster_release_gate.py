@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import subprocess
 from typing import Any
@@ -10,6 +12,8 @@ from loom_cli.__main__ import main
 from loom_cli.cluster_release_gate import (
     ReleaseGateCheck,
     ReleaseGateReport,
+    _gb10_worker_check,
+    _hf_mirror_boundary_check,
     collect_release_gate_report,
     format_release_gate_markdown,
     query_live_alembic_heads,
@@ -310,7 +314,9 @@ def test_release_gate_rejects_live_loom_service_workload_contract_mismatch(
 
     check = next(check for check in report.checks if check.name == "workload-trust-contract")
     assert check.outcome == "fail"
-    assert check.evidence["expected"][expected_env_name] != check.evidence["actual"][expected_env_name]
+    assert (
+        check.evidence["expected"][expected_env_name] != check.evidence["actual"][expected_env_name]
+    )
     assert not report.all_pass
 
 
@@ -385,7 +391,7 @@ def _external_workers_manifest_section() -> dict[str, Any]:
             "path": "deploy/environment-state/staging.toml",
             "sha256": "state-sha",
         },
-        "control_plane_environment": "production",
+        "control_plane_environment": "staging",
         "slurm_pools": [
             {
                 "pool_name": "oldlab",
@@ -400,10 +406,17 @@ def _external_workers_manifest_section() -> dict[str, Any]:
         ],
         "gb10_desired_states": [
             {
+                "environment": "staging",
                 "pool_name": "gb10-arm64",
                 "image_tag": "staging-abc123",
+                "max_concurrent": 10,
                 "env_config_version": "staging-abc123",
-                "source_git_commit": "abc123ffffffffffffffffffffffffffffffffff",
+                "source_git_commit": "a" * 40,
+                "target_slots": 140,
+                "host_intents": {
+                    **{f"trt-gb10-{index}": "active" for index in range(1, 16) if index != 7},
+                    "trt-gb10-7": "stopped",
+                },
             },
         ],
     }
@@ -429,11 +442,85 @@ def _catalog_manifest_section() -> dict[str, Any]:
     }
 
 
-def _hf_boundary_evidence(**overrides: Any) -> dict[str, Any]:
+_ACTIVE_GB10_HOSTS = [f"trt-gb10-{index}" for index in range(1, 16) if index != 7]
+
+
+def _hf_external_workers_manifest_section() -> dict[str, Any]:
+    external_workers = _external_workers_manifest_section()
+    desired = external_workers["gb10_desired_states"][0]
+    desired["target_slots"] = 140
+    desired["host_intents"] = {
+        **{host: "active" for host in _ACTIVE_GB10_HOSTS},
+        "trt-gb10-7": "stopped",
+    }
+    return external_workers
+
+
+def _gb10_status_for_external_workers(
+    external_workers: dict[str, Any],
+) -> dict[str, Any]:
+    desired_states = copy.deepcopy(external_workers["gb10_desired_states"])
+    desired = desired_states[0]
+    nodes = [
+        {
+            "environment": desired["environment"],
+            "pool_name": desired["pool_name"],
+            "hostname": host,
+            "apply_state": "applied",
+            "current_image_tag": desired["image_tag"],
+            "current_env_config_version": desired["env_config_version"],
+            "current_max_concurrent": desired["max_concurrent"],
+            "desired_intent": "active",
+            "source_git_commit": desired["source_git_commit"],
+            "source_git_dirty": False,
+            "worker_id": f"worker-{host}",
+            "worker_status": "active",
+            "worker_fresh": True,
+            "worker_backend_names": ["docker"],
+        }
+        for host in _ACTIVE_GB10_HOSTS
+    ]
+    return {
+        "desired_states": desired_states,
+        "nodes": nodes,
+        "unlinked_workers": [],
+    }
+
+
+def _gb10_release_gate_inputs(external_workers: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "environment_state_check_artifact": {
+            "environment": "staging",
+            "control_plane_environment": "staging",
+            "profile": "deploy/environment-state/staging.toml",
+            "ok": True,
+            "drift": [],
+            "autoscaler_blockers": [],
+        },
+        "gb10_workers_status_artifact": _gb10_status_for_external_workers(external_workers),
+    }
+
+
+def _hf_boundary_evidence(
+    *,
+    gb10_status: dict[str, Any] | None = None,
+    **overrides: Any,
+) -> dict[str, Any]:
+    if gb10_status is None:
+        gb10_status = _gb10_status_for_external_workers(_hf_external_workers_manifest_section())
+    status_sha256 = hashlib.sha256(
+        json.dumps(gb10_status, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     evidence: dict[str, Any] = {
         "schema_version": 1,
         "environment": "staging",
         "benchmark_id": "skilllearnbench",
+        "candidate_binding": {
+            "environment": "staging",
+            "release_image_tag": "staging-abc123",
+            "release_git_sha": "a" * 40,
+            "gb10_workers_status_sha256": status_sha256,
+        },
         "catalog": {
             "runnable_tasks": 100,
             "requires_caps": {"cpu_arch": "any"},
@@ -452,17 +539,29 @@ def _hf_boundary_evidence(**overrides: Any) -> dict[str, Any]:
         "worker_boundary": {
             "canary_started": True,
             "terminal_state": "succeeded",
+            "canary_task_filter": {
+                "task_ids": ["skilllearnbench/example/example-1"],
+            },
+            "canary_worker_pools": {
+                "active": {},
+                "terminal": {"gb10-arm64": 2},
+            },
+            "expected_trial_count": 2,
+            "succeeded_trials": 2,
             "hf_token_present": False,
             "hf_token_isolated": True,
             "direct_hf_egress_required": False,
             "materialized_from_internal_source": True,
             "gb10_hf_token_check_summary": {
-                "checked_hosts": 15,
+                "checked_hosts": 14,
+                "checked_host_names": _ACTIVE_GB10_HOSTS,
                 "ssh_failed_hosts": [],
+                "docker_ps_failed_hosts": [],
+                "hosts_without_containers": [],
                 "env_file_missing_hosts": [],
                 "env_file_hf_token_present_hosts": [],
                 "hosts_with_container_hf_token_present": [],
-                "containers_checked": 2,
+                "containers_checked": 14,
                 "inspect_failed": [],
             },
         },
@@ -477,7 +576,11 @@ def _hf_boundary_evidence(**overrides: Any) -> dict[str, Any]:
 
 
 def test_release_gate_passes_when_ready_pod_image_id_matches_expected_digest() -> None:
-    manifest = _manifest(expected_digest="sha256:" + "1" * 64)
+    external_workers = _external_workers_manifest_section()
+    manifest = _manifest(
+        expected_digest="sha256:" + "1" * 64,
+        external_workers=external_workers,
+    )
     apps = _FakeAppsV1(
         {
             "loom-service": _deployment(
@@ -505,6 +608,7 @@ def test_release_gate_passes_when_ready_pod_image_id_matches_expected_digest() -
         rendered_manifest_sha256="rendered-sha",
         cluster_config_sha256="config-sha",
         live_alembic_heads=["0050"],
+        **_gb10_release_gate_inputs(external_workers),
     )
 
     assert report.all_pass
@@ -560,7 +664,11 @@ def test_release_gate_fails_when_ready_pod_image_id_does_not_match_manifest() ->
 
 
 def test_release_gate_accepts_kind_import_runtime_identity_when_template_matches() -> None:
-    manifest = _manifest(expected_digest="sha256:" + "1" * 64)
+    external_workers = _external_workers_manifest_section()
+    manifest = _manifest(
+        expected_digest="sha256:" + "1" * 64,
+        external_workers=external_workers,
+    )
     apps = _FakeAppsV1(
         {
             "loom-service": _deployment(
@@ -588,6 +696,7 @@ def test_release_gate_accepts_kind_import_runtime_identity_when_template_matches
         rendered_manifest_sha256="rendered-sha",
         cluster_config_sha256="config-sha",
         live_alembic_heads=["0050"],
+        **_gb10_release_gate_inputs(external_workers),
     )
 
     assert report.all_pass
@@ -660,7 +769,11 @@ def test_release_gate_accepts_kind_import_status_image_alias_on_target_pod() -> 
     template image, a kind-import runtime identity plus a different
     status.containerStatuses[].image tag can be a containerd display alias.
     """
-    manifest = _manifest(expected_digest="sha256:" + "1" * 64)
+    external_workers = _external_workers_manifest_section()
+    manifest = _manifest(
+        expected_digest="sha256:" + "1" * 64,
+        external_workers=external_workers,
+    )
     apps = _FakeAppsV1(
         {
             "loom-service": _deployment(
@@ -689,6 +802,7 @@ def test_release_gate_accepts_kind_import_status_image_alias_on_target_pod() -> 
         rendered_manifest_sha256="rendered-sha",
         cluster_config_sha256="config-sha",
         live_alembic_heads=["0050"],
+        **_gb10_release_gate_inputs(external_workers),
     )
 
     assert report.all_pass
@@ -703,7 +817,11 @@ def test_release_gate_accepts_kind_import_status_image_alias_on_target_pod() -> 
 
 
 def test_release_gate_does_not_mark_default_docker_prefix_status_image_stale() -> None:
-    manifest = _manifest(expected_digest="sha256:" + "1" * 64)
+    external_workers = _external_workers_manifest_section()
+    manifest = _manifest(
+        expected_digest="sha256:" + "1" * 64,
+        external_workers=external_workers,
+    )
     apps = _FakeAppsV1(
         {
             "loom-service": _deployment(
@@ -732,6 +850,7 @@ def test_release_gate_does_not_mark_default_docker_prefix_status_image_stale() -
         rendered_manifest_sha256="rendered-sha",
         cluster_config_sha256="config-sha",
         live_alembic_heads=["0050"],
+        **_gb10_release_gate_inputs(external_workers),
     )
 
     assert report.all_pass
@@ -744,7 +863,11 @@ def test_release_gate_does_not_mark_default_docker_prefix_status_image_stale() -
 
 
 def test_release_gate_passes_zero_replica_deployment_when_template_matches() -> None:
-    manifest = _manifest(expected_digest="sha256:" + "1" * 64)
+    external_workers = _external_workers_manifest_section()
+    manifest = _manifest(
+        expected_digest="sha256:" + "1" * 64,
+        external_workers=external_workers,
+    )
     deployment = _deployment(
         name="loom-service",
         image="loom-service:staging-abc123",
@@ -761,6 +884,7 @@ def test_release_gate_passes_zero_replica_deployment_when_template_matches() -> 
         rendered_manifest_sha256="rendered-sha",
         cluster_config_sha256="config-sha",
         live_alembic_heads=["0050"],
+        **_gb10_release_gate_inputs(external_workers),
     )
 
     assert report.all_pass
@@ -1255,7 +1379,8 @@ def test_release_gate_requires_hf_mirror_boundary_evidence_for_staging_catalog_g
 
 
 def test_release_gate_accepts_secret_safe_hf_mirror_boundary_evidence() -> None:
-    manifest = _manifest()
+    external_workers = _hf_external_workers_manifest_section()
+    manifest = _manifest(external_workers=external_workers)
     manifest["catalog_provisioning"] = _catalog_manifest_section()
     report = collect_release_gate_report(
         manifest=manifest,
@@ -1281,6 +1406,13 @@ def test_release_gate_accepts_secret_safe_hf_mirror_boundary_evidence() -> None:
         rendered_manifest_sha256="rendered-sha",
         cluster_config_sha256="config-sha",
         live_alembic_heads=["0050"],
+        environment_state_check_artifact={
+            "environment": "staging",
+            "ok": True,
+            "drift": [],
+            "autoscaler_blockers": [],
+        },
+        gb10_workers_status_artifact=_gb10_status_for_external_workers(external_workers),
         hf_mirror_boundary_artifact=_hf_boundary_evidence(),
         hf_mirror_boundary_path="hf-mirror-boundary-staging-abc123.json",
     )
@@ -1295,16 +1427,23 @@ def test_release_gate_accepts_secret_safe_hf_mirror_boundary_evidence() -> None:
 
 
 def test_release_gate_rejects_hf_boundary_when_gb10_checks_do_not_run() -> None:
-    manifest = _manifest()
+    external_workers = _hf_external_workers_manifest_section()
+    manifest = _manifest(external_workers=external_workers)
     manifest["catalog_provisioning"] = _catalog_manifest_section()
     evidence = _hf_boundary_evidence(
         worker_boundary={
             "gb10_hf_token_check_summary": {
                 "checked_hosts": 15,
+                "checked_host_names": [
+                    *_ACTIVE_GB10_HOSTS,
+                    "trt-gb10-7",
+                ],
                 "ssh_failed_hosts": [
                     "trt-gb10-1",
                     "trt-gb10-2",
                 ],
+                "docker_ps_failed_hosts": [],
+                "hosts_without_containers": [],
                 "env_file_missing_hosts": [],
                 "env_file_hf_token_present_hosts": [],
                 "hosts_with_container_hf_token_present": [],
@@ -1337,6 +1476,13 @@ def test_release_gate_rejects_hf_boundary_when_gb10_checks_do_not_run() -> None:
         rendered_manifest_sha256="rendered-sha",
         cluster_config_sha256="config-sha",
         live_alembic_heads=["0050"],
+        environment_state_check_artifact={
+            "environment": "staging",
+            "ok": True,
+            "drift": [],
+            "autoscaler_blockers": [],
+        },
+        gb10_workers_status_artifact=_gb10_status_for_external_workers(external_workers),
         hf_mirror_boundary_artifact=evidence,
         hf_mirror_boundary_path="hf-mirror-boundary-staging-abc123.json",
     )
@@ -1344,7 +1490,7 @@ def test_release_gate_rejects_hf_boundary_when_gb10_checks_do_not_run() -> None:
     assert not report.all_pass
     check = next(check for check in report.checks if check.name == "hf-mirror-token-boundary")
     assert check.outcome == "fail"
-    assert "GB10 HF token checks must inspect active workers" in check.detail
+    assert "exact manifest-active host set" in check.detail
     assert check.evidence["gb10_ssh_failed_hosts"] == [
         "trt-gb10-1",
         "trt-gb10-2",
@@ -1352,8 +1498,190 @@ def test_release_gate_rejects_hf_boundary_when_gb10_checks_do_not_run() -> None:
     assert check.evidence["gb10_containers_checked"] == 0
 
 
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "thirteen-hosts",
+        "fifteen-hosts",
+        "wrong-fourteen-host-set",
+        "missing-failure-list",
+        "non-list-failure-field",
+    ],
+)
+def test_hf_boundary_rejects_inexact_or_incomplete_gb10_coverage(drift: str) -> None:
+    external_workers = _hf_external_workers_manifest_section()
+    manifest = _manifest(external_workers=external_workers)
+    manifest["catalog_provisioning"] = _catalog_manifest_section()
+    gb10_status = _gb10_status_for_external_workers(external_workers)
+    artifact = _hf_boundary_evidence(gb10_status=gb10_status)
+    summary = artifact["worker_boundary"]["gb10_hf_token_check_summary"]
+    if drift == "thirteen-hosts":
+        summary["checked_hosts"] = 13
+        summary["checked_host_names"] = _ACTIVE_GB10_HOSTS[:-1]
+        summary["containers_checked"] = 13
+    elif drift == "fifteen-hosts":
+        summary["checked_hosts"] = 15
+        summary["checked_host_names"] = [*_ACTIVE_GB10_HOSTS, "trt-gb10-7"]
+        summary["containers_checked"] = 15
+    elif drift == "wrong-fourteen-host-set":
+        summary["checked_host_names"] = [*_ACTIVE_GB10_HOSTS[:-1], "trt-gb10-7"]
+    elif drift == "missing-failure-list":
+        summary.pop("docker_ps_failed_hosts")
+    elif drift == "non-list-failure-field":
+        summary["hosts_without_containers"] = "none"
+
+    check = _hf_mirror_boundary_check(
+        manifest=manifest,
+        artifact=artifact,
+        artifact_path="hf-mirror-boundary.json",
+        artifact_error=None,
+        gb10_status_artifact=gb10_status,
+    )
+
+    assert check is not None
+    assert check.outcome == "fail"
+    if drift in {"missing-failure-list", "non-list-failure-field"}:
+        assert check.evidence["gb10_summary_schema_valid"] is False
+        assert check.detail == "GB10 HF token check summary is incomplete or invalid"
+    else:
+        assert "exact manifest-active host set" in check.detail
+
+
+@pytest.mark.parametrize("drift", ["image-tag", "git-sha", "gb10-status"])
+def test_hf_boundary_rejects_stale_candidate_binding(drift: str) -> None:
+    external_workers = _hf_external_workers_manifest_section()
+    manifest = _manifest(external_workers=external_workers)
+    manifest["catalog_provisioning"] = _catalog_manifest_section()
+    original_status = _gb10_status_for_external_workers(external_workers)
+    artifact = _hf_boundary_evidence(gb10_status=original_status)
+    checked_status = copy.deepcopy(original_status)
+    if drift == "image-tag":
+        manifest["release"]["image_tag"] = "staging-new1234"
+    elif drift == "git-sha":
+        manifest["release"]["git_sha"] = "b" * 40
+    elif drift == "gb10-status":
+        checked_status["nodes"][0]["worker_id"] = "replacement-worker"
+
+    check = _hf_mirror_boundary_check(
+        manifest=manifest,
+        artifact=artifact,
+        artifact_path="hf-mirror-boundary.json",
+        artifact_error=None,
+        gb10_status_artifact=checked_status,
+    )
+
+    assert check is not None
+    assert check.outcome == "fail"
+    assert check.detail == (
+        "HF boundary evidence must bind the exact candidate and GB10 status artifact"
+    )
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "failed",
+        "cancelled",
+        "running",
+        "zero-expected",
+        "partial-success",
+        "boolean-counts",
+        "wrong-task-filter",
+        "wrong-worker-pool",
+        "extra-terminal-pool",
+    ],
+)
+def test_hf_boundary_requires_fully_succeeded_matching_canary(drift: str) -> None:
+    external_workers = _hf_external_workers_manifest_section()
+    manifest = _manifest(external_workers=external_workers)
+    manifest["catalog_provisioning"] = _catalog_manifest_section()
+    gb10_status = _gb10_status_for_external_workers(external_workers)
+    artifact = _hf_boundary_evidence(gb10_status=gb10_status)
+    boundary = artifact["worker_boundary"]
+    if drift in {"failed", "cancelled", "running"}:
+        boundary["terminal_state"] = drift
+    elif drift == "zero-expected":
+        boundary["expected_trial_count"] = 0
+        boundary["succeeded_trials"] = 0
+        boundary["canary_worker_pools"]["terminal"]["gb10-arm64"] = 0
+    elif drift == "partial-success":
+        boundary["succeeded_trials"] = 1
+    elif drift == "boolean-counts":
+        boundary["expected_trial_count"] = 1
+        boundary["succeeded_trials"] = True
+        boundary["canary_worker_pools"]["terminal"]["gb10-arm64"] = True
+    elif drift == "wrong-task-filter":
+        boundary["canary_task_filter"] = {"benchmark_id": "other"}
+    elif drift == "wrong-worker-pool":
+        boundary["canary_worker_pools"] = {
+            "active": {},
+            "terminal": {"oldlab": 2},
+        }
+    elif drift == "extra-terminal-pool":
+        boundary["canary_worker_pools"]["terminal"]["oldlab"] = 1
+
+    check = _hf_mirror_boundary_check(
+        manifest=manifest,
+        artifact=artifact,
+        artifact_path="hf-mirror-boundary.json",
+        artifact_error=None,
+        gb10_status_artifact=gb10_status,
+    )
+
+    assert check is not None
+    assert check.outcome == "fail"
+    assert check.detail == "canary must be a fully succeeded SkillLearnBench GB10 batch"
+
+
+@pytest.mark.parametrize(
+    ("drift", "expected_detail"),
+    [
+        ("negative-runnable", "SkillLearnBench catalog must report runnable tasks"),
+        (
+            "missing-non-internal-list",
+            "runtime_sources.non_internal_sources must be a list",
+        ),
+        (
+            "string-non-internal-list",
+            "runtime_sources.non_internal_sources must be a list",
+        ),
+        ("string-source-count", "SkillLearnBench must use internal s3:// runtime sources"),
+    ],
+)
+def test_hf_boundary_rejects_malformed_catalog_or_source_coverage(
+    drift: str,
+    expected_detail: str,
+) -> None:
+    external_workers = _hf_external_workers_manifest_section()
+    manifest = _manifest(external_workers=external_workers)
+    manifest["catalog_provisioning"] = _catalog_manifest_section()
+    gb10_status = _gb10_status_for_external_workers(external_workers)
+    artifact = _hf_boundary_evidence(gb10_status=gb10_status)
+    if drift == "negative-runnable":
+        artifact["catalog"]["runnable_tasks"] = -1
+    elif drift == "missing-non-internal-list":
+        artifact["runtime_sources"].pop("non_internal_sources")
+    elif drift == "string-non-internal-list":
+        artifact["runtime_sources"]["non_internal_sources"] = "hf://external/task"
+    elif drift == "string-source-count":
+        artifact["runtime_sources"]["total_task_sources"] = "100"
+
+    check = _hf_mirror_boundary_check(
+        manifest=manifest,
+        artifact=artifact,
+        artifact_path="hf-mirror-boundary.json",
+        artifact_error=None,
+        gb10_status_artifact=gb10_status,
+    )
+
+    assert check is not None
+    assert check.outcome == "fail"
+    assert check.detail == expected_detail
+
+
 def test_release_gate_rejects_non_s3_or_secret_leaking_hf_boundary_evidence() -> None:
-    manifest = _manifest()
+    external_workers = _hf_external_workers_manifest_section()
+    manifest = _manifest(external_workers=external_workers)
     manifest["catalog_provisioning"] = _catalog_manifest_section()
     evidence = _hf_boundary_evidence(
         runtime_sources={
@@ -1387,6 +1715,13 @@ def test_release_gate_rejects_non_s3_or_secret_leaking_hf_boundary_evidence() ->
         rendered_manifest_sha256="rendered-sha",
         cluster_config_sha256="config-sha",
         live_alembic_heads=["0050"],
+        environment_state_check_artifact={
+            "environment": "staging",
+            "ok": True,
+            "drift": [],
+            "autoscaler_blockers": [],
+        },
+        gb10_workers_status_artifact=_gb10_status_for_external_workers(external_workers),
         hf_mirror_boundary_artifact=evidence,
         hf_mirror_boundary_path="hf-mirror-boundary-staging-abc123.json",
     )
@@ -1456,8 +1791,9 @@ def test_release_gate_fails_when_environment_state_check_reports_drift() -> None
 
 
 def test_release_gate_passes_when_environment_state_check_is_clean() -> None:
+    external_workers = _external_workers_manifest_section()
     report = collect_release_gate_report(
-        manifest=_manifest(external_workers=_external_workers_manifest_section()),
+        manifest=_manifest(external_workers=external_workers),
         apps_v1=_FakeAppsV1(
             {
                 "loom-service": _deployment(
@@ -1488,34 +1824,7 @@ def test_release_gate_passes_when_environment_state_check_is_clean() -> None:
             "drift": [],
         },
         environment_state_check_path="environment-state-check-live-secrets.json",
-        gb10_workers_status_artifact={
-            "desired_states": [
-                {
-                    "environment": "staging",
-                    "pool_name": "gb10-arm64",
-                    "image_tag": "staging-abc123",
-                    "max_concurrent": 10,
-                    "env_config_version": "staging-abc123",
-                    "host_intents": {"trt-gb10-1": "active"},
-                },
-            ],
-            "nodes": [
-                {
-                    "environment": "staging",
-                    "pool_name": "gb10-arm64",
-                    "hostname": "trt-gb10-1",
-                    "apply_state": "applied",
-                    "current_image_tag": "staging-abc123",
-                    "current_env_config_version": "staging-abc123",
-                    "current_max_concurrent": 10,
-                    "desired_intent": "active",
-                    "worker_id": "worker-trt-gb10-1",
-                    "worker_status": "active",
-                    "worker_fresh": True,
-                    "worker_backend_names": ["docker"],
-                },
-            ],
-        },
+        gb10_workers_status_artifact=_gb10_status_for_external_workers(external_workers),
         gb10_workers_status_path="gb10-workers-status-staging-abc123.json",
     )
 
@@ -2132,12 +2441,107 @@ def test_release_gate_rejects_gb10_status_without_manifest_desired_state() -> No
     assert not report.all_pass
     check = next(check for check in report.checks if check.name == "gb10-worker-convergence")
     assert check.outcome == "fail"
-    assert check.detail == "release manifest declares no GB10 desired state"
+    assert check.detail == "release manifest declares an invalid GB10 desired-state policy"
     assert check.evidence["manifest_desired_state_count"] == 0
+    assert check.evidence["manifest_policy_mismatches"]
+
+
+def test_gb10_gate_rejects_staging_manifest_without_external_worker_sections() -> None:
+    check = _gb10_worker_check(
+        manifest=_manifest(),
+        artifact=None,
+        artifact_path=None,
+        artifact_error=None,
+    )
+
+    assert check is not None
+    assert check.outcome == "fail"
+    assert check.detail == "release manifest declares an invalid GB10 desired-state policy"
+    assert check.evidence["manifest_policy_mismatches"] == [
+        "staging release manifest must declare the GB10 desired-state contract"
+    ]
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "empty-desired-states",
+        "missing-host-intents",
+        "host-intents-subset",
+        "wrong-target-slots",
+    ],
+)
+def test_gb10_gate_rejects_status_not_exactly_bound_to_manifest(drift: str) -> None:
+    external_workers = _external_workers_manifest_section()
+    artifact_desired = copy.deepcopy(external_workers["gb10_desired_states"])
+    if drift == "empty-desired-states":
+        artifact_desired = []
+    elif drift == "missing-host-intents":
+        artifact_desired[0].pop("host_intents")
+    elif drift == "host-intents-subset":
+        artifact_desired[0]["host_intents"].pop("trt-gb10-7")
+    elif drift == "wrong-target-slots":
+        artifact_desired[0]["target_slots"] = 20
+
+    check = _gb10_worker_check(
+        manifest=_manifest(external_workers=external_workers),
+        artifact={
+            "desired_states": artifact_desired,
+            "nodes": [],
+            "unlinked_workers": [],
+        },
+        artifact_path="gb10-workers-status.json",
+        artifact_error=None,
+    )
+
+    assert check is not None
+    assert check.outcome == "fail"
+    assert check.detail == ("GB10 worker status desired state does not match release manifest")
+    assert check.evidence["contract_mismatches"]
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "empty-manifest",
+        "wrong-environment",
+        "unknown-host-intent",
+        "stale-source-sha",
+    ],
+)
+def test_gb10_gate_rejects_invalid_candidate_manifest_policy(drift: str) -> None:
+    external_workers = _external_workers_manifest_section()
+    desired_states = external_workers["gb10_desired_states"]
+    if drift == "empty-manifest":
+        external_workers["gb10_desired_states"] = []
+    elif drift == "wrong-environment":
+        desired_states[0]["environment"] = "production"
+    elif drift == "unknown-host-intent":
+        desired_states[0]["host_intents"]["trt-gb10-6"] = "actve"
+    elif drift == "stale-source-sha":
+        desired_states[0]["source_git_commit"] = "b" * 40
+    manifest = _manifest(external_workers=external_workers)
+    artifact = (
+        None if drift == "empty-manifest" else _gb10_status_for_external_workers(external_workers)
+    )
+
+    check = _gb10_worker_check(
+        manifest=manifest,
+        artifact=artifact,
+        artifact_path=None,
+        artifact_error=None,
+    )
+
+    assert check is not None
+    assert check.outcome == "fail"
+    assert check.detail == "release manifest declares an invalid GB10 desired-state policy"
 
 
 def test_release_gate_fails_when_gb10_status_reports_missing_active_host() -> None:
-    manifest = _manifest(external_workers=_external_workers_manifest_section())
+    external_workers = _external_workers_manifest_section()
+    manifest = _manifest(external_workers=external_workers)
+    status = _gb10_status_for_external_workers(external_workers)
+    status["nodes"] = []
     apps = _FakeAppsV1(
         {
             "loom-service": _deployment(
@@ -2171,30 +2575,21 @@ def test_release_gate_fails_when_gb10_status_reports_missing_active_host() -> No
             "drift": [],
             "autoscaler_blockers": [],
         },
-        gb10_workers_status_artifact={
-            "desired_states": [
-                {
-                    "environment": "staging",
-                    "pool_name": "gb10-arm64",
-                    "image_tag": "staging-abc123",
-                    "max_concurrent": 10,
-                    "env_config_version": "staging-abc123",
-                    "host_intents": {"trt-gb10-14": "active"},
-                },
-            ],
-            "nodes": [],
-        },
+        gb10_workers_status_artifact=status,
     )
 
     assert not report.all_pass
     check = next(check for check in report.checks if check.name == "gb10-worker-convergence")
     assert check.outcome == "fail"
-    assert "trt-gb10-14" in check.evidence["mismatches"][0]
+    assert "trt-gb10-1" in check.evidence["mismatches"][0]
     assert "missing active node report" in check.evidence["mismatches"][0]
 
 
 def test_release_gate_fails_when_active_gb10_node_has_no_registered_worker() -> None:
-    manifest = _manifest(external_workers=_external_workers_manifest_section())
+    external_workers = _external_workers_manifest_section()
+    manifest = _manifest(external_workers=external_workers)
+    status = _gb10_status_for_external_workers(external_workers)
+    status["nodes"][0]["worker_id"] = None
     apps = _FakeAppsV1(
         {
             "loom-service": _deployment(
@@ -2228,33 +2623,7 @@ def test_release_gate_fails_when_active_gb10_node_has_no_registered_worker() -> 
             "drift": [],
             "autoscaler_blockers": [],
         },
-        gb10_workers_status_artifact={
-            "desired_states": [
-                {
-                    "environment": "staging",
-                    "pool_name": "gb10-arm64",
-                    "image_tag": "staging-abc123",
-                    "max_concurrent": 10,
-                    "env_config_version": "staging-abc123",
-                    "host_intents": {"trt-gb10-1": "active"},
-                },
-            ],
-            "nodes": [
-                {
-                    "environment": "staging",
-                    "pool_name": "gb10-arm64",
-                    "hostname": "trt-gb10-1",
-                    "apply_state": "applied",
-                    "current_image_tag": "staging-abc123",
-                    "current_env_config_version": "staging-abc123",
-                    "current_max_concurrent": 10,
-                    "desired_intent": "active",
-                    "source_git_commit": "abc123ffffffffffffffffffffffffffffffffff",
-                    "source_git_dirty": False,
-                    "worker_id": None,
-                },
-            ],
-        },
+        gb10_workers_status_artifact=status,
     )
 
     assert not report.all_pass

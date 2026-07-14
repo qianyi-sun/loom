@@ -30,8 +30,7 @@ def _migration_revision(path: Path) -> str:
         value: ast.expr | None = None
         if isinstance(node, ast.Assign):
             if not any(
-                isinstance(target, ast.Name) and target.id == "revision"
-                for target in node.targets
+                isinstance(target, ast.Name) and target.id == "revision" for target in node.targets
             ):
                 continue
             value = node.value
@@ -47,11 +46,7 @@ def _migration_revision(path: Path) -> str:
 def test_alembic_migration_revisions_are_unique() -> None:
     migrations = sorted((REPO_ROOT / "migrations" / "versions").glob("*.py"))
     revisions = [_migration_revision(path) for path in migrations]
-    duplicates = {
-        revision: count
-        for revision, count in Counter(revisions).items()
-        if count > 1
-    }
+    duplicates = {revision: count for revision, count in Counter(revisions).items() if count > 1}
     assert duplicates == {}
 
 
@@ -73,7 +68,7 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
     environment_state_path = tmp_path / "staging.toml"
     environment_state_path.write_text(
         'environment = "staging"\n'
-        'control_plane_environment = "production"\n'
+        'control_plane_environment = "staging"\n'
         'secret_example = "super-secret-token"\n'
         "[[worker_pool_autoscaler_policies]]\n"
         'pool_name = "oldlab"\n'
@@ -85,13 +80,18 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
         "[[gb10_worker_pool_desired_states]]\n"
         'pool_name = "gb10-arm64"\n'
         'image_tag = "${IMAGE_TAG}"\n'
+        "max_concurrent = 10\n"
         'env_config_version = "${ENV_CONFIG_VERSION}"\n'
         'source_git_commit = "${GIT_SHA}"\n'
+        "target_slots = 140\n"
+        "[gb10_worker_pool_desired_states.host_intents]\n"
+        'trt-gb10-1 = "active"\n'
+        'trt-gb10-7 = "stopped"\n'
         "[catalog_provisioning]\n"
         "required = true\n"
         'command = "loom datasets register skilllearnbench --hf-org PRHW '
         '--revision \\"$PUBLISHED_SHA\\" --mirror-to-object-store '
-        '--bucket loom-benchmarks && '
+        "--bucket loom-benchmarks && "
         'loom datasets audit --all --verify-bundles"\n'
         'env_file = "/secure/staging-catalog.env"\n'
         'required_env = ["PUBLISHED_SHA", "HF_TOKEN", "LOOM_SVC_DB_URL", '
@@ -154,10 +154,7 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
             "loom-service": {
                 "loom-service": {
                     "image": "loom-service:staging-abc123",
-                    "repo_digest": (
-                        "loom-service@sha256:"
-                        + "1" * 64
-                    ),
+                    "repo_digest": ("loom-service@sha256:" + "1" * 64),
                     "image_id": "sha256:" + "2" * 64,
                 },
             },
@@ -165,9 +162,7 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
         generated_at="2026-07-01T00:00:00Z",
         loom_cli_version="test-version",
     )
-    assert manifest_with_identities["rendered_manifest"][
-        "deployment_image_identities"
-    ] == {
+    assert manifest_with_identities["rendered_manifest"]["deployment_image_identities"] == {
         "loom-service": {
             "loom-service": {
                 "image": "loom-service:staging-abc123",
@@ -182,7 +177,7 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
     assert manifest["external_workers"]["environment_state_file"]["sha256"] == (
         hashlib.sha256(environment_state_path.read_bytes()).hexdigest()
     )
-    assert manifest["external_workers"]["control_plane_environment"] == "production"
+    assert manifest["external_workers"]["control_plane_environment"] == "staging"
     assert manifest["external_workers"]["slurm_pools"] == [
         {
             "pool_name": "oldlab",
@@ -194,17 +189,24 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
     ]
     assert manifest["external_workers"]["gb10_desired_states"] == [
         {
+            "environment": "staging",
             "pool_name": "gb10-arm64",
             "image_tag": "staging-abc123",
+            "max_concurrent": 10,
             "env_config_version": "staging-abc123",
             "source_git_commit": "a" * 40,
+            "target_slots": 140,
+            "host_intents": {
+                "trt-gb10-1": "active",
+                "trt-gb10-7": "stopped",
+            },
         },
     ]
     assert manifest["catalog_provisioning"] == {
         "required": True,
         "command": (
             "loom datasets register skilllearnbench --hf-org PRHW "
-            "--revision \"$PUBLISHED_SHA\" --mirror-to-object-store "
+            '--revision "$PUBLISHED_SHA" --mirror-to-object-store '
             "--bucket loom-benchmarks && "
             "loom datasets audit --all --verify-bundles"
         ),
@@ -279,14 +281,16 @@ def test_cluster_release_manifest_cli_accepts_expected_image_identities(
     )
     identities_path = tmp_path / "image-identities.json"
     identities_path.write_text(
-        json.dumps({
-            "loom-service": {
+        json.dumps(
+            {
                 "loom-service": {
-                    "image": "loom-service:staging-def456",
-                    "repo_digest": "loom-service@sha256:" + "3" * 64,
+                    "loom-service": {
+                        "image": "loom-service:staging-def456",
+                        "repo_digest": "loom-service@sha256:" + "3" * 64,
+                    },
                 },
-            },
-        }),
+            }
+        ),
         encoding="utf-8",
     )
     output_path = tmp_path / "release-manifest-staging-def456.json"
@@ -312,9 +316,12 @@ def test_cluster_release_manifest_cli_accepts_expected_image_identities(
 
     assert rc == 0
     manifest = json.loads(output_path.read_text(encoding="utf-8"))
-    assert manifest["rendered_manifest"]["deployment_image_identities"][
-        "loom-service"
-    ]["loom-service"]["repo_digest"] == "loom-service@sha256:" + "3" * 64
+    assert (
+        manifest["rendered_manifest"]["deployment_image_identities"]["loom-service"][
+            "loom-service"
+        ]["repo_digest"]
+        == "loom-service@sha256:" + "3" * 64
+    )
 
 
 def test_build_protected_release_manifest_rejects_non_v1_workload_contract(

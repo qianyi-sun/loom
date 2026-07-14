@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import subprocess
@@ -38,7 +39,7 @@ if env_file.exists():
         if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
             env_keys.append(key)
 ps = subprocess.run(
-    ["docker", "ps", "-a", "--filter", "name=worker", "--format", "{{.Names}}"],
+    ["docker", "ps", "--filter", "name=worker", "--format", "{{.Names}}"],
     capture_output=True,
     text=True,
 )
@@ -88,6 +89,42 @@ def _int(value: Any) -> int:
 
 def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _canonical_json_sha256(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _candidate_binding_from_gb10_status(
+    status: dict[str, Any],
+    *,
+    environment: str,
+) -> dict[str, Any]:
+    desired_states = status.get("desired_states")
+    if not isinstance(desired_states, list) or len(desired_states) != 1:
+        raise HfBoundaryEvidenceError(
+            "--gb10-workers-status must contain exactly one desired state"
+        )
+    desired = desired_states[0]
+    if not isinstance(desired, dict):
+        raise HfBoundaryEvidenceError("GB10 desired state must be an object")
+    if desired.get("environment") != environment:
+        raise HfBoundaryEvidenceError(
+            "GB10 desired-state environment does not match HF evidence environment"
+        )
+    image_tag = desired.get("image_tag")
+    source_git_commit = desired.get("source_git_commit")
+    if not isinstance(image_tag, str) or not image_tag:
+        raise HfBoundaryEvidenceError("GB10 desired state image_tag is required")
+    if not isinstance(source_git_commit, str) or not source_git_commit:
+        raise HfBoundaryEvidenceError("GB10 desired state source_git_commit is required")
+    return {
+        "environment": environment,
+        "release_image_tag": image_tag,
+        "release_git_sha": source_git_commit,
+        "gb10_workers_status_sha256": _canonical_json_sha256(status),
+    }
 
 
 def _secret_leak_paths(value: Any, *, path: str = "") -> list[str]:
@@ -178,15 +215,19 @@ def compose_boundary_evidence(
         raise HfBoundaryEvidenceError(
             "sample task tags must include hf_repo_id and hf_revision",
         )
+    valid_task_config_count = audit_item.get("valid_task_config_count")
+    runnable_tasks = _int(
+        audit_item.get("raw_task_count")
+        if valid_task_config_count is None
+        else valid_task_config_count
+    )
 
     return {
         "schema_version": 1,
         "environment": environment,
         "benchmark_id": benchmark_id,
         "catalog": {
-            "runnable_tasks": _int(
-                audit_item.get("valid_task_config_count") or audit_item.get("raw_task_count")
-            ),
+            "runnable_tasks": runnable_tasks,
             "requires_caps": {
                 "cpu_arch": str(task_environment.get("cpu_arch") or ""),
             },
@@ -219,6 +260,8 @@ def compose_boundary_evidence(
             "canary_batch_id": canary_summary.get("batch_id"),
             "canary_task_filter": canary_summary.get("task_filter"),
             "canary_worker_pools": canary_summary.get("worker_pools"),
+            "expected_trial_count": canary_summary.get("expected_trial_count"),
+            "succeeded_trials": canary_summary.get("succeeded_trials"),
             "gb10_hf_token_check_summary": worker_summary,
         },
         "secret_scan": {"raw_secret_values_present": False},
@@ -351,6 +394,23 @@ def _task_filter_mentions_benchmark(
     )
 
 
+def _is_successful_canary_row(
+    row: Mapping[str, Any],
+    *,
+    benchmark_id: str,
+    worker_pool: str,
+) -> bool:
+    task_filter = _mapping(row.get("task_filter"))
+    required_pools = row.get("required_worker_pools")
+    return (
+        row.get("state") == "finished"
+        and row.get("result_status") == "succeeded"
+        and _task_filter_mentions_benchmark(task_filter, benchmark_id)
+        and isinstance(required_pools, list)
+        and worker_pool in required_pools
+    )
+
+
 async def collect_canary_summary_from_db(
     *,
     db_url: str,
@@ -405,12 +465,10 @@ async def collect_canary_summary_from_db(
 
             selected: dict[str, Any] | None = None
             for row in rows:
-                task_filter = _mapping(row.get("task_filter"))
-                required_pools = row.get("required_worker_pools")
-                if (
-                    _task_filter_mentions_benchmark(task_filter, benchmark_id)
-                    and isinstance(required_pools, list)
-                    and worker_pool in required_pools
+                if _is_successful_canary_row(
+                    dict(row),
+                    benchmark_id=benchmark_id,
+                    worker_pool=worker_pool,
                 ):
                     selected = dict(row)
                     break
@@ -588,12 +646,14 @@ def collect_worker_boundary_from_gb10(
             argv.extend(["-i", str(ssh_identity), "-o", "IdentitiesOnly=yes"])
         if ssh_certificate is not None:
             argv.extend(["-o", f"CertificateFile={ssh_certificate}"])
-        argv.extend([
-            target,
-            "python3",
-            "-",
-            repo_path,
-        ])
+        argv.extend(
+            [
+                target,
+                "python3",
+                "-",
+                repo_path,
+            ]
+        )
         proc = subprocess.run(
             argv,
             capture_output=True,
@@ -614,7 +674,16 @@ def collect_worker_boundary_from_gb10(
         results.append(entry)
     summary = {
         "checked_hosts": len(results),
+        "checked_host_names": sorted(r["host"] for r in results),
         "ssh_failed_hosts": [r["host"] for r in results if not r.get("ssh_ok")],
+        "docker_ps_failed_hosts": sorted(
+            r["host"] for r in results if r.get("ssh_ok") and r.get("docker_ps_ok") is not True
+        ),
+        "hosts_without_containers": sorted(
+            r["host"]
+            for r in results
+            if r.get("ssh_ok") and r.get("docker_ps_ok") is True and not (r.get("containers") or [])
+        ),
         "env_file_missing_hosts": [
             r["host"] for r in results if r.get("ssh_ok") and not r.get("env_file_exists")
         ],
@@ -777,6 +846,16 @@ def run_hf_boundary_evidence_command(args: Any) -> int:
             source_summary=source_summary,
             canary_summary=canary,
             worker_boundary=worker_boundary,
+        )
+        if not args.gb10_workers_status:
+            raise HfBoundaryEvidenceError(
+                "hf-boundary-evidence requires --gb10-workers-status for candidate binding"
+            )
+        gb10_status_path = Path(args.gb10_workers_status)
+        gb10_status = _read_json(gb10_status_path)
+        evidence["candidate_binding"] = _candidate_binding_from_gb10_status(
+            gb10_status,
+            environment=args.environment,
         )
         evidence["evidence_inputs"] = {
             "audit_json": str(args.audit_json) if args.audit_json else None,

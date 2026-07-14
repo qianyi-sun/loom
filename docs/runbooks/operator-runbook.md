@@ -4008,13 +4008,26 @@ task-level runtime mirror provenance from the target DB, finds a succeeded
 SkillLearnBench GB10 canary unless `--canary-batch-id` is supplied, and checks
 GB10 worker `.env` files plus worker container env keys for `HF_TOKEN`
 presence. It records only counts, paths, prefixes, batch ids, booleans, and
-redacted/secret-safe references. The GB10 check uses the same
+redacted/secret-safe references. It also binds the evidence to the candidate
+environment, image tag, full Git SHA, and canonical SHA-256 of the exact GB10
+status artifact consumed by the release gate; reusing evidence from an older
+candidate or a different status snapshot fails closed. The GB10 check uses the same
 `[gb10_pool].ssh_config`, `ssh_identity_file`, and optional
 `ssh_certificate_file` as rollout GB10 prep; failed SSH, failed container
-inspection, or zero inspected active worker containers are release-gate
-failures. The remote worker probe is sent to `python3 -` over SSH stdin rather
-than embedded as a multiline `python3 -c` argument, so the check does not depend
-on remote shell quoting preserving Python source code.
+listing or inspection, or no running inspected worker container on any active
+host are release-gate failures. The remote probe uses `docker ps` without
+`-a`, so stopped or exited historical containers do not count as coverage.
+Under the #822 quarantine, the exact active
+staging set is `trt-gb10-1` through `trt-gb10-15` excluding `trt-gb10-7` (14
+hosts); node 7 remains in the physical 15-host inventory but is declared
+`stopped` and must not appear in the active HF boundary probe until the
+quarantine is deliberately removed through a merged change. The evidence
+therefore records the sorted, actual SSH targets in `checked_host_names`, plus
+`docker_ps_failed_hosts` and `hosts_without_containers`, so a matching count
+cannot hide a wrong or partially inspected host set. The remote worker probe is
+sent to `python3 -` over SSH stdin rather than embedded as a multiline
+`python3 -c` argument, so the check does not depend on remote shell quoting
+preserving Python source code.
 
 The generated artifact has this shape:
 
@@ -4023,6 +4036,12 @@ The generated artifact has this shape:
   "schema_version": 1,
   "environment": "staging",
   "benchmark_id": "skilllearnbench",
+  "candidate_binding": {
+    "environment": "staging",
+    "release_image_tag": "staging-$CANDIDATE_SHA",
+    "release_git_sha": "$CANDIDATE_FULL_SHA",
+    "gb10_workers_status_sha256": "$CANONICAL_STATUS_SHA256"
+  },
   "catalog": {
     "runnable_tasks": 100,
     "requires_caps": {"cpu_arch": "any"}
@@ -4041,16 +4060,34 @@ The generated artifact has this shape:
   "worker_boundary": {
     "canary_started": true,
     "terminal_state": "succeeded",
+    "canary_task_filter": {
+      "benchmark_id": "skilllearnbench"
+    },
+    "canary_worker_pools": {
+      "active": {},
+      "terminal": {"gb10-arm64": 2}
+    },
+    "expected_trial_count": 2,
+    "succeeded_trials": 2,
     "hf_token_present": false,
     "hf_token_isolated": true,
     "direct_hf_egress_required": false,
     "materialized_from_internal_source": true,
     "gb10_hf_token_check_summary": {
-      "checked_hosts": 15,
+      "checked_hosts": 14,
+      "checked_host_names": [
+        "trt-gb10-1", "trt-gb10-10", "trt-gb10-11", "trt-gb10-12",
+        "trt-gb10-13", "trt-gb10-14", "trt-gb10-15", "trt-gb10-2",
+        "trt-gb10-3", "trt-gb10-4", "trt-gb10-5", "trt-gb10-6",
+        "trt-gb10-8", "trt-gb10-9"
+      ],
       "ssh_failed_hosts": [],
+      "docker_ps_failed_hosts": [],
+      "hosts_without_containers": [],
+      "env_file_missing_hosts": [],
       "env_file_hf_token_present_hosts": [],
       "hosts_with_container_hf_token_present": [],
-      "containers_checked": 15,
+      "containers_checked": 14,
       "inspect_failed": []
     }
   },

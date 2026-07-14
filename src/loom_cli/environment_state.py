@@ -34,6 +34,7 @@ def _release_source_prefix(image_tag: Any) -> str | None:
     match = _RELEASE_TAG_SHA_RE.search(image_tag)
     return match.group(1) if match else None
 
+
 _AUTOSCALER_DEFAULTS: dict[str, Any] = {
     "enabled": False,
     "min_slots": 0,
@@ -457,9 +458,7 @@ def load_environment_state_profile(
             external_slurm_runner_prerequisites,
             "external_slurm_runner_prerequisites",
         ),
-        external_slurm_autoscaler_supervisors=(
-            external_slurm_autoscaler_supervisors
-        ),
+        external_slurm_autoscaler_supervisors=(external_slurm_autoscaler_supervisors),
     )
 
 
@@ -554,25 +553,31 @@ def _append_gb10_node_source_drift(
     for node in nodes:
         if not isinstance(node, dict):
             continue
-        intent = node.get("desired_intent") or node.get("current_intent")
-        apply_state = node.get("apply_state")
-        if (
-            intent in _GB10_NODE_SOURCE_DRIFT_IGNORED_INTENTS
-            or apply_state in _GB10_NODE_SOURCE_DRIFT_IGNORED_APPLY_STATES
-        ):
-            continue
         env = node.get("environment")
         pool = node.get("pool_name")
         hostname = node.get("hostname")
-        if not (
-            isinstance(env, str)
-            and isinstance(pool, str)
-            and isinstance(hostname, str)
-        ):
+        if not (isinstance(env, str) and isinstance(pool, str) and isinstance(hostname, str)):
             continue
         matched_desired = desired_by_key.get((env, pool))
         if matched_desired is None:
             continue
+        host_intents = matched_desired.get("host_intents")
+        authoritative_intent = (
+            host_intents.get(hostname)
+            if isinstance(host_intents, dict) and hostname in host_intents
+            else None
+        )
+        if authoritative_intent is not None:
+            if authoritative_intent in _GB10_NODE_SOURCE_DRIFT_IGNORED_INTENTS:
+                continue
+        else:
+            intent = node.get("desired_intent") or node.get("current_intent")
+            apply_state = node.get("apply_state")
+            if (
+                intent in _GB10_NODE_SOURCE_DRIFT_IGNORED_INTENTS
+                or apply_state in _GB10_NODE_SOURCE_DRIFT_IGNORED_APPLY_STATES
+            ):
+                continue
         expected_source = matched_desired.get("source_git_commit")
         if not isinstance(expected_source, str) or not expected_source.strip():
             expected_source = _release_source_prefix(matched_desired.get("image_tag"))
@@ -581,18 +586,14 @@ def _append_gb10_node_source_drift(
         expected_source = expected_source.strip()
         source_commit = node.get("source_git_commit")
         source_dirty = node.get("source_git_dirty")
-        source_commit_bad = (
-            not isinstance(source_commit, str)
-            or not source_commit.startswith(expected_source)
+        source_commit_bad = not isinstance(source_commit, str) or not source_commit.startswith(
+            expected_source
         )
         source_dirty_bad = source_dirty is not False
         if source_commit_bad:
             drift.append(
                 StateDrift(
-                    path=(
-                        f"gb10_worker_node_status[{env}/{pool}/{hostname}]"
-                        ".source_git_commit"
-                    ),
+                    path=(f"gb10_worker_node_status[{env}/{pool}/{hostname}].source_git_commit"),
                     desired=expected_source,
                     live=source_commit,
                 ),
@@ -600,10 +601,7 @@ def _append_gb10_node_source_drift(
         elif source_dirty_bad:
             drift.append(
                 StateDrift(
-                    path=(
-                        f"gb10_worker_node_status[{env}/{pool}/{hostname}]"
-                        ".source_git_dirty"
-                    ),
+                    path=(f"gb10_worker_node_status[{env}/{pool}/{hostname}].source_git_dirty"),
                     desired=False,
                     live=source_dirty,
                 ),
@@ -751,8 +749,7 @@ def autoscaler_blockers(
     live: dict[str, Any],
 ) -> list[dict[str, Any]]:
     expected_keys = {
-        (policy["environment"], policy["pool_name"])
-        for policy in profile.autoscaler_policies
+        (policy["environment"], policy["pool_name"]) for policy in profile.autoscaler_policies
     }
     policies = _as_dict(live.get("autoscaler_status", {}), "autoscaler_status").get(
         "policies",
@@ -980,11 +977,7 @@ def render_external_slurm_autoscaler_timer(supervisor: dict[str, Any]) -> str:
 
 
 def _unit_payload(text: str) -> str:
-    lines = [
-        line.rstrip()
-        for line in text.splitlines()
-        if not line.startswith("# ")
-    ]
+    lines = [line.rstrip() for line in text.splitlines() if not line.startswith("# ")]
     return "\n".join(lines).strip()
 
 
@@ -1083,9 +1076,7 @@ def _append_service_status_drift(
     exec_status = status.get("ExecMainStatus", "")
     active_state = status.get("ActiveState", "")
     failed = (
-        active_state == "failed"
-        or result not in {"", "success"}
-        or exec_status not in {"", "0"}
+        active_state == "failed" or result not in {"", "success"} or exec_status not in {"", "0"}
     )
     if not failed:
         return
