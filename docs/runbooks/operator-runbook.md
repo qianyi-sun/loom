@@ -1390,6 +1390,38 @@ only from a clean merged checkout that is reachable from the freshly fetched
 current `origin/dev`. The installer takes its assets from that exact fresh
 `dev` head, never from unmerged working-tree content:
 
+The host must provide Ubuntu with systemd, a root-owned `/usr/bin/python3`
+whose resolved executable stays under `/usr` and reports Python 3.11 or newer,
+and a root-owned, non-group/world-writable `/usr/local/bin/uv`. Do not satisfy
+these checks with a developer-managed interpreter, a user-local `uv`, a PPA, or
+a hand-written compatibility symlink. The current reviewed x86_64 Linux
+bootstrap uses upstream `uv` 0.11.26 and its published checksum:
+
+```bash
+uv_version=0.11.26
+uv_asset=uv-x86_64-unknown-linux-gnu.tar.gz
+uv_tmp=$(mktemp -d)
+(
+  cd "$uv_tmp"
+  curl -fsSLO "https://github.com/astral-sh/uv/releases/download/${uv_version}/${uv_asset}"
+  curl -fsSLO "https://github.com/astral-sh/uv/releases/download/${uv_version}/${uv_asset}.sha256"
+  sha256sum -c "${uv_asset}.sha256"
+  tar -xzf "$uv_asset"
+  sudo install -o root -g root -m 0755 \
+    "uv-x86_64-unknown-linux-gnu/uv" /usr/local/bin/uv
+)
+rm -rf "$uv_tmp"
+/usr/local/bin/uv --version
+```
+
+The repository deliberately does not track a cross-environment `uv.lock`;
+`pyproject.toml` and the selected merged candidate are its dependency
+authority. The installer therefore resolves that candidate's declared
+constraints into the root-owned venv without editable installs. It does not
+use `--frozen`, which would always fail in a fresh checkout with no lockfile.
+A repeated install at the same source is a no-op; a newly merged source causes
+the service venv to be synchronized again.
+
 ```bash
 sudo ./scripts/ops/staging_rollout_host.py plan
 sudo ./scripts/ops/staging_rollout_host.py install \

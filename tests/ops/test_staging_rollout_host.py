@@ -640,6 +640,228 @@ def test_cli_rejects_repository_ref_and_host_overrides() -> None:
         parser.parse_args(["plan", "--host", "example"])
 
 
+@pytest.mark.parametrize("version", ["3.11\n", "3.12\n"])
+def test_system_python_version_probe_accepts_supported_python(version: str) -> None:
+    class VersionRunner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            assert kwargs == {"check": False}
+            self.calls.append(list(argv))
+            return host.CommandResult(0, version)
+
+    runner = VersionRunner()
+    python = Path("/usr/bin/python3.12")
+
+    host.HostSystem(runner)._validate_system_python_version(python)
+
+    assert runner.calls == [
+        [
+            str(python),
+            "-I",
+            "-S",
+            "-c",
+            "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+        ]
+    ]
+
+
+@pytest.mark.parametrize(
+    ("returncode", "version"),
+    [(0, "3.10\n"), (0, "4.0\n"), (0, "3.12 extra\n"), (0, ""), (1, "3.12\n")],
+)
+def test_system_python_version_probe_fails_closed(returncode: int, version: str) -> None:
+    class VersionRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del argv
+            assert kwargs == {"check": False}
+            return host.CommandResult(returncode, version)
+
+    with pytest.raises(host.InstallError, match="Python"):
+        host.HostSystem(VersionRunner())._validate_system_python_version(
+            Path("/usr/bin/python3.12")
+        )
+
+
+def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SyncRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            call = list(argv)
+            self.calls.append((call, kwargs))
+            if call[1:3] == ["-I", "-S"]:
+                return host.CommandResult(0, "3.12\n")
+            return host.CommandResult(0)
+
+    resolved = {
+        host.SYSTEM_PYTHON: Path("/usr/bin/python3.12"),
+        host.UV_BINARY: Path("/usr/local/bin/uv"),
+    }
+    monkeypatch.setattr(
+        host,
+        "_safe_root_executable",
+        lambda path, *, label: resolved[path],
+    )
+    runner = SyncRunner()
+    system = host.HostSystem(runner)
+    monkeypatch.setattr(system, "venv_ready", lambda: True)
+    source_root = Path("/opt/loom-staging-runner/source")
+
+    system.sync_venv(source_root)
+
+    sync_call, sync_kwargs = runner.calls[-1]
+    assert sync_call == [
+        "/usr/local/bin/uv",
+        "sync",
+        "--project",
+        str(source_root),
+        "--no-editable",
+        "--extra",
+        "cluster",
+        "--extra",
+        "rollout",
+        "--python",
+        "/usr/bin/python3.12",
+    ]
+    assert "--frozen" not in sync_call
+    assert sync_kwargs["env"] == {
+        "PATH": host._ROOT_PATH,
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "UV_PROJECT_ENVIRONMENT": str(host.VENV),
+    }
+
+
+def test_installer_fixes_system_python_and_uv_authority_paths() -> None:
+    assert host.SYSTEM_PYTHON == Path("/usr/bin/python3")
+    assert host.UV_BINARY == Path("/usr/local/bin/uv")
+
+
+def test_venv_python_minor_drift_converges_through_resync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class VenvRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            call = list(argv)
+            if call[1:3] == ["-I", "-S"]:
+                assert kwargs == {"check": False}
+                return host.CommandResult(0, "3.13\n")
+            assert kwargs == {"check": False}
+            assert call == ["stat", "-c", "%F:%U:%G:%a", str(host.VENV)]
+            return host.CommandResult(0, "directory:root:root:755\n")
+
+    resolved = {
+        host.SYSTEM_PYTHON: Path("/usr/bin/python3.13"),
+        host.VENV / "bin/python": Path("/usr/bin/python3.12"),
+    }
+    monkeypatch.setattr(
+        host.os.path,
+        "lexists",
+        lambda path: path in {host.VENV, host.VENV / "bin/python"},
+    )
+    monkeypatch.setattr(
+        host,
+        "_safe_root_executable",
+        lambda path, *, label: resolved[path],
+    )
+    monkeypatch.setattr(
+        host,
+        "_validate_owned_tree",
+        lambda root, *, expected_uid, expected_gid, allowed_external_symlink_targets: None,
+    )
+
+    assert host.HostSystem(VenvRunner()).venv_ready() is False
+
+
+def test_dangling_venv_python_converges_only_after_tree_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class VenvRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            call = list(argv)
+            if call[1:3] == ["-I", "-S"]:
+                assert kwargs == {"check": False}
+                return host.CommandResult(0, "3.12\n")
+            assert kwargs == {"check": False}
+            return host.CommandResult(0, "directory:root:root:755\n")
+
+    python = host.VENV / "bin/python"
+    tree_validated = False
+
+    def validate_tree(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal tree_validated
+        del args, kwargs
+        tree_validated = True
+
+    def resolve_executable(path: Path, *, label: str) -> Path:
+        del label
+        if path == host.SYSTEM_PYTHON:
+            return Path("/usr/bin/python3.12")
+        assert path == python
+        assert tree_validated
+        raise host.InstallError("dangling venv Python")
+
+    monkeypatch.setattr(host.os.path, "lexists", lambda path: path in {host.VENV, python})
+    monkeypatch.setattr(host, "_safe_root_executable", resolve_executable)
+    monkeypatch.setattr(host, "_validate_owned_tree", validate_tree)
+
+    assert host.HostSystem(VenvRunner()).venv_ready() is False
+    assert tree_validated
+
+
+def test_owned_tree_allows_only_an_exact_dangling_external_target(tmp_path: Path) -> None:
+    uid, gid = os.geteuid(), os.getegid()
+    root = tmp_path / "venv"
+    bindir = root / "bin"
+    bindir.mkdir(parents=True, mode=0o755)
+    python = bindir / "python"
+    target = Path("/usr/bin/python3.99")
+    python.symlink_to(target)
+
+    host._validate_owned_tree(
+        root,
+        expected_uid=uid,
+        expected_gid=gid,
+        allowed_external_symlink_targets=(target,),
+    )
+    with pytest.raises(host.InstallError, match="escapes"):
+        host._validate_owned_tree(root, expected_uid=uid, expected_gid=gid)
+
+
+def test_venv_python_link_rejects_non_system_python_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    venv = tmp_path / "venv"
+    bindir = venv / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "python").symlink_to("/usr/local/bin/python3.12")
+
+    class VenvRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            call = list(argv)
+            if call[1:3] == ["-I", "-S"]:
+                assert kwargs == {"check": False}
+                return host.CommandResult(0, "3.12\n")
+            assert kwargs == {"check": False}
+            return host.CommandResult(0, "directory:root:root:755\n")
+
+    monkeypatch.setattr(host, "VENV", venv)
+    monkeypatch.setattr(
+        host,
+        "_safe_root_executable",
+        lambda path, *, label: Path("/usr/bin/python3.12"),
+    )
+
+    with pytest.raises(host.InstallError, match="link is unsafe"):
+        host.HostSystem(VenvRunner()).venv_ready()
+
+
 class RecordingRunner:
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
