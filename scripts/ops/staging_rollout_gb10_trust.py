@@ -1317,12 +1317,12 @@ def main(
                 raise TrustConfigurationError(
                     "active-policy migration requires merged installer authority"
                 )
-            ledger = store.load(allow_absent=False)
-            if ledger is None:  # pragma: no cover - allow_absent=False owns this invariant
+            existing_ledger = store.load(allow_absent=False)
+            if existing_ledger is None:  # pragma: no cover - allow_absent=False owns this invariant
                 raise TrustConfigurationError("GB10 trust revocation ledger is unavailable")
             ledger = _migrate_active_policy(
                 store,
-                ledger=ledger,
+                ledger=existing_ledger,
                 inventory=inventory,
                 key_fingerprint=key_fingerprint,
             )
