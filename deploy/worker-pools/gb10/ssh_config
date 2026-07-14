@@ -22,10 +22,6 @@ Host trt-gb10-6
   HostName 192.168.20.16
   ProxyJump trt-gb10-1
 
-Host trt-gb10-7
-  HostName 192.168.20.17
-  ProxyJump trt-gb10-1
-
 Host trt-gb10-8
   HostName 192.168.20.18
   ProxyJump trt-gb10-1
@@ -61,10 +57,11 @@ Host trt-gb10-15
 Host trt-gb10-*
   User qianyi
   Port 22
-  IdentityFile /var/lib/loom-staging-rollout/gb10-deploy-ed25519
+  IdentityFile /data/loom-staging/breakglass/20260714T204734Z-2649ce1/breakglass-rollout-ed25519
   IdentitiesOnly yes
   PubkeyAuthentication yes
   PasswordAuthentication no
   StrictHostKeyChecking accept-new
+  UserKnownHostsFile /data/loom-staging/breakglass/20260714T204734Z-2649ce1/known_hosts
   ServerAliveInterval 30
   ServerAliveCountMax 3
