@@ -1,0 +1,1145 @@
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path, PurePosixPath
+
+import pytest
+import scripts.component_ownership as component_ownership
+
+from loom_cli.rollout.steps.s02_build_images import ROLLOUT_IMAGES
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_component_ownership_authority_files_exist() -> None:
+    assert (REPO_ROOT / "config/component-ownership.toml").is_file()
+    assert (REPO_ROOT / "scripts/component_ownership.py").is_file()
+
+
+def test_path_matcher_is_segment_safe_and_supports_recursive_globs() -> None:
+    matches_path = component_ownership.matches_path
+
+    assert matches_path("tests/unit/test_example.py", "tests/unit/**/*.py")
+    assert matches_path("tests/unit/nested/test_example.py", "tests/unit/**/*.py")
+    assert not matches_path("tests/unit/nested/test_example.py", "tests/unit/*.py")
+    assert not matches_path("tests/unit/test_example.pyc", "tests/unit/**/*.py")
+
+
+def test_load_manifest_parses_typed_component_and_test_suite(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+ci_lanes = ["tests-root"]
+smoke_owners = ["cluster-smoke"]
+scan_owners = ["image-scan"]
+attestation_owners = ["release-attestation"]
+
+[[components]]
+id = "example"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.example"
+build_context = "."
+source_paths = ["deploy/Dockerfile.example", "src/example/**"]
+smoke_owner = "cluster-smoke"
+scan_owner = "image-scan"
+attestation_owner = "release-attestation"
+release_digest = "loom-example"
+runtime_policy = "start"
+
+[[test_suites]]
+id = "python-fast"
+language = "python"
+lane = "tests-root"
+include_paths = ["tests/unit/**/*.py"]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    assert manifest.schema_version == 1
+    assert manifest.smoke_owners == ("cluster-smoke",)
+    assert manifest.scan_owners == ("image-scan",)
+    assert manifest.attestation_owners == ("release-attestation",)
+    assert manifest.components[0].release_digest == "loom-example"
+    assert manifest.test_suites[0].lane == "tests-root"
+    assert manifest.test_suites[0].runtime_payload is False
+
+
+def test_load_manifest_rejects_unknown_keys(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+
+[[components]]
+id = "example"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.example"
+build_context = "."
+source_paths = ["deploy/Dockerfile.example"]
+smoke_owner = "cluster-smoke"
+scan_owner = "image-scan"
+attestation_owner = "release-attestation"
+release_digest = "loom-example"
+runtime_policy = "start"
+typo_owner = "ignored"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(component_ownership.ManifestError, match=r"unknown keys.*typo_owner"):
+        component_ownership.load_manifest(manifest_path)
+
+
+@pytest.mark.parametrize("schema_version", ["true", "1.0"])
+def test_load_manifest_rejects_non_integer_schema_version(
+    tmp_path: Path,
+    schema_version: str,
+) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        f"schema_version = {schema_version}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        component_ownership.ManifestError,
+        match="schema_version must be the integer 1",
+    ):
+        component_ownership.load_manifest(manifest_path)
+
+
+@pytest.mark.parametrize("unsafe_path", ["/absolute", "../escape", "dir\\file"])
+def test_load_manifest_rejects_unsafe_repository_paths(
+    tmp_path: Path,
+    unsafe_path: str,
+) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        f"""
+schema_version = 1
+
+[[components]]
+id = "example"
+kind = "release-image"
+dockerfile = "{unsafe_path}"
+build_context = "."
+source_paths = ["deploy/Dockerfile.example"]
+smoke_owner = "cluster-smoke"
+scan_owner = "image-scan"
+attestation_owner = "release-attestation"
+release_digest = "loom-example"
+runtime_policy = "start"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(component_ownership.ManifestError, match="safe repository-relative path"):
+        component_ownership.load_manifest(manifest_path)
+
+
+def test_test_suite_must_choose_lane_or_runtime_payload_not_both(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+ci_lanes = ["tests-root"]
+
+[[test_suites]]
+id = "fixture-tests"
+language = "python"
+lane = "tests-root"
+runtime_payload = true
+include_paths = ["tests/fixtures/**/*.py"]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        component_ownership.ManifestError, match="exactly one of lane or runtime_payload"
+    ):
+        component_ownership.load_manifest(manifest_path)
+
+
+def test_test_owner_matcher_applies_exclusions_and_fails_on_unknown_paths(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+ci_lanes = ["integration", "integration-docker"]
+
+[[test_suites]]
+id = "integration-fast"
+language = "python"
+lane = "integration"
+include_paths = ["tests/integration/**/*.py"]
+exclude_paths = ["tests/integration/test_docker.py"]
+
+[[test_suites]]
+id = "integration-docker"
+language = "python"
+lane = "integration-docker"
+include_paths = ["tests/integration/test_docker.py"]
+""".strip(),
+        encoding="utf-8",
+    )
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    assert manifest.test_owner_for_path("tests/integration/test_fast.py").lane == "integration"
+    assert (
+        manifest.test_owner_for_path("tests/integration/test_docker.py").lane
+        == "integration-docker"
+    )
+    with pytest.raises(component_ownership.ManifestError, match="unowned test path"):
+        manifest.test_owner_for_path("tests/new-suite/test_unknown.py")
+
+
+def test_component_matcher_returns_all_affected_components(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+
+[[components]]
+id = "service"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.service"
+build_context = "."
+source_paths = ["deploy/Dockerfile.service", "src/shared/**"]
+smoke_owner = "staging-smoke"
+scan_owner = "image-scan"
+attestation_owner = "release-attestation"
+release_digest = "loom-service"
+runtime_policy = "start"
+
+[[components]]
+id = "worker"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.worker"
+build_context = "."
+source_paths = ["deploy/Dockerfile.worker", "src/shared/**"]
+smoke_owner = "staging-smoke"
+scan_owner = "image-scan"
+attestation_owner = "release-attestation"
+release_digest = "loom-worker"
+runtime_policy = "start"
+""".strip(),
+        encoding="utf-8",
+    )
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    assert [owner.id for owner in manifest.component_owners_for_path("src/shared/model.py")] == [
+        "service",
+        "worker",
+    ]
+    assert [
+        owner.id for owner in manifest.component_owners_for_path("deploy/Dockerfile.worker")
+    ] == ["worker"]
+
+
+def test_validator_fails_closed_for_unowned_dockerfile(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text("schema_version = 1\n", encoding="utf-8")
+    dockerfile = tmp_path / "deploy/Dockerfile.new-runtime"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    errors = component_ownership.validate_manifest(
+        manifest,
+        repo_root=tmp_path,
+        tracked_paths=("deploy/Dockerfile.new-runtime",),
+    )
+
+    assert "Dockerfile has no component owner: deploy/Dockerfile.new-runtime" in errors
+
+
+@pytest.mark.parametrize(
+    ("test_path", "language"),
+    [
+        ("tests/new_suite/test_unknown.py", "python"),
+        ("deploy/catalog/new/tasks/example/tests/test_result.py", "python"),
+        ("new-runtime/tests/helper.py", "python"),
+        ("cmd/new-runtime/runtime_test.go", "go"),
+        ("web/src/new-feature.test.tsx", "web"),
+        ("new-ui/src/new-feature.spec.ts", "web"),
+    ],
+)
+def test_validator_fails_closed_for_unowned_test_files(
+    tmp_path: Path,
+    test_path: str,
+    language: str,
+) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text("schema_version = 1\n", encoding="utf-8")
+    target = tmp_path / test_path
+    target.parent.mkdir(parents=True)
+    target.write_text("# test\n", encoding="utf-8")
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    errors = component_ownership.validate_manifest(
+        manifest,
+        repo_root=tmp_path,
+        tracked_paths=(test_path,),
+    )
+
+    assert f"{language} test has no CI owner: {test_path}" in errors
+
+
+def test_validator_rejects_duplicate_release_digest_ownership(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+
+[[components]]
+id = "one"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.one"
+build_context = "."
+source_paths = ["deploy/Dockerfile.one"]
+smoke_owner = "staging-smoke"
+scan_owner = "image-scan"
+attestation_owner = "release-attestation"
+release_digest = "loom-duplicate"
+runtime_policy = "start"
+
+[[components]]
+id = "two"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.two"
+build_context = "."
+source_paths = ["deploy/Dockerfile.two"]
+smoke_owner = "staging-smoke"
+scan_owner = "image-scan"
+attestation_owner = "release-attestation"
+release_digest = "loom-duplicate"
+runtime_policy = "start"
+""".strip(),
+        encoding="utf-8",
+    )
+    for name in ("one", "two"):
+        target = tmp_path / f"deploy/Dockerfile.{name}"
+        target.parent.mkdir(exist_ok=True)
+        target.write_text("FROM scratch\n", encoding="utf-8")
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    errors = component_ownership.validate_manifest(
+        manifest,
+        repo_root=tmp_path,
+        tracked_paths=("deploy/Dockerfile.one", "deploy/Dockerfile.two"),
+    )
+
+    assert "release digest has multiple component owners: loom-duplicate: one, two" in errors
+
+
+@pytest.mark.parametrize(
+    ("kind", "runtime_policy", "release_digest_line"),
+    [
+        ("unknown", "start", 'release_digest = "loom-example"'),
+        ("release-image", "runtime-payload", 'release_digest = "loom-example"'),
+        ("release-image", "start", ""),
+        ("runtime-payload-image", "runtime-payload", 'release_digest = "loom-example"'),
+        ("runtime-payload-image", "start", ""),
+    ],
+)
+def test_component_kind_enforces_release_and_runtime_policy_contract(
+    tmp_path: Path,
+    kind: str,
+    runtime_policy: str,
+    release_digest_line: str,
+) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        f"""
+schema_version = 1
+
+[[components]]
+id = "example"
+kind = "{kind}"
+dockerfile = "deploy/Dockerfile.example"
+build_context = "."
+source_paths = ["deploy/Dockerfile.example"]
+smoke_owner = "staging-smoke"
+scan_owner = "image-scan"
+attestation_owner = "release-attestation"
+{release_digest_line}
+runtime_policy = "{runtime_policy}"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(component_ownership.ManifestError, match="component kind contract"):
+        component_ownership.load_manifest(manifest_path)
+
+
+def test_repository_manifest_owns_every_dockerfile_and_test() -> None:
+    tracked_paths = tuple(
+        subprocess.check_output(
+            ["git", "ls-files"],
+            cwd=REPO_ROOT,
+            text=True,
+        ).splitlines()
+    )
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+
+    errors = component_ownership.validate_manifest(
+        manifest,
+        repo_root=REPO_ROOT,
+        tracked_paths=tracked_paths,
+    )
+
+    assert errors == []
+    tracked_dockerfiles = {
+        path
+        for path in tracked_paths
+        if PurePosixPath(path).name == "Dockerfile"
+        or PurePosixPath(path).name.startswith("Dockerfile.")
+    }
+    release_dockerfiles = {
+        path for path in tracked_dockerfiles if path.startswith("deploy/Dockerfile.")
+    }
+    payload_dockerfiles = tracked_dockerfiles - release_dockerfiles
+    assert {
+        item.dockerfile for item in manifest.components if item.kind == "release-image"
+    } == release_dockerfiles
+    assert {
+        item.dockerfile for item in manifest.components if item.kind == "runtime-payload-image"
+    } == payload_dockerfiles
+
+
+def test_validator_requires_any_docker_marked_pytest_module_in_docker_lane(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+ci_lanes = ["tests-root"]
+
+[[test_suites]]
+id = "root-fast"
+language = "python"
+lane = "tests-root"
+include_paths = ["tests/unit/**/*.py"]
+""".strip(),
+        encoding="utf-8",
+    )
+    test_path = "tests/unit/test_docker_runtime.py"
+    target = tmp_path / test_path
+    target.parent.mkdir(parents=True)
+    target.write_text("pytestmark = pytest.mark.docker\n", encoding="utf-8")
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    errors = component_ownership.validate_manifest(
+        manifest,
+        repo_root=tmp_path,
+        tracked_paths=(test_path,),
+    )
+
+    assert (
+        "docker-marked pytest module must use integration-docker lane: "
+        "tests/unit/test_docker_runtime.py: tests-root" in errors
+    )
+
+
+def test_validator_ignores_docker_marker_text_inside_strings(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+ci_lanes = ["tests-root"]
+
+[[test_suites]]
+id = "root-fast"
+language = "python"
+lane = "tests-root"
+include_paths = ["tests/unit/**/*.py"]
+""".strip(),
+        encoding="utf-8",
+    )
+    test_path = "tests/unit/test_marker_documentation.py"
+    target = tmp_path / test_path
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        'DOCUMENTED_MARKER = "pytest.mark.docker"\n\n'
+        "def test_example() -> None:\n"
+        "    assert DOCUMENTED_MARKER\n",
+        encoding="utf-8",
+    )
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    errors = component_ownership.validate_manifest(
+        manifest,
+        repo_root=tmp_path,
+        tracked_paths=(test_path,),
+    )
+
+    assert errors == []
+
+
+def test_cli_validate_and_query_are_fail_closed() -> None:
+    script = REPO_ROOT / "scripts/component_ownership.py"
+    validate = subprocess.run(
+        [sys.executable, str(script), "validate"],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    known = subprocess.run(
+        [sys.executable, str(script), "query", "deploy/Dockerfile.worker"],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    unknown = subprocess.run(
+        [sys.executable, str(script), "query", "new-runtime/unknown.bin"],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert validate.returncode == 0, validate.stderr
+    assert re.fullmatch(
+        r"validated \d+ components and \d+ tracked test files\n",
+        validate.stdout,
+    )
+    assert known.returncode == 0, known.stderr
+    assert [item["id"] for item in json.loads(known.stdout)["components"]] == ["worker"]
+    assert unknown.returncode != 0
+    assert "unowned path: new-runtime/unknown.bin" in unknown.stderr
+
+
+def test_validator_rejects_duplicate_component_ids(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+
+[[components]]
+id = "duplicate"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.one"
+build_context = "."
+source_paths = ["deploy/Dockerfile.one"]
+smoke_owner = "smoke"
+scan_owner = "scan"
+attestation_owner = "attest"
+release_digest = "loom-one"
+runtime_policy = "start"
+
+[[components]]
+id = "duplicate"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.two"
+build_context = "."
+source_paths = ["deploy/Dockerfile.two"]
+smoke_owner = "smoke"
+scan_owner = "scan"
+attestation_owner = "attest"
+release_digest = "loom-two"
+runtime_policy = "start"
+""".strip(),
+        encoding="utf-8",
+    )
+    for name in ("one", "two"):
+        target = tmp_path / f"deploy/Dockerfile.{name}"
+        target.parent.mkdir(exist_ok=True)
+        target.write_text("FROM scratch\n", encoding="utf-8")
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    errors = component_ownership.validate_manifest(
+        manifest,
+        repo_root=tmp_path,
+        tracked_paths=("deploy/Dockerfile.one", "deploy/Dockerfile.two"),
+    )
+
+    assert "component id has multiple definitions: duplicate" in errors
+
+
+def test_validator_rejects_component_dockerfile_that_is_not_tracked(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+
+[[components]]
+id = "missing"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.missing"
+build_context = "."
+source_paths = ["deploy/Dockerfile.missing"]
+smoke_owner = "smoke"
+scan_owner = "scan"
+attestation_owner = "attest"
+release_digest = "loom-missing"
+runtime_policy = "start"
+""".strip(),
+        encoding="utf-8",
+    )
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    errors = component_ownership.validate_manifest(
+        manifest,
+        repo_root=tmp_path,
+        tracked_paths=(),
+    )
+
+    assert "component Dockerfile is not tracked: missing: deploy/Dockerfile.missing" in errors
+
+
+def test_validator_rejects_missing_build_context(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+
+[[components]]
+id = "example"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.example"
+build_context = "missing-context"
+source_paths = ["deploy/Dockerfile.example"]
+smoke_owner = "smoke"
+scan_owner = "scan"
+attestation_owner = "attest"
+release_digest = "loom-example"
+runtime_policy = "start"
+""".strip(),
+        encoding="utf-8",
+    )
+    dockerfile = tmp_path / "deploy/Dockerfile.example"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    errors = component_ownership.validate_manifest(
+        manifest,
+        repo_root=tmp_path,
+        tracked_paths=("deploy/Dockerfile.example",),
+    )
+
+    assert "component build context is not a directory: example: missing-context" in errors
+
+
+def test_validator_requires_source_paths_to_own_component_dockerfile(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+
+[[components]]
+id = "example"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.example"
+build_context = "."
+source_paths = ["src/example/**"]
+smoke_owner = "smoke"
+scan_owner = "scan"
+attestation_owner = "attest"
+release_digest = "loom-example"
+runtime_policy = "start"
+""".strip(),
+        encoding="utf-8",
+    )
+    dockerfile = tmp_path / "deploy/Dockerfile.example"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    errors = component_ownership.validate_manifest(
+        manifest,
+        repo_root=tmp_path,
+        tracked_paths=("deploy/Dockerfile.example",),
+    )
+
+    assert (
+        "component source paths do not own Dockerfile: example: deploy/Dockerfile.example" in errors
+    )
+
+
+@pytest.mark.parametrize(
+    ("dockerfile_path", "kind", "policy", "digest_line", "expected_kind"),
+    [
+        (
+            "deploy/Dockerfile.example",
+            "runtime-payload-image",
+            "runtime-payload",
+            "",
+            "release-image",
+        ),
+        (
+            "tests/fixtures/task/Dockerfile",
+            "release-image",
+            "conformance",
+            'release_digest = "loom-fixture"',
+            "runtime-payload-image",
+        ),
+    ],
+)
+def test_validator_derives_release_or_payload_kind_from_dockerfile_location(
+    tmp_path: Path,
+    dockerfile_path: str,
+    kind: str,
+    policy: str,
+    digest_line: str,
+    expected_kind: str,
+) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        f"""
+schema_version = 1
+
+[[components]]
+id = "example"
+kind = "{kind}"
+dockerfile = "{dockerfile_path}"
+build_context = "."
+source_paths = ["{dockerfile_path}"]
+smoke_owner = "smoke"
+scan_owner = "scan"
+attestation_owner = "attest"
+{digest_line}
+runtime_policy = "{policy}"
+""".strip(),
+        encoding="utf-8",
+    )
+    dockerfile = tmp_path / dockerfile_path
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    errors = component_ownership.validate_manifest(
+        manifest,
+        repo_root=tmp_path,
+        tracked_paths=(dockerfile_path,),
+    )
+
+    assert (
+        f"component kind does not match Dockerfile location: example: {kind}; "
+        f"expected {expected_kind}" in errors
+    )
+
+
+def test_release_image_validator_rejects_digest_name_mismatch(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+
+[[components]]
+id = "service"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.service"
+build_context = "."
+source_paths = ["deploy/Dockerfile.service"]
+smoke_owner = "smoke"
+scan_owner = "scan"
+attestation_owner = "attest"
+release_digest = "loom-wrong"
+runtime_policy = "start"
+""".strip(),
+        encoding="utf-8",
+    )
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    errors = component_ownership.validate_release_image_ownership(
+        manifest,
+        (("loom-service", "deploy/Dockerfile.service"),),
+    )
+
+    assert (
+        "release image digest mismatch: deploy/Dockerfile.service: "
+        "manifest=loom-wrong consumer=loom-service" in errors
+    )
+
+
+def test_rollout_release_images_have_exact_manifest_owner() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+
+    assert (
+        component_ownership.validate_release_image_ownership(
+            manifest,
+            ROLLOUT_IMAGES,
+        )
+        == []
+    )
+
+
+def test_load_manifest_rejects_unknown_test_language(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+ci_lanes = ["unknown"]
+
+[[test_suites]]
+id = "unknown"
+language = "rust"
+lane = "unknown"
+include_paths = ["tests/**/*.rs"]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(component_ownership.ManifestError, match="language must be one of"):
+        component_ownership.load_manifest(manifest_path)
+
+
+def test_validator_requires_dockerfile_inside_build_context(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+
+[[components]]
+id = "example"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.example"
+build_context = "other-context"
+source_paths = ["deploy/Dockerfile.example"]
+smoke_owner = "smoke"
+scan_owner = "scan"
+attestation_owner = "attest"
+release_digest = "loom-example"
+runtime_policy = "start"
+""".strip(),
+        encoding="utf-8",
+    )
+    dockerfile = tmp_path / "deploy/Dockerfile.example"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    (tmp_path / "other-context").mkdir()
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    errors = component_ownership.validate_manifest(
+        manifest,
+        repo_root=tmp_path,
+        tracked_paths=("deploy/Dockerfile.example",),
+    )
+
+    assert (
+        "component Dockerfile is outside build context: example: "
+        "deploy/Dockerfile.example not under other-context" in errors
+    )
+
+
+def test_cli_query_rejects_globally_invalid_manifest(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        (REPO_ROOT / "config/component-ownership.toml").read_text(encoding="utf-8")
+        + """
+
+[[components]]
+id = "worker"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.worker"
+build_context = "."
+source_paths = ["deploy/Dockerfile.worker"]
+smoke_owner = "worker-runtime-conformance"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-worker-copy"
+runtime_policy = "start"
+""",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts/component_ownership.py"),
+            "--manifest",
+            str(manifest_path),
+            "query",
+            "deploy/Dockerfile.worker",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "component id has multiple definitions: worker" in result.stderr
+
+
+def test_release_image_validator_rejects_duplicate_consumer_pairs(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+
+[[components]]
+id = "service"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.service"
+build_context = "."
+source_paths = ["deploy/Dockerfile.service"]
+smoke_owner = "smoke"
+scan_owner = "scan"
+attestation_owner = "attest"
+release_digest = "loom-service"
+runtime_policy = "start"
+""".strip(),
+        encoding="utf-8",
+    )
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    errors = component_ownership.validate_release_image_ownership(
+        manifest,
+        (
+            ("loom-service", "deploy/Dockerfile.service"),
+            ("loom-service", "deploy/Dockerfile.service"),
+        ),
+    )
+
+    assert "consumer release image name is duplicated: loom-service" in errors
+    assert "consumer release Dockerfile is duplicated: deploy/Dockerfile.service" in errors
+
+
+def test_load_manifest_rejects_lane_not_declared_in_registry(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+ci_lanes = ["integration"]
+
+[[test_suites]]
+id = "integration-fast"
+language = "python"
+lane = "integrtaion"
+include_paths = ["tests/integration/**/*.py"]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(component_ownership.ManifestError, match="undeclared CI lane"):
+        component_ownership.load_manifest(manifest_path)
+
+
+def test_validator_rejects_stale_component_source_pattern(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+
+[[components]]
+id = "service"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.service"
+build_context = "."
+source_paths = ["deploy/Dockerfile.service", "src/missing.py"]
+smoke_owner = "smoke"
+scan_owner = "scan"
+attestation_owner = "attest"
+release_digest = "loom-service"
+runtime_policy = "start"
+""".strip(),
+        encoding="utf-8",
+    )
+    dockerfile = tmp_path / "deploy/Dockerfile.service"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    errors = component_ownership.validate_manifest(
+        manifest,
+        repo_root=tmp_path,
+        tracked_paths=("deploy/Dockerfile.service",),
+    )
+
+    assert "component source pattern matches no tracked path: service: src/missing.py" in errors
+
+
+def test_validator_rejects_stale_test_include_and_exclude_patterns(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+ci_lanes = ["tests-root"]
+
+[[test_suites]]
+id = "root"
+language = "python"
+lane = "tests-root"
+include_paths = ["tests/**/*.py", "tests/missing/**/*.py"]
+exclude_paths = ["tests/removed.py"]
+""".strip(),
+        encoding="utf-8",
+    )
+    test_path = "tests/test_present.py"
+    target = tmp_path / test_path
+    target.parent.mkdir()
+    target.write_text("def test_present(): pass\n", encoding="utf-8")
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    errors = component_ownership.validate_manifest(
+        manifest,
+        repo_root=tmp_path,
+        tracked_paths=(test_path,),
+    )
+
+    assert "test include pattern matches no tracked test: root: tests/missing/**/*.py" in errors
+    assert "test exclude pattern matches no tracked test: root: tests/removed.py" in errors
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["id", "smoke_owner", "scan_owner", "attestation_owner"],
+)
+def test_load_manifest_rejects_non_slug_component_identity_fields(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    values = {
+        "id": "example",
+        "smoke_owner": "smoke",
+        "scan_owner": "scan",
+        "attestation_owner": "attest",
+    }
+    values[field] = "Not Allowed"
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        f"""
+schema_version = 1
+
+[[components]]
+id = "{values["id"]}"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.example"
+build_context = "."
+source_paths = ["deploy/Dockerfile.example"]
+smoke_owner = "{values["smoke_owner"]}"
+scan_owner = "{values["scan_owner"]}"
+attestation_owner = "{values["attestation_owner"]}"
+release_digest = "loom-example"
+runtime_policy = "start"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(component_ownership.ManifestError, match="lowercase slug"):
+        component_ownership.load_manifest(manifest_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("smoke_owner", "stagin-smoke", "component smoke owner is undeclared"),
+        ("scan_owner", "imagse", "component scan owner is undeclared"),
+        (
+            "attestation_owner",
+            "release-provennce",
+            "component attestation owner is undeclared",
+        ),
+    ],
+)
+def test_validator_rejects_undeclared_component_owner(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    expected: str,
+) -> None:
+    owners = {
+        "smoke_owner": "staging-smoke",
+        "scan_owner": "images",
+        "attestation_owner": "release-provenance",
+    }
+    owners[field] = value
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        f"""
+schema_version = 1
+smoke_owners = ["staging-smoke"]
+scan_owners = ["images"]
+attestation_owners = ["release-provenance"]
+
+[[components]]
+id = "service"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.service"
+build_context = "."
+source_paths = ["deploy/Dockerfile.service"]
+smoke_owner = "{owners["smoke_owner"]}"
+scan_owner = "{owners["scan_owner"]}"
+attestation_owner = "{owners["attestation_owner"]}"
+release_digest = "loom-service"
+runtime_policy = "start"
+""".strip(),
+        encoding="utf-8",
+    )
+    dockerfile = tmp_path / "deploy/Dockerfile.service"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    errors = component_ownership.validate_manifest(
+        manifest,
+        repo_root=tmp_path,
+        tracked_paths=("deploy/Dockerfile.service",),
+    )
+
+    assert any(expected in error and value in error for error in errors)
+
+
+def test_validator_rejects_unused_lane_and_component_owner_registry_entries(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 1
+ci_lanes = ["tests-root", "unused-lane"]
+smoke_owners = ["staging-smoke", "unused-smoke"]
+scan_owners = ["images", "unused-scan"]
+attestation_owners = ["release-provenance", "unused-attestation"]
+
+[[components]]
+id = "service"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.service"
+build_context = "."
+source_paths = ["deploy/Dockerfile.service"]
+smoke_owner = "staging-smoke"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-service"
+runtime_policy = "start"
+
+[[test_suites]]
+id = "root-fast"
+language = "python"
+lane = "tests-root"
+include_paths = ["tests/unit/**/*.py"]
+""".strip(),
+        encoding="utf-8",
+    )
+    dockerfile = tmp_path / "deploy/Dockerfile.service"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    test_path = tmp_path / "tests/unit/test_present.py"
+    test_path.parent.mkdir(parents=True)
+    test_path.write_text("def test_present() -> None: pass\n", encoding="utf-8")
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    errors = component_ownership.validate_manifest(
+        manifest,
+        repo_root=tmp_path,
+        tracked_paths=("deploy/Dockerfile.service", "tests/unit/test_present.py"),
+    )
+
+    assert "CI lane has no test suite owner: unused-lane" in errors
+    assert "smoke owner has no component: unused-smoke" in errors
+    assert "scan owner has no component: unused-scan" in errors
+    assert "attestation owner has no component: unused-attestation" in errors

@@ -131,6 +131,14 @@ add checks but may not remove checks inferred from changed paths. The PR
 template and contributor guidance describe the rule, while a repository test
 prevents workflow-to-documentation drift.
 
+The phase-one machine-readable inventory lives at
+`config/component-ownership.toml`. Its fail-closed validator owns the schema,
+all tracked Dockerfile and test-path assignments, allowed CI lanes, component
+owner registries, and rollout image identity checks. The current planner and
+workflow mappings remain independent consumers during the staged #788
+migration; this inventory is not yet evidence that every downstream list is
+generated from one source.
+
 GitHub settings are part of the acceptance evidence:
 
 - `dev` has no repository-wide approval count; Codex-authored routine `dev`
