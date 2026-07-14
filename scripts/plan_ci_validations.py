@@ -96,9 +96,7 @@ class ValidationPlan:
                 "coverage_summary",
             )
         }
-        outputs["reasons_json"] = json.dumps(
-            self.reasons, sort_keys=True, separators=(",", ":")
-        )
+        outputs["reasons_json"] = json.dumps(self.reasons, sort_keys=True, separators=(",", ":"))
         return outputs
 
 
@@ -106,10 +104,7 @@ def _is_documentation_path(path: str) -> bool:
     return (
         path in DOC_METADATA_PATHS
         or path.startswith(".github/ISSUE_TEMPLATE/")
-        or (
-            path.startswith("docs/")
-            and Path(path).suffix in DOCS_STATIC_SUFFIXES
-        )
+        or (path.startswith("docs/") and Path(path).suffix in DOCS_STATIC_SUFFIXES)
     )
 
 
@@ -270,10 +265,7 @@ def plan_validations(
     if selected["coverage_summary"]:
         select("integration", "coverage-summary-requires-integration")
 
-    if any(
-        selected[name]
-        for name in ("integration", "integration_docker", "coverage_summary")
-    ):
+    if any(selected[name] for name in ("integration", "integration_docker", "coverage_summary")):
         docs_only = False
 
     return ValidationPlan(
