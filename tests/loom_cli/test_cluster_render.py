@@ -804,11 +804,11 @@ def test_staging_profile_declares_repo_owned_gb10_ssh_config() -> None:
     assert cfg.gb10_pool.ssh_config == "../worker-pools/gb10/ssh_config"
     assert (
         cfg.gb10_pool.ssh_identity_file
-        == "/shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519"
+        == "/var/lib/loom-staging-rollout/gb10-deploy-ed25519"
     )
     assert len(cfg.gb10_pool.hosts) == 15
     assert (
-        "IdentityFile /shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519"
+        "IdentityFile /var/lib/loom-staging-rollout/gb10-deploy-ed25519"
         in ssh_config
     )
     assert "IdentitiesOnly yes" in ssh_config

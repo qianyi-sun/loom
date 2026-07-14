@@ -181,8 +181,8 @@ def test_env_state_materializes_external_prereqs_before_apply_check(
         )
 
     monkeypatch.setattr(
-        "loom_cli.rollout.steps.s10_env_state._profile_path_for",
-        lambda ctx: str(profile),
+        "loom_cli.rollout.steps.s10_env_state._candidate_profile_path",
+        lambda _ctx, _step_dir: Path(profile),
     )
     monkeypatch.setattr(
         "loom_cli.rollout.steps.s10_env_state._materialize_external_slurm_runner_prerequisites",
@@ -228,8 +228,8 @@ def test_env_state_stops_before_apply_when_control_plane_is_not_ready(
         raise AssertionError("env-state apply/check should wait for CP first")
 
     monkeypatch.setattr(
-        "loom_cli.rollout.steps.s10_env_state._profile_path_for",
-        lambda ctx: str(profile),
+        "loom_cli.rollout.steps.s10_env_state._candidate_profile_path",
+        lambda _ctx, _step_dir: Path(profile),
     )
     monkeypatch.setattr(
         "loom_cli.rollout.steps.s10_env_state._materialize_external_slurm_runner_prerequisites",

@@ -130,6 +130,44 @@ def test_planner_change_selects_every_heavy_gate() -> None:
 @pytest.mark.parametrize(
     "path",
     [
+        "deploy/environments/staging.cluster.toml",
+        "deploy/environment-state/staging.toml",
+        "deploy/staging-rollout/loom-staging-rollout.sudoers",
+        "deploy/worker-pools/gb10/ssh_config",
+        "scripts/ops/staging_rollout_host.py",
+        "scripts/ops/verify_staging_rollout_secret_boundary.py",
+        "src/loom_cli/rollout/operator/broker.py",
+        "tests/loom_cli/rollout/operator/test_broker.py",
+        "tests/loom_cli/test_cluster_render.py",
+        "tests/loom_cli/test_environment_state.py",
+        "tests/ops/test_staging_rollout_host.py",
+    ],
+)
+def test_protected_staging_rollout_paths_select_every_heavy_gate(path: str) -> None:
+    plan = plan_validations(
+        changed_paths=[path], labels=set(), event_name="pull_request"
+    )
+
+    assert plan.unowned_runtime is False
+    assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
+    assert all("protected-staging-rollout" in plan.reasons[check] for check in HEAVY_CHECKS)
+
+
+def test_nearby_rollout_module_does_not_gain_protected_staging_authority() -> None:
+    plan = plan_validations(
+        changed_paths=["src/loom_cli/rollout/operator_notes.py"],
+        labels=set(),
+        event_name="pull_request",
+    )
+
+    assert plan.unowned_runtime is False
+    assert plan.selected_heavy_checks() == {"integration", "images"}
+    assert all("protected-staging-rollout" not in plan.reasons[check] for check in HEAVY_CHECKS)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
         "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/instruction.md",
         "docs/architecture/cluster-deploy-spikes/01-sandbox-bridge.sh",
         "unowned-runtime/new-input.bin",

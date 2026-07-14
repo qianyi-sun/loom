@@ -1075,9 +1075,10 @@ def test_cli_up_backup_guard_flags_thread_to_preflight(
 ) -> None:
     manifest = tmp_path / "backup-manifest.json"
     manifest.write_text("{}", encoding="utf-8")
-    config = tmp_path / "staging.cluster.toml"
+    config = tmp_path / "production.cluster.toml"
     config.write_text(
-        'namespace = "loom-staging"\n'
+        'namespace = "loom-production"\n'
+        'runtime_environment = "production"\n'
         "[workload_contract]\n"
         'workload_trust_mode = "internal_trusted"\n'
         "taskset_transforms_enabled = false\n"
@@ -1092,9 +1093,9 @@ def test_cli_up_backup_guard_flags_thread_to_preflight(
             "cluster",
             "up",
             "--namespace",
-            "loom-staging",
+            "loom-production",
             "--environment",
-            "staging",
+            "production",
             "--config",
             str(config),
             "--backup-manifest",
@@ -1105,7 +1106,7 @@ def test_cli_up_backup_guard_flags_thread_to_preflight(
     )
 
     assert rc == 0
-    assert captures["preflight_kwargs"]["environment"] == "staging"
+    assert captures["preflight_kwargs"]["environment"] == "production"
     assert captures["preflight_kwargs"]["backup_manifest"] == manifest.resolve()
     assert captures["preflight_kwargs"]["backup_max_age_hours"] == 12
 
@@ -1116,14 +1117,26 @@ def test_cli_up_config_file_threads_static_host_path_to_preflight_and_render(
 ) -> None:
     cfg = tmp_path / "cluster.toml"
     cfg.write_text(
-        'namespace = "loom-staging"\n'
+        'namespace = "loom-dev"\n'
+        'runtime_environment = "development"\n'
         'persistent_storage_backend = "static-host-path"\n'
-        'persistent_storage_host_path_root = "/data/loom-staging"\n',
+        'persistent_storage_host_path_root = "/tmp/loom-development"\n',
         encoding="utf-8",
     )
     captures = _patch_full_up_path(monkeypatch)
 
-    rc = main(["cluster", "up", "--config", str(cfg)])
+    rc = main(
+        [
+            "cluster",
+            "up",
+            "--config",
+            str(cfg),
+            "--namespace",
+            "loom-dev",
+            "--environment",
+            "development",
+        ]
+    )
 
     assert rc == 0
     assert (
@@ -1131,7 +1144,7 @@ def test_cli_up_config_file_threads_static_host_path_to_preflight_and_render(
         == "static-host-path"
     )
     assert "kind: PersistentVolume" in captures["apply_yaml_text"]
-    assert 'path: "/data/loom-staging/postgres"' in captures["apply_yaml_text"]
+    assert 'path: "/tmp/loom-development/postgres"' in captures["apply_yaml_text"]
 
 
 def test_cli_up_config_file_invalid_returns_2(

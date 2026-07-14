@@ -24,7 +24,7 @@ class ClusterUpStep(SubcommandStep):
     timeout_sec = 900.0
 
     def argv(self, ctx: RolloutContext, step_dir: StepDir) -> Sequence[str]:
-        return candidate_loom_argv(
+        argv = candidate_loom_argv(
             "cluster",
             "up",
             "--namespace",
@@ -37,6 +37,14 @@ class ClusterUpStep(SubcommandStep):
             "--sandbox-deadline-max-pods",
             "4",
         )
+        if ctx.request_envelope_path is not None:
+            argv.extend(
+                [
+                    "--rollout-request-envelope",
+                    str(ctx.request_envelope_path),
+                ]
+            )
+        return argv
 
     def cwd(self, ctx: RolloutContext, step_dir: StepDir) -> Path:
         return candidate_loom_cwd(step_dir)

@@ -70,12 +70,15 @@ class RolloutContext:
         cluster_config_sha256: sha256 of cluster_config_path contents at launch.
         rollout_root: Root of the evidence directory tree (#174 model).
         backup_manifest_path: Path to a pre-existing backup manifest for the
-            protected environment. The dumps themselves are produced by the
-            operator per the runbook (needs Postgres/MinIO credentials the
-            driver doesn't have); the backup step verifies the manifest via
-            ``loom cluster backup check``. Not part of ``inputs_hash`` — the
-            manifest changes between rollouts and stale-checks are handled
-            by ``backup check`` itself.
+            protected environment. Legacy manual rollouts use operator-produced
+            dumps because the driver lacks Postgres/MinIO credentials. Brokered
+            protected rollouts instead use the broker-owned backup created and
+            verified before unit launch. In both paths the backup step verifies
+            the manifest via ``loom cluster backup check``. Legacy manual
+            contexts omit the path from ``inputs_hash``; broker-created contexts
+            bind both the exact path and sha256 into persisted inputs/step
+            hashes. Freshness is still enforced independently by ``backup
+            check``.
         backup_manifest_min_remaining_hours: Minimum remaining freshness
             window required by the rollout backup step before the manifest
             reaches the protected backup max age. This keeps long GB10 prep
@@ -104,6 +107,15 @@ class RolloutContext:
     rollout_root: Path
     backup_manifest_path: Path
     backup_manifest_min_remaining_hours: int = 2
+    backup_manifest_sha256: str | None = None
+    runner_config_sha256: str | None = None
+    request_id: str | None = None
+    initiating_operator: str | None = None
+    initiating_uid: int | None = None
+    attempt_number: int | None = None
+    attempt_operator: str | None = None
+    attempt_uid: int | None = None
+    request_envelope_path: Path | None = None
     admin_token_source: str = "env:LOOM_CP_ADMIN_TOKEN"
     expect_admin_token_fingerprint: str | None = None
     worker_token_source: str | None = None
@@ -129,7 +141,7 @@ class RolloutContext:
 
         The keys are stable and sorted so re-writes don't drift.
         """
-        return {
+        inputs: dict[str, object] = {
             "image_tag": self.image_tag,
             "target_ref": self.target_ref,
             "resolved_sha": self.resolved_sha,
@@ -152,13 +164,28 @@ class RolloutContext:
             "cluster_config_path": str(self.cluster_config_path),
             "cluster_config_sha256": self.cluster_config_sha256,
             "rollout_root": str(self.rollout_root),
-            "backup_manifest_min_remaining_hours": (
-                self.backup_manifest_min_remaining_hours
-            ),
+            "backup_manifest_min_remaining_hours": (self.backup_manifest_min_remaining_hours),
             "scope": self.scope,
             "exclude_oldlab": self.exclude_oldlab,
             "gb10_prep_concurrency": self.gb10_prep_concurrency,
         }
+        if self.request_id is None:
+            return inputs
+        inputs.update(
+            {
+                "admin_token_source": _secret_source_identity(self.admin_token_source),
+                "worker_token_source": _secret_source_identity(self.worker_token_source),
+                "service_token_source": _secret_source_identity(self.service_token_source),
+                "smoke_api_token_source": _secret_source_identity(self.smoke_api_token_source),
+                "backup_manifest_path": str(self.backup_manifest_path),
+                "backup_manifest_sha256": self.backup_manifest_sha256,
+                "runner_config_sha256": self.runner_config_sha256,
+                "request_id": self.request_id,
+                "initiating_operator": self.initiating_operator,
+                "initiating_uid": self.initiating_uid,
+            }
+        )
+        return inputs
 
     def is_full_cluster_scope(self) -> bool:
         return self.scope == "full-cluster"
@@ -166,3 +193,10 @@ class RolloutContext:
     def would_falsify_full_cluster_acceptance(self) -> bool:
         """#340 acceptance: exclude-oldlab + full-cluster is contradictory."""
         return self.is_full_cluster_scope() and self.exclude_oldlab
+
+
+def _secret_source_identity(source: str | None) -> str | None:
+    """Persist a change-detecting identity without exposing a protected path."""
+    if source is None:
+        return None
+    return "sha256:" + hashlib.sha256(source.encode("utf-8")).hexdigest()

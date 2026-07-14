@@ -25,7 +25,9 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -36,6 +38,7 @@ from loom_cli.cluster_backup_guard import is_protected_environment
 from loom_cli.gb10_release_gate import gb10_release_target_mismatches
 from loom_cli.rollout_lock import (
     DEFAULT_ROLLOUT_LOCK_TTL_SECONDS,
+    RolloutAttribution,
     RolloutLease,
     RolloutLeaseError,
     RolloutLeaseManager,
@@ -66,6 +69,77 @@ _DEFAULT_CP_URL = "http://localhost:8080"
 _DEFAULT_EXPIRES_DAYS = 365
 _DEFAULT_ADMIN_TOKEN_SOURCE = "env:LOOM_ADMIN_TOKEN"
 _DEFAULT_ENV_DIAGNOSTIC_PREFIX = "LOOM_"
+_EXPLICIT_ROLLOUT_LOCK_OPTIONS_ATTR = "_explicit_rollout_lock_options"
+_BROKER_LOCK_OPTIONS = frozenset(
+    {
+        "--rollout-id",
+        "--rollout-lock-dir",
+        "--rollout-lock-ttl-seconds",
+        "--rollout-lock-evidence",
+        "--force-rollout-lock",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _EnvironmentStateBrokerBinding:
+    config: Any
+    envelope: Any
+    evidence_path: Path
+    attribution: RolloutAttribution
+
+
+def _record_explicit_rollout_lock_option(
+    namespace: argparse.Namespace,
+    option_string: str | None,
+) -> None:
+    options = set(getattr(namespace, _EXPLICIT_ROLLOUT_LOCK_OPTIONS_ATTR, ()))
+    if option_string is not None:
+        options.add(option_string)
+    setattr(namespace, _EXPLICIT_ROLLOUT_LOCK_OPTIONS_ATTR, options)
+
+
+class _ExplicitRolloutLockStore(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        del parser
+        setattr(namespace, self.dest, values)
+        _record_explicit_rollout_lock_option(namespace, option_string)
+
+
+class _ExplicitRolloutLockStoreTrue(argparse.Action):
+    def __init__(
+        self,
+        option_strings: list[str],
+        dest: str,
+        default: object = False,
+        required: bool = False,
+        help: str | None = None,
+    ) -> None:
+        super().__init__(
+            option_strings=option_strings,
+            dest=dest,
+            nargs=0,
+            default=default,
+            required=required,
+            help=help,
+        )
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        del parser, values
+        setattr(namespace, self.dest, True)
+        _record_explicit_rollout_lock_option(namespace, option_string)
 
 
 def _env_diagnostic_value(entry: RedactedEnvironmentEntry) -> str:
@@ -107,6 +181,7 @@ def _add_rollout_lock_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--rollout-id",
         default=None,
+        action=_ExplicitRolloutLockStore,
         help=(
             "Operator-visible protected rollout owner id. Defaults to "
             "environment-hostname-pid when a lock is required."
@@ -116,6 +191,7 @@ def _add_rollout_lock_args(parser: argparse.ArgumentParser) -> None:
         "--rollout-lock-dir",
         type=Path,
         default=None,
+        action=_ExplicitRolloutLockStore,
         help=(
             "Directory for per-environment rollout mutation leases. Defaults "
             "to $LOOM_ROLLOUT_LOCK_DIR or ~/.loom/rollout-locks for protected "
@@ -126,6 +202,7 @@ def _add_rollout_lock_args(parser: argparse.ArgumentParser) -> None:
         "--rollout-lock-ttl-seconds",
         type=int,
         default=DEFAULT_ROLLOUT_LOCK_TTL_SECONDS,
+        action=_ExplicitRolloutLockStore,
         help=(
             "Protected rollout mutation lease TTL in seconds "
             f"(default: {DEFAULT_ROLLOUT_LOCK_TTL_SECONDS})."
@@ -135,11 +212,12 @@ def _add_rollout_lock_args(parser: argparse.ArgumentParser) -> None:
         "--rollout-lock-evidence",
         type=Path,
         default=None,
+        action=_ExplicitRolloutLockStore,
         help="Optional JSON evidence path for rollout lock acquire/release events.",
     )
     parser.add_argument(
         "--force-rollout-lock",
-        action="store_true",
+        action=_ExplicitRolloutLockStoreTrue,
         help=(
             "Replace an active protected rollout mutation lease. Use only "
             "after preserving evidence that the recorded owner is stale."
@@ -147,23 +225,268 @@ def _add_rollout_lock_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _load_broker_rollout_envelope(path: Path) -> tuple[Any, Any]:
+    from loom_cli.rollout.operator.config import OperatorConfig
+    from loom_cli.rollout.operator.envelope import (
+        fixed_operator_config_path,
+        load_validated_envelope,
+    )
+
+    config = OperatorConfig.load(fixed_operator_config_path())
+    envelope = load_validated_envelope(
+        path,
+        config,
+        effective_uid=os.geteuid(),
+    )
+    return config, envelope
+
+
+def _require_real_directory(
+    path: Path,
+    *,
+    label: str,
+    expected_owner_uid: int | None = None,
+) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ValueError(f"{label} is unavailable") from exc
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError(f"{label} must be a real directory, not a symlink")
+    if expected_owner_uid is not None and metadata.st_uid != expected_owner_uid:
+        raise ValueError(f"{label} must be service-owned")
+
+
+def _require_real_file(
+    path: Path,
+    *,
+    label: str,
+    expected_owner_uid: int | None = None,
+) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ValueError(f"{label} is unavailable") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"{label} must be a regular file, not a symlink")
+    if expected_owner_uid is not None and metadata.st_uid != expected_owner_uid:
+        raise ValueError(f"{label} must be service-owned")
+
+
+def _fixed_rollout_lock_evidence_path(
+    config: Any,
+    envelope: Any,
+    *,
+    step_directory: str,
+) -> Path:
+    root = Path(config.rollout_root)
+    if not root.is_absolute() or ".." in root.parts:
+        raise ValueError("rollout lock evidence root must be an absolute fixed path")
+    rollout_parent = root / "rollouts"
+    rollout_dir = rollout_parent / str(envelope.rollout_id)
+    evidence_parent = rollout_dir / step_directory
+    service_uid = os.geteuid()
+    for path, label, owner_uid in (
+        (root, "rollout lock evidence root", None),
+        (rollout_parent, "rollout lock evidence rollouts directory", None),
+        (rollout_dir, "rollout lock evidence rollout directory", service_uid),
+        (evidence_parent, "rollout lock evidence parent", service_uid),
+    ):
+        _require_real_directory(path, label=label, expected_owner_uid=owner_uid)
+    evidence_path = evidence_parent / "rollout-lock.json"
+    try:
+        metadata = evidence_path.lstat()
+    except FileNotFoundError:
+        return evidence_path
+    except OSError as exc:
+        raise ValueError("rollout lock evidence path is unavailable") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("rollout lock evidence path must not be a symlink")
+    if metadata.st_uid != service_uid:
+        raise ValueError("rollout lock evidence path must be service-owned")
+    return evidence_path
+
+
+def _expected_broker_environment_profile(config: Any, envelope: Any) -> Path:
+    from loom_cli.cluster_config import load_cluster_config
+
+    rollout_dir = Path(config.rollout_root) / "rollouts" / str(envelope.rollout_id)
+    candidate_root = rollout_dir / "01-worktree" / "src"
+    _require_real_directory(candidate_root, label="broker candidate worktree")
+    try:
+        relative_config = Path(config.cluster_config_path).relative_to(config.runner_repo)
+    except ValueError as exc:
+        raise ValueError("configured staging cluster profile is outside the runner repo") from exc
+    candidate_config = candidate_root / relative_config
+    _require_real_file(candidate_config, label="broker candidate cluster config")
+    cluster_config = load_cluster_config(candidate_config)
+    profile_value = str(cluster_config.env_state_profile or "").strip()
+    if not profile_value:
+        raise ValueError("broker candidate cluster config has no environment-state profile")
+    profile = Path(profile_value)
+    if profile.is_absolute():
+        expected = profile
+    else:
+        expected = Path(os.path.normpath(candidate_config.parent / profile))
+    try:
+        expected.relative_to(candidate_root)
+    except ValueError as exc:
+        raise ValueError("broker environment-state profile escapes candidate worktree") from exc
+    _require_real_file(expected, label="broker environment-state profile")
+    return expected
+
+
+def _validate_broker_environment_state_inputs(
+    args: argparse.Namespace,
+    config: Any,
+    envelope: Any,
+    *,
+    operation: str,
+) -> Path:
+    if envelope.environment != "staging" or args.environment != envelope.environment:
+        raise ValueError("environment-state target does not match broker envelope")
+    if args.cp_url != envelope.cp_url:
+        raise ValueError("environment-state CP URL does not match broker envelope")
+    if args.admin_token != envelope.admin_token_source:
+        raise ValueError("environment-state admin token source does not match broker envelope")
+    if args.expect_admin_token_fingerprint != envelope.expect_admin_token_fingerprint:
+        raise ValueError("environment-state token fingerprint does not match broker envelope")
+    if operation == "check" and args.worker_token != envelope.worker_token_source:
+        raise ValueError("environment-state worker token source does not match broker envelope")
+    expected_profile = _expected_broker_environment_profile(config, envelope)
+    if Path(args.file) != expected_profile:
+        raise ValueError("environment-state profile path does not match broker rollout")
+    if list(args.var) != [
+        f"IMAGE_TAG={envelope.image_tag}",
+        f"ENV_CONFIG_VERSION={envelope.image_tag}",
+        f"GIT_SHA={envelope.resolved_sha}",
+    ]:
+        raise ValueError("environment-state release variables do not match broker envelope")
+    expected_format = "json" if operation == "check" else "text"
+    if args.format != expected_format:
+        raise ValueError("environment-state output format does not match broker rollout")
+    return _fixed_rollout_lock_evidence_path(
+        config,
+        envelope,
+        step_directory="11-env-state",
+    )
+
+
+def _validate_broker_environment_state_profile(
+    profile: EnvironmentStateProfile,
+    envelope: Any,
+) -> None:
+    if (
+        profile.environment != envelope.environment
+        or profile.control_plane_environment != envelope.environment
+    ):
+        raise ValueError("environment-state profile targets do not match broker envelope")
+
+
+def _reject_broker_lock_overrides_before_profile(args: argparse.Namespace) -> None:
+    if getattr(args, "rollout_request_envelope", None) is None:
+        return
+    explicit = set(getattr(args, _EXPLICIT_ROLLOUT_LOCK_OPTIONS_ATTR, ()))
+    if explicit & _BROKER_LOCK_OPTIONS:
+        raise ValueError("manual rollout lock overrides are forbidden in broker mode")
+
+
+def _prepare_environment_state_broker_binding(
+    args: argparse.Namespace,
+    *,
+    operation: str,
+) -> _EnvironmentStateBrokerBinding | None:
+    envelope_path = getattr(args, "rollout_request_envelope", None)
+    if envelope_path is None:
+        if args.environment == "staging" and is_protected_environment(
+            environment=args.environment,
+            namespace=args.environment,
+        ):
+            raise ValueError(
+                "broker-created request envelope is required for staging environment-state"
+            )
+        return None
+    _reject_broker_lock_overrides_before_profile(args)
+    config, envelope = _load_broker_rollout_envelope(Path(envelope_path))
+    evidence_path = _validate_broker_environment_state_inputs(
+        args,
+        config,
+        envelope,
+        operation=operation,
+    )
+    return _EnvironmentStateBrokerBinding(
+        config=config,
+        envelope=envelope,
+        evidence_path=evidence_path,
+        attribution=RolloutAttribution(
+            request_id=envelope.request_id,
+            initiating_operator=envelope.initiating_operator,
+            initiating_uid=envelope.initiating_uid,
+            attempt_number=envelope.attempt_number,
+            attempt_operator=envelope.attempt_operator,
+            attempt_uid=envelope.attempt_uid,
+        ),
+    )
+
+
+def _protected_environment_state_target(
+    args: argparse.Namespace,
+    profile: EnvironmentStateProfile,
+) -> str | None:
+    protected_targets: list[str] = []
+    for target in dict.fromkeys(
+        (
+            str(args.environment),
+            profile.environment,
+            profile.control_plane_environment,
+        )
+    ):
+        if is_protected_environment(environment=target, namespace=target):
+            protected_targets.append(target)
+    if "staging" in protected_targets:
+        return "staging"
+    if "production" in protected_targets:
+        return "production"
+    return None
+
+
 def _acquire_environment_state_rollout_lock(
     args: argparse.Namespace,
     *,
     operation: str,
+    profile: EnvironmentStateProfile,
+    broker_binding: _EnvironmentStateBrokerBinding | None,
 ) -> RolloutLease | None:
-    if not is_protected_environment(
-        environment=args.environment,
-        namespace=args.environment,
-    ):
+    environment = _protected_environment_state_target(args, profile)
+    if environment is None:
         return None
-    environment = args.environment
-    manager = RolloutLeaseManager(args.rollout_lock_dir or default_rollout_lock_dir())
+    if environment == "staging":
+        if broker_binding is None:
+            raise ValueError(
+                "broker-created request envelope is required for staging environment-state"
+            )
+        _validate_broker_environment_state_profile(
+            profile,
+            broker_binding.envelope,
+        )
+    manager = RolloutLeaseManager(
+        Path(broker_binding.config.runtime_root) / "mutation-locks"
+        if broker_binding is not None
+        else args.rollout_lock_dir or default_rollout_lock_dir()
+    )
     try:
         lease = manager.acquire(
             environment=environment,
-            owner_id=rollout_owner_id(environment, args.rollout_id),
-            ttl_seconds=args.rollout_lock_ttl_seconds,
+            owner_id=(
+                broker_binding.envelope.rollout_id
+                if broker_binding is not None
+                else rollout_owner_id(environment, args.rollout_id)
+            ),
+            ttl_seconds=(
+                DEFAULT_ROLLOUT_LOCK_TTL_SECONDS
+                if broker_binding is not None
+                else args.rollout_lock_ttl_seconds
+            ),
             command=[
                 "loom",
                 "admin",
@@ -174,8 +497,13 @@ def _acquire_environment_state_rollout_lock(
                 "--file",
                 str(args.file),
             ],
-            evidence_path=args.rollout_lock_evidence,
-            force=args.force_rollout_lock,
+            evidence_path=(
+                broker_binding.evidence_path
+                if broker_binding is not None
+                else args.rollout_lock_evidence
+            ),
+            force=False if broker_binding is not None else args.force_rollout_lock,
+            attribution=(broker_binding.attribution if broker_binding is not None else None),
         )
     except (RolloutLeaseError, ValueError) as exc:
         sys.stderr.write(f"error: {exc}\n")
@@ -762,28 +1090,47 @@ def _fetch_environment_state(
 
 def _environment_state_apply(args: argparse.Namespace) -> int:
     try:
-        lease = _acquire_environment_state_rollout_lock(args, operation="apply")
-    except (RolloutLeaseError, ValueError):
+        broker_binding = _prepare_environment_state_broker_binding(
+            args,
+            operation="apply",
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
+    profile = _load_environment_state_profile_from_args(args)
+    if profile is None:
+        return 2
+    try:
+        lease = _acquire_environment_state_rollout_lock(
+            args,
+            operation="apply",
+            profile=profile,
+            broker_binding=broker_binding,
+        )
+    except RolloutLeaseError:
+        return 1
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
         return 1
     rc = 1
     try:
-        rc = _environment_state_apply_impl(args)
+        rc = _environment_state_apply_impl(args, profile)
         return rc
     finally:
         if lease is not None:
             lease.release(status="released" if rc == 0 else "failed")
 
 
-def _environment_state_apply_impl(args: argparse.Namespace) -> int:
+def _environment_state_apply_impl(
+    args: argparse.Namespace,
+    profile: EnvironmentStateProfile,
+) -> int:
     from loom_cli.environment_state import (
         apply_external_slurm_autoscaler_supervisors,
         autoscaler_policy_payload,
         gb10_desired_state_payload,
     )
 
-    profile = _load_environment_state_profile_from_args(args)
-    if profile is None:
-        return 2
     try:
         admin_token = _resolve_admin_token(args.admin_token)
     except ValueError as e:
@@ -875,19 +1222,41 @@ def _environment_state_apply_impl(args: argparse.Namespace) -> int:
 
 def _environment_state_check(args: argparse.Namespace) -> int:
     try:
-        lease = _acquire_environment_state_rollout_lock(args, operation="check")
-    except (RolloutLeaseError, ValueError):
+        broker_binding = _prepare_environment_state_broker_binding(
+            args,
+            operation="check",
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
+    profile = _load_environment_state_profile_from_args(args)
+    if profile is None:
+        return 2
+    try:
+        lease = _acquire_environment_state_rollout_lock(
+            args,
+            operation="check",
+            profile=profile,
+            broker_binding=broker_binding,
+        )
+    except RolloutLeaseError:
+        return 1
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
         return 1
     rc = 1
     try:
-        rc = _environment_state_check_impl(args)
+        rc = _environment_state_check_impl(args, profile)
         return rc
     finally:
         if lease is not None:
             lease.release(status="released" if rc == 0 else "failed")
 
 
-def _environment_state_check_impl(args: argparse.Namespace) -> int:
+def _environment_state_check_impl(
+    args: argparse.Namespace,
+    profile: EnvironmentStateProfile,
+) -> int:
     from loom_cli.environment_state import (
         autoscaler_blockers,
         diff_environment_state,
@@ -895,9 +1264,6 @@ def _environment_state_check_impl(args: argparse.Namespace) -> int:
         diff_external_slurm_runner_prerequisites,
     )
 
-    profile = _load_environment_state_profile_from_args(args)
-    if profile is None:
-        return 2
     try:
         admin_token = _resolve_admin_token(args.admin_token)
     except ValueError as e:
@@ -1788,6 +2154,12 @@ def dispatch(argv: list[str]) -> int:
                 "apply/check fail before contacting CP if the resolved admin "
                 "token source drifts from the protected-environment source."
             ),
+        )
+        p.add_argument(
+            "--rollout-request-envelope",
+            type=Path,
+            default=None,
+            help=argparse.SUPPRESS,
         )
         _add_rollout_lock_args(p)
 

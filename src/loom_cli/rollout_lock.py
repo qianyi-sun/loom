@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import socket
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -15,6 +16,9 @@ from typing import Any, TextIO
 
 DEFAULT_ROLLOUT_LOCK_TTL_SECONDS = 4 * 60 * 60
 _HELD_LOCKS: dict[Path, dict[str, Any]] = {}
+_SAFE_REQUEST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{7,79}$")
+_SAFE_OPERATOR_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,63}$")
+_ATTRIBUTED_COMMAND = ["broker-attributed-rollout-mutation"]
 
 
 class RolloutLeaseError(RuntimeError):
@@ -25,10 +29,57 @@ class RolloutLeaseError(RuntimeError):
         self.diagnostic = diagnostic
 
 
+@dataclass(frozen=True, slots=True)
+class RolloutAttribution:
+    """Immutable broker identity carried by protected mutation leases."""
+
+    request_id: str
+    initiating_operator: str
+    initiating_uid: int
+    attempt_number: int
+    attempt_operator: str
+    attempt_uid: int
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.request_id, str)
+            or _SAFE_REQUEST_ID_RE.fullmatch(self.request_id) is None
+        ):
+            raise ValueError(
+                "request_id must match ^[a-z0-9][a-z0-9-]{7,79}$",
+            )
+        self._validate_operator(self.initiating_operator, "initiating_operator")
+        self._validate_uid(self.initiating_uid, "initiating_uid")
+        if type(self.attempt_number) is not int or self.attempt_number < 1:
+            raise ValueError("attempt_number must be a positive integer")
+        self._validate_operator(self.attempt_operator, "attempt_operator")
+        self._validate_uid(self.attempt_uid, "attempt_uid")
+
+    @staticmethod
+    def _validate_operator(value: object, field_name: str) -> None:
+        if not isinstance(value, str) or _SAFE_OPERATOR_RE.fullmatch(value) is None:
+            raise ValueError(f"{field_name} must be a safe OS username")
+
+    @staticmethod
+    def _validate_uid(value: object, field_name: str) -> None:
+        if type(value) is not int or value < 0:
+            raise ValueError(f"{field_name} must be a non-negative integer")
+
+    def to_dict(self) -> dict[str, str | int]:
+        """Return the exact six safe attribution fields for evidence."""
+        return {
+            "request_id": self.request_id,
+            "initiating_operator": self.initiating_operator,
+            "initiating_uid": self.initiating_uid,
+            "attempt_number": self.attempt_number,
+            "attempt_operator": self.attempt_operator,
+            "attempt_uid": self.attempt_uid,
+        }
+
+
 def _safe_environment_name(environment: str) -> str:
     cleaned = "".join(
-        char if char.isalnum() or char in {"-", "_", "."} else "-"
-        for char in environment.strip()
+        char if char.isalnum() or char in {"-", "_", "."} else "-" for char in environment.strip()
     )
     return cleaned or "unknown"
 
@@ -96,6 +147,7 @@ class RolloutLease:
     acquired_at: datetime
     expires_at: datetime
     _handle: TextIO
+    attribution: RolloutAttribution | None = None
     evidence_path: Path | None = None
     stale_owner_id: str | None = None
     _released: bool = False
@@ -111,15 +163,18 @@ class RolloutLease:
                 active["release_status"] = status
                 _write_json_to_handle(self._handle, active)
             if self.evidence_path is not None:
+                release_event: dict[str, Any] = {
+                    "event": "released",
+                    "status": status,
+                    "environment": self.environment,
+                    "owner_id": self.owner_id,
+                    "released_at": released_at.isoformat(),
+                }
+                if self.attribution is not None:
+                    release_event.update(self.attribution.to_dict())
                 _append_evidence_event(
                     self.evidence_path,
-                    {
-                        "event": "released",
-                        "status": status,
-                        "environment": self.environment,
-                        "owner_id": self.owner_id,
-                        "released_at": released_at.isoformat(),
-                    },
+                    release_event,
                 )
         finally:
             _HELD_LOCKS.pop(self.lock_path.resolve(), None)
@@ -174,6 +229,7 @@ class RolloutLeaseManager:
         command: Sequence[str],
         evidence_path: Path | str | None = None,
         force: bool = False,
+        attribution: RolloutAttribution | None = None,
     ) -> RolloutLease:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
@@ -221,9 +277,11 @@ class RolloutLeaseManager:
                 "ttl_seconds": ttl_seconds,
                 "hostname": socket.gethostname(),
                 "pid": os.getpid(),
-                "command": list(command),
+                "command": (list(command) if attribution is None else list(_ATTRIBUTED_COMMAND)),
                 "forced": bool(force),
             }
+            if attribution is not None:
+                lease_payload.update(attribution.to_dict())
             if stale_owner_id:
                 lease_payload["replaced_stale_owner_id"] = stale_owner_id
             _write_json_to_handle(handle, lease_payload)
@@ -240,6 +298,8 @@ class RolloutLeaseManager:
                 }
                 if stale_owner_id:
                     event["replaced_owner_id"] = stale_owner_id
+                if attribution is not None:
+                    event.update(attribution.to_dict())
                 try:
                     _append_evidence_event(evidence, event)
                 except OSError as exc:
@@ -262,6 +322,7 @@ class RolloutLeaseManager:
                 acquired_at=acquired_at,
                 expires_at=expires_at,
                 _handle=handle,
+                attribution=attribution,
                 evidence_path=evidence,
                 stale_owner_id=stale_owner_id,
             )
@@ -301,7 +362,6 @@ class RolloutLeaseManager:
             "active_expires_at": previous.get("expires_at"),
             "active_hostname": previous.get("hostname"),
             "active_pid": previous.get("pid"),
-            "active_command": previous.get("command"),
             "recovery": (
                 "Wait for the active rollout to release the lease, or use "
                 "--force-rollout-lock only after preserving evidence that the "

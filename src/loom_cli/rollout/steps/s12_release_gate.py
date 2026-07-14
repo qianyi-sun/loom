@@ -11,6 +11,7 @@ from typing import Any
 from loom_cli.cluster_cmd import _rendered_deployment_images
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
+from loom_cli.rollout.operator.redaction import redact_rollout_text
 from loom_cli.rollout.steps.base import RunResult
 from loom_cli.rollout.steps.candidate_source import (
     CandidateToolingError,
@@ -31,6 +32,12 @@ from loom_cli.rollout.steps.subprocess_util import SubprocessResult, run_capture
 
 _GB10_STATUS_MAX_ATTEMPTS = 180
 _GB10_STATUS_RETRY_DELAY_SEC = 5.0
+
+
+def _append_redacted_diagnostic(path: Path, text: str) -> None:
+    """Append only centrally-redacted text to a nested diagnostic artifact."""
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(redact_rollout_text(text))
 
 
 def _is_transient_cp_unreachable(stderr: str) -> bool:
@@ -408,7 +415,7 @@ class ReleaseGateStep(SubcommandStep):
             cwd = self.cwd(ctx, step_dir)
             env = self.env(ctx, step_dir)
         except CandidateToolingError as exc:
-            step_dir.stderr_path().write_text(str(exc) + "\n")
+            self.write_stderr(step_dir, str(exc) + "\n")
             return RunResult(exit_code=2, error=str(exc))
 
         artifacts = {
@@ -506,8 +513,9 @@ class ReleaseGateStep(SubcommandStep):
                 if _is_transient_cp_unreachable(
                     gb10.stderr,
                 ) or _is_gb10_convergence_failure(gb10):
-                    gb10_retry_log.open("a", encoding="utf-8").write(
-                        f"attempt {attempt}/{_GB10_STATUS_MAX_ATTEMPTS}: {gb10.stderr.strip()}\n"
+                    _append_redacted_diagnostic(
+                        gb10_retry_log,
+                        f"attempt {attempt}/{_GB10_STATUS_MAX_ATTEMPTS}: {gb10.stderr.strip()}\n",
                     )
                     if attempt < _GB10_STATUS_MAX_ATTEMPTS:
                         time.sleep(_GB10_STATUS_RETRY_DELAY_SEC)
@@ -535,10 +543,11 @@ class ReleaseGateStep(SubcommandStep):
                 last_env_state_check = env_state_check
                 if env_state_check.returncode != 0:
                     if _is_gb10_node_status_drift_only(env_state_check.stdout):
-                        gb10_retry_log.open("a", encoding="utf-8").write(
+                        _append_redacted_diagnostic(
+                            gb10_retry_log,
                             f"attempt {attempt}/{_GB10_STATUS_MAX_ATTEMPTS}: "
                             "environment-state check still reports GB10 "
-                            "node-status drift\n"
+                            "node-status drift\n",
                         )
                         if attempt < _GB10_STATUS_MAX_ATTEMPTS:
                             time.sleep(_GB10_STATUS_RETRY_DELAY_SEC)
@@ -608,9 +617,10 @@ class ReleaseGateStep(SubcommandStep):
                     ),
                     artifacts=artifacts,
                 )
-            gb10_retry_log.open("a", encoding="utf-8").write(
+            _append_redacted_diagnostic(
+                gb10_retry_log,
                 f"attempt {attempt}/{_GB10_STATUS_MAX_ATTEMPTS}: "
-                "release-gate still reports GB10 convergence drift\n"
+                "release-gate still reports GB10 convergence drift\n",
             )
             if attempt < _GB10_STATUS_MAX_ATTEMPTS:
                 time.sleep(_GB10_STATUS_RETRY_DELAY_SEC)

@@ -27,13 +27,13 @@ from loom_cli.rollout.steps.subprocess_util import run_captured
 #: can parametrize over the same list AND diff it against the rendered
 #: deploy manifests.
 ROLLOUT_IMAGES: tuple[tuple[str, str], ...] = (
-    ("loom-control-plane",       "deploy/Dockerfile.control-plane"),
+    ("loom-control-plane", "deploy/Dockerfile.control-plane"),
     ("loom-family-orchestrator", "deploy/Dockerfile.family-orchestrator"),
-    ("loom-llm-gateway",         "deploy/Dockerfile.gateway"),
-    ("loom-service",             "deploy/Dockerfile.service"),
-    ("loom-web",                 "deploy/Dockerfile.web"),
-    ("loom-worker",              "deploy/Dockerfile.worker"),
-    ("loom-egress-xds",          "deploy/Dockerfile.egress-xds"),
+    ("loom-llm-gateway", "deploy/Dockerfile.gateway"),
+    ("loom-service", "deploy/Dockerfile.service"),
+    ("loom-web", "deploy/Dockerfile.web"),
+    ("loom-worker", "deploy/Dockerfile.worker"),
+    ("loom-egress-xds", "deploy/Dockerfile.egress-xds"),
 )
 
 
@@ -52,7 +52,9 @@ class BuildImagesStep(BaseStep):
         }
 
     def _verify_impl(
-        self, ctx: RolloutContext, step_dir: StepDir,
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
     ) -> VerifyOutcome:
         """Ask docker whether each expected tag exists."""
         missing: list[str] = []
@@ -69,9 +71,7 @@ class BuildImagesStep(BaseStep):
 
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:
         # Build context lives at the worktree from step 01.
-        worktree = (
-            step_dir.path.parent / "01-worktree" / "src"
-        )
+        worktree = step_dir.path.parent / "01-worktree" / "src"
         if not worktree.is_dir():
             return RunResult(
                 exit_code=1,
@@ -97,9 +97,12 @@ class BuildImagesStep(BaseStep):
 
             result = run_captured(
                 [
-                    "docker", "build",
-                    "-f", dockerfile,
-                    "-t", tag,
+                    "docker",
+                    "build",
+                    "-f",
+                    dockerfile,
+                    "-t",
+                    tag,
                     ".",
                 ],
                 cwd=worktree,
@@ -107,22 +110,19 @@ class BuildImagesStep(BaseStep):
             stdout_lines.append(f"# docker build {tag}\n{result.stdout}")
             stderr_lines.append(f"# docker build {tag}\n{result.stderr}")
             if result.returncode != 0:
-                step_dir.stdout_path().write_text("\n".join(stdout_lines))
-                step_dir.stderr_path().write_text("\n".join(stderr_lines))
+                self.write_stdout(step_dir, "\n".join(stdout_lines))
+                self.write_stderr(step_dir, "\n".join(stderr_lines))
                 return RunResult(
                     exit_code=result.returncode,
                     error=(
                         result.stderr.strip().splitlines()[-1]
-                        if result.stderr.strip() else
-                        f"docker build {tag} exited {result.returncode}"
+                        if result.stderr.strip()
+                        else f"docker build {tag} exited {result.returncode}"
                     ),
                 )
-        step_dir.stdout_path().write_text("\n".join(stdout_lines))
-        step_dir.stderr_path().write_text("\n".join(stderr_lines))
+        self.write_stdout(step_dir, "\n".join(stdout_lines))
+        self.write_stderr(step_dir, "\n".join(stderr_lines))
         return RunResult(
             exit_code=0,
-            summary=(
-                f"built {len(ROLLOUT_IMAGES)} images at tag "
-                f"{ctx.image_tag}"
-            ),
+            summary=(f"built {len(ROLLOUT_IMAGES)} images at tag {ctx.image_tag}"),
         )

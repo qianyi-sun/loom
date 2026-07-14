@@ -1544,7 +1544,7 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert len(gb10_policy["actuator_config"]["allowed_nodes"]) == 15
     assert (
         gb10_policy["actuator_config"]["env_file"]
-        == f"/shared_work/qianyi/loom-worker-capacity/{environment}-gb10-worker-staging-test.env"
+        == "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-test.env"
     )
     suffix = "loom-remote-worker-staging-test"
     assert gb10_policy["actuator_config"]["repo_dir"].endswith(suffix)
@@ -1603,7 +1603,7 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert profile.external_slurm_runner_prerequisites["materialize"] is True
     assert (
         profile.external_slurm_runner_prerequisites["env_template_glob"]
-        == "/shared_work/qianyi/loom-worker-capacity/staging-gb10-worker-staging-*.env"
+        == "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-*.env"
     )
 
 

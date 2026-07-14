@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.evidence import EvidenceDirectory
+from loom_cli.rollout.steps.candidate_source import candidate_loom_argv
 from loom_cli.rollout.steps.s05_backup import BackupStep
 
 
@@ -26,10 +26,7 @@ class TestBackupStepArgv:
 
         argv = list(BackupStep().argv(ctx, step_dir))
 
-        assert argv == [
-            sys.executable,
-            "-m",
-            "loom_cli",
+        assert argv == candidate_loom_argv(
             "cluster",
             "backup",
             "check",
@@ -41,7 +38,7 @@ class TestBackupStepArgv:
             str(manifest),
             "--min-remaining-hours",
             "2",
-        ]
+        )
 
     def test_uses_context_min_remaining_hours(self, tmp_path: Path) -> None:
         manifest = tmp_path / "backup-manifest.json"
@@ -71,11 +68,5 @@ class TestBackupStepArgv:
         argv = list(BackupStep().argv(ctx, step_dir))
 
         assert "--label" not in argv
-        assert argv[:6] == [
-            sys.executable,
-            "-m",
-            "loom_cli",
-            "cluster",
-            "backup",
-            "check",
-        ]
+        expected_command = candidate_loom_argv("cluster", "backup", "check")
+        assert argv[: len(expected_command)] == expected_command

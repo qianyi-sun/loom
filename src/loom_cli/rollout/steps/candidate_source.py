@@ -18,6 +18,38 @@ class CandidateToolingError(RuntimeError):
     """Raised when the resolved rollout worktree cannot run Loom tooling."""
 
 
+_CANDIDATE_RUNPY_LAUNCHER = (
+    "import runpy,sys;"
+    "sys.path.insert(0,'src');"
+    "sys.argv=['loom',*sys.argv[1:]];"
+    "runpy.run_module('loom_cli',run_name='__main__')"
+)
+_FIXED_PATH = "/usr/local/bin:/usr/bin:/bin"
+_PASSTHROUGH_ENV_KEYS = (
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "KUBECONFIG",
+    "LOOM_STAGING_ROLLOUT_CONFIG",
+)
+
+
+def _fixed_candidate_environment() -> dict[str, str]:
+    """Build the complete candidate environment without inherited injection."""
+    tool_bin = str(Path(sys.executable).parent)
+    env = {
+        "HOME": "/var/lib/loom-staging-rollout",
+        "USER": "loom-rollout",
+        "LOGNAME": "loom-rollout",
+        "PATH": f"{tool_bin}:{_FIXED_PATH}",
+        "LC_ALL": "C.UTF-8",
+    }
+    for name in _PASSTHROUGH_ENV_KEYS:
+        value = os.environ.get(name)
+        if value:
+            env[name] = value
+    return env
+
+
 def candidate_worktree(step_dir: StepDir) -> Path:
     """Return the resolved candidate worktree path from a later step dir."""
     return step_dir.path.parent / "01-worktree" / "src"
@@ -38,19 +70,13 @@ def validate_candidate_loom_source(step_dir: StepDir) -> Path:
 
 def candidate_loom_argv(*args: str) -> list[str]:
     """Run the candidate checkout's ``loom_cli`` package with this Python."""
-    return [sys.executable, "-m", "loom_cli", *args]
+    return [sys.executable, "-I", "-c", _CANDIDATE_RUNPY_LAUNCHER, *args]
 
 
 def candidate_loom_env(step_dir: StepDir) -> dict[str, str]:
     """Return an environment that imports ``loom_cli`` from the worktree."""
     worktree = validate_candidate_loom_source(step_dir)
-    candidate_src = str(worktree / "src")
-    env = os.environ.copy()
-    existing = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = candidate_src if not existing else f"{candidate_src}{os.pathsep}{existing}"
-    tool_bin = str(Path(sys.executable).parent)
-    existing_path = env.get("PATH")
-    env["PATH"] = tool_bin if not existing_path else f"{tool_bin}{os.pathsep}{existing_path}"
+    env = _fixed_candidate_environment()
     env["LOOM_ROLLOUT_CANDIDATE_WORKTREE"] = str(worktree)
     return env
 
@@ -76,6 +102,7 @@ def candidate_relative_path(path: Path, step_dir: StepDir) -> Path:
             capture_output=True,
             text=True,
             check=False,
+            env=_fixed_candidate_environment(),
         )
     except OSError:
         return path

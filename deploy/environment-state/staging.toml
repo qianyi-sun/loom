@@ -43,7 +43,7 @@ allowed_nodes = [
   "trt-gb10-14",
   "trt-gb10-15",
 ]
-env_file = "/shared_work/qianyi/loom-worker-capacity/staging-gb10-worker-${IMAGE_TAG}.env"
+env_file = "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-${IMAGE_TAG}.env"
 repo_dir = "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}"
 requested_cpus = 20
 requested_memory_mib = 115000
@@ -124,4 +124,4 @@ expected_repo_ref = "${IMAGE_TAG}"
 require_clean_repo = true
 require_worker_token_parity = true
 materialize = true
-env_template_glob = "/shared_work/qianyi/loom-worker-capacity/staging-gb10-worker-staging-*.env"
+env_template_glob = "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-*.env"

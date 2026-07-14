@@ -1,0 +1,930 @@
+from __future__ import annotations
+
+import grp
+import io
+import pwd
+import subprocess
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from loom_cli.rollout.operator import broker as broker_module
+from loom_cli.rollout.operator.backup import BackupError, VerifiedBackup
+from loom_cli.rollout.operator.broker import BrokerDependencies
+from loom_cli.rollout.operator.broker import main as broker_main
+from loom_cli.rollout.operator.config import OperatorConfig
+from loom_cli.rollout.operator.lifecycle import LifecycleBusyError, ReconciliationResult
+from loom_cli.rollout.operator.model import (
+    ActivePointer,
+    CallerIdentity,
+    CandidateBinding,
+    DriverEnvelope,
+    RequestEvent,
+    RolloutRequest,
+)
+from loom_cli.rollout.operator.policy import sanitized_child_environment
+from loom_cli.rollout.operator.preflight import PreflightCheck, PreflightReport
+
+NOW = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+SHA = "a" * 40
+REQUEST_ID = "req-alpha"
+ROLLOUT_ID = "rollout-alpha"
+
+
+def make_config(tmp_path: Path) -> OperatorConfig:
+    return OperatorConfig(
+        schema_version=1,
+        service_user="loom-rollout",
+        operator_group="loom-staging-operators",
+        remote_url="https://github.com/qianyi-sun/loom.git",
+        target_ref="refs/heads/dev",
+        runner_repo=tmp_path / "runner/repo",
+        state_root=tmp_path / "state",
+        runtime_root=tmp_path / "runtime",
+        rollout_root=tmp_path / "data",
+        kubeconfig_path=tmp_path / "kubeconfig",
+        cluster_config_path=tmp_path / "runner/repo/deploy/environments/staging.cluster.toml",
+        admin_token_source=f"file:{tmp_path}/admin-token",
+        worker_token_source=f"file:{tmp_path}/worker-token",
+        service_token_source=f"file:{tmp_path}/service-token",
+        expect_admin_token_fingerprint="sha256:abc123def456 len=64",
+        cluster_name="loom-staging",
+        namespace="loom-staging",
+        environment="staging",
+        cp_url="http://127.0.0.1:18081",
+        smoke_on_behalf_username="devansh",
+        smoke_on_behalf_team_id="11111111-1111-4111-8111-111111111111",
+        scope="current-gb10",
+        gb10_prep_concurrency=8,
+        config_path=tmp_path / "staging-rollout.toml",
+        config_sha256="1" * 64,
+    )
+
+
+class FakeStore:
+    def __init__(self, order: list[str]) -> None:
+        self.order = order
+        self.requests: dict[str, RolloutRequest] = {}
+        self.events: dict[str, list[RequestEvent]] = {}
+        self.envelopes: dict[tuple[str, int], DriverEnvelope] = {}
+        self.active: ActivePointer | None = None
+
+    def create_request(self, request: RolloutRequest) -> Path:
+        self.order.append("request")
+        self.requests[request.request_id] = request
+        self.events[request.request_id] = []
+        return Path("/request.json")
+
+    def read_request(self, request_id: str) -> RolloutRequest:
+        if request_id not in self.requests:
+            raise RuntimeError("request does not exist")
+        return self.requests[request_id]
+
+    def append_event(self, event: RequestEvent) -> Path:
+        self.events[event.request_id].append(event)
+        return Path("/events.jsonl")
+
+    def read_events(self, request_id: str) -> list[RequestEvent]:
+        if request_id not in self.events:
+            raise RuntimeError("request does not exist")
+        return list(self.events[request_id])
+
+    def publish_attempt_envelope(self, envelope: DriverEnvelope) -> Path:
+        self.order.append("envelope-finalize")
+        self.envelopes[(envelope.request_id, envelope.attempt_number)] = envelope
+        return Path(
+            f"/state/requests/{envelope.request_id}/attempts/"
+            f"{envelope.attempt_number}/envelope.json"
+        )
+
+    def read_attempt_envelope(self, request_id: str, attempt_number: int) -> DriverEnvelope:
+        return self.envelopes[(request_id, attempt_number)]
+
+    def next_attempt_number(self, request_id: str) -> int:
+        attempts = [number for (stored, number) in self.envelopes if stored == request_id]
+        return max(attempts, default=0) + 1
+
+    def read_active(self) -> ActivePointer | None:
+        return self.active
+
+
+class FakeCandidate:
+    def __init__(self, order: list[str]) -> None:
+        self.order = order
+        self.fetch_count = 0
+
+    def bind(self) -> CandidateBinding:
+        self.order.append("fetch")
+        self.fetch_count += 1
+        return CandidateBinding(
+            remote_url="https://github.com/qianyi-sun/loom.git",
+            target_ref="origin/dev",
+            resolved_sha=SHA,
+            image_tag="staging-aaaaaaa",
+            fetched_at="2026-07-14T12:00:00Z",
+        )
+
+
+class FakeBackup:
+    def __init__(self, order: list[str]) -> None:
+        self.order = order
+        self.create_count = 0
+
+    def create(self, request: RolloutRequest) -> VerifiedBackup:
+        self.order.append("backup-create")
+        self.create_count += 1
+        return VerifiedBackup(
+            Path("/data/loom-staging/backups/fixed/backup-manifest.json"), "2" * 64
+        )
+
+
+class FailingBackup(FakeBackup):
+    def create(self, request: RolloutRequest) -> VerifiedBackup:
+        self.order.append("backup-create")
+        self.create_count += 1
+        raise BackupError("postgres_dump_failed")
+
+
+class FakeSystemd:
+    def __init__(self) -> None:
+        self.start_count = 0
+        self.terminated: list[str] = []
+        self.journal = ("token=known-secret\n",)
+        self.visible_units: set[str] = set()
+        self.terminate_error: Exception | None = None
+        self.on_terminate = None
+
+    def terminate(self, unit_name: str) -> None:
+        if self.on_terminate is not None:
+            self.on_terminate()
+        if self.terminate_error is not None:
+            raise self.terminate_error
+        self.terminated.append(unit_name)
+
+    def show(self, unit_name: str):  # type: ignore[no-untyped-def]
+        return object() if unit_name in self.visible_units else None
+
+    def stream_journal(self, unit_name: str, follow: bool):  # type: ignore[no-untyped-def]
+        return iter(self.journal)
+
+
+class FakeLifecycle:
+    def __init__(self, store: FakeStore, systemd: FakeSystemd, order: list[str]) -> None:
+        self.store = store
+        self.systemd = systemd
+        self.order = order
+        self.guard_depth = 0
+        self.reconciled: ReconciliationResult | None = None
+        self.maintenance = False
+
+    @contextmanager
+    def launch_guard(self):  # type: ignore[no-untyped-def]
+        self.guard_depth += 1
+        try:
+            yield
+        finally:
+            self.guard_depth -= 1
+
+    def reconcile_active(self) -> ReconciliationResult:
+        if self.reconciled is not None:
+            return self.reconciled
+        pointer = self.store.active
+        return ReconciliationResult(
+            outcome="busy" if pointer else "idle",
+            pointer=pointer,
+            cleared=False,
+            safe_status={} if pointer is None else {"request_id": pointer.request_id},
+        )
+
+    def assert_admission_open(self) -> None:
+        assert self.guard_depth > 0
+        if self.maintenance:
+            raise LifecycleBusyError(
+                "staging rollout admission is disabled for maintenance",
+                {"status": "busy", "reason": "maintenance"},
+            )
+
+    def launch(self, envelope: DriverEnvelope) -> ActivePointer:
+        pointer = ActivePointer(
+            request_id=envelope.request_id,
+            attempt_number=envelope.attempt_number,
+            unit_name=f"loom-staging-rollout-{envelope.request_id}-{envelope.attempt_number}.service",
+            status="pending",
+        )
+        self.order.append("active")
+        self.store.active = pointer
+        self.order.append("systemd")
+        self.systemd.start_count += 1
+        return pointer
+
+
+@dataclass
+class FakeBundle:
+    dependencies: BrokerDependencies
+    config: OperatorConfig
+    store: FakeStore
+    candidate: FakeCandidate
+    backup: FakeBackup
+    systemd: FakeSystemd
+    lifecycle: FakeLifecycle
+    order: list[str]
+    stdout: io.StringIO
+    stderr: io.StringIO
+
+
+def fakes(tmp_path: Path, *, backup: FakeBackup | None = None) -> FakeBundle:
+    order: list[str] = []
+    config = make_config(tmp_path)
+    store = FakeStore(order)
+    candidate = FakeCandidate(order)
+    selected_backup = backup or FakeBackup(order)
+    selected_backup.order = order
+    systemd = FakeSystemd()
+    lifecycle = FakeLifecycle(store, systemd, order)
+    stdout, stderr = io.StringIO(), io.StringIO()
+
+    def preflight() -> PreflightReport:
+        order.append("preflight")
+        return PreflightReport((PreflightCheck("all", True, None),))
+
+    deps = BrokerDependencies(
+        config=config,
+        authenticate=lambda: CallerIdentity("hongjian", 2002),
+        preflight=preflight,
+        bind_candidate=candidate.bind,
+        backup=selected_backup,
+        store=store,  # type: ignore[arg-type]
+        lifecycle=lifecycle,  # type: ignore[arg-type]
+        systemd=systemd,  # type: ignore[arg-type]
+        now=lambda: NOW,
+        new_request_id=lambda: REQUEST_ID,
+        new_rollout_id=lambda _: ROLLOUT_ID,
+        stdout=stdout,
+        stderr=stderr,
+        known_secrets=lambda: ("known-secret",),
+    )
+    return FakeBundle(
+        deps,
+        config,
+        store,
+        candidate,
+        selected_backup,
+        systemd,
+        lifecycle,
+        order,
+        stdout,
+        stderr,
+    )
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["start", "--ref", "origin/dev"],
+        ["start", "--image-tag", "staging-deadbee"],
+        ["start", "--config", "/tmp/config"],
+        ["start", "--force"],
+        ["resume", REQUEST_ID, "--ref", "origin/dev"],
+        ["cancel", REQUEST_ID],
+        ["start", "--dry"],
+        ["cancel", REQUEST_ID, "--rea", "because"],
+    ],
+)
+def test_public_surface_rejects_unapproved_arguments(tmp_path: Path, argv: list[str]) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(argv, dependencies=deps.dependencies) == 2
+    assert deps.order == []
+
+
+@pytest.mark.parametrize("reason", ["", "   ", "x" * 501])
+def test_cancel_reason_is_nonempty_and_bounded(tmp_path: Path, reason: str) -> None:
+    deps = fakes(tmp_path)
+    assert (
+        broker_main(["cancel", REQUEST_ID, "--reason", reason], dependencies=deps.dependencies) == 2
+    )
+
+
+def test_dry_run_fetches_and_records_preview_without_backup_unit_or_rollout(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    rc = broker_main(["start", "--dry-run"], dependencies=deps.dependencies)
+    assert rc == 0
+    assert deps.candidate.fetch_count == 1
+    assert deps.backup.create_count == 0
+    assert deps.systemd.start_count == 0
+    assert deps.store.read_active() is None
+    assert deps.store.read_request(REQUEST_ID).status == "preview"
+    assert deps.store.read_events(REQUEST_ID)[-1].event == "preview"
+
+
+def test_maintenance_marker_blocks_start_before_preflight(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    deps.lifecycle.maintenance = True
+
+    rc = broker_main(["start", "--dry-run"], dependencies=deps.dependencies)
+
+    assert rc == 1
+    assert deps.order == []
+    assert '"reason":"maintenance"' in deps.stderr.getvalue()
+
+
+def test_start_reserves_before_launch_and_returns_detached_request(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    rc = broker_main(["start"], dependencies=deps.dependencies)
+    assert rc == 0
+    assert deps.order == [
+        "preflight",
+        "fetch",
+        "request",
+        "backup-create",
+        "envelope-finalize",
+        "active",
+        "systemd",
+    ]
+    assert REQUEST_ID in deps.stdout.getvalue()
+    assert SHA in deps.stdout.getvalue()
+
+
+def test_backup_failure_never_publishes_envelope_or_starts_unit(tmp_path: Path) -> None:
+    deps = fakes(tmp_path, backup=FailingBackup([]))
+    assert broker_main(["start"], dependencies=deps.dependencies) == 1
+    assert deps.systemd.start_count == 0
+    assert deps.store.read_active() is None
+    assert deps.store.envelopes == {}
+    assert deps.store.read_events(REQUEST_ID)[-1].event == "backup_failed"
+
+
+def test_start_refuses_when_another_request_is_active(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    deps.store.active = ActivePointer(
+        request_id="req-other",
+        attempt_number=1,
+        unit_name="loom-staging-rollout-req-other-1.service",
+        status="running",
+    )
+    assert broker_main(["start"], dependencies=deps.dependencies) == 1
+    assert deps.order == []
+
+
+def test_unknown_request_preview_resume_and_done_resume_are_rejected(tmp_path: Path) -> None:
+    unknown = fakes(tmp_path / "unknown")
+    assert broker_main(["resume", REQUEST_ID], dependencies=unknown.dependencies) == 1
+
+    preview = fakes(tmp_path / "preview")
+    assert broker_main(["start", "--dry-run"], dependencies=preview.dependencies) == 0
+    assert broker_main(["resume", REQUEST_ID], dependencies=preview.dependencies) == 1
+
+    done = fakes(tmp_path / "done")
+    assert broker_main(["start"], dependencies=done.dependencies) == 0
+    done.store.active = None
+    done.store.append_event(
+        RequestEvent(
+            request_id=REQUEST_ID,
+            event="attempt_done",
+            occurred_at="2026-07-14T12:10:00Z",
+            operator="hongjian",
+            operator_uid=2002,
+            attempt_number=1,
+            unit_name=f"loom-staging-rollout-{REQUEST_ID}-1.service",
+            status="done",
+        )
+    )
+    assert broker_main(["resume", REQUEST_ID], dependencies=done.dependencies) == 1
+
+
+def test_resume_reuses_original_sha_backup_and_rollout_id(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    deps.store.active = None
+    deps.store.append_event(
+        RequestEvent(
+            request_id=REQUEST_ID,
+            event="attempt_failed",
+            occurred_at="2026-07-14T12:10:00Z",
+            operator="hongjian",
+            operator_uid=2002,
+            attempt_number=1,
+            unit_name=f"loom-staging-rollout-{REQUEST_ID}-1.service",
+            status="failed",
+            reason="driver_failed",
+        )
+    )
+    first = deps.store.read_attempt_envelope(REQUEST_ID, 1)
+    deps.order.clear()
+
+    assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 0
+    envelope = deps.store.read_attempt_envelope(REQUEST_ID, 2)
+    assert envelope.resolved_sha == first.resolved_sha
+    assert envelope.backup_manifest_path == first.backup_manifest_path
+    assert envelope.backup_manifest_sha256 == first.backup_manifest_sha256
+    assert envelope.rollout_id == first.rollout_id
+    assert envelope.resume is True
+    assert deps.candidate.fetch_count == 1
+    assert deps.backup.create_count == 1
+
+
+def test_cancel_records_actor_reason_and_terminates_known_unit(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+
+    assert (
+        broker_main(
+            ["cancel", REQUEST_ID, "--reason", "staging validation is abandoned"],
+            dependencies=deps.dependencies,
+        )
+        == 0
+    )
+
+    event = deps.store.read_events(REQUEST_ID)[-1]
+    assert event.event == "cancel_requested"
+    assert event.operator == "hongjian"
+    assert event.reason == "staging validation is abandoned"
+    assert deps.systemd.terminated == [f"loom-staging-rollout-{REQUEST_ID}-1.service"]
+
+
+def test_logs_redacts_exact_known_secret(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+
+    assert broker_main(["logs", REQUEST_ID], dependencies=deps.dependencies) == 0
+    assert "token=known-secret" not in deps.stdout.getvalue()
+    assert "[REDACTED" in deps.stdout.getvalue()
+
+
+def _last_json(stream: io.StringIO) -> dict[str, object]:
+    import json
+
+    return json.loads(stream.getvalue().splitlines()[-1])
+
+
+def test_explicit_status_reconciles_and_preserves_safe_lifecycle_details(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    pointer = deps.store.active
+    assert pointer is not None
+    deps.lifecycle.reconciled = ReconciliationResult(
+        outcome="busy",
+        pointer=pointer,
+        cleared=False,
+        safe_status={
+            "request_id": REQUEST_ID,
+            "attempt_number": 1,
+            "unit_name": pointer.unit_name,
+            "status": "running",
+            "current_step": "S07_release_gate",
+            "reason": "unit_running",
+        },
+    )
+
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+    payload = _last_json(deps.stdout)
+    assert payload["status"] == "running"
+    assert payload["current_step"] == "S07_release_gate"
+    assert payload["reason"] == "unit_running"
+    assert payload["unit_name"] == pointer.unit_name
+
+
+def test_implicit_status_returns_terminal_attempt_cleared_during_same_reconcile(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    pointer = deps.store.active
+    assert pointer is not None
+    deps.store.active = None
+    deps.lifecycle.reconciled = ReconciliationResult(
+        outcome="done",
+        pointer=pointer,
+        cleared=True,
+        safe_status={
+            "request_id": REQUEST_ID,
+            "status": "done",
+            "reason": "terminal_rollout_state",
+            "current_step": "S99_summary",
+        },
+    )
+
+    assert broker_main(["status"], dependencies=deps.dependencies) == 0
+    payload = _last_json(deps.stdout)
+    assert payload["request_id"] == REQUEST_ID
+    assert payload["status"] == "done"
+    assert payload["reason"] == "terminal_rollout_state"
+    assert payload["current_step"] == "S99_summary"
+
+
+def test_status_preserves_busy_safe_status_before_active_pointer_is_visible(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    deps.lifecycle.reconciled = ReconciliationResult(
+        outcome="busy",
+        pointer=None,
+        cleared=False,
+        safe_status={"status": "busy", "reason": "launch_in_progress"},
+    )
+
+    assert broker_main(["status"], dependencies=deps.dependencies) == 0
+    assert _last_json(deps.stdout) == {
+        "status": "busy",
+        "reason": "launch_in_progress",
+    }
+
+
+def test_explicit_status_does_not_overlay_unattributed_global_busy_state(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start", "--dry-run"], dependencies=deps.dependencies) == 0
+    deps.lifecycle.reconciled = ReconciliationResult(
+        outcome="busy",
+        pointer=None,
+        cleared=False,
+        safe_status={"status": "busy", "reason": "launch_in_progress"},
+    )
+
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+    payload = _last_json(deps.stdout)
+    assert payload["request_id"] == REQUEST_ID
+    assert payload["status"] == "preview"
+    assert "reason" not in payload
+
+
+def test_start_continues_after_reconcile_clears_terminal_pointer(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    old_pointer = ActivePointer(
+        request_id="req-terminal",
+        attempt_number=1,
+        unit_name="loom-staging-rollout-req-terminal-1.service",
+        status="running",
+    )
+    deps.lifecycle.reconciled = ReconciliationResult(
+        outcome="done",
+        pointer=old_pointer,
+        cleared=True,
+        safe_status={"request_id": "req-terminal", "status": "done"},
+    )
+
+    assert broker_main(["start", "--dry-run"], dependencies=deps.dependencies) == 0
+    assert deps.candidate.fetch_count == 1
+
+
+def test_terminal_request_status_preserves_latest_event_step_and_reason(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    deps.store.active = None
+    deps.store.append_event(
+        RequestEvent(
+            request_id=REQUEST_ID,
+            event="attempt_failed",
+            occurred_at="2026-07-14T12:10:00Z",
+            operator="hongjian",
+            operator_uid=2002,
+            attempt_number=1,
+            unit_name=f"loom-staging-rollout-{REQUEST_ID}-1.service",
+            status="failed",
+            reason="driver_failed",
+            current_step="S07_release_gate",
+        )
+    )
+
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+    payload = _last_json(deps.stdout)
+    assert payload["reason"] == "driver_failed"
+    assert payload["current_step"] == "S07_release_gate"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("config_sha256", "f" * 64),
+        ("cluster_name", "other-cluster"),
+        ("namespace", "other-namespace"),
+        ("environment", "other"),
+        ("cp_url", "http://127.0.0.1:9999"),
+        ("cluster_config_path", Path("/tmp/other.cluster.toml")),
+        ("rollout_root", Path("/tmp/other-rollout")),
+        ("admin_token_source", "file:/tmp/other-admin"),
+        ("worker_token_source", "file:/tmp/other-worker"),
+        ("service_token_source", "file:/tmp/other-service"),
+        ("expect_admin_token_fingerprint", "sha256:ffffffffffff len=64"),
+        ("smoke_on_behalf_username", "other-user"),
+        ("smoke_on_behalf_team_id", "22222222-2222-4222-8222-222222222222"),
+        ("scope", "other-scope"),
+        ("gb10_prep_concurrency", 7),
+    ],
+)
+def test_resume_rejects_every_config_bound_drift_before_publication_or_launch(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    deps.store.active = None
+    deps.store.append_event(
+        RequestEvent(
+            request_id=REQUEST_ID,
+            event="attempt_failed",
+            occurred_at="2026-07-14T12:10:00Z",
+            operator="hongjian",
+            operator_uid=2002,
+            attempt_number=1,
+            unit_name=f"loom-staging-rollout-{REQUEST_ID}-1.service",
+            status="failed",
+            reason="driver_failed",
+        )
+    )
+    envelopes_before = dict(deps.store.envelopes)
+    starts_before = deps.systemd.start_count
+    deps.dependencies.config = replace(deps.config, **{field: value})  # type: ignore[arg-type]
+
+    assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 1
+    assert deps.store.envelopes == envelopes_before
+    assert deps.store.active is None
+    assert deps.systemd.start_count == starts_before
+
+
+def test_resume_recovers_finalized_prelaunch_orphan_without_creating_new_attempt(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    first = deps.store.read_attempt_envelope(REQUEST_ID, 1)
+    deps.store.active = None
+    deps.systemd.start_count = 0
+
+    assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 0
+    assert deps.store.read_attempt_envelope(REQUEST_ID, 1) == first
+    assert deps.store.next_attempt_number(REQUEST_ID) == 2
+    assert deps.store.active is not None
+    assert deps.store.active.attempt_number == 1
+    assert deps.systemd.start_count == 1
+
+
+def test_resume_recovers_orphan_when_crash_preceded_publication_event(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    deps.store.active = None
+    deps.systemd.start_count = 0
+    deps.store.events[REQUEST_ID] = [
+        event for event in deps.store.events[REQUEST_ID] if event.event != "envelope_published"
+    ]
+
+    assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 0
+    assert deps.store.active is not None
+    assert deps.store.active.attempt_number == 1
+    assert deps.systemd.start_count == 1
+
+
+def test_resume_does_not_recover_orphan_when_expected_unit_exists(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    deps.store.active = None
+    deps.systemd.start_count = 0
+    unit = f"loom-staging-rollout-{REQUEST_ID}-1.service"
+    deps.systemd.visible_units.add(unit)
+
+    assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 1
+    assert deps.store.active is None
+    assert deps.systemd.start_count == 0
+
+
+def test_resume_rejects_orphan_whose_backup_drifted_from_first_attempt(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    deps.store.active = None
+    deps.store.append_event(
+        RequestEvent(
+            request_id=REQUEST_ID,
+            event="attempt_failed",
+            occurred_at="2026-07-14T12:10:00Z",
+            operator="hongjian",
+            operator_uid=2002,
+            attempt_number=1,
+            unit_name=f"loom-staging-rollout-{REQUEST_ID}-1.service",
+            status="failed",
+            reason="driver_failed",
+        )
+    )
+    assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 0
+    deps.store.active = None
+    second = deps.store.read_attempt_envelope(REQUEST_ID, 2)
+    deps.store.envelopes[(REQUEST_ID, 2)] = replace(
+        second,
+        backup_manifest_path="/data/loom-staging/backups/other/backup-manifest.json",
+        backup_manifest_sha256="9" * 64,
+    )
+    deps.systemd.start_count = 0
+
+    assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 1
+    assert deps.store.active is None
+    assert deps.systemd.start_count == 0
+
+
+def test_cancel_redacts_reason_and_terminates_under_launch_guard(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    deps.systemd.on_terminate = lambda: (
+        None
+        if deps.lifecycle.guard_depth > 0
+        else (_ for _ in ()).throw(AssertionError("cancel was not serialized"))
+    )
+
+    assert (
+        broker_main(
+            ["cancel", REQUEST_ID, "--reason", "abandoned known-secret validation"],
+            dependencies=deps.dependencies,
+        )
+        == 0
+    )
+    event = deps.store.read_events(REQUEST_ID)[-1]
+    assert event.event == "cancel_requested"
+    assert "abandoned known-secret validation" != event.reason
+    assert "[REDACTED" in (event.reason or "")
+
+
+def test_failed_termination_compensates_persisted_cancel_intent(tmp_path: Path) -> None:
+    from loom_cli.rollout.operator.systemd import SystemdOperationError
+
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    deps.systemd.terminate_error = SystemdOperationError("unit already completed")
+
+    assert (
+        broker_main(
+            ["cancel", REQUEST_ID, "--reason", "abandoned"],
+            dependencies=deps.dependencies,
+        )
+        == 1
+    )
+    events = deps.store.read_events(REQUEST_ID)
+    assert [event.event for event in events[-2:]] == ["cancel_requested", "cancel_failed"]
+    assert events[-1].reason == "unit_termination_failed"
+
+
+def test_terminal_event_wins_if_termination_reports_failure_after_worker_exit(
+    tmp_path: Path,
+) -> None:
+    from loom_cli.rollout.operator.systemd import SystemdOperationError
+
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    pointer = deps.store.read_active()
+    assert pointer is not None
+
+    def finish_worker() -> None:
+        deps.store.append_event(
+            RequestEvent(
+                request_id=REQUEST_ID,
+                event="cancelled",
+                occurred_at="2026-07-14T12:01:00Z",
+                operator="hongjian",
+                operator_uid=2002,
+                attempt_number=pointer.attempt_number,
+                unit_name=pointer.unit_name,
+                status="cancelled",
+                reason="cancel_requested",
+            )
+        )
+        deps.store.active = None
+
+    deps.systemd.on_terminate = finish_worker
+    deps.systemd.terminate_error = SystemdOperationError("unit already completed")
+
+    assert (
+        broker_main(
+            ["cancel", REQUEST_ID, "--reason", "abandoned"],
+            dependencies=deps.dependencies,
+        )
+        == 1
+    )
+    assert deps.store.read_events(REQUEST_ID)[-1].event == "cancel_failed"
+
+    deps.stdout.seek(0)
+    deps.stdout.truncate(0)
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+    assert _last_json(deps.stdout)["status"] == "cancelled"
+    assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 0
+    assert deps.store.read_active() is not None
+    assert deps.store.read_active().attempt_number == 2
+
+
+def test_cancel_redaction_failure_occurs_before_termination(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+
+    def fail_secret_read() -> tuple[str, ...]:
+        raise RuntimeError("secret source unavailable")
+
+    deps.dependencies.known_secrets = fail_secret_read
+
+    assert (
+        broker_main(
+            ["cancel", REQUEST_ID, "--reason", "abandoned"],
+            dependencies=deps.dependencies,
+        )
+        == 1
+    )
+    assert deps.systemd.terminated == []
+    assert all(event.event != "cancel_requested" for event in deps.store.read_events(REQUEST_ID))
+
+
+def test_operator_known_secrets_include_catalog_environment_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config(tmp_path)
+    monkeypatch.setattr(
+        broker_module,
+        "known_secrets_from_sources",
+        lambda sources: ("token-value",),
+    )
+    monkeypatch.setattr(
+        broker_module,
+        "catalog_secret_values",
+        lambda config, service_uid: ("catalog-value", "minio-secret"),
+        raising=False,
+    )
+
+    assert hasattr(broker_module, "_operator_known_secrets")
+    values = broker_module._operator_known_secrets(  # type: ignore[attr-defined]
+        config, service_uid=1234
+    )
+    assert values == ("token-value", "catalog-value", "minio-secret")
+
+
+def test_default_broker_run_and_stream_use_exact_sanitized_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config(tmp_path)
+    expected = sanitized_child_environment(config, service_uid=1234)
+    run_environments: list[dict[str, str] | None] = []
+    popen_environments: list[dict[str, str] | None] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        run_environments.append(kwargs.get("env"))  # type: ignore[arg-type]
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    class FakePopen:
+        def __init__(self, argv: list[str], **kwargs: object) -> None:
+            del argv
+            popen_environments.append(kwargs.get("env"))  # type: ignore[arg-type]
+            self.stdout = io.StringIO("")
+
+        def poll(self) -> int:
+            return 0
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout: int) -> int:
+            del timeout
+            return 0
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+
+    broker_module._run(["git", "status"], environment=expected)
+    stream = broker_module._stream(["journalctl"], environment=expected)
+    stream.close()
+    assert run_environments == [expected]
+    assert popen_environments == [expected]
+
+
+def test_group_resolution_includes_primary_and_supplementary_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pwd,
+        "getpwnam",
+        lambda username: SimpleNamespace(pw_gid=200),
+    )
+    monkeypatch.setattr(
+        grp,
+        "getgrgid",
+        lambda gid: SimpleNamespace(gr_name="loom-staging-operators"),
+    )
+    monkeypatch.setattr(
+        grp,
+        "getgrall",
+        lambda: [SimpleNamespace(gr_name="docker", gr_mem=["hongjian"])],
+    )
+
+    assert broker_module._groups("hongjian") == {
+        "loom-staging-operators",
+        "docker",
+    }

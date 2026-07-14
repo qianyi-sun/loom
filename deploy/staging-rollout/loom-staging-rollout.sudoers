@@ -1,0 +1,1 @@
+%loom-staging-operators ALL=(loom-rollout) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-rollout-broker *
