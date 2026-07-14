@@ -354,6 +354,35 @@ def test_diff_environment_state_reports_gb10_node_source_git_commit_drift(
     assert source_drift[0].live == "ce55a358d8472bce4b580a363806993678d8f116"
 
 
+def test_diff_environment_state_rejects_suffix_after_explicit_source_commit(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "staging.state.toml"
+    _write_profile(profile_path)
+    expected_source = "c72f50d67f0d571fef55a9abbbced4e37752ca0e"
+    profile = load_environment_state_profile(
+        profile_path,
+        variables={
+            "IMAGE_TAG": "staging-c72f50d",
+            "ENV_CONFIG_VERSION": "staging-c72f50d",
+            "GIT_SHA": expected_source,
+        },
+    )
+    live = _gb10_live_with_node_source(
+        image_tag="staging-c72f50d",
+        env_config_version="staging-c72f50d",
+        source_git_commit=f"{expected_source}-junk",
+        source_git_dirty=False,
+    )
+
+    drift = diff_environment_state(profile, live)
+
+    source_drift = [item for item in drift if "source_git_commit" in item.path]
+    assert len(source_drift) == 1
+    assert source_drift[0].desired == expected_source
+    assert source_drift[0].live == f"{expected_source}-junk"
+
+
 def test_diff_environment_state_reports_gb10_node_dirty_source(
     tmp_path: Path,
 ) -> None:

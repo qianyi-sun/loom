@@ -532,12 +532,13 @@ def _append_gb10_node_source_drift(
     release-gate passes on `staging-baa1d327` / `staging-c72f50d`
     while GB10 workers actually ran pre-#350 code.
 
-    For each desired state whose `image_tag` embeds a git-SHA suffix,
-    verify every active node in the same (environment, pool) reports
-    a `source_git_commit` starting with that SHA prefix and
-    `source_git_dirty is False`. Otherwise emit a StateDrift so the
-    same `environment-state check` artifact consumed by the release
-    gate fails hard instead of silently passing.
+    For each desired state, verify every active node in the same
+    (environment, pool) reports the exact explicitly declared
+    `source_git_commit`. Only legacy desired states without that field may
+    fall back to the SHA prefix embedded in `image_tag`. The checkout must
+    also report `source_git_dirty is False`. Otherwise emit a StateDrift so
+    the same `environment-state check` artifact consumed by the release gate
+    fails hard instead of silently passing.
     """
     if not isinstance(nodes, list):
         return
@@ -578,16 +579,20 @@ def _append_gb10_node_source_drift(
                 or apply_state in _GB10_NODE_SOURCE_DRIFT_IGNORED_APPLY_STATES
             ):
                 continue
-        expected_source = matched_desired.get("source_git_commit")
-        if not isinstance(expected_source, str) or not expected_source.strip():
+        declared_source = matched_desired.get("source_git_commit")
+        source_is_explicit = isinstance(declared_source, str) and bool(declared_source.strip())
+        expected_source = declared_source if source_is_explicit else None
+        if expected_source is None:
             expected_source = _release_source_prefix(matched_desired.get("image_tag"))
         if expected_source is None:
             continue
         expected_source = expected_source.strip()
         source_commit = node.get("source_git_commit")
         source_dirty = node.get("source_git_dirty")
-        source_commit_bad = not isinstance(source_commit, str) or not source_commit.startswith(
-            expected_source
+        source_commit_bad = not isinstance(source_commit, str) or (
+            source_commit != expected_source
+            if source_is_explicit
+            else not source_commit.startswith(expected_source)
         )
         source_dirty_bad = source_dirty is not False
         if source_commit_bad:
