@@ -330,7 +330,10 @@ def test_oversized_postgres_dump_stops_before_crossing_component_cap(
             sink.write(b"12345")
 
     capacity = lambda _path: backup_module._CapacitySnapshot(  # noqa: E731
-        free_bytes=10_000,
+        # Linux reports 4 KiB directory blocks while APFS commonly reports a
+        # much smaller value. Leave room for private directory accounting so
+        # this test reaches the Postgres component cap on every platform.
+        free_bytes=100_000,
         free_inodes=10_000,
         block_size=1,
     )
@@ -342,7 +345,7 @@ def test_oversized_postgres_dump_stops_before_crossing_component_cap(
         minio=SuccessfulMinioMirror(),
         now=lambda: FIXED_NOW,
         max_postgres_bytes=4,
-        max_total_bytes=1000,
+        max_total_bytes=100_000,
         disk_reserve_bytes=0,
         inode_reserve=0,
         capacity_provider=capacity,
@@ -360,7 +363,10 @@ def test_oversized_postgres_dump_stops_before_crossing_component_cap(
 def test_postgres_stream_rechecks_declining_host_free_space_between_chunks(
     tmp_path: Path,
 ) -> None:
-    state = {"free_bytes": 100}
+    # Directory allocation consumes several 4 KiB blocks on Linux. Start with
+    # enough room to reach the stream, then make the second write observe the
+    # intended one-byte free-space boundary.
+    state = {"free_bytes": 100_000}
 
     class DecliningPostgresRunner(RecordingRunner):
         def stream_stdout(
@@ -392,7 +398,7 @@ def test_postgres_stream_rechecks_declining_host_free_space_between_chunks(
         minio=SuccessfulMinioMirror(),
         now=lambda: FIXED_NOW,
         max_postgres_bytes=100,
-        max_total_bytes=10_000,
+        max_total_bytes=1_000_000,
         disk_reserve_bytes=1,
         inode_reserve=1,
         capacity_provider=capacity,
