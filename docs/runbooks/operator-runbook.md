@@ -517,6 +517,38 @@ knob you need.
      ingress-nginx's `from-to-www-redirect` handling redirects back to the bare
      `yylx.world` host with the original path. Do not configure a second
      frontend/API base under `www`.
+   - Keep the repository-pinned ingress-nginx controller's trusted raw-path
+     guard intact. Its ConfigMap leaves `allow-snippet-annotations: "false"`,
+     disables slash merging, and returns exact HTTP 404 for path-side `%2F`,
+     `%5C`, literal backslash, `//`, or any percent-encoded byte in the first
+     path segment before those forms can cross-match a Loom route. Rendered
+     `/dev` and `/prod` regexes also disable case folding for the prefix group,
+     while the controller keeps an independent raw mixed-case guard. The web
+     pod repeats the raw guard, uses case-sensitive valid prefix locations, and
+     rejects normalized mixed-case prefixes after percent-decoding for direct
+     Service traffic. The raw-path guard stops at the query delimiter, so
+     canonical redirects may still preserve
+     values such as `?next=%2Fmonitor&x=1`. Staging must observe exactly one
+     `Location` at each redirect boundary and exactly one health
+     `Content-Type` whose MIME essence is `application/json`; selecting the
+     first of duplicate headers is not acceptance. Do not replace this with
+     per-Ingress `server-snippet` or `configuration-snippet` annotations. If an
+     operator replaces the pinned controller, the trusted controller
+     configuration must reproduce this fail-closed behavior and pass the
+     labeled cluster and staging smoke jobs before rollout.
+     Protected rollout step 03 reapplies the pinned manifest from the rollout's
+     fixed-SHA `01-worktree/src` on every run, including existing healthy
+     clusters, and fails unless the live controller ConfigMap reads back the
+     exact values parsed from the commit-bound evidence bytes. It never reads,
+     hashes, or applies the operator checkout's ambient copy. The resolved candidate SHA
+     and candidate manifest SHA-256 are part of the
+     `node-label-admission-and-commit-bound-controller-config-v4` step fingerprint.
+     Evidence
+     records `installed` only when the controller Deployment was absent before
+     apply; an existing Deployment is `reconciled` even when its IngressClass
+     was missing or drifted. `reused` is not a valid controller state. The run
+     artifacts expose the candidate SHA, commit-bound evidence path, candidate
+     source path, and manifest SHA-256 for direct evidence review.
    - For a lab or invite-only staging host reached directly by IP address, set
      `ingress_host` to that IP and pre-create the TLS Secret with a certificate
      whose Subject Alternative Name includes the IP address. Kubernetes rejects
@@ -1630,6 +1662,13 @@ existing request whose candidate is intact, `loom-staging-rollout resume
 REQUEST_ID` revalidates the same candidate and envelope. The broker supplies
 the candidate-bound cluster-config path; operators do not pass one.
 
+Rollout step 03 applies this rule to its non-CLI ingress dependency too. It
+resolves `deploy/k8s/ingress-nginx-kind.yaml` under the fixed candidate
+worktree, derives the expected controller ConfigMap and SHA-256 from that exact
+file, and passes its absolute path to `kubectl apply`. A missing rollout id,
+candidate worktree, or candidate manifest fails closed; the ambient checkout is
+never a fallback.
+
 For cluster render/apply/gate subcommands, the driver also writes a
 rollout-owned `rollout-cluster-config.toml` artifact under the rollout
 evidence directory. This synthesized config copies the operator's source
@@ -1715,7 +1754,7 @@ desired state.
 | 00 | resolve-target | git rev-parse; validates image-tag ↔ sha7 |
 | 01 | worktree | `git worktree add` at target sha |
 | 02 | build-images | `docker build` × every rollout-critical image (#365) |
-| 03 | kind-cluster | Ensure the staging kind cluster, kubeconfig, repo-local pinned ingress-nginx IngressClass/controller (`deploy/k8s/ingress-nginx-kind.yaml`), namespace, static worker trajectory Retain PV/PVC, and backup-manifest Kubernetes secrets exist before any image load or migration. Recreated kind clusters must bind the protected `/data/...` root, label the control-plane node `ingress-ready=true`, and verify the ingress-nginx controller pod plus admission endpoint before step 08 preflight can rely on the webhook. Secret restore sanitizes runtime metadata/client-side apply annotations and uses server-side apply so reruns converge after partial restores. This restores the cluster substrate needed for step 08 preflight, not only the kube API (#206). |
+| 03 | kind-cluster | Ensure the staging kind cluster, kubeconfig, fixed-candidate pinned ingress-nginx IngressClass/controller (`deploy/k8s/ingress-nginx-kind.yaml` at the resolved candidate SHA), namespace, static worker trajectory Retain PV/PVC, and backup-manifest Kubernetes secrets exist before any image load or migration. Every run labels the control-plane node `ingress-ready=true`, validates the candidate worktree identity and cleanliness, materializes the manifest's commit-bound Git blob into the step evidence path, applies that evidence copy, reads back the live controller ConfigMap against values parsed from the same bytes, waits for the controller pod plus admission endpoint, and records `installed` only for an absent pre-apply Deployment or `reconciled` for an existing Deployment; the candidate SHA plus manifest SHA-256 invalidate stale completed-step evidence. Artifacts record the commit-bound evidence path, candidate source path, and hash. Missing candidate inputs fail closed without an ambient-checkout fallback. Recreated clusters still bind the protected `/data/...` root. Secret restore sanitizes runtime metadata/client-side apply annotations and uses server-side apply so reruns converge after partial restores. This restores the cluster substrate needed for step 08 preflight, not only the kube API (#206). |
 | 04 | kind-load-images | candidate-source `loom cluster load-images` (#96) |
 | 05 | backup | candidate-source `loom cluster backup check --manifest <path> --min-remaining-hours <N>` (#363, #619 freshness buffer) |
 | 06 | audit | candidate-source `loom cluster audit` |
@@ -4154,6 +4193,43 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    Both route documents must report the expected `environment`,
    `environmentLabel`, `routePath`, `apiBase`, and `apiRouteBase`; the response
    must be `no-store`. Production labels must not contain beta wording.
+   Then prove that the built bundle actually mounts in a fresh logged-out
+   Chromium context on the exact, slash-canonical, and supported deep routes,
+   both on direct entry and after refresh:
+   ```bash
+   (
+     cd web
+     npm ci
+     npx --no-install playwright install chromium
+     npm run smoke:routes -- \
+       --route https://yylx.world/prod \
+       --route https://yylx.world/dev \
+       --trace ../frontend-route-browser-trace.zip
+   )
+   ```
+   The command emits a redacted route/status report. It waits for React commit,
+   explicit settled anonymous/authenticated state, and a bounded quiet window
+   with no active same-origin requests or cross-origin scripts. Cross-origin
+   non-script resources do not block that window; a pending cross-origin script
+   remains blocking until its success or failure is observed. Each final client
+   URL must equal the requested route; only an explicitly anonymous root with
+   exactly one exact `${routePath}/api/v1/auth/me` fetch/XHR `401` in that phase
+   may use the canonical `${routePath}/settings` login fallback. Chromium's
+   post-response `ERR_ABORTED` is tolerated only when paired by request identity
+   to that one delivered `401`; an unpaired network failure, a `204`,
+   malformed `200`, `5xx`, network failure, or mixed response set fails rather
+   than being treated as signed out. Before refresh the smoke restores the
+   original direct URL, preserving bookmark coverage even after that fallback.
+   Failed same-origin requests, cross-origin scripts, application console/page
+   errors, non-2xx same-origin scripts/styles, and assets outside the selected
+   prefix fail. Browser-generated errors are ignored only when they match an
+   observed failed request or `4xx`/`5xx` response for a cross-origin non-script
+   resource, or the exact anonymous
+   `${routePath}/api/v1/auth/me` fetch/XHR when that phase's complete response
+   set is one exact `401`; no query variant, competing status, or other
+   same-origin error is exempt. The trace comes only from the
+   command's fresh logged-out context; retain it as rollout evidence and do not
+   substitute a signed-in profile.
 5. **Remote-worker private tunnels hold.** If remote workers are attached, the
    shared-staging broker collects watchdog evidence and verifies the exact
    worker-facing URLs from the control node and declared worker hosts. Inspect

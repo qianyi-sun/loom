@@ -112,6 +112,83 @@ def test_cluster_template_change_selects_cluster_and_staging() -> None:
     assert plan.images is False
 
 
+def test_pinned_ingress_controller_change_selects_cluster_and_staging() -> None:
+    plan = plan_validations(
+        changed_paths=["deploy/k8s/ingress-nginx-kind.yaml"],
+        labels=set(),
+        event_name="pull_request",
+    )
+
+    assert plan.cluster_smoke is True
+    assert plan.staging_smoke is True
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "src/loom_cli/rollout/steps/candidate_source.py",
+        "src/loom_cli/rollout/steps/s03_kind_cluster.py",
+        "src/loom_cli/rollout/steps/subprocess_util.py",
+        "tests/loom_cli/rollout/steps/test_candidate_source_invocation.py",
+        "tests/loom_cli/rollout/steps/test_s03_kind_cluster.py",
+        "tests/loom_cli/rollout/steps/test_subprocess_util.py",
+    ],
+)
+def test_kind_cluster_rollout_contract_selects_cluster_and_staging(path: str) -> None:
+    plan = plan_validations(
+        changed_paths=[path],
+        labels=set(),
+        event_name="pull_request",
+    )
+
+    assert plan.cluster_smoke is True
+    assert plan.staging_smoke is True
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".github/workflows/staging-smoke.yml",
+        "deploy/Dockerfile.web",
+        "deploy/nginx-spa.conf",
+        "deploy/web-runtime-config.sh",
+        "src/loom_cli/templates/k8s/ingress.yaml.j2",
+        "scripts/ops/frontend_route_smoke.py",
+        "web/package-lock.json",
+        "web/package.json",
+        "web/scripts/frontend-route-browser-smoke.mjs",
+        "web/scripts/frontend-route-browser-smoke.test.mjs",
+        "web/src/main.tsx",
+    ],
+)
+def test_frontend_route_contract_selects_staging_smoke(path: str) -> None:
+    plan = plan_validations(
+        changed_paths=[path],
+        labels=set(),
+        event_name="pull_request",
+    )
+
+    assert plan.staging_smoke is True
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "web/src/__tests__/AuthContext.test.tsx",
+        "web/src/auth/AuthContext.tsx",
+    ],
+)
+def test_browser_auth_contract_selects_cluster_and_staging(path: str) -> None:
+    plan = plan_validations(
+        changed_paths=[path],
+        labels=set(),
+        event_name="pull_request",
+    )
+
+    assert plan.cluster_smoke is True
+    assert plan.staging_smoke is True
+
+
 def test_planner_change_selects_every_heavy_gate() -> None:
     plan = plan_validations(
         changed_paths=["scripts/plan_ci_validations.py"],

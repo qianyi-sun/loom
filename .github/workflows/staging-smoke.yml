@@ -270,7 +270,12 @@ jobs:
           cat > /tmp/cluster-config.toml <<EOF
           namespace = "loom"
           image_tag = "${IMAGE_TAG}"
-          ingress_host = "loom.staging.example"
+          ingress_host = "yylx.world"
+          ingress_redirect_hosts = ["www.yylx.world"]
+          frontend_environment = "staging"
+          frontend_environment_label = "Development / staging"
+          frontend_route_path = "/dev"
+          frontend_api_base_path = "/dev"
           [replicas]
           service = 1
           control_plane = 1
@@ -363,6 +368,321 @@ jobs:
           uv run python -m loom_cli cluster status \
             --context kind-loom-staging --namespace loom \
             --format table
+
+      - name: Route kind ingress hosts to the local controller
+        run: |
+          printf '%s\n' '127.0.0.1 yylx.world www.yylx.world' \
+            | sudo tee -a /etc/hosts
+          getent hosts yylx.world www.yylx.world
+
+      - name: Set up browser smoke Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install pinned browser smoke dependencies
+        working-directory: web
+        run: |
+          npm ci
+          npx --no-install playwright install --with-deps chromium
+
+      - name: Verify prefixed frontend routes through ingress-nginx
+        run: |
+          set -euo pipefail
+
+          require_singleton_header() {
+            local headers_file="$1"
+            local header_name="$2"
+            local comparison="$3"
+            local expected="$4"
+            uv run python - "$headers_file" "$header_name" "$comparison" "$expected" <<'PY'
+          import sys
+          from pathlib import Path
+
+          headers_path, wanted_name, comparison, expected = sys.argv[1:]
+          values: list[str] = []
+          for raw_line in Path(headers_path).read_bytes().splitlines():
+              if raw_line.startswith((b" ", b"\t")):
+                  raise SystemExit("folded response headers are not accepted")
+              name, separator, value = raw_line.partition(b":")
+              if separator and name.decode("ascii", errors="strict").lower() == wanted_name.lower():
+                  values.append(value.strip().decode("latin-1"))
+          if len(values) != 1:
+              raise SystemExit(f"expected exactly one {wanted_name} header")
+          observed = values[0]
+          if comparison == "mime":
+              observed = observed.split(";", 1)[0].strip().lower()
+              expected = expected.lower()
+          elif comparison != "exact":
+              raise SystemExit("unsupported singleton-header comparison")
+          if observed != expected:
+              raise SystemExit(f"unexpected singleton {wanted_name} header")
+          PY
+          }
+
+          # Wait for the pinned ingress-nginx controller to observe the newly
+          # applied Ingress resources before running the authoritative report.
+          ready=false
+          for attempt in $(seq 1 30); do
+            if curl --insecure --fail --silent --show-error --path-as-is \
+                 --max-time 10 \
+                 https://yylx.world/dev/loom-frontend-config.json \
+                 >/dev/null; then
+              ready=true
+              break
+            fi
+            echo "Ingress route not ready (attempt ${attempt}/30)"
+            sleep 2
+          done
+          if [[ "$ready" != "true" ]]; then
+            echo "::error::prefixed ingress route did not become ready"
+            exit 1
+          fi
+
+          CI=true uv run python scripts/ops/frontend_route_smoke.py \
+            --insecure-for-kind \
+            --route staging=https://yylx.world/dev=https://yylx.world/dev/api \
+            --json | tee /tmp/loom-frontend-route-smoke.json
+
+          # The report contains only requested URLs, methods, statuses, and
+          # content types. Select one validated hashed route asset without
+          # trusting arbitrary report data as a new request target.
+          asset_path=$(
+            uv run python - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+          from urllib.parse import urlsplit
+
+          report = json.loads(
+              Path("/tmp/loom-frontend-route-smoke.json").read_text(encoding="utf-8")
+          )
+          if report.get("status") != "pass":
+              raise SystemExit("frontend route report did not pass")
+          candidates: list[str] = []
+          for route in report.get("routes", []):
+              for response in route.get("responses", []):
+                  parsed = urlsplit(response.get("url", ""))
+                  path = parsed.path
+                  content_type = response.get("content_type", "").lower()
+                  expected_mime = (
+                      "javascript" if path.endswith(".js") else "text/css"
+                  )
+                  if (
+                      parsed.scheme == "https"
+                      and parsed.hostname == "yylx.world"
+                      and parsed.port is None
+                      and not parsed.username
+                      and not parsed.password
+                      and not parsed.query
+                      and not parsed.fragment
+                      and response.get("method") == "GET"
+                      and response.get("status") == 200
+                      and expected_mime in content_type
+                      and re.fullmatch(
+                          r"/dev/assets/[A-Za-z0-9._-]+-[A-Za-z0-9_-]{6,}\.(?:js|css)",
+                          path,
+                      )
+                  ):
+                      candidates.append(path)
+          if not candidates:
+              raise SystemExit("route report contains no safe hashed asset path")
+          print(sorted(set(candidates))[0])
+          PY
+          )
+          root_asset_path="${asset_path#/dev}"
+          root_asset_headers=$(mktemp)
+          root_asset_status=$(curl --insecure --silent --show-error \
+            --path-as-is --no-location --max-redirs 0 --max-time 10 \
+            --dump-header "$root_asset_headers" --output /dev/null \
+            --write-out '%{http_code}' \
+            "https://yylx.world${root_asset_path}")
+          if [[ "$root_asset_status" != "404" ]] \
+             || grep -qi '^location:' "$root_asset_headers"; then
+            echo "::error::root asset boundary failed: ${root_asset_path} (HTTP ${root_asset_status})"
+            rm -f "$root_asset_headers"
+            exit 1
+          fi
+          rm -f "$root_asset_headers"
+
+          # Near-prefix and encoded-slash probes must not select either public
+          # route. Redirects stay disabled so a cross-match cannot hide behind
+          # a finite result.
+          for path in \
+              /devil \
+              /devapi \
+              /prodfoo \
+              /DEV \
+              /Dev/ \
+              /dEv/monitor \
+              /PROD \
+              /Prod/api/v1/health \
+              '/D%45V/monitor' \
+              '/d%45v/api/v1/health' \
+              '/d%65v/monitor' \
+              '/PR%4fD/' \
+              '/pr%4Fd/' \
+              '/dev%2Fmonitor' \
+              '/dev/%2Fmonitor' \
+              '/dev%5Cmonitor' \
+              '/dev/%5cmonitor' \
+              '/dev\monitor' \
+              '/dev/\monitor' \
+              /dev//monitor \
+              /dev/monitor//details \
+              '/dev/api/v1/%2Fhealth' \
+              '/dev/api/v1/%5Chealth' \
+              '/dev/api/v1\health' \
+              /dev/api/v1//health \
+              /dev/api/v1/health//; do
+            headers=$(mktemp)
+            status=$(curl --insecure --silent --show-error --path-as-is \
+              --no-location --max-redirs 0 --max-time 10 \
+              --dump-header "$headers" --output /dev/null \
+              --write-out '%{http_code}' "https://yylx.world${path}")
+            if [[ "$status" != "404" ]] || grep -qi '^location:' "$headers"; then
+              echo "::error::non-route path did not fail closed: ${path} (HTTP ${status})"
+              rm -f "$headers"
+              exit 1
+            fi
+            rm -f "$headers"
+          done
+
+          # Bypass ingress and probe the web Service directly so the pod-level
+          # Nginx guard cannot regress behind a correct controller guard.
+          web_pf_log=$(mktemp)
+          kubectl --context kind-loom-staging -n loom port-forward \
+            svc/loom-web 18081:80 >"$web_pf_log" 2>&1 &
+          WEB_PF_PID=$!
+          cleanup_web_port_forward() {
+            kill "$WEB_PF_PID" 2>/dev/null || true
+            wait "$WEB_PF_PID" 2>/dev/null || true
+            rm -f "$web_pf_log"
+          }
+          trap cleanup_web_port_forward EXIT
+          web_ready=false
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent --show-error --path-as-is --max-time 5 \
+                 http://127.0.0.1:18081/dev/loom-frontend-config.json \
+                 >/dev/null; then
+              web_ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$web_ready" != "true" ]]; then
+            echo "::error::direct loom-web port-forward did not become ready"
+            exit 1
+          fi
+          for path in \
+              /DEV \
+              /Dev/monitor \
+              /PROD \
+              '/D%45V/monitor' \
+              '/d%45v/monitor' \
+              '/d%65v/monitor' \
+              '/PR%4fD/' \
+              '/pr%4Fd/' \
+              '/dev%2Fmonitor' \
+              '/dev/%2fmonitor' \
+              '/dev%5Cmonitor' \
+              '/dev/%5cmonitor' \
+              '/dev\monitor' \
+              '/dev/\monitor' \
+              '/dev/api/v1\health' \
+              /dev//monitor; do
+            headers=$(mktemp)
+            status=$(curl --silent --show-error --path-as-is \
+              --no-location --max-redirs 0 --max-time 10 \
+              --dump-header "$headers" --output /dev/null \
+              --write-out '%{http_code}' "http://127.0.0.1:18081${path}")
+            if [[ "$status" != "404" ]] || grep -qi '^location:' "$headers"; then
+              echo "::error::direct web path did not fail closed: ${path} (HTTP ${status})"
+              rm -f "$headers"
+              exit 1
+            fi
+            rm -f "$headers"
+          done
+          cleanup_web_port_forward
+          trap - EXIT
+
+          # A JSON health response distinguishes loom-service routing from a
+          # web SPA fallback that also happens to return HTTP 200.
+          health_headers=$(mktemp)
+          health_status=$(curl --insecure --silent --show-error --path-as-is \
+            --no-location --max-redirs 0 --max-time 10 \
+            --dump-header "$health_headers" \
+            --output /tmp/loom-service-health.json \
+            --write-out '%{http_code}' \
+            https://yylx.world/dev/api/v1/health)
+          if [[ "$health_status" != "200" ]] \
+             || ! require_singleton_header \
+                  "$health_headers" content-type mime application/json; then
+            echo "::error::prefixed loom-service health route failed: HTTP ${health_status}"
+            rm -f "$health_headers"
+            exit 1
+          fi
+          uv run python -m json.tool /tmp/loom-service-health.json >/dev/null
+          rm -f "$health_headers"
+
+          # Verify a finite www -> canonical host -> slash-canonical chain,
+          # preserving the encoded query at both redirect boundaries.
+          www_headers=$(mktemp)
+          www_status=$(curl --insecure --silent --show-error --path-as-is \
+            --no-location --max-redirs 0 --max-time 10 \
+            --dump-header "$www_headers" --output /dev/null \
+            --write-out '%{http_code}' \
+            'https://www.yylx.world/dev?next=%2Fmonitor&x=1')
+          if [[ "$www_status" != "308" ]] \
+             || ! require_singleton_header "$www_headers" location exact \
+                  'https://yylx.world/dev?next=%2Fmonitor&x=1'; then
+            echo "::error::unexpected www redirect: HTTP ${www_status}"
+            rm -f "$www_headers"
+            exit 1
+          fi
+          rm -f "$www_headers"
+
+          canonical_headers=$(mktemp)
+          canonical_status=$(curl --insecure --silent --show-error --path-as-is \
+            --no-location --max-redirs 0 --max-time 10 \
+            --dump-header "$canonical_headers" --output /dev/null \
+            --write-out '%{http_code}' \
+            'https://yylx.world/dev?next=%2Fmonitor&x=1')
+          if [[ "$canonical_status" != "308" ]] \
+             || ! require_singleton_header "$canonical_headers" location exact \
+                  '/dev/?next=%2Fmonitor&x=1'; then
+            echo "::error::unexpected slash redirect: HTTP ${canonical_status}"
+            rm -f "$canonical_headers"
+            exit 1
+          fi
+          rm -f "$canonical_headers"
+
+          final_status=$(curl --insecure --silent --show-error --path-as-is \
+            --no-location --max-redirs 0 --max-time 10 \
+            --output /dev/null --write-out '%{http_code}' \
+            'https://yylx.world/dev/?next=%2Fmonitor&x=1')
+          if [[ "$final_status" != "200" ]]; then
+            echo "::error::finite canonical chain ended with HTTP ${final_status}"
+            exit 1
+          fi
+
+      - name: Verify prefixed frontend routes mount in Chromium
+        run: |
+          CI=true npm --prefix web run smoke:routes -- \
+            --route https://yylx.world/dev \
+            --insecure-for-kind \
+            --trace /tmp/loom-frontend-route-browser-trace.zip
+
+      - name: Upload frontend route browser trace
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: frontend-route-browser-trace-${{ github.run_id }}
+          path: /tmp/loom-frontend-route-browser-trace.zip
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Verify /healthz on every service via port-forward
         # Probe each service's /healthz from a temporary port-forward.

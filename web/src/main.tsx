@@ -5,6 +5,7 @@ import { BrowserRouter } from "react-router-dom";
 
 import App from "./App";
 import { AuthProvider } from "./auth/AuthContext";
+import { useAuth } from "./auth/useAuth";
 import "./index.css";
 import { getFrontendConfig, loadFrontendConfig } from "./lib/frontendConfig";
 
@@ -18,14 +19,41 @@ const queryClient = new QueryClient({
   },
 });
 
+// This production entrypoint is not a Fast Refresh module. The wrapper exposes
+// a browser-smoke signal only after React commits the application tree.
+// eslint-disable-next-line react-refresh/only-export-components
+function MountedApp({ rootElement }: { rootElement: HTMLElement }): JSX.Element {
+  const { authError, isAuthenticated, isLoading } = useAuth();
+  React.useLayoutEffect(() => {
+    rootElement.setAttribute("data-loom-mounted", "true");
+    if (isLoading) {
+      rootElement.removeAttribute("data-loom-auth-settled");
+      rootElement.removeAttribute("data-loom-auth-state");
+    } else {
+      rootElement.setAttribute("data-loom-auth-settled", "true");
+      rootElement.setAttribute(
+        "data-loom-auth-state",
+        authError ? "error" : isAuthenticated ? "authenticated" : "anonymous",
+      );
+    }
+    return () => {
+      rootElement.removeAttribute("data-loom-mounted");
+      rootElement.removeAttribute("data-loom-auth-settled");
+      rootElement.removeAttribute("data-loom-auth-state");
+    };
+  }, [authError, isAuthenticated, isLoading, rootElement]);
+  return <App />;
+}
+
 function renderApp(): void {
   const routePath = getFrontendConfig().routePath;
-  ReactDOM.createRoot(document.getElementById("root")!).render(
+  const rootElement = document.getElementById("root")!;
+  ReactDOM.createRoot(rootElement).render(
     <React.StrictMode>
       <QueryClientProvider client={queryClient}>
         <BrowserRouter basename={routePath || undefined}>
           <AuthProvider>
-            <App />
+            <MountedApp rootElement={rootElement} />
           </AuthProvider>
         </BrowserRouter>
       </QueryClientProvider>

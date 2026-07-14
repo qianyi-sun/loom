@@ -321,6 +321,19 @@ subjects:
 apiVersion: v1
 data:
   allow-snippet-annotations: "false"
+  http-snippet: |
+    map $request_uri $loom_ambiguous_path {
+      default 0;
+      ~*^[^?]*(?:%2f|%5c|\x5c|//) 1;
+      "~*^/[^/?]*%[0-9a-f]{2}[^/?]*(?:/|[?]|$)" 1;
+      ~^/(?:dev|prod)(?:/|\?|$) 0;
+      ~*^/(?:dev|prod)(?:/|\?|$) 1;
+    }
+  server-snippet: |
+    merge_slashes off;
+    if ($loom_ambiguous_path) {
+      return 404;
+    }
 kind: ConfigMap
 metadata:
   labels:

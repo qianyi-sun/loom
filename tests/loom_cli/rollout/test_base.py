@@ -87,6 +87,8 @@ class TestBaseStepIsDone:
         ev.write_step_result(
             step_dir,
             {
+                "number": step.number,
+                "name": step.name,
                 "state": "done",
                 "inputs_hash": step.inputs_hash(ctx),
             },
@@ -102,6 +104,8 @@ class TestBaseStepIsDone:
         ev.write_step_result(
             step_dir,
             {
+                "number": step.number,
+                "name": step.name,
                 "state": "done",
                 "inputs_hash": "wrong-hash",
             },
@@ -117,14 +121,61 @@ class TestBaseStepIsDone:
         ev.write_step_result(
             step_dir,
             {
+                "number": step.number,
+                "name": step.name,
                 "state": "running",
                 "inputs_hash": step.inputs_hash(ctx),
             },
         )
         assert not step.is_done(ctx, step_dir)
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("number", 7), ("name", "different-step")],
+    )
+    def test_returns_false_when_result_identity_is_wrong(
+        self,
+        tmp_path: Path,
+        field: str,
+        value: object,
+    ) -> None:
+        step = _NoOpStep()
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "rid")
+        ev.ensure()
+        step_dir = ev.step_dir(42, "noop")
+        result: dict[str, object] = {
+            "number": step.number,
+            "name": step.name,
+            "state": "done",
+            "inputs_hash": step.inputs_hash(ctx),
+        }
+        result[field] = value
+        ev.write_step_result(step_dir, result)
+
+        assert not step.is_done(ctx, step_dir)
+
+    def test_returns_false_when_result_is_not_an_object(self, tmp_path: Path) -> None:
+        step = _NoOpStep()
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "rid")
+        ev.ensure()
+        step_dir = ev.step_dir(42, "noop")
+        step_dir.result_path().write_text("[]\n", encoding="utf-8")
+        assert not step.is_done(ctx, step_dir)
+
 
 class TestBaseStepDefaults:
+    def test_default_done_revalidation_is_disabled(self, tmp_path: Path) -> None:
+        step = _NoOpStep()
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "rid")
+        ev.ensure()
+        step_dir = ev.step_dir(42, "noop")
+
+        assert step.verify_done(ctx, step_dir) is None
+        assert not step.requires_strict_live_verification()
+
     def test_default_verify_is_unknown(self, tmp_path: Path) -> None:
         step = _NoOpStep()
         ctx = make_ctx(tmp_path)

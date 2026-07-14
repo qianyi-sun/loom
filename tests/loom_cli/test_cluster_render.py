@@ -8,7 +8,9 @@ the YAML files in the repo are seeing the same thing the CLI emits.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+from urllib.parse import unquote
 
 import pytest
 import yaml
@@ -659,27 +661,41 @@ def test_render_ingress_redirect_hosts_bind_tls_and_redirect_to_canonical() -> N
         ingress_host="yylx.world",
         ingress_redirect_hosts=("www.yylx.world",),
         ingress_tls_secret_name="loom-staging-tls",
+        ingress_cert_manager_cluster_issuer="letsencrypt-prod",
         frontend_environment="staging",
         frontend_environment_label="Development / staging",
         frontend_route_path="/dev",
         frontend_api_base_path="/dev",
     )
     docs = _load_docs(render_manifests(cfg))
-    ingresses = [d for d in docs if d["kind"] == "Ingress"]
-    assert [d["metadata"]["name"] for d in ingresses] == ["loom-ingress"]
-    main = next(d for d in ingresses if d["metadata"]["name"] == "loom-ingress")
+    ingresses = {d["metadata"]["name"]: d for d in docs if d["kind"] == "Ingress"}
+    assert set(ingresses) == {"loom-ingress", "loom-frontend-prefix-redirect"}
+    main = ingresses["loom-ingress"]
+    redirect = ingresses["loom-frontend-prefix-redirect"]
 
     assert (
         main["metadata"]["annotations"]["nginx.ingress.kubernetes.io/from-to-www-redirect"]
         == "true"
     )
+    assert main["metadata"]["annotations"]["cert-manager.io/cluster-issuer"] == (
+        "letsencrypt-prod"
+    )
+    assert (
+        "nginx.ingress.kubernetes.io/from-to-www-redirect"
+        not in redirect["metadata"]["annotations"]
+    )
+    assert "cert-manager.io/cluster-issuer" not in redirect["metadata"]["annotations"]
     assert [r["host"] for r in main["spec"]["rules"]] == ["yylx.world"]
-    assert main["spec"]["tls"] == [
-        {
-            "hosts": ["yylx.world", "www.yylx.world"],
-            "secretName": "loom-staging-tls",
-        }
-    ]
+    assert (
+        redirect["spec"]["tls"]
+        == main["spec"]["tls"]
+        == [
+            {
+                "hosts": ["yylx.world", "www.yylx.world"],
+                "secretName": "loom-staging-tls",
+            }
+        ]
+    )
 
 
 def test_render_rejects_redirect_host_matching_canonical_host() -> None:
@@ -702,7 +718,9 @@ def test_render_rejects_redirect_host_outside_www_counterpart() -> None:
 
 def test_render_ingress_routes_only_api_and_spa_backends() -> None:
     docs = _load_docs(render_manifests(_DEFAULT_CFG))
-    ingress = next(d for d in docs if d["kind"] == "Ingress")
+    ingresses = [d for d in docs if d["kind"] == "Ingress"]
+    assert [d["metadata"]["name"] for d in ingresses] == ["loom-ingress"]
+    ingress = ingresses[0]
     assert [r["host"] for r in ingress["spec"]["rules"]] == ["loom.example.com"]
     paths = ingress["spec"]["rules"][0]["http"]["paths"]
     assert [
@@ -733,15 +751,18 @@ def test_render_profile_ingress_routes_api_and_spa_under_frontend_prefix(
 ) -> None:
     cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / filename)
     docs = _load_docs(render_manifests(cfg))
-    ingress = next(d for d in docs if d["kind"] == "Ingress")
+    ingresses = {d["metadata"]["name"]: d for d in docs if d["kind"] == "Ingress"}
+    assert set(ingresses) == {"loom-ingress", "loom-frontend-prefix-redirect"}
 
+    ingress = ingresses["loom-ingress"]
     annotations = ingress["metadata"]["annotations"]
     assert annotations["nginx.ingress.kubernetes.io/use-regex"] == "true"
-    assert annotations["nginx.ingress.kubernetes.io/rewrite-target"] == "/$2"
+    assert annotations["nginx.ingress.kubernetes.io/rewrite-target"] == "/$1"
 
     rule = ingress["spec"]["rules"][0]
     assert rule["host"] == "yylx.world"
     paths = rule["http"]["paths"]
+    prefix_expression = f"/(?-i:{route_path[1:]})"
     assert [
         (
             p["path"],
@@ -751,12 +772,198 @@ def test_render_profile_ingress_routes_api_and_spa_under_frontend_prefix(
         )
         for p in paths
     ] == [
-        (f"{route_path}(/|$)(api/v1.*)", "ImplementationSpecific", "loom-service", 8090),
-        (f"{route_path}(/|$)(.*)", "ImplementationSpecific", "loom-web", 80),
+        (
+            f"{prefix_expression}/(api/v1((/[^/%]+)*/?))$",
+            "ImplementationSpecific",
+            "loom-service",
+            8090,
+        ),
+        (
+            f"{prefix_expression}/(([^/%]+/)*[^/%]+/?)?$",
+            "ImplementationSpecific",
+            "loom-web",
+            80,
+        ),
     ]
+
+    redirect = ingresses["loom-frontend-prefix-redirect"]
+    assert "nginx.ingress.kubernetes.io/rewrite-target" not in (
+        redirect["metadata"]["annotations"]
+    )
+    redirect_path = redirect["spec"]["rules"][0]["http"]["paths"][0]
+    assert redirect_path["path"] == f"{prefix_expression}$"
+    assert redirect_path["pathType"] == "ImplementationSpecific"
+    assert redirect_path["backend"]["service"]["name"] == "loom-web"
+    assert redirect_path["backend"]["service"]["port"]["number"] == 80
     assert (
         _deployment_env_value(docs, "loom-service", "LOOM_SVC_PUBLIC_BASE_URL")
         == f"https://yylx.world{route_path}"
+    )
+
+
+def _rendered_dev_ingress_paths() -> dict[str, str]:
+    cfg = _default_cfg(
+        ingress_host="yylx.world",
+        frontend_environment="staging",
+        frontend_environment_label="Development / staging",
+        frontend_route_path="/dev",
+        frontend_api_base_path="/dev",
+    )
+    docs = _load_docs(render_manifests(cfg))
+    ingress = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Ingress"
+        and doc["metadata"]["name"] == "loom-ingress"
+    )
+    return {
+        path["backend"]["service"]["name"]: path["path"]
+        for path in ingress["spec"]["rules"][0]["http"]["paths"]
+    }
+
+
+def _ingress_nginx_fullmatch(pattern: str, request_path: str) -> re.Match[str] | None:
+    """Model ingress-nginx's generated ``location ~*`` semantics."""
+    return re.fullmatch(pattern, request_path, flags=re.IGNORECASE)
+
+
+def _trusted_controller_guard_rejects(request_uri: str) -> bool:
+    path = request_uri.partition("?")[0]
+    if re.search(r"(?:%2f|%5c|\\|//)", path, flags=re.IGNORECASE):
+        return True
+    first_segment = path.partition("/")[2].partition("/")[0]
+    if re.search(r"%[0-9a-f]{2}", first_segment, flags=re.IGNORECASE):
+        return True
+    canonical_prefix = re.match(r"^/(?:dev|prod)(?:/|$)", path)
+    case_insensitive_prefix = re.match(
+        r"^/(?:dev|prod)(?:/|$)",
+        path,
+        flags=re.IGNORECASE,
+    )
+    return case_insensitive_prefix is not None and canonical_prefix is None
+
+
+def test_render_prefixed_ingress_regexes_preserve_outer_rewrite_capture() -> None:
+    paths = _rendered_dev_ingress_paths()
+    cases = (
+        ("loom-service", "/dev/api/v1", "api/v1"),
+        ("loom-service", "/dev/api/v1/", "api/v1/"),
+        ("loom-service", "/dev/api/v1/health", "api/v1/health"),
+        ("loom-service", "/dev/api/v1/trials/example-id/", "api/v1/trials/example-id/"),
+        ("loom-web", "/dev/", None),
+        ("loom-web", "/dev/monitor", "monitor"),
+        ("loom-web", "/dev/monitor/", "monitor/"),
+        ("loom-web", "/dev/library/batches/example-id", "library/batches/example-id"),
+    )
+
+    for backend, request_path, expected_rewrite in cases:
+        match = _ingress_nginx_fullmatch(paths[backend], request_path)
+        assert match is not None, (backend, request_path)
+        assert match.group(1) == expected_rewrite
+
+
+def test_render_prefixed_ingress_controller_order_routes_api_before_spa() -> None:
+    paths = _rendered_dev_ingress_paths()
+    controller_order = sorted(
+        paths.items(),
+        key=lambda item: len(item[1]),
+        reverse=True,
+    )
+    assert len(paths["loom-service"]) > len(paths["loom-web"])
+
+    cases = (
+        ("/dev/api/v1", "loom-service"),
+        ("/dev/api/v1/health", "loom-service"),
+        ("/dev/api/v1/trials/example-id/artifacts", "loom-service"),
+        ("/dev/", "loom-web"),
+        ("/dev/monitor", "loom-web"),
+        ("/dev/library/batches/example-id", "loom-web"),
+    )
+    for request_path, expected_backend in cases:
+        first_match = next(
+            backend
+            for backend, pattern in controller_order
+            if _ingress_nginx_fullmatch(pattern, request_path)
+        )
+        assert first_match == expected_backend
+
+
+def test_render_prefixed_ingress_regexes_reject_cross_matches_and_empty_segments() -> None:
+    paths = _rendered_dev_ingress_paths()
+    non_routes = (
+        "/dev",
+        "/devil",
+        "/devapi",
+        "/prodfoo",
+        "/dev%2Fmonitor",
+        "/dev/%2Fmonitor",
+        "/dev//monitor",
+        "/dev/monitor//details",
+        "/dev/api/v1/%2Fhealth",
+        "/dev/api/v1//health",
+        "/dev/api/v1/health//",
+    )
+
+    for request_path in non_routes:
+        assert all(
+            _ingress_nginx_fullmatch(pattern, request_path) is None
+            for pattern in paths.values()
+        ), request_path
+
+
+def test_ingress_nginx_inline_prefix_case_resists_controller_ignorecase() -> None:
+    paths = _rendered_dev_ingress_paths()
+    redirect_pattern = "/(?-i:dev)$"
+    noncanonical_routes = (
+        ("/DEV", redirect_pattern),
+        ("/Dev/monitor", paths["loom-web"]),
+        ("/dEV/api/v1/health", paths["loom-service"]),
+    )
+
+    for request_path, controller_pattern in noncanonical_routes:
+        assert _ingress_nginx_fullmatch(controller_pattern, request_path) is None
+        assert _trusted_controller_guard_rejects(request_path)
+
+
+def test_ingress_nginx_decoded_prefixes_cannot_bypass_raw_and_case_guards() -> None:
+    paths = _rendered_dev_ingress_paths()
+    cases = (
+        ("/D%45V/monitor", paths["loom-web"], False),
+        ("/d%45v/api/v1/health", paths["loom-service"], False),
+        ("/d%65v/monitor", paths["loom-web"], True),
+        ("/PR%4fD/", paths["loom-web"], False),
+        ("/pr%4Fd/", paths["loom-web"], False),
+    )
+
+    for request_uri, controller_pattern, normalized_would_match in cases:
+        normalized = unquote(request_uri)
+        assert (
+            _ingress_nginx_fullmatch(controller_pattern, normalized) is not None
+        ) is normalized_would_match
+        assert _trusted_controller_guard_rejects(request_uri)
+
+
+@pytest.mark.parametrize(
+    "request_uri",
+    [
+        "/dev%2Fmonitor",
+        "/dev/%2fmonitor",
+        "/dev%5Cmonitor",
+        "/dev/%5cmonitor",
+        r"/dev\monitor",
+        r"/dev/\monitor",
+        "/dev//monitor",
+    ],
+)
+def test_trusted_controller_guard_rejects_ambiguous_raw_separators(
+    request_uri: str,
+) -> None:
+    assert _trusted_controller_guard_rejects(request_uri)
+
+
+def test_trusted_controller_guard_ignores_encoded_separator_in_query() -> None:
+    assert not _trusted_controller_guard_rejects(
+        "/dev?next=%2Fmonitor&windows=%5Ctemp"
     )
 
 

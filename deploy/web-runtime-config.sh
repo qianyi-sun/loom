@@ -2,6 +2,8 @@
 set -eu
 
 config_path="${LOOM_FRONTEND_CONFIG_PATH:-/usr/share/nginx/html/loom-frontend-config.json}"
+index_template_path="${LOOM_FRONTEND_INDEX_TEMPLATE_PATH:-/usr/share/nginx/html/index.html.template}"
+index_path="${LOOM_FRONTEND_INDEX_PATH:-/usr/share/nginx/html/index.html}"
 
 environment="${LOOM_FRONTEND_ENVIRONMENT:-local}"
 label="${LOOM_FRONTEND_ENVIRONMENT_LABEL:-Local development}"
@@ -59,6 +61,32 @@ if [ "${environment}" = "production" ] && printf '%s' "${label}" | grep -Eiq 'be
   echo "production frontend label must not contain beta wording" >&2
   exit 1
 fi
+
+if [ ! -f "${index_template_path}" ]; then
+  echo "frontend index template not found: ${index_template_path}" >&2
+  exit 1
+fi
+
+tmp_index_path="${index_path}.tmp"
+if [ -n "${route_path}" ]; then
+  sed \
+    -e "s|src=\"\./assets/|src=\"${route_path}/assets/|g" \
+    -e "s|href=\"\./assets/|href=\"${route_path}/assets/|g" \
+    "${index_template_path}" > "${tmp_index_path}"
+  if grep -Eq '(src|href)="\./assets/' "${tmp_index_path}"; then
+    echo "frontend shell retained a relative build asset" >&2
+    rm -f "${tmp_index_path}"
+    exit 1
+  fi
+  if grep -Eq '/(dev|prod)/(dev|prod)/assets/' "${tmp_index_path}"; then
+    echo "frontend shell contains a double or stale route prefix" >&2
+    rm -f "${tmp_index_path}"
+    exit 1
+  fi
+else
+  cp "${index_template_path}" "${tmp_index_path}"
+fi
+mv "${tmp_index_path}" "${index_path}"
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
