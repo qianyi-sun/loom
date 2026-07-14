@@ -54,6 +54,7 @@ ROOT_KUBECONFIG = Path("/root/.kube/config")
 ROOT_KUBECONFIG_SNAPSHOT_PARENT = Path("/root")
 SERVICE_KEY = STATE_ROOT / "gb10-deploy-ed25519"
 INSTALL_RECORD = Path("/etc/loom/staging-rollout.install.json")
+TRUST_REVOCATION_LEDGER = Path("/etc/loom/staging-rollout-gb10-trust-revocation.json")
 SYSTEM_PYTHON = Path("/usr/bin/python3")
 UV_BINARY = Path("/usr/local/bin/uv")
 
@@ -246,6 +247,107 @@ class LocalFilesystem:
         path.unlink()
         return True
 
+    def _validated_trust_ledger(self, *, expected_fingerprint: str) -> tuple[Path, os.stat_result]:
+        path = self.path(TRUST_REVOCATION_LEDGER)
+        if not path.exists() and not path.is_symlink():
+            raise InstallError("GB10 trust revocation ledger disappeared before finalization")
+        parent = path.parent
+        expected_uid = 0 if self.root == Path("/") else os.geteuid()
+        expected_gid = 0 if self.root == Path("/") else os.getegid()
+        try:
+            parent_metadata = os.lstat(parent)
+        except OSError as exc:
+            raise InstallError("GB10 trust revocation ledger directory is unavailable") from exc
+        if (
+            not stat.S_ISDIR(parent_metadata.st_mode)
+            or stat.S_ISLNK(parent_metadata.st_mode)
+            or parent_metadata.st_uid != expected_uid
+            or parent_metadata.st_gid != expected_gid
+            or stat.S_IMODE(parent_metadata.st_mode) != 0o755
+        ):
+            raise InstallError("GB10 trust revocation ledger directory is unsafe")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError as exc:
+            raise InstallError("GB10 trust revocation ledger is unavailable") from exc
+        try:
+            metadata = os.fstat(fd)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != expected_uid
+                or metadata.st_gid != expected_gid
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_size <= 0
+                or metadata.st_size > 64 * 1024
+            ):
+                raise InstallError("GB10 trust revocation ledger metadata is unsafe")
+            try:
+                payload = os.read(fd, 64 * 1024 + 1)
+            except OSError as exc:
+                raise InstallError("GB10 trust revocation ledger could not be read") from exc
+            if len(payload) != metadata.st_size:
+                raise InstallError("GB10 trust revocation ledger changed while it was read")
+        finally:
+            os.close(fd)
+        try:
+            raw = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise InstallError("GB10 trust revocation ledger is invalid") from exc
+        topology_sha256 = raw.get("topology_sha256") if isinstance(raw, dict) else None
+        if (
+            not isinstance(raw, dict)
+            or set(raw)
+            != {
+                "key_fingerprint",
+                "revocation_hosts",
+                "schema_version",
+                "topology_sha256",
+            }
+            or type(raw.get("schema_version")) is not int
+            or raw.get("schema_version") != 1
+            or raw.get("key_fingerprint") != expected_fingerprint
+            or raw.get("revocation_hosts") != []
+            or not isinstance(topology_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", topology_sha256) is None
+        ):
+            raise InstallError("GB10 trust revocation ledger is not safe to finalize")
+        try:
+            current = os.lstat(path)
+        except OSError as exc:
+            raise InstallError("GB10 trust revocation ledger changed before finalization") from exc
+        if (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise InstallError("GB10 trust revocation ledger changed before finalization")
+        return path, metadata
+
+    def validate_trust_ledger_for_removal(self, *, expected_fingerprint: str) -> None:
+        self._validated_trust_ledger(expected_fingerprint=expected_fingerprint)
+
+    def remove_validated_trust_ledger(self, *, expected_fingerprint: str) -> bool:
+        path, metadata = self._validated_trust_ledger(expected_fingerprint=expected_fingerprint)
+        try:
+            current = os.lstat(path)
+        except OSError as exc:
+            raise InstallError("GB10 trust revocation ledger changed before removal") from exc
+        if (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise InstallError("GB10 trust revocation ledger changed before removal")
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise InstallError("GB10 trust revocation ledger could not be removed") from exc
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+        except OSError as exc:
+            raise InstallError("GB10 trust revocation ledger removal is not durable") from exc
+        try:
+            try:
+                os.fsync(directory_fd)
+            except OSError as exc:
+                raise InstallError("GB10 trust revocation ledger removal is not durable") from exc
+        finally:
+            os.close(directory_fd)
+        return True
+
     def remove_tree(self, absolute: Path) -> bool:
         if absolute not in {GENERATED_ROOT, RUNTIME_ROOT}:
             raise InstallError("refusing recursive removal outside service-generated state")
@@ -278,7 +380,11 @@ class LocalFilesystem:
             parsed = json.loads(payload)
         except json.JSONDecodeError as exc:
             raise InstallError("install record is invalid") from exc
-        if not isinstance(parsed, dict) or parsed.get("schema_version") != 1:
+        if (
+            not isinstance(parsed, dict)
+            or type(parsed.get("schema_version")) is not int
+            or parsed.get("schema_version") not in {1, 2}
+        ):
             raise InstallError("install record is invalid")
         return parsed
 
@@ -556,6 +662,7 @@ class HostSystem:
             "kubectl",
             "loginctl",
             "setfacl",
+            "ssh",
             "ssh-keygen",
             "systemctl",
             "visudo",
@@ -1341,6 +1448,35 @@ class HostSystem:
         )
         return result.returncode == 0
 
+    def prepare_gb10_trust_ledger(self, source_root: Path, *, mode: str) -> None:
+        operations = {
+            "fresh": "initialize-ledger",
+            "legacy": "register-legacy-ledger",
+            "existing": "validate-ledger",
+        }
+        operation = operations.get(mode)
+        if operation is None:
+            raise InstallError("GB10 trust ledger preparation mode is invalid")
+        system_python = _safe_root_executable(SYSTEM_PYTHON, label="system Python")
+        self._validate_system_python_version(system_python)
+        self.runner.run(
+            [
+                str(system_python),
+                "-I",
+                str(source_root / "scripts/ops/staging_rollout_gb10_trust.py"),
+                operation,
+            ]
+        )
+
+    def require_gb10_revocation_complete(self) -> None:
+        self.runner.run(
+            [
+                str(VENV / "bin/python"),
+                str(TRUST_TOOL_PATH),
+                "finalize-check",
+            ]
+        )
+
     def run_post_install_dry_run(self) -> None:
         self.runner.run(
             [
@@ -1456,6 +1592,7 @@ class HostSystem:
             TMPFILES_PATH: "regular file:root:root:644",
             CONFIG_PATH: "regular file:root:root:600",
             INSTALL_RECORD: "regular file:root:root:600",
+            TRUST_REVOCATION_LEDGER: "regular file:root:root:600",
             TRUST_TOOL_PATH: "regular file:root:root:755",
             KUBECONFIG_PATH: "regular file:loom-rollout:loom-rollout:600",
             RUNTIME_ROOT: "directory:loom-rollout:loom-rollout:700",
@@ -1709,7 +1846,7 @@ class HostInstaller:
         if not isinstance(sha, str):
             raise InstallError("install record source SHA is invalid")
         installation_state = record.get("installation_state")
-        if installation_state not in {"installing", "ready"}:
+        if installation_state not in {"installing", "ready", "uninstalling"}:
             raise InstallError("install record installation state is invalid")
         self.system.validate_installed_source(
             sha,
@@ -1756,6 +1893,11 @@ class HostInstaller:
                 changes.append(f"directory:{directory}")
         self.system.validate_install_record_authority(allow_absent=True)
         previous_record = self.filesystem.load_install_record()
+        if (
+            previous_record is not None
+            and previous_record.get("installation_state") == "uninstalling"
+        ):
+            raise InstallError("complete the interrupted uninstall before installing")
         protected_payloads = [
             self.filesystem.read_bytes(path, limit=_MAX_PROTECTED_INPUT_BYTES)
             for path in PROTECTED_INPUTS
@@ -1826,6 +1968,11 @@ class HostInstaller:
             previous_record is not None
             and (previous_record.get("installation_state") == "ready" or admission_enabled)
         )
+        trust_ledger_migrated = bool(
+            previous_record is not None
+            and previous_record.get("schema_version") == 2
+            and self._record_flag(previous_record, "trust_ledger_migrated")
+        )
 
         def record_value(
             state: str,
@@ -1834,11 +1981,12 @@ class HostInstaller:
             maintenance: bool,
         ) -> dict[str, object]:
             return {
-                "schema_version": 1,
+                "schema_version": 2,
                 "installation_state": state,
                 "admission_enabled": admission,
                 "maintenance_enabled": maintenance,
                 "trust_requires_revocation": trust_requires_revocation,
+                "trust_ledger_migrated": trust_ledger_migrated,
                 "source_sha": source_sha,
                 "smoke_on_behalf_team_id": team_id,
                 "service_key_fingerprint": fingerprint,
@@ -2016,6 +2164,24 @@ class HostInstaller:
             enabled_linger = True
             changes.append("linger")
         fingerprint = self.system.public_key_fingerprint()
+        ledger_prepared = not trust_ledger_migrated
+        if trust_ledger_migrated:
+            ledger_mode = "existing"
+        elif trust_requires_revocation:
+            ledger_mode = "legacy"
+        else:
+            ledger_mode = "fresh"
+        if self.source_root is None:  # pragma: no cover - prepare_install_source owns this
+            raise InstallError("root installation source is unavailable")
+        self.system.prepare_gb10_trust_ledger(self.source_root, mode=ledger_mode)
+        trust_ledger_migrated = True
+        if ledger_prepared:
+            changes.append("trust-ledger")
+            persist_record(
+                "installing",
+                admission=admission_enabled,
+                maintenance=maintenance_enabled,
+            )
 
         for destination, payload, mode, owner in installed_files:
             if self.filesystem.atomic_write(destination, payload, mode):
@@ -2139,11 +2305,51 @@ class HostInstaller:
             raise InstallError("uninstall requires a valid install record")
         self._bind_existing_source(record)
 
-        admission_was_present = self.filesystem.remove(SUDOERS_PATH)
+        resuming_uninstall = record.get("installation_state") == "uninstalling"
         admission_enabled = self._record_flag(record, "admission_enabled")
-        trust_requires_revocation = self._record_flag(record, "trust_requires_revocation") or bool(
-            record.get("installation_state") == "ready" or admission_enabled
+        recorded_trust_revocation = self._record_flag(record, "trust_requires_revocation")
+        trust_requires_revocation = recorded_trust_revocation or bool(
+            not resuming_uninstall
+            and (record.get("installation_state") == "ready" or admission_enabled)
         )
+        trust_ledger_migrated = bool(
+            record.get("schema_version") == 2 and self._record_flag(record, "trust_ledger_migrated")
+        )
+        trust_ledger_removed = (
+            self._record_flag(record, "trust_ledger_removed")
+            if "trust_ledger_removed" in record
+            else False
+        )
+        uninstall_state_fields = {
+            "admission_enabled",
+            "maintenance_enabled",
+            "trust_ledger_migrated",
+            "trust_ledger_removed",
+            "trust_requires_revocation",
+        }
+        if resuming_uninstall and (
+            record.get("schema_version") != 2
+            or not uninstall_state_fields.issubset(record)
+            or admission_enabled
+            or trust_requires_revocation
+            or (not trust_ledger_migrated and not trust_ledger_removed)
+        ):
+            raise InstallError("interrupted uninstall record is invalid")
+        if not resuming_uninstall and trust_ledger_removed:
+            raise InstallError("install record trust-ledger state is invalid")
+        if trust_requires_revocation and not trust_ledger_migrated:
+            raise InstallError("uninstall requires a completed GB10 trust ledger migration")
+        raw_fingerprint = record.get("service_key_fingerprint")
+        expected_fingerprint = (
+            raw_fingerprint
+            if isinstance(raw_fingerprint, str)
+            and re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}", raw_fingerprint) is not None
+            else None
+        )
+        if trust_ledger_migrated and not trust_ledger_removed and expected_fingerprint is None:
+            raise InstallError("install record service-key fingerprint is invalid")
+        admission_was_present = self.filesystem.remove(SUDOERS_PATH)
+        maintenance_enabled = self._record_flag(record, "maintenance_enabled")
         if admission_was_present or admission_enabled:
             try:
                 self.system.begin_maintenance()
@@ -2163,8 +2369,44 @@ class HostInstaller:
                 if status == "unknown":
                     raise InstallError("cannot prove staging rollout is inactive")
                 raise InstallError("refusing uninstall while a rollout is active")
+            maintenance_enabled = True
         if trust_requires_revocation:
             self.system.revoke_gb10_trust()
+            self.system.require_gb10_revocation_complete()
+        ledger_path = self.filesystem.path(TRUST_REVOCATION_LEDGER)
+        ledger_present = ledger_path.exists() or ledger_path.is_symlink()
+        if trust_ledger_removed and ledger_present:
+            raise InstallError("finalized GB10 trust revocation ledger reappeared")
+        if trust_ledger_migrated and not trust_ledger_removed and ledger_present:
+            if expected_fingerprint is None:  # pragma: no cover - validated above
+                raise InstallError("install record service-key fingerprint is invalid")
+            self.filesystem.validate_trust_ledger_for_removal(
+                expected_fingerprint=expected_fingerprint
+            )
+        elif trust_ledger_migrated and not trust_ledger_removed and not resuming_uninstall:
+            raise InstallError("GB10 trust revocation ledger disappeared before finalization")
+
+        def persist_uninstall_record() -> None:
+            payload = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+            self.filesystem.atomic_write(INSTALL_RECORD, payload, 0o600)
+            self.system.install_owner(INSTALL_RECORD, "root", 0o600)
+
+        if not resuming_uninstall:
+            record = dict(record)
+            record.update(
+                {
+                    "schema_version": 2,
+                    "installation_state": "uninstalling",
+                    "admission_enabled": False,
+                    "maintenance_enabled": maintenance_enabled,
+                    "trust_requires_revocation": False,
+                    "trust_ledger_migrated": trust_ledger_migrated,
+                    "trust_ledger_removed": not trust_ledger_migrated,
+                }
+            )
+            trust_ledger_removed = not trust_ledger_migrated
+            persist_uninstall_record()
+
         removed: list[str] = []
         for grant in reversed(
             sorted(
@@ -2197,6 +2439,17 @@ class HostInstaller:
             removed.append(str(GENERATED_ROOT))
         if self.filesystem.remove_tree(RUNTIME_ROOT):
             removed.append(str(RUNTIME_ROOT))
+        if trust_ledger_migrated and not trust_ledger_removed:
+            if expected_fingerprint is None:  # pragma: no cover - validated above
+                raise InstallError("install record service-key fingerprint is invalid")
+            ledger_present = ledger_path.exists() or ledger_path.is_symlink()
+            if ledger_present and self.filesystem.remove_validated_trust_ledger(
+                expected_fingerprint=expected_fingerprint
+            ):
+                removed.append(str(TRUST_REVOCATION_LEDGER))
+            trust_ledger_removed = True
+            record["trust_ledger_removed"] = True
+            persist_uninstall_record()
         if self.filesystem.remove(INSTALL_RECORD):
             removed.append(str(INSTALL_RECORD))
         return {

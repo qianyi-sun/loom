@@ -28,6 +28,9 @@ class FakeSystem:
         self.candidate_syncs = 0
         self.candidate_sha: str | None = None
         self.revoked = False
+        self.revoke_error: str | None = None
+        self.ledger_modes: list[str] = []
+        self.events: list[str] = []
         self.removed_members: list[str] = []
         self.trust_ready = False
         self.dry_runs = 0
@@ -183,7 +186,68 @@ class FakeSystem:
         return self.key
 
     def public_key_fingerprint(self) -> str:
-        return "SHA256:safe-service-fingerprint"
+        return "SHA256:6JjXfjyF6JMXDB2Wp4t1YgAzFJPaTv5mQJaqodL6GdU"
+
+    def _trust_ledger(self) -> dict[str, object]:
+        try:
+            payload = self.filesystem.read_bytes(host.TRUST_REVOCATION_LEDGER, limit=64 * 1024)
+            parsed = json.loads(payload)
+        except (host.InstallError, json.JSONDecodeError) as exc:
+            raise host.InstallError("fake GB10 trust ledger is unavailable") from exc
+        path = self.filesystem.path(host.TRUST_REVOCATION_LEDGER)
+        if (
+            not isinstance(parsed, dict)
+            or path.is_symlink()
+            or (path.stat().st_mode & 0o777) != 0o600
+            or set(parsed)
+            != {
+                "key_fingerprint",
+                "revocation_hosts",
+                "schema_version",
+                "topology_sha256",
+            }
+            or type(parsed.get("schema_version")) is not int
+            or parsed.get("schema_version") != 1
+            or not isinstance(parsed.get("revocation_hosts"), list)
+        ):
+            raise host.InstallError("fake GB10 trust ledger is invalid")
+        return parsed
+
+    def _write_trust_ledger(self, hosts: list[str]) -> None:
+        payload = (
+            json.dumps(
+                {
+                    "key_fingerprint": self.public_key_fingerprint(),
+                    "revocation_hosts": hosts,
+                    "schema_version": 1,
+                    "topology_sha256": "b" * 64,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode()
+        self.filesystem.atomic_write(host.TRUST_REVOCATION_LEDGER, payload, 0o600)
+
+    def prepare_gb10_trust_ledger(self, source_root: Path, *, mode: str) -> None:
+        assert source_root == host.REPO_ROOT
+        assert mode in {"fresh", "legacy", "existing"}
+        self.ledger_modes.append(mode)
+        self.events.append(f"trust-ledger:{mode}")
+        if not self.filesystem.exists(host.TRUST_REVOCATION_LEDGER):
+            if mode == "existing":
+                raise host.InstallError("fake GB10 trust ledger is unavailable")
+            self._write_trust_ledger([])
+        ledger = self._trust_ledger()
+        if ledger.get("key_fingerprint") != self.public_key_fingerprint():
+            raise host.InstallError("fake GB10 trust ledger key binding is invalid")
+        if mode == "legacy":
+            self._write_trust_ledger([f"trt-gb10-{number}" for number in range(1, 16)])
+
+    def require_gb10_revocation_complete(self) -> None:
+        self.events.append("trust-ledger:finalize-check")
+        if self._trust_ledger().get("revocation_hosts") != []:
+            raise host.InstallError("fake GB10 trust revocation is incomplete")
 
     def install_owner(self, path: Path, owner: str, mode: int) -> bool:
         del owner
@@ -268,7 +332,12 @@ class FakeSystem:
         self.maintenance = False
 
     def revoke_gb10_trust(self) -> None:
+        if self.revoke_error is not None:
+            raise host.InstallError(self.revoke_error)
+        self._trust_ledger()
         self.revoked = True
+        self.events.append("trust-ledger:revoke")
+        self._write_trust_ledger([])
 
     def remove_acl(self, grant: host.AclGrant) -> None:
         self.input_acls.discard(grant.path)
@@ -330,7 +399,10 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     assert record["admission_enabled"] is True
     assert record["maintenance_enabled"] is False
     assert record["trust_requires_revocation"] is True
+    assert record["trust_ledger_migrated"] is True
+    assert record["schema_version"] == 2
     assert record["added_acls"]
+    assert system.ledger_modes == ["fresh", "existing"]
     assert set(system.source_reads) >= {
         "deploy/staging-rollout/loom-staging-rollout",
         "deploy/staging-rollout/loom-staging-rollout-broker",
@@ -339,6 +411,68 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         "deploy/staging-rollout/staging-rollout.toml",
         "scripts/ops/staging_rollout_gb10_trust.py",
     }
+
+
+def test_install_migrates_legacy_revocation_before_replacing_trust_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    installer.filesystem.remove(host.TRUST_REVOCATION_LEDGER)
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    record["schema_version"] = 1
+    record.pop("trust_ledger_migrated")
+    installer.filesystem.atomic_write(
+        host.INSTALL_RECORD,
+        (json.dumps(record, sort_keys=True) + "\n").encode(),
+        0o600,
+    )
+    installer.filesystem.atomic_write(host.TRUST_TOOL_PATH, b"legacy-trust-tool\n", 0o755)
+    system.ledger_modes.clear()
+    system.events.clear()
+    original_atomic_write = host.LocalFilesystem.atomic_write
+
+    def record_authority_write(
+        filesystem: host.LocalFilesystem,
+        absolute: Path,
+        payload: bytes,
+        mode: int,
+    ) -> bool:
+        if absolute == host.TRUST_TOOL_PATH:
+            system.events.append("trust-tool:replace")
+        return original_atomic_write(filesystem, absolute, payload, mode)
+
+    monkeypatch.setattr(host.LocalFilesystem, "atomic_write", record_authority_write)
+
+    result = installer.install(TEAM_ID)
+
+    assert result["ok"] is True
+    assert system.ledger_modes == ["legacy"]
+    assert system.events.index("trust-ledger:legacy") < system.events.index("trust-tool:replace")
+    assert system._trust_ledger()["revocation_hosts"] == [
+        f"trt-gb10-{number}" for number in range(1, 16)
+    ]
+    migrated = installer.filesystem.load_install_record()
+    assert migrated is not None
+    assert migrated["schema_version"] == 2
+    assert migrated["trust_ledger_migrated"] is True
+
+
+def test_reinstall_fails_closed_when_migrated_ledger_disappears(tmp_path: Path) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    installer.filesystem.remove(host.TRUST_REVOCATION_LEDGER)
+    system.ledger_modes.clear()
+
+    with pytest.raises(host.InstallError, match="ledger is unavailable"):
+        installer.install(TEAM_ID)
+
+    assert system.ledger_modes == ["existing"]
+    assert installer.filesystem.exists(host.SERVICE_KEY)
+    assert installer.filesystem.exists(host.INSTALL_RECORD)
+    assert installer.filesystem.exists(host.SUDOERS_PATH)
 
 
 def test_install_runs_dry_run_only_after_all_gb10_trust_is_ready(tmp_path: Path) -> None:
@@ -632,6 +766,181 @@ def test_uninstall_refuses_active_request_and_retains_ledger(tmp_path: Path) -> 
     assert not installer.filesystem.exists(host.SERVICE_KEY)
     assert not installer.filesystem.exists(host.GENERATED_ROOT)
     assert not installer.filesystem.exists(host.INSTALL_RECORD)
+    assert not installer.filesystem.exists(host.TRUST_REVOCATION_LEDGER)
+    assert result["removed"][-2:] == [
+        str(host.TRUST_REVOCATION_LEDGER),
+        str(host.INSTALL_RECORD),
+    ]
+    assert system.events[-2:] == [
+        "trust-ledger:revoke",
+        "trust-ledger:finalize-check",
+    ]
+
+
+def test_uninstall_remote_revocation_failure_retains_key_tool_record_and_ledger(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    pending_hosts = [f"trt-gb10-{number}" for number in range(1, 16)]
+    system._write_trust_ledger(pending_hosts)
+    system.status = "done"
+    system.revoke_error = "injected remote revocation failure"
+
+    with pytest.raises(host.InstallError, match="remote revocation failure"):
+        installer.uninstall(retain_ledger=True)
+
+    assert system._trust_ledger()["revocation_hosts"] == pending_hosts
+    assert installer.filesystem.exists(host.SERVICE_KEY)
+    assert installer.filesystem.exists(Path(str(host.SERVICE_KEY) + ".pub"))
+    assert installer.filesystem.exists(host.TRUST_TOOL_PATH)
+    assert installer.filesystem.exists(host.INSTALL_RECORD)
+    assert not installer.filesystem.exists(host.SUDOERS_PATH)
+    assert system.maintenance is True
+
+
+def test_uninstall_rejects_unsafe_trust_ledger_without_removing_local_key(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    installer.filesystem.path(host.TRUST_REVOCATION_LEDGER).chmod(0o644)
+    system.status = "done"
+
+    with pytest.raises(host.InstallError, match="ledger is invalid"):
+        installer.uninstall(retain_ledger=True)
+
+    assert installer.filesystem.exists(host.SERVICE_KEY)
+    assert installer.filesystem.exists(host.TRUST_TOOL_PATH)
+    assert installer.filesystem.exists(host.INSTALL_RECORD)
+    assert installer.filesystem.exists(host.TRUST_REVOCATION_LEDGER)
+
+
+def test_uninstall_retries_when_ledger_was_deleted_before_durability_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    system.status = "done"
+    original_remove_ledger = host.LocalFilesystem.remove_validated_trust_ledger
+
+    def remove_then_fail(filesystem: host.LocalFilesystem, *, expected_fingerprint: str) -> bool:
+        original_remove_ledger(
+            filesystem,
+            expected_fingerprint=expected_fingerprint,
+        )
+        raise host.InstallError("injected ledger directory fsync failure")
+
+    monkeypatch.setattr(
+        host.LocalFilesystem,
+        "remove_validated_trust_ledger",
+        remove_then_fail,
+    )
+    with pytest.raises(host.InstallError, match="fsync failure"):
+        installer.uninstall(retain_ledger=True)
+
+    interrupted = installer.filesystem.load_install_record()
+    assert interrupted is not None
+    assert interrupted["installation_state"] == "uninstalling"
+    assert interrupted["trust_requires_revocation"] is False
+    assert interrupted["trust_ledger_removed"] is False
+    assert not installer.filesystem.exists(host.TRUST_REVOCATION_LEDGER)
+
+    monkeypatch.setattr(
+        host.LocalFilesystem,
+        "remove_validated_trust_ledger",
+        original_remove_ledger,
+    )
+    result = installer.uninstall(retain_ledger=True)
+
+    assert result["ok"] is True
+    assert not installer.filesystem.exists(host.INSTALL_RECORD)
+
+
+def test_uninstall_retries_after_install_record_removal_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    system.status = "done"
+    original_remove = host.LocalFilesystem.remove
+    fail_record_removal = True
+
+    def injected_remove(filesystem: host.LocalFilesystem, absolute: Path) -> bool:
+        nonlocal fail_record_removal
+        if absolute == host.INSTALL_RECORD and fail_record_removal:
+            fail_record_removal = False
+            raise host.InstallError("injected install record removal failure")
+        return original_remove(filesystem, absolute)
+
+    monkeypatch.setattr(host.LocalFilesystem, "remove", injected_remove)
+    with pytest.raises(host.InstallError, match="record removal failure"):
+        installer.uninstall(retain_ledger=True)
+
+    interrupted = installer.filesystem.load_install_record()
+    assert interrupted is not None
+    assert interrupted["installation_state"] == "uninstalling"
+    assert interrupted["trust_requires_revocation"] is False
+    assert interrupted["trust_ledger_removed"] is True
+    assert not installer.filesystem.exists(host.TRUST_REVOCATION_LEDGER)
+    with pytest.raises(host.InstallError, match="interrupted uninstall"):
+        installer.install(TEAM_ID)
+
+    result = installer.uninstall(retain_ledger=True)
+
+    assert result["ok"] is True
+    assert not installer.filesystem.exists(host.INSTALL_RECORD)
+
+
+def test_trust_ledger_concurrent_replacement_is_reported_as_install_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    ledger_path = installer.filesystem.path(host.TRUST_REVOCATION_LEDGER)
+    original_lstat = host.os.lstat
+    ledger_lstats = 0
+
+    def racing_lstat(path: os.PathLike[str] | str) -> os.stat_result:
+        nonlocal ledger_lstats
+        if Path(path) == ledger_path:
+            ledger_lstats += 1
+            if ledger_lstats == 2:
+                raise FileNotFoundError("injected concurrent ledger replacement")
+        return original_lstat(path)
+
+    monkeypatch.setattr(host.os, "lstat", racing_lstat)
+
+    with pytest.raises(host.InstallError, match="changed before removal"):
+        installer.filesystem.remove_validated_trust_ledger(
+            expected_fingerprint=system.public_key_fingerprint()
+        )
+
+    assert ledger_path.exists()
+
+
+def test_uninstall_refuses_unmigrated_legacy_revocation_record(tmp_path: Path) -> None:
+    installer, _ = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    record["schema_version"] = 1
+    record.pop("trust_ledger_migrated")
+    installer.filesystem.atomic_write(
+        host.INSTALL_RECORD,
+        (json.dumps(record, sort_keys=True) + "\n").encode(),
+        0o600,
+    )
+
+    with pytest.raises(host.InstallError, match="ledger migration"):
+        installer.uninstall(retain_ledger=True)
+
+    assert installer.filesystem.exists(host.SUDOERS_PATH)
+    assert installer.filesystem.exists(host.SERVICE_KEY)
+    assert installer.filesystem.exists(host.INSTALL_RECORD)
 
 
 def test_uninstall_removes_only_acls_recorded_as_added(tmp_path: Path) -> None:

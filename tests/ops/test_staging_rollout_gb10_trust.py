@@ -3,10 +3,12 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import stat
 import struct
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -65,6 +67,62 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path, bytes]:
     return config, public_path, identity, public_key
 
 
+def _ledger_path(tmp_path: Path) -> Path:
+    parent = tmp_path / "etc" / "loom"
+    parent.mkdir(parents=True, exist_ok=True)
+    parent.chmod(0o755)
+    return parent / "staging-rollout-gb10-trust-revocation.json"
+
+
+def _main(
+    argv: list[str],
+    *,
+    tmp_path: Path,
+    config: Path,
+    public_path: Path,
+    run=trust._subprocess_runner,
+) -> int:
+    return trust.main(
+        argv,
+        run=run,
+        ssh_config_path=config,
+        public_key_path=public_path,
+        ledger_path=_ledger_path(tmp_path),
+        expected_uid=os.getuid(),
+        expected_gid=os.getgid(),
+    )
+
+
+def _initialize_ledger(tmp_path: Path, config: Path, public_path: Path) -> None:
+    inventory = trust.parse_ssh_inventory(config.read_text(encoding="utf-8"))
+    trust._initialize_ledger(
+        trust.RevocationLedgerStore(
+            path=_ledger_path(tmp_path),
+            expected_uid=os.getuid(),
+            expected_gid=os.getgid(),
+        ),
+        inventory=inventory,
+        key_fingerprint=trust._key_fingerprint(public_path.read_bytes()),
+    )
+
+
+def _register_ledger_hosts(
+    tmp_path: Path,
+    config: Path,
+    public_path: Path,
+    hosts: tuple[str, ...],
+) -> None:
+    _initialize_ledger(tmp_path, config, public_path)
+    store = trust.RevocationLedgerStore(
+        path=_ledger_path(tmp_path),
+        expected_uid=os.getuid(),
+        expected_gid=os.getgid(),
+    )
+    ledger = store.load(allow_absent=False)
+    assert ledger is not None
+    trust._register_revocation_hosts(store, ledger=ledger, hosts=hosts)
+
+
 def _run_remote(
     home: Path,
     operation: str,
@@ -83,6 +141,9 @@ def test_inventory_expands_exactly_all_15_targets_and_checked_in_user() -> None:
     inventory = trust.parse_ssh_inventory(_ssh_config())
 
     assert inventory.hosts == tuple(f"trt-gb10-{number}" for number in range(1, 16))
+    assert inventory.active_hosts == tuple(
+        f"trt-gb10-{number}" for number in range(1, 16) if number != 7
+    )
     assert inventory.remote_user == "qianyi"
     assert inventory.hostnames == (
         "207.35.188.227",
@@ -93,6 +154,14 @@ def test_inventory_expands_exactly_all_15_targets_and_checked_in_user() -> None:
     assert inventory.identity_file == trust.SERVICE_PRIVATE_KEY_PATH
 
 
+def test_topology_digest_binds_active_host_policy() -> None:
+    inventory = trust.parse_ssh_inventory(_ssh_config())
+
+    changed_policy = replace(inventory, active_hosts=inventory.hosts)
+
+    assert trust._topology_sha256(changed_policy) != trust._topology_sha256(inventory)
+
+
 def test_checked_in_inventory_contract_is_exact() -> None:
     checked_in = (
         Path(__file__).resolve().parents[2] / "deploy" / "worker-pools" / "gb10" / "ssh_config"
@@ -100,6 +169,9 @@ def test_checked_in_inventory_contract_is_exact() -> None:
     inventory = trust.parse_ssh_inventory(checked_in.read_text(encoding="utf-8"))
 
     assert inventory.hosts == tuple(f"trt-gb10-{number}" for number in range(1, 16))
+    assert inventory.active_hosts == tuple(
+        f"trt-gb10-{number}" for number in range(1, 16) if number != 7
+    )
     assert inventory.remote_user == "qianyi"
     assert inventory.hostnames == (
         "207.35.188.227",
@@ -136,6 +208,52 @@ def test_inventory_fails_closed_on_unapproved_topology_or_auth(
         trust.parse_ssh_inventory(bad_config)
 
 
+@pytest.mark.parametrize(
+    "bad_config",
+    [
+        "Host *\n  ProxyCommand none\n\n" + _ssh_config(),
+        _ssh_config().replace(
+            "Host trt-gb10-2\n",
+            "Host trt-gb10-2\n  ProxyCommand /usr/bin/false blocked\n",
+            1,
+        ),
+        _ssh_config().replace(
+            "  User qianyi\n",
+            "  User qianyi\n  ProxyCommand none\n",
+            1,
+        ),
+    ],
+)
+def test_inventory_rejects_every_proxycommand_matching_a_gb10_alias(
+    bad_config: str,
+) -> None:
+    with pytest.raises(trust.TrustConfigurationError, match="ProxyCommand"):
+        trust.parse_ssh_inventory(bad_config)
+
+
+@pytest.mark.skipif(shutil.which("ssh") is None, reason="OpenSSH client is unavailable")
+def test_openssh_first_value_proxycommand_would_override_later_proxyjump(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "ssh_config"
+    config.write_text(
+        "Host trt-gb10-2\n  ProxyCommand /usr/bin/false first-value-sentinel\n\n" + _ssh_config(),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        ["ssh", "-G", "-F", str(config), "trt-gb10-2"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "proxycommand /usr/bin/false first-value-sentinel" in completed.stdout.lower()
+    with pytest.raises(trust.TrustConfigurationError, match="ProxyCommand"):
+        trust.parse_ssh_inventory(config.read_text(encoding="utf-8"))
+
+
 @pytest.mark.parametrize("operation", ["check", "revoke"])
 def test_nonbootstrap_commands_reject_target_and_identity_overrides(operation: str) -> None:
     with pytest.raises(SystemExit):
@@ -148,28 +266,175 @@ def test_nonbootstrap_commands_reject_target_and_identity_overrides(operation: s
         trust._parser().parse_args([operation, "--bootstrap-identity", "/tmp/key"])
 
 
+def test_initialize_ledger_is_secret_free_bound_and_root_modeled(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config, public_path, _identity, public_key = _write_inputs(tmp_path)
+
+    rc = _main(
+        ["initialize-ledger"],
+        tmp_path=tmp_path,
+        config=config,
+        public_path=public_path,
+    )
+
+    assert rc == 0
+    ledger_path = _ledger_path(tmp_path)
+    assert stat.S_IMODE(ledger_path.stat().st_mode) == 0o600
+    raw = json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert raw["key_fingerprint"] == trust._key_fingerprint(public_key)
+    assert raw["revocation_hosts"] == []
+    assert len(raw["topology_sha256"]) == 64
+    assert public_key.decode("ascii").strip() not in ledger_path.read_text(encoding="utf-8")
+    assert list(ledger_path.parent.glob(f".{ledger_path.name}.*")) == []
+    report = json.loads(capsys.readouterr().out)
+    assert report["ledger_hosts_remaining"] == 0
+
+
+def test_register_legacy_ledger_records_full_topology_without_ssh(
+    tmp_path: Path,
+) -> None:
+    config, public_path, _identity, _public_key_bytes = _write_inputs(tmp_path)
+
+    def reject_ssh(*_args, **_kwargs):
+        raise AssertionError("ledger migration must not contact a host")
+
+    rc = _main(
+        ["register-legacy-ledger"],
+        tmp_path=tmp_path,
+        config=config,
+        public_path=public_path,
+        run=reject_ssh,
+    )
+
+    assert rc == 0
+    ledger = trust.RevocationLedger.from_bytes(_ledger_path(tmp_path).read_bytes())
+    assert ledger.revocation_hosts == tuple(f"trt-gb10-{number}" for number in range(1, 16))
+
+
+def test_check_fails_closed_when_ledger_does_not_cover_active_hosts(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config, public_path, _identity, _public_key_bytes = _write_inputs(tmp_path)
+    _initialize_ledger(tmp_path, config, public_path)
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, b'{"status":"present"}\n', b"")
+
+    rc = _main(
+        ["check"],
+        tmp_path=tmp_path,
+        config=config,
+        public_path=public_path,
+        run=fake_run,
+    )
+
+    assert rc == 2
+    assert calls == []
+    assert "missing active hosts" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("failure", ["mode", "symlink", "oversized", "schema"])
+def test_ledger_metadata_and_schema_fail_closed(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+) -> None:
+    config, public_path, _identity, _public_key_bytes = _write_inputs(tmp_path)
+    _initialize_ledger(tmp_path, config, public_path)
+    ledger_path = _ledger_path(tmp_path)
+    if failure == "mode":
+        ledger_path.chmod(0o644)
+    elif failure == "symlink":
+        target = tmp_path / "attacker-ledger"
+        target.write_bytes(ledger_path.read_bytes())
+        target.chmod(0o600)
+        ledger_path.unlink()
+        ledger_path.symlink_to(target)
+    elif failure == "oversized":
+        ledger_path.write_bytes(b"x" * (trust._LEDGER_MAX_BYTES + 1))
+        ledger_path.chmod(0o600)
+    else:
+        raw = json.loads(ledger_path.read_text(encoding="utf-8"))
+        raw["unexpected"] = True
+        ledger_path.write_text(json.dumps(raw) + "\n", encoding="utf-8")
+        ledger_path.chmod(0o600)
+
+    rc = _main(
+        ["initialize-ledger"],
+        tmp_path=tmp_path,
+        config=config,
+        public_path=public_path,
+    )
+
+    assert rc == 2
+    assert "revocation ledger" in capsys.readouterr().err
+
+
+def test_ledger_rejects_key_and_topology_binding_drift(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config, public_path, _identity, _public_key_bytes = _write_inputs(tmp_path)
+    _initialize_ledger(tmp_path, config, public_path)
+    public_path.write_bytes(_public_key(2))
+    public_path.chmod(0o644)
+
+    key_rc = _main(
+        ["initialize-ledger"],
+        tmp_path=tmp_path,
+        config=config,
+        public_path=public_path,
+    )
+
+    assert key_rc == 2
+    assert "key binding" in capsys.readouterr().err
+
+    public_path.write_bytes(_public_key(1))
+    raw = json.loads(_ledger_path(tmp_path).read_text(encoding="utf-8"))
+    raw["topology_sha256"] = "0" * 64
+    _ledger_path(tmp_path).write_text(json.dumps(raw) + "\n", encoding="utf-8")
+    _ledger_path(tmp_path).chmod(0o600)
+    topology_rc = _main(
+        ["initialize-ledger"],
+        tmp_path=tmp_path,
+        config=config,
+        public_path=public_path,
+    )
+
+    assert topology_rc == 2
+    assert "topology binding" in capsys.readouterr().err
+
+
 def test_bootstrap_sends_public_key_only_over_stdin_to_every_host(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     config, public_path, identity, public_key = _write_inputs(tmp_path)
+    _initialize_ledger(tmp_path, config, public_path)
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     def fake_run(argv, **kwargs):
         calls.append((list(argv), dict(kwargs)))
         return subprocess.CompletedProcess(argv, 0, b'{"status":"installed"}\n', b"")
 
-    rc = trust.main(
+    rc = _main(
         ["bootstrap", "--bootstrap-identity", str(identity)],
+        tmp_path=tmp_path,
         run=fake_run,
-        ssh_config_path=config,
-        public_key_path=public_path,
+        config=config,
+        public_path=public_path,
     )
 
     assert rc == 0
-    assert len(calls) == 15
-    for number, (argv, kwargs) in enumerate(calls, start=1):
-        assert argv[-2] == f"trt-gb10-{number}"
+    expected_hosts = [f"trt-gb10-{number}" for number in range(1, 16) if number != 7]
+    assert len(calls) == 14
+    for host, (argv, kwargs) in zip(expected_hosts, calls, strict=True):
+        assert argv[-2] == host
         assert argv[:3] == ["ssh", "-F", str(config)]
         assert argv[argv.index("-i") + 1] == str(identity)
         assert kwargs["input"] == public_key
@@ -181,7 +446,9 @@ def test_bootstrap_sends_public_key_only_over_stdin_to_every_host(
     report = json.loads(captured.out)
     assert report["ok"] is True
     assert report["remote_user"] == "qianyi"
-    assert len(report["hosts"]) == 15
+    assert [entry["host"] for entry in report["hosts"]] == expected_hosts
+    ledger = trust.RevocationLedger.from_bytes(_ledger_path(tmp_path).read_bytes())
+    assert ledger.revocation_hosts == tuple(expected_hosts)
 
 
 def test_check_continues_after_partial_host_failure_without_echoing_remote_output(
@@ -189,6 +456,13 @@ def test_check_continues_after_partial_host_failure_without_echoing_remote_outpu
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     config, public_path, _identity, public_key = _write_inputs(tmp_path)
+    inventory = trust.parse_ssh_inventory(config.read_text(encoding="utf-8"))
+    _register_ledger_hosts(
+        tmp_path,
+        config,
+        public_path,
+        inventory.active_hosts,
+    )
     calls: list[list[str]] = []
     sentinel = "DO_NOT_ECHO_REMOTE_OUTPUT"
 
@@ -196,25 +470,27 @@ def test_check_continues_after_partial_host_failure_without_echoing_remote_outpu
         calls.append(list(argv))
         assert kwargs["input"] == public_key
         assert "-i" not in argv
-        if argv[-2] == "trt-gb10-7":
+        if argv[-2] == "trt-gb10-8":
             return subprocess.CompletedProcess(argv, 255, b"", sentinel.encode())
         return subprocess.CompletedProcess(argv, 0, b'{"status":"present"}\n', b"")
 
-    rc = trust.main(
+    rc = _main(
         ["check"],
+        tmp_path=tmp_path,
         run=fake_run,
-        ssh_config_path=config,
-        public_key_path=public_path,
+        config=config,
+        public_path=public_path,
     )
 
     assert rc == 1
-    assert len(calls) == 15
+    assert len(calls) == 14
+    assert all(argv[-2] != "trt-gb10-7" for argv in calls)
     captured = capsys.readouterr()
     assert sentinel not in captured.out
     assert sentinel not in captured.err
     report = json.loads(captured.out)
     failed = [entry for entry in report["hosts"] if not entry["ok"]]
-    assert failed == [{"host": "trt-gb10-7", "ok": False, "status": "remote-failed"}]
+    assert failed == [{"host": "trt-gb10-8", "ok": False, "status": "remote-failed"}]
 
 
 def test_revoke_processes_private_hosts_before_jump_host(
@@ -222,6 +498,8 @@ def test_revoke_processes_private_hosts_before_jump_host(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     config, public_path, _identity, public_key = _write_inputs(tmp_path)
+    inventory = trust.parse_ssh_inventory(config.read_text(encoding="utf-8"))
+    _register_ledger_hosts(tmp_path, config, public_path, inventory.hosts)
     calls: list[list[str]] = []
 
     def fake_run(argv, **kwargs):
@@ -229,11 +507,12 @@ def test_revoke_processes_private_hosts_before_jump_host(
         assert kwargs["input"] == public_key
         return subprocess.CompletedProcess(argv, 0, b'{"status":"revoked"}\n', b"")
 
-    rc = trust.main(
+    rc = _main(
         ["revoke"],
+        tmp_path=tmp_path,
         run=fake_run,
-        ssh_config_path=config,
-        public_key_path=public_path,
+        config=config,
+        public_path=public_path,
     )
 
     assert rc == 0
@@ -241,6 +520,8 @@ def test_revoke_processes_private_hosts_before_jump_host(
     assert [argv[-2] for argv in calls] == expected_hosts
     report = json.loads(capsys.readouterr().out)
     assert [entry["host"] for entry in report["hosts"]] == expected_hosts
+    assert report["ledger_hosts_remaining"] == 0
+    assert _ledger_path(tmp_path).is_file()
 
 
 def test_revoke_preserves_jump_host_when_private_host_fails(
@@ -248,19 +529,24 @@ def test_revoke_preserves_jump_host_when_private_host_fails(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     config, public_path, _identity, _public_key_bytes = _write_inputs(tmp_path)
+    inventory = trust.parse_ssh_inventory(config.read_text(encoding="utf-8"))
+    _register_ledger_hosts(tmp_path, config, public_path, inventory.hosts)
     calls: list[list[str]] = []
+    fail_seven = True
 
     def fake_run(argv, **_kwargs):
+        nonlocal fail_seven
         calls.append(list(argv))
-        if argv[-2] == "trt-gb10-7":
+        if argv[-2] == "trt-gb10-7" and fail_seven:
             return subprocess.CompletedProcess(argv, 255, b"", b"")
         return subprocess.CompletedProcess(argv, 0, b'{"status":"revoked"}\n', b"")
 
-    rc = trust.main(
+    rc = _main(
         ["revoke"],
+        tmp_path=tmp_path,
         run=fake_run,
-        ssh_config_path=config,
-        public_key_path=public_path,
+        config=config,
+        public_path=public_path,
     )
 
     assert rc == 1
@@ -271,6 +557,23 @@ def test_revoke_preserves_jump_host_when_private_host_fails(
         "ok": False,
         "status": "dependency-failed",
     }
+    ledger = trust.RevocationLedger.from_bytes(_ledger_path(tmp_path).read_bytes())
+    assert ledger.revocation_hosts == ("trt-gb10-1", "trt-gb10-7")
+
+    calls.clear()
+    fail_seven = False
+    retry_rc = _main(
+        ["revoke"],
+        tmp_path=tmp_path,
+        run=fake_run,
+        config=config,
+        public_path=public_path,
+    )
+
+    assert retry_rc == 0
+    assert [argv[-2] for argv in calls] == ["trt-gb10-7", "trt-gb10-1"]
+    retry_report = json.loads(capsys.readouterr().out)
+    assert retry_report["ledger_hosts_remaining"] == 0
 
 
 def test_remote_bootstrap_is_idempotent_and_preserves_unrelated_lines(tmp_path: Path) -> None:

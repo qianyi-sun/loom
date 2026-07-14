@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import errno
 import fnmatch
+import hashlib
 import ipaddress
 import json
 import os
@@ -15,6 +17,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,7 +26,10 @@ from typing import Any, Protocol
 SSH_CONFIG_PATH = Path("/opt/loom-staging-runner/repo/deploy/worker-pools/gb10/ssh_config")
 SERVICE_PRIVATE_KEY_PATH = Path("/var/lib/loom-staging-rollout/gb10-deploy-ed25519")
 SERVICE_PUBLIC_KEY_PATH = Path("/var/lib/loom-staging-rollout/gb10-deploy-ed25519.pub")
+REVOCATION_LEDGER_PATH = Path("/etc/loom/staging-rollout-gb10-trust-revocation.json")
 _EXPECTED_HOSTS = tuple(f"trt-gb10-{number}" for number in range(1, 16))
+_EXCLUDED_HOSTS = frozenset({"trt-gb10-7"})
+_ACTIVE_HOSTS = tuple(host for host in _EXPECTED_HOSTS if host not in _EXCLUDED_HOSTS)
 _EXPECTED_HOSTNAMES = (
     "207.35.188.227",
     *(f"192.168.20.{number}" for number in range(12, 26)),
@@ -32,6 +38,8 @@ _EXPECTED_PORTS = (2221,) + (22,) * 14
 _EXPECTED_REMOTE_USER = "qianyi"
 _SAFE_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,63}$")
 _PUBLIC_KEY_MAX_BYTES = 16 * 1024
+_LEDGER_MAX_BYTES = 64 * 1024
+_LEDGER_SCHEMA_VERSION = 1
 _SSH_TIMEOUT_SECONDS = 30
 
 
@@ -57,6 +65,7 @@ class TrustConfigurationError(ValueError):
 @dataclass(frozen=True, slots=True)
 class SshInventory:
     hosts: tuple[str, ...]
+    active_hosts: tuple[str, ...]
     remote_user: str
     hostnames: tuple[str, ...]
     ports: tuple[int, ...]
@@ -78,6 +87,157 @@ class HostResult:
 class _HostBlock:
     patterns: tuple[str, ...]
     options: Mapping[str, tuple[str, ...]]
+
+
+@dataclass(frozen=True, slots=True)
+class RevocationLedger:
+    key_fingerprint: str
+    topology_sha256: str
+    revocation_hosts: tuple[str, ...]
+
+    def to_bytes(self) -> bytes:
+        return (
+            json.dumps(
+                {
+                    "key_fingerprint": self.key_fingerprint,
+                    "revocation_hosts": list(self.revocation_hosts),
+                    "schema_version": _LEDGER_SCHEMA_VERSION,
+                    "topology_sha256": self.topology_sha256,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+
+    @classmethod
+    def from_bytes(cls, payload: bytes) -> RevocationLedger:
+        try:
+            raw = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise TrustConfigurationError("GB10 trust revocation ledger is invalid") from exc
+        required = {
+            "key_fingerprint",
+            "revocation_hosts",
+            "schema_version",
+            "topology_sha256",
+        }
+        if not isinstance(raw, dict) or set(raw) != required:
+            raise TrustConfigurationError("GB10 trust revocation ledger schema is invalid")
+        fingerprint = raw["key_fingerprint"]
+        topology_sha256 = raw["topology_sha256"]
+        hosts = raw["revocation_hosts"]
+        if (
+            type(raw["schema_version"]) is not int
+            or raw["schema_version"] != _LEDGER_SCHEMA_VERSION
+            or not isinstance(fingerprint, str)
+            or re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}", fingerprint) is None
+            or not isinstance(topology_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", topology_sha256) is None
+            or not isinstance(hosts, list)
+            or any(not isinstance(host, str) for host in hosts)
+            or len(hosts) != len(set(hosts))
+            or any(host not in _EXPECTED_HOSTS for host in hosts)
+        ):
+            raise TrustConfigurationError("GB10 trust revocation ledger values are invalid")
+        ordered = tuple(host for host in _EXPECTED_HOSTS if host in hosts)
+        if tuple(hosts) != ordered:
+            raise TrustConfigurationError("GB10 trust revocation ledger host order is invalid")
+        return cls(
+            key_fingerprint=fingerprint,
+            topology_sha256=topology_sha256,
+            revocation_hosts=ordered,
+        )
+
+
+@dataclass(slots=True)
+class RevocationLedgerStore:
+    path: Path = REVOCATION_LEDGER_PATH
+    expected_uid: int = 0
+    expected_gid: int = 0
+
+    def _validate_path(self) -> Path:
+        if not self.path.is_absolute() or ".." in self.path.parts:
+            raise TrustConfigurationError("GB10 trust revocation ledger path is unsafe")
+        parent = self.path.parent
+        try:
+            metadata = os.lstat(parent)
+        except OSError as exc:
+            raise TrustConfigurationError(
+                "GB10 trust revocation ledger directory is unavailable"
+            ) from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != self.expected_uid
+            or metadata.st_gid != self.expected_gid
+            or stat.S_IMODE(metadata.st_mode) != 0o755
+        ):
+            raise TrustConfigurationError("GB10 trust revocation ledger directory is unsafe")
+        return parent
+
+    def load(self, *, allow_absent: bool) -> RevocationLedger | None:
+        self._validate_path()
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(self.path, flags)
+        except OSError as exc:
+            if allow_absent and exc.errno == errno.ENOENT:
+                return None
+            raise TrustConfigurationError("GB10 trust revocation ledger is unavailable") from exc
+        try:
+            metadata = os.fstat(fd)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != self.expected_uid
+                or metadata.st_gid != self.expected_gid
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_size <= 0
+                or metadata.st_size > _LEDGER_MAX_BYTES
+            ):
+                raise TrustConfigurationError("GB10 trust revocation ledger metadata is unsafe")
+            payload = os.read(fd, _LEDGER_MAX_BYTES + 1)
+            if len(payload) != metadata.st_size:
+                raise TrustConfigurationError(
+                    "GB10 trust revocation ledger changed while it was read"
+                )
+            return RevocationLedger.from_bytes(payload)
+        finally:
+            os.close(fd)
+
+    def write(self, ledger: RevocationLedger) -> None:
+        parent = self._validate_path()
+        self.load(allow_absent=True)
+        payload = ledger.to_bytes()
+        if len(payload) > _LEDGER_MAX_BYTES:
+            raise TrustConfigurationError("GB10 trust revocation ledger is too large")
+        fd, temporary = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=parent)
+        try:
+            os.fchmod(fd, 0o600)
+            metadata = os.fstat(fd)
+            if metadata.st_uid != self.expected_uid or metadata.st_gid != self.expected_gid:
+                raise TrustConfigurationError(
+                    "GB10 trust revocation ledger temporary owner is unsafe"
+                )
+            with os.fdopen(fd, "wb", closefd=True) as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.path)
+            directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            if self.load(allow_absent=False) != ledger:
+                raise TrustConfigurationError("GB10 trust revocation ledger write did not converge")
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            Path(temporary).unlink(missing_ok=True)
+            raise
 
 
 def _tokens(raw_line: str) -> list[str]:
@@ -158,6 +318,8 @@ def parse_ssh_inventory(text: str) -> SshInventory:
         for block in blocks:
             if not _block_matches(block.patterns, host):
                 continue
+            if block.options.get("proxycommand"):
+                raise TrustConfigurationError("GB10 SSH ProxyCommand is not approved")
             for key in (
                 "user",
                 "hostname",
@@ -224,12 +386,34 @@ def parse_ssh_inventory(text: str) -> SshInventory:
         raise TrustConfigurationError("GB10 SSH target resolution is ambiguous")
     return SshInventory(
         hosts=_EXPECTED_HOSTS,
+        active_hosts=_ACTIVE_HOSTS,
         remote_user=users[0],
         hostnames=tuple(hostnames),
         ports=tuple(ports),
         proxy_jumps=tuple(proxy_jumps),
         identity_file=SERVICE_PRIVATE_KEY_PATH,
     )
+
+
+def _topology_sha256(inventory: SshInventory) -> str:
+    active_hosts = set(inventory.active_hosts)
+    payload = json.dumps(
+        [
+            {
+                "active": host in active_hosts,
+                "host": host,
+                "hostname": inventory.hostnames[index],
+                "identity_file": str(inventory.identity_file),
+                "port": inventory.ports[index],
+                "proxy_jump": inventory.proxy_jumps[index],
+                "remote_user": inventory.remote_user,
+            }
+            for index, host in enumerate(inventory.hosts)
+        ],
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _read_bounded_regular_file(path: Path) -> bytes:
@@ -282,6 +466,12 @@ def _decoded_ed25519_blob(payload: bytes) -> bytes:
     if key_length != 32 or len(decoded) != offset + 4 + key_length:
         raise TrustConfigurationError("service public key blob is not a valid Ed25519 key")
     return decoded
+
+
+def _key_fingerprint(public_key: bytes) -> str:
+    digest = hashlib.sha256(_decoded_ed25519_blob(public_key)).digest()
+    encoded = base64.b64encode(digest).decode("ascii").rstrip("=")
+    return f"SHA256:{encoded}"
 
 
 def _validate_bootstrap_identity(path: Path) -> None:
@@ -578,25 +768,17 @@ def _ssh_argv(
 def converge_trust(
     operation: str,
     *,
-    inventory: SshInventory,
+    hosts: Sequence[str],
     ssh_config: Path,
     public_key: bytes,
     run: Runner,
     bootstrap_identity: Path | None = None,
 ) -> tuple[HostResult, ...]:
-    """Run one fixed trust operation on all hosts and retain only safe status."""
+    """Run one fixed trust operation on the supplied fixed hosts."""
     if operation not in _SUCCESS_STATUSES:
         raise ValueError("unsupported trust operation")
     results: list[HostResult] = []
-    hosts = (*inventory.hosts[1:], inventory.hosts[0]) if operation == "revoke" else inventory.hosts
     for host in hosts:
-        if (
-            operation == "revoke"
-            and host == inventory.hosts[0]
-            and not all(result.ok for result in results)
-        ):
-            results.append(HostResult(host=host, ok=False, status="dependency-failed"))
-            continue
         argv = _ssh_argv(
             host=host,
             operation=operation,
@@ -625,6 +807,133 @@ def converge_trust(
     return tuple(results)
 
 
+def _validate_ledger_binding(
+    ledger: RevocationLedger,
+    *,
+    inventory: SshInventory,
+    key_fingerprint: str,
+) -> None:
+    if ledger.key_fingerprint != key_fingerprint:
+        raise TrustConfigurationError("GB10 trust revocation ledger key binding is invalid")
+    if ledger.topology_sha256 != _topology_sha256(inventory):
+        raise TrustConfigurationError("GB10 trust revocation ledger topology binding is invalid")
+
+
+def _initialize_ledger(
+    store: RevocationLedgerStore,
+    *,
+    inventory: SshInventory,
+    key_fingerprint: str,
+) -> RevocationLedger:
+    ledger = store.load(allow_absent=True)
+    if ledger is None:
+        ledger = RevocationLedger(
+            key_fingerprint=key_fingerprint,
+            topology_sha256=_topology_sha256(inventory),
+            revocation_hosts=(),
+        )
+        store.write(ledger)
+    _validate_ledger_binding(
+        ledger,
+        inventory=inventory,
+        key_fingerprint=key_fingerprint,
+    )
+    return ledger
+
+
+def _load_bound_ledger(
+    store: RevocationLedgerStore,
+    *,
+    inventory: SshInventory,
+    key_fingerprint: str,
+) -> RevocationLedger:
+    ledger = store.load(allow_absent=False)
+    if ledger is None:  # pragma: no cover - allow_absent=False owns this invariant
+        raise TrustConfigurationError("GB10 trust revocation ledger is unavailable")
+    _validate_ledger_binding(
+        ledger,
+        inventory=inventory,
+        key_fingerprint=key_fingerprint,
+    )
+    return ledger
+
+
+def _register_revocation_hosts(
+    store: RevocationLedgerStore,
+    *,
+    ledger: RevocationLedger,
+    hosts: Sequence[str],
+) -> RevocationLedger:
+    if not set(hosts).issubset(_EXPECTED_HOSTS):
+        raise TrustConfigurationError("GB10 trust revocation host registration is invalid")
+    requested = set(ledger.revocation_hosts)
+    requested.update(hosts)
+    updated = RevocationLedger(
+        key_fingerprint=ledger.key_fingerprint,
+        topology_sha256=ledger.topology_sha256,
+        revocation_hosts=tuple(host for host in _EXPECTED_HOSTS if host in requested),
+    )
+    if updated != ledger:
+        store.write(updated)
+    return updated
+
+
+def revoke_trust(
+    *,
+    inventory: SshInventory,
+    ssh_config: Path,
+    public_key: bytes,
+    run: Runner,
+    store: RevocationLedgerStore,
+    ledger: RevocationLedger,
+) -> tuple[HostResult, ...]:
+    """Revoke private hosts durably before removing the jump-host trust."""
+    results: list[HostResult] = []
+    jump_host = inventory.hosts[0]
+    private_hosts = tuple(host for host in ledger.revocation_hosts if host != jump_host)
+    for host in private_hosts:
+        result = converge_trust(
+            "revoke",
+            hosts=(host,),
+            ssh_config=ssh_config,
+            public_key=public_key,
+            run=run,
+        )[0]
+        results.append(result)
+        if not result.ok:
+            continue
+        ledger = RevocationLedger(
+            key_fingerprint=ledger.key_fingerprint,
+            topology_sha256=ledger.topology_sha256,
+            revocation_hosts=tuple(
+                candidate for candidate in ledger.revocation_hosts if candidate != host
+            ),
+        )
+        store.write(ledger)
+
+    remaining_private = tuple(host for host in ledger.revocation_hosts if host != jump_host)
+    if jump_host in ledger.revocation_hosts and remaining_private:
+        results.append(HostResult(host=jump_host, ok=False, status="dependency-failed"))
+    elif jump_host in ledger.revocation_hosts:
+        result = converge_trust(
+            "revoke",
+            hosts=(jump_host,),
+            ssh_config=ssh_config,
+            public_key=public_key,
+            run=run,
+        )[0]
+        results.append(result)
+        if result.ok:
+            store.write(
+                RevocationLedger(
+                    key_fingerprint=ledger.key_fingerprint,
+                    topology_sha256=ledger.topology_sha256,
+                    revocation_hosts=(),
+                )
+            )
+    return tuple(results)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     subparsers = parser.add_subparsers(dest="operation", required=True)
@@ -632,6 +941,10 @@ def _parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--bootstrap-identity", type=Path, required=True)
     subparsers.add_parser("check", allow_abbrev=False)
     subparsers.add_parser("revoke", allow_abbrev=False)
+    subparsers.add_parser("initialize-ledger", allow_abbrev=False)
+    subparsers.add_parser("register-legacy-ledger", allow_abbrev=False)
+    subparsers.add_parser("validate-ledger", allow_abbrev=False)
+    subparsers.add_parser("finalize-check", allow_abbrev=False)
     return parser
 
 
@@ -645,34 +958,115 @@ def main(
     run: Runner = _subprocess_runner,
     ssh_config_path: Path = SSH_CONFIG_PATH,
     public_key_path: Path = SERVICE_PUBLIC_KEY_PATH,
+    ledger_path: Path = REVOCATION_LEDGER_PATH,
+    expected_uid: int = 0,
+    expected_gid: int = 0,
 ) -> int:
     args = _parser().parse_args(argv)
     try:
         config_payload = _read_bounded_regular_file(ssh_config_path)
         inventory = parse_ssh_inventory(config_payload.decode("utf-8"))
         public_key = _read_bounded_regular_file(public_key_path)
-        _decoded_ed25519_blob(public_key)
+        key_fingerprint = _key_fingerprint(public_key)
+        store = RevocationLedgerStore(
+            path=ledger_path,
+            expected_uid=expected_uid,
+            expected_gid=expected_gid,
+        )
         bootstrap_identity = getattr(args, "bootstrap_identity", None)
         if bootstrap_identity is not None:
             _validate_bootstrap_identity(bootstrap_identity)
+        if args.operation == "initialize-ledger":
+            ledger = _initialize_ledger(
+                store,
+                inventory=inventory,
+                key_fingerprint=key_fingerprint,
+            )
+            results: tuple[HostResult, ...] = ()
+        elif args.operation == "register-legacy-ledger":
+            ledger = _initialize_ledger(
+                store,
+                inventory=inventory,
+                key_fingerprint=key_fingerprint,
+            )
+            ledger = _register_revocation_hosts(
+                store,
+                ledger=ledger,
+                hosts=inventory.hosts,
+            )
+            results = ()
+        elif args.operation == "validate-ledger":
+            ledger = _load_bound_ledger(
+                store,
+                inventory=inventory,
+                key_fingerprint=key_fingerprint,
+            )
+            results = ()
+        else:
+            ledger = _load_bound_ledger(
+                store,
+                inventory=inventory,
+                key_fingerprint=key_fingerprint,
+            )
+            if args.operation == "bootstrap":
+                ledger = _register_revocation_hosts(
+                    store,
+                    ledger=ledger,
+                    hosts=inventory.active_hosts,
+                )
+                results = converge_trust(
+                    "bootstrap",
+                    hosts=inventory.active_hosts,
+                    ssh_config=ssh_config_path,
+                    public_key=public_key,
+                    run=run,
+                    bootstrap_identity=bootstrap_identity,
+                )
+            elif args.operation == "check":
+                if not set(inventory.active_hosts).issubset(ledger.revocation_hosts):
+                    raise TrustConfigurationError(
+                        "GB10 trust revocation ledger is missing active hosts"
+                    )
+                results = converge_trust(
+                    "check",
+                    hosts=inventory.active_hosts,
+                    ssh_config=ssh_config_path,
+                    public_key=public_key,
+                    run=run,
+                )
+            elif args.operation == "revoke":
+                results = revoke_trust(
+                    inventory=inventory,
+                    ssh_config=ssh_config_path,
+                    public_key=public_key,
+                    run=run,
+                    store=store,
+                    ledger=ledger,
+                )
+                ledger = _load_bound_ledger(
+                    store,
+                    inventory=inventory,
+                    key_fingerprint=key_fingerprint,
+                )
+            else:
+                if ledger.revocation_hosts:
+                    raise TrustConfigurationError(
+                        "GB10 trust revocation ledger still has managed hosts"
+                    )
+                results = ()
     except (TrustConfigurationError, UnicodeDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    results = converge_trust(
-        args.operation,
-        inventory=inventory,
-        ssh_config=ssh_config_path,
-        public_key=public_key,
-        run=run,
-        bootstrap_identity=bootstrap_identity,
+    ok = all(result.ok for result in results) and (
+        args.operation != "revoke" or not ledger.revocation_hosts
     )
-    ok = all(result.ok for result in results)
     print(
         json.dumps(
             {
                 "action": args.operation,
                 "hosts": [result.to_dict() for result in results],
+                "ledger_hosts_remaining": len(ledger.revocation_hosts),
                 "ok": ok,
                 "remote_user": inventory.remote_user,
             },
