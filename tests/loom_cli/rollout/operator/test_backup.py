@@ -1598,6 +1598,149 @@ def test_latest_directory_fsync_failure_restores_previous_relative_pointer(
     assert list(backups_root.glob(".latest.*")) == []
 
 
+def test_replace_exception_after_atomic_success_restores_previous_latest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config(tmp_path)
+    backups_root = config.rollout_root / "backups"
+    backups_root.mkdir(mode=0o700)
+    old = backups_root / "20260712T120000Z-old-request"
+    old.mkdir(mode=0o700)
+    latest = backups_root / "latest"
+    latest.symlink_to(old.name)
+    original_replace = backup_module.os.replace
+    replace_raised = False
+
+    def replace_then_raise(*args: object, **kwargs: object) -> None:
+        nonlocal replace_raised
+        should_raise = (
+            not replace_raised
+            and len(args) >= 2
+            and str(args[0]).endswith(".tmp")
+            and args[1] == "latest"
+        )
+        original_replace(*args, **kwargs)  # type: ignore[arg-type]
+        if should_raise:
+            replace_raised = True
+            raise OSError("replace completion was ambiguous")
+
+    monkeypatch.setattr(backup_module.os, "replace", replace_then_raise)
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        minio=SuccessfulMinioMirror(),
+        now=lambda: FIXED_NOW,
+    )
+
+    with pytest.raises(BackupError, match="latest_publish_failed"):
+        creator.create(make_request())
+
+    failed_root = backups_root / "20260713T200000Z-stg-20260713-abcdef12"
+    assert replace_raised
+    assert latest.readlink() == Path(old.name)
+    assert not (failed_root / "backup-manifest.json").exists()
+    assert list(backups_root.glob(".latest.*")) == []
+
+
+def test_replace_exception_after_first_latest_removes_ambiguous_pointer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config(tmp_path)
+    original_replace = backup_module.os.replace
+    replace_raised = False
+
+    def replace_then_raise(*args: object, **kwargs: object) -> None:
+        nonlocal replace_raised
+        should_raise = (
+            not replace_raised
+            and len(args) >= 2
+            and str(args[0]).endswith(".tmp")
+            and args[1] == "latest"
+        )
+        original_replace(*args, **kwargs)  # type: ignore[arg-type]
+        if should_raise:
+            replace_raised = True
+            raise OSError("replace completion was ambiguous")
+
+    monkeypatch.setattr(backup_module.os, "replace", replace_then_raise)
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        minio=SuccessfulMinioMirror(),
+        now=lambda: FIXED_NOW,
+    )
+
+    with pytest.raises(BackupError, match="latest_publish_failed"):
+        creator.create(make_request())
+
+    backups_root = config.rollout_root / "backups"
+    failed_root = backups_root / "20260713T200000Z-stg-20260713-abcdef12"
+    assert replace_raised
+    assert not (backups_root / "latest").exists()
+    assert not (failed_root / "backup-manifest.json").exists()
+    assert list(backups_root.glob(".latest.*")) == []
+
+
+@pytest.mark.parametrize("recovery_failure", ["readback", "restore"])
+def test_ambiguous_replace_recovery_failure_preserves_canonical_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_failure: str,
+) -> None:
+    config = make_config(tmp_path)
+    backups_root = config.rollout_root / "backups"
+    backups_root.mkdir(mode=0o700)
+    old = backups_root / "20260712T120000Z-old-request"
+    old.mkdir(mode=0o700)
+    latest = backups_root / "latest"
+    latest.symlink_to(old.name)
+    original_replace = backup_module.os.replace
+    replace_raised = False
+
+    def replace_then_raise(*args: object, **kwargs: object) -> None:
+        nonlocal replace_raised
+        should_raise = (
+            not replace_raised
+            and len(args) >= 2
+            and str(args[0]).endswith(".tmp")
+            and args[1] == "latest"
+        )
+        original_replace(*args, **kwargs)  # type: ignore[arg-type]
+        if should_raise:
+            replace_raised = True
+            raise OSError("replace completion was ambiguous")
+
+    def fail_recovery(*_args: object, **_kwargs: object) -> object:
+        raise OSError("recovery state is unavailable")
+
+    monkeypatch.setattr(backup_module.os, "replace", replace_then_raise)
+    if recovery_failure == "readback":
+        monkeypatch.setattr(backup_module, "_latest_matches", fail_recovery)
+    else:
+        monkeypatch.setattr(backup_module, "_restore_latest", fail_recovery)
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        minio=SuccessfulMinioMirror(),
+        now=lambda: FIXED_NOW,
+    )
+
+    with pytest.raises(BackupError, match="latest_publish_failed"):
+        creator.create(make_request())
+
+    failed_root = backups_root / "20260713T200000Z-stg-20260713-abcdef12"
+    manifest_path = failed_root / "backup-manifest.json"
+    assert replace_raised
+    assert latest.readlink() == Path(failed_root.name)
+    assert manifest_path.is_file()
+    assert list(backups_root.glob(".latest.*")) == []
+
+
 def test_successful_latest_replacement_removes_precreated_rollback(
     tmp_path: Path,
 ) -> None:
@@ -2529,6 +2672,42 @@ def test_minio_closes_body_returned_by_get_after_absolute_deadline(
     assert events.index("body_close") < events.index("client_close")
     assert events.index("client_close") < events.index("terminate")
     assert events[-3:] == ["terminate", "wait:5.0", "port_forward_close"]
+    backups_root = config.rollout_root / "backups"
+    assert not (backups_root / "latest").exists()
+    assert not list(backups_root.glob("*/backup-manifest.json"))
+
+
+def test_minio_rechecks_absolute_deadline_after_client_cleanup(
+    tmp_path: Path,
+) -> None:
+    now = [0.0]
+
+    class CloseAdvancesDeadlineS3(OneObjectS3):
+        def close(self) -> None:
+            now[0] = 61.0
+            events.append("client_close")
+            super().close()
+
+    events: list[str] = []
+    client = CloseAdvancesDeadlineS3()
+    config = make_config(tmp_path)
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        minio=Boto3MinioMirror(
+            client_factory=lambda *_args, **_kwargs: client,
+            timeout_seconds=60.0,
+            monotonic=lambda: now[0],
+            deadline_waiter=lambda stop, _timeout: stop.wait(1.0),
+        ),
+        now=lambda: FIXED_NOW,
+    )
+
+    with pytest.raises(BackupError, match="minio_snapshot_failed"):
+        creator.create(make_request())
+
+    assert events == ["client_close"]
     backups_root = config.rollout_root / "backups"
     assert not (backups_root / "latest").exists()
     assert not list(backups_root.glob("*/backup-manifest.json"))

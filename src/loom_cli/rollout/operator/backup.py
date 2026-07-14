@@ -898,6 +898,28 @@ def _latest_matches(directory_fd: int, target: str | None) -> bool:
     return os.readlink("latest", dir_fd=directory_fd) == target
 
 
+def _recover_ambiguous_latest_replace(
+    directory_fd: int,
+    *,
+    previous_target: str | None,
+    new_target: str,
+    rollback: _LatestRollback | None,
+) -> bool:
+    try:
+        if _latest_matches(directory_fd, previous_target):
+            return True
+        if not _latest_matches(directory_fd, new_target):
+            return False
+        _restore_latest(
+            directory_fd,
+            previous_target,
+            rollback=rollback,
+        )
+        return _latest_matches(directory_fd, previous_target)
+    except Exception:
+        return False
+
+
 def _publish_latest(
     bundle_root: Path,
     *,
@@ -937,15 +959,24 @@ def _publish_latest(
                 resources.release_entry(latest_account)
                 raise
             temp_exists = True
+        except Exception:
+            raise _LatestPublicationError(rollback_confirmed=True) from None
+        try:
             os.replace(
                 temp_name,
                 "latest",
                 src_dir_fd=directory_fd,
                 dst_dir_fd=directory_fd,
             )
-            temp_exists = False
         except Exception:
-            raise _LatestPublicationError(rollback_confirmed=True) from None
+            rollback_confirmed = _recover_ambiguous_latest_replace(
+                directory_fd,
+                previous_target=previous_target,
+                new_target=bundle_root.name,
+                rollback=rollback,
+            )
+            raise _LatestPublicationError(rollback_confirmed=rollback_confirmed) from None
+        temp_exists = False
         try:
             os.fsync(directory_fd)
             resources.check_live()
@@ -1529,6 +1560,7 @@ class Boto3MinioMirror:
                 raise close_error
         if expired:
             raise ValueError("MinIO mirror exceeded total deadline")
+        budget.check_deadline()
 
 
 class _SubprocessPortForward:
