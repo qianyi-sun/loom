@@ -4,9 +4,11 @@ import hashlib
 import os
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from loom_cli.rollout.operator import config as operator_config
 from loom_cli.rollout.operator.config import (
     APPROVED_REMOTE_URL,
     ConfigError,
@@ -153,6 +155,133 @@ def test_config_rejects_non_root_owned_or_writable_file(tmp_path: Path) -> None:
         OperatorConfig.load(path, expected_owner_uid=os.getuid() + 1)
 
 
+def test_config_accepts_exact_owner_gid_and_mode(tmp_path: Path) -> None:
+    path = _write_config(tmp_path / "staging-rollout.toml")
+    path.chmod(0o640)
+
+    config = OperatorConfig.load(
+        path,
+        expected_owner_uid=os.getuid(),
+        expected_owner_gid=os.getgid(),
+        expected_mode=0o640,
+    )
+
+    assert config.config_path == path
+
+
+def test_config_rejects_wrong_owner_gid_or_exact_mode(tmp_path: Path) -> None:
+    path = _write_config(tmp_path / "staging-rollout.toml")
+
+    with pytest.raises(ConfigError, match="owner GID"):
+        OperatorConfig.load(
+            path,
+            expected_owner_uid=os.getuid(),
+            expected_owner_gid=os.getgid() + 1,
+            expected_mode=0o600,
+        )
+
+    with pytest.raises(ConfigError, match=r"config mode 0600.*expected mode 0640"):
+        OperatorConfig.load(
+            path,
+            expected_owner_uid=os.getuid(),
+            expected_owner_gid=os.getgid(),
+            expected_mode=0o640,
+        )
+
+
+def test_config_rejects_hardlink(tmp_path: Path) -> None:
+    path = _write_config(tmp_path / "staging-rollout.toml")
+    os.link(path, tmp_path / "staging-rollout-copy.toml")
+
+    with pytest.raises(ConfigError, match="config metadata is unsafe"):
+        OperatorConfig.load(path, expected_owner_uid=os.getuid())
+
+
+def test_config_rejects_oversized_file(tmp_path: Path) -> None:
+    path = tmp_path / "staging-rollout.toml"
+    path.write_bytes(b"x" * ((1 << 20) + 1))
+    path.chmod(0o600)
+
+    with pytest.raises(ConfigError, match="config metadata is unsafe"):
+        OperatorConfig.load(path, expected_owner_uid=os.getuid())
+
+
+def test_config_rejects_unsafe_parent_authority(tmp_path: Path) -> None:
+    unsafe_parent = tmp_path / "unsafe"
+    unsafe_parent.mkdir(mode=0o777)
+    unsafe_parent.chmod(0o777)
+    path = _write_config(unsafe_parent / "staging-rollout.toml")
+
+    with pytest.raises(ConfigError, match="config parent authority is unsafe"):
+        operator_config._read_protected_config(
+            path,
+            os.getuid(),
+            validate_parent_authority=True,
+        )
+
+
+def test_config_rejects_descriptor_identity_change_while_reading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _write_config(tmp_path / "staging-rollout.toml")
+    real_read = os.read
+    changed = False
+
+    def racing_read(fd: int, size: int) -> bytes:
+        nonlocal changed
+        chunk = real_read(fd, size)
+        if chunk and not changed:
+            changed = True
+            os.fchmod(fd, 0o400)
+        return chunk
+
+    monkeypatch.setattr(operator_config.os, "read", racing_read)
+
+    with pytest.raises(ConfigError, match="config changed while it was read"):
+        OperatorConfig.load(path, expected_owner_uid=os.getuid())
+
+
+def test_default_authority_rejects_service_primary_group_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _write_config(tmp_path / "staging-rollout.toml")
+    monkeypatch.setattr(
+        operator_config.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_uid=2000, pw_gid=2001),
+    )
+    monkeypatch.setattr(
+        operator_config.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=2002),
+    )
+
+    with pytest.raises(ConfigError, match="service account primary group is invalid"):
+        OperatorConfig.load(path)
+
+
+def test_default_authority_rejects_root_service_uid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _write_config(tmp_path / "staging-rollout.toml")
+    monkeypatch.setattr(
+        operator_config.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_uid=0, pw_gid=2001),
+    )
+    monkeypatch.setattr(
+        operator_config.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=2001),
+    )
+
+    with pytest.raises(ConfigError, match="service account UID is invalid"):
+        OperatorConfig.load(path)
+
+
 def test_config_rejects_symlink_and_non_regular_file(tmp_path: Path) -> None:
     target = _write_config(tmp_path / "target.toml")
     link = tmp_path / "staging-rollout.toml"
@@ -162,6 +291,26 @@ def test_config_rejects_symlink_and_non_regular_file(tmp_path: Path) -> None:
         OperatorConfig.load(link, expected_owner_uid=os.getuid())
     with pytest.raises(ConfigError, match="regular file"):
         OperatorConfig.load(tmp_path, expected_owner_uid=os.getuid())
+
+
+def test_config_opens_untrusted_leaf_without_blocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _write_config(tmp_path / "staging-rollout.toml")
+    real_open = os.open
+    observed_flags: list[int] = []
+
+    def recording_open(candidate: Path, flags: int) -> int:
+        observed_flags.append(flags)
+        return real_open(candidate, flags)
+
+    monkeypatch.setattr(operator_config.os, "open", recording_open)
+
+    OperatorConfig.load(path, expected_owner_uid=os.getuid())
+
+    assert len(observed_flags) == 1
+    assert observed_flags[0] & os.O_NONBLOCK
 
 
 def test_config_rejects_unknown_and_missing_keys(tmp_path: Path) -> None:

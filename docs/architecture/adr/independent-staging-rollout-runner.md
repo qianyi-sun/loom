@@ -71,6 +71,11 @@ a dedicated Ed25519 GB10 deploy identity. Under #822, that public key is
 bootstrapped to the exact 14-host active set; the full 15-host checked-in
 topology remains validated and is retained for legacy-ledger revocation. The
 private key remains mode 0600 and is never shared with an operator.
+The `loom-rollout` passwd UID and `id -u loom-rollout` must resolve to the same
+nonzero value. Its passwd primary GID, the GID of the named `loom-rollout`
+group, and `id -g loom-rollout` must likewise resolve to the same nonzero value.
+Installation and readiness checks fail closed when those service identity
+views disagree.
 
 The installer itself has an operator-established bootstrap prerequisite: invoke
 it only from a clean root-owned checkout beneath a root-owned,
@@ -96,7 +101,11 @@ candidate without editable installs and without the inapplicable `--frozen`
 flag. A source-SHA change forces another synchronization. Every synchronization
 also uses uv's exact `--reinstall-package loom` boundary, so a same-SHA repair
 restores deleted or corrupt package resources instead of accepting uv's
-already-satisfied result.
+already-satisfied result. A previous install record in any state other than
+`ready` forces both candidate-checkout and venv resynchronization even when its
+recorded source SHA matches the newly fetched `dev` head. A crash after the
+provisional record is published therefore cannot let retry bless the old wheel
+as the new source.
 The non-editable wheel bundles exact, repository-tested copies of the canonical
 Loom schema, Grafana dashboards, Envoy bootstrap, and imported Jinja template
 partial through `importlib.resources`; runtime code never derives those
@@ -108,7 +117,9 @@ pre-existing host configuration. It then writes the fixed operator config as
 `root:loom-rollout` mode `0640` and, before restoring admission, runs the full
 service-user broker probe, which also loads that config. The config is readable
 by the service group but is never group- or world-writable and contains no raw
-secret values. The installed broker entry point uses the same
+secret values. It must be a regular file with exactly one link. The installed
+loader and host readiness check enforce the same `root:loom-rollout`, `0640`,
+`nlink=1` authority. The installed broker entry point uses the same
 isolated/no-bytecode interpreter boundary, so an operator-controlled working
 directory cannot shadow `loom_cli`.
 
@@ -155,7 +166,12 @@ malformed output, stderr, or unsafe metadata returns unknown and fails closed.
 That proof deliberately does not import the installed broker being replaced, so
 a broken package can be repaired without creating an admission bypass. A valid
 but stale `active.json` also blocks until the supported broker reconciliation
-path clears it; operators must not delete the pointer by hand.
+path clears it; operators must not delete the pointer by hand. An existing
+hard-linked config is not edited through the shared inode: only after this
+protected-pointer plus systemd-unit inactivity proof may the installer
+atomically replace the canonical path with a new single-link inode. Thus config
+detachment cannot occur before the same independent no-active-rollout gate used
+for every other installed-file mutation.
 
 ### Failure, recovery, and break-glass
 
