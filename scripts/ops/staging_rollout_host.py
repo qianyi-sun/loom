@@ -50,6 +50,8 @@ TRUST_TOOL_PATH = Path("/usr/local/libexec/loom-staging-rollout-gb10-trust")
 SUDOERS_PATH = Path("/etc/sudoers.d/loom-staging-rollout")
 TMPFILES_PATH = Path("/etc/tmpfiles.d/loom-staging-rollout.conf")
 KUBECONFIG_PATH = STATE_ROOT / "kubeconfig"
+ROOT_KUBECONFIG = Path("/root/.kube/config")
+ROOT_KUBECONFIG_SNAPSHOT_PARENT = Path("/root")
 SERVICE_KEY = STATE_ROOT / "gb10-deploy-ed25519"
 INSTALL_RECORD = Path("/etc/loom/staging-rollout.install.json")
 SYSTEM_PYTHON = Path("/usr/bin/python3")
@@ -73,6 +75,7 @@ _FINGERPRINT_TOKEN = "__ADMIN_TOKEN_FINGERPRINT__"
 _TEAM_TOKEN = "__SMOKE_ON_BEHALF_TEAM_ID__"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_PROTECTED_INPUT_BYTES = 4 << 20
+_MAX_KUBECONFIG_BYTES = 1 << 20
 _ROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
@@ -364,6 +367,76 @@ def _runtime_identity(root: Path, *, service_uid: int, service_gid: int) -> None
         or stat.S_IMODE(metadata.st_mode) != 0o700
     ):
         raise InstallError("service runtime directory is unsafe")
+
+
+def _read_root_kubeconfig_source() -> bytes:
+    """Read the fixed root kubeconfig through one authority-checked descriptor."""
+    try:
+        for parent in ROOT_KUBECONFIG.parents:
+            metadata = os.lstat(parent)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or metadata.st_uid != 0
+                or metadata.st_gid != 0
+                or stat.S_IMODE(metadata.st_mode) & 0o022
+            ):
+                raise InstallError("root kubeconfig parent authority is unsafe")
+    except OSError as exc:
+        raise InstallError("root kubeconfig parent authority is unavailable") from exc
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(ROOT_KUBECONFIG, flags)
+    except OSError as exc:
+        raise InstallError("root kubeconfig source is unavailable") from exc
+
+    failure: BaseException | None = None
+    payload = b""
+    try:
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != 0
+            or before.st_gid != 0
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > _MAX_KUBECONFIG_BYTES
+        ):
+            raise InstallError("root kubeconfig source metadata is unsafe")
+        chunks: list[bytes] = []
+        remaining = _MAX_KUBECONFIG_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        after = os.fstat(fd)
+        if (
+            len(payload) != before.st_size
+            or len(payload) > _MAX_KUBECONFIG_BYTES
+            or (after.st_dev, after.st_ino, after.st_size)
+            != (before.st_dev, before.st_ino, before.st_size)
+        ):
+            raise InstallError("root kubeconfig source changed during read")
+    except OSError as exc:
+        failure = InstallError("root kubeconfig source read failed")
+        failure.__cause__ = exc
+    except InstallError as exc:
+        failure = exc
+    finally:
+        try:
+            os.close(fd)
+        except OSError as exc:
+            if failure is None:
+                failure = InstallError("root kubeconfig source close failed")
+                failure.__cause__ = exc
+    if failure is not None:
+        raise failure
+    return payload
 
 
 def _maintenance_marker(
@@ -1175,9 +1248,38 @@ class HostSystem:
             raise InstallError("service ACL removal did not converge")
 
     def export_kubeconfig(self) -> bytes:
-        result = self.runner.run(
-            ["kubectl", "config", "view", "--raw", "--minify", "--context", "loom-staging"]
-        )
+        source_payload = _read_root_kubeconfig_source()
+        with tempfile.TemporaryDirectory(
+            prefix="loom-staging-kubeconfig-",
+            dir=ROOT_KUBECONFIG_SNAPSHOT_PARENT,
+        ) as raw_directory:
+            snapshot_fd, raw_snapshot = tempfile.mkstemp(dir=raw_directory)
+            snapshot = Path(raw_snapshot)
+            try:
+                os.fchmod(snapshot_fd, 0o600)
+                with os.fdopen(snapshot_fd, "wb", closefd=True) as handle:
+                    handle.write(source_payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except OSError as exc:
+                try:
+                    os.close(snapshot_fd)
+                except OSError:
+                    pass
+                raise InstallError("private kubeconfig snapshot failed") from exc
+            result = self.runner.run(
+                [
+                    "kubectl",
+                    "--kubeconfig",
+                    str(snapshot),
+                    "config",
+                    "view",
+                    "--raw",
+                    "--minify",
+                    "--context",
+                    "loom-staging",
+                ]
+            )
         if not result.stdout.strip():
             raise InstallError("loom-staging kubeconfig export is empty")
         return result.stdout.encode("utf-8")

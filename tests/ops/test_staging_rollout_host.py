@@ -991,6 +991,148 @@ def test_verify_user_manager_rejects_invalid_manager_version(version: str) -> No
         host.HostSystem(UserManagerRunner()).verify_user_manager()
 
 
+def _root_directory_metadata(*, mode: int = 0o700, uid: int = 0) -> os.stat_result:
+    return os.stat_result((stat.S_IFDIR | mode, 11, 7, 1, uid, 0, 0, 0, 0, 0))
+
+
+def _root_kubeconfig_metadata(
+    payload: bytes, *, mode: int = 0o600, uid: int = 0, nlink: int = 1
+) -> os.stat_result:
+    return os.stat_result((stat.S_IFREG | mode, 23, 17, nlink, uid, 0, len(payload), 0, 0, 0))
+
+
+def test_read_root_kubeconfig_binds_authority_to_one_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"apiVersion: v1\ncurrent-context: loom-staging\n"
+    metadata = _root_kubeconfig_metadata(payload)
+    reads = iter((payload, b""))
+    opened: list[tuple[Path, int]] = []
+    closed: list[int] = []
+    monkeypatch.setattr(host.os, "lstat", lambda path: _root_directory_metadata())
+    monkeypatch.setattr(
+        host.os,
+        "open",
+        lambda path, flags: opened.append((path, flags)) or 41,
+    )
+    monkeypatch.setattr(host.os, "fstat", lambda fd: metadata)
+    monkeypatch.setattr(host.os, "read", lambda fd, size: next(reads))
+    monkeypatch.setattr(host.os, "close", lambda fd: closed.append(fd))
+
+    assert host._read_root_kubeconfig_source() == payload
+    assert opened[0][0] == host.ROOT_KUBECONFIG
+    assert opened[0][1] & getattr(os, "O_NOFOLLOW", 0)
+    assert closed == [41]
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        _root_directory_metadata(mode=0o720),
+        _root_directory_metadata(uid=1000),
+        os.stat_result((stat.S_IFLNK | 0o777, 11, 7, 1, 0, 0, 0, 0, 0, 0)),
+    ],
+)
+def test_read_root_kubeconfig_rejects_unsafe_parent(
+    monkeypatch: pytest.MonkeyPatch, metadata: os.stat_result
+) -> None:
+    monkeypatch.setattr(
+        host.os,
+        "lstat",
+        lambda path: (
+            metadata if path == host.ROOT_KUBECONFIG.parent else _root_directory_metadata()
+        ),
+    )
+
+    with pytest.raises(host.InstallError, match="parent authority is unsafe"):
+        host._read_root_kubeconfig_source()
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        _root_kubeconfig_metadata(b"payload", mode=0o640),
+        _root_kubeconfig_metadata(b"payload", uid=1000),
+        _root_kubeconfig_metadata(b"payload", nlink=2),
+        os.stat_result((stat.S_IFDIR | 0o600, 23, 17, 1, 0, 0, 7, 0, 0, 0)),
+    ],
+)
+def test_read_root_kubeconfig_rejects_unsafe_source_metadata(
+    monkeypatch: pytest.MonkeyPatch, metadata: os.stat_result
+) -> None:
+    monkeypatch.setattr(host.os, "lstat", lambda path: _root_directory_metadata())
+    monkeypatch.setattr(host.os, "open", lambda path, flags: 41)
+    monkeypatch.setattr(host.os, "fstat", lambda fd: metadata)
+    monkeypatch.setattr(host.os, "close", lambda fd: None)
+
+    with pytest.raises(host.InstallError, match="source metadata is unsafe"):
+        host._read_root_kubeconfig_source()
+
+
+def test_read_root_kubeconfig_rejects_descriptor_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"apiVersion: v1\n"
+    before = _root_kubeconfig_metadata(payload)
+    after = os.stat_result(
+        (
+            before.st_mode,
+            before.st_ino + 1,
+            before.st_dev,
+            before.st_nlink,
+            before.st_uid,
+            before.st_gid,
+            before.st_size,
+            0,
+            0,
+            0,
+        )
+    )
+    metadata = iter((before, after))
+    reads = iter((payload, b""))
+    monkeypatch.setattr(host.os, "lstat", lambda path: _root_directory_metadata())
+    monkeypatch.setattr(host.os, "open", lambda path, flags: 41)
+    monkeypatch.setattr(host.os, "fstat", lambda fd: next(metadata))
+    monkeypatch.setattr(host.os, "read", lambda fd, size: next(reads))
+    monkeypatch.setattr(host.os, "close", lambda fd: None)
+
+    with pytest.raises(host.InstallError, match="changed during read"):
+        host._read_root_kubeconfig_source()
+
+
+def test_export_kubeconfig_uses_process_private_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = b"apiVersion: v1\ncurrent-context: loom-staging\n"
+    snapshot_path: Path | None = None
+
+    class KubeconfigRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal snapshot_path
+            call = list(argv)
+            assert kwargs == {}
+            assert call[0:2] == ["kubectl", "--kubeconfig"]
+            snapshot_path = Path(call[2])
+            assert snapshot_path.read_bytes() == source
+            assert stat.S_IMODE(snapshot_path.stat().st_mode) == 0o600
+            assert call[3:] == [
+                "config",
+                "view",
+                "--raw",
+                "--minify",
+                "--context",
+                "loom-staging",
+            ]
+            return host.CommandResult(0, source.decode())
+
+    monkeypatch.setattr(host, "_read_root_kubeconfig_source", lambda: source)
+    monkeypatch.setattr(host, "ROOT_KUBECONFIG_SNAPSHOT_PARENT", tmp_path)
+
+    assert host.HostSystem(KubeconfigRunner()).export_kubeconfig() == source
+    assert snapshot_path is not None
+    assert not snapshot_path.exists()
+
+
 def test_installer_fixes_system_python_and_uv_authority_paths() -> None:
     assert host.SYSTEM_PYTHON == Path("/usr/bin/python3")
     assert host.UV_BINARY == Path("/usr/local/bin/uv")
