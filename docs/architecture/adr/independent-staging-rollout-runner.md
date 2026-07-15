@@ -87,6 +87,18 @@ summaries. This does not make secrets inaccessible to the already
 root-equivalent administrators; a stronger boundary would require a separate
 runner host and credential rotation.
 
+ACL convergence is fail-closed. The installer computes the smallest explicit
+mask expansion needed by the service entry and compares the complete effective
+ACL before and after. Only the declared human operators may gain permissions
+that were already present in their raw named-user entries; every other user or
+group must have zero effective-permission gain. In particular, the path-scoped
+numeric UID 2012 entry used by OLDLAB-2 is preserved but may never be unmasked
+by this installer. A missing default ACL is initialized from the directory's
+effective access base only when required for service-owned data, and that
+complete initialization remains reversible. POSIX ACL masks are also reflected in the
+numeric group mode bits, so validation uses raw and effective ACL entries rather
+than claiming that `st_mode` is unchanged.
+
 ### Backup and locking
 
 A non-dry `start` creates and verifies a new immutable backup manifest before
@@ -120,6 +132,20 @@ ACLs/memberships/linger/key material, and retain request and rollout evidence.
 A legacy ledger can contain all 15 inventory hosts; a #822-era install records
 the 14 active hosts. A failed upgrade retains that durable ledger so uninstall
 cannot leave stale remote trust.
+
+Before the first ACL mutation, the root-owned provisional install record stores
+the complete ACL preimage and expected postimage for every required mask
+change. Retry and uninstall accept only one of those two exact states. Uninstall
+restores the preimage, deletes an installer-created default ACL when its
+preimage was absent, and removes a service entry only when the separate grant
+ledger proves the installer created it; any third-party drift stops recovery
+without discarding the ledger. The first such transaction upgrades legacy v1
+or trust-ledger v2 install records to v3 before touching an ACL. Older v1/v2
+installers reject v3 rather than silently ignoring the reversible ACL ledger.
+During a v1 trust-ledger migration, the provisional v3 record separately pins
+the legacy source SHA until migration succeeds, so a crash cannot reinterpret
+the new candidate as the old trust topology. An interrupted v2 migration that
+already lost that binding is ambiguous and fails closed.
 
 ## Alternatives considered
 
@@ -165,7 +191,10 @@ Repository tests cover fixed merged-only candidate selection, immutable
 envelopes, caller attribution, lifecycle locking, backup-before-launch,
 redaction, cancellation/resume, installer idempotence and recovery, exact GB10
 trust bootstrap/revocation, secret-boundary scanning, advisory CODEOWNERS
-routing, and full CI selection.
+routing, and full CI selection. ACL coverage includes safe operator-only mask
+expansion, zero new UID 2012/unknown/group permissions, plan/apply drift,
+preimage-ledger retry, and exact uninstall restoration for existing and absent
+default masks.
 
 Repository verification is necessary but not live acceptance. Installation on
 shared `platform-dev` is allowed only after the implementation has merged into

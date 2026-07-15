@@ -5,6 +5,7 @@ import json
 import os
 import stat
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from scripts.ops import staging_rollout_host as host
@@ -28,6 +29,7 @@ class FakeSystem:
         self.service_key_generations = 0
         self.input_acls: set[Path] = set()
         self.data_acls: set[Path] = set()
+        self.acl_adjustment_states: dict[host.AclGrant, str] = {}
         self.linger = False
         self.status = "idle"
         self.validated = 0
@@ -284,7 +286,7 @@ class FakeSystem:
         self.ledger_modes.append(mode)
         self.ledger_previous_source_shas.append(previous_source_sha)
         self.events.append(f"trust-ledger:{mode}")
-        if mode == "legacy" and self.previous_topology_drift:
+        if mode == "legacy" and self.previous_topology_drift and previous_source_sha == "a" * 40:
             raise host.InstallError(
                 "legacy GB10 trust topology drifted from the previous installed source"
             )
@@ -352,7 +354,13 @@ class FakeSystem:
             self.data_acls.add(Path(f"{grant.path}#{grant.default}"))
         else:
             self.input_acls.add(grant.path)
+        if plan.mask_adjustment is not None:
+            self.acl_adjustment_states[grant] = "after"
         return grant
+
+    def acl_adjustment_state(self, adjustment: host.AclMaskAdjustment) -> str:
+        grant = host.AclGrant(adjustment.path, default=adjustment.default)
+        return self.acl_adjustment_states.get(grant, "before")
 
     def ensure_input_acl(self, path: Path) -> tuple[host.AclGrant, ...]:
         return tuple(self.apply_acl(plan) for plan in self.plan_input_acl(path))
@@ -393,9 +401,18 @@ class FakeSystem:
         self.events.append("trust-ledger:revoke")
         self._write_trust_ledger([])
 
-    def remove_acl(self, grant: host.AclGrant) -> None:
-        self.input_acls.discard(grant.path)
-        self.data_acls.discard(Path(f"{grant.path}#{grant.default}"))
+    def remove_acl(
+        self,
+        grant: host.AclGrant,
+        mask_adjustment: host.AclMaskAdjustment | None = None,
+        *,
+        remove_service_entry: bool = True,
+    ) -> None:
+        if mask_adjustment is not None:
+            self.acl_adjustment_states[grant] = "before"
+        if remove_service_entry:
+            self.input_acls.discard(grant.path)
+            self.data_acls.discard(Path(f"{grant.path}#{grant.default}"))
 
     def disable_linger(self) -> None:
         self.linger = False
@@ -467,12 +484,13 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     assert system.dry_runs == 0
     record = installer.filesystem.load_install_record()
     assert record is not None
+    assert record["schema_version"] == 3
     assert record["installation_state"] == "ready"
     assert record["admission_enabled"] is True
     assert record["maintenance_enabled"] is False
     assert record["trust_requires_revocation"] is True
     assert record["trust_ledger_migrated"] is True
-    assert record["schema_version"] == 2
+    assert "trust_legacy_source_sha" not in record
     assert record["added_acls"]
     assert system.ledger_modes == ["fresh", "existing"]
     assert system.ledger_previous_source_shas == [None, None]
@@ -533,8 +551,9 @@ def test_install_migrates_legacy_revocation_before_replacing_trust_tool(
     ]
     migrated = installer.filesystem.load_install_record()
     assert migrated is not None
-    assert migrated["schema_version"] == 2
+    assert migrated["schema_version"] == 3
     assert migrated["trust_ledger_migrated"] is True
+    assert "trust_legacy_source_sha" not in migrated
 
 
 def test_legacy_migration_rejects_previous_to_candidate_topology_drift(
@@ -561,8 +580,113 @@ def test_legacy_migration_rejects_previous_to_candidate_topology_drift(
 
     assert system.ledger_modes[-1] == "legacy"
     assert system.ledger_previous_source_shas[-1] == "a" * 40
+    interrupted = installer.filesystem.load_install_record()
+    assert interrupted is not None
+    assert interrupted["schema_version"] == 3
+    assert interrupted["source_sha"] == "b" * 40
+    assert interrupted["trust_legacy_source_sha"] == "a" * 40
+    assert interrupted["trust_ledger_migrated"] is False
     assert installer.filesystem.read_bytes(host.TRUST_TOOL_PATH) == old_trust_tool
     assert not installer.filesystem.exists(host.TRUST_REVOCATION_LEDGER)
+
+    with pytest.raises(host.InstallError, match="topology drifted"):
+        installer.install(TEAM_ID)
+
+    assert system.ledger_previous_source_shas[-2:] == ["a" * 40, "a" * 40]
+
+
+def test_legacy_source_binding_survives_post_migration_record_write_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    installer.filesystem.remove(host.TRUST_REVOCATION_LEDGER)
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    record["schema_version"] = 1
+    record.pop("trust_ledger_migrated")
+    installer.filesystem.atomic_write(
+        host.INSTALL_RECORD,
+        (json.dumps(record, sort_keys=True) + "\n").encode(),
+        0o600,
+    )
+    system.remote_source_sha = "b" * 40
+    original_atomic_write = host.LocalFilesystem.atomic_write
+    install_record_writes = 0
+
+    def fail_second_install_record_write(
+        filesystem: host.LocalFilesystem,
+        absolute: Path,
+        payload: bytes,
+        mode: int,
+    ) -> bool:
+        nonlocal install_record_writes
+        if absolute == host.INSTALL_RECORD:
+            install_record_writes += 1
+            if install_record_writes == 2:
+                raise host.InstallError("injected post-ledger record failure")
+        return original_atomic_write(filesystem, absolute, payload, mode)
+
+    monkeypatch.setattr(host.LocalFilesystem, "atomic_write", fail_second_install_record_write)
+
+    with pytest.raises(host.InstallError, match="post-ledger record failure"):
+        installer.install(TEAM_ID)
+
+    interrupted = installer.filesystem.load_install_record()
+    assert interrupted is not None
+    assert interrupted["source_sha"] == "b" * 40
+    assert interrupted["trust_legacy_source_sha"] == "a" * 40
+    assert interrupted["trust_ledger_migrated"] is False
+    assert system._trust_ledger()["revocation_hosts"] == [
+        f"trt-gb10-{number}" for number in range(1, 16)
+    ]
+
+    monkeypatch.setattr(host.LocalFilesystem, "atomic_write", original_atomic_write)
+    result = installer.install(TEAM_ID)
+
+    assert result["ok"] is True
+    assert system.ledger_previous_source_shas[-2:] == ["a" * 40, "a" * 40]
+    recovered = installer.filesystem.load_install_record()
+    assert recovered is not None
+    assert recovered["trust_ledger_migrated"] is True
+    assert "trust_legacy_source_sha" not in recovered
+
+
+def test_install_refuses_interrupted_v2_legacy_migration_without_source_binding(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    record.update(
+        {
+            "schema_version": 2,
+            "installation_state": "installing",
+            "admission_enabled": False,
+            "maintenance_enabled": True,
+            "trust_ledger_migrated": False,
+        }
+    )
+    installer.filesystem.atomic_write(
+        host.INSTALL_RECORD,
+        (json.dumps(record, sort_keys=True) + "\n").encode(),
+        0o600,
+    )
+    record_before = installer.filesystem.read_bytes(host.INSTALL_RECORD)
+    ledger_modes_before = list(system.ledger_modes)
+    maintenance_begins_before = system.maintenance_begins
+    system.remote_source_sha = "b" * 40
+
+    with pytest.raises(host.InstallError, match="lost its legacy source binding"):
+        installer.install(TEAM_ID)
+
+    assert installer.filesystem.read_bytes(host.INSTALL_RECORD) == record_before
+    assert installer.filesystem.exists(host.SUDOERS_PATH)
+    assert system.ledger_modes == ledger_modes_before
+    assert system.maintenance_begins == maintenance_begins_before
+    assert system.install_source_sha == "a" * 40
 
 
 def test_reinstall_fails_closed_when_migrated_ledger_disappears(tmp_path: Path) -> None:
@@ -589,6 +713,7 @@ def test_legacy_ready_record_never_regenerates_a_missing_service_key_pair(
     assert record is not None
     record["schema_version"] = 1
     record.pop("trust_ledger_migrated")
+    record.pop("acl_mask_adjustments", None)
     installer.filesystem.atomic_write(
         host.INSTALL_RECORD,
         (json.dumps(record, sort_keys=True) + "\n").encode(),
@@ -663,6 +788,51 @@ def test_existing_authority_rejects_partial_service_key_pair_without_mutation(
     assert system.ledger_modes == ledger_modes_before
     assert system.service_key_generations == generations_before
     assert installer.filesystem.exists(host.SUDOERS_PATH)
+
+
+@pytest.mark.parametrize("legacy_schema", [1, 2])
+def test_reinstall_upgrades_pre_acl_record_before_acl_mutation(
+    tmp_path: Path,
+    legacy_schema: int,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    record["schema_version"] = legacy_schema
+    record.pop("acl_mask_adjustments", None)
+    if legacy_schema == 1:
+        record.pop("trust_ledger_migrated")
+        installer.filesystem.remove(host.TRUST_REVOCATION_LEDGER)
+    installer.filesystem.atomic_write(
+        host.INSTALL_RECORD,
+        (json.dumps(record, sort_keys=True) + "\n").encode(),
+        0o600,
+    )
+    path = host.PROTECTED_INPUTS[3]
+    plan = _fake_mask_plan(path, service_preexisting=True)
+    system.plan_input_acl = (  # type: ignore[method-assign]
+        lambda candidate: (plan,) if candidate == path else ()
+    )
+    system.plan_data_acl = lambda candidate: ()  # type: ignore[method-assign]
+    original_apply = system.apply_acl
+
+    def assert_v3_preimage_before_apply(candidate: host.AclPlan) -> host.AclGrant:
+        provisional = installer.filesystem.load_install_record()
+        assert provisional is not None
+        assert provisional["schema_version"] == 3
+        assert provisional["installation_state"] == "installing"
+        assert provisional["trust_ledger_migrated"] is True
+        assert provisional["acl_mask_adjustments"]
+        return original_apply(candidate)
+
+    system.apply_acl = assert_v3_preimage_before_apply  # type: ignore[method-assign]
+
+    installer.install(TEAM_ID)
+
+    upgraded = installer.filesystem.load_install_record()
+    assert upgraded is not None
+    assert upgraded["schema_version"] == 3
 
 
 def test_install_runs_dry_run_only_after_all_gb10_trust_is_ready(tmp_path: Path) -> None:
@@ -854,10 +1024,10 @@ def test_failed_acl_plan_never_replaces_installed_authority_files(tmp_path: Path
 
     def fail(path: Path) -> tuple[host.AclPlan, ...]:
         del path
-        raise host.InstallError("pre-existing service ACL is insufficient or masked")
+        raise host.InstallError("pre-existing service ACL is insufficient")
 
     system.plan_input_acl = fail  # type: ignore[method-assign]
-    with pytest.raises(host.InstallError, match="insufficient or masked"):
+    with pytest.raises(host.InstallError, match="insufficient"):
         installer.install(TEAM_ID)
 
     assert installer.filesystem.path(host.CLIENT_PATH).read_bytes() == original
@@ -1157,6 +1327,30 @@ def test_trust_ledger_rename_cas_never_deletes_nonempty_replacement(
     assert tombstone_path.exists()
     retained = json.loads(tombstone_path.read_text(encoding="utf-8"))
     assert retained["revocation_hosts"] == ["trt-gb10-2"]
+
+
+def test_uninstall_rejects_invalid_maintenance_ledger_before_disabling_admission(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    record["maintenance_enabled"] = "corrupt"
+    installer.filesystem.atomic_write(
+        host.INSTALL_RECORD,
+        (json.dumps(record, sort_keys=True) + "\n").encode(),
+        0o600,
+    )
+    sudoers_before = installer.filesystem.read_bytes(host.SUDOERS_PATH)
+    maintenance_begins_before = system.maintenance_begins
+
+    with pytest.raises(host.InstallError, match="maintenance_enabled ledger is invalid"):
+        installer.uninstall(retain_ledger=True)
+
+    assert installer.filesystem.read_bytes(host.SUDOERS_PATH) == sudoers_before
+    assert system.maintenance_begins == maintenance_begins_before
+    assert system.revoked is False
 
 
 def test_uninstall_refuses_unmigrated_legacy_revocation_record(tmp_path: Path) -> None:
@@ -1900,6 +2094,118 @@ class RecordingRunner:
         return host.CommandResult(0)
 
 
+class StatefulAclRunner:
+    _TAG_NAMES: ClassVar[dict[str, str]] = {
+        "u": "user",
+        "g": "group",
+        "m": "mask",
+        "o": "other",
+    }
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+        self.acls: dict[str, dict[bool, dict[tuple[str, str], str]]] = {}
+        self.passwd = {
+            "qianyi": "qianyi:x:2009:2009::/home/qianyi:/bin/bash\n",
+            "hongjian": "hongjian:x:2010:2010::/home/hongjian:/bin/bash\n",
+            "devansh": "devansh:x:2011:2011::/home/devansh:/bin/bash\n",
+        }
+
+    def seed(
+        self,
+        path: Path,
+        *,
+        access: tuple[str, ...],
+        default: tuple[str, ...] = (),
+    ) -> None:
+        self.acls[str(path)] = {
+            False: host._acl_snapshot_map(access, allow_empty=False),
+            True: host._acl_snapshot_map(default, allow_empty=True),
+        }
+
+    @staticmethod
+    def _intersection(left: str, right: str) -> str:
+        return "".join(
+            left[index] if left[index] != "-" and right[index] != "-" else "-" for index in range(3)
+        )
+
+    def _render(self, path: str) -> str:
+        namespaces = self.acls[path]
+        lines: list[str] = []
+        for default in (False, True):
+            entries = namespaces[default]
+            mask = entries.get(("mask", ""))
+            for raw in host._canonical_acl_snapshot(entries):
+                match = host._ACL_SNAPSHOT_ENTRY_RE.fullmatch(raw)
+                assert match is not None
+                tag, qualifier, permissions = match.groups()
+                masked = (tag == "user" and bool(qualifier)) or tag == "group"
+                effective = (
+                    self._intersection(permissions, mask)
+                    if masked and mask is not None
+                    else permissions
+                )
+                prefix = "default:" if default else ""
+                suffix = f"\t#effective:{effective}" if effective != permissions else ""
+                lines.append(f"{prefix}{raw}{suffix}")
+        return "\n".join(lines) + "\n"
+
+    @classmethod
+    def _parse_spec(
+        cls,
+        value: str,
+        *,
+        permissions_required: bool,
+    ) -> tuple[bool, tuple[str, str], str | None]:
+        fields = value.split(":")
+        default = fields[0] == "d"
+        if default:
+            fields = fields[1:]
+        tag = cls._TAG_NAMES[fields[0]]
+        if permissions_required:
+            permissions = fields[-1]
+            qualifier = fields[1] if len(fields) == 3 else ""
+            return default, (tag, qualifier), permissions
+        qualifier = fields[1] if len(fields) == 2 else ""
+        return default, (tag, qualifier), None
+
+    def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        call = list(argv)
+        self.calls.append(call)
+        if call[0] == "getfacl":
+            return host.CommandResult(0, self._render(call[-1]))
+        if call[:2] == ["getent", "passwd"]:
+            qualifier = call[2]
+            if qualifier in self.passwd:
+                return host.CommandResult(0, self.passwd[qualifier])
+            for payload in self.passwd.values():
+                if payload.split(":")[2] == qualifier:
+                    return host.CommandResult(0, payload)
+            return host.CommandResult(2)
+        if call[:2] == ["setfacl", "-k"]:
+            self.acls[call[-1]][True] = {}
+            return host.CommandResult(0)
+        if call[:2] == ["setfacl", "-n"]:
+            path = call[-1]
+            if "-m" in call:
+                raw_modifiers = call[call.index("-m") + 1]
+                for raw in raw_modifiers.split(","):
+                    default, key, permissions = self._parse_spec(
+                        raw,
+                        permissions_required=True,
+                    )
+                    assert permissions is not None
+                    self.acls[path][default][key] = permissions
+            if "-x" in call:
+                raw_removals = call[call.index("-x") + 1]
+                for raw in raw_removals.split(","):
+                    default, key, _ = self._parse_spec(raw, permissions_required=False)
+                    self.acls[path][default].pop(key, None)
+            return host.CommandResult(0)
+        raise AssertionError(f"unexpected command: {call}")
+
+
 class NoopSourceRunner:
     def __init__(
         self,
@@ -1952,6 +2258,457 @@ def test_acl_convergence_uses_named_no_mask_entry_without_owner_or_mode_changes(
     assert "chmod" not in flattened
     assert any(call[:4] == ["setfacl", "-n", "-m", "u:loom-rollout:r--"] for call in runner.calls)
     assert all("admin-token-fixture" not in " ".join(call) for call in runner.calls)
+
+
+def test_acl_converges_masked_preexisting_service_and_restores_without_removing_it() -> None:
+    path = host.PROTECTED_INPUTS[3]
+    before = (
+        "user::rw-",
+        "user:loom-rollout:r--",
+        "group::---",
+        "mask::---",
+        "other::---",
+    )
+    runner = StatefulAclRunner()
+    runner.seed(path, access=before)
+    system = host.HostSystem(runner)
+
+    plan = system._plan_acl(path, permissions="r--", default=False)
+
+    assert plan is not None
+    assert plan.adds_service_entry is False
+    assert plan.mask_adjustment is not None
+    assert plan.mask_adjustment.before_mask == "---"
+    assert plan.mask_adjustment.after_mask == "r--"
+    system.apply_acl(plan)
+    assert system._acl_entry(path, default=False) == ("r--", "r--")
+    assert any("m::r--" in call for call in runner.calls if call[0] == "setfacl")
+
+    system.remove_acl(
+        plan.grant,
+        plan.mask_adjustment,
+        remove_service_entry=False,
+    )
+
+    assert host._canonical_acl_snapshot(runner.acls[str(path)][False]) == before
+
+
+def test_acl_rollback_removes_ledgered_service_but_preserves_original_mask() -> None:
+    path = host.PROTECTED_INPUTS[3]
+    before = (
+        "user::rw-",
+        "user:loom-rollout:r--",
+        "group::---",
+        "mask::---",
+        "other::---",
+    )
+    runner = StatefulAclRunner()
+    runner.seed(path, access=before)
+    system = host.HostSystem(runner)
+    plan = system._plan_acl(path, permissions="r--", default=False)
+    assert plan is not None and plan.mask_adjustment is not None
+    system.apply_acl(plan)
+
+    system.remove_acl(
+        plan.grant,
+        plan.mask_adjustment,
+        remove_service_entry=True,
+    )
+
+    assert host._canonical_acl_snapshot(runner.acls[str(path)][False]) == (
+        "user::rw-",
+        "group::---",
+        "mask::---",
+        "other::---",
+    )
+
+
+def test_acl_mask_expansion_allows_only_declared_operator_gains() -> None:
+    path = host.DATA_DIRECTORIES[1]
+    runner = StatefulAclRunner()
+    runner.seed(
+        path,
+        access=(
+            "user::rwx",
+            "user:devansh:rwx",
+            "user:hongjian:rwx",
+            "group::---",
+            "mask::---",
+            "other::---",
+        ),
+    )
+    system = host.HostSystem(runner)
+
+    plan = system._plan_acl(path, permissions="rwx", default=False)
+
+    assert plan is not None and plan.mask_adjustment is not None
+    assert plan.mask_adjustment.after_mask == "rwx"
+    system.apply_acl(plan)
+    rendered = runner._render(str(path))
+    assert "user:devansh:rwx" in rendered
+    assert "user:hongjian:rwx" in rendered
+    assert "user:loom-rollout:rwx" in rendered
+    assert "#effective" not in rendered
+
+
+def test_acl_mask_expansion_preserves_uid_2012_without_new_effective_bits() -> None:
+    path = host.DATA_DIRECTORIES[1]
+    runner = StatefulAclRunner()
+    runner.seed(
+        path,
+        access=(
+            "user::rwx",
+            "user:2012:r--",
+            "group::---",
+            "mask::r--",
+            "other::---",
+        ),
+    )
+    system = host.HostSystem(runner)
+
+    plan = system._plan_acl(path, permissions="rwx", default=False)
+
+    assert plan is not None and plan.mask_adjustment is not None
+    system.apply_acl(plan)
+    assert "user:2012:r--" in runner._render(str(path))
+
+
+@pytest.mark.parametrize(
+    "affected_entry",
+    [
+        "user:2012:r--",
+        "user:undeclared:r--",
+        "group:undeclared:r--",
+        "group::r--",
+    ],
+)
+def test_acl_mask_expansion_rejects_undeclared_principal_gain(
+    affected_entry: str,
+) -> None:
+    path = host.PROTECTED_INPUTS[3]
+    runner = StatefulAclRunner()
+    base = ["user::rw-", "group::---", "mask::---", "other::---"]
+    if affected_entry.startswith("group::"):
+        base[1] = affected_entry
+    else:
+        base.insert(1, affected_entry)
+    runner.seed(path, access=tuple(base))
+
+    with pytest.raises(host.InstallError, match="undeclared principal"):
+        host.HostSystem(runner)._plan_acl(path, permissions="r--", default=False)
+
+    assert all(call[0] != "setfacl" for call in runner.calls)
+
+
+def test_acl_mask_expansion_rejects_operator_name_resolved_to_uid_2012() -> None:
+    path = host.PROTECTED_INPUTS[3]
+    runner = StatefulAclRunner()
+    runner.passwd["devansh"] = "devansh:x:2012:2012::/home/devansh:/bin/bash\n"
+    runner.seed(
+        path,
+        access=(
+            "user::rw-",
+            "user:devansh:r--",
+            "group::---",
+            "mask::---",
+            "other::---",
+        ),
+    )
+
+    with pytest.raises(host.InstallError, match="undeclared principal"):
+        host.HostSystem(runner)._plan_acl(path, permissions="r--", default=False)
+
+    assert all(call[0] != "setfacl" for call in runner.calls)
+
+
+def test_acl_initializes_and_fully_removes_installer_created_default_acl() -> None:
+    path = host.DATA_DIRECTORIES[0]
+    access = ("user::rwx", "group::rwx", "mask::---", "other::---")
+    runner = StatefulAclRunner()
+    runner.seed(path, access=access)
+    system = host.HostSystem(runner)
+
+    plan = system._plan_acl(path, permissions="rwx", default=True)
+
+    assert plan is not None and plan.mask_adjustment is not None
+    assert plan.before_acl == ()
+    assert "group::---" in plan.after_acl
+    system.apply_acl(plan)
+    assert "default:user:loom-rollout:rwx" in runner._render(str(path))
+    system.remove_acl(plan.grant, plan.mask_adjustment, remove_service_entry=True)
+    assert runner.acls[str(path)][True] == {}
+    assert host._canonical_acl_snapshot(runner.acls[str(path)][False]) == access
+    assert ["setfacl", "-k", str(path)] in runner.calls
+
+
+@pytest.mark.parametrize("default", [False, True])
+def test_acl_rollback_removes_installer_created_mask_from_existing_base(
+    default: bool,
+) -> None:
+    path = host.DATA_DIRECTORIES[0] if default else host.PROTECTED_INPUTS[4]
+    access = ("user::rwx", "group::---", "other::---")
+    baseline = access if default else ("user::rw-", "group::r--", "other::---")
+    runner = StatefulAclRunner()
+    runner.seed(
+        path,
+        access=access if default else baseline,
+        default=baseline if default else (),
+    )
+    system = host.HostSystem(runner)
+    permissions = "rwx" if default else "r--"
+
+    plan = system._plan_acl(path, permissions=permissions, default=default)
+
+    assert plan is not None and plan.mask_adjustment is not None
+    assert plan.mask_adjustment.before_mask is None
+    system.apply_acl(plan)
+    system.remove_acl(plan.grant, plan.mask_adjustment, remove_service_entry=True)
+    restored = system._acl_snapshot(system._acl_entries(path), default=default)
+    assert restored == baseline
+
+
+def test_acl_apply_rejects_plan_time_drift_before_setfacl() -> None:
+    path = host.PROTECTED_INPUTS[3]
+    runner = StatefulAclRunner()
+    runner.seed(
+        path,
+        access=(
+            "user::rw-",
+            "user:loom-rollout:r--",
+            "group::---",
+            "mask::---",
+            "other::---",
+        ),
+    )
+    system = host.HostSystem(runner)
+    plan = system._plan_acl(path, permissions="r--", default=False)
+    assert plan is not None
+    runner.acls[str(path)][False][("user", "undeclared")] = "r--"
+
+    with pytest.raises(host.InstallError, match="changed before convergence"):
+        system.apply_acl(plan)
+
+    assert all(call[0] != "setfacl" for call in runner.calls)
+
+
+def test_acl_apply_rejects_unexpected_readback_subject() -> None:
+    class InjectingRunner(StatefulAclRunner):
+        inject = False
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            call = list(argv)
+            if call[0] == "getfacl" and self.inject:
+                self.acls[call[-1]][False][("user", "undeclared")] = "---"
+                self.inject = False
+            result = super().run(argv, **kwargs)
+            if call[0] == "setfacl":
+                self.inject = True
+            return result
+
+    path = host.PROTECTED_INPUTS[3]
+    runner = InjectingRunner()
+    runner.seed(path, access=("user::rw-", "group::---", "other::---"))
+    system = host.HostSystem(runner)
+    plan = system._plan_acl(path, permissions="r--", default=False)
+    assert plan is not None
+
+    with pytest.raises(host.InstallError, match="did not converge"):
+        system.apply_acl(plan)
+
+
+def test_acl_mask_adjustment_record_round_trip_and_validation() -> None:
+    path = host.PROTECTED_INPUTS[3]
+    runner = StatefulAclRunner()
+    runner.seed(
+        path,
+        access=(
+            "user::rw-",
+            "user:loom-rollout:r--",
+            "group::---",
+            "mask::---",
+            "other::---",
+        ),
+    )
+    plan = host.HostSystem(runner)._plan_acl(path, permissions="r--", default=False)
+    assert plan is not None and plan.mask_adjustment is not None
+    value = plan.mask_adjustment.to_dict()
+
+    assert host.AclMaskAdjustment.from_dict(value) == plan.mask_adjustment
+    value["after_mask"] = "---"
+    with pytest.raises(host.InstallError, match="inconsistent"):
+        host.AclMaskAdjustment.from_dict(value)
+
+
+def _fake_mask_plan(path: Path, *, service_preexisting: bool = False) -> host.AclPlan:
+    before = ["user::rw-"]
+    if service_preexisting:
+        before.append("user:loom-rollout:r--")
+    before.extend(["group::---", "mask::---", "other::---"])
+    after = ["user::rw-", "user:loom-rollout:r--", "group::---", "mask::r--", "other::---"]
+    adjustment = host.AclMaskAdjustment.from_dict(
+        {
+            "path": str(path),
+            "default": False,
+            "before_mask": "---",
+            "after_mask": "r--",
+            "before_acl": before,
+            "after_acl": after,
+        }
+    )
+    return host.AclPlan(
+        grant=host.AclGrant(path),
+        permissions="r--",
+        adds_service_entry=not service_preexisting,
+        before_acl=adjustment.before_acl,
+        after_acl=adjustment.after_acl,
+        mask_adjustment=adjustment,
+    )
+
+
+def test_partial_acl_apply_persists_all_mask_preimages_and_retries(tmp_path: Path) -> None:
+    installer, system = _installer(tmp_path)
+    plans = {
+        host.PROTECTED_INPUTS[0]: _fake_mask_plan(host.PROTECTED_INPUTS[0]),
+        host.PROTECTED_INPUTS[1]: _fake_mask_plan(host.PROTECTED_INPUTS[1]),
+    }
+
+    def planned_input(path: Path) -> tuple[host.AclPlan, ...]:
+        plan = plans.get(path)
+        if plan is None:
+            return ()
+        if system.acl_adjustment_states.get(plan.grant) == "after":
+            return ()
+        return (plan,)
+
+    system.plan_input_acl = planned_input  # type: ignore[method-assign]
+    system.plan_data_acl = lambda path: ()  # type: ignore[method-assign]
+    original_apply = system.apply_acl
+    calls = 0
+
+    def fail_before_second(plan: host.AclPlan) -> host.AclGrant:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise host.InstallError("injected ACL mask failure")
+        return original_apply(plan)
+
+    system.apply_acl = fail_before_second  # type: ignore[method-assign]
+    with pytest.raises(host.InstallError, match="ACL mask failure"):
+        installer.install(TEAM_ID)
+
+    interrupted = installer.filesystem.load_install_record()
+    assert interrupted is not None
+    assert interrupted["installation_state"] == "installing"
+    assert len(interrupted["acl_mask_adjustments"]) == 2
+    assert system.acl_adjustment_states[plans[host.PROTECTED_INPUTS[0]].grant] == "after"
+    assert plans[host.PROTECTED_INPUTS[1]].grant not in system.acl_adjustment_states
+
+    system.apply_acl = original_apply  # type: ignore[method-assign]
+    result = installer.install(TEAM_ID)
+
+    assert result["ok"] is True
+    ready = installer.filesystem.load_install_record()
+    assert ready is not None
+    assert ready["installation_state"] == "ready"
+    assert len(ready["acl_mask_adjustments"]) == 2
+    assert set(system.acl_adjustment_states.values()) == {"after"}
+
+    installer.uninstall(retain_ledger=True)
+    assert set(system.acl_adjustment_states.values()) == {"before"}
+    assert system.input_acls == set()
+
+
+def test_preexisting_masked_service_acl_is_not_claimed_by_install_ledger(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    path = host.PROTECTED_INPUTS[3]
+    plan = _fake_mask_plan(path, service_preexisting=True)
+    system.input_acls.add(path)
+    system.plan_input_acl = (  # type: ignore[method-assign]
+        lambda candidate: (plan,) if candidate == path else ()
+    )
+    system.plan_data_acl = lambda candidate: ()  # type: ignore[method-assign]
+
+    installer.install(TEAM_ID)
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    assert plan.grant not in host.HostInstaller._record_grants(record)
+    assert plan.grant in host.HostInstaller._record_mask_adjustments(record)
+
+    installer.uninstall(retain_ledger=True)
+    assert path in system.input_acls
+    assert system.acl_adjustment_states[plan.grant] == "before"
+
+
+def test_check_reports_recorded_acl_mask_drift(tmp_path: Path) -> None:
+    installer, system = _installer(tmp_path)
+    path = host.PROTECTED_INPUTS[3]
+    plan = _fake_mask_plan(path)
+
+    def planned_input(candidate: Path) -> tuple[host.AclPlan, ...]:
+        if candidate != path or system.acl_adjustment_states.get(plan.grant) == "after":
+            return ()
+        return (plan,)
+
+    system.plan_input_acl = planned_input  # type: ignore[method-assign]
+    system.plan_data_acl = lambda candidate: ()  # type: ignore[method-assign]
+    installer.install(TEAM_ID)
+    assert installer.check()["ok"] is True
+
+    system.acl_adjustment_states[plan.grant] = "drift"
+    result = installer.check()
+
+    assert result["ok"] is False
+    assert f"acl-mask:access:{path}" in result["failures"]
+
+
+def test_acl_mask_ledger_rejects_duplicates_and_unmanaged_paths() -> None:
+    managed = _fake_mask_plan(host.PROTECTED_INPUTS[0]).mask_adjustment
+    assert managed is not None
+    value = managed.to_dict()
+    with pytest.raises(host.InstallError, match="mask ledger"):
+        host.HostInstaller._record_mask_adjustments({"acl_mask_adjustments": [value, value]})
+
+    value["path"] = "/tmp/unmanaged"
+    with pytest.raises(host.InstallError, match="mask ledger"):
+        host.HostInstaller._record_mask_adjustments({"acl_mask_adjustments": [value]})
+
+    for schema_version in (1, 2):
+        assert host.HostInstaller._record_mask_adjustments({"schema_version": schema_version}) == {}
+        with pytest.raises(host.InstallError, match="legacy install record"):
+            host.HostInstaller._record_mask_adjustments(
+                {"schema_version": schema_version, "acl_mask_adjustments": []}
+            )
+
+
+def test_uninstall_rejects_cross_ledger_ownership_drift_before_mutation(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    path = host.PROTECTED_INPUTS[3]
+    plan = _fake_mask_plan(path)
+    system.plan_input_acl = (  # type: ignore[method-assign]
+        lambda candidate: (plan,) if candidate == path else ()
+    )
+    system.plan_data_acl = lambda candidate: ()  # type: ignore[method-assign]
+    installer.install(TEAM_ID)
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    record["added_acls"] = [value for value in record["added_acls"] if value["path"] != str(path)]
+    installer.filesystem.atomic_write(
+        host.INSTALL_RECORD,
+        (json.dumps(record, sort_keys=True) + "\n").encode(),
+        0o600,
+    )
+
+    with pytest.raises(host.InstallError, match="ACL ledgers are inconsistent"):
+        installer.uninstall(retain_ledger=True)
+
+    assert installer.filesystem.exists(host.SUDOERS_PATH)
+    assert system.maintenance_begins == 1  # install only
+    assert system.revoked is False
+    assert path in system.input_acls
 
 
 def test_unchanged_root_source_performs_no_clone_fetch_checkout_or_install(
