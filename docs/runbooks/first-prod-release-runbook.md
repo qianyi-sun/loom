@@ -273,7 +273,14 @@ path; after a failed validation the default `auto` release intent switches to
 `draining` instead of stopping active work.
 
 The runner queues host-local node-agent starts with `systemctl --no-block` and
-uses the Control Plane status gate to prove convergence. A long-running
+uses the Control Plane status gate to prove convergence. Before it mutates
+desired state, the runner requires one coherent candidate identity: identical
+image/env tags, a matching tag SHA prefix, and an exact full
+`source_git_commit`. Before the validation command starts, every selected node
+must then report the exact environment/pool/image/env/source, clean checkout,
+unique linked active/fresh worker id, and docker backend; malformed or reused
+linked/unlinked worker ids fail closed. A candidate-identity failure occurs
+before any active or cleanup desired-state mutation. A long-running
 `Type=oneshot` node-agent must not block summary writing or validation resume;
 per-host SSH start calls are bounded by `--node-agent-command-timeout`.
 
