@@ -65,6 +65,8 @@ TRUST_LOCK_FD_ENV = "LOOM_GB10_TRUST_LOCK_FD"
 KNOWN_HOSTS_PATH = Path("/etc/loom/staging-rollout-gb10-known-hosts")
 SYSTEM_PYTHON = Path("/usr/bin/python3")
 UV_BINARY = Path("/usr/local/bin/uv")
+SYSTEM_SHELL = Path("/bin/sh")
+SYSTEM_GIT = Path("/usr/bin/git")
 
 PROTECTED_INPUTS = (
     Path("/shared_work/qianyi/loom-worker-capacity/staging-admin-token"),
@@ -78,6 +80,7 @@ DATA_DIRECTORIES = (
     Path("/data/loom-staging/postgres"),
     Path("/data/loom-staging/minio"),
     Path("/data/loom-staging/backups"),
+    Path("/data/loom-staging/environment-state"),
 )
 
 _FINGERPRINT_TOKEN = "__ADMIN_TOKEN_FINGERPRINT__"
@@ -653,6 +656,7 @@ def _validate_owned_tree(
     expected_uid: int,
     expected_gid: int,
     allowed_external_symlink_targets: tuple[Path, ...] = (),
+    require_nonwritable: bool = True,
 ) -> None:
     """Reject writable or replaceable descendants in an executable authority tree."""
     try:
@@ -686,8 +690,115 @@ def _validate_owned_tree(
                 continue
             if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
                 raise InstallError(f"authority tree contains a special file: {root}")
-            if stat.S_IMODE(metadata.st_mode) & 0o022:
+            if require_nonwritable and stat.S_IMODE(metadata.st_mode) & 0o022:
                 raise InstallError(f"authority tree is group/world writable: {root}")
+
+
+def _harden_owned_tree(
+    root: Path,
+    *,
+    expected_uid: int,
+    expected_gid: int,
+) -> bool:
+    """Remove group/world write bits from an otherwise safe owned tree."""
+    _validate_owned_tree(
+        root,
+        expected_uid=expected_uid,
+        expected_gid=expected_gid,
+        require_nonwritable=False,
+    )
+    changed = False
+    visited: set[Path] = set()
+    for directory, directories, filenames in os.walk(root, followlinks=False):
+        current = Path(directory)
+        paths = [
+            current,
+            *(current / name for name in directories),
+            *(current / name for name in filenames),
+        ]
+        for path in paths:
+            if path in visited:
+                continue
+            visited.add(path)
+            try:
+                before = os.lstat(path)
+            except OSError as exc:
+                raise InstallError(f"authority tree changed during hardening: {root}") from exc
+            if stat.S_ISLNK(before.st_mode):
+                continue
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+            )
+            if stat.S_ISDIR(before.st_mode):
+                flags |= getattr(os, "O_DIRECTORY", 0)
+            try:
+                fd = os.open(path, flags)
+            except OSError as exc:
+                raise InstallError(f"authority tree changed during hardening: {root}") from exc
+            try:
+                opened = os.fstat(fd)
+                if (
+                    (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                    or opened.st_uid != expected_uid
+                    or opened.st_gid != expected_gid
+                    or not (stat.S_ISDIR(opened.st_mode) or stat.S_ISREG(opened.st_mode))
+                ):
+                    raise InstallError(f"authority tree changed during hardening: {root}")
+                mode = stat.S_IMODE(opened.st_mode)
+                hardened = mode & ~0o022
+                if hardened != mode:
+                    os.fchmod(fd, hardened)
+                    changed = True
+            finally:
+                os.close(fd)
+    _validate_owned_tree(root, expected_uid=expected_uid, expected_gid=expected_gid)
+    return changed
+
+
+def _validate_git_checkout_tree(
+    root: Path,
+    *,
+    expected_uid: int,
+    expected_gid: int,
+    require_nonwritable: bool = True,
+) -> None:
+    _validate_owned_tree(
+        root,
+        expected_uid=expected_uid,
+        expected_gid=expected_gid,
+        require_nonwritable=require_nonwritable,
+    )
+    try:
+        git_dir = os.lstat(root / ".git")
+    except OSError as exc:
+        raise InstallError(f"Git authority directory is unavailable: {root}") from exc
+    if (
+        not stat.S_ISDIR(git_dir.st_mode)
+        or stat.S_ISLNK(git_dir.st_mode)
+        or git_dir.st_uid != expected_uid
+        or git_dir.st_gid != expected_gid
+    ):
+        raise InstallError(f"Git authority directory is unsafe: {root}")
+
+
+def _validate_root_authority_parent_chain(path: Path) -> None:
+    """Require every replaceable parent of a root authority to be root-controlled."""
+    for parent in path.parents:
+        try:
+            metadata = os.lstat(parent)
+        except OSError as exc:
+            raise InstallError(f"root authority parent is unavailable: {path}") from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            raise InstallError(f"root authority parent is unsafe: {path}")
 
 
 def _safe_root_executable(path: Path, *, label: str) -> Path:
@@ -986,9 +1097,14 @@ class HostSystem:
             raise InstallError("installer requires systemd")
         python = _safe_root_executable(SYSTEM_PYTHON, label="system Python")
         _safe_root_executable(UV_BINARY, label="uv")
+        _safe_root_executable(SYSTEM_SHELL, label="system shell")
+        _safe_root_executable(SYSTEM_GIT, label="system Git")
         self._validate_system_python_version(python)
 
     def _validate_repo_contract(self, repo: Path, *, root_owned: bool) -> None:
+        if root_owned:
+            _validate_root_authority_parent_chain(repo)
+            _validate_git_checkout_tree(repo, expected_uid=0, expected_gid=0)
         remotes = self.runner.run(["git", "-C", str(repo), "remote"]).stdout.splitlines()
         urls = self.runner.run(
             ["git", "-C", str(repo), "config", "--get-all", "remote.origin.url"]
@@ -1001,22 +1117,15 @@ class HostSystem:
         ).stdout
         if remotes != ["origin"] or urls != [REMOTE_URL] or pushurl.returncode == 0 or dirty:
             raise InstallError("Git source is dirty or does not use the single approved origin")
-        if root_owned:
-            for path in (RUNNER_ROOT, repo, repo / ".git"):
-                metadata = self.runner.run(["stat", "-c", "%F:%U:%G:%a", str(path)]).stdout.strip()
-                parts = metadata.split(":")
-                if (
-                    len(parts) != 4
-                    or parts[0] != "directory"
-                    or parts[1:3] != ["root", "root"]
-                    or re.fullmatch(r"[0-7]{3,4}", parts[3]) is None
-                    or int(parts[3], 8) & 0o022
-                ):
-                    raise InstallError("root installation source ownership is unsafe")
-            _validate_owned_tree(repo, expected_uid=0, expected_gid=0)
 
     def validate_invocation_checkout(self) -> str:
-        self._validate_repo_contract(REPO_ROOT, root_owned=False)
+        """Detect bootstrap checkout drift before installer-managed mutation.
+
+        The operator must establish this root-owned checkout before Python is
+        executed. This in-process check is defense in depth, not a bootstrap
+        trust boundary against an already malicious checkout.
+        """
+        self._validate_repo_contract(REPO_ROOT, root_owned=True)
         head = self.runner.run(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"]).stdout.strip()
         if _SHA_RE.fullmatch(head) is None:
             raise InstallError("installer checkout HEAD is invalid")
@@ -1268,18 +1377,42 @@ class HostSystem:
                 "-i",
                 f"HOME={STATE_ROOT}",
                 "PATH=/usr/bin:/bin",
-                "git",
+                "GIT_CONFIG_NOSYSTEM=1",
+                "GIT_CONFIG_GLOBAL=/dev/null",
+                "GIT_TERMINAL_PROMPT=0",
+                str(SYSTEM_SHELL),
+                "-c",
+                'umask 077; exec "$@"',
+                "loom-staging-git",
+                str(SYSTEM_GIT),
                 *arguments,
             ],
             check=check,
         )
 
-    def ensure_candidate(self, expected_sha: str, *, refresh: bool) -> None:
+    def ensure_candidate(self, expected_sha: str, *, refresh: bool) -> bool:
         if _SHA_RE.fullmatch(expected_sha) is None:
             raise InstallError("candidate checkout SHA is invalid")
+        changed = False
+        service_uid, service_gid = self._service_ids()
         if self._probe(["test", "-d", str(CANDIDATE_REPO / ".git")]).returncode != 0:
             self._service_git("clone", "--origin", "origin", REMOTE_URL, str(CANDIDATE_REPO))
             refresh = True
+            changed = True
+        _validate_git_checkout_tree(
+            CANDIDATE_REPO,
+            expected_uid=service_uid,
+            expected_gid=service_gid,
+            require_nonwritable=False,
+        )
+        changed = (
+            _harden_owned_tree(
+                CANDIDATE_REPO,
+                expected_uid=service_uid,
+                expected_gid=service_gid,
+            )
+            or changed
+        )
         remotes = self._service_git("-C", str(CANDIDATE_REPO), "remote").stdout.splitlines()
         urls = self._service_git(
             "-C", str(CANDIDATE_REPO), "config", "--get-all", "remote.origin.url"
@@ -1324,12 +1457,31 @@ class HostSystem:
                 "--detach",
                 expected_sha,
             )
+            changed = True
+        changed = (
+            _harden_owned_tree(
+                CANDIDATE_REPO,
+                expected_uid=service_uid,
+                expected_gid=service_gid,
+            )
+            or changed
+        )
         head = self._service_git("-C", str(CANDIDATE_REPO), "rev-parse", "HEAD").stdout.strip()
         if head != expected_sha:
             raise InstallError("candidate checkout did not converge to the installed source SHA")
+        return changed
 
     def candidate_ready(self, expected_sha: str) -> bool:
         if self._probe(["test", "-d", str(CANDIDATE_REPO / ".git")]).returncode != 0:
+            return False
+        try:
+            service_uid, service_gid = self._service_ids()
+            _validate_git_checkout_tree(
+                CANDIDATE_REPO,
+                expected_uid=service_uid,
+                expected_gid=service_gid,
+            )
+        except InstallError:
             return False
         remotes = self._service_git(
             "-C", str(CANDIDATE_REPO), "remote", check=False
@@ -2270,40 +2422,7 @@ class HostSystem:
         service_groups = set(self._probe(["id", "-nG", SERVICE_USER]).stdout.split())
         if service_groups != {SERVICE_USER, "docker"}:
             failures.append("service-groups")
-        origin = self._service_git(
-            "-C",
-            str(CANDIDATE_REPO),
-            "config",
-            "--get-all",
-            "remote.origin.url",
-            check=False,
-        )
-        pushurl = self._service_git(
-            "-C",
-            str(CANDIDATE_REPO),
-            "config",
-            "--get-all",
-            "remote.origin.pushurl",
-            check=False,
-        )
-        dirty = self._service_git(
-            "-C",
-            str(CANDIDATE_REPO),
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            check=False,
-        )
-        remotes = self._service_git("-C", str(CANDIDATE_REPO), "remote", check=False)
-        head = self._service_git("-C", str(CANDIDATE_REPO), "rev-parse", "HEAD", check=False)
-        if (
-            remotes.stdout.splitlines() != ["origin"]
-            or origin.stdout.splitlines() != [REMOTE_URL]
-            or pushurl.returncode == 0
-            or dirty.stdout
-            or head.returncode != 0
-            or head.stdout.strip() != expected_sha
-        ):
+        if not service_account_ready or not self.candidate_ready(expected_sha):
             failures.append("candidate-checkout")
         for path in PROTECTED_INPUTS:
             try:
@@ -3194,7 +3313,8 @@ class HostInstaller:
             if self.system.ensure_owned_directory(directory, owner=SERVICE_USER, mode=mode):
                 changes.append(f"directory:{directory}")
 
-        self.system.ensure_candidate(source_sha, refresh=refresh_runtime)
+        if self.system.ensure_candidate(source_sha, refresh=refresh_runtime):
+            changes.append("candidate-checkout")
         if venv_lock_requires_hardening:
             self.system.harden_venv_lock()
             changes.append("venv-lock")

@@ -1424,9 +1424,15 @@ a run.
 #### Root installation and update
 
 Installation is a root maintenance action, not part of each rollout. Run it
-only from a clean merged checkout that is reachable from the freshly fetched
-current `origin/dev`. The installer takes its assets from that exact fresh
-`dev` head, never from unmerged working-tree content:
+only from a clean root-owned merged checkout beneath a root-owned,
+non-group/world-writable parent chain. A developer-owned checkout remains
+replaceable after `sudo`, triggers Git's dubious-ownership protection, and is
+not supported; never add it to global `safe.directory`. This is an operator
+bootstrap prerequisite: the script cannot establish checkout trust after
+Python has already loaded it. Its in-process ownership check catches accidental
+drift before installer-managed mutation, not a malicious checkout controlled by
+an already root-equivalent operator. The installer takes its assets from the
+exact freshly fetched `dev` head, never from unmerged working-tree content.
 
 The host must provide Ubuntu with systemd, a root-owned `/usr/bin/python3`
 whose resolved executable stays under `/usr` and reports Python 3.11 or newer,
@@ -1522,11 +1528,44 @@ records that the whole default ACL was absent. Because the ACL mask is represent
 the numeric group mode bits, inspect `getfacl` raw/effective entries rather than
 using mode alone as the permission proof.
 
+Protected-input parents intentionally grant only traverse (`--x`) permission;
+the leaf grants read (`r--`). Linux preflight opens those parent descriptors
+with `O_PATH|O_DIRECTORY|O_NOFOLLOW`, preserving no-listing access while still
+rejecting symlinked path components. The data contract includes
+the declared rollout, Postgres, MinIO, backup, and pre-existing
+`environment-state` subdirectories. Each receives access/default `rwx`; the
+staging root remains read/traverse-only. This explicit environment-state grant
+is required because a new parent default ACL does not retrofit an existing
+directory, and step 10 atomically replaces `environment-state/staging.toml`.
+
+Create the fixed invocation checkout as root with a deterministic umask. On a
+later update, require a clean checkout, fetch `dev`, and detach at the fetched
+remote head. Do not force over local drift:
+
 ```bash
-sudo ./scripts/ops/staging_rollout_host.py plan
-sudo ./scripts/ops/staging_rollout_host.py install \
+INSTALLER_CHECKOUT=/root/loom-staging-installer
+sudo /bin/sh -c 'umask 077; exec /usr/bin/git "$@"' loom-staging-git \
+  clone --origin origin --branch dev --single-branch \
+  https://github.com/qianyi-sun/loom.git "$INSTALLER_CHECKOUT"
+
+# Subsequent merged-dev refreshes:
+sudo /bin/sh -c 'umask 077; exec /usr/bin/git "$@"' loom-staging-git \
+  -C "$INSTALLER_CHECKOUT" status --porcelain=v1 --untracked-files=all
+sudo /bin/sh -c 'umask 077; exec /usr/bin/git "$@"' loom-staging-git \
+  -C "$INSTALLER_CHECKOUT" fetch --prune origin \
+  refs/heads/dev:refs/remotes/origin/dev
+sudo /bin/sh -c 'umask 077; exec /usr/bin/git "$@"' loom-staging-git \
+  -C "$INSTALLER_CHECKOUT" checkout --detach refs/remotes/origin/dev
+
+sudo "$INSTALLER_CHECKOUT/scripts/ops/staging_rollout_host.py" plan
+sudo "$INSTALLER_CHECKOUT/scripts/ops/staging_rollout_host.py" install \
   --smoke-on-behalf-team-id "<agentic-rl-team-uuid>"
 ```
+
+For first installation, run the clone command only when the destination is
+absent. For updates, skip clone and use the three refresh commands. An occupied,
+dirty, wrongly owned, writable, or wrong-origin checkout must be inspected and
+recreated as a new root-owned path rather than repaired in place.
 
 Once per newly generated service-key lifecycle, use one explicitly approved
 Ed25519 admin identity as the bootstrap channel to the exact 14-host active
@@ -1563,7 +1602,7 @@ sudo /opt/loom-staging-runner/venv/bin/python \
   /usr/local/libexec/loom-staging-rollout-gb10-trust rotate-bootstrap \
   --bootstrap-identity /secure/path/<approved-admin-ed25519-key>
 
-sudo ./scripts/ops/staging_rollout_host.py check --format json
+sudo "$INSTALLER_CHECKOUT/scripts/ops/staging_rollout_host.py" check --format json
 loom-staging-rollout start --dry-run
 ```
 
@@ -1572,7 +1611,13 @@ policy, files, ownership, ACLs, service state, and merged `dev` SHA already
 match. An update first disables broker admission under the shared launch lock
 and refuses while a rollout is active. A failed update keeps admission disabled
 and records an uninstall-safe recovery ledger rather than exposing a partially
-updated runner. Before any ACL write, that provisional root-owned ledger stores
+updated runner. Candidate Git runs as `loom-rollout` through a fixed clean
+environment and `0077` umask. Existing group/world write bits are removed only
+inside that maintenance transaction and only after full service ownership,
+ordinary entry type, and contained-symlink validation; foreign ownership,
+special files, or escaping symlinks fail closed. Candidate readiness repeats
+the complete non-writable-tree validation before any Git command. Before any
+ACL write, the provisional root-owned ledger stores
 the complete before and expected after ACL for every mask change. A retry accepts
 only those exact states and never resamples drift as a new baseline. The write
 also upgrades legacy schema v1 or trust-ledger schema v2 install records to v3;

@@ -43,6 +43,13 @@ _REQUIRED_IMPORTS = (
     "loom_benchmarks.adapters.skilllearnbench",
     "loom_benchmark_terminal_bench_2.adapter",
 )
+_REQUIRED_ROLLOUT_SUBDIRECTORIES = (
+    "rollouts",
+    "postgres",
+    "minio",
+    "backups",
+    "environment-state",
+)
 FULL_GB10_HOSTS = tuple(f"trt-gb10-{number}" for number in range(1, 16))
 TEMPORARILY_EXCLUDED_GB10_HOSTS = frozenset({"trt-gb10-7"})
 ACTIVE_GB10_HOSTS = tuple(
@@ -168,8 +175,10 @@ def _trusted_file_bytes(
     if not normalized.is_absolute():
         return None
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    # Linux O_PATH preserves the installer contract of traverse-only parent
+    # ACLs; O_RDONLY would also require directory listing permission.
     directory_flags = (
-        os.O_RDONLY
+        getattr(os, "O_PATH", os.O_RDONLY)
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_DIRECTORY", 0)
         | getattr(os, "O_NOFOLLOW", 0)
@@ -244,18 +253,63 @@ def _source_path(source: str) -> Path | None:
     return path if path.is_absolute() and ".." not in path.parts else None
 
 
+def _directory_has_access(path: Path, modes: tuple[int, ...]) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    return bool(
+        stat.S_ISDIR(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and all(os.access(path, mode) for mode in modes)
+    )
+
+
+def _checkout_tree_is_trusted(root: Path, *, service_uid: int) -> bool:
+    allowed_owners = {0, service_uid}
+    try:
+        root_metadata = root.lstat()
+        root_resolved = root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    if (
+        not stat.S_ISDIR(root_metadata.st_mode)
+        or stat.S_ISLNK(root_metadata.st_mode)
+        or root_metadata.st_uid not in allowed_owners
+        or stat.S_IMODE(root_metadata.st_mode) & 0o022
+    ):
+        return False
+    for directory, directories, filenames in os.walk(root, followlinks=False):
+        for name in [".", *directories, *filenames]:
+            path = Path(directory) if name == "." else Path(directory) / name
+            try:
+                metadata = path.lstat()
+            except OSError:
+                return False
+            if metadata.st_uid not in allowed_owners:
+                return False
+            if stat.S_ISLNK(metadata.st_mode):
+                try:
+                    target = (path.parent / os.readlink(path)).resolve(strict=False)
+                except (OSError, RuntimeError):
+                    return False
+                if not target.is_relative_to(root_resolved):
+                    return False
+                continue
+            if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
+                return False
+            if stat.S_IMODE(metadata.st_mode) & 0o022:
+                return False
+    try:
+        git_dir = (root / ".git").lstat()
+    except OSError:
+        return False
+    return stat.S_ISDIR(git_dir.st_mode) and not stat.S_ISLNK(git_dir.st_mode)
+
+
 def _checkout_is_trusted(config: OperatorConfig, *, service_uid: int) -> bool:
-    for path in (config.runner_repo, config.runner_repo / ".git"):
-        try:
-            metadata = path.lstat()
-        except OSError:
-            return False
-        if (
-            not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_uid not in {0, service_uid}
-            or stat.S_IMODE(metadata.st_mode) & 0o022
-        ):
-            return False
+    if not _checkout_tree_is_trusted(config.runner_repo, service_uid=service_uid):
+        return False
     return (
         _readable_config_bytes(
             config.runner_repo / ".git" / "config",
@@ -511,8 +565,18 @@ def collect_preflight(
         "restore access to the staging namespace",
     )
 
-    data_ok = all(os.access(config.rollout_root, mode) for mode in (os.R_OK, os.W_OK, os.X_OK))
-    add("data-root", data_ok, "restore service read write and traverse access to staging data")
+    data_ok = _directory_has_access(config.rollout_root, (os.R_OK, os.X_OK)) and all(
+        _directory_has_access(
+            config.rollout_root / name,
+            (os.R_OK, os.W_OK, os.X_OK),
+        )
+        for name in _REQUIRED_ROLLOUT_SUBDIRECTORIES
+    )
+    add(
+        "data-root",
+        data_ok,
+        "restore root read traverse and declared staging subdirectory write access",
+    )
 
     credentials_ok = service_uid >= 0
     admin_fingerprint_ok = False

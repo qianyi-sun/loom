@@ -72,6 +72,21 @@ bootstrapped to the exact 14-host active set; the full 15-host checked-in
 topology remains validated and is retained for legacy-ledger revocation. The
 private key remains mode 0600 and is never shared with an operator.
 
+The installer itself has an operator-established bootstrap prerequisite: invoke
+it only from a clean root-owned checkout beneath a root-owned,
+non-group/world-writable parent chain. A user-owned checkout is unsupported and
+must not be added to Git's global `safe.directory` list. Because Python has
+already loaded the checkout before the in-process ownership check runs, that
+check detects accidental pre-mutation drift; it is not an adversarial bootstrap
+trust boundary. This matches the declared operational threat model in which
+the installing root/Docker operators are already root-equivalent. Service-owned
+candidate Git commands run with a fixed `0077` umask. During a
+maintenance/inactivity transaction, an existing candidate may have group/world
+write bits removed only after its full tree has passed service ownership,
+ordinary-file/directory type, and contained symlink validation; any other drift
+fails closed. Readiness revalidates that complete tree before running Git or
+loading candidate configuration.
+
 The root venv is built only with a fixed root-owned `/usr/local/bin/uv` and the
 safe resolved target of `/usr/bin/python3`, which must be Python 3.11 or newer
 and remain under `/usr`. Because the repository intentionally treats
@@ -97,10 +112,15 @@ secret values. The installed broker entry point uses the same
 isolated/no-bytecode interpreter boundary, so an operator-controlled working
 directory cannot shadow `loom_cli`.
 
-The service account receives named ACLs only for the declared staging token,
-catalog, and data paths. Secret values stay in protected file sources and are
-excluded from argv, request/status JSON, journals, rollout evidence, and
-summaries. This does not make secrets inaccessible to the already
+The service account receives traverse-only parent ACLs and leaf-read ACLs only
+for the declared staging token and catalog inputs. Preflight traverses those
+parents with Linux `O_PATH` and `O_NOFOLLOW`, so it neither needs nor receives
+directory-listing permission. The staging data root remains read/traverse-only;
+its declared rollout, Postgres, MinIO, backup, and pre-existing
+`environment-state` subdirectories receive access/default `rwx` ACLs. Secret
+values stay in protected file sources and are excluded from argv,
+request/status JSON, journals, rollout evidence, and summaries. This does not
+make secrets inaccessible to the already
 root-equivalent administrators; a stronger boundary would require a separate
 runner host and credential rotation.
 

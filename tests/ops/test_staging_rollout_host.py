@@ -172,10 +172,12 @@ class FakeSystem:
         mapped = self.filesystem.path(host.RUNTIME_ROOT)
         return mapped.is_dir() and (mapped.stat().st_mode & 0o777) == 0o700
 
-    def ensure_candidate(self, expected_sha: str, *, refresh: bool) -> None:
-        if refresh or self.candidate_sha != expected_sha:
+    def ensure_candidate(self, expected_sha: str, *, refresh: bool) -> bool:
+        changed = refresh or self.candidate_sha != expected_sha
+        if changed:
             self.candidate_syncs += 1
             self.candidate_sha = expected_sha
+        return changed
 
     def candidate_ready(self, expected_sha: str) -> bool:
         return self.candidate_sha == expected_sha
@@ -515,6 +517,10 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     assert stat.S_IMODE(known_hosts.stat().st_mode) == 0o644
     assert set(system.operator_members) == set(host.OPERATORS)
     assert system.docker is True
+    environment_state = Path("/data/loom-staging/environment-state")
+    assert Path(f"{environment_state}#False") in system.data_acls
+    assert Path(f"{environment_state}#True") in system.data_acls
+    assert not any(str(grant).startswith("/data/loom-staging#") for grant in system.data_acls)
     assert system.candidate_syncs == 2  # candidate convergence and venv sync run only once
     assert system.maintenance_begins == 1
     assert system.maintenance_ends == 1
@@ -3183,7 +3189,8 @@ def test_unchanged_root_source_performs_no_clone_fetch_checkout_or_install(
     runner = NoopSourceRunner(source, runner_root, sha)
     monkeypatch.setattr(host, "RUNNER_ROOT", runner_root)
     monkeypatch.setattr(host, "INSTALL_SOURCE", source)
-    monkeypatch.setattr(host, "_validate_owned_tree", lambda *args, **kwargs: None)
+    monkeypatch.setattr(host, "_validate_root_authority_parent_chain", lambda path: None)
+    monkeypatch.setattr(host, "_validate_git_checkout_tree", lambda *args, **kwargs: None)
 
     assert host.HostSystem(runner).prepare_install_source() == (source, sha)
 
@@ -3206,7 +3213,8 @@ def test_new_root_source_is_fetched_but_not_checked_out_before_admission_gate(
     runner = NoopSourceRunner(source, runner_root, new_sha, head_sha=old_sha)
     monkeypatch.setattr(host, "RUNNER_ROOT", runner_root)
     monkeypatch.setattr(host, "INSTALL_SOURCE", source)
-    monkeypatch.setattr(host, "_validate_owned_tree", lambda *args, **kwargs: None)
+    monkeypatch.setattr(host, "_validate_root_authority_parent_chain", lambda path: None)
+    monkeypatch.setattr(host, "_validate_git_checkout_tree", lambda *args, **kwargs: None)
 
     assert host.HostSystem(runner).prepare_install_source() == (source, new_sha)
     assert runner.head_sha == old_sha
@@ -3215,7 +3223,9 @@ def test_new_root_source_is_fetched_but_not_checked_out_before_admission_gate(
     assert all("checkout" not in call for call in runner.calls)
 
 
-def test_dirty_invocation_checkout_is_rejected_before_source_install() -> None:
+def test_dirty_invocation_checkout_is_rejected_before_source_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class DirtyRunner:
         def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
             del kwargs
@@ -3230,8 +3240,29 @@ def test_dirty_invocation_checkout_is_rejected_before_source_install() -> None:
                 return host.CommandResult(0, " M deploy/staging-rollout/staging-rollout.toml\n")
             raise AssertionError(f"unexpected command: {call}")
 
+    monkeypatch.setattr(host, "_validate_root_authority_parent_chain", lambda path: None)
+    monkeypatch.setattr(host, "_validate_git_checkout_tree", lambda *args, **kwargs: None)
+
     with pytest.raises(host.InstallError, match="dirty"):
         host.HostSystem(DirtyRunner()).validate_invocation_checkout()
+
+
+def test_invocation_checkout_rejects_replaceable_root_authority_before_git(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoGitRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del argv, kwargs
+            raise AssertionError("Git ran before invocation authority validation")
+
+    def reject(path: Path) -> None:
+        assert path == host.REPO_ROOT
+        raise host.InstallError("root authority parent is unsafe")
+
+    monkeypatch.setattr(host, "_validate_root_authority_parent_chain", reject)
+
+    with pytest.raises(host.InstallError, match="root authority parent is unsafe"):
+        host.HostSystem(NoGitRunner()).validate_invocation_checkout()
 
 
 def test_source_asset_read_is_bound_to_exact_git_object() -> None:
@@ -3400,3 +3431,106 @@ def test_owned_tree_rejects_writable_descendant_and_escaping_symlink(tmp_path: P
     (root / "escape").symlink_to(tmp_path / "outside")
     with pytest.raises(host.InstallError, match="escapes"):
         host._validate_owned_tree(root, expected_uid=uid, expected_gid=gid)
+
+
+def test_owned_tree_hardening_removes_only_group_world_write_bits(tmp_path: Path) -> None:
+    uid, gid = os.geteuid(), os.getegid()
+    root = tmp_path / "candidate"
+    nested = root / ".git"
+    nested.mkdir(parents=True, mode=0o775)
+    config = nested / "config"
+    config.write_text('[remote "origin"]\n', encoding="utf-8")
+    config.chmod(0o664)
+    executable = root / "run.sh"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o775)
+
+    assert host._harden_owned_tree(root, expected_uid=uid, expected_gid=gid) is True
+    assert stat.S_IMODE(nested.stat().st_mode) == 0o755
+    assert stat.S_IMODE(config.stat().st_mode) == 0o644
+    assert stat.S_IMODE(executable.stat().st_mode) == 0o755
+    assert host._harden_owned_tree(root, expected_uid=uid, expected_gid=gid) is False
+
+
+def test_git_checkout_authority_rejects_external_worktree_pointer(tmp_path: Path) -> None:
+    uid, gid = os.geteuid(), os.getegid()
+    root = tmp_path / "checkout"
+    root.mkdir(mode=0o700)
+    (root / ".git").write_text("gitdir: /outside/repository\n", encoding="utf-8")
+
+    with pytest.raises(host.InstallError, match="Git authority directory is unsafe"):
+        host._validate_git_checkout_tree(root, expected_uid=uid, expected_gid=gid)
+
+
+def test_candidate_convergence_hardens_existing_checkout_and_uses_fixed_umask(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uid, gid = os.geteuid(), os.getegid()
+    sha = "a" * 40
+    candidate = tmp_path / "repo"
+    git_dir = candidate / ".git"
+    git_dir.mkdir(parents=True, mode=0o775)
+    config = git_dir / "config"
+    config.write_text('[remote "origin"]\n', encoding="utf-8")
+    config.chmod(0o664)
+    tracked = candidate / "tracked.py"
+    tracked.write_text("pass\n", encoding="utf-8")
+    tracked.chmod(0o664)
+
+    class CandidateRunner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            call = list(argv)
+            self.calls.append(call)
+            if call[:2] == ["id", "-u"]:
+                return host.CommandResult(0, f"{uid}\n")
+            if call[:2] == ["id", "-g"]:
+                return host.CommandResult(0, f"{gid}\n")
+            if call[:2] == ["test", "-d"]:
+                return host.CommandResult(0)
+            git_index = call.index("/usr/bin/git")
+            arguments = call[git_index + 1 :]
+            if arguments[-1:] == ["remote"]:
+                return host.CommandResult(0, "origin\n")
+            if arguments[-1:] == ["remote.origin.url"]:
+                return host.CommandResult(0, host.REMOTE_URL + "\n")
+            if arguments[-1:] == ["remote.origin.pushurl"]:
+                return host.CommandResult(1)
+            if "status" in arguments:
+                return host.CommandResult(0)
+            if arguments[-2:] == ["rev-parse", "HEAD"]:
+                return host.CommandResult(0, sha + "\n")
+            raise AssertionError(f"unexpected command: {call}")
+
+    monkeypatch.setattr(host, "CANDIDATE_REPO", candidate)
+    runner = CandidateRunner()
+
+    assert host.HostSystem(runner).ensure_candidate(sha, refresh=False) is True
+    assert stat.S_IMODE(git_dir.stat().st_mode) == 0o755
+    assert stat.S_IMODE(config.stat().st_mode) == 0o644
+    assert stat.S_IMODE(tracked.stat().st_mode) == 0o644
+    assert all(
+        {
+            "GIT_CONFIG_NOSYSTEM=1",
+            "GIT_CONFIG_GLOBAL=/dev/null",
+            "GIT_TERMINAL_PROMPT=0",
+        }.issubset(call)
+        for call in runner.calls
+        if "/usr/bin/git" in call
+    )
+    assert all(
+        call[call.index("/bin/sh") : call.index("/usr/bin/git") + 1]
+        == [
+            "/bin/sh",
+            "-c",
+            'umask 077; exec "$@"',
+            "loom-staging-git",
+            "/usr/bin/git",
+        ]
+        for call in runner.calls
+        if "/usr/bin/git" in call
+    )
