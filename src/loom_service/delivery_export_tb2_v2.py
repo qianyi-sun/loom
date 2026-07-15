@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, BinaryIO
 
@@ -57,11 +58,25 @@ class Tb2V2TrialBundle:
     artifact_manifest_entries: list[dict[str, str]] = field(default_factory=list)
 
 
+def _iter_jsonl_raw_lines(stream: BinaryIO) -> Iterator[bytes]:
+    """Yield JSONL records as raw bytes.
+
+    boto3 ``StreamingBody.__iter__`` yields fixed-size *chunks* (typically
+    1 KiB), not newline-delimited records. Prefer ``iter_lines()`` when
+    present so MinIO GetObject streams parse as true JSONL.
+    """
+    iter_lines = getattr(stream, "iter_lines", None)
+    if callable(iter_lines):
+        yield from iter_lines()
+        return
+    yield from stream
+
+
 def parse_trajectory_events(stream: BinaryIO) -> list[TrajectoryEvent]:
     """Parse trajectory JSONL with bounded size/line caps."""
     events: list[TrajectoryEvent] = []
     total_bytes = 0
-    for line_no, raw in enumerate(stream, start=1):
+    for line_no, raw in enumerate(_iter_jsonl_raw_lines(stream), start=1):
         if line_no > MAX_JSONL_LINES:
             raise Tb2V2ExportError(
                 "trajectory_parse_limit_exceeded",
@@ -538,4 +553,3 @@ def build_per_trial_v2_bundle(
         native_artifacts=native_artifacts,
         artifact_manifest_entries=artifact_manifest_entries,
     )
-
