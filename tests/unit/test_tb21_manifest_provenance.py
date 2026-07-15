@@ -12,6 +12,7 @@ import tomli_w
 from loom_benchmark_terminal_bench_2.upstream import load_tb21_lock
 from loom_benchmarks.util import sha256_of_dir
 
+from loom.trajectory.storage import bundle_file_metadata_sha256
 from loom.trial.workspace import WorkspaceStagingPolicy, materialize_workspace
 from loom_benchmark_tool.audit_cmd import (
     AuditResult,
@@ -24,7 +25,10 @@ from loom_benchmark_tool.manifest import (
     TB21_AGENT_WORKSPACE_POLICY,
 )
 from loom_worker import main_loop as worker_main_loop
-from loom_worker.main_loop import _tb21_workspace_staging_policy_from_provenance
+from loom_worker.main_loop import (
+    _tb21_workspace_staging_policy_from_provenance,
+    _verify_materialized_tb21_bundle_checksum,
+)
 from loom_worker.runner_pool import RunnerPool
 from loom_worker.vllm_registry import WorkerVLLMRegistry
 
@@ -132,7 +136,9 @@ def _tb21_audit_fixture(
                     "verifier_asset": {
                         "script_path": "/workspace/verifier/run.sh",
                         "sha256": f"sha256:{sha256(verifier.read_bytes()).hexdigest()}",
+                        "mode": "0755",
                     },
+                    "bundle_file_metadata_sha256": bundle_file_metadata_sha256(bundle),
                     "image_provenance": {
                         "docker_image": "python:3.12-slim",
                         "dockerfile": None,
@@ -258,6 +264,29 @@ async def test_worker_rejects_tb21_bundle_mutated_after_its_clean_audit(
     assert task_row.checksum in str(patches[0]["failure_message"])
 
 
+def test_worker_rejects_tb21_bundle_when_mode_sidecar_is_lost_or_tampered(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "task.toml").write_text("[task]\nid='x'\n")
+    verifier = tmp_path / "verifier" / "run.sh"
+    verifier.parent.mkdir()
+    verifier.write_text("#!/bin/sh\n")
+    verifier.chmod(0o755)
+    checksum = sha256_of_dir(tmp_path)
+    provenance = {"bundle_file_metadata_sha256": bundle_file_metadata_sha256(tmp_path)}
+
+    # S3 without the trusted sidecar materializes ordinary 0644 files. Bytes
+    # still match the task checksum, so only the bound mode digest catches it.
+    verifier.chmod(0o644)
+
+    with pytest.raises(ValueError, match="file mode metadata mismatch"):
+        _verify_materialized_tb21_bundle_checksum(
+            task_dir=tmp_path,
+            expected_checksum=checksum,
+            source_provenance=provenance,
+        )
+
+
 def test_tb21_manifest_schema_requires_a_private_agent_workspace_policy() -> None:
     assert MANIFEST_SCHEMA_VERSION == 4
     assert TB21_AGENT_WORKSPACE_POLICY == {
@@ -274,6 +303,7 @@ def test_tb21_manifest_schema_requires_a_private_agent_workspace_policy() -> Non
             "verifier/**",
             "upstream-task.toml",
         ],
+        "trusted_oracle_paths": ["solution/**"],
     }
 
 
@@ -302,6 +332,21 @@ async def test_tb21_agent_staging_excludes_private_bundle_content(
     )
 
     assert driver.uploaded == ["/workspace/instruction.md"]
+
+    oracle_driver = _RecordingDriver()
+    await materialize_workspace(
+        driver=oracle_driver,
+        task_dir=tmp_path,
+        dst=PurePosixPath("/oracle-workspace"),
+        policy=policy,
+        phase="agent",
+        trusted_private_paths=policy.trusted_oracle_paths,
+    )
+
+    assert "/oracle-workspace/solution/solve.sh" in oracle_driver.uploaded
+    assert "/oracle-workspace/tests/test.sh" not in oracle_driver.uploaded
+    assert "/oracle-workspace/verifier/run.sh" not in oracle_driver.uploaded
+    assert "/oracle-workspace/upstream-task.toml" not in oracle_driver.uploaded
 
     await materialize_workspace(
         driver=driver,
@@ -344,6 +389,7 @@ def test_worker_tb21_gate_rejects_a_well_formed_noncanonical_policy() -> None:
             "verifier/**",
             "private-upstream.toml",
         ],
+        "trusted_oracle_paths": ["solution/**"],
     }
 
     with pytest.raises(ValueError, match="canonical"):
@@ -392,8 +438,10 @@ async def test_audit_rejects_invalid_native_verifier_asset(
     if mutation == "missing":
         verifier.unlink()
         row.checksum = sha256_of_dir(bundle)
+        row.source_provenance["bundle_file_metadata_sha256"] = bundle_file_metadata_sha256(bundle)
     elif mutation == "nonexecutable":
         verifier.chmod(0o644)
+        row.source_provenance["bundle_file_metadata_sha256"] = bundle_file_metadata_sha256(bundle)
     else:
         row.source_provenance["verifier_asset"]["sha256"] = "sha256:" + "0" * 64
 
@@ -412,6 +460,7 @@ async def test_audit_uses_the_worker_compatibility_gate(tmp_path: Path) -> None:
         "FROM python:3.12-slim\nRUN sed -i 's/x/y/' /etc/resolv.conf\n",
     )
     row.checksum = sha256_of_dir(bundle)
+    row.source_provenance["bundle_file_metadata_sha256"] = bundle_file_metadata_sha256(bundle)
 
     result = await audit_tb21_profile(session, object_store=object_store)
 

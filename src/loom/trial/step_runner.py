@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import tempfile
 import time
 from datetime import UTC, datetime
@@ -34,6 +35,22 @@ from loom.trial.workspace import materialize_workspace
 if TYPE_CHECKING:
     from loom.trial.trial import TrialContext
 
+logger = logging.getLogger(__name__)
+
+
+class _VerifierDriverLease:
+    """Idempotent ownership of the private verifier driver lifecycle."""
+
+    def __init__(self) -> None:
+        self.driver: Driver | None = None
+
+    async def close(self, *, delete: bool) -> None:
+        driver = self.driver
+        if driver is None:
+            return
+        self.driver = None
+        await driver.stop(delete=delete)
+
 
 async def run_step(
     *,
@@ -41,6 +58,32 @@ async def run_step(
     step: StepConfig,
     trajectory: TrajectoryWriter,
     baseline_policy: NetworkPolicy,
+) -> StepResult:
+    lease = _VerifierDriverLease()
+    try:
+        return await _run_step_impl(
+            ctx=ctx,
+            step=step,
+            trajectory=trajectory,
+            baseline_policy=baseline_policy,
+            verifier_driver_lease=lease,
+        )
+    finally:
+        # Cancellation and watchdog paths bypass ordinary result assembly.
+        # The lease makes this cleanup idempotent with the normal path below.
+        try:
+            await asyncio.shield(lease.close(delete=ctx.trial_config.delete_env))
+        except Exception:
+            logger.exception("failed to stop isolated verifier driver")
+
+
+async def _run_step_impl(
+    *,
+    ctx: TrialContext,
+    step: StepConfig,
+    trajectory: TrajectoryWriter,
+    baseline_policy: NetworkPolicy,
+    verifier_driver_lease: _VerifierDriverLease,
 ) -> StepResult:
     sr_started = datetime.now(UTC)
     sr_error: StepError | None = None
@@ -98,6 +141,7 @@ async def run_step(
                         "private workspace staging requires a fresh verifier driver",
                     )
                 isolated_verifier_driver = factory()
+                verifier_driver_lease.driver = isolated_verifier_driver
                 verifier_env = isolated_verifier_driver
                 await verifier_env.start(options=_isolated_verifier_start_options(ctx))
                 # The verifier driver receives a fresh public bundle plus its
@@ -241,7 +285,7 @@ async def run_step(
     if isolated_verifier_driver is not None:
         try:
             await asyncio.shield(
-                isolated_verifier_driver.stop(delete=ctx.trial_config.delete_env),
+                verifier_driver_lease.close(delete=ctx.trial_config.delete_env),
             )
         except Exception as exc:
             if sr_error is None:

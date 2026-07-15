@@ -146,4 +146,5 @@ def test_convert_preserves_native_bytes_modes_and_supported_contract(
     assert provenance["verifier_asset"] == {
         "script_path": "/app/verifier/run.sh",
         "sha256": f"sha256:{sha256((out_dir / 'verifier' / 'run.sh').read_bytes()).hexdigest()}",
+        "mode": "0755",
     }

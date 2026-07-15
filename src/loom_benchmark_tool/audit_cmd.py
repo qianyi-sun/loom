@@ -23,7 +23,7 @@ from loom.db.schema import Benchmark, BenchmarkAlias
 from loom.db.schema import Task as TaskRow
 from loom.models.task import TaskConfig
 from loom.task_bundle_compat import validate_task_dir_compatibility
-from loom.trajectory.storage import ObjectStore
+from loom.trajectory.storage import ObjectStore, bundle_file_metadata_sha256
 from loom_benchmark_tool.manifest import tb21_workspace_policy_isolated
 
 TB21_PROFILE_ID = "terminal-bench-2@tb2.1-r6"
@@ -385,6 +385,9 @@ async def _verify_bundle_bytes(
         actual = sha256_of_dir(bundle_dir)
         if not _same_sha256(row.checksum, actual):
             raise ValueError(f"checksum mismatch expected={row.checksum} actual={actual}")
+        observed_metadata_digest = bundle_file_metadata_sha256(bundle_dir)
+        if source_provenance.get("bundle_file_metadata_sha256") != observed_metadata_digest:
+            raise ValueError("bundle file mode metadata digest mismatch")
         task_toml = bundle_dir / "task.toml"
         if not task_toml.is_file():
             raise ValueError("missing task.toml")
@@ -403,6 +406,7 @@ async def _verify_bundle_bytes(
         )
         return {
             "observed_bundle_checksum": f"sha256:{actual}",
+            "observed_bundle_file_metadata_sha256": observed_metadata_digest,
             "observed_verifier_checksum": verifier_checksum,
         }
 
@@ -441,6 +445,8 @@ def _verify_script_verifier_asset(
         raise ValueError("verifier asset provenance is missing")
     if raw_asset.get("script_path") != raw_script_path:
         raise ValueError("verifier asset script_path mismatch")
+    if raw_asset.get("mode") != "0755":
+        raise ValueError("verifier asset mode provenance mismatch")
     observed = f"sha256:{sha256(local_script.read_bytes()).hexdigest()}"
     if raw_asset.get("sha256") != observed:
         raise ValueError("verifier asset checksum mismatch")
@@ -460,9 +466,7 @@ def _snapshot_id(
     persists and a subsequent audit must reproduce.
     """
     immutable_profile_provenance = {
-        key: value
-        for key, value in profile_provenance.items()
-        if key != "activation_audit"
+        key: value for key, value in profile_provenance.items() if key != "activation_audit"
     }
     payload = {
         "profile": TB21_PROFILE_ID,

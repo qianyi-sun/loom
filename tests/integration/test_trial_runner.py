@@ -90,7 +90,8 @@ def _docker_supporting_caps() -> Capabilities:
 
 
 async def test_runner_invokes_run_and_reports_states(  # type: ignore[no-untyped-def]
-    hello_task, tmp_path: Path,
+    hello_task,
+    tmp_path: Path,
 ):
     state_calls: list[tuple[str, str | None]] = []
 
@@ -102,22 +103,30 @@ async def test_runner_invokes_run_and_reports_states(  # type: ignore[no-untyped
         state_calls.append((state, failure_reason))
         return True
 
-    handler = command_table_handler({
-        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
-            return_code=0, stdout=b"hello\n", stderr=b"",
-            truncated=False, duration_sec=0.05,
-        ),
-    })
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
+                return_code=0,
+                stdout=b"hello\n",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.05,
+            ),
+        }
+    )
 
     trial_id = uuid4()
     runner = LocalTrialRunner(
-        trial_id=trial_id, team_id=uuid4(),
-        task_config=_task_config(), task_checksum="0" * 64,
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=_task_config(),
+        task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(),
         driver_factory=_driver_factory(handler),
-        agent_factory=lambda task_dir, _gw, _model, _name:
-            OracleAgent(task_dir=task_dir, trial_id=trial_id),
+        agent_factory=lambda task_dir, _gw, _model, _name: OracleAgent(
+            task_dir=task_dir, trial_id=trial_id
+        ),
         verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
         object_store=FakeObjectStore(),
         gateway_client=FakeLLMGatewayClient(scripted=[]),
@@ -156,7 +165,8 @@ async def test_runner_uses_fresh_verifier_driver_for_private_workspace_policy(
 
     class _PublicOutputAgent:
         mode = "out-of-box"
-        name = "public-output"
+        # A user-controlled name is not sufficient to receive private assets.
+        name = "oracle"
         version = "1"
         supports_os = frozenset({"linux"})
         model = None
@@ -225,10 +235,110 @@ async def test_runner_uses_fresh_verifier_driver_for_private_workspace_policy(
     assert drivers[0].state == "stopped"
     assert drivers[1].state == "stopped"
     assert PurePosixPath("/workspace/verifier/run.sh") not in drivers[0].filesystem
+    assert PurePosixPath("/workspace/solution/solve.sh") not in drivers[0].filesystem
+    assert PurePosixPath("/workspace/tests/private-test.sh") not in drivers[0].filesystem
+
+
+async def test_runner_grants_only_solution_to_trusted_oracle_runtime(
+    hello_task: Path,
+    tmp_path: Path,
+) -> None:
+    """Canonical provenance + the concrete Oracle runtime unlock solution only."""
+
+    class _HandoffDriver(FakeDriver):
+        async def exec(self, cmd: str, **kwargs: object) -> ExecResult:
+            if cmd.startswith("find "):
+                paths = [
+                    path.as_posix().encode()
+                    for path in sorted(self.filesystem)
+                    if path.is_relative_to(PurePosixPath("/workspace"))
+                ]
+                return ExecResult(
+                    return_code=0,
+                    stdout=b"\x00".join(paths) + (b"\x00" if paths else b""),
+                    stderr=b"",
+                    truncated=False,
+                    duration_sec=0,
+                )
+            return await super().exec(cmd, **kwargs)
+
+    class _Verifier:
+        name = "capture"
+
+        async def verify(self, *, env, **_kwargs):  # type: ignore[no-untyped-def]
+            assert PurePosixPath("/workspace/solution/solve.sh") in env.filesystem
+            assert PurePosixPath("/workspace/tests/private-test.sh") in env.filesystem
+            assert PurePosixPath("/workspace/verifier/run.sh") in env.filesystem
+            return VerifierResult(rewards={"passed": 1.0})
+
+    (hello_task / "tests").mkdir()
+    (hello_task / "tests" / "private-test.sh").write_text("private\n")
+    (hello_task / "verifier").mkdir()
+    (hello_task / "verifier" / "run.sh").write_text("#!/bin/sh\n")
+    (hello_task / "upstream-task.toml").write_text("private upstream\n")
+    drivers: list[_HandoffDriver] = []
+
+    def driver_factory() -> _HandoffDriver:
+        driver = _HandoffDriver(
+            exec_handler=command_table_handler(
+                {
+                    "chmod +x /workspace/solution/solve.sh && "
+                    "/workspace/solution/solve.sh": ExecResult(
+                        return_code=0,
+                        stdout=b"hello\n",
+                        stderr=b"",
+                        truncated=False,
+                        duration_sec=0.01,
+                    ),
+                },
+            ),
+        )
+        drivers.append(driver)
+        return driver
+
+    async def state_patch(
+        _state: str,
+        _failure_reason: str | None,
+        _failure_message: str | None = None,
+    ) -> bool:
+        return True
+
+    trial_id = uuid4()
+    runner = LocalTrialRunner(
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=_task_config(),
+        task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(agent_name="oracle", agent_model=None),
+        driver_factory=driver_factory,
+        agent_factory=lambda task_dir, _gw, _model, _name: OracleAgent(
+            task_dir=task_dir,
+            trial_id=trial_id,
+        ),
+        verifier_factory=lambda: _Verifier(),  # type: ignore[return-value]
+        object_store=FakeObjectStore(),
+        gateway_client=FakeLLMGatewayClient(scripted=[]),
+        local_trajectory_root=tmp_path / "trajectories",
+        state_patch_callback=state_patch,
+        workspace_staging_policy=WorkspaceStagingPolicy.from_provenance(
+            TB21_AGENT_WORKSPACE_POLICY,
+        ),
+    )
+
+    result = await runner.run()
+
+    assert result.state == TrialState.SUCCEEDED
+    assert len(drivers) == 2
+    assert PurePosixPath("/workspace/solution/solve.sh") in drivers[0].filesystem
+    assert PurePosixPath("/workspace/tests/private-test.sh") not in drivers[0].filesystem
+    assert PurePosixPath("/workspace/verifier/run.sh") not in drivers[0].filesystem
+    assert PurePosixPath("/workspace/upstream-task.toml") not in drivers[0].filesystem
 
 
 async def test_runner_starts_sidecars_and_uses_returned_network(
-    hello_task: Path, tmp_path: Path,
+    hello_task: Path,
+    tmp_path: Path,
 ) -> None:
     events: list[str] = []
 
@@ -259,19 +369,25 @@ async def test_runner_starts_sidecars_and_uses_returned_network(
     ) -> bool:
         return True
 
-    handler = command_table_handler({
-        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
-            return_code=0, stdout=b"hello\n", stderr=b"",
-            truncated=False, duration_sec=0.05,
-        ),
-    })
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
+                return_code=0,
+                stdout=b"hello\n",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.05,
+            ),
+        }
+    )
     driver = CapturingDriver(
         capabilities=_docker_supporting_caps(),
         exec_handler=handler,
     )
     trial_id = uuid4()
     runner = LocalTrialRunner(
-        trial_id=trial_id, team_id=uuid4(),
+        trial_id=trial_id,
+        team_id=uuid4(),
         task_config=_task_config(
             sidecars=[TaskSidecarConfig(name="api", docker_image="api:latest")],
             environment={"API_URL": "http://api:8000"},
@@ -280,8 +396,9 @@ async def test_runner_starts_sidecars_and_uses_returned_network(
         task_dir=hello_task,
         trial_config=stub_trial_config(),
         driver_factory=lambda: driver,
-        agent_factory=lambda task_dir, _gw, _model, _name:
-            OracleAgent(task_dir=task_dir, trial_id=trial_id),
+        agent_factory=lambda task_dir, _gw, _model, _name: OracleAgent(
+            task_dir=task_dir, trial_id=trial_id
+        ),
         verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
         object_store=FakeObjectStore(),
         gateway_client=FakeLLMGatewayClient(scripted=[]),
@@ -305,7 +422,8 @@ async def test_runner_starts_sidecars_and_uses_returned_network(
 
 
 async def test_runner_swallows_state_patch_exception(  # type: ignore[no-untyped-def]
-    hello_task, tmp_path: Path,
+    hello_task,
+    tmp_path: Path,
 ):
     """A transient PATCH failure must not crash the trial body. The runner
     logs the warning and lets Trial.run() continue."""
@@ -321,21 +439,29 @@ async def test_runner_swallows_state_patch_exception(  # type: ignore[no-untyped
             raise RuntimeError("simulated network blip")
         return True
 
-    handler = command_table_handler({
-        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
-            return_code=0, stdout=b"hello\n", stderr=b"",
-            truncated=False, duration_sec=0.05,
-        ),
-    })
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
+                return_code=0,
+                stdout=b"hello\n",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.05,
+            ),
+        }
+    )
     trial_id = uuid4()
     runner = LocalTrialRunner(
-        trial_id=trial_id, team_id=uuid4(),
-        task_config=_task_config(), task_checksum="0" * 64,
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=_task_config(),
+        task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(),
         driver_factory=_driver_factory(handler),
-        agent_factory=lambda task_dir, _gw, _model, _name:
-            OracleAgent(task_dir=task_dir, trial_id=trial_id),
+        agent_factory=lambda task_dir, _gw, _model, _name: OracleAgent(
+            task_dir=task_dir, trial_id=trial_id
+        ),
         verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
         object_store=FakeObjectStore(),
         gateway_client=FakeLLMGatewayClient(scripted=[]),
@@ -350,7 +476,8 @@ async def test_runner_swallows_state_patch_exception(  # type: ignore[no-untyped
 
 
 async def test_runner_marks_failed_when_trajectory_upload_cannot_start(  # type: ignore[no-untyped-def]
-    hello_task, tmp_path: Path,
+    hello_task,
+    tmp_path: Path,
 ):
     """A missing trajectories bucket makes multipart upload creation fail.
 
@@ -376,21 +503,29 @@ async def test_runner_marks_failed_when_trajectory_upload_cannot_start(  # type:
         calls.append((state, failure_reason))
         return True
 
-    handler = command_table_handler({
-        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
-            return_code=0, stdout=b"hello\n", stderr=b"",
-            truncated=False, duration_sec=0.05,
-        ),
-    })
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
+                return_code=0,
+                stdout=b"hello\n",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.05,
+            ),
+        }
+    )
     trial_id = uuid4()
     runner = LocalTrialRunner(
-        trial_id=trial_id, team_id=uuid4(),
-        task_config=_task_config(), task_checksum="0" * 64,
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=_task_config(),
+        task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(),
         driver_factory=_driver_factory(handler),
-        agent_factory=lambda task_dir, _gw, _model, _name:
-            OracleAgent(task_dir=task_dir, trial_id=trial_id),
+        agent_factory=lambda task_dir, _gw, _model, _name: OracleAgent(
+            task_dir=task_dir, trial_id=trial_id
+        ),
         verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
         object_store=MissingBucketStore(),
         gateway_client=FakeLLMGatewayClient(scripted=[]),
@@ -406,7 +541,8 @@ async def test_runner_marks_failed_when_trajectory_upload_cannot_start(  # type:
 
 
 async def test_runner_marks_failed_when_artifact_upload_fails(  # type: ignore[no-untyped-def]
-    hello_task, tmp_path: Path,
+    hello_task,
+    tmp_path: Path,
 ):
     """Artifact persistence is part of platform success.
 
@@ -441,22 +577,27 @@ async def test_runner_marks_failed_when_artifact_upload_fails(  # type: ignore[n
                 duration_sec=0.01,
             )
         return ExecResult(
-            return_code=0, stdout=b"hello\n", stderr=b"",
-            truncated=False, duration_sec=0.05,
+            return_code=0,
+            stdout=b"hello\n",
+            stderr=b"",
+            truncated=False,
+            duration_sec=0.05,
         )
 
     trial_id = uuid4()
     driver = FakeDriver(exec_handler=handler)
     driver.filesystem[PurePosixPath("/workspace/result.txt")] = b"hello"
     runner = LocalTrialRunner(
-        trial_id=trial_id, team_id=uuid4(),
+        trial_id=trial_id,
+        team_id=uuid4(),
         task_config=_task_config(artifacts=["result.txt"]),
         task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(),
         driver_factory=lambda: driver,
-        agent_factory=lambda task_dir, _gw, _model, _name:
-            OracleAgent(task_dir=task_dir, trial_id=trial_id),
+        agent_factory=lambda task_dir, _gw, _model, _name: OracleAgent(
+            task_dir=task_dir, trial_id=trial_id
+        ),
         verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
         object_store=MissingArtifactBucketStore(),
         gateway_client=FakeLLMGatewayClient(scripted=[]),
@@ -475,7 +616,8 @@ async def test_runner_marks_failed_when_artifact_upload_fails(  # type: ignore[n
 
 
 async def test_runner_projects_successful_trial_outputs(  # type: ignore[no-untyped-def]
-    hello_task, tmp_path: Path,
+    hello_task,
+    tmp_path: Path,
 ):
     state_calls: list[tuple[str, str | None]] = []
     projection_calls: list[dict[str, Any]] = []
@@ -492,10 +634,12 @@ async def test_runner_projects_successful_trial_outputs(  # type: ignore[no-unty
         result_payload: dict[str, Any],
         trajectory_index: dict[str, Any],
     ) -> bool:
-        projection_calls.append({
-            "result": result_payload,
-            "trajectory_index": trajectory_index,
-        })
+        projection_calls.append(
+            {
+                "result": result_payload,
+                "trajectory_index": trajectory_index,
+            }
+        )
         return True
 
     def handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
@@ -508,8 +652,11 @@ async def test_runner_projects_successful_trial_outputs(  # type: ignore[no-unty
                 duration_sec=0.01,
             )
         return ExecResult(
-            return_code=0, stdout=b"hello\n", stderr=b"",
-            truncated=False, duration_sec=0.05,
+            return_code=0,
+            stdout=b"hello\n",
+            stderr=b"",
+            truncated=False,
+            duration_sec=0.05,
         )
 
     trial_id = uuid4()
@@ -517,14 +664,16 @@ async def test_runner_projects_successful_trial_outputs(  # type: ignore[no-unty
     driver = FakeDriver(exec_handler=handler)
     driver.filesystem[PurePosixPath("/workspace/result.txt")] = b"hello"
     runner = LocalTrialRunner(
-        trial_id=trial_id, team_id=team_id,
+        trial_id=trial_id,
+        team_id=team_id,
         task_config=_task_config(artifacts=["result.txt"]),
         task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(),
         driver_factory=lambda: driver,
-        agent_factory=lambda task_dir, _gw, _model, _name:
-            OracleAgent(task_dir=task_dir, trial_id=trial_id),
+        agent_factory=lambda task_dir, _gw, _model, _name: OracleAgent(
+            task_dir=task_dir, trial_id=trial_id
+        ),
         verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
         object_store=FakeObjectStore(),
         gateway_client=FakeLLMGatewayClient(scripted=[]),
@@ -541,27 +690,26 @@ async def test_runner_projects_successful_trial_outputs(  # type: ignore[no-unty
     projection = projection_calls[0]
     assert projection["result"]["state"] == "succeeded"
     assert projection["result"]["aggregate_reward"] == 1.0
-    assert (
-        projection["trajectory_index"]["trajectory_uri"]
-        == result.trajectory_uri
-    )
+    assert projection["trajectory_index"]["trajectory_uri"] == result.trajectory_uri
     assert projection["trajectory_index"]["atif_uri"] == result.atif_uri
-    assert projection["trajectory_index"]["artifacts"] == [{
-        "step_name": "main",
-        "bucket": "artifacts",
-        "key": f"{team_id}/{trial_id}/main/result.txt",
-        "size": 5,
-        "content_hash": (
-            "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e"
-            "1b161e5c1fa7425e73043362938b9824"
-        ),
-        "share_status": "shared",
-        "blocked_reason": None,
-    }]
+    assert projection["trajectory_index"]["artifacts"] == [
+        {
+            "step_name": "main",
+            "bucket": "artifacts",
+            "key": f"{team_id}/{trial_id}/main/result.txt",
+            "size": 5,
+            "content_hash": (
+                "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+            ),
+            "share_status": "shared",
+            "blocked_reason": None,
+        }
+    ]
 
 
 async def test_runner_does_not_report_success_when_output_projection_fails(  # type: ignore[no-untyped-def]
-    hello_task, tmp_path: Path,
+    hello_task,
+    tmp_path: Path,
 ):
     state_calls: list[tuple[str, str | None, str | None]] = []
     projection_calls = 0
@@ -594,8 +742,11 @@ async def test_runner_does_not_report_success_when_output_projection_fails(  # t
                 duration_sec=0.01,
             )
         return ExecResult(
-            return_code=0, stdout=b"hello\n", stderr=b"",
-            truncated=False, duration_sec=0.05,
+            return_code=0,
+            stdout=b"hello\n",
+            stderr=b"",
+            truncated=False,
+            duration_sec=0.05,
         )
 
     trial_id = uuid4()
@@ -603,14 +754,16 @@ async def test_runner_does_not_report_success_when_output_projection_fails(  # t
     driver = FakeDriver(exec_handler=handler)
     driver.filesystem[PurePosixPath("/workspace/result.txt")] = b"hello"
     runner = LocalTrialRunner(
-        trial_id=trial_id, team_id=team_id,
+        trial_id=trial_id,
+        team_id=team_id,
         task_config=_task_config(artifacts=["result.txt"]),
         task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(),
         driver_factory=lambda: driver,
-        agent_factory=lambda task_dir, _gw, _model, _name:
-            OracleAgent(task_dir=task_dir, trial_id=trial_id),
+        agent_factory=lambda task_dir, _gw, _model, _name: OracleAgent(
+            task_dir=task_dir, trial_id=trial_id
+        ),
         verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
         object_store=FakeObjectStore(),
         gateway_client=FakeLLMGatewayClient(scripted=[]),
@@ -626,14 +779,15 @@ async def test_runner_does_not_report_success_when_output_projection_fails(  # t
     assert result.failure_reason == FailureReason.TRAJECTORY_FLUSH_FAILED
     assert not any(call[0] == "succeeded" for call in state_calls)
     assert any(
-        call[0] == "failed"
-        and call[1] == FailureReason.TRAJECTORY_FLUSH_FAILED.value
+        call[0] == "failed" and call[1] == FailureReason.TRAJECTORY_FLUSH_FAILED.value
         for call in state_calls
     )
 
 
 async def test_runner_logs_fenced_response(  # type: ignore[no-untyped-def]
-    hello_task, tmp_path: Path, caplog,
+    hello_task,
+    tmp_path: Path,
+    caplog,
 ):
     async def fenced_patch(
         state: str,
@@ -642,21 +796,29 @@ async def test_runner_logs_fenced_response(  # type: ignore[no-untyped-def]
     ) -> bool:
         return state != "running"  # Pretend `running` PATCH was fenced
 
-    handler = command_table_handler({
-        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
-            return_code=0, stdout=b"hello\n", stderr=b"",
-            truncated=False, duration_sec=0.05,
-        ),
-    })
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
+                return_code=0,
+                stdout=b"hello\n",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.05,
+            ),
+        }
+    )
     trial_id = uuid4()
     runner = LocalTrialRunner(
-        trial_id=trial_id, team_id=uuid4(),
-        task_config=_task_config(), task_checksum="0" * 64,
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=_task_config(),
+        task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(),
         driver_factory=_driver_factory(handler),
-        agent_factory=lambda task_dir, _gw, _model, _name:
-            OracleAgent(task_dir=task_dir, trial_id=trial_id),
+        agent_factory=lambda task_dir, _gw, _model, _name: OracleAgent(
+            task_dir=task_dir, trial_id=trial_id
+        ),
         verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
         object_store=FakeObjectStore(),
         gateway_client=FakeLLMGatewayClient(scripted=[]),
@@ -665,13 +827,15 @@ async def test_runner_logs_fenced_response(  # type: ignore[no-untyped-def]
     )
 
     import logging
+
     with caplog.at_level(logging.WARNING, logger="loom_worker.trial_runner"):
         await runner.run()
     assert any("state_patch_fenced" in m for m in caplog.messages)
 
 
 async def test_trial_config_agent_and_model_drive_the_factory(  # type: ignore[no-untyped-def]
-    hello_task, tmp_path: Path,
+    hello_task,
+    tmp_path: Path,
 ):
     """Plan 23: TrialConfig.agent_name + agent_model are required and
     used directly. The worker NEVER falls back to TaskConfig.agent.*
@@ -686,12 +850,17 @@ async def test_trial_config_agent_and_model_drive_the_factory(  # type: ignore[n
         captured["model"] = model
         return OracleAgent(task_dir=task_dir, trial_id=uuid4())
 
-    handler = command_table_handler({
-        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
-            return_code=0, stdout=b"hello\n", stderr=b"",
-            truncated=False, duration_sec=0.05,
-        ),
-    })
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
+                return_code=0,
+                stdout=b"hello\n",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.05,
+            ),
+        }
+    )
     explicit_model = ModelSpec(provider="anthropic", name="claude-opus-4-7")
 
     async def noop_patch(
@@ -704,8 +873,10 @@ async def test_trial_config_agent_and_model_drive_the_factory(  # type: ignore[n
     # Task says oracle/None; TrialConfig says claude-code/claude-opus-4-7
     # — the factory MUST see the TrialConfig values, not the task's.
     runner = LocalTrialRunner(
-        trial_id=uuid4(), team_id=uuid4(),
-        task_config=_task_config(), task_checksum="0" * 64,
+        trial_id=uuid4(),
+        team_id=uuid4(),
+        task_config=_task_config(),
+        task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(
             agent_name="claude-code",
@@ -746,12 +917,17 @@ async def test_runner_applies_trial_request_params_to_agent(
     def capture_factory(task_dir, _gw, model, name):  # type: ignore[no-untyped-def]
         return RequestParamAgent()
 
-    handler = command_table_handler({
-        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
-            return_code=0, stdout=b"hello\n", stderr=b"",
-            truncated=False, duration_sec=0.05,
-        ),
-    })
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
+                return_code=0,
+                stdout=b"hello\n",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.05,
+            ),
+        }
+    )
 
     async def noop_patch(
         state: str,
@@ -761,8 +937,10 @@ async def test_runner_applies_trial_request_params_to_agent(
         return True
 
     runner = LocalTrialRunner(
-        trial_id=uuid4(), team_id=uuid4(),
-        task_config=_task_config(), task_checksum="0" * 64,
+        trial_id=uuid4(),
+        team_id=uuid4(),
+        task_config=_task_config(),
+        task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(
             agent_name="litellm",

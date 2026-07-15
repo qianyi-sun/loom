@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from loom.trajectory.storage import bundle_file_metadata_sha256
 from loom_benchmark_tool.register_cmd import (
     mirror_manifest_task_bundle,
     run_register,
@@ -90,6 +91,10 @@ async def test_mirror_manifest_task_bundle_uploads_hf_files_to_internal_store(
     (bundle / ".gitignore").write_text("*.pt\n")
     (bundle / "solution" / "solve.sh").write_text("echo ok\n")
     checksum = _bundle_checksum(bundle)
+    metadata_sha256 = bundle_file_metadata_sha256(bundle)
+    object_prefix = (
+        f"fake-bench/PRHW__loom-benchmark-fake/7908700/task-001/{checksum}/{metadata_sha256}/"
+    )
 
     store = FakeObjectStore()
 
@@ -104,36 +109,39 @@ async def test_mirror_manifest_task_bundle_uploads_hf_files_to_internal_store(
         bucket="loom-benchmarks",
     )
 
-    assert result.source == (
-        "s3://loom-benchmarks/fake-bench/"
-        f"PRHW__loom-benchmark-fake/7908700/task-001/{checksum}/"
-    )
+    assert result.source == (f"s3://loom-benchmarks/{object_prefix}")
     assert result.uploaded == 3
     assert result.skipped == 0
     assert result.bytes_uploaded == (
         len("[task]\nid='fake-bench/task-001'\n") + len("*.pt\n") + len("echo ok\n")
     )
-    assert store.objects[
-        (
-            "loom-benchmarks",
-            "fake-bench/PRHW__loom-benchmark-fake/7908700/"
-            f"task-001/{checksum}/.gitignore",
-        )
-    ] == b"*.pt\n"
-    assert store.objects[
-        (
-            "loom-benchmarks",
-            "fake-bench/PRHW__loom-benchmark-fake/7908700/"
-            f"task-001/{checksum}/task.toml",
-        )
-    ] == b"[task]\nid='fake-bench/task-001'\n"
-    assert store.objects[
-        (
-            "loom-benchmarks",
-            "fake-bench/PRHW__loom-benchmark-fake/7908700/"
-            f"task-001/{checksum}/solution/solve.sh",
-        )
-    ] == b"echo ok\n"
+    assert (
+        store.objects[
+            (
+                "loom-benchmarks",
+                f"{object_prefix}.gitignore",
+            )
+        ]
+        == b"*.pt\n"
+    )
+    assert (
+        store.objects[
+            (
+                "loom-benchmarks",
+                f"{object_prefix}task.toml",
+            )
+        ]
+        == b"[task]\nid='fake-bench/task-001'\n"
+    )
+    assert (
+        store.objects[
+            (
+                "loom-benchmarks",
+                f"{object_prefix}solution/solve.sh",
+            )
+        ]
+        == b"echo ok\n"
+    )
 
 
 @pytest.mark.asyncio
@@ -174,6 +182,52 @@ async def test_mirror_manifest_task_bundle_skips_matching_internal_objects(
 
 
 @pytest.mark.asyncio
+async def test_same_bytes_with_different_modes_use_disjoint_mirror_prefixes(
+    tmp_path: Path,
+) -> None:
+    bundle = tmp_path / "repo" / "task-001"
+    (bundle / "verifier").mkdir(parents=True)
+    (bundle / "task.toml").write_text("[task]\nid='fake-bench/task-001'\n")
+    script = bundle / "verifier" / "run.sh"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o644)
+    checksum = _bundle_checksum(bundle)
+    store = FakeObjectStore()
+
+    ordinary = await mirror_manifest_task_bundle(
+        repo_id="PRHW/loom-benchmark-fake",
+        revision="7908700",
+        task_id="fake-bench/task-001",
+        checksum=checksum,
+        hf_path="task-001/",
+        snapshot_root=tmp_path / "repo",
+        object_store=store,
+        bucket="loom-benchmarks",
+    )
+    script.chmod(0o755)
+    executable = await mirror_manifest_task_bundle(
+        repo_id="PRHW/loom-benchmark-fake",
+        revision="7908700",
+        task_id="fake-bench/task-001",
+        checksum=checksum,
+        hf_path="task-001/",
+        snapshot_root=tmp_path / "repo",
+        object_store=store,
+        bucket="loom-benchmarks",
+    )
+
+    assert ordinary.source != executable.source
+    assert any(
+        key.startswith(ordinary.source.removeprefix("s3://loom-benchmarks/"))
+        for _, key in store.objects
+    )
+    assert any(
+        key.startswith(executable.source.removeprefix("s3://loom-benchmarks/"))
+        for _, key in store.objects
+    )
+
+
+@pytest.mark.asyncio
 async def test_mirror_manifest_task_bundle_rejects_checksum_drift(
     tmp_path: Path,
 ) -> None:
@@ -202,8 +256,7 @@ async def test_mirror_manifest_task_bundle_rejects_unsafe_dockerfile(
     (bundle / "environment").mkdir(parents=True)
     (bundle / "task.toml").write_text("[task]\nid='fake-bench/task-001'\n")
     (bundle / "environment" / "Dockerfile").write_text(
-        "FROM node:18-bookworm\n"
-        "RUN npm install -g npm@latest\n",
+        "FROM node:18-bookworm\nRUN npm install -g npm@latest\n",
     )
     checksum = _bundle_checksum(bundle)
 
@@ -229,6 +282,7 @@ async def test_run_register_mirror_writes_internal_source_and_hf_provenance(
     bundle.mkdir(parents=True)
     (bundle / "task.toml").write_text("[task]\nid='fake-bench/task-001'\n")
     checksum = _bundle_checksum(bundle)
+    metadata_sha256 = bundle_file_metadata_sha256(bundle)
     manifest = {
         "benchmark_id": "fake-bench",
         "display_name": "Fake Bench",
@@ -249,6 +303,7 @@ async def test_run_register_mirror_writes_internal_source_and_hf_provenance(
             }
         ],
     }
+
     class FakeExcluded:
         def __getattr__(self, name: str) -> str:
             return f"excluded.{name}"
@@ -277,7 +332,20 @@ async def test_run_register_mirror_writes_internal_source_and_hf_provenance(
         async def __aexit__(self, *_args: object) -> None:
             return None
 
-        async def execute(self, statement: FakeInsert) -> None:
+        def begin(self):  # type: ignore[no-untyped-def]
+            class _Transaction:
+                async def __aenter__(self) -> None:
+                    return None
+
+                async def __aexit__(self, *_args: object) -> None:
+                    return None
+
+            return _Transaction()
+
+        async def scalar(self, _statement: object) -> None:
+            return None
+
+        async def execute(self, statement: FakeInsert, *_args: object) -> None:
             executed.append(statement)
 
         async def commit(self) -> None:
@@ -326,7 +394,7 @@ async def test_run_register_mirror_writes_internal_source_and_hf_provenance(
     assert isinstance(tags, dict)
     assert task_insert.payload["source"] == (
         "s3://loom-benchmarks/fake-bench/"
-        f"PRHW__loom-benchmark-fake/7908700/task-001/{checksum}/"
+        f"PRHW__loom-benchmark-fake/7908700/task-001/{checksum}/{metadata_sha256}/"
     )
     assert tags == {
         "split": "test",

@@ -14,6 +14,7 @@ from loom_benchmarks.base import BenchmarkInstance, ConvertedTask, UpstreamSourc
 from loom_benchmarks.util import sha256_of_dir
 
 from loom.terminal_bench_normalize import normalize_terminal_bench_task_toml
+from loom.trajectory.storage import bundle_file_metadata_sha256
 from loom.trial.workspace import TB21_AGENT_WORKSPACE_POLICY
 from loom_benchmark_terminal_bench_2 import upstream
 
@@ -87,7 +88,9 @@ class TerminalBench2Adapter:
             "verifier_asset": {
                 "script_path": script_path,
                 "sha256": f"sha256:{sha256(verifier_script.read_bytes()).hexdigest()}",
+                "mode": "0755",
             },
+            "bundle_file_metadata_sha256": bundle_file_metadata_sha256(bundle_dir),
             "image_provenance": {
                 "docker_image": env.get("docker_image"),
                 "dockerfile": env.get("dockerfile"),

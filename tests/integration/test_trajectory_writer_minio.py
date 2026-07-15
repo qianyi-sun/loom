@@ -13,6 +13,7 @@ from testcontainers.minio import MinioContainer
 from loom.models.trajectory import StepStartEvent
 from loom.trajectory.storage import MinioObjectStore
 from loom.trajectory.writer import TrajectoryWriter
+from loom_benchmark_tool.upload import upload_task_dir
 
 
 @pytest.fixture(scope="module")
@@ -81,3 +82,34 @@ async def test_minio_object_store_ensure_bucket_creates_missing_bucket(
     await store.ensure_bucket(bucket_name)
 
     assert client.bucket_exists(bucket_name)
+
+
+async def test_minio_bundle_roundtrip_restores_executable_mode(
+    tmp_path: Path,
+    store: MinioObjectStore,
+) -> None:
+    bucket_name = f"bundle-modes-{uuid4().hex}"
+    await store.ensure_bucket(bucket_name)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "task.toml").write_text("[task]\nid='mode-test'\n")
+    verifier = source / "verifier" / "run.sh"
+    verifier.parent.mkdir()
+    verifier.write_text("#!/bin/sh\nexit 0\n")
+    verifier.chmod(0o755)
+
+    await upload_task_dir(
+        store=store,
+        bucket=bucket_name,
+        prefix="task/",
+        task_dir=source,
+    )
+    out = tmp_path / "out"
+    count = await store.download_prefix(
+        bucket=bucket_name,
+        prefix="task/",
+        out_dir=out,
+    )
+
+    assert count == 2
+    assert (out / "verifier" / "run.sh").stat().st_mode & 0o777 == 0o755

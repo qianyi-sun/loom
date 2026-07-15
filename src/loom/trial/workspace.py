@@ -79,6 +79,7 @@ TB21_AGENT_WORKSPACE_POLICY: dict[str, object] = {
         "verifier/**",
         "upstream-task.toml",
     ],
+    "trusted_oracle_paths": ["solution/**"],
 }
 
 
@@ -94,21 +95,37 @@ class WorkspaceStagingPolicy:
 
     agent_excluded_paths: tuple[str, ...]
     verifier_only_paths: tuple[str, ...]
+    trusted_oracle_paths: tuple[str, ...]
 
     @classmethod
     def from_provenance(cls, raw: Mapping[str, object]) -> WorkspaceStagingPolicy:
         if raw.get("schema_version") != 1:
             raise ValueError("workspace staging policy schema_version must be 1")
-        required = {"schema_version", "agent_excluded_paths", "verifier_only_paths"}
+        required = {
+            "schema_version",
+            "agent_excluded_paths",
+            "verifier_only_paths",
+            "trusted_oracle_paths",
+        }
         if set(raw) != required:
             raise ValueError("workspace staging policy must contain the exact v1 fields")
         agent_paths = cls._validate_paths(raw["agent_excluded_paths"])
         verifier_paths = cls._validate_paths(raw["verifier_only_paths"])
+        trusted_oracle_paths = cls._validate_paths(raw["trusted_oracle_paths"])
         if agent_paths != verifier_paths:
             raise ValueError(
                 "workspace staging policy verifier_only_paths must equal agent_excluded_paths",
             )
-        return cls(agent_excluded_paths=agent_paths, verifier_only_paths=verifier_paths)
+        if any(path not in agent_paths for path in trusted_oracle_paths):
+            raise ValueError(
+                "workspace staging policy trusted_oracle_paths must be a subset "
+                "of agent_excluded_paths",
+            )
+        return cls(
+            agent_excluded_paths=agent_paths,
+            verifier_only_paths=verifier_paths,
+            trusted_oracle_paths=trusted_oracle_paths,
+        )
 
     @staticmethod
     def _validate_paths(value: object) -> tuple[str, ...]:
@@ -138,6 +155,7 @@ async def materialize_workspace(
     dst: PurePosixPath,
     policy: WorkspaceStagingPolicy | None = None,
     phase: WorkspacePhase = "agent",
+    trusted_private_paths: tuple[str, ...] = (),
 ) -> int:
     """Recursively upload every regular file under `task_dir` to `dst`
     inside the sandbox, preserving the relative path layout. Returns
@@ -166,7 +184,11 @@ async def materialize_workspace(
             continue
         if policy is not None:
             private = policy.is_private(PurePosixPath(*rel.parts))
-            if phase == "agent" and private:
+            trusted_private = any(
+                fnmatchcase(PurePosixPath(*rel.parts).as_posix(), pattern)
+                for pattern in trusted_private_paths
+            )
+            if phase == "agent" and private and not trusted_private:
                 continue
             if phase == "verifier" and not private:
                 continue

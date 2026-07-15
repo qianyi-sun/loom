@@ -13,6 +13,7 @@ from typing import Any
 from uuid import UUID
 
 from loom.agent.base import AgentRuntime, InBoxAgentRuntime
+from loom.agent.oracle import OracleAgent
 from loom.driver.base import Driver, StartOptions
 from loom.errors import classify_failure, classify_failure_message
 from loom.models.networking import NetworkPolicy
@@ -252,6 +253,15 @@ class Trial:
                         dst=workdir,
                         policy=self.ctx.workspace_staging_policy,
                         phase="agent",
+                        trusted_private_paths=(
+                            self.ctx.workspace_staging_policy.trusted_oracle_paths
+                            if (
+                                self.ctx.workspace_staging_policy is not None
+                                and self.ctx.trial_config.agent_name == "oracle"
+                                and isinstance(self.ctx.agent, OracleAgent)
+                            )
+                            else ()
+                        ),
                     )
                     if hasattr(self.ctx.agent, "workdir"):
                         self.ctx.agent.workdir = workdir

@@ -61,7 +61,11 @@ from loom.startup_retry import (
 )
 from loom.task_bundle_compat import validate_task_dir_compatibility
 from loom.trajectory.cp_event_sink import CpEventSink
-from loom.trajectory.storage import MinioObjectStore, ObjectStore
+from loom.trajectory.storage import (
+    MinioObjectStore,
+    ObjectStore,
+    bundle_file_metadata_sha256,
+)
 from loom.trial.workspace import TB21_AGENT_WORKSPACE_POLICY, WorkspaceStagingPolicy
 from loom.verifier.base import Verifier
 from loom.verifier.pytest_verifier import PytestVerifier
@@ -762,6 +766,7 @@ async def _spawn_trial(
                 _verify_materialized_tb21_bundle_checksum(
                     task_dir=task_dir,
                     expected_checksum=task_checksum,
+                    source_provenance=provenance,
                 )
             validate_task_dir_compatibility(task_dir)
             # #275: serialize concurrent task-image builds so a burst of
@@ -1339,6 +1344,7 @@ def _verify_materialized_tb21_bundle_checksum(
     *,
     task_dir: Path,
     expected_checksum: str,
+    source_provenance: dict[str, Any],
 ) -> None:
     """Fail closed when current object-store bytes differ from the audited row.
 
@@ -1352,6 +1358,13 @@ def _verify_materialized_tb21_bundle_checksum(
         raise ValueError(
             "materialized TB2.1 bundle checksum mismatch "
             f"expected={expected_checksum} actual=sha256:{actual_checksum}",
+        )
+    actual_metadata_digest = bundle_file_metadata_sha256(task_dir)
+    if source_provenance.get("bundle_file_metadata_sha256") != actual_metadata_digest:
+        raise ValueError(
+            "materialized TB2.1 bundle file mode metadata mismatch "
+            f"expected={source_provenance.get('bundle_file_metadata_sha256')} "
+            f"actual={actual_metadata_digest}",
         )
 
 

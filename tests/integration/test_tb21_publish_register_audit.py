@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 from collections.abc import AsyncIterator
+from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -11,7 +13,7 @@ from sqlalchemy import create_engine, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Benchmark, BenchmarkAlias
+from loom.db.schema import Benchmark, BenchmarkAlias, Team, Trial
 from loom.db.schema import Task as TaskRow
 from loom.models.task import TaskConfig
 from loom_benchmark_tool.audit_cmd import AuditResult, activate_tb21_alias
@@ -31,6 +33,7 @@ async def db(postgres_url: str) -> AsyncIterator[AsyncSession]:
             session.execute(
                 delete(BenchmarkAlias).where(BenchmarkAlias.alias == "terminal-bench-2")
             )
+            session.execute(delete(Trial).where(Trial.task_id == TASK_ID))
             session.execute(delete(TaskRow).where(TaskRow.benchmark_id == PROFILE))
             session.execute(delete(Benchmark).where(Benchmark.id == PROFILE))
             session.commit()
@@ -49,6 +52,7 @@ async def db(postgres_url: str) -> AsyncIterator[AsyncSession]:
                 session.execute(
                     delete(BenchmarkAlias).where(BenchmarkAlias.alias == "terminal-bench-2")
                 )
+                session.execute(delete(Trial).where(Trial.task_id == TASK_ID))
                 session.execute(delete(TaskRow).where(TaskRow.benchmark_id == PROFILE))
                 session.execute(delete(Benchmark).where(Benchmark.id == PROFILE))
                 session.commit()
@@ -78,7 +82,9 @@ def _manifest() -> dict[str, object]:
         "verifier_asset": {
             "script_path": "/workspace/verifier/run.sh",
             "sha256": "sha256:" + "b" * 64,
+            "mode": "0755",
         },
+        "bundle_file_metadata_sha256": "sha256:" + "e" * 64,
         "image_provenance": {"docker_image": "python:3.12-slim", "cpu_arch": "x86_64"},
         "workspace_staging_policy": TB21_AGENT_WORKSPACE_POLICY,
     }
@@ -154,6 +160,105 @@ async def test_register_keeps_tb21_profile_pending_and_rejects_direct_physical_s
         )
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail["reason"] == "benchmark_not_runnable"
+
+
+async def test_exact_reregister_preserves_runnable_profile_and_alias(
+    db: AsyncSession,
+    postgres_url: str,
+) -> None:
+    manifest = _manifest()
+    await run_register(
+        benchmark="terminal-bench-2",
+        hf_org="test-org",
+        hf_token=None,
+        db_url=postgres_url,
+        registered_by="test",
+        manifest=manifest,
+    )
+    benchmark = await db.get(Benchmark, PROFILE)
+    assert benchmark is not None
+    benchmark.execution_state = "runnable"
+    activated_provenance = dict(benchmark.profile_provenance)
+    activated_provenance["activation_audit"] = {
+        "schema_version": 1,
+        "snapshot_id": "sha256:" + "c" * 64,
+        "verified_bundles": 89,
+    }
+    benchmark.profile_provenance = activated_provenance
+    db.add(BenchmarkAlias(alias="terminal-bench-2", benchmark_id=PROFILE))
+    await db.commit()
+
+    result = await run_register(
+        benchmark="terminal-bench-2",
+        hf_org="test-org",
+        hf_token=None,
+        db_url=postgres_url,
+        registered_by="second-operator",
+        manifest=manifest,
+    )
+
+    db.expire_all()
+    benchmark = await db.get(Benchmark, PROFILE)
+    alias = await db.get(BenchmarkAlias, "terminal-bench-2")
+    assert result["registered"] == 0
+    assert result["skipped"] == 1
+    assert benchmark is not None
+    assert benchmark.execution_state == "runnable"
+    assert benchmark.profile_provenance["activation_audit"]["snapshot_id"] == ("sha256:" + "c" * 64)
+    assert alias is not None and alias.benchmark_id == PROFILE
+
+
+async def test_reregister_drift_cannot_change_task_referenced_by_queued_trial(
+    db: AsyncSession,
+    postgres_url: str,
+) -> None:
+    manifest = _manifest()
+    await run_register(
+        benchmark="terminal-bench-2",
+        hf_org="test-org",
+        hf_token=None,
+        db_url=postgres_url,
+        registered_by="test",
+        manifest=manifest,
+    )
+    benchmark = await db.get(Benchmark, PROFILE)
+    assert benchmark is not None
+    benchmark.execution_state = "runnable"
+    team = Team(name=f"tb21-immutability-{uuid4()}")
+    db.add(team)
+    await db.flush()
+    queued = Trial(
+        team_id=team.id,
+        task_id=TASK_ID,
+        config={"agent_name": "oracle", "agent_model": None},
+        requires_caps={},
+        state="queued",
+    )
+    db.add(queued)
+    await db.commit()
+    queued_id = queued.id
+
+    drifted = copy.deepcopy(manifest)
+    drifted["tasks"][0]["checksum"] = "sha256:" + "d" * 64  # type: ignore[index]
+    with pytest.raises(ValueError, match="new physical profile ID"):
+        await run_register(
+            benchmark="terminal-bench-2",
+            hf_org="test-org",
+            hf_token=None,
+            db_url=postgres_url,
+            registered_by="drifted-operator",
+            manifest=drifted,
+        )
+
+    db.expire_all()
+    task = await db.get(TaskRow, TASK_ID)
+    benchmark = await db.get(Benchmark, PROFILE)
+    queued_after = await db.get(Trial, queued_id)
+    assert task is not None and task.checksum == "sha256:" + "a" * 64
+    assert benchmark is not None and benchmark.execution_state == "runnable"
+    assert queued_after is not None
+    assert queued_after.state == "queued"
+    assert queued_after.task_id == TASK_ID
 
 
 async def test_activation_writes_alias_only_after_exact_isolated_audit(

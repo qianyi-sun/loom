@@ -1,3 +1,4 @@
+import asyncio
 import fnmatch
 import shlex
 from pathlib import Path, PurePosixPath
@@ -584,3 +585,69 @@ async def test_private_verifier_uses_fresh_driver_without_exposing_agent_workspa
     assert verifier_driver.state == "stopped"
     assert agent_driver.private_paths_observed == []
     assert PurePosixPath("/workspace/verifier/run.sh") not in agent_driver.filesystem
+
+
+async def test_private_verifier_driver_is_stopped_when_step_is_cancelled(
+    context: TrialContext,
+) -> None:
+    entered_verifier = asyncio.Event()
+
+    class _HandoffDriver(FakeDriver):
+        async def exec(self, cmd, **kwargs):  # type: ignore[no-untyped-def]
+            if cmd.startswith("find "):
+                paths = [
+                    path.as_posix().encode()
+                    for path in sorted(self.filesystem)
+                    if path.is_relative_to(PurePosixPath("/workspace"))
+                ]
+                return ExecResult(
+                    return_code=0,
+                    stdout=b"\x00".join(paths) + (b"\x00" if paths else b""),
+                    stderr=b"",
+                    truncated=False,
+                    duration_sec=0,
+                )
+            return await super().exec(cmd, **kwargs)
+
+    class _BlockingVerifier:
+        name = "blocking"
+
+        async def verify(self, **_kwargs):  # type: ignore[no-untyped-def]
+            entered_verifier.set()
+            await asyncio.Future()
+
+    task_dir = context.task_dir
+    (task_dir / "tests").mkdir()
+    (task_dir / "tests" / "private-test.sh").write_text("private\n")
+    (task_dir / "verifier").mkdir()
+    (task_dir / "verifier" / "run.sh").write_text("#!/bin/sh\n")
+    (task_dir / "upstream-task.toml").write_text("private upstream\n")
+    verifier_driver = _HandoffDriver()
+    context.workspace_staging_policy = WorkspaceStagingPolicy.from_provenance(
+        TB21_AGENT_WORKSPACE_POLICY,
+    )
+    context.verifier_driver_factory = lambda: verifier_driver
+    context.verifier = _BlockingVerifier()  # type: ignore[assignment]
+
+    writer = TrajectoryWriter(
+        local_path=context.local_trajectory_path,
+        store=context.object_store,
+        bucket=context.trajectory_bucket,
+        key=context.trajectory_key,
+        min_part_bytes=0,
+    )
+    async with writer:
+        running = asyncio.create_task(
+            run_step(
+                ctx=context,
+                step=context.task_config.steps[0],
+                trajectory=writer,
+                baseline_policy=Public(),
+            )
+        )
+        await asyncio.wait_for(entered_verifier.wait(), timeout=2)
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+
+    assert verifier_driver.state == "stopped"
