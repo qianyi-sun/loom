@@ -9,6 +9,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from loom_cli.canary_task_filter import task_filter_targets_only_benchmark
 from loom_cli.cluster_sandbox_deadline import (
     FAILURE_CLASS as SANDBOX_DEADLINE_FAILURE_CLASS,
 )
@@ -1517,22 +1518,6 @@ def _manifest_active_gb10_hosts(manifest: dict[str, Any]) -> list[str]:
     return sorted(active_hosts)
 
 
-def _canary_task_filter_matches_benchmark(value: Any, benchmark_id: str) -> bool:
-    if not isinstance(value, dict):
-        return False
-    if value.get("benchmark_id") == benchmark_id:
-        return True
-    benchmark_ids = value.get("benchmark_ids")
-    if isinstance(benchmark_ids, list) and benchmark_id in benchmark_ids:
-        return True
-    task_ids = value.get("task_ids")
-    return isinstance(task_ids, list) and any(
-        isinstance(task_id, str)
-        and (task_id == benchmark_id or task_id.startswith(f"{benchmark_id}/"))
-        for task_id in task_ids
-    )
-
-
 def _secret_leak_paths(value: Any, *, path: str = "") -> list[str]:
     if isinstance(value, str):
         return [path or "$"] if _RAW_SECRET_RE.search(value) else []
@@ -1650,6 +1635,7 @@ def _hf_mirror_boundary_evidence(
             "canary_worker_pools": worker_boundary.get("canary_worker_pools"),
             "canary_expected_trial_count": worker_boundary.get("expected_trial_count"),
             "canary_succeeded_trials": worker_boundary.get("succeeded_trials"),
+            "canary_task_provenance": worker_boundary.get("canary_task_provenance"),
             "worker_hf_token_present": worker_hf_token_present,
             "direct_hf_egress_required": direct_hf_egress_required,
             "materialized_from_internal_source": (
@@ -1861,6 +1847,7 @@ def _hf_mirror_boundary_check(
     expected_trials = evidence.get("canary_expected_trial_count")
     succeeded_trials = evidence.get("canary_succeeded_trials")
     canary_worker_pools = evidence.get("canary_worker_pools")
+    task_provenance = evidence.get("canary_task_provenance")
     terminal_pools = (
         canary_worker_pools.get("terminal") if isinstance(canary_worker_pools, dict) else None
     )
@@ -1876,10 +1863,20 @@ def _hf_mirror_boundary_check(
         or isinstance(succeeded_trials, bool)
         or not isinstance(succeeded_trials, int)
         or succeeded_trials != expected_trials
-        or not _canary_task_filter_matches_benchmark(
+        or not task_filter_targets_only_benchmark(
             evidence.get("canary_task_filter"),
             _HF_MIRROR_BENCHMARK_ID,
         )
+        or not isinstance(task_provenance, dict)
+        or isinstance(task_provenance.get("trial_count"), bool)
+        or task_provenance.get("trial_count") != expected_trials
+        or isinstance(task_provenance.get("target_benchmark_trial_count"), bool)
+        or task_provenance.get("target_benchmark_trial_count") != expected_trials
+        or isinstance(task_provenance.get("non_target_trial_count"), bool)
+        or task_provenance.get("non_target_trial_count") != 0
+        or isinstance(task_provenance.get("task_set_trial_count"), bool)
+        or task_provenance.get("task_set_trial_count") != 0
+        or task_provenance.get("benchmark_ids") != [_HF_MIRROR_BENCHMARK_ID]
         or not isinstance(terminal_pools, dict)
         or set(terminal_pools) != {_STAGING_GB10_POOL_NAME}
         or isinstance(terminal_pools.get(_STAGING_GB10_POOL_NAME), bool)

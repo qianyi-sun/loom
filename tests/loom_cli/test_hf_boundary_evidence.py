@@ -82,6 +82,13 @@ def _canary_summary() -> dict[str, object]:
         "worker_pools": {"terminal": {"gb10-arm64": 2}},
         "expected_trial_count": 2,
         "succeeded_trials": 2,
+        "task_provenance": {
+            "trial_count": 2,
+            "target_benchmark_trial_count": 2,
+            "non_target_trial_count": 0,
+            "task_set_trial_count": 0,
+            "benchmark_ids": ["skilllearnbench"],
+        },
     }
 
 
@@ -157,6 +164,51 @@ def test_compose_preserves_explicit_zero_valid_task_count() -> None:
         ({"result_status": "failed"}, False),
         ({"state": "running"}, False),
         ({"task_filter": {"benchmark_id": "other"}}, False),
+        ({"task_filter": {"benchmark_ids": ["skilllearnbench"]}}, True),
+        (
+            {"task_filter": {"benchmark_ids": ["other", "skilllearnbench"]}},
+            False,
+        ),
+        (
+            {
+                "task_filter": {
+                    "task_ids": [
+                        "skilllearnbench/example/example-1",
+                        "skilllearnbench/example/example-2",
+                    ],
+                },
+            },
+            True,
+        ),
+        (
+            {
+                "task_filter": {
+                    "task_ids": [
+                        "other/task-1",
+                        "skilllearnbench/example/example-1",
+                    ],
+                },
+            },
+            False,
+        ),
+        (
+            {
+                "task_filter": {
+                    "benchmark_id": "skilllearnbench",
+                    "task_set_id": "other-set",
+                },
+            },
+            False,
+        ),
+        (
+            {
+                "task_filter": {
+                    "benchmark_id": "skilllearnbench",
+                    "future_source_selector": "other",
+                },
+            },
+            False,
+        ),
         ({"required_worker_pools": ["oldlab"]}, False),
     ],
 )
@@ -180,6 +232,44 @@ def test_canary_row_requires_success_benchmark_and_gb10_pool(
         )
         is expected
     )
+
+
+def test_canary_trial_summary_records_actual_task_provenance() -> None:
+    summary = hf_boundary_evidence._summarize_canary_trials(
+        [
+            {
+                "state": "succeeded",
+                "pool_name": "gb10-arm64",
+                "task_benchmark_id": "skilllearnbench",
+                "task_set_id": None,
+            },
+            {
+                "state": "succeeded",
+                "pool_name": "gb10-arm64",
+                "task_benchmark_id": "other",
+                "task_set_id": None,
+            },
+            {
+                "state": "succeeded",
+                "pool_name": "gb10-arm64",
+                "task_benchmark_id": None,
+                "task_set_id": "other-set",
+            },
+        ],
+        benchmark_id="skilllearnbench",
+    )
+
+    assert summary == {
+        "worker_pools": {"active": {}, "terminal": {"gb10-arm64": 3}},
+        "succeeded_trials": 3,
+        "task_provenance": {
+            "trial_count": 3,
+            "target_benchmark_trial_count": 1,
+            "non_target_trial_count": 2,
+            "task_set_trial_count": 1,
+            "benchmark_ids": ["other", "skilllearnbench"],
+        },
+    }
 
 
 def test_write_secret_safe_json_rejects_raw_hf_token(tmp_path: Path) -> None:

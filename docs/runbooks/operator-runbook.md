@@ -4069,6 +4069,13 @@ The generated artifact has this shape:
     },
     "expected_trial_count": 2,
     "succeeded_trials": 2,
+    "canary_task_provenance": {
+      "trial_count": 2,
+      "target_benchmark_trial_count": 2,
+      "non_target_trial_count": 0,
+      "task_set_trial_count": 0,
+      "benchmark_ids": ["skilllearnbench"]
+    },
     "hf_token_present": false,
     "hf_token_isolated": true,
     "direct_hf_egress_required": false,
@@ -4099,8 +4106,10 @@ Pass the artifact to `loom cluster release-gate` with
 `--hf-mirror-boundary-evidence "$ROLLOUT_DIR/hf-mirror-boundary-evidence-$IMAGE_TAG.json"`.
 The release gate fails staging/production when the release manifest records the
 SkillLearnBench HF catalog gate but this artifact is missing, has non-`s3://`
-runtime sources, lacks HF provenance, reports worker `HF_TOKEN` presence,
-has missing/failed GB10 token inspection, requires direct worker HF egress, or
+runtime sources, lacks HF provenance, uses a task filter that can select any
+non-SkillLearnBench source, cannot prove every actual canary trial joined to a
+SkillLearnBench benchmark task, reports worker `HF_TOKEN` presence, has
+missing/failed GB10 token inspection, requires direct worker HF egress, or
 contains raw secret-looking values. This repo-side check does not replace live
 staging validation; it makes the required evidence acceptance-testable and
 production-promotion-blocking.

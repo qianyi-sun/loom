@@ -548,6 +548,13 @@ def _hf_boundary_evidence(
             },
             "expected_trial_count": 2,
             "succeeded_trials": 2,
+            "canary_task_provenance": {
+                "trial_count": 2,
+                "target_benchmark_trial_count": 2,
+                "non_target_trial_count": 0,
+                "task_set_trial_count": 0,
+                "benchmark_ids": ["skilllearnbench"],
+            },
             "hf_token_present": False,
             "hf_token_isolated": True,
             "direct_hf_egress_required": False,
@@ -1587,6 +1594,12 @@ def test_hf_boundary_rejects_stale_candidate_binding(drift: str) -> None:
         "partial-success",
         "boolean-counts",
         "wrong-task-filter",
+        "mixed-benchmark-filter",
+        "mixed-task-filter",
+        "taskset-filter",
+        "missing-task-provenance",
+        "non-target-task-provenance",
+        "boolean-task-provenance",
         "wrong-worker-pool",
         "extra-terminal-pool",
     ],
@@ -1612,6 +1625,33 @@ def test_hf_boundary_requires_fully_succeeded_matching_canary(drift: str) -> Non
         boundary["canary_worker_pools"]["terminal"]["gb10-arm64"] = True
     elif drift == "wrong-task-filter":
         boundary["canary_task_filter"] = {"benchmark_id": "other"}
+    elif drift == "mixed-benchmark-filter":
+        boundary["canary_task_filter"] = {
+            "benchmark_ids": ["other", "skilllearnbench"],
+            "subset_kind": "first_n",
+            "n": 1,
+        }
+    elif drift == "mixed-task-filter":
+        boundary["canary_task_filter"] = {
+            "task_ids": ["other/task-1", "skilllearnbench/example/example-1"],
+        }
+    elif drift == "taskset-filter":
+        boundary["canary_task_filter"] = {
+            "benchmark_id": "skilllearnbench",
+            "task_set_id": "other-set",
+        }
+    elif drift == "missing-task-provenance":
+        boundary.pop("canary_task_provenance")
+    elif drift == "non-target-task-provenance":
+        boundary["canary_task_provenance"] = {
+            "trial_count": 2,
+            "target_benchmark_trial_count": 1,
+            "non_target_trial_count": 1,
+            "task_set_trial_count": 0,
+            "benchmark_ids": ["other", "skilllearnbench"],
+        }
+    elif drift == "boolean-task-provenance":
+        boundary["canary_task_provenance"]["non_target_trial_count"] = False
     elif drift == "wrong-worker-pool":
         boundary["canary_worker_pools"] = {
             "active": {},

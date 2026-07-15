@@ -17,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from loom_benchmark_tool.db_url import normalize_db_url
+from loom_cli.canary_task_filter import task_filter_targets_only_benchmark
 
 _RAW_SECRET_RE = re.compile(r"(?:hf_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})")
 
@@ -262,6 +263,7 @@ def compose_boundary_evidence(
             "canary_worker_pools": canary_summary.get("worker_pools"),
             "expected_trial_count": canary_summary.get("expected_trial_count"),
             "succeeded_trials": canary_summary.get("succeeded_trials"),
+            "canary_task_provenance": canary_summary.get("task_provenance"),
             "gb10_hf_token_check_summary": worker_summary,
         },
         "secret_scan": {"raw_secret_values_present": False},
@@ -377,23 +379,6 @@ async def collect_source_summary_from_db(
     }
 
 
-def _task_filter_mentions_benchmark(
-    task_filter: Mapping[str, Any],
-    benchmark_id: str,
-) -> bool:
-    if task_filter.get("benchmark_id") == benchmark_id:
-        return True
-    benchmark_ids = task_filter.get("benchmark_ids")
-    if isinstance(benchmark_ids, list) and benchmark_id in benchmark_ids:
-        return True
-    task_ids = task_filter.get("task_ids")
-    return isinstance(task_ids, list) and any(
-        isinstance(task_id, str)
-        and (task_id == benchmark_id or task_id.startswith(f"{benchmark_id}/"))
-        for task_id in task_ids
-    )
-
-
 def _is_successful_canary_row(
     row: Mapping[str, Any],
     *,
@@ -405,10 +390,52 @@ def _is_successful_canary_row(
     return (
         row.get("state") == "finished"
         and row.get("result_status") == "succeeded"
-        and _task_filter_mentions_benchmark(task_filter, benchmark_id)
+        and task_filter_targets_only_benchmark(task_filter, benchmark_id)
         and isinstance(required_pools, list)
         and worker_pool in required_pools
     )
+
+
+def _summarize_canary_trials(
+    trial_rows: Sequence[Mapping[str, Any]],
+    *,
+    benchmark_id: str,
+) -> dict[str, Any]:
+    terminal: dict[str, int] = {}
+    active: dict[str, int] = {}
+    succeeded_trials = 0
+    target_benchmark_trials = 0
+    non_target_trials = 0
+    task_set_trials = 0
+    task_benchmark_ids: set[str] = set()
+    for row in trial_rows:
+        state = str(row.get("state") or "")
+        pool = str(row.get("pool_name") or "unknown")
+        task_benchmark_id = row.get("task_benchmark_id")
+        task_set_id = row.get("task_set_id")
+        if state == "succeeded":
+            succeeded_trials += 1
+        if task_benchmark_id == benchmark_id:
+            target_benchmark_trials += 1
+        else:
+            non_target_trials += 1
+        if isinstance(task_benchmark_id, str) and task_benchmark_id:
+            task_benchmark_ids.add(task_benchmark_id)
+        if task_set_id is not None:
+            task_set_trials += 1
+        bucket = terminal if state in {"succeeded", "failed", "cancelled"} else active
+        bucket[pool] = bucket.get(pool, 0) + 1
+    return {
+        "worker_pools": {"active": active, "terminal": terminal},
+        "succeeded_trials": succeeded_trials,
+        "task_provenance": {
+            "trial_count": len(trial_rows),
+            "target_benchmark_trial_count": target_benchmark_trials,
+            "non_target_trial_count": non_target_trials,
+            "task_set_trial_count": task_set_trials,
+            "benchmark_ids": sorted(task_benchmark_ids),
+        },
+    }
 
 
 async def collect_canary_summary_from_db(
@@ -483,9 +510,12 @@ async def collect_canary_summary_from_db(
                     await conn.execute(
                         text(
                             """
-                        SELECT t.state, w.pool_name
+                        SELECT t.state, w.pool_name,
+                               task.benchmark_id AS task_benchmark_id,
+                               task.task_set_id
                         FROM trials t
                         LEFT JOIN workers w ON w.id = t.worker_id
+                        LEFT JOIN tasks task ON task.id = t.task_id
                         WHERE t.batch_id = CAST(:batch_id AS uuid)
                         """
                         ),
@@ -498,25 +528,20 @@ async def collect_canary_summary_from_db(
     finally:
         await engine.dispose()
 
-    terminal: dict[str, int] = {}
-    active: dict[str, int] = {}
-    succeeded_trials = 0
-    for row in trial_rows:
-        state = str(row.get("state") or "")
-        pool = str(row.get("pool_name") or "unknown")
-        if state == "succeeded":
-            succeeded_trials += 1
-        bucket = terminal if state in {"succeeded", "failed", "cancelled"} else active
-        bucket[pool] = bucket.get(pool, 0) + 1
+    trial_summary = _summarize_canary_trials(
+        [dict(row) for row in trial_rows],
+        benchmark_id=benchmark_id,
+    )
 
     return {
         "batch_id": selected["id"],
         "canary_started": bool(selected.get("created_at")),
         "terminal_state": selected.get("result_status") or selected.get("state"),
         "task_filter": selected.get("task_filter"),
-        "worker_pools": {"active": active, "terminal": terminal},
+        "worker_pools": trial_summary["worker_pools"],
         "expected_trial_count": selected.get("expected_trial_count"),
-        "succeeded_trials": succeeded_trials,
+        "succeeded_trials": trial_summary["succeeded_trials"],
+        "task_provenance": trial_summary["task_provenance"],
     }
 
 
