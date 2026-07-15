@@ -32,6 +32,7 @@ on:
     paths:
       - "deploy/Dockerfile.*"
       - "deploy/nginx-spa.conf"
+      - "deploy/nginx-spa-security-headers.conf"
       - "deploy/web-runtime-config.sh"
       - "src/**"
       - "packages/**"
@@ -39,6 +40,7 @@ on:
       - "web/index.html"
       - "web/package*.json"
       - "web/src/**"
+      - "web/tailwind.config.js"
       - "web/vite.config.ts"
       # Go source for the llm-gateway-sandbox binary (#547 item #3).
       - "cmd/**"
@@ -209,6 +211,7 @@ jobs:
                       "web/package-lock.json",
                       "web/vite.config.ts",
                       "deploy/nginx-spa.conf",
+                      "deploy/nginx-spa-security-headers.conf",
                       "deploy/web-runtime-config.sh",
                   }:
                       selected.add("web")

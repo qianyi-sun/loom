@@ -149,6 +149,7 @@ def test_images_builds_use_planner_selection() -> None:
 def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     jobs = workflow["jobs"]
+    push_paths = _workflow_on(workflow)["push"]["paths"]
 
     assert "plan" in jobs
     assert "images" in jobs["plan"]["outputs"]
@@ -161,6 +162,8 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     assert "web/index.html" in plan_script
     assert "deploy/Dockerfile.worker" in plan_script
     assert "migrations/" in plan_script
+    assert "web/tailwind.config.js" in push_paths
+    assert "deploy/nginx-spa-security-headers.conf" in push_paths
 
 
 def test_images_matrix_plan_receives_shared_required_decision() -> None:
@@ -216,6 +219,20 @@ def test_images_mixed_known_and_unowned_paths_select_all_images(tmp_path: Path) 
         "web",
         "llm-gateway-sandbox",
     }
+
+
+def test_frontend_security_policy_change_selects_only_web_image(tmp_path: Path) -> None:
+    result, output = _run_image_matrix_plan(
+        tmp_path,
+        required="true",
+        unowned_runtime="false",
+        changed_paths=("deploy/nginx-spa-security-headers.conf",),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(output.removeprefix("images=").strip()) == [
+        {"image": "web", "dockerfile": "deploy/Dockerfile.web"},
+    ]
 
 
 @pytest.mark.parametrize("required", ["", "invalid"])
@@ -821,6 +838,13 @@ def test_staging_route_smoke_locks_exact_ingress_boundary_probes() -> None:
     assert "http://127.0.0.1:18081${path}" in script
     assert "https://yylx.world/dev/api/v1/health" in script
     assert "https://www.yylx.world/dev?next=%2Fmonitor&x=1" in script
+    assert "scripts/ops/frontend_security_headers.py" in script
+    assert "--route staging=https://yylx.world/dev" in script
+    assert "--probe web_500=500=http://127.0.0.1:18082/dev/security-header-5xx-probe" in script
+    assert "--web-origin-only" in script
+    assert "index.html.security-header-smoke" in script
+    assert "trap cleanup_security_5xx_probe EXIT" in script
+    assert "trap - EXIT" in script
 
 
 def test_web_nginx_has_same_raw_path_and_case_guard_as_controller() -> None:

@@ -316,6 +316,21 @@ authenticated sessions, and application errors from the bundle are never
 covered by those exceptions. CI uploads the logged-out
 Playwright trace as short-lived rollout diagnostic evidence.
 
+The web Nginx layer also owns one fail-closed browser policy for SPA shells,
+runtime config, assets, slash-canonical redirects, and web-origin errors. The
+policy is a self-only CSP for scripts, styles, fonts, connections, forms, and
+manifests; it denies objects and framing and permits only the tested `data:` or
+`blob:` image/media/worker cases needed for rendering and downloads. Responses
+also carry `X-Content-Type-Options: nosniff`,
+`Referrer-Policy: no-referrer`, and a Permissions Policy that disables camera,
+microphone, and geolocation. The shared Nginx include uses `always` and is
+re-included in every location that declares its own cache header, avoiding
+Nginx's `add_header` inheritance trap. ingress-nginx retains the existing HSTS
+header for TLS responses it generates. Staging validates exact singleton
+values on 200, 308, 404, and an ephemeral, restored web-pod 500; the Chromium
+gate rejects CSP console violations. Reports contain URL/status/error metadata,
+never response headers or bodies.
+
 The repository-pinned ingress-nginx controller also rejects ambiguous raw path
 separators before Nginx normalizes them. Its trusted ConfigMap uses a global
 `http-snippet` map over `$request_uri` plus a `server-snippet` with

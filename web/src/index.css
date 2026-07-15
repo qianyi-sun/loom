@@ -1,7 +1,3 @@
-/* DM Sans + JetBrains Mono are loaded via <link> in index.html so
- * stylesheet parsing isn't blocked. Keeping the import out of the
- * CSS bundle avoids a render-blocking dependency on Google Fonts. */
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -38,14 +34,20 @@ html, body {
 }
 
 body {
-  font-family: "DM Sans", system-ui, -apple-system, BlinkMacSystemFont,
-    "Segoe UI", Roboto, sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    sans-serif;
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   background: var(--bg-primary);
   color: var(--text-primary);
+}
+
+.frontend-config-error {
+  padding: 24px;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    sans-serif;
 }
 
 /*
@@ -103,4 +105,3 @@ button:focus-visible, a:focus-visible {
     box-shadow: 0 0 20px var(--accent-glow);
   }
 }
-

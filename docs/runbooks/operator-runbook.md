@@ -4427,10 +4427,19 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
      --route production=https://yylx.world/prod=https://yylx.world/prod/api \
      --route development=https://yylx.world/dev=https://yylx.world/dev/api \
      --json
+
+   python scripts/ops/frontend_security_headers.py \
+     --route production=https://yylx.world/prod \
+     --route development=https://yylx.world/dev \
+     --json
    ```
    Both route documents must report the expected `environment`,
    `environmentLabel`, `routePath`, `apiBase`, and `apiRouteBase`; the response
-   must be `no-store`. Production labels must not contain beta wording.
+   must be `no-store`. Production labels must not contain beta wording. The
+   security report must pass exact singleton CSP, `nosniff`, referrer,
+   permissions, and HSTS checks on 200, 308, and wrong-asset 404 responses; it
+   records no headers or response bodies. Staging CI separately proves the
+   web-origin policy on a restored, disposable-pod 500.
    Then prove that the built bundle actually mounts in a fresh logged-out
    Chromium context on the exact, slash-canonical, and supported deep routes,
    both on direct entry and after refresh:

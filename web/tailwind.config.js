@@ -8,7 +8,6 @@ export default {
     extend: {
       fontFamily: {
         sans: [
-          "DM Sans",
           "system-ui",
           "-apple-system",
           "BlinkMacSystemFont",
@@ -17,10 +16,13 @@ export default {
           "sans-serif",
         ],
         mono: [
-          "JetBrains Mono",
           "ui-monospace",
           "SFMono-Regular",
           "Menlo",
+          "Monaco",
+          "Consolas",
+          "Liberation Mono",
+          "Courier New",
           "monospace",
         ],
       },

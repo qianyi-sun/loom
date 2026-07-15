@@ -65,6 +65,10 @@ void loadFrontendConfig()
   .then(renderApp)
   .catch((err: unknown) => {
     console.error("Failed to load Loom frontend config", err);
-    document.getElementById("root")!.innerHTML =
-      '<div style="padding: 24px; font-family: sans-serif">Frontend configuration error.</div>';
+    const rootElement = document.getElementById("root")!;
+    const message = document.createElement("div");
+    message.className = "frontend-config-error";
+    message.setAttribute("role", "alert");
+    message.textContent = "Frontend configuration error.";
+    rootElement.replaceChildren(message);
   });
