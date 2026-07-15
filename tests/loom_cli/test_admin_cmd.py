@@ -814,6 +814,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_nodes(
                         "max_concurrent": 10,
                         "env_config_version": "env-new",
                         "previous_image_tag": "staging-old",
+                        "host_intents": {"trt-gb10-1": "active"},
                     },
                 ],
                 "nodes": [
@@ -834,6 +835,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_nodes(
                         "error_message": None,
                     },
                 ],
+                "unlinked_workers": [],
             },
         )
 
@@ -1050,6 +1052,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_source_checkout(
                         "max_concurrent": 10,
                         "env_config_version": "staging-76875ac",
                         "previous_image_tag": "staging-b453057",
+                        "host_intents": {"trt-gb10-1": "active"},
                     },
                 ],
                 "nodes": [
@@ -1075,6 +1078,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_source_checkout(
                         "source_git_dirty": False,
                     },
                 ],
+                "unlinked_workers": [],
             },
         )
 
@@ -1117,6 +1121,7 @@ def test_gb10_workers_status_release_target_gate_fails_without_source_provenance
                         "image_tag": "staging-76875ac",
                         "max_concurrent": 10,
                         "env_config_version": "staging-76875ac",
+                        "host_intents": {"trt-gb10-1": "active"},
                     },
                 ],
                 "nodes": [
@@ -1140,6 +1145,7 @@ def test_gb10_workers_status_release_target_gate_fails_without_source_provenance
                         ),
                     },
                 ],
+                "unlinked_workers": [],
             },
         )
 
