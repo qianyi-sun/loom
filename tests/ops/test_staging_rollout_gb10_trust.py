@@ -156,10 +156,17 @@ def _run_remote(
     home: Path,
     operation: str,
     public_key: bytes,
+    *,
+    bootstrap_public_key: bytes | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
+    payload = (
+        trust._bootstrap_envelope(public_key, bootstrap_public_key)
+        if operation == "rotate-bootstrap" and bootstrap_public_key is not None
+        else public_key
+    )
     return subprocess.run(
         [sys.executable, "-c", trust._REMOTE_SCRIPT, operation],
-        input=public_key,
+        input=payload,
         capture_output=True,
         check=False,
         env={**os.environ, "HOME": str(home)},
@@ -697,10 +704,23 @@ def test_bootstrap_sends_public_key_only_over_stdin_to_every_host(
 ) -> None:
     config, public_path, identity, public_key = _write_inputs(tmp_path)
     _initialize_ledger(tmp_path, config, public_path)
+    bootstrap_public_key = _public_key(80, "bootstrap")
     calls: list[tuple[list[str], dict[str, object]]] = []
+    temporary_configs: list[Path] = []
 
     def fake_run(argv, **kwargs):
+        if argv[0] == str(trust.SSH_KEYGEN_BINARY):
+            assert argv == [str(trust.SSH_KEYGEN_BINARY), "-y", "-f", str(identity)]
+            assert kwargs["stdin"] == subprocess.DEVNULL
+            assert kwargs["env"]["SSH_ASKPASS_REQUIRE"] == "never"
+            return subprocess.CompletedProcess(argv, 0, bootstrap_public_key, b"")
         calls.append((list(argv), dict(kwargs)))
+        temporary_configs.append(Path(argv[2]))
+        rendered = Path(argv[2]).read_text(encoding="utf-8")
+        assert f'IdentityFile "{identity}"' in rendered
+        assert f'IdentityFile "{trust.SERVICE_PRIVATE_KEY_PATH}"' in rendered
+        assert "IdentityAgent none" in rendered
+        assert "ProxyJump trt-gb10-1" in rendered
         return subprocess.CompletedProcess(argv, 0, b'{"status":"installed"}\n', b"")
 
     rc = _main(
@@ -712,19 +732,24 @@ def test_bootstrap_sends_public_key_only_over_stdin_to_every_host(
     )
 
     assert rc == 0
-    expected_hosts = [f"trt-gb10-{number}" for number in range(1, 16) if number != 7]
+    expected_hosts = [f"trt-gb10-{number}" for number in range(2, 16) if number != 7]
+    expected_hosts.append("trt-gb10-1")
     assert len(calls) == 14
     for host, (argv, kwargs) in zip(expected_hosts, calls, strict=True):
         assert argv[-2] == host
-        assert argv[:3] == [str(trust.SSH_BINARY), "-F", str(config)]
+        assert argv[:2] == [str(trust.SSH_BINARY), "-F"]
         assert "StrictHostKeyChecking=yes" in argv
         assert f"UserKnownHostsFile={trust.KNOWN_HOSTS_PATH}" in argv
         assert "GlobalKnownHostsFile=/dev/null" in argv
         assert "UpdateHostKeys=no" in argv
-        assert argv[argv.index("-i") + 1] == str(identity)
+        assert "-i" not in argv
         assert kwargs["input"] == public_key
         assert kwargs["text"] is False
         assert public_key.decode("ascii").strip() not in " ".join(argv)
+        assert str(identity) not in " ".join(argv)
+    assert temporary_configs
+    assert all(path == temporary_configs[0] for path in temporary_configs)
+    assert not temporary_configs[0].exists()
     captured = capsys.readouterr()
     assert public_key.decode("ascii").strip() not in captured.out
     assert public_key.decode("ascii").strip() not in captured.err
@@ -733,7 +758,205 @@ def test_bootstrap_sends_public_key_only_over_stdin_to_every_host(
     assert report["remote_user"] == "qianyi"
     assert [entry["host"] for entry in report["hosts"]] == expected_hosts
     ledger = trust.RevocationLedger.from_bytes(_ledger_path(tmp_path).read_bytes())
-    assert ledger.revocation_hosts == tuple(expected_hosts)
+    assert ledger.revocation_hosts == tuple(
+        f"trt-gb10-{number}" for number in range(1, 16) if number != 7
+    )
+
+
+@pytest.mark.parametrize(
+    ("operation", "success_status"),
+    [("bootstrap", "installed"), ("rotate-bootstrap", "rotated")],
+)
+def test_bootstrap_operations_defer_jump_host_after_private_host_failure(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    operation: str,
+    success_status: str,
+) -> None:
+    config, public_path, identity, _public_key_value = _write_inputs(tmp_path)
+    _initialize_ledger(tmp_path, config, public_path)
+    calls: list[str] = []
+
+    def fake_run(argv, **_kwargs):
+        if argv[0] == str(trust.SSH_KEYGEN_BINARY):
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                _public_key(80, "derived-bootstrap"),
+                b"",
+            )
+        calls.append(argv[-2])
+        if argv[-2] == "trt-gb10-8":
+            return subprocess.CompletedProcess(argv, 255, b"", b"private failure")
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps({"status": success_status}).encode("ascii") + b"\n",
+            b"",
+        )
+
+    rc = _main(
+        [operation, "--bootstrap-identity", str(identity)],
+        tmp_path=tmp_path,
+        run=fake_run,
+        config=config,
+        public_path=public_path,
+    )
+
+    assert rc == 1
+    assert calls == [f"trt-gb10-{number}" for number in range(2, 16) if number != 7]
+    report = json.loads(capsys.readouterr().out)
+    assert report["hosts"][-1] == {
+        "host": "trt-gb10-1",
+        "ok": False,
+        "status": "dependency-failed",
+    }
+
+
+def test_rotate_bootstrap_binds_service_and_derived_bootstrap_public_keys(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config, public_path, identity, service_public_key = _write_inputs(tmp_path)
+    _initialize_ledger(tmp_path, config, public_path)
+    bootstrap_public_key = _public_key(80, "derived-bootstrap")
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_run(argv, **kwargs):
+        if argv[0] == str(trust.SSH_KEYGEN_BINARY):
+            return subprocess.CompletedProcess(argv, 0, bootstrap_public_key, b"")
+        calls.append((argv[-2], dict(kwargs)))
+        return subprocess.CompletedProcess(argv, 0, b'{"status":"rotated"}\n', b"")
+
+    rc = _main(
+        ["rotate-bootstrap", "--bootstrap-identity", str(identity)],
+        tmp_path=tmp_path,
+        run=fake_run,
+        config=config,
+        public_path=public_path,
+    )
+
+    assert rc == 0
+    expected_hosts = [f"trt-gb10-{number}" for number in range(2, 16) if number != 7]
+    expected_hosts.append("trt-gb10-1")
+    assert [host for host, _ in calls] == expected_hosts
+    for _host, kwargs in calls:
+        envelope = json.loads(kwargs["input"])
+        assert envelope == {
+            "bootstrap_public_key": " ".join(bootstrap_public_key.decode("ascii").split()[:2]),
+            "schema_version": 1,
+            "service_public_key": service_public_key.decode("ascii").strip(),
+        }
+    report = json.loads(capsys.readouterr().out)
+    assert report["ok"] is True
+    assert [entry["status"] for entry in report["hosts"]] == ["rotated"] * 14
+
+
+@pytest.mark.skipif(shutil.which("ssh") is None, reason="OpenSSH client is unavailable")
+def test_generated_bootstrap_config_applies_both_keys_to_jump_and_private_hosts(
+    tmp_path: Path,
+) -> None:
+    config, _public_path, identity, _public_key_value = _write_inputs(tmp_path)
+    inventory = trust.parse_ssh_inventory(config.read_text(encoding="utf-8"))
+
+    with trust._bootstrap_ssh_config(
+        inventory,
+        bootstrap_identity=identity,
+        parent=tmp_path,
+        expected_uid=os.getuid(),
+        expected_gid=os.getgid(),
+    ) as temporary:
+        assert stat.S_IMODE(temporary.stat().st_mode) == 0o600
+        for host in ("trt-gb10-1", "trt-gb10-2"):
+            completed = subprocess.run(
+                ["ssh", "-G", "-F", str(temporary), host],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert completed.returncode == 0, completed.stderr
+            identities = [
+                line.split(maxsplit=1)[1]
+                for line in completed.stdout.splitlines()
+                if line.startswith("identityfile ")
+            ]
+            assert identities == [str(identity), str(trust.SERVICE_PRIVATE_KEY_PATH)]
+            assert "identityagent none" in completed.stdout
+            assert "batchmode yes" in completed.stdout
+            assert "controlmaster false" in completed.stdout
+            assert "gssapiauthentication no" in completed.stdout
+            assert "hostbasedauthentication no" in completed.stdout
+            assert "identitiesonly yes" in completed.stdout
+            assert "kbdinteractiveauthentication no" in completed.stdout
+            assert "passwordauthentication no" in completed.stdout
+            assert "preferredauthentications publickey" in completed.stdout
+            assert "pubkeyauthentication true" in completed.stdout
+        private = subprocess.run(
+            ["ssh", "-G", "-F", str(temporary), "trt-gb10-2"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert "proxyjump trt-gb10-1" in private.stdout
+
+    assert not temporary.exists()
+
+
+@pytest.mark.parametrize("value", ["/secure/key%h", "/secure/${HOME}/key", "/secure/key\nHost *"])
+def test_bootstrap_config_rejects_ssh_expansion_and_directive_injection(value: str) -> None:
+    with pytest.raises(trust.TrustConfigurationError, match="configuration value is unsafe"):
+        trust._quote_ssh_config_value(value)
+
+
+def test_bootstrap_key_derivation_failure_contacts_no_host(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config, public_path, identity, _public_key_value = _write_inputs(tmp_path)
+    _initialize_ledger(tmp_path, config, public_path)
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 1, b"", b"DO_NOT_ECHO_KEYGEN_ERROR")
+
+    rc = _main(
+        ["bootstrap", "--bootstrap-identity", str(identity)],
+        tmp_path=tmp_path,
+        run=fake_run,
+        config=config,
+        public_path=public_path,
+    )
+
+    assert rc == 2
+    assert calls == [[str(trust.SSH_KEYGEN_BINARY), "-y", "-f", str(identity)]]
+    captured = capsys.readouterr()
+    assert "DO_NOT_ECHO_KEYGEN_ERROR" not in captured.out
+    assert "DO_NOT_ECHO_KEYGEN_ERROR" not in captured.err
+    assert "bootstrap identity public key is unavailable" in captured.err
+
+
+def test_bootstrap_rejects_hard_linked_identity_before_key_derivation(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config, public_path, identity, _public_key_value = _write_inputs(tmp_path)
+    _initialize_ledger(tmp_path, config, public_path)
+    os.link(identity, tmp_path / "second-name")
+
+    def forbidden_run(*_args, **_kwargs):
+        raise AssertionError("bootstrap identity must fail before any subprocess")
+
+    rc = _main(
+        ["bootstrap", "--bootstrap-identity", str(identity)],
+        tmp_path=tmp_path,
+        run=forbidden_run,
+        config=config,
+        public_path=public_path,
+    )
+
+    assert rc == 2
+    assert "bootstrap identity metadata is not approved" in capsys.readouterr().err
 
 
 def test_check_continues_after_partial_host_failure_without_echoing_remote_output(
@@ -965,6 +1188,227 @@ def test_remote_bootstrap_inserts_new_key_without_private_key_fixture(tmp_path: 
     rendered = authorized_keys.read_text(encoding="utf-8")
     assert unrelated in rendered
     assert rendered.count("loom-staging-rollout") == 1
+
+
+def test_remote_rotation_replaces_only_canonical_bootstrap_marker_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(parents=True, mode=0o700)
+    bootstrap_key = _public_key(80, "loom-staging-rollout")
+    service_key = _public_key(1, "service")
+    unrelated = _public_key(90, "unrelated").decode("ascii").strip()
+    authorized_keys = ssh_dir / "authorized_keys"
+    original_prefix = f"# preserve\r\n{unrelated}\n".encode("ascii")
+    authorized_keys.write_bytes(
+        original_prefix + bootstrap_key.decode("ascii").strip().encode("ascii")
+    )
+    authorized_keys.chmod(0o600)
+
+    first = _run_remote(
+        home,
+        "rotate-bootstrap",
+        service_key,
+        bootstrap_public_key=bootstrap_key,
+    )
+    after_first = authorized_keys.read_text(encoding="utf-8")
+    metadata_after_first = authorized_keys.stat()
+    second = _run_remote(
+        home,
+        "rotate-bootstrap",
+        service_key,
+        bootstrap_public_key=bootstrap_key,
+    )
+    metadata_after_second = authorized_keys.stat()
+
+    assert first.returncode == 0
+    assert json.loads(first.stdout) == {"status": "rotated"}
+    assert second.returncode == 0
+    assert json.loads(second.stdout) == {"status": "already-present"}
+    assert authorized_keys.read_text(encoding="utf-8") == after_first
+    assert bootstrap_key.decode("ascii").split()[1] not in after_first
+    assert service_key.decode("ascii").split()[1] in after_first
+    assert unrelated in after_first
+    assert "# preserve" in after_first
+    assert after_first.count("loom-staging-rollout") == 1
+    service_fields = service_key.decode("ascii").split()
+    assert authorized_keys.read_bytes() == (
+        original_prefix
+        + f"{service_fields[0]} {service_fields[1]} loom-staging-rollout".encode("ascii")
+    )
+    assert (
+        metadata_after_second.st_ino,
+        metadata_after_second.st_mode,
+        metadata_after_second.st_uid,
+        metadata_after_second.st_gid,
+        metadata_after_second.st_size,
+        metadata_after_second.st_mtime_ns,
+        metadata_after_second.st_ctime_ns,
+    ) == (
+        metadata_after_first.st_ino,
+        metadata_after_first.st_mode,
+        metadata_after_first.st_uid,
+        metadata_after_first.st_gid,
+        metadata_after_first.st_size,
+        metadata_after_first.st_mtime_ns,
+        metadata_after_first.st_ctime_ns,
+    )
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        "missing",
+        "unrelated-marker",
+        "noncanonical-bootstrap",
+        "duplicate-bootstrap",
+        "bootstrap-plus-service",
+        "revoked-bootstrap",
+    ],
+)
+def test_remote_rotation_rejects_ambiguous_authority_without_writing(
+    tmp_path: Path,
+    existing: str,
+) -> None:
+    home = tmp_path / "home"
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(parents=True, mode=0o700)
+    bootstrap_key = _public_key(80, "loom-staging-rollout")
+    service_key = _public_key(1, "service")
+    third_key = _public_key(90, "loom-staging-rollout")
+    bootstrap_line = bootstrap_key.decode("ascii").strip()
+    service_line = _public_key(1, "unmanaged-service").decode("ascii").strip()
+    if existing == "missing":
+        original = _public_key(91, "unrelated").decode("ascii")
+    elif existing == "unrelated-marker":
+        original = third_key.decode("ascii")
+    elif existing == "noncanonical-bootstrap":
+        original = f'command="/usr/bin/true" {bootstrap_line}\n'
+    elif existing == "duplicate-bootstrap":
+        original = bootstrap_line + "\n" + _public_key(80, "duplicate").decode("ascii")
+    elif existing == "bootstrap-plus-service":
+        original = bootstrap_line + "\n" + service_line + "\n"
+    else:
+        bootstrap = _run_remote(home, "bootstrap", bootstrap_key)
+        assert bootstrap.returncode == 0
+        revoked = _run_remote(home, "revoke", bootstrap_key)
+        assert revoked.returncode == 0
+        original = (ssh_dir / "authorized_keys").read_text(encoding="utf-8")
+    authorized_keys = ssh_dir / "authorized_keys"
+    if existing != "revoked-bootstrap":
+        authorized_keys.write_text(original, encoding="utf-8")
+        authorized_keys.chmod(0o600)
+
+    result = _run_remote(
+        home,
+        "rotate-bootstrap",
+        service_key,
+        bootstrap_public_key=bootstrap_key,
+    )
+
+    assert result.returncode == 3
+    assert authorized_keys.read_text(encoding="utf-8") == original
+
+
+def test_remote_rotation_rejects_duplicate_envelope_keys_without_writing(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(parents=True, mode=0o700)
+    bootstrap_key = _public_key(80, "loom-staging-rollout")
+    service_key = _public_key(1, "service")
+    authorized_keys = ssh_dir / "authorized_keys"
+    original = bootstrap_key.decode("ascii")
+    authorized_keys.write_text(original, encoding="utf-8")
+    authorized_keys.chmod(0o600)
+    bootstrap_value = bootstrap_key.decode("ascii").strip()
+    service_value = service_key.decode("ascii").strip()
+    payload = (
+        "{"
+        f'"bootstrap_public_key":{json.dumps(bootstrap_value)},'
+        f'"bootstrap_public_key":{json.dumps(bootstrap_value)},'
+        '"schema_version":1,'
+        f'"service_public_key":{json.dumps(service_value)}'
+        "}\n"
+    ).encode("ascii")
+
+    result = subprocess.run(
+        [sys.executable, "-c", trust._REMOTE_SCRIPT, "rotate-bootstrap"],
+        input=payload,
+        capture_output=True,
+        check=False,
+        env={**os.environ, "HOME": str(home)},
+    )
+
+    assert result.returncode == 2
+    assert json.loads(result.stdout) == {"status": "invalid-rotation-envelope"}
+    assert authorized_keys.read_text(encoding="utf-8") == original
+
+
+def test_remote_rotation_rejects_invalid_envelope_semantics_without_writing(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(parents=True, mode=0o700)
+    bootstrap_key = _public_key(80, "loom-staging-rollout")
+    service_key = _public_key(1, "service")
+    authorized_keys = ssh_dir / "authorized_keys"
+    original = bootstrap_key.decode("ascii")
+    authorized_keys.write_text(original, encoding="utf-8")
+    authorized_keys.chmod(0o600)
+    bootstrap_value = bootstrap_key.decode("ascii").strip()
+    service_value = service_key.decode("ascii").strip()
+    common = {
+        "bootstrap_public_key": bootstrap_value,
+        "schema_version": 1,
+        "service_public_key": service_value,
+    }
+    payloads = [
+        json.dumps({**common, "schema_version": True}).encode("ascii") + b"\n",
+        json.dumps({**common, "unexpected": "field"}).encode("ascii") + b"\n",
+        trust._bootstrap_envelope(service_key, service_key),
+    ]
+
+    for payload in payloads:
+        result = subprocess.run(
+            [sys.executable, "-c", trust._REMOTE_SCRIPT, "rotate-bootstrap"],
+            input=payload,
+            capture_output=True,
+            check=False,
+            env={**os.environ, "HOME": str(home)},
+        )
+
+        assert result.returncode == 2
+        assert json.loads(result.stdout) == {"status": "invalid-rotation-envelope"}
+        assert authorized_keys.read_text(encoding="utf-8") == original
+
+
+def test_remote_rotation_rejects_insecure_authority_mode_without_writing(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(parents=True, mode=0o700)
+    bootstrap_key = _public_key(80, "loom-staging-rollout")
+    authorized_keys = ssh_dir / "authorized_keys"
+    original = bootstrap_key.decode("ascii")
+    authorized_keys.write_text(original, encoding="utf-8")
+    authorized_keys.chmod(0o640)
+
+    result = _run_remote(
+        home,
+        "rotate-bootstrap",
+        _public_key(1, "service"),
+        bootstrap_public_key=bootstrap_key,
+    )
+
+    assert result.returncode == 3
+    assert json.loads(result.stdout) == {"status": "rotation-authority-mode-invalid"}
+    assert authorized_keys.read_text(encoding="utf-8") == original
+    assert stat.S_IMODE(authorized_keys.stat().st_mode) == 0o640
 
 
 def test_remote_check_requires_exact_marked_key_and_modes(tmp_path: Path) -> None:
