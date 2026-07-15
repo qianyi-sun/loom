@@ -161,15 +161,32 @@ is one atomic SQL statement, which:
 - Eliminates the lost-update race entirely.
 - Makes the claim path testable as a pure SQL fixture.
 - Lets workers retry on `None` (queue empty) without any
-  scheduler-side state.
+scheduler-side state.
+
+GB10 capacity intent and prod-pressure control use the same atomic claim
+boundary. Publishing `draining`/`stopped` desired intent, or applying a prod
+pressure signal while a busy host temporarily keeps active intent, reconciles
+every matching worker registration by hostname and pool before node-agent
+shutdown; the `EXISTS` clause above requires `w.drain_state = 'active'`. This
+makes a still-running or duplicate container unclaimable while graceful work drains.
+Recovery requires a subsequent node-agent report confirming
+`current_intent=active` and `apply_state=applied`; changing a file-only
+capacity manifest never bypasses this registry fence.
+
+## Bounded prod-pressure preemption
+
+- A normal drain is non-preemptive: registry fencing stops new claims while
+  the busy Compose worker remains active.
+- A preemptible staging lease may advance to `stopped` only after its configured
+  grace period. The Control Plane records `prod_capacity_pressure` on affected
+  claimed/running trials before stopping the host. The existing crash detector
+  then returns those trials to `queued` with retry backoff while preserving the
+  explicit pressure diagnostic.
+- Non-preemptible busy hosts never advance to stopped because of prod pressure;
+  they stop only after their assigned claimed/running count reaches zero.
 
 ## What this is NOT
 
-- **Not preemptive.** Once a trial is `claimed`, the scheduler
-  cannot revoke it. The worker must voluntarily release (success,
-  failure) or crash. Preemption would require worker-side cancel
-  semantics; tracked as follow-up if priority inversion becomes a
-  real problem.
 - **Not fair-aware across providers.** DRF is per-team, not
   per-provider. A team submitting 100 Anthropic trials gets the
   same share as one submitting 100 OpenAI trials; provider RPM

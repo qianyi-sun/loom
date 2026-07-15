@@ -28,11 +28,15 @@ UPDATE trials
    SET state = 'queued',
        worker_id = NULL,
        failure_reason = CASE
+           WHEN failure_reason = 'prod_capacity_pressure'
+           THEN failure_reason
            WHEN state = 'claimed' AND started_at IS NULL
            THEN 'worker_lost_claim'
            ELSE failure_reason
        END,
        failure_message = CASE
+           WHEN failure_reason = 'prod_capacity_pressure'
+           THEN failure_message
            WHEN state = 'claimed' AND started_at IS NULL
            THEN CONCAT(
                'claimed_without_started_reclaimed trial_id=', id::text,

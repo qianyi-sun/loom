@@ -334,8 +334,75 @@ async def upsert_desired_state(
         row.env = safe_env
         row.force = bool(force)
         row.updated_at = now
+    await _reconcile_worker_registry_for_host_intents(
+        session,
+        environment=environment,
+        pool_name=pool_name,
+        host_intents=safe_host_intents,
+        owner="gb10-lifecycle",
+        now=now,
+    )
     await session.flush()
     return row
+
+
+async def _reconcile_worker_registry_for_host_intents(
+    session: AsyncSession,
+    *,
+    environment: str,
+    pool_name: str,
+    host_intents: dict[str, str],
+    owner: str,
+    now: datetime,
+) -> dict[str, int]:
+    """Make desired GB10 intent an immediate scheduler claim gate.
+
+    Node status rows are not a reliable join authority: the host-local agent
+    does not know its worker registration UUID, and one hostname can have
+    stale or duplicate registrations.  Reconcile every matching registry row
+    by ``hostname`` + ``pool_name`` so desired ``draining``/``stopped`` intent
+    blocks claims before the asynchronous node-agent apply completes.
+
+    Active intent is deliberately not enough to resurrect a registry row.  A
+    node report must confirm that the host-local container is active first.
+    """
+    inactive_hosts = {
+        hostname: intent
+        for hostname, intent in host_intents.items()
+        if intent in {"draining", "stopped"}
+    }
+    if not inactive_hosts:
+        return {"draining": 0, "drained": 0}
+
+    workers = (
+        (
+            await session.execute(
+                select(Worker).where(
+                    Worker.pool_name == pool_name,
+                    Worker.hostname.in_(tuple(inactive_hosts)),
+                ),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    changed = {"draining": 0, "drained": 0}
+    for worker in workers:
+        intent = inactive_hosts[worker.hostname]
+        target_state = "drained" if intent == "stopped" else "draining"
+        if worker.drain_state == target_state:
+            continue
+        if worker.drain_state == "drained" and target_state == "draining":
+            continue
+        worker.drain_state = target_state
+        worker.drain_requested_at = worker.drain_requested_at or now
+        worker.drain_reason = (
+            f"gb10 host {worker.hostname} desired_intent={intent} "
+            f"environment={environment}"
+        )
+        worker.drain_owner = owner
+        changed[target_state] += 1
+    return changed
 
 
 async def record_node_report(
@@ -398,56 +465,84 @@ async def record_node_report(
         row.last_apply_at = now
     row.updated_at = now
 
-    await _reconcile_worker_drain_state_for_stopped_host(
+    prod_pressure_control = (
+        (desired.rollout_policy or {}).get("prod_pressure_control")
+        if desired is not None
+        else None
+    )
+    allow_prod_pressure_recovery = bool(
+        isinstance(prod_pressure_control, dict)
+        and prod_pressure_control.get("state") == "recovered"
+        and isinstance(prod_pressure_control.get("last_signal"), dict)
+        and prod_pressure_control["last_signal"].get("has_pressure") is False
+    )
+    await _reconcile_worker_drain_state_for_host_intent(
         session,
         row,
         now=now,
+        allow_prod_pressure_recovery=allow_prod_pressure_recovery,
     )
 
     await session.flush()
     return row
 
 
-async def _reconcile_worker_drain_state_for_stopped_host(
+async def _reconcile_worker_drain_state_for_host_intent(
     session: AsyncSession,
     row: GB10WorkerNodeStatus,
     *,
     now: datetime,
+    allow_prod_pressure_recovery: bool = False,
 ) -> None:
-    """#368 defense: force the worker registry to reflect a stopped
-    host intent, even if the node-agent's "applied" report was a no-op
-    (env file already matched, container never actually stopped) and
-    the worker keeps heartbeating.
+    """Keep every registry row for a reported host aligned with intent.
 
-    Without this reconciliation, the scheduler sees `Worker.drain_state
-    = 'active'` and continues claiming trials on a host the lifecycle
-    layer says is stopped. `loom resources status` also reports the
-    host in `active_workers` / `total_slots`.
-
-    Two triggers force the worker to `drained`:
-    1. Desired + current + apply all report `stopped` → the node has
-       affirmatively confirmed shutdown. Worker registry should match.
-    2. Desired = `stopped` and the row has an attached `worker_id` →
-       even if apply_state is `already current` (the #368 bug), the
-       operator has expressed intent and the CP must not treat the
-       host as active capacity.
+    This is the second #368 fence after desired-state reconciliation.  It
+    covers old rows, duplicate registrations, and reports without a
+    ``worker_id``.  Recovery is allowed only after the agent positively
+    reports active/applied, and only for drains owned by this lifecycle.
     """
-    if row.worker_id is None:
-        return
-    desired_intent = row.desired_intent
-    if desired_intent != "stopped":
-        return
-    worker_row = await session.get(Worker, row.worker_id)
-    if worker_row is None or worker_row.drain_state == "drained":
-        return
-    worker_row.drain_state = "drained"
-    worker_row.drain_requested_at = worker_row.drain_requested_at or now
-    worker_row.drain_reason = (
-        f"gb10 host {row.hostname} desired_intent=stopped "
-        f"(current_intent={row.current_intent or '-'}, "
-        f"apply_state={row.apply_state})"
+    stmt = select(Worker).where(
+        Worker.pool_name == row.pool_name,
+        Worker.hostname == row.hostname,
     )
-    worker_row.drain_owner = "gb10-lifecycle"
+    workers = (await session.execute(stmt)).scalars().all()
+    desired_intent = row.desired_intent
+    for worker in workers:
+        if desired_intent == "stopped":
+            if worker.drain_state != "drained":
+                worker.drain_state = "drained"
+                worker.drain_requested_at = worker.drain_requested_at or now
+            worker.drain_reason = (
+                f"gb10 host {row.hostname} desired_intent=stopped "
+                f"(current_intent={row.current_intent or '-'}, "
+                f"apply_state={row.apply_state})"
+            )
+            worker.drain_owner = worker.drain_owner or "gb10-lifecycle"
+        elif desired_intent == "draining":
+            if worker.drain_state == "active":
+                worker.drain_state = "draining"
+                worker.drain_requested_at = worker.drain_requested_at or now
+                worker.drain_reason = (
+                    f"gb10 host {row.hostname} desired_intent=draining"
+                )
+                worker.drain_owner = worker.drain_owner or "gb10-lifecycle"
+        elif (
+            desired_intent == "active"
+            and row.current_intent == "active"
+            and row.apply_state in {"applied", "rolled_back"}
+            and worker.drain_state in {"draining", "drained"}
+            and (
+                worker.drain_owner == "gb10-lifecycle"
+                or (
+                    worker.drain_owner == "prod-pressure-controller"
+                    and allow_prod_pressure_recovery
+                )
+            )
+        ):
+            worker.drain_state = "active"
+            worker.drain_requested_at = None
+            worker.drain_reason = None
+            worker.drain_owner = None
 
 
 async def fetch_lifecycle_status(

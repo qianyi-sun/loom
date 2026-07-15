@@ -1,0 +1,12 @@
+[Unit]
+Description=Continuously reconcile Loom production pressure into staging capacity
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Persistent=true
+Unit=loom-prod-pressure-worker-control.service
+
+[Install]
+WantedBy=timers.target

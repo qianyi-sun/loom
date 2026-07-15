@@ -40,6 +40,8 @@ def test_first_prod_runbook_has_executable_command_coverage() -> None:
         "scripts/ops/worker_capacity_manifest.py lease-staging",
         "scripts/ops/worker_capacity_manifest.py release-staging",
         "scripts/ops/worker_capacity_manifest.py drain-staging",
+        "scripts/ops/prod_pressure_worker_control.py",
+        "loom-prod-pressure-worker-control.timer",
         "scripts/ops/release_gate.py validate",
         "scripts/ops/frontend_route_smoke.py",
         "scripts/ops/operator_free_user_e2e_gate.py",

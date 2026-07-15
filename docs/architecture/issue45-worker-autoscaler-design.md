@@ -148,9 +148,19 @@ New desired state shape:
 Node-agent behavior:
 
 - `active`: current #43 behavior; worker should be up and current.
-- `draining`: update local env with `LOOM_WORKER_DRAIN=1` or call the drain API,
-  stop claiming new trials, wait for no in-flight trials, then stop compose.
+- `draining`: update local env with drain intent and keep Compose running while
+  the Control Plane claim fence prevents new work. A controller advances the
+  host to `stopped` after its in-flight count reaches zero.
 - `stopped`: keep worker compose stopped and report `apply_state=stopped`.
+
+Desired inactive intent is also an immediate Control Plane claim fence. The
+registry reconciliation matches hostname plus pool rather than depending on a
+node report's optional worker UUID, so stale, duplicate, and unlinked
+registrations cannot remain claimable. The host agent always executes and
+verifies Compose stop for `stopped`, even when its env file already matches;
+`draining` deliberately leaves Compose alive for in-flight work. Active
+recovery reopens a lifecycle-owned inactive registration only
+after the agent positively reports active/applied.
 
 The Control Plane does not SSH into GB10. It changes desired state; each host
 pulls and applies locally. Scale-up chooses stopped hosts first, then raises

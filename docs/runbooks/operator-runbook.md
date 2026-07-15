@@ -817,6 +817,15 @@ knob you need.
    staging rollout failure. Nonzero production pressure stops new staging
    claims, immediately returns idle staging slots to production, and reports
    running staging slots as draining. TTL expiry also stops new staging claims.
+   `scripts/ops/prod_pressure_worker_control.py` is the runtime bridge: it
+   polls the private production CP signal, applies it to staging GB10 desired
+   state, and fences all matching worker registrations through
+   `Worker.drain_state`. Loss of the production signal fails closed to a
+   staging drain. Install the repo-owned
+   `deploy/worker-capacity/loom-prod-pressure-worker-control.timer` for the
+   supervised 30-second reconcile; a foreground invocation is not automatic
+   activation. Pressure clearing restores desired host intents, but claims stay
+   fenced until the node-agent reports the active container state.
 
    A production promotion manifest must record the latest staging lease status in
    `checks.prod_staging_isolation.staging_capacity`. The release gate requires

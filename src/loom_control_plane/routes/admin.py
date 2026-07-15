@@ -26,6 +26,11 @@ from loom_control_plane.gb10_worker_lifecycle import (
     record_node_report,
     upsert_desired_state,
 )
+from loom_control_plane.prod_pressure_control import (
+    ProdPressureSignal,
+    apply_prod_pressure_signal,
+    fetch_prod_pressure_signal,
+)
 from loom_control_plane.slurm_worker_jobs import (
     SlurmWorkerJobObservation,
     fetch_slurm_worker_job_status,
@@ -103,6 +108,15 @@ class _GB10NodeReportPayload(BaseModel):
     source_git_dirty: bool | None = None
     worker_id: UUID | None = None
     last_apply_at: datetime | None = None
+
+
+class _ProdPressurePayload(BaseModel):
+    prod_pending_count: int = Field(ge=0)
+    prod_active_count: int = Field(ge=0)
+    prod_capacity_shortfall: int = Field(ge=0)
+    source: str = "control-plane prod queue summary"
+    preemptible: bool = True
+    grace_period_seconds: int = Field(default=600, ge=0)
 
 
 class _AutoscalerPolicyPayload(BaseModel):
@@ -379,6 +393,27 @@ async def get_worker_pool_autoscaler_status(
         )
 
 
+@router.get("/worker-pools/{pool_name}/prod-pressure")
+async def get_worker_pool_prod_pressure(
+    pool_name: str,
+    request: Request,
+    freshness_sec: int = Query(default=120, gt=0),
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    """Return the secret-free pressure signal from this (prod) CP."""
+    await _require_admin_scope(request, authorization, "admin:worker_pools")
+    try:
+        async with request.app.state.session_factory() as session:
+            signal = await fetch_prod_pressure_signal(
+                session,
+                pool_name=pool_name,
+                freshness_sec=freshness_sec,
+            )
+        return signal.public_dict()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.put("/gb10-worker-pools/{environment}/{pool_name}/desired-state")
 async def put_gb10_worker_pool_desired_state(
     environment: str,
@@ -408,6 +443,37 @@ async def put_gb10_worker_pool_desired_state(
             return desired_state_to_dict(row)
     except UnsafeDesiredEnvError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/gb10-worker-pools/{environment}/{pool_name}/prod-pressure")
+async def put_gb10_worker_pool_prod_pressure(
+    environment: str,
+    pool_name: str,
+    request: Request,
+    payload: _ProdPressurePayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    """Consume a prod pressure signal into desired state and claim fencing."""
+    await _require_admin_scope(request, authorization, "admin:gb10_workers")
+    try:
+        async with request.app.state.session_factory() as session:
+            result = await apply_prod_pressure_signal(
+                session,
+                environment=environment,
+                pool_name=pool_name,
+                signal=ProdPressureSignal(
+                    prod_pending_count=payload.prod_pending_count,
+                    prod_active_count=payload.prod_active_count,
+                    prod_capacity_shortfall=payload.prod_capacity_shortfall,
+                    source=payload.source,
+                ),
+                preemptible=payload.preemptible,
+                grace_period_seconds=payload.grace_period_seconds,
+            )
+            await session.commit()
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

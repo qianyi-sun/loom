@@ -195,6 +195,11 @@ Attach these to the release issue or release PR:
   produce `prod_pressure.cause=prod_capacity_pressure`,
   `new_staging_claims_allowed=false`, idle staging slots returned to prod, and running
   staging slots reported as draining rather than as staging rollout failure.
+  Runtime evidence must also include
+  `scripts/ops/prod_pressure_worker_control.py`: the production CP pressure
+  snapshot is consumed by staging desired state and `Worker.drain_state`, so a
+  fresh claim attempt is fenced before node-agent shutdown convergence. A
+  manifest-only status preview is not worker-control evidence.
 - `scripts/staging_smoke_gate.py` Markdown evidence with `--fail-on-skip`
   and `--allow-mutating-checks` against disposable staging data. The report
   must include the final service restart/OOM row by passing `--k8s-namespace`;

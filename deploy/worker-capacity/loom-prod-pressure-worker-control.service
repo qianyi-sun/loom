@@ -1,0 +1,22 @@
+[Unit]
+Description=Loom production-pressure staging worker control reconcile
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/loom/prod-pressure-worker-control.env
+
+[Service]
+Type=oneshot
+User=loom-rollout
+Group=loom-rollout
+WorkingDirectory=/opt/loom-staging-runner/repo
+EnvironmentFile=/etc/loom/prod-pressure-worker-control.env
+Environment=PATH=/opt/loom-staging-runner/venv/bin:/usr/local/bin:/usr/bin:/bin
+StateDirectory=loom-prod-pressure-worker-control
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/loom-prod-pressure-worker-control
+ExecStart=/opt/loom-staging-runner/venv/bin/python -I -B scripts/ops/prod_pressure_worker_control.py --prod-cp-url ${LOOM_PROD_PRESSURE_PROD_CP_URL} --prod-admin-token ${LOOM_PROD_PRESSURE_PROD_TOKEN_SOURCE} --staging-cp-url ${LOOM_PROD_PRESSURE_STAGING_CP_URL} --staging-admin-token ${LOOM_PROD_PRESSURE_STAGING_TOKEN_SOURCE} --staging-environment ${LOOM_PROD_PRESSURE_STAGING_ENVIRONMENT} --pool-name ${LOOM_PROD_PRESSURE_POOL_NAME} --preemptible --grace-period-seconds ${LOOM_PROD_PRESSURE_GRACE_SECONDS} --freshness-seconds ${LOOM_PROD_PRESSURE_FRESHNESS_SECONDS} --evidence-out /var/lib/loom-prod-pressure-worker-control/latest.json
+TimeoutStartSec=60
