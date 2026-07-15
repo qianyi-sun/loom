@@ -2,6 +2,7 @@ import React from "react";
 
 import {
   createBrowserFailureId,
+  markBrowserFailureForConsoleRedaction,
   reportBrowserFailure,
 } from "../lib/errorReporting";
 import { frontendHomePath } from "../lib/frontendConfig";
@@ -22,7 +23,8 @@ export class RootErrorBoundary extends React.Component<
 > {
   state: RootErrorBoundaryState = { referenceId: null };
 
-  static getDerivedStateFromError(): RootErrorBoundaryState {
+  static getDerivedStateFromError(error: unknown): RootErrorBoundaryState {
+    markBrowserFailureForConsoleRedaction(error);
     return { referenceId: createBrowserFailureId() };
   }
 

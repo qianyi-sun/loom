@@ -230,4 +230,8 @@ def test_frontend_has_no_third_party_font_or_avoidable_inline_fallback() -> None
     assert ".innerHTML" not in "\n".join((main, recovery_sources))
     assert '<main role="status" aria-live="polite" aria-busy="true">' in index_html
     assert "Starting Loom" in index_html
+    assert "installBrowserConsoleErrorRedaction();" in main
+    assert main.index("installBrowserConsoleErrorRedaction();") < main.index(
+        "ReactDOM.createRoot(rootElement).render("
+    )
     assert "ReactDOM.createRoot(rootElement).render(" in main

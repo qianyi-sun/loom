@@ -9,6 +9,7 @@ import { useAuth } from "./auth/useAuth";
 import { FrontendBootstrap } from "./bootstrap/FrontendBootstrap";
 import { RootErrorBoundary } from "./components/RootErrorBoundary";
 import "./index.css";
+import { installBrowserConsoleErrorRedaction } from "./lib/errorReporting";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -47,6 +48,7 @@ function MountedApp({ rootElement }: { rootElement: HTMLElement }): JSX.Element 
 }
 
 const rootElement = document.getElementById("root")!;
+installBrowserConsoleErrorRedaction();
 ReactDOM.createRoot(rootElement).render(
   <React.StrictMode>
     <RootErrorBoundary>
