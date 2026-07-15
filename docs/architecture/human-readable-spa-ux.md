@@ -304,6 +304,7 @@ Verification commands:
 cd web && npm test
 cd web && npm run build
 cd web && npm run lint
+uv run pytest -q tests/ops/test_frontend_accessibility_contract.py
 ```
 
 ## Accessibility And Layout
@@ -315,6 +316,11 @@ cd web && npm run lint
 - Buttons must have clear visible labels; destructive buttons need action
   verbs and confirmation where appropriate.
 - Diagnostics panels must not dominate first-viewport content.
+- Production dialogs use the shared `Modal` primitive. It owns unique title and
+  description relationships, initial focus, Tab/Shift+Tab containment, Escape
+  and backdrop dismissal, background inertness, re-entrant body scroll locking,
+  and final focus restoration. Mutation-specific pending and retry semantics
+  remain caller contracts; the primitive does not infer them.
 
 ## Rollout Strategy
 
