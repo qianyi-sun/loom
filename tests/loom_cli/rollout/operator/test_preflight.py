@@ -124,6 +124,8 @@ def make_config(tmp_path: Path) -> OperatorConfig:
         path.chmod(0o600)
     data_root = tmp_path / "data"
     data_root.mkdir(mode=0o700)
+    for name in preflight_module._REQUIRED_ROLLOUT_SUBDIRECTORIES:  # type: ignore[attr-defined]
+        (data_root / name).mkdir(mode=0o700)
     return OperatorConfig(
         schema_version=1,
         service_user="loom-rollout",
@@ -377,6 +379,48 @@ def test_checkout_rejects_untrusted_git_config_before_any_git_command(
     assert calls == []
 
 
+@pytest.mark.parametrize("unsafe", ["writable-directory", "escaping-symlink"])
+def test_checkout_rejects_unsafe_descendant_before_any_git_command(
+    tmp_path: Path,
+    unsafe: str,
+) -> None:
+    config = make_config(tmp_path)
+    if unsafe == "writable-directory":
+        (config.runner_repo / "deploy").chmod(0o775)
+    else:
+        (config.runner_repo / "escape").symlink_to(tmp_path / "outside")
+    calls: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return successful_command(argv)
+
+    report = collect_preflight(
+        config,
+        service_uid=os.geteuid(),
+        run=run,
+        which=lambda name: f"/usr/bin/{name}",
+        importer=lambda name: object(),
+    )
+
+    assert next(check for check in report.checks if check.name == "checkout").passed is False
+    assert calls == []
+
+
+def test_checkout_rejects_symlinked_repository_root(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    linked = tmp_path / "linked-repo"
+    linked.symlink_to(config.runner_repo, target_is_directory=True)
+
+    assert (
+        preflight_module._checkout_tree_is_trusted(  # type: ignore[attr-defined]
+            linked,
+            service_uid=os.geteuid(),
+        )
+        is False
+    )
+
+
 def test_checkout_requires_pushurl_to_be_exactly_absent(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     (config.runner_repo / ".git/config").write_text('[remote "origin"]\n', encoding="utf-8")
@@ -441,6 +485,80 @@ def test_credentials_and_catalog_accept_qianyi_style_0640_acl_readability(
 
     assert outcomes["credentials"] is True
     assert outcomes["catalog-environment"] is True
+
+
+def test_data_root_needs_only_read_traverse_when_declared_subdirectories_are_writable(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    config.rollout_root.chmod(0o500)
+    try:
+        report = collect_preflight(
+            config,
+            service_uid=os.geteuid(),
+            run=successful_command,
+            which=lambda name: f"/usr/bin/{name}",
+            importer=lambda name: object(),
+        )
+    finally:
+        config.rollout_root.chmod(0o700)
+
+    assert next(check for check in report.checks if check.name == "data-root").passed is True
+
+
+def test_data_root_requires_preexisting_environment_state_write_access(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    (config.rollout_root / "environment-state").rmdir()
+
+    report = collect_preflight(
+        config,
+        service_uid=os.geteuid(),
+        run=successful_command,
+        which=lambda name: f"/usr/bin/{name}",
+        importer=lambda name: object(),
+    )
+
+    assert next(check for check in report.checks if check.name == "data-root").passed is False
+
+
+def test_data_root_rejects_symlinked_declared_subdirectory(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    environment_state = config.rollout_root / "environment-state"
+    environment_state.rmdir()
+    outside = tmp_path / "outside-environment-state"
+    outside.mkdir(mode=0o700)
+    environment_state.symlink_to(outside, target_is_directory=True)
+
+    report = collect_preflight(
+        config,
+        service_uid=os.geteuid(),
+        run=successful_command,
+        which=lambda name: f"/usr/bin/{name}",
+        importer=lambda name: object(),
+    )
+
+    assert next(check for check in report.checks if check.name == "data-root").passed is False
+
+
+@pytest.mark.skipif(not hasattr(os, "O_PATH"), reason="Linux O_PATH contract")
+def test_credentials_accept_traverse_only_parent_without_directory_listing(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    credentials = Path(config.admin_token_source.removeprefix("file:")).parent
+    credentials.chmod(0o100)
+    try:
+        report = collect_preflight(
+            config,
+            service_uid=os.geteuid(),
+            run=successful_command,
+            which=lambda name: f"/usr/bin/{name}",
+            importer=lambda name: object(),
+        )
+    finally:
+        credentials.chmod(0o700)
+
+    assert next(check for check in report.checks if check.name == "credentials").passed is True
 
 
 def test_qianyi_owner_allowance_is_explicit_not_applied_to_git_config(
