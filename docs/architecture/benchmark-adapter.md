@@ -381,22 +381,31 @@ browsing/network-capable agent.
 
 | Slug | License | Upstream |
 |---|---|---|
-| terminal-bench-2 | Apache-2.0 | git `laude-institute/terminal-bench` @ SHA `91e10457` (v0.1.1) |
+| terminal-bench-2 | Apache-2.0 | Harbor Hub `terminal-bench/terminal-bench-2-1@6` |
 
-The TB-2 adapter is broken out into its own package because it
-pins a specific upstream SHA + ships a verifier shim that
-translates pytest exit codes into the ScriptVerifier JSON contract.
-At the pinned v0.1.1 SHA it enumerates 86 official tasks. Each task uses a
-build-only `.loom-build/client` Docker context and `workdir = "/app"`; the 3
-multi-service tasks (`security-vulhub-minio`, `simple-sheets-put`, and
-`simple-web-scraper`) declare `environment.sidecars` instead of falling back to
-a single-image approximation. The adapter also normalizes pinned TB-2
-compatibility edges: Dockerfile `COPY` heredocs are materialized into ordinary
-build-context files for docker-py legacy builds, and Python-REPL
-`solution.yaml` command groups are rendered as stdin scripts for oracle smoke
-runs. Compose fields that affect the primary client sandbox are preserved in
-the generated `TaskConfig`: `dns`, `extra_hosts`, and `tmpfs` map to
-`environment.dns`, `environment.extra_hosts`, and `environment.tmpfs`.
+The package exposes the stable selector `terminal-bench-2`, but execution is
+bound to the immutable physical profile `terminal-bench-2@tb2.1-r6`. Harbor Hub
+revision 6, metadata version
+`sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a`,
+and its 89 package digests are authoritative. The fixed Git snapshot is
+independent provenance; its single reviewed `sanitize-git-repo` digest
+divergence never replaces the Hub package or creates a fallback.
+
+The adapter preserves native schema-1.1 `task.toml` as
+`upstream-task.toml`, emits a Loom schema-1 task config, retains native build,
+timeout, architecture, test, solution, and verifier assets, and tags Oracle
+eligibility explicitly from a real non-symlink `solution/solve.sh`. Task IDs or
+benchmark prefixes never imply Oracle compatibility.
+
+Registration leaves the physical profile `pending`. Activation performs a
+fresh audit of all 89 object-store bundles, verifier executables, package
+digests, task configs, image/runtime inputs, and the exact private-workspace
+policy before atomically marking the profile `runnable` and moving the public
+alias. Agent execution and verification use separate drivers: the agent never
+receives `solution/`, `tests/`, `verifier/`, or `upstream-task.toml`. A worker
+rehashes the materialized bundle before starting either driver. A numeric
+reward, including `0`, is a valid benchmark result; missing or malformed reward
+evidence is a platform/verifier failure.
 Compose fields used only by the upstream harness runner, such as
 `container_name` and log `volumes`, are not copied into Loom task config.
 

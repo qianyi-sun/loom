@@ -102,6 +102,14 @@ rejects stale/forged evidence, provenance/config/checksum drift, incompatible
 task images, missing or non-executable verifier assets, and any missing
 private-workspace isolation.
 
+Release rollouts must never infer a smoke task from the public selector or a
+legacy TB2 task name. For `--scope full-cluster`, pass an audited physical ID
+explicitly with
+`--smoke-task-id terminal-bench-2@tb2.1-r6/<task-name>`. The
+`current-gb10` scope keeps its separate Loom-owned smoke task. A failed rev-6
+activation or canary disables TB2 submission; it cannot fall back to TB2.0 or
+reduce the 89-task audit.
+
 ## License
 
 Apache-2.0, following the Terminal-Bench 2.1 source repository.

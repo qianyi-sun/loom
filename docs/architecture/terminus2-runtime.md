@@ -24,6 +24,13 @@ package). Gate 1 evidence:
 Worker provenance is emitted at trial start via `terminus2_runtime_provenance`
 events and `loom.agent.terminus2.worker_provenance`.
 
+This runtime identity is independent of benchmark identity. A TB2.1 trial must
+record both the Harbor Hub rev-6 package/profile provenance and the Terminus-2
+worker/bridge provenance; matching one does not attest the other. The benchmark
+worker also verifies the materialized task checksum before agent startup, keeps
+private tests/solutions/verifier files out of this agent runtime, and creates a
+fresh verifier-only driver after Terminus-2 exits.
+
 ## Runtime shape
 
 ```
@@ -108,10 +115,15 @@ Evidence checklist:
 
 - `llm_evidence_status: calls_observed` on the batch/trial
 - `terminus2_runtime_provenance` with `harbor_compat_sha` matching the pin
+- for a TB2.1 canary, physical profile `terminal-bench-2@tb2.1-r6`, Hub
+  metadata/package digest, Loom bundle checksum, verifier identity, and runtime
+  provenance are all present as separate fields
 - At least one `terminus2_command` + `terminus2_terminal_observation` pair
 - LLM rows joined to real `gateway_request_id` / `llm_calls.id` (not synthetic
   `harbor-step-N` ids)
 - Harbor artifacts present: `.loom/agent/trajectory.json`, `.loom/agent/recording.cast`
+- verifier reward is finite and numeric; `0` is valid, while a missing reward
+  is a platform/verifier failure
 
 ## Export
 

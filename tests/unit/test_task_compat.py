@@ -61,33 +61,33 @@ def test_script_verifier_task_does_not_provide_solve_sh() -> None:
     ) is False
 
 
-def test_terminal_bench_script_task_provides_solve_sh_capability() -> None:
-    """Terminal-Bench-2 uses the script verifier, but its adapter wraps
-    upstream `solution.sh` / `solution.yaml` references as
-    `solution/solve.sh`, so oracle compatibility must not be inferred from
-    verifier name alone. Until every TB2 task is re-registered with the
-    per-instance `oracle_eligible` tag (post-#217 G7), the legacy task-id
-    prefix is the backstop for tagless rows."""
+def test_tb21_oracle_capability_uses_explicit_tag() -> None:
+    """The active TB2.1 profile publishes Oracle eligibility per task."""
+    assert task_provides_capability(
+        _config(
+            "script",
+            task_id="terminal-bench-2@tb2.1-r6/chess-best-move",
+        ),
+        "solution_solve_sh",
+        tags={"oracle_eligible": "true"},
+    ) is True
+
+
+def test_tagless_legacy_terminal_bench_id_has_no_oracle_capability() -> None:
+    """Retired TB2 rows cannot regain Oracle eligibility from their id."""
     assert task_provides_capability(
         _config(
             "script",
             task_id="terminal-bench-2/simple-web-scraper",
         ),
         "solution_solve_sh",
-    ) is True
+    ) is False
 
 
-def test_terminal_bench_explicit_false_tag_overrides_prefix_backstop() -> None:
-    """Once the adapter emits per-instance `oracle_eligible` (G7 of #217),
-    a TB2 task without an upstream `solution.sh`/`solution.yaml` is tagged
-    `oracle_eligible="false"`. That explicit tag must beat the legacy
-    `terminal-bench-2/` prefix backstop so the matrix preflight stops
-    sending the oracle agent at tasks the runtime will reject."""
+def test_explicit_false_tag_overrides_pytest_convention() -> None:
+    """An explicit eligibility decision wins over the pytest convention."""
     assert task_provides_capability(
-        _config(
-            "script",
-            task_id="terminal-bench-2/some-task-without-solution",
-        ),
+        _config("pytest", task_id="custom/pytest-without-solution"),
         "solution_solve_sh",
         tags={"oracle_eligible": "false"},
     ) is False
@@ -209,9 +209,12 @@ def test_filter_tasks_by_agent_capability_splits_compat_and_incompat() -> None:
     assert compat == [
         "mbpp/100",
         "humaneval/0",
-        "terminal-bench-2/simple-web-scraper",
     ]
-    assert incompat == ["aime-25/2025-I/2", "gpqa/q1"]
+    assert incompat == [
+        "aime-25/2025-I/2",
+        "terminal-bench-2/simple-web-scraper",
+        "gpqa/q1",
+    ]
 
 
 def test_filter_with_no_requirements_returns_everything_as_compatible() -> None:

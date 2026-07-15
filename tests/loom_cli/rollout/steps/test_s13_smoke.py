@@ -13,6 +13,7 @@ from loom_cli.rollout.steps.s13_smoke import (
     SmokeStep,
     _admin_on_behalf_config,
     _ingress_base,
+    _smoke_task_id,
     _trajectory_head_request,
 )
 
@@ -490,73 +491,18 @@ def test_current_gb10_smoke_defaults_to_gb10_compatible_task_and_pool(
     ]
 
 
-def test_full_cluster_smoke_keeps_terminal_bench_default_without_pool(
+def test_full_cluster_smoke_requires_explicit_audited_task_id(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ctx = make_ctx(tmp_path, scope="full-cluster")
-    ev = EvidenceDirectory(tmp_path, "test-rid")
-    ev.ensure()
-    step_dir = ev.step_dir(15, "smoke")
-    captured_payloads: list[dict[str, Any]] = []
-
-    monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "smoke-user-token")
     monkeypatch.delenv("LOOM_SMOKE_TASK_ID", raising=False)
-    monkeypatch.delenv("LOOM_SMOKE_REQUIRED_WORKER_POOL", raising=False)
-    monkeypatch.setattr(
-        "loom_cli.rollout.steps.s13_smoke._ingress_base",
-        lambda _ctx: "https://loom.test",
-    )
 
-    def fake_get(url: str, *, token: str | None = None) -> tuple[int, bytes]:
-        assert token == "smoke-user-token"
-        if url.endswith("/api/v1/health"):
-            return 200, b'{"status":"ok"}'
-        if url.endswith("/api/v1/auth/whoami"):
-            return (
-                200,
-                b'{"credential_type":"user_owned_api_token","scopes":["read:own","submit"]}',
-            )
-        if url.endswith("/api/v1/benchmarks"):
-            return 200, b'{"items":[{"id":"terminal-bench-2"}]}'
-        if url.endswith("/api/v1/tasks/terminal-bench-2/hello-world"):
-            return (
-                200,
-                b'{"id":"terminal-bench-2/hello-world","benchmark_id":"terminal-bench-2"}',
-            )
-        if url.endswith("/api/v1/trials/trial-1"):
-            return 200, b'{"id":"trial-1","state":"succeeded","aggregate_reward":1.0}'
-        if url.endswith("/api/v1/usage"):
-            return 200, b'{"items":[]}'
-        raise AssertionError(f"unexpected GET {url}")
-
-    def fake_post(
-        url: str,
-        payload: dict[str, object],
-        *,
-        token: str | None = None,
-    ) -> tuple[int, bytes]:
-        assert url.endswith("/api/v1/trials")
-        assert token == "smoke-user-token"
-        captured_payloads.append(dict(payload))
-        return 201, b'{"trial_id":"trial-1"}'
-
-    monkeypatch.setattr("loom_cli.rollout.steps.s13_smoke._http_get", fake_get)
-    monkeypatch.setattr("loom_cli.rollout.steps.s13_smoke._http_post", fake_post)
-
-    result = SmokeStep().run(ctx, step_dir)
-
-    assert result.exit_code == 0
-    assert captured_payloads == [
-        {
-            "task_id": "terminal-bench-2/hello-world",
-            "config": {"agent_name": "oracle", "agent_model": None},
-            "idempotency_key": "smoke-"
-            + hashlib.sha256(
-                f"{ctx.image_tag}|{ctx.resolved_sha}".encode(),
-            ).hexdigest()[:16],
-        }
-    ]
+    with pytest.raises(
+        RuntimeError,
+        match=r"--smoke-task-id.*audited current profile",
+    ):
+        _smoke_task_id(ctx)
 
 
 def test_smoke_rejects_non_user_owned_smoke_token_before_submit(

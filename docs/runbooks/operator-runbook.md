@@ -1860,10 +1860,12 @@ create user-facing work under the account-auth model. For
 `loom-smoke/gb10-oracle-hello-world` with
 `required_worker_pool=gb10-arm64`, because that task is oracle-compatible and
 declares `cpu_arch=any`. For `--scope=full-cluster`, the default is
-`terminal-bench-2/hello-world` with no required pool. Override
-`--smoke-task-id` only with another short task that exists in the live
-`/api/v1/tasks/{id}` catalog and is compatible with the rollout scope and
-selected worker pool. If the override must target a specific pool, set
+not defined: the rollout fails closed unless `--smoke-task-id` names a short,
+audited physical task from the current profile, for example
+`terminal-bench-2@tb2.1-r6/<task>`. The task must exist in the live
+`/api/v1/tasks/{id}` catalog and be compatible with the rollout scope and
+selected worker pool; Loom never guesses a TB2 task or falls back to TB2.0. If
+the selection must target a specific pool, set
 `--smoke-required-worker-pool` explicitly; the driver only injects the GB10
 pool for its built-in current-gb10 default.
 
@@ -3708,7 +3710,7 @@ workload shape. Halve the `for:` durations for staging.
 | 502 from Control Plane | Postgres unreachable | `kubectl exec deploy/loom-control-plane -- pg_isready -h loom-postgres` |
 | Trials stuck queued | No worker matches `requires_caps` | Inspect `trials.requires_caps` vs registered `workers.capabilities`, including `cpu_arch`; legacy missing `cpu_arch` means x86_64-only |
 | Batch finishes `all_failed` with zero child trials | Batch fan-out was rejected by deterministic submission policy/config checks after preview-time checks were bypassed or state changed | Open Batch Detail or `loom eval batch show <id>` and inspect `failure_reason`, `failure_message`, and `fanout_errors`; update the task config, provider/backend selection, permissions, or catalog state before retrying |
-| `POST /api/v1/batches` returns 400 `agent×task capability mismatch` | Selected agent's `requires_capabilities` (from `/api/v1/agents`) isn't satisfied by every task in the filter — e.g. `oracle` against an aime/gpqa task that doesn't ship `solution/solve.sh`; Terminal-Bench-2 is allowed because its adapter emits a wrapper | Resubmit with a compatible task slate (drop the listed incompatible tasks), or drop the incompatible agent from `combinations` |
+| `POST /api/v1/batches` returns 400 `agent×task capability mismatch` | Selected agent's `requires_capabilities` (from `/api/v1/agents`) isn't satisfied by every task in the filter — e.g. `oracle` against a task that doesn't ship `solution/solve.sh`; mixed adapters such as TB2.1 must publish an explicit `oracle_eligible=true` tag, and no task-id prefix grants capability | Resubmit with a compatible tagged task slate (drop the listed incompatible tasks), or drop the incompatible agent from `combinations` |
 | Worker logs `state_patch_error`, CP returns 400 requiring `result`, or DB rejects with `trials_succeeded_has_result` | A writeback path patched `state='succeeded'` before persisting/providing `result` (#416 Slice 4). CP should reject this as a clear 400 before the database constraint is reached; the constraint still blocks direct inconsistent writes | Inspect `select id, state, result, finished_at from trials where state='succeeded' and result is null` — should be empty post-#416. If non-empty, audit recent worker code for an out-of-order writeback |
 | 429 from Gateway | Provider rate limit | Check `loom_llm_calls_total{provider,result}` panel |
 | Trajectory or artifact uploads failing | MinIO credentials wrong or runtime bucket bootstrap failed | `kubectl logs deploy/loom-worker --tail=200` for `ensure_bucket`, `trajectory_flush_failed`, or `artifact_upload_failed`; verify `mc ls loom-minio/trajectories` and `mc ls loom-minio/artifacts` |
@@ -5265,15 +5267,15 @@ That runbook is GO-gated: prepare the commands, preflight checklist, stop
 conditions, and evidence directory up front, but do not submit the canary until
 the coordinator confirms the clean anchor and #190 targeted durability evidence.
 
-## Terminal-Bench 2.0 staging readiness
+## Terminal-Bench 2.1 revision-6 staging readiness
 
-The TB-2 adapter (`packages/loom-benchmark-terminal-bench-2`) and its 86-task
-pinned bundle (`terminal-bench-core` v0.1.1, commit
-`91e10457b5410f16c44364da1a34cb6de8c488a5`) ship with the staging
-catalog. The exercises in this section are the cluster-side acceptance gates
-for issue #217 that cannot be covered by unit CI: real worker image builds,
-provider trials, MinIO mirroring, sidecar plumbing, and resource-budget
-profiling all need a deployed environment.
+The `terminal-bench-2` public selector may execute only the immutable
+`terminal-bench-2@tb2.1-r6` profile. Harbor Hub
+`terminal-bench/terminal-bench-2-1@6`, its metadata version, and all 89 locked
+package digests are the execution authority. The old 86-task TB2.0 catalog is
+historical/read-only and is never an execution, rollback, or smoke fallback.
+The exercises in this section are cluster-side #749 acceptance gates that unit
+CI cannot supply.
 
 After a successful broker rollout of the merged candidate, disposable G3/G4/
 G6/G9 staging trials and smoke checks may run independently. Only G5 catalog
@@ -5292,7 +5294,7 @@ Prerequisites:
 - The MinIO endpoint, access key, and secret key for the target environment.
 - A Hugging Face token if publishing the bundle from outside the cluster.
 
-### G5 — Mirror the TB-2 bundle into the object store
+### Publish, mirror, fresh-audit, and activate
 
 The bundle is large enough that pulling it from Hugging Face at trial-time
 saturates the worker setup budget. Publish once, register, mirror, and audit:
@@ -5308,15 +5310,28 @@ export LOOM_MINIO_SECRET_KEY=...
 loom datasets publish terminal-bench-2 --hf-org "$LOOM_HF_ORG"
 loom datasets register terminal-bench-2 --hf-org "$LOOM_HF_ORG" \
   --mirror-to-object-store
-loom datasets audit terminal-bench-2 --verify-bundles
+loom datasets audit terminal-bench-2@tb2.1-r6 \
+  --tb21-audit-json "$PWD/tb21-audit.json" \
+  --minio-endpoint "$LOOM_MINIO_ENDPOINT"
+loom datasets activate terminal-bench-2 \
+  --profile terminal-bench-2@tb2.1-r6 \
+  --audit-json "$PWD/tb21-audit.json" \
+  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
+  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
+  --minio-secret-key "$LOOM_MINIO_SECRET_KEY"
 ```
 
 Acceptance:
 
-- `loom datasets audit` exits 0 and reports `valid_bundles=86`,
+- registration leaves the physical profile `pending` and direct submission is
+  rejected;
+- audit and activation each inspect all 89 packages and report
+  `valid_bundles=89`,
   `missing_bundles=0`, `mismatched_bundles=0`.
-- The object store path `<bucket>/benchmarks/terminal-bench-2/<sha>/` exists
-  for each of the 86 tasks.
+- activation repeats the audit against current object-store bytes inside the
+  alias transaction, then makes the profile `runnable`;
+- a fresh post-activation audit reproduces the same snapshot identity;
+- workers rehash materialized bundles before image or driver startup.
 
 ### Service vs. local CLI — IMPORTANT
 
@@ -5338,15 +5353,16 @@ loom auth login --server "$LOOM_API_URL"
 
 ### G3 — Live cluster end-to-end (easy + hard task)
 
-Pick one short task and one long task. `hello-world` is the canonical short
-case; `simple-web-scraper` is a representative long case (it pulls a sidecar).
+Select one known-pass and one verifier-sensitive task from the clean 89/89
+audit. Record their physical IDs; do not infer names from historical TB2.0.
 A successful trial must land verifier output with a numeric reward plus the
 ATIF and trajectory in object storage.
 
 ```bash
 mkdir -p ./tb2-evidence
 
-for task in terminal-bench-2/hello-world terminal-bench-2/simple-web-scraper; do
+for task in "$TB21_KNOWN_PASS_TASK_ID" "$TB21_VERIFIER_SENSITIVE_TASK_ID"; do
+  case "$task" in terminal-bench-2@tb2.1-r6/*) ;; *) exit 1 ;; esac
   loom eval run --agent oracle --task "$task"
   # `loom eval run` prints the trial_id; wait for terminal state, then:
   #   loom eval trial show <trial_id> --json > "./tb2-evidence/${task//\//_}.json"
@@ -5356,7 +5372,9 @@ done
 
 Acceptance:
 
-- Both trials end with `state=succeeded` and `reward >= 0`.
+- Both trials end with platform `state=succeeded` and a finite numeric reward.
+  Reward `0` is a valid scored result; missing reward is a platform/verifier
+  failure.
 - ATIF JSON and trajectory blobs are downloadable through the Run Library SPA.
 - The trial's `verifier.rewards` JSON validates against the
   `loom.models.verifier.VerifierResult` shape — `to_tb2_report()` consumes
@@ -5365,18 +5383,15 @@ Acceptance:
 Archive the ATIFs under `docs/evidence/issue-217/` and link them in the
 closing comment on #217.
 
-### G4 — Sidecar tasks against the staging sandbox
+### Architecture and environment-sensitive tasks
 
-Three pinned tasks declare compose sidecars (`security-vulhub-minio`,
-`simple-sheets-put`, `simple-web-scraper`). Run each individually so the
-worker exercises the per-trial network, DNS propagation, and `extra_hosts`
-plumbing.
+Select every task classified by the rev-6 audit as needing distinct
+architecture, image-build, or environment behavior. Run the full selected set;
+do not reduce it to remembered TB2.0 names.
 
 ```bash
-for task in \
-  terminal-bench-2/security-vulhub-minio \
-  terminal-bench-2/simple-sheets-put \
-  terminal-bench-2/simple-web-scraper; do
+for task in ${TB21_ENVIRONMENT_SENSITIVE_TASK_IDS:?}; do
+  case "$task" in terminal-bench-2@tb2.1-r6/*) ;; *) exit 1 ;; esac
   loom eval run --agent oracle --task "$task"
 done
 ```
@@ -5393,7 +5408,8 @@ Acceptance:
 
 The staging agent catalog (PR #177) ships Claude Opus 4.7, Sonnet 4.6,
 and Haiku 4.5. Run one TB-2 task per provider to confirm tool-loop reach to
-verifier output. Use `hello-world` for cost discipline.
+verifier output. Set `TB21_PROVIDER_SMOKE_TASK_ID` to one short physical task
+from the clean current audit for cost discipline.
 
 ```bash
 # Replace --provider/--model with the staging connection name for each
@@ -5407,7 +5423,7 @@ for agent_model in \
     --agent "$agent" \
     --provider "$provider" \
     --model "$model" \
-    --task terminal-bench-2/hello-world
+  --task "$TB21_PROVIDER_SMOKE_TASK_ID"
 done
 ```
 
@@ -5431,9 +5447,10 @@ Profile a representative slice (one short, one medium, one long task):
 
 ```bash
 for task in \
-  terminal-bench-2/hello-world \
-  terminal-bench-2/chess-best-move \
-  terminal-bench-2/security-vulhub-minio; do
+  "$TB21_SHORT_TASK_ID" \
+  "$TB21_MEDIUM_TASK_ID" \
+  "$TB21_LONG_TASK_ID"; do
+  case "$task" in terminal-bench-2@tb2.1-r6/*) ;; *) exit 1 ;; esac
   trial_id=$(loom eval run --agent oracle --task "$task" --json \
     | jq -r .trial_id)
   loom eval trial show "$trial_id" --json \
@@ -5457,17 +5474,17 @@ Acceptance:
   in `deploy/environments/<env>.profile` under `[task_budget_overrides]` and
   re-run.
 
-### Closing #217
+### Closing #749
 
 When all five exercises above produce green evidence:
 
-- Comment on #217 with the artifact links (`--tb2-report` outputs, run IDs,
+- Comment on #749 with the artifact links (`--tb2-report` outputs, run IDs,
   audit logs).
 - Drop the `[WIP]` prefix from the title.
 - Close the issue.
 
-If any exercise blocks, open a focused sub-issue with the failure mode and
-link it from #217; do not merge incomplete evidence.
+If any exercise blocks, keep #749 open and record the failure mode. Do not
+activate a reduced profile, substitute TB2.0, or merge incomplete evidence.
 
 ## Capacity planning
 

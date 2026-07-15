@@ -488,12 +488,11 @@ surfaces:
 - MBPP: second code benchmark, cheap and simple.
 - AIME 2022-2025: lightweight provider/model smoke with full per-year
   registration and source-license metadata.
-- Terminal-Bench-2 full pinned v0.1.1 task set: terminal sandbox behavior. The
-  registered set contains 86 valid task configs, each declaring
-  `workdir = "/app"`, a build-only `.loom-build/client` Docker context, and the
-  upstream bash `run-tests.sh` script verifier. The 3 multi-service tasks use
-  `environment.sidecars` so workers run the official auxiliary services instead
-  of a single-image approximation.
+- Terminal-Bench 2.1 Harbor Hub revision 6: terminal sandbox behavior. The
+  physical `terminal-bench-2@tb2.1-r6` profile contains exactly 89 locked
+  native packages. It remains `pending` after registration and becomes
+  runnable only through a fresh all-package audit and atomic alias activation;
+  there is no TB2.0 execution fallback or reduced-task mode.
 - SkillFlow and SkillLearnBench: research-demanded agentic skill learning
   paths. Their real upstreams publish task bundles rather than one JSON row per
   instance, so the adapter must wrap each bundle with Loom `task.toml` and a

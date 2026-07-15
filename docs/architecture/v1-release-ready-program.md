@@ -281,6 +281,13 @@ The final matrix is executed against one immutable candidate from the fixed
 
 - canonical Terminal-Bench 2.1 Harbor Hub revision 6, SkillLearnBench, and the
   already-scoped realistic user-uploaded TaskSet lane;
+- TB2.1 physical profile `terminal-bench-2@tb2.1-r6` activated only after a
+  fresh 89/89 audit of Hub digests, bundles, verifier assets, checksums,
+  architecture, and the private-verifier-driver boundary; no TB2.0 fallback or
+  reduced task count is allowed;
+- an explicit audited TB2.1 physical task ID supplied to every full-cluster
+  rollout via `--smoke-task-id`; only `current-gb10` retains the Loom-owned
+  `loom-smoke/gb10-oracle-hello-world` default;
 - representative agent/model cells from #35;
 - operator-free frontend and CLI/API submit, monitor, detail/debug, usage,
   artifact, trajectory, and export paths;
@@ -293,7 +300,10 @@ The final matrix is executed against one immutable candidate from the fixed
 
 A realistic multi-task result with all-zero or all-full reward is not
 score-valid evidence until root-caused. A single-task smoke proves connectivity
-only.
+only. Numeric verifier reward `0` is still a platform-successful scored result;
+missing, malformed, or non-finite reward evidence is a platform/verifier
+failure. Benchmark profile/Hub provenance and agent-runtime/image provenance
+must be recorded independently.
 
 The promotion package is generated from the candidate, not assembled by hand.
 It includes:
