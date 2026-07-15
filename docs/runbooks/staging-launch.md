@@ -617,6 +617,17 @@ do not run per-host `gb10-agent apply` as a staging-launch shortcut. The worker
 token is read from the protected service source and is never stored in Control
 Plane desired state or operator argv.
 
+Rollout step 12 also proves the boot-time recovery chain rather than only one
+successful apply: the deploy user must have `Linger=yes`, the candidate
+node-agent service and timer must match the installed units, and the timer must
+be enabled and active/waiting. After the rollout session disconnects, wait more
+than one timer period, stop one declared-active canary worker, and require the
+same candidate image and a fresh linked heartbeat to return within the next
+period. A stopped/excluded host, including the current node 7 exception, must
+not return. Do not leave a legacy production node-agent timer sharing the
+staging tunnel ports or Compose root; fence or isolate it before connectivity
+is restored.
+
 For OLDLAB 1-5, use the committed staged files in
 `deploy/worker-pools/oldlab/` as the source of truth for included nodes,
 requested Slurm slice, and controller env overrides. OLDLAB 4/5 must not be

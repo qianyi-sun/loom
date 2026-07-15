@@ -825,6 +825,30 @@ For systemd service/timer templates and GB10-specific paths, see
 fallback when the node-agent timer, token, or CP desired-state API is
 unavailable.
 
+The protected rollout requires `loginctl show-user "$USER" -p Linger --value`
+to return `yes` before it changes either unit. It installs the candidate's
+service and timer into `~/.config/systemd/user`, starts the oneshot once for
+immediate convergence, enables/restarts the timer, and verifies both installed
+bytes and live systemd properties. Bootstrap linger once with the host's normal
+user/admin path:
+
+```bash
+loginctl enable-linger "$USER"
+```
+
+An active host is reconciled every timer period. If its current or normally
+idle-exited container already uses the desired image, the node-agent reuses it
+and runs Compose reconciliation without a new pull/build. Missing containers or
+runtime-image drift still trigger the candidate-bound pull/build. `draining`
+and `stopped` hosts do not pull, build, or start a worker.
+
+After installation, disconnect the operator SSH session, wait longer than one
+timer period, stop one active canary worker, and require the timer to restore a
+fresh linked worker within the next period. Confirm excluded/stopped hosts stay
+absent. A legacy node-agent for another environment must be stopped or fully
+isolated from this environment's tunnel ports and Compose root before tunnel
+connectivity is restored.
+
 ## Start A Remote Worker
 
 On the worker host, copy the example env file to an untracked file:
