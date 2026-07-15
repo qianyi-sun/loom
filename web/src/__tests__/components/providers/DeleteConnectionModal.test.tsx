@@ -5,6 +5,20 @@ import { describe, expect, it, vi } from "vitest";
 import DeleteConnectionModal from "../../../components/providers/DeleteConnectionModal";
 
 describe("DeleteConnectionModal", () => {
+  it("uses the shared labelled dialog and initially focuses confirmation", () => {
+    render(
+      <DeleteConnectionModal
+        connectionName="prod-x"
+        onClose={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+    const dialog = screen.getByRole("dialog", { name: "Delete connection" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(dialog).toHaveAttribute("aria-describedby");
+    expect(screen.getByLabelText(/type connection name/i)).toHaveFocus();
+  });
+
   it("submit is disabled until connection name typed", async () => {
     const user = userEvent.setup();
     render(

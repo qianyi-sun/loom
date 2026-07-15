@@ -5,6 +5,20 @@ import { describe, expect, it, vi } from "vitest";
 import RotateKeyModal from "../../../components/providers/RotateKeyModal";
 
 describe("RotateKeyModal", () => {
+  it("uses the shared labelled dialog and initially focuses the new key", () => {
+    render(
+      <RotateKeyModal
+        connectionName="prod-anthropic"
+        onClose={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+    const dialog = screen.getByRole("dialog", { name: "Rotate API key" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(dialog).toHaveAttribute("aria-describedby");
+    expect(screen.getByLabelText(/new api key/i)).toHaveFocus();
+  });
+
   it("submit is disabled until both fields filled + name matches", async () => {
     const user = userEvent.setup();
     render(

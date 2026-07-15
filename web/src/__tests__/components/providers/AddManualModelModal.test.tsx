@@ -5,6 +5,14 @@ import { describe, expect, it, vi } from "vitest";
 import AddManualModelModal from "../../../components/providers/AddManualModelModal";
 
 describe("AddManualModelModal", () => {
+  it("uses the shared labelled dialog and initially focuses model id", () => {
+    render(<AddManualModelModal onClose={vi.fn()} onSubmit={vi.fn()} />);
+    const dialog = screen.getByRole("dialog", { name: "Add manual model" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(dialog).toHaveAttribute("aria-describedby");
+    expect(screen.getByRole("textbox", { name: /model id/i })).toHaveFocus();
+  });
+
   it("submit calls onSubmit with model_id + optional display_name", async () => {
     const onSubmit = vi.fn();
     const user = userEvent.setup();
@@ -32,5 +40,12 @@ describe("AddManualModelModal", () => {
     render(<AddManualModelModal onClose={onClose} onSubmit={vi.fn()} />);
     await user.click(screen.getByRole("button", { name: /cancel/i }));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("keeps submission disabled while pending", async () => {
+    const user = userEvent.setup();
+    render(<AddManualModelModal pending onClose={vi.fn()} onSubmit={vi.fn()} />);
+    await user.type(screen.getByLabelText(/model id/i), "manual/gpt-x");
+    expect(screen.getByRole("button", { name: /^add/i })).toBeDisabled();
   });
 });
