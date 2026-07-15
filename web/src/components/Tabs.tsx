@@ -244,8 +244,9 @@ export function Tabs<Value extends string>({
           aria-orientation="horizontal"
           className={tabListClassName}
           onFocusCapture={(event) => {
+            const focusedTarget = event.target as EventTarget;
             const focusedTab = Array.from(tabRefs.current.entries()).find(
-              ([, tabNode]) => tabNode === event.target,
+              ([, tabNode]) => tabNode === focusedTarget,
             );
             if (!focusedTab) return;
             const token = focusTokenRef.current + 1;
