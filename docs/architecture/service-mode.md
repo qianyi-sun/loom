@@ -595,6 +595,11 @@ Core pages include:
   supplemental reruns are available. Batch detail also renders the Debug
   evidence card from the same `debug_evidence` object exposed to API and CLI
   callers.
+- **Run Library** — complete timestamp/id keyset traversal with URL-backed
+  filters and session-local Previous/Next cursor history. Scope or filter
+  changes synchronously reset to page one; guarded `aria-disabled` controls
+  block concurrent page changes without dropping keyboard focus, and later-page
+  errors retain Previous and Retry actions.
 - **NewBatch** — textarea JSON parse for `task_filter` +
   `trial_config` with local validation
 - **Tasks** — cluster task catalog
@@ -613,7 +618,10 @@ Core pages include:
   owner/team-admin legacy invite create/list/revoke/resend, and one-time
   API-token reveal with CLI setup commands. The page is split into role-aware
   sections, and platform-admin invite creation uses a team selector rather than
-  requiring raw team ids.
+  requiring raw team ids. Its Audit section mounts lazily and uses the same
+  session-local Previous/Next, loading, error/retry, and terminal-page contract.
+  Audit keeps the event UUID wire cursor for rolling compatibility while the
+  server resolves its timestamp and applies the stable timestamp/id predicate.
 - **NotFound**
 
 Auth model: browser users sign in through `/api/v1/auth/login` with username

@@ -1021,7 +1021,11 @@ knob you need.
    ```
    Audit rows include authenticated or operator-attested actors and safe
    metadata such as token prefixes, never raw bearer, invite, setup, or reset
-   tokens.
+   tokens. Results use stable `created_at DESC, id DESC` keyset order. When
+   `next_cursor` is non-null, pass that event UUID unchanged as the next
+   request's `cursor`; the service resolves its timestamp for stable tie-breaker
+   traversal. Continue until the cursor is null rather than assuming the first
+   page contains the complete audit history.
 
 10. **Staging incident controls.** Use the same admin token plus an
     operator-attested `X-Loom-Admin-Actor` for every emergency mutation:

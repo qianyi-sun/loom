@@ -334,7 +334,9 @@ The SPA reduces the old mixed navigation into a role-aware primary set:
   **All teams** scopes, `username / team` owner labels, structured filters for
   benchmark/agent/model/provider fields, task/config summaries, artifact
   groups, safe shared artifact downloads, clone-config actions, reuse actions,
-  and provenance.
+  and provenance. Previous/Next controls traverse the service's stable
+  timestamp/id cursor; cursor history remains session-local while URL-backed
+  filters synchronously reset to page one.
 - **Usage** — cost/token/trial rollups scoped to the selected current team for
   ordinary users. Platform-admin sessions use the fixed internal-team registry
   for a team-name selector and can leave the filter blank for platform-wide
@@ -352,7 +354,9 @@ The SPA reduces the old mixed navigation into a role-aware primary set:
   selected team/role, one-time invite-link reveal, and audit events. The route
   is split into role-aware sections so Requests, Teams, Invites, API tokens, and
   Audit are not presented as one long mixed form. Platform-admin invite creation
-  uses a team-name selector instead of a raw team id input.
+  uses a team-name selector instead of a raw team id input. The Audit query is
+  lazy-mounted in its tab and exposes complete Previous/Next traversal plus
+  explicit loading, retryable error, empty, and terminal states.
 - **Providers** — provider detail tabs are URL-addressable. `/providers/:id`
   defaults to Overview, while `?tab=models` and `?tab=settings` open those tabs
   on first render and keep accessible tab/panel relationships intact.
