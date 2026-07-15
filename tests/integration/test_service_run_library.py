@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -13,7 +14,7 @@ import boto3
 import httpx
 import pytest
 from botocore.config import Config
-from sqlalchemy import create_engine, delete, insert, select, update
+from sqlalchemy import create_engine, delete, event, insert, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from testcontainers.minio import MinioContainer
@@ -472,6 +473,237 @@ async def run_library_setup(
         sync_engine.dispose()
 
 
+def _seed_cursor_batches(
+    *,
+    postgres_url: str,
+    team_id: UUID,
+    task_id: str,
+    provider_connection_id: UUID,
+) -> tuple[list[str], str]:
+    tied_at = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
+    visible: list[tuple[UUID, datetime]] = []
+    batch_rows: list[dict[str, object]] = []
+    trial_rows: list[dict[str, object]] = []
+    artifact_rows: list[dict[str, object]] = []
+
+    for index in range(53):
+        batch_id = UUID(int=10_000 + index)
+        trial_id = UUID(int=20_000 + index)
+        artifact_id = UUID(int=30_000 + index)
+        created_at = tied_at if index < 27 else tied_at - timedelta(minutes=index - 26)
+        visible.append((batch_id, created_at))
+        batch_rows.append(
+            {
+                "id": batch_id,
+                "team_id": team_id,
+                "name": f"cursor completeness {index:02d}",
+                "description": "issue 774 deterministic traversal fixture",
+                "task_filter": {
+                    "subset_kind": "explicit",
+                    "task_ids": [task_id],
+                },
+                "trial_config": {},
+                "state": "finished",
+                "result_status": "succeeded",
+                "created_at": created_at,
+                "finished_at": created_at,
+                "created_by_token_prefix": "test:774",
+                "expected_trial_count": 1,
+                "n_per_task": 1,
+                "backend": "docker",
+                "combinations": [],
+                "provider_connection_id": provider_connection_id,
+                "provider_model_id": "gpt-4o-mini",
+                "visibility": "org",
+                "share_status": "shared",
+            }
+        )
+        trial_rows.append(
+            {
+                "id": trial_id,
+                "team_id": team_id,
+                "batch_id": batch_id,
+                "task_id": task_id,
+                "config": {},
+                "requires_caps": {},
+                "state": "succeeded",
+                "submitted_at": created_at,
+                "started_at": created_at,
+                "finished_at": created_at,
+                "result": {"aggregate_reward": 1.0},
+                "visibility": "org",
+                "share_status": "shared",
+            }
+        )
+        artifact_rows.append(
+            {
+                "id": artifact_id,
+                "artifact_type": "training_data_export",
+                "artifact_schema_version": "1.0",
+                "name": f"cursor export {index:02d}",
+                "team_id": team_id,
+                "batch_id": batch_id,
+                "trial_id": trial_id,
+                "created_by": {
+                    "kind": "trial",
+                    "batch_id": str(batch_id),
+                    "trial_id": str(trial_id),
+                },
+                "content_hash": f"sha256:{index:064x}",
+                "storage": {
+                    "backend": "object_store",
+                    "bucket": "artifacts",
+                    "key": f"cursor-774/{trial_id}/export.jsonl",
+                    "media_type": "application/x-ndjson",
+                    "size_bytes": 1,
+                },
+                "visibility": "org",
+                "share_status": "shared",
+                "redaction_state": "redacted",
+                "safety_state": "safe",
+                "retention": {"class": "shared_reusable"},
+                "provenance": {
+                    "batch_id": str(batch_id),
+                    "trial_id": str(trial_id),
+                    "source_trial_ids": [str(trial_id)],
+                    "relation": "produced_from",
+                },
+                "artifact_metadata": {"fixture_index": index},
+                "created_at": created_at,
+            }
+        )
+
+    private_batch_id = UUID(int=90_000)
+    private_trial_id = UUID(int=90_001)
+    private_artifact_id = UUID(int=90_002)
+    batch_rows.append(
+        {
+            "id": private_batch_id,
+            "team_id": team_id,
+            "name": "cursor completeness private",
+            "description": "must remain outside cross-team traversal",
+            "task_filter": {"subset_kind": "explicit", "task_ids": [task_id]},
+            "trial_config": {},
+            "state": "finished",
+            "result_status": "succeeded",
+            "created_at": tied_at,
+            "finished_at": tied_at,
+            "created_by_token_prefix": "test:774",
+            "expected_trial_count": 1,
+            "n_per_task": 1,
+            "backend": "docker",
+            "combinations": [],
+            "provider_connection_id": provider_connection_id,
+            "provider_model_id": "gpt-4o-mini",
+            "visibility": "private",
+            "share_status": "shared",
+        }
+    )
+    trial_rows.append(
+        {
+            "id": private_trial_id,
+            "team_id": team_id,
+            "batch_id": private_batch_id,
+            "task_id": task_id,
+            "config": {},
+            "requires_caps": {},
+            "state": "succeeded",
+            "submitted_at": tied_at,
+            "started_at": tied_at,
+            "finished_at": tied_at,
+            "result": {"aggregate_reward": 1.0},
+            "visibility": "private",
+            "share_status": "shared",
+        }
+    )
+    artifact_rows.append(
+        {
+            "id": private_artifact_id,
+            "artifact_type": "training_data_export",
+            "artifact_schema_version": "1.0",
+            "name": "private cursor export",
+            "team_id": team_id,
+            "batch_id": private_batch_id,
+            "trial_id": private_trial_id,
+            "created_by": {"kind": "trial", "trial_id": str(private_trial_id)},
+            "content_hash": "sha256:" + ("f" * 64),
+            "storage": {
+                "backend": "object_store",
+                "bucket": "artifacts",
+                "key": f"cursor-774/{private_trial_id}/export.jsonl",
+                "media_type": "application/x-ndjson",
+                "size_bytes": 1,
+            },
+            "visibility": "private",
+            "share_status": "shared",
+            "redaction_state": "redacted",
+            "safety_state": "safe",
+            "retention": {"class": "owner_only"},
+            "provenance": {
+                "batch_id": str(private_batch_id),
+                "trial_id": str(private_trial_id),
+                "relation": "produced_from",
+            },
+            "artifact_metadata": {},
+            "created_at": tied_at,
+        }
+    )
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(insert(Batch), batch_rows)
+        conn.execute(insert(Trial), trial_rows)
+        conn.execute(insert(Artifact), artifact_rows)
+    sync_engine.dispose()
+
+    expected_ids = [
+        str(batch_id)
+        for batch_id, _created_at in sorted(
+            visible,
+            key=lambda item: (item[1], item[0].int),
+            reverse=True,
+        )
+    ]
+    return expected_ids, str(private_batch_id)
+
+
+async def _walk_run_library_pages(
+    client: httpx.AsyncClient,
+    *,
+    headers: dict[str, str],
+    params: dict[str, str],
+) -> tuple[list[str], list[int], list[str | None]]:
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    ids: list[str] = []
+    page_sizes: list[int] = []
+    returned_cursors: list[str | None] = []
+
+    while True:
+        request_params = dict(params)
+        if cursor is not None:
+            request_params["cursor"] = cursor
+        response = await client.get(
+            "/api/v1/run-library/batches",
+            params=request_params,
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        page_ids = [item["id"] for item in body["items"]]
+        ids.extend(page_ids)
+        page_sizes.append(len(page_ids))
+        returned_cursors.append(body["next_cursor"])
+        cursor = body["next_cursor"]
+        if cursor is None:
+            break
+        assert cursor not in seen_cursors
+        seen_cursors.add(cursor)
+        assert len(returned_cursors) < 10
+
+    return ids, page_sizes, returned_cursors
+
+
 async def test_run_library_defaults_to_my_team_and_all_teams_shows_shared_owner(
     run_library_setup: dict[str, object],
 ) -> None:
@@ -524,6 +756,119 @@ async def test_run_library_defaults_to_my_team_and_all_teams_shows_shared_owner(
     )
     assert default_shared["visibility"] == "org"
     assert default_shared["share_status"] == "shared"
+
+
+async def test_run_library_cursor_walk_has_no_gaps_or_duplicates(
+    run_library_setup: dict[str, object],
+) -> None:
+    expected_ids, private_id = _seed_cursor_batches(
+        postgres_url=str(run_library_setup["postgres_url"]),
+        team_id=run_library_setup["team_a"],
+        task_id=str(run_library_setup["task_id"]),
+        provider_connection_id=run_library_setup["conn_a"],
+    )
+    transport = httpx.ASGITransport(app=run_library_setup["app"])
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as client:
+        ids, page_sizes, cursors = await _walk_run_library_pages(
+            client,
+            headers={"Authorization": f"Bearer {run_library_setup['raw_b']}"},
+            params={
+                "scope": "all",
+                "q": "cursor completeness",
+                "limit": "17",
+            },
+        )
+
+    assert page_sizes == [17, 17, 17, 2]
+    assert cursors[-1] is None
+    assert ids == expected_ids
+    assert len(ids) == 53
+    assert len(set(ids)) == 53
+    assert private_id not in ids
+
+
+async def test_artifact_filtered_cursor_walk_is_complete_and_bounded(
+    run_library_setup: dict[str, object],
+) -> None:
+    expected_ids, private_id = _seed_cursor_batches(
+        postgres_url=str(run_library_setup["postgres_url"]),
+        team_id=run_library_setup["team_a"],
+        task_id=str(run_library_setup["task_id"]),
+        provider_connection_id=run_library_setup["conn_a"],
+    )
+    transport = httpx.ASGITransport(app=run_library_setup["app"])
+    headers = {"Authorization": f"Bearer {run_library_setup['raw_b']}"}
+    params = {
+        "scope": "all",
+        "q": "cursor completeness",
+        "artifact_type": "training_data_export",
+        "limit": "17",
+    }
+    statements: list[str] = []
+
+    def capture_statement(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        statements.append(" ".join(statement.lower().split()))
+
+    engine = run_library_setup["app"].state.session_factory.kw["bind"]
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as client:
+        event.listen(engine.sync_engine, "before_cursor_execute", capture_statement)
+        try:
+            first = await client.get(
+                "/api/v1/run-library/batches",
+                params=params,
+                headers=headers,
+            )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", capture_statement)
+        assert first.status_code == 200, first.text
+        assert len(first.json()["items"]) == 17
+        assert first.json()["next_cursor"] is not None
+        ids, page_sizes, cursors = await _walk_run_library_pages(
+            client,
+            headers=headers,
+            params=params,
+        )
+
+    assert page_sizes == [17, 17, 17, 2]
+    assert cursors[-1] is None
+    assert ids == expected_ids
+    assert len(set(ids)) == 53
+    assert private_id not in ids
+    candidate_queries = [
+        statement for statement in statements if "from batches join teams" in statement
+    ]
+    assert len(candidate_queries) == 1
+    assert "exists (select artifacts.id" in candidate_queries[0]
+
+
+async def test_run_library_rejects_naive_timestamp_cursor(
+    run_library_setup: dict[str, object],
+) -> None:
+    body = json.dumps(
+        {
+            "t": "2026-07-10T12:00:00",
+            "i": str(uuid4()),
+        }
+    ).encode()
+    cursor = base64.urlsafe_b64encode(body).decode().rstrip("=")
+    transport = httpx.ASGITransport(app=run_library_setup["app"])
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as client:
+        response = await client.get(
+            "/api/v1/run-library/batches",
+            params={"scope": "all", "cursor": cursor},
+            headers={"Authorization": f"Bearer {run_library_setup['raw_b']}"},
+        )
+
+    assert response.status_code == 400
+    assert "timezone offset" in response.json()["detail"]
 
 
 async def test_run_library_batch_list_does_not_load_trials_without_artifact_filters(
@@ -1277,18 +1622,20 @@ async def test_artifact_filter_is_applied_before_batch_limit(
     postgres_url = run_library_setup["postgres_url"]
     older_batch = uuid4()
     older_trial = uuid4()
-    newer_batch = uuid4()
-    newer_trial = uuid4()
+    newer_rows = [(uuid4(), uuid4()) for _index in range(55)]
     metric_artifact = uuid4()
     now = datetime.now(UTC)
 
     sync_engine = create_engine(str(postgres_url))
     with sync_engine.begin() as conn:
-        for batch_id, trial_id, created_offset, name in (
-            (older_batch, older_trial, 0, "older metric batch"),
-            (newer_batch, newer_trial, 1, "newer nonmatching batch"),
-        ):
-            created = now.replace(microsecond=created_offset)
+        rows = [
+            (older_batch, older_trial, now - timedelta(minutes=1), "older metric batch"),
+            *[
+                (batch_id, trial_id, now, f"newer nonmatching batch {index:02d}")
+                for index, (batch_id, trial_id) in enumerate(newer_rows)
+            ],
+        ]
+        for batch_id, trial_id, created, name in rows:
             conn.execute(
                 insert(Batch).values(
                     id=batch_id,
@@ -1377,8 +1724,164 @@ async def test_artifact_filter_is_applied_before_batch_limit(
             headers={"Authorization": f"Bearer {raw_b}"},
         )
 
+        statements: list[str] = []
+
+        def capture_statement(
+            _connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            statements.append(" ".join(statement.lower().split()))
+
+        engine = app.state.session_factory.kw["bind"]
+        event.listen(engine.sync_engine, "before_cursor_execute", capture_statement)
+        try:
+            missing = await ac.get(
+                "/api/v1/run-library/batches",
+                params={
+                    "scope": "all",
+                    "artifact_type": "artifact-type-that-does-not-exist",
+                    "limit": "1",
+                },
+                headers={"Authorization": f"Bearer {raw_b}"},
+            )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", capture_statement)
+
     assert r.status_code == 200, r.text
     assert [item["id"] for item in r.json()["items"]] == [str(older_batch)]
+    assert r.json()["next_cursor"] is None
+    assert missing.status_code == 200, missing.text
+    assert missing.json() == {"items": [], "next_cursor": None}
+    candidate_queries = [
+        statement for statement in statements if "from batches join teams" in statement
+    ]
+    assert len(candidate_queries) == 1
+    assert not any(
+        statement.startswith(("select trials.", "select artifacts.")) for statement in statements
+    )
+
+
+async def test_batch_level_artifact_filter_respects_metadata_visibility(
+    run_library_setup: dict[str, object],
+) -> None:
+    app = run_library_setup["app"]
+    raw_a = run_library_setup["raw_a"]
+    raw_b = run_library_setup["raw_b"]
+    team_a = run_library_setup["team_a"]
+    batch_shared = run_library_setup["batch_shared"]
+    postgres_url = run_library_setup["postgres_url"]
+    now = datetime.now(UTC)
+
+    artifact_rows = [
+        {
+            "id": uuid4(),
+            "artifact_type": "trajectory_bundle",
+            "artifact_schema_version": "1.0",
+            "name": "owner-only batch trajectory",
+            "team_id": team_a,
+            "batch_id": batch_shared,
+            "trial_id": None,
+            "created_by": {"kind": "batch", "batch_id": str(batch_shared)},
+            "content_hash": "sha256:" + ("7" * 64),
+            "storage": {
+                "backend": "object_store",
+                "bucket": "artifacts",
+                "key": f"{team_a}/{batch_shared}/trajectory.tar.zst",
+                "media_type": "application/zstd",
+                "size_bytes": 7,
+            },
+            "visibility": "private",
+            "share_status": "shared",
+            "redaction_state": "redacted",
+            "safety_state": "safe",
+            "retention": {"class": "owner_only"},
+            "provenance": {
+                "batch_id": str(batch_shared),
+                "relation": "produced_from",
+            },
+            "artifact_metadata": {},
+            "created_at": now,
+        },
+        {
+            "id": uuid4(),
+            "artifact_type": "task_split",
+            "artifact_schema_version": "1.0",
+            "name": "shared batch task split",
+            "team_id": team_a,
+            "batch_id": batch_shared,
+            "trial_id": None,
+            "created_by": {"kind": "batch", "batch_id": str(batch_shared)},
+            "content_hash": "sha256:" + ("8" * 64),
+            "storage": {
+                "backend": "object_store",
+                "bucket": "artifacts",
+                "key": f"{team_a}/{batch_shared}/task-split.json",
+                "media_type": "application/json",
+                "size_bytes": 8,
+            },
+            "visibility": "org",
+            "share_status": "shared",
+            "redaction_state": "redacted",
+            "safety_state": "safe",
+            "retention": {"class": "shared_reusable"},
+            "provenance": {
+                "batch_id": str(batch_shared),
+                "relation": "produced_from",
+            },
+            "artifact_metadata": {},
+            "created_at": now,
+        },
+    ]
+    sync_engine = create_engine(str(postgres_url))
+    with sync_engine.begin() as conn:
+        conn.execute(insert(Artifact), artifact_rows)
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        hidden_cross_team = await ac.get(
+            "/api/v1/run-library/batches",
+            params={"scope": "all", "artifact_type": "trajectory_bundle"},
+            headers={"Authorization": f"Bearer {raw_b}"},
+        )
+        shared_cross_team = await ac.get(
+            "/api/v1/run-library/batches",
+            params={"scope": "all", "artifact_type": "task_split"},
+            headers={"Authorization": f"Bearer {raw_b}"},
+        )
+        owner_private = await ac.get(
+            "/api/v1/run-library/batches",
+            params={"artifact_type": "trajectory_bundle"},
+            headers={"Authorization": f"Bearer {raw_a}"},
+        )
+
+    assert hidden_cross_team.status_code == 200, hidden_cross_team.text
+    assert hidden_cross_team.json()["items"] == []
+    assert shared_cross_team.status_code == 200, shared_cross_team.text
+    assert [item["id"] for item in shared_cross_team.json()["items"]] == [str(batch_shared)]
+    assert owner_private.status_code == 200, owner_private.text
+    assert [item["id"] for item in owner_private.json()["items"]] == [str(batch_shared)]
+
+
+async def test_batch_artifact_filter_preserves_legacy_trial_fallback(
+    run_library_setup: dict[str, object],
+) -> None:
+    transport = httpx.ASGITransport(app=run_library_setup["app"])
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.get(
+            "/api/v1/run-library/batches",
+            params={"artifact_type": "atif_projection"},
+            headers={"Authorization": f"Bearer {run_library_setup['raw_a']}"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert [item["id"] for item in response.json()["items"]] == [
+        str(run_library_setup["batch_private"])
+    ]
 
 
 async def test_typed_registry_policy_controls_reuse_and_records_provenance(
