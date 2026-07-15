@@ -604,6 +604,22 @@ pressure clears before the lease TTL expires, rerun `status` with zero
 prod-pressure counts to recover the bounded staging desired slots from the lease
 metadata.
 
+The file helper does not control live workers. Continuous enforcement is the
+root-installed `deploy/worker-capacity/loom-prod-pressure-worker-control.timer`;
+its oneshot service runs `scripts/ops/prod_pressure_worker_control.py` every 30
+seconds from the authorized fixed runner and persists sanitized health evidence.
+It reads `/admin/worker-pools/<pool>/prod-pressure` from production and posts
+the sanitized counts to staging's
+`/admin/gb10-worker-pools/<environment>/<pool>/prod-pressure`. Desired
+`draining`/`stopped` intent immediately fences every matching worker registry
+row by hostname and pool, including unlinked or duplicate registrations; the
+claim SQL already requires `Worker.drain_state = active`. `draining` keeps
+Compose alive for in-flight work, while `stopped` always runs Compose stop and
+verifies the service is no longer running. Idle hosts become stopped
+immediately. Busy non-preemptible hosts stop only after in-flight work reaches
+zero; preemptible hosts may become stopped after grace with a durable
+prod-pressure retry diagnostic.
+
 Use an explicit manual drain only for operator-initiated pause scenarios that
 are not represented by the prod-pressure counts. The report separates
 `running_staging_trials` from `idle_leased_slots` so operators can see what is
@@ -1371,8 +1387,9 @@ Control Plane does not SSH into hosts. Each `loom worker gb10-agent apply`
 pulls desired state and applies its host intent:
 
 - `active`: run the worker compose service.
-- `draining`: write drain intent, stop compose with the drain timeout, and
-  let the worker finish in-flight trials before exit.
+- `draining`: write drain intent and keep Compose running while the registry
+  claim fence prevents new work; the capacity controller advances an idle host
+  to `stopped`.
 - `stopped`: keep compose stopped.
 
 The active path is liveness-aware as well as metadata-aware. If image/env/source

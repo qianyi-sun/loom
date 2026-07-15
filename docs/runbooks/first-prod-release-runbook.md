@@ -291,6 +291,44 @@ Any nonzero production pending count, active count, or capacity shortfall stops
 new staging claims and returns idle staging slots to production in the desired-state
 artifact.
 
+The manifest command remains the candidate-bound audit artifact. Runtime
+enforcement is owned by the prod-pressure worker controller: it reads queued,
+active, and capacity-shortfall counts from the private production Control
+Plane, then posts the sanitized signal to staging. The staging CP immediately
+marks matching GB10 registry rows `draining`, which makes `/trials/claim`
+return no work before the asynchronous node-agent/Compose stop converges.
+
+The durable deployment is the root-installed
+`loom-prod-pressure-worker-control.timer` from `deploy/worker-capacity/`; the
+command below is an operator-visible foreground equivalent for bounded
+validation, not the automatic production activation path.
+
+`LIVE PROD + STAGING AUTHORITY REQUIRED`
+
+```bash
+uv run python scripts/ops/prod_pressure_worker_control.py \
+  --prod-cp-url http://127.0.0.1:28081 \
+  --prod-admin-token file:/path/to/prod-admin-token \
+  --staging-cp-url http://127.0.0.1:18081 \
+  --staging-admin-token file:/path/to/staging-admin-token \
+  --staging-environment staging \
+  --pool-name gb10-arm64 \
+  --preemptible \
+  --grace-period-seconds 600 \
+  --watch-interval-seconds 30 \
+  --evidence-out "$ROLLOUT_DIR/prod-pressure-worker-control.json"
+```
+
+If the production pressure endpoint is unavailable, the controller fails
+closed by posting a synthetic capacity shortfall and draining staging. It does
+not stop non-preemptible busy hosts: their registry is claim-fenced while the
+Compose worker finishes in-flight work. A preemptible busy host is stopped only
+after the configured grace period; affected trials carry the explicit
+`prod_capacity_pressure` retry diagnostic, and the crash detector returns them
+to `queued` with retry backoff after the worker heartbeat expires. When
+pressure clears, the previous bounded host intents are restored; claims remain
+fenced until each node-agent confirms its active Compose worker again.
+
 `DRY-RUN SAFE`
 
 ```bash
