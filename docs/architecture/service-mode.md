@@ -628,7 +628,11 @@ no longer stores normal bearer-token login state in `localStorage`.
 **Deployment:** `deploy/Dockerfile.web` is a multi-stage build —
 node-slim builds the Vite bundle, nginx-alpine serves it, and a startup
 script writes public `loom-frontend-config.json` route/API metadata from pod
-environment variables.
+environment variables. Nginx serves the bundle with a self-only Content
+Security Policy, `nosniff`, `no-referrer`, and disabled camera/microphone/
+geolocation permissions on success, redirect, and error responses. The bundle
+uses system sans/monospace stacks and has no runtime Google Fonts dependency;
+ingress-nginx continues to own HSTS at the TLS boundary.
 `deploy/k8s/web.yaml` is a 2-replica Deployment + Service on port
 80. The TLS `loom-ingress` routes `<ingress_host>/api/v1/*` to
 `loom-service:8090` and everything else to `loom-web:80`; nginx inside

@@ -74,6 +74,24 @@ For public repository operation:
   and `owner` roles are enforced server-side, with owner-only management of team
   API tokens and provider connections.
 
+## Public Web Origin Policy
+
+- The production web Nginx configuration is authoritative for CSP,
+  `X-Content-Type-Options`, `Referrer-Policy`, and `Permissions-Policy` on SPA
+  shells, runtime config, static assets, canonical redirects, and web-origin
+  errors. Keep `always` semantics and the shared include in cache-header
+  locations; a location-local `add_header` otherwise disables inheritance.
+- CSP remains self-only for scripts, styles, fonts, connections, forms, and
+  manifests; objects and framing are denied. Only tested `data:`/`blob:`
+  image, media, worker, and download behavior may widen the relevant directive.
+  Do not add wildcards, unsafe script execution, or a third-party font origin.
+- ingress-nginx owns HSTS at the TLS boundary. Release evidence validates the
+  combined exact singleton headers instead of duplicating the web policy in
+  tenant-controlled Ingress snippets.
+- `scripts/ops/frontend_security_headers.py` emits only requested URLs,
+  statuses, and redacted pass/fail errors. Browser smoke must also remain free
+  of CSP console violations.
+
 ## Shared Artifact Boundary
 
 - Existing batch, trial, trajectory, ATIF, and artifact routes remain scoped to

@@ -446,6 +446,14 @@ jobs:
             --route staging=https://yylx.world/dev=https://yylx.world/dev/api \
             --json | tee /tmp/loom-frontend-route-smoke.json
 
+          # Validate the exact combined web-origin + ingress browser policy on
+          # shell/config 200s, the slash-canonical 308, and a wrong-asset 404.
+          # The redacted report never records response headers or bodies.
+          CI=true uv run python scripts/ops/frontend_security_headers.py \
+            --insecure-for-kind \
+            --route staging=https://yylx.world/dev \
+            --json | tee /tmp/loom-frontend-security-headers.json
+
           # The report contains only requested URLs, methods, statuses, and
           # content types. Select one validated hashed route asset without
           # trusting arbitrary report data as a new request target.
@@ -667,6 +675,69 @@ jobs:
             echo "::error::finite canonical chain ended with HTTP ${final_status}"
             exit 1
           fi
+
+          # Prove Nginx's `always` behavior on a real 500 without shipping a
+          # test-only endpoint. Remove only the generated shell in this
+          # ephemeral kind pod, probe the pod directly, and restore it under a
+          # trap before any later smoke step runs. HSTS is intentionally not
+          # required on this loopback probe because ingress owns TLS/HSTS.
+          web_pod_count=$(
+            kubectl --context kind-loom-staging -n loom get pods \
+              -l app=loom-web --field-selector=status.phase=Running \
+              -o name | wc -l | tr -d ' '
+          )
+          if [[ "$web_pod_count" != "1" ]]; then
+            echo "::error::expected one running loom-web pod, found ${web_pod_count}"
+            exit 1
+          fi
+          web_pod=$(
+            kubectl --context kind-loom-staging -n loom get pods \
+              -l app=loom-web --field-selector=status.phase=Running \
+              -o jsonpath='{.items[0].metadata.name}'
+          )
+          security_pf_log=$(mktemp)
+          kubectl --context kind-loom-staging -n loom port-forward \
+            "pod/${web_pod}" 18082:8080 >"$security_pf_log" 2>&1 &
+          SECURITY_PF_PID=$!
+          security_restore_needed=false
+          cleanup_security_5xx_probe() {
+            if [[ "${security_restore_needed:-false}" == "true" ]]; then
+              kubectl --context kind-loom-staging -n loom exec "$web_pod" -- \
+                sh -c 'mv /usr/share/nginx/html/index.html.security-header-smoke /usr/share/nginx/html/index.html' \
+                >/dev/null 2>&1 || true
+            fi
+            kill "$SECURITY_PF_PID" 2>/dev/null || true
+            wait "$SECURITY_PF_PID" 2>/dev/null || true
+            rm -f "$security_pf_log"
+          }
+          trap cleanup_security_5xx_probe EXIT
+          security_web_ready=false
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent --show-error --path-as-is --max-time 5 \
+                 http://127.0.0.1:18082/dev/ >/dev/null; then
+              security_web_ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$security_web_ready" != "true" ]]; then
+            echo "::error::direct loom-web security probe did not become ready"
+            exit 1
+          fi
+          kubectl --context kind-loom-staging -n loom exec "$web_pod" -- \
+            mv /usr/share/nginx/html/index.html \
+               /usr/share/nginx/html/index.html.security-header-smoke
+          security_restore_needed=true
+          CI=true uv run python scripts/ops/frontend_security_headers.py \
+            --web-origin-only \
+            --probe web_500=500=http://127.0.0.1:18082/dev/security-header-5xx-probe \
+            --json | tee /tmp/loom-frontend-security-headers-500.json
+          kubectl --context kind-loom-staging -n loom exec "$web_pod" -- \
+            mv /usr/share/nginx/html/index.html.security-header-smoke \
+               /usr/share/nginx/html/index.html
+          security_restore_needed=false
+          cleanup_security_5xx_probe
+          trap - EXIT
 
       - name: Verify prefixed frontend routes mount in Chromium
         run: |

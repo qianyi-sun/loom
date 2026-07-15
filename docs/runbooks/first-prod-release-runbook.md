@@ -420,7 +420,20 @@ uv run python scripts/ops/frontend_route_smoke.py \
   --route development=https://yylx.world/dev=https://yylx.world/dev/api \
   --json \
   > "$ROLLOUT_DIR/frontend-route-smoke.json"
+
+uv run python scripts/ops/frontend_security_headers.py \
+  --route production=https://yylx.world/prod \
+  --route development=https://yylx.world/dev \
+  --json \
+  > "$ROLLOUT_DIR/frontend-security-headers.json"
 ```
+
+The security-header smoke requires exact singleton CSP, `nosniff`, referrer,
+permissions, and HSTS values on canonical 200 responses, exact-prefix 308s,
+and wrong-asset 404s. It records no response headers or bodies. The staging CI
+contract separately creates and restores a temporary missing-shell condition
+inside its disposable web pod to prove that the web-origin headers also survive
+a 500. Do not create a production-only error endpoint for that check.
 
 Treat `www.yylx.world` as a redirect-only alias, not a second release route.
 The cluster profiles bind it to the same TLS secret through
