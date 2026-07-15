@@ -53,4 +53,31 @@ describe("RecoveryPanel", () => {
     await user.tab();
     expect(home).toHaveFocus();
   });
+
+  it("uses an alert section without nesting document landmarks for route failures", async () => {
+    render(
+      <main id="main-content">
+        <RecoveryPanel
+          scope="route"
+          title="Loom could not display this section"
+          message="This route failed safely."
+          referenceId="WEB-ABCDEF12"
+          onRetry={() => undefined}
+          onReload={() => undefined}
+          homeHref="/dev/"
+        />
+      </main>,
+    );
+
+    const alert = screen.getByRole("alert");
+    await waitFor(() => expect(alert).toHaveFocus());
+    expect(screen.getAllByRole("main")).toHaveLength(1);
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(
+      screen.queryByRole("link", { name: "Skip to main content" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Go to Loom home" }),
+    ).toHaveAttribute("href", "/dev/");
+  });
 });

@@ -55,6 +55,7 @@ describe("Layout", () => {
     const identityContext = within(nav).getByLabelText("Current user and team");
     expect(identityContext).toHaveTextContent("Owner / EAI");
     expect(identityContext).toHaveTextContent("owner");
+    expect(screen.getByRole("main")).toHaveAttribute("id", "main-content");
   });
 
   it("gives the signed-out settings page a wide public onboarding shell", async () => {
@@ -72,6 +73,7 @@ describe("Layout", () => {
     const shell = screen.getByTestId("public-onboarding-shell");
     expect(shell).toHaveClass("max-w-6xl");
     expect(shell).not.toHaveClass("max-w-md");
+    expect(screen.getByRole("main")).toHaveAttribute("id", "main-content");
   });
 
   it("keeps invite acceptance reachable before sign-in", async () => {

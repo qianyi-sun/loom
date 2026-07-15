@@ -5,6 +5,7 @@ export type BrowserFailureKind =
   | "frontend-config-http"
   | "frontend-config-invalid"
   | "root-render"
+  | "route-render"
   | "uncaught-runtime"
   | "unhandled-rejection";
 

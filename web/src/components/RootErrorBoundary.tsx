@@ -22,6 +22,8 @@ export class RootErrorBoundary extends React.Component<
   RootErrorBoundaryProps,
   RootErrorBoundaryState
 > {
+  private readonly reportedReferences = new Set<string>();
+
   state: RootErrorBoundaryState = { referenceId: null };
 
   static getDerivedStateFromError(error: unknown): RootErrorBoundaryState {
@@ -30,8 +32,10 @@ export class RootErrorBoundary extends React.Component<
 
   componentDidCatch(error: unknown): void {
     try {
-      if (this.state.referenceId) {
-        reportBrowserFailure("root-render", this.state.referenceId);
+      const referenceId = prepareBrowserFailureForBoundary(error);
+      if (!this.reportedReferences.has(referenceId)) {
+        this.reportedReferences.add(referenceId);
+        reportBrowserFailure("root-render", referenceId);
       }
     } finally {
       clearBrowserFailureConsoleRedaction(error);

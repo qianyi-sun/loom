@@ -113,6 +113,33 @@ describe("RootErrorBoundary", () => {
     expect(screen.getByText("Root recovered")).toBeInTheDocument();
   });
 
+  it("reports distinct root sibling failures with distinct references", () => {
+    const reports: BrowserFailureReport[] = [];
+    setBrowserFailureReporter((report) => reports.push(report));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    function BrokenSibling({ error }: { error: Error }): JSX.Element {
+      throw error;
+    }
+
+    render(
+      <RootErrorBoundary>
+        <BrokenSibling error={new Error("first root sibling")} />
+        <BrokenSibling error={new Error("second root sibling")} />
+      </RootErrorBoundary>,
+    );
+
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(reports).toHaveLength(2);
+    expect(reports.map(({ kind }) => kind)).toEqual([
+      "root-render",
+      "root-render",
+    ]);
+    expect(new Set(reports.map(({ referenceId }) => referenceId)).size).toBe(
+      2,
+    );
+  });
+
   it("keeps tainted objects redacted without retaining primitive markers", () => {
     const consoleSink = vi
       .spyOn(console, "error")
