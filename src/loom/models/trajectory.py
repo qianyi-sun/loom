@@ -50,6 +50,7 @@ class EventKind(StrEnum):
     WORKER_DRAIN_INTERRUPTED = "worker_drain_interrupted"
     # Terminus-2 native runtime (#744)
     TERMINUS2_RUNTIME_PROVENANCE = "terminus2_runtime_provenance"
+    TERMINUS2_USER_PROMPT = "terminus2_user_prompt"
     TERMINUS2_TURN = "terminus2_turn"
     TERMINUS2_COMMAND = "terminus2_command"
     TERMINUS2_TERMINAL_OBSERVATION = "terminus2_terminal_observation"
@@ -308,6 +309,16 @@ class Terminus2RuntimeProvenanceEvent(_EventBase):
     benchmark_provenance: dict[str, str] | None = None
 
 
+class Terminus2UserPromptEvent(_EventBase):
+    """Harbor ``source=user`` step — initial system/task prompt (and later user nudges)."""
+
+    kind: Literal[EventKind.TERMINUS2_USER_PROMPT] = EventKind.TERMINUS2_USER_PROMPT
+    prompt_id: str
+    harbor_step_id: int = Field(ge=1)
+    message: str
+    is_initial: bool = False
+
+
 class Terminus2TurnEvent(_EventBase):
     kind: Literal[EventKind.TERMINUS2_TURN] = EventKind.TERMINUS2_TURN
     turn_id: str
@@ -318,6 +329,8 @@ class Terminus2TurnEvent(_EventBase):
     analysis: str = ""
     plan: str = ""
     raw_response_excerpt: str = ""
+    reasoning_content: str = ""
+    harbor_step_id: int | None = Field(default=None, ge=1)
 
 
 class Terminus2CommandEvent(_EventBase):
@@ -381,8 +394,8 @@ TrajectoryEvent = Annotated[
     | VerifierStartEvent | VerifierEndEvent | VerifierCheckEvent
     | NetworkPolicyChangeEvent
     | WorkerLostClaimEvent | WorkerDrainInterruptedEvent
-    | Terminus2RuntimeProvenanceEvent | Terminus2TurnEvent | Terminus2CommandEvent
-    | Terminus2TerminalObservationEvent | Terminus2ParseRetryEvent
+    | Terminus2RuntimeProvenanceEvent | Terminus2UserPromptEvent | Terminus2TurnEvent
+    | Terminus2CommandEvent | Terminus2TerminalObservationEvent | Terminus2ParseRetryEvent
     | Terminus2ContextBoundaryEvent | Terminus2ArtifactRefEvent,
     Field(discriminator="kind"),
 ]
