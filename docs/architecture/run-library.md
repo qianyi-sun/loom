@@ -65,7 +65,12 @@ legacy artifact JSON still says `share_status = "shared"`.
   list artifact summary is capped per batch and includes
   `artifact_summary_truncated=true` when more typed artifacts exist; it does
   not materialize every trial trajectory or count the full artifact inventory
-  for large historical batches. Pages are ordered by
+  for large historical batches. Summary attribution prefers `Artifact.batch_id`
+  and otherwise follows `Artifact.trial_id -> Trial.batch_id`. The same
+  owner/admin or org-shared parent-priority metadata policy is applied before
+  both counting and truncation, so private cross-team artifacts affect neither.
+  A single bounded lateral query loads at most the cap plus one visible artifact
+  per page batch. Pages are ordered by
   `created_at DESC, id DESC` and return an opaque timestamp/id `next_cursor`.
   The cursor predicate uses the same two-field tie-breaker, so tied timestamps
   cannot create gaps, duplicates, or unstable traversal. Decoded timestamps

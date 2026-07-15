@@ -1338,34 +1338,70 @@ async def _batch_list_trial_rollups(
 
 async def _batch_list_artifact_summaries(
     session: Any,
+    ctx: Any,
     batch_ids: Sequence[UUID],
 ) -> tuple[dict[UUID, dict[str, int]], set[UUID]]:
+    """Load capped, caller-visible typed summaries in one lateral query."""
+
     summaries = {batch_id: _empty_artifact_summary() for batch_id in batch_ids}
     truncated: set[UUID] = set()
     if not batch_ids:
         return summaries, truncated
 
     per_batch_limit = max(int(_BATCH_LIST_ARTIFACT_SUMMARY_PER_BATCH_LIMIT), 0)
-    if per_batch_limit == 0:
-        return summaries, set(batch_ids)
-
-    for batch_id in batch_ids:
-        artifact_types = (
-            (
-                await session.execute(
-                    select(Artifact.artifact_type)
-                    .where(Artifact.batch_id == batch_id)
-                    .limit(per_batch_limit + 1),
-                )
-            )
-            .scalars()
-            .all()
+    artifact_trial = aliased(Trial, name="artifact_summary_trial")
+    direct_parent = and_(
+        Artifact.batch_id == Batch.id,
+        _artifact_metadata_visibility_predicate(ctx, batch_model=Batch),
+    )
+    trial_parent = and_(
+        Artifact.batch_id.is_(None),
+        artifact_trial.batch_id == Batch.id,
+        _artifact_metadata_visibility_predicate(ctx, trial_model=artifact_trial),
+    )
+    visible_artifacts = (
+        select(
+            Artifact.artifact_type.label("artifact_type"),
+            Artifact.created_at.label("created_at"),
+            Artifact.id.label("artifact_id"),
         )
-        if len(artifact_types) > per_batch_limit:
+        .select_from(Artifact)
+        .outerjoin(artifact_trial, artifact_trial.id == Artifact.trial_id)
+        .where(or_(direct_parent, trial_parent))
+        .order_by(Artifact.created_at.asc(), Artifact.id.asc())
+        .limit(per_batch_limit + 1)
+        .correlate(Batch)
+        .lateral("visible_batch_artifacts")
+    )
+    rows = (
+        await session.execute(
+            select(
+                Batch.id,
+                visible_artifacts.c.artifact_type,
+                visible_artifacts.c.created_at,
+                visible_artifacts.c.artifact_id,
+            )
+            .select_from(Batch)
+            .join(visible_artifacts, true())
+            .where(Batch.id.in_(batch_ids))
+            .order_by(
+                Batch.id.asc(),
+                visible_artifacts.c.created_at.asc(),
+                visible_artifacts.c.artifact_id.asc(),
+            ),
+        )
+    ).all()
+
+    seen = {batch_id: 0 for batch_id in batch_ids}
+    for batch_id, artifact_type, _created_at, _artifact_id in rows:
+        if batch_id not in summaries:
+            continue
+        seen[batch_id] += 1
+        if seen[batch_id] > per_batch_limit:
             truncated.add(batch_id)
+            continue
         summary = summaries.setdefault(batch_id, _empty_artifact_summary())
-        for artifact_type in artifact_types[:per_batch_limit]:
-            summary[_artifact_group_for_type(str(artifact_type))] += 1
+        summary[_artifact_group_for_type(str(artifact_type))] += 1
     return summaries, truncated
 
 
@@ -1571,7 +1607,7 @@ async def list_run_library_batches(
     batch_ids = [batch.id for batch, _team in page_rows]
     trial_rollups = await _batch_list_trial_rollups(session, batch_ids)
     artifact_summaries, truncated_artifact_summaries = await _batch_list_artifact_summaries(
-        session, batch_ids
+        session, ctx, batch_ids
     )
     for batch, team in page_rows:
         item = _serialize_batch_list_item(
