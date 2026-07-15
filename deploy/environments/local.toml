@@ -1,0 +1,21 @@
+environment = "local"
+short_name = "local"
+github_environment = "local"
+namespace = "loom-local"
+ingress_host = "yylx.world"
+frontend_route = "https://yylx.world/local"
+frontend_api_base = "https://yylx.world/local/api"
+cluster_config = "deploy/environments/local.cluster.toml"
+allowed_refs = ["refs/heads/dev"]
+allowed_tag_prefixes = []
+
+database_name = "loom_local"
+task_bucket = "loom-local-tasks"
+trajectories_bucket = "loom-local-trajectories"
+artifacts_bucket = "loom-local-artifacts"
+secret_store_key_ref = "github-environment:local/LOOM_SECRET_STORE_MASTER_KEY"
+service_api_token_ref = "github-environment:local/LOOM_SERVICE_API_TOKEN"
+worker_token_ref = "github-environment:local/LOOM_WORKER_TOKEN"
+provider_secret_ref = "github-environment:local/LOOM_PROVIDER_SECRET_REF"
+yibuapi_secret_ref = "github-environment:local/YIBUAPI_API_KEY"
+provider_connection_namespace = "local"

@@ -8,7 +8,15 @@ set -euo pipefail
 : "${LOOM_DEPLOY_TOKEN:?environment-scoped GitHub secret is required}"
 
 case "${LOOM_DEPLOY_ENVIRONMENT}" in
-  development|staging|production)
+  local|staging|production)
+    ;;
+  development)
+    # #857: `development` env renamed to `local` (self-contained kind
+    # deployment). Accept `development` here temporarily so an in-flight
+    # rollout doesn't fail mid-cutover; log a deprecation notice and
+    # translate. Remove after all callers migrate.
+    echo "warning: LOOM_DEPLOY_ENVIRONMENT=development is deprecated; use 'local' (#857)" >&2
+    LOOM_DEPLOY_ENVIRONMENT=local
     ;;
   *)
     echo "Unsupported LOOM_DEPLOY_ENVIRONMENT=${LOOM_DEPLOY_ENVIRONMENT}" >&2
@@ -91,7 +99,7 @@ if [[ "${LOOM_DRY_RUN:-false}" == "true" ]]; then
   exit 0
 fi
 
-if [[ "${LOOM_DEPLOY_ENVIRONMENT}" != "development" && -z "${LOOM_ROLLOUT_LOCK_DIR:-}" ]]; then
+if [[ "${LOOM_DEPLOY_ENVIRONMENT}" != "local" && -z "${LOOM_ROLLOUT_LOCK_DIR:-}" ]]; then
   echo "LOOM_ROLLOUT_LOCK_DIR is required for ${LOOM_DEPLOY_ENVIRONMENT} deploys." >&2
   echo "Set it to the shared protected-environment rollout lock directory." >&2
   exit 2
