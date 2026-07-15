@@ -4,29 +4,42 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import create_engine, delete, func, select, update
+from sqlalchemy import and_, create_engine, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from loom.admin_secret import AdminSecretVerifier
-from loom.db.schema import AdminAuditEvent, Team, TeamMembership, User, UserSession
+from loom.db.schema import (
+    AdminAuditEvent,
+    PasswordResetRequest,
+    Team,
+    TeamInvite,
+    TeamMembership,
+    Token,
+    User,
+    UserSession,
+)
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from loom_service.session_auth import create_session_for_user
 
 RAW_ADMIN_TOKEN = "loom_admin_" + "B" * 43
 SESSION_TTL_SEC = 900
 AUDIT_ACTION = "auth.staging_admin_browser_session.create"
+BUILD_SHA = "a" * 40
 
 
 @pytest.fixture
 async def staging_admin_session_app(
     monkeypatch: pytest.MonkeyPatch,
     postgres_url: str,
+    tmp_path: Path,
 ) -> AsyncIterator[tuple[FastAPI, UUID, str]]:
     for key, value in {
         "LOOM_ENV": "staging",
@@ -38,6 +51,12 @@ async def staging_admin_session_app(
         "LOOM_SVC_GATEWAY_URL": "http://gw:9100/",
     }.items():
         monkeypatch.setenv(key, value)
+    build_sha_path = tmp_path / "image-build-sha"
+    build_sha_path.write_text(f"{BUILD_SHA}\n", encoding="ascii")
+    monkeypatch.setattr(
+        "loom_service.routes.auth._IMAGE_BUILD_SHA_PATH",
+        build_sha_path,
+    )
 
     settings = LoomServiceSettings(_env_file=None)
     app = create_app(settings)
@@ -97,9 +116,17 @@ async def staging_admin_session_app(
         with session_local() as session:
             session.execute(
                 delete(AdminAuditEvent).where(
-                    AdminAuditEvent.action == AUDIT_ACTION,
-                    AdminAuditEvent.target_id == str(target_id),
+                    or_(
+                        and_(
+                            AdminAuditEvent.action == AUDIT_ACTION,
+                            AdminAuditEvent.target_id == str(target_id),
+                        ),
+                        AdminAuditEvent.actor == f"normal-platform-admin-{target_id.hex}",
+                    ),
                 ),
+            )
+            session.execute(
+                delete(Token).where(Token.created_by_user_id == target_id),
             )
             session.execute(
                 delete(UserSession).where(UserSession.user_id == target_id),
@@ -150,6 +177,7 @@ async def test_bootstrap_sets_fixed_secure_cookie_and_safe_audit(
         assert response.content == b""
         assert response.headers["cache-control"] == "no-store"
         assert response.headers["pragma"] == "no-cache"
+        assert response.headers["x-loom-build-sha"] == BUILD_SHA
         cookies = response.headers.get_list("set-cookie")
         assert len(cookies) == 1
         cookie = cookies[0].lower()
@@ -172,7 +200,7 @@ async def test_bootstrap_sets_fixed_secure_cookie_and_safe_audit(
             headers={"X-Loom-CSRF": body["csrf_token"]},
         )
         assert refresh.status_code == 403
-        assert refresh.json()["detail"] == ("staging admin browser sessions cannot be refreshed")
+        assert refresh.json()["detail"] == ("staging admin browser session is validation-only")
 
         refreshed_me = await client.get("/api/v1/auth/me")
         logout = await client.post(
@@ -198,6 +226,7 @@ async def test_bootstrap_sets_fixed_secure_cookie_and_safe_audit(
             "target_status": target_status,
             "target_username": target_username,
             "ttl_seconds": SESSION_TTL_SEC,
+            "build_sha": BUILD_SHA,
         }
         stored_session = (
             session.execute(
@@ -267,6 +296,44 @@ async def test_staging_cookie_is_rejected_if_runtime_changes(
             json={"username": target_username},
         )
         assert hidden.status_code == 404
+        stale_cookie_mutation = await client.post(
+            "/api/v1/auth/password-reset-requests",
+            json={"username": target_username},
+        )
+        assert stale_cookie_mutation.status_code == 403
+        assert stale_cookie_mutation.json()["detail"] == (
+            "staging admin browser session is validation-only"
+        )
+
+
+@pytest.mark.parametrize("build_sha", ["", "not-a-sha", "A" * 40])
+async def test_bootstrap_fails_closed_without_valid_runtime_build_identity(
+    staging_admin_session_app: tuple[FastAPI, UUID, str],
+    monkeypatch: pytest.MonkeyPatch,
+    build_sha: str,
+    tmp_path: Path,
+) -> None:
+    app, _target_id, target_username = staging_admin_session_app
+    invalid_build_sha_path = tmp_path / "invalid-image-build-sha"
+    invalid_build_sha_path.write_text(build_sha, encoding="ascii")
+    monkeypatch.setattr(
+        "loom_service.routes.auth._IMAGE_BUILD_SHA_PATH",
+        invalid_build_sha_path,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="https://svc.example",
+    ) as client:
+        response = await client.post(
+            "/api/v1/auth/staging-admin-browser-session",
+            headers=_headers(request_id="missing-build-identity"),
+            json={"username": target_username},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "staging build identity unavailable"
+    assert "set-cookie" not in response.headers
 
 
 @pytest.mark.parametrize(
@@ -345,7 +412,179 @@ async def test_platform_admin_browser_session_cannot_bootstrap_another_session(
         )
 
     assert nested.status_code == 403
-    assert nested.json()["detail"] == "singleton admin bearer required"
+    assert nested.json()["detail"] == ("staging admin browser session is validation-only")
+
+
+async def test_validation_session_rejects_all_representative_mutations(
+    staging_admin_session_app: tuple[FastAPI, UUID, str],
+    postgres_url: str,
+) -> None:
+    app, target_id, target_username = staging_admin_session_app
+    sync_engine = create_engine(postgres_url)
+    with sessionmaker(sync_engine)() as session:
+        admin_team_id = session.execute(
+            select(TeamMembership.team_id).where(
+                TeamMembership.user_id == target_id,
+            ),
+        ).scalar_one()
+        before = {
+            "tokens": session.scalar(select(func.count()).select_from(Token)),
+            "resets": session.scalar(
+                select(func.count()).select_from(PasswordResetRequest),
+            ),
+            "invites": session.scalar(
+                select(func.count()).select_from(TeamInvite),
+            ),
+        }
+
+    mutations = [
+        (
+            "POST",
+            "/api/v1/tokens",
+            {
+                "name": "must-not-persist",
+                "type": "team",
+                "scopes": ["read:own"],
+                "expires_in_days": 365,
+                "team_id": str(admin_team_id),
+            },
+        ),
+        (
+            "POST",
+            "/api/v1/auth/password-reset-requests",
+            {"username": target_username},
+        ),
+        (
+            "POST",
+            "/api/v1/auth/reset/complete",
+            {
+                "token": "loom_reset_abcdefghijklmnop",
+                "password": "must-not-change",
+                "confirm_password": "must-not-change",
+            },
+        ),
+        (
+            "POST",
+            "/api/v1/invites/accept",
+            {
+                "code": "loom_invite_abcdefghijklmnop",
+                "email": "blocked@example.com",
+            },
+        ),
+        (
+            "POST",
+            "/api/v1/invites",
+            {
+                "email": "blocked@example.com",
+                "team_id": str(admin_team_id),
+                "role": "owner",
+                "expires_in_days": 365,
+            },
+        ),
+        (
+            "PATCH",
+            f"/api/v1/admin/teams/{admin_team_id}",
+            {"name": "must-not-change"},
+        ),
+        (
+            "POST",
+            f"/api/v1/admin/registration-requests/{uuid4()}/approve",
+            {"role": "owner"},
+        ),
+    ]
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="https://svc.example",
+    ) as client:
+        created = await client.post(
+            "/api/v1/auth/staging-admin-browser-session",
+            headers=_headers(request_id="validation-only-mutations"),
+            json={"username": target_username},
+        )
+        assert created.status_code == 204
+        me = await client.get("/api/v1/auth/me")
+        csrf = me.json()["csrf_token"]
+
+        for method, path, payload in mutations:
+            response = await client.request(
+                method,
+                path,
+                headers={
+                    "X-Loom-CSRF": csrf,
+                    "X-Loom-Admin-Actor": "blocked-validation-session",
+                },
+                json=payload,
+            )
+            assert response.status_code == 403, (method, path, response.text)
+            assert response.json()["detail"] == ("staging admin browser session is validation-only")
+            assert response.headers["cache-control"] == "no-store"
+
+    with sessionmaker(sync_engine)() as session:
+        after = {
+            "tokens": session.scalar(select(func.count()).select_from(Token)),
+            "resets": session.scalar(
+                select(func.count()).select_from(PasswordResetRequest),
+            ),
+            "invites": session.scalar(
+                select(func.count()).select_from(TeamInvite),
+            ),
+        }
+    sync_engine.dispose()
+    assert after == before
+
+
+async def test_ordinary_platform_admin_session_retains_write_authority(
+    staging_admin_session_app: tuple[FastAPI, UUID, str],
+) -> None:
+    app, target_id, _target_username = staging_admin_session_app
+    async with app.state.session_factory() as session:
+        user = (await session.execute(select(User).where(User.id == target_id))).scalar_one()
+        team_id = (
+            await session.execute(
+                select(TeamMembership.team_id).where(
+                    TeamMembership.user_id == target_id,
+                ),
+            )
+        ).scalar_one()
+        created = await create_session_for_user(
+            session,
+            user=user,
+            current_team_id=team_id,
+            session_ttl_seconds=900,
+        )
+        await session.commit()
+
+    actor = f"normal-platform-admin-{target_id.hex}"
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="https://svc.example",
+    ) as client:
+        client.cookies.set(
+            "loom_session",
+            created.raw_session,
+            domain="svc.example",
+            path="/",
+        )
+        response = await client.post(
+            "/api/v1/tokens",
+            headers={
+                "X-Loom-CSRF": created.raw_csrf,
+                "X-Loom-Admin-Actor": actor,
+            },
+            json={
+                "name": "ordinary-admin-write-still-works",
+                "type": "team",
+                "scopes": ["read:own"],
+                "expires_in_days": 1,
+                "team_id": str(team_id),
+            },
+        )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["item"]["created_by_user_id"] == str(target_id)
 
 
 async def test_bootstrap_rejects_non_contract_body_fields(

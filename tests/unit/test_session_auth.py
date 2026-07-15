@@ -12,6 +12,7 @@ from loom_service.session_auth import (
     hash_secret,
     is_staging_admin_browser_session,
     session_cookie_options,
+    staging_admin_browser_request_allowed,
     verify_csrf,
 )
 
@@ -65,6 +66,31 @@ def test_staging_admin_session_prefix_is_exact() -> None:
     )
     assert not is_staging_admin_browser_session("loom_session_example-secret")
     assert not is_staging_admin_browser_session(None)
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD", "OPTIONS"])
+def test_staging_admin_validation_session_allows_read_methods(
+    method: str,
+) -> None:
+    assert staging_admin_browser_request_allowed(
+        method=method,
+        path="/api/v1/tokens",
+    )
+
+
+def test_staging_admin_validation_session_allows_only_exact_logout_write() -> None:
+    assert staging_admin_browser_request_allowed(
+        method="POST",
+        path="/api/v1/auth/logout",
+    )
+    assert not staging_admin_browser_request_allowed(
+        method="POST",
+        path="/api/v1/auth/logout/",
+    )
+    assert not staging_admin_browser_request_allowed(
+        method="DELETE",
+        path="/api/v1/auth/logout",
+    )
 
 
 def test_session_cookie_options_reject_non_positive_override() -> None:

@@ -192,7 +192,7 @@ describe("AdminAccess", () => {
                 action: "team_registration.approve",
                 target_type: "team_registration",
                 target_id: "reg-1",
-                request_id: null,
+                request_id: "staging-admin-browser-request",
                 source_ip_hash: null,
                 user_agent_hash: null,
                 metadata: { team_id: "team-1" },
@@ -248,6 +248,11 @@ describe("AdminAccess", () => {
     expect(screen.getByRole("tab", { name: "API tokens" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Audit" })).toBeInTheDocument();
     expect(await screen.findByText("Mark Li")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Account requests" }).closest(
+        '[data-loom-query="registration-requests"]',
+      ),
+    ).toHaveAttribute("data-loom-query-status", "success");
     expect(screen.getAllByText("latent@example.com").length).toBeGreaterThan(0);
     expect(screen.getByText(
       "Approve older team-registration requests into an invite link. Username/password account approvals are listed above.",
@@ -258,6 +263,11 @@ describe("AdminAccess", () => {
     await userEvent.click(screen.getByRole("tab", { name: "Teams" }));
     expect(await screen.findByDisplayValue("research-platform")).toBeInTheDocument();
     expect(screen.getByText("Internal teams")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Internal teams" }).closest(
+        '[data-loom-query="admin-teams"]',
+      ),
+    ).toHaveAttribute("data-loom-query-status", "success");
     await userEvent.type(screen.getByLabelText("New team name"), "Core AI");
     await userEvent.click(screen.getByRole("button", { name: "Create team" }));
     await userEvent.clear(screen.getByLabelText("Team name for research-platform"));
@@ -278,8 +288,19 @@ describe("AdminAccess", () => {
     )).toBeInTheDocument();
     await userEvent.click(screen.getByRole("tab", { name: "Invites" }));
     expect(screen.getByText("Pending invites")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Pending invites" }).closest(
+        '[data-loom-query="invites"]',
+      ),
+    ).toHaveAttribute("data-loom-query-status", "success");
     await userEvent.click(screen.getByRole("tab", { name: "Audit" }));
     expect(await screen.findByText("team_registration.approve")).toBeInTheDocument();
+    expect(screen.getByText("staging-admin-browser-request")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Audit log" }).closest(
+        '[data-loom-query="audit-events"]',
+      ),
+    ).toHaveAttribute("data-loom-query-status", "success");
     await waitFor(() => {
       const approveCall = fetchSpy.mock.calls.find(([input]) =>
         String(input).endsWith("/reg-1/approve"),

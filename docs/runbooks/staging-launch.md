@@ -82,11 +82,12 @@ Attach these to the release issue or release PR:
   TLS-bound redirect host via `ingress_redirect_hosts = ["www.yylx.world"]`;
   smoke and release evidence should use the canonical bare-domain routes.
 - Sanitized `loom-staging-admin-browser-smoke.json` evidence bound to the exact
-  candidate SHA and `https://yylx.world/dev`, produced only after the logged-out
-  route smoke. It must show the correlated safe audit event, all six Admin
-  Access tabs, Audit log, Rate cards, logout/revocation, and final
-  `/api/v1/auth/me` `401`. The workflow may source the ephemeral singleton admin
-  bearer only through a masked environment variable, protected file, or stdin;
+  build SHA reported by the running service and `https://yylx.world/dev`,
+  produced only after the logged-out route smoke. It must show the correlated
+  request ID and safe audit event, successful product APIs and visible state
+  for all six Admin Access tabs, Audit log, Rate cards, logout/revocation, and
+  final `/api/v1/auth/me` `401`. The workflow may source the ephemeral singleton
+  admin bearer only through an owner-only (`0600`) file or non-interactive stdin;
   it must upload no trace, screenshot, storage state, cookie, or raw secret.
   This staging-only admin evidence does not replace normal-user onboarding,
   team-boundary, or submission evidence.

@@ -208,7 +208,10 @@ export default function RateCardsAdmin(): JSX.Element {
         />
       </DocsCallout>
 
-      <Card>
+      <Card
+        data-loom-query="rate-cards"
+        data-loom-query-status={list.status}
+      >
         <Card.Header title="Published" />
         <Card.Body>
           {list.isPending ? <LoadingState /> : null}

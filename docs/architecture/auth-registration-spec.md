@@ -561,7 +561,9 @@ once. The old link fails with `invalid invite`.
 Returns recent admin audit rows with cursor pagination. The current backend uses
 the last event id as the next cursor. Team users never see this endpoint. Raw
 tokens, provider secrets, request bodies, and artifact paths must not appear in
-audit metadata.
+audit metadata. The platform-admin Audit table renders each safe request ID so
+browser acceptance can visibly correlate a row with the current bootstrap
+request instead of matching only a repeated action name.
 
 ### Staging Admin Browser Acceptance Session
 
@@ -579,16 +581,24 @@ The target must already be an enabled `active` or `pending_setup`
 team. The exchange never creates, enables, promotes, or repairs a user, team, or
 membership. Success returns an empty `204`, sets a distinct Secure, HttpOnly,
 SameSite=Lax cookie with a fixed 900-second maximum lifetime, and adds
-`Cache-Control: no-store`. The session cannot be refreshed, and verification
-fails outside staging or after the target is disabled or loses platform-admin
-authority.
+`Cache-Control: no-store`. The service image must carry a lowercase 40-character
+SHA baked into `/opt/loom/build-sha` and its OCI revision label; the exchange
+reads the image file, fails `503` without it, and returns that identity as
+`X-Loom-Build-SHA`. A runtime environment variable cannot override the image
+identity. The session is validation-only: `GET`, `HEAD`, and
+`OPTIONS` remain available, while every unsafe request fails `403` before route
+handling except the exact `POST /api/v1/auth/logout` cleanup path. It cannot be
+refreshed, and verification fails outside staging or after the target is
+disabled or loses platform-admin authority.
 
 The session creation and `auth.staging_admin_browser_session.create` audit row
 commit atomically. Audit metadata contains only the target username/status,
 fixed TTL, and singleton-admin auth source; it never contains the bearer or raw
-cookie. This route is solely an audited #692 browser-acceptance bridge. It does
-not replace #802 grant/revoke controls, normal password/setup flows, or
-candidate evidence from a non-admin user.
+cookie. It also records the running build SHA so the browser report can
+correlate the exact bootstrap request with the deployed runtime. This route is
+solely an audited #692 browser-acceptance bridge. It does not replace #802
+grant/revoke controls, normal password/setup flows, or candidate evidence from
+a non-admin user.
 
 ### Legacy Email-Code Browser Auth
 
@@ -621,8 +631,8 @@ The response includes a freshly rotated `csrf_token`.
 
 Refresh extends a normal user session, rotates both the session cookie and CSRF
 state, and returns a fresh `csrf_token`. The staging admin browser acceptance
-session is never refreshable. Logout revokes either session row and clears the
-session cookie.
+session is never refreshable or writable beyond exact logout. Logout revokes
+either session row and clears the session cookie.
 
 Every unsafe method authenticated by a browser session requires the configured
 CSRF header to match the server-side CSRF hash for that session. Bearer token

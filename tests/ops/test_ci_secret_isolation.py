@@ -237,10 +237,17 @@ def test_staging_admin_browser_smoke_uses_only_ephemeral_secret_indirection() ->
         smoke,
         "Upload sanitized staging admin browser report",
     )
+    cleanup = _named_step(
+        smoke,
+        "Cleanup staging admin browser secret files",
+    )
 
     assert 'ADMIN_TOKEN="loom_admin_$(openssl rand -hex 24)"' in bootstrap
     assert 'echo "::add-mask::${ADMIN_TOKEN}"' in bootstrap
     assert "install -m 0600 /dev/null /tmp/loom-staging-admin-token" in bootstrap
+    assert "umask 077" in bootstrap
+    assert "trap cleanup_bootstrap_secret EXIT" in bootstrap
+    assert 'rm -f "$admin_toml"' in bootstrap
     assert "GITHUB_ENV" not in bootstrap
     assert '--admin-token-source "file:${admin_token_file}"' in browser
     assert "trap 'rm -f \"$admin_token_file\"' EXIT" in browser
@@ -248,6 +255,10 @@ def test_staging_admin_browser_smoke_uses_only_ephemeral_secret_indirection() ->
     assert "Bearer" not in browser
     assert "${ADMIN_TOKEN}" not in browser
     assert "${{ secrets." not in str(smoke)
+    assert cleanup["if"] == "always()"
+    assert cleanup["run"] == (
+        "rm -f /tmp/loom-staging-admin-token /tmp/admin.toml"
+    )
 
     assert upload["if"] == "always()"
     assert upload["with"]["path"] == "/tmp/loom-staging-admin-browser-smoke.json"

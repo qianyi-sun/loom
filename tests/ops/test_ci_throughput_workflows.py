@@ -302,6 +302,31 @@ def test_images_merge_groups_do_not_publish_or_write_cache() -> None:
     assert any(step.get("name") == "Log in to GHCR" for step in publish["steps"])
 
 
+def test_service_image_build_and_publish_bake_exact_full_head_sha() -> None:
+    workflow = _workflow(".github/workflows/images.yml")
+    expected_steps = {
+        "build": "Build without registry or cache write authority",
+        "publish": "Build and publish trusted image",
+    }
+
+    for job_name, step_name in expected_steps.items():
+        step = next(
+            step
+            for step in workflow["jobs"][job_name]["steps"]
+            if step.get("name") == step_name
+        )
+        script = step["run"]
+        assert step["env"]["HEAD_SHA"] == "${{ github.sha }}"
+        assert 'if [[ "$IMAGE_NAME" == "service" ]]; then' in script
+        assert (
+            'build_args+=(--build-arg "LOOM_BUILD_SHA=${HEAD_SHA}")'
+            in script
+        )
+        assert script.index("LOOM_BUILD_SHA=${HEAD_SHA}") < script.index(
+            "build_args+=(.)"
+        )
+
+
 def test_stable_gate_scripts_have_valid_bash_syntax() -> None:
     invalid_gates: dict[str, str] = {}
     for workflow_path, (gate_id, _) in GATE_CONTRACTS.items():
@@ -991,7 +1016,14 @@ def test_staging_admin_browser_smoke_is_bounded_and_uploads_only_safe_json() -> 
     anonymous_trace_index = names.index("Upload frontend route browser trace")
     admin_index = names.index("Verify authenticated staging admin browser surfaces")
     report_index = names.index("Upload sanitized staging admin browser report")
-    assert anonymous_index < anonymous_trace_index < admin_index < report_index
+    cleanup_index = names.index("Cleanup staging admin browser secret files")
+    assert (
+        anonymous_index
+        < anonymous_trace_index
+        < admin_index
+        < report_index
+        < cleanup_index
+    )
 
     cluster_config = next(
         step for step in steps if step.get("name") == "Generate cluster-config.toml"
@@ -1002,7 +1034,13 @@ def test_staging_admin_browser_smoke_is_bounded_and_uploads_only_safe_json() -> 
     script = admin["run"]
     assert "CI=true npm --prefix web run smoke:staging-admin --" in script
     assert "--route https://yylx.world/dev" in script
-    assert '--candidate-sha "$candidate_sha"' in script
+    assert (
+        "kubectl --context kind-loom-staging -n loom exec deploy/loom-service"
+        in script
+    )
+    assert "-- cat /opt/loom/build-sha" in script
+    assert '[[ "$deployed_sha" == "$checkout_sha" ]]' in script
+    assert '--expected-deployed-sha "$deployed_sha"' in script
     assert '--admin-token-source "file:${admin_token_file}"' in script
     assert "trap 'rm -f \"$admin_token_file\"' EXIT" in script
     assert "--username qianyi" in script
@@ -1023,6 +1061,22 @@ def test_staging_admin_browser_smoke_is_bounded_and_uploads_only_safe_json() -> 
         "if-no-files-found",
         "retention-days",
     ]
+    cleanup = steps[cleanup_index]
+    assert cleanup["if"] == "always()"
+    assert cleanup["run"] == (
+        "rm -f /tmp/loom-staging-admin-token /tmp/admin.toml"
+    )
+
+    build = next(
+        step for step in steps if step.get("name") == "Build images (parallel)"
+    )
+    assert "checkout_sha=$(git rev-parse HEAD)" in build["run"]
+    assert (
+        'build_args+=(--build-arg "LOOM_BUILD_SHA=${checkout_sha}")'
+        in build["run"]
+    )
+    assert "org.opencontainers.image.revision" in build["run"]
+    assert '[[ "$service_revision" == "$checkout_sha" ]]' in build["run"]
 
     package = json.loads((REPO_ROOT / "web/package.json").read_text(encoding="utf-8"))
     assert package["scripts"]["smoke:staging-admin"] == (
@@ -1038,6 +1092,47 @@ def test_staging_admin_browser_smoke_is_bounded_and_uploads_only_safe_json() -> 
     assert '`${options.route}/api/v1/auth/logout`' in smoke
     assert "cleanup.auth_me_after_logout_status" in smoke
     assert 'recordVideo: undefined' in smoke
+    for api_path in (
+        "/api/v1/admin/registration-requests?status=pending",
+        "/api/v1/admin/team-registrations?status=pending",
+        "/api/v1/admin/password-reset-requests?status=pending",
+        "/api/v1/admin/teams",
+        "/api/v1/invites?status=pending",
+        "/api/v1/tokens",
+        "/api/v1/admin/audit-events?limit=50",
+        "/api/v1/rate-cards",
+    ):
+        assert api_path in smoke
+    for event in (
+        'page.on("console"',
+        'page.on("pageerror"',
+        'page.on("request"',
+        'page.on("requestfinished"',
+        'page.on("requestfailed"',
+    ):
+        assert event in smoke
+    for query_name in (
+        "registration-requests",
+        "team-registrations",
+        "password-reset-requests",
+        "admin-teams",
+        "invites",
+        "api-tokens",
+        "audit-events",
+        "rate-cards",
+    ):
+        assert f'"{query_name}"' in smoke
+    assert "await pageMonitor.waitForQuiet(options.timeoutMs)" in smoke
+    assert smoke.index("await pageMonitor.waitForQuiet") < smoke.index(
+        "await page.close()"
+    )
+    assert smoke.index("await page.close()") < smoke.index(
+        "pageMonitor.applyChecks(checks)"
+    )
+    assert "name: auditIdentity.requestId" in smoke
+    assert "name: `user:${auditIdentity.targetUserId}`" in smoke
+    assert smoke.count("exact: true") >= 6
+    assert "checks.all_admin_tabs_operable =" in smoke
     assert "screenshot(" not in smoke
     assert "storageState" not in smoke
 

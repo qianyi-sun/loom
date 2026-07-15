@@ -2,8 +2,10 @@
 
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import { constants as fsConstants } from "node:fs";
 import * as fs from "node:fs/promises";
+import { isIP } from "node:net";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
@@ -11,7 +13,9 @@ import { pathToFileURL } from "node:url";
 const ADMIN_ACTOR = "staging-admin-browser-smoke";
 const AUDIT_ACTION = "auth.staging_admin_browser_session.create";
 const BOOTSTRAP_PATH = "/api/v1/auth/staging-admin-browser-session";
+const CANONICAL_STAGING_ROUTE = "https://yylx.world/dev";
 const EXPECTED_TTL_SEC = 900;
+const NETWORK_QUIET_WINDOW_MS = 500;
 const MAX_SECRET_BYTES = 16 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_VIEWPORT = Object.freeze({ width: 1440, height: 900 });
@@ -28,11 +32,30 @@ const SHA_RE = /^[0-9a-f]{40}$/;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const USERNAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{1,63}$/;
-const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const ADMIN_TOKEN_RE = /^loom_admin_[A-Za-z0-9._~+/=-]{32,}$/;
 const SAFE_VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z._+~-]{0,63}$/;
 const SECRET_TEXT_RE =
   /\b(?:Bearer\s+)?loom_(?:admin|api|invite|team|w|session|csrf|login|setup|reset)_[A-Za-z0-9._~+/=-]+/gi;
+const SECRET_ENV_VALUE_RE =
+  /\b(?:Bearer\s+)?loom_(?:admin|api|invite|team|w|session|csrf|login|setup|reset)_[A-Za-z0-9._~+/=-]+/i;
+const SAFE_BROWSER_ENV_KEYS = new Set([
+  "DISPLAY",
+  "FONTCONFIG_FILE",
+  "FONTCONFIG_PATH",
+  "HOME",
+  "LANG",
+  "LANGUAGE",
+  "PATH",
+  "PLAYWRIGHT_BROWSERS_PATH",
+  "SSL_CERT_DIR",
+  "SSL_CERT_FILE",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "TZ",
+  "XAUTHORITY",
+  "XDG_RUNTIME_DIR",
+]);
 const SENSITIVE_KEYS = new Set([
   "authorization",
   "cookie",
@@ -71,28 +94,26 @@ export function canonicalStagingRoute(value) {
     throw new SafeSmokeError("invalid_route", "route URL is malformed");
   }
   if (
-    parsed.protocol !== "https:" ||
-    !parsed.hostname ||
+    parsed.origin !== "https://yylx.world" ||
     parsed.username ||
     parsed.password ||
     parsed.port ||
     parsed.search ||
     parsed.hash ||
-    parsed.pathname.replace(/\/+$/, "") !== "/dev"
+    !["/dev", "/dev/"].includes(parsed.pathname)
   ) {
     throw new SafeSmokeError(
       "invalid_route",
-      "route must be a credential-free HTTPS origin ending in /dev",
+      "route must be the canonical https://yylx.world/dev staging route",
     );
   }
-  parsed.pathname = "/dev";
-  return parsed.href.replace(/\/$/, "");
+  return CANONICAL_STAGING_ROUTE;
 }
 
 export function parseArgs(argv) {
   const options = {
     route: "",
-    candidateSha: "",
+    expectedDeployedSha: "",
     adminTokenSource: "",
     username: "",
     reportPath: "",
@@ -103,7 +124,7 @@ export function parseArgs(argv) {
   };
   const valueArguments = new Set([
     "--route",
-    "--candidate-sha",
+    "--expected-deployed-sha",
     "--admin-token-source",
     "--username",
     "--report",
@@ -144,7 +165,9 @@ export function parseArgs(argv) {
     const value = requiredValue(argv, index);
     index += 1;
     if (argument === "--route") options.route = value;
-    if (argument === "--candidate-sha") options.candidateSha = value;
+    if (argument === "--expected-deployed-sha") {
+      options.expectedDeployedSha = value;
+    }
     if (argument === "--admin-token-source") {
       options.adminTokenSource = value;
     }
@@ -156,21 +179,21 @@ export function parseArgs(argv) {
   if (options.help) return options;
   if (
     !options.route ||
-    !options.candidateSha ||
+    !options.expectedDeployedSha ||
     !options.adminTokenSource ||
     !options.username ||
     !options.reportPath
   ) {
     throw new SafeSmokeError(
       "invalid_arguments",
-      "route, candidate SHA, token source, username, and report are required",
+      "route, deployed SHA, token source, username, and report are required",
     );
   }
   options.route = canonicalStagingRoute(options.route);
-  if (!SHA_RE.test(options.candidateSha)) {
+  if (!SHA_RE.test(options.expectedDeployedSha)) {
     throw new SafeSmokeError(
-      "invalid_candidate",
-      "candidate SHA must be 40 lowercase hexadecimal characters",
+      "invalid_deployed_identity",
+      "deployed SHA must be 40 lowercase hexadecimal characters",
     );
   }
   const username = options.username.trim().toLowerCase();
@@ -203,18 +226,23 @@ export function parseArgs(argv) {
   }
   if (
     options.adminTokenSource !== "-" &&
-    !options.adminTokenSource.startsWith("env:") &&
     !options.adminTokenSource.startsWith("file:")
   ) {
     throw new SafeSmokeError(
       "invalid_token_source",
-      "admin token source must be env:VAR, file:/absolute/path, or -",
+      "admin token source must be file:/absolute/path or -",
     );
   }
-  if (options.insecureForKind && process.env.CI !== "true") {
+  if (
+    options.insecureForKind &&
+    !(
+      process.env.CI === "true" &&
+      process.env.GITHUB_ACTIONS === "true"
+    )
+  ) {
     throw new SafeSmokeError(
       "invalid_tls_mode",
-      "--insecure-for-kind requires CI=true",
+      "--insecure-for-kind requires GitHub Actions",
     );
   }
   return options;
@@ -236,6 +264,12 @@ function validateAdminToken(value) {
 }
 
 async function readBoundedStdin(stdin) {
+  if (stdin?.isTTY === true) {
+    throw new SafeSmokeError(
+      "interactive_stdin",
+      "admin token stdin must be redirected from a non-interactive source",
+    );
+  }
   const chunks = [];
   let size = 0;
   for await (const chunk of stdin) {
@@ -254,32 +288,15 @@ async function readBoundedStdin(stdin) {
 
 export async function loadAdminToken(
   source,
-  { env = process.env, fsModule = fs, stdin = process.stdin } = {},
+  { fsModule = fs, stdin = process.stdin } = {},
 ) {
   if (source === "-") {
     return validateAdminToken(await readBoundedStdin(stdin));
   }
-  if (source.startsWith("env:")) {
-    const name = source.slice("env:".length);
-    if (!ENV_NAME_RE.test(name)) {
-      throw new SafeSmokeError(
-        "invalid_token_source",
-        "admin token environment source is malformed",
-      );
-    }
-    const value = env[name];
-    if (typeof value !== "string" || value.length === 0) {
-      throw new SafeSmokeError(
-        "missing_admin_token",
-        "admin token environment source is unavailable",
-      );
-    }
-    return validateAdminToken(value);
-  }
   if (!source.startsWith("file:")) {
     throw new SafeSmokeError(
       "invalid_token_source",
-      "admin token source must be env:VAR, file:/absolute/path, or -",
+      "admin token source must be file:/absolute/path or -",
     );
   }
 
@@ -308,13 +325,15 @@ export async function loadAdminToken(
       !opened.isFile() ||
       opened.dev !== before.dev ||
       opened.ino !== before.ino ||
+      (typeof process.getuid === "function" &&
+      opened.uid !== process.getuid()) ||
       opened.size < 1 ||
       opened.size > MAX_SECRET_BYTES ||
-      (opened.mode & 0o027) !== 0
+      (opened.mode & 0o7777) !== 0o600
     ) {
       throw new SafeSmokeError(
         "unsafe_token_file",
-        "admin token file ownership or mode contract is unsafe",
+        "admin token file must be owner-matched with exact mode 0600",
       );
     }
     const buffer = Buffer.alloc(MAX_SECRET_BYTES + 1);
@@ -340,6 +359,70 @@ export async function loadAdminToken(
   } finally {
     await handle?.close().catch(() => {});
   }
+}
+
+function loopbackAddress(address) {
+  if (isIP(address) === 4) {
+    return address.startsWith("127.");
+  }
+  if (isIP(address) !== 6) return false;
+  const normalized = address.toLowerCase();
+  return normalized === "::1" || normalized.startsWith("::ffff:127.");
+}
+
+export async function assertInsecureKindBoundary(
+  options,
+  { env = process.env, dnsLookup = lookup } = {},
+) {
+  if (!options.insecureForKind) return;
+  if (!(env.CI === "true" && env.GITHUB_ACTIONS === "true")) {
+    throw new SafeSmokeError(
+      "invalid_tls_mode",
+      "--insecure-for-kind requires GitHub Actions",
+    );
+  }
+  let records;
+  try {
+    records = await dnsLookup(new URL(options.route).hostname, {
+      all: true,
+      verbatim: true,
+    });
+  } catch {
+    throw new SafeSmokeError(
+      "invalid_tls_target",
+      "canonical staging route could not be resolved safely",
+    );
+  }
+  if (
+    !Array.isArray(records) ||
+    records.length === 0 ||
+    records.some((record) => !loopbackAddress(record?.address ?? ""))
+  ) {
+    throw new SafeSmokeError(
+      "invalid_tls_target",
+      "--insecure-for-kind requires a loopback-resolved staging route",
+    );
+  }
+}
+
+export function scrubBrowserEnvironment(env, knownSecrets = []) {
+  const output = {};
+  for (const [key, rawValue] of Object.entries(env ?? {})) {
+    if (
+      typeof rawValue !== "string" ||
+      !(SAFE_BROWSER_ENV_KEYS.has(key) || key.startsWith("LC_"))
+    ) {
+      continue;
+    }
+    if (
+      knownSecrets.some((secret) => secret && rawValue.includes(secret)) ||
+      SECRET_ENV_VALUE_RE.test(rawValue)
+    ) {
+      continue;
+    }
+    output[key] = rawValue;
+  }
+  return output;
 }
 
 function sensitiveKey(key) {
@@ -382,16 +465,33 @@ function initialChecks() {
     bootstrap_status_204: false,
     bootstrap_empty_body: false,
     bootstrap_no_store: false,
+    deployed_build_sha_present: false,
+    deployed_build_sha_matches_expected: false,
     secure_http_only_lax_cookie: false,
     authenticated_target_user: false,
     platform_admin_authority: false,
     audit_event_correlated: false,
     admin_access_document_2xx: false,
     authenticated_react_mount: false,
+    admin_requests_apis_200: false,
+    admin_requests_ui_visible: false,
+    admin_accounts_apis_200: false,
+    admin_accounts_ui_visible: false,
+    admin_teams_api_200: false,
+    admin_teams_ui_visible: false,
+    admin_invites_apis_200: false,
+    admin_invites_ui_visible: false,
+    admin_tokens_api_200: false,
+    admin_tokens_ui_visible: false,
+    admin_audit_api_200: false,
     all_admin_tabs_operable: false,
     audit_tab_event_visible: false,
     rate_cards_api_200: false,
     rate_cards_ui_visible: false,
+    browser_console_clean: false,
+    browser_page_errors_clean: false,
+    browser_request_failures_clean: false,
+    browser_server_errors_clean: false,
   };
 }
 
@@ -414,7 +514,7 @@ export function validateBootstrapCookie(cookies, nowSeconds) {
 
 export function findCorrelatedAuditEvent(
   payload,
-  { requestId, targetUserId, username },
+  { requestId, targetUserId, username, buildSha },
 ) {
   if (!payload || !Array.isArray(payload.items)) return null;
   return (
@@ -427,6 +527,7 @@ export function findCorrelatedAuditEvent(
         event.target_id === targetUserId &&
         event.metadata?.target_username === username &&
         event.metadata?.auth_source === "singleton_admin_bearer" &&
+        event.metadata?.build_sha === buildSha &&
         ["active", "pending_setup"].includes(event.metadata?.target_status) &&
         event.metadata?.ttl_seconds === EXPECTED_TTL_SEC &&
         UUID_RE.test(event.id ?? ""),
@@ -438,6 +539,190 @@ function responsePathMatches(response, targetUrl) {
   return response.request().method() === "GET" && response.url() === targetUrl;
 }
 
+function createResponseLedger(page) {
+  const responses = new Map();
+  page.on("response", (response) => {
+    if (response.request().method() !== "GET") return;
+    const existing = responses.get(response.url()) ?? [];
+    existing.push(response);
+    responses.set(response.url(), existing);
+  });
+  return {
+    waitForGet(targetUrl, timeoutMs) {
+      const existing = responses.get(targetUrl);
+      if (existing?.length) return Promise.resolve(existing.at(-1));
+      return page.waitForResponse(
+        (response) => responsePathMatches(response, targetUrl),
+        { timeout: timeoutMs },
+      );
+    },
+  };
+}
+
+export function createAuthenticatedPageMonitor(
+  page,
+  route,
+  { nowFn = () => Date.now() } = {},
+) {
+  const expectedOrigin = new URL(route).origin;
+  const consoleErrors = [];
+  const crossOriginNonScriptFailures = [];
+  let pageErrorCount = 0;
+  let requestFailureCount = 0;
+  let serverErrorCount = 0;
+  let activeRequestCount = 0;
+  let lastActivityAt = nowFn();
+
+  function recordActivity() {
+    lastActivityAt = nowFn();
+  }
+
+  function completeRequest() {
+    activeRequestCount = Math.max(0, activeRequestCount - 1);
+    recordActivity();
+  }
+
+  function parsedNetworkUrl(value) {
+    try {
+      const parsed = new URL(value);
+      return ["http:", "https:"].includes(parsed.protocol) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  page.on("console", (message) => {
+    recordActivity();
+    if (message.type() !== "error") return;
+    const location = message.location();
+    consoleErrors.push({
+      text: message.text(),
+      url: location.url ?? "",
+      line: location.lineNumber ?? location.line ?? -1,
+      column: location.columnNumber ?? location.column ?? -1,
+    });
+  });
+  page.on("pageerror", () => {
+    recordActivity();
+    pageErrorCount += 1;
+  });
+  page.on("request", () => {
+    activeRequestCount += 1;
+    recordActivity();
+  });
+  page.on("requestfinished", completeRequest);
+  page.on("requestfailed", (request) => {
+    completeRequest();
+    const parsed = parsedNetworkUrl(request.url());
+    if (!parsed) return;
+    const sameOrigin = parsed.origin === expectedOrigin;
+    if (sameOrigin || request.resourceType() === "script") {
+      requestFailureCount += 1;
+      return;
+    }
+    crossOriginNonScriptFailures.push(request.url());
+  });
+  page.on("response", (response) => {
+    recordActivity();
+    if (response.status() < 500) return;
+    const parsed = parsedNetworkUrl(response.url());
+    if (!parsed) return;
+    const sameOrigin = parsed.origin === expectedOrigin;
+    if (sameOrigin || response.request().resourceType() === "script") {
+      serverErrorCount += 1;
+      return;
+    }
+    crossOriginNonScriptFailures.push(response.url());
+  });
+
+  return {
+    async waitForQuiet(timeoutMs) {
+      const deadline = nowFn() + timeoutMs;
+      for (;;) {
+        const now = nowFn();
+        const quietFor = now - lastActivityAt;
+        if (
+          activeRequestCount === 0 &&
+          quietFor >= NETWORK_QUIET_WINDOW_MS
+        ) {
+          return;
+        }
+        const remaining = deadline - now;
+        if (remaining <= 0) {
+          throw new SafeSmokeError(
+            "browser_not_quiet",
+            "authenticated browser runtime did not reach network quiet",
+          );
+        }
+        const untilQuiet = Math.max(
+          1,
+          NETWORK_QUIET_WINDOW_MS - quietFor,
+        );
+        await page.waitForTimeout(Math.min(100, untilQuiet, remaining));
+      }
+    },
+    applyChecks(checks) {
+      const blockingConsoleErrors = consoleErrors.filter((error) => {
+        const browserGenerated =
+          error.text.startsWith("Failed to load resource:") &&
+          error.line === 0 &&
+          error.column === 0 &&
+          Boolean(error.url);
+        return !(
+          browserGenerated &&
+          crossOriginNonScriptFailures.includes(error.url)
+        );
+      });
+      checks.browser_console_clean = blockingConsoleErrors.length === 0;
+      checks.browser_page_errors_clean = pageErrorCount === 0;
+      checks.browser_request_failures_clean = requestFailureCount === 0;
+      checks.browser_server_errors_clean = serverErrorCount === 0;
+      if (
+        !checks.browser_console_clean ||
+        !checks.browser_page_errors_clean ||
+        !checks.browser_request_failures_clean ||
+        !checks.browser_server_errors_clean
+      ) {
+        throw new SafeSmokeError(
+          "browser_runtime_error",
+          "authenticated browser runtime reported a blocking error",
+        );
+      }
+    },
+  };
+}
+
+function responseStatusIs200(response) {
+  return response?.status() === 200;
+}
+
+async function selectAdminTab(page, name, timeoutMs) {
+  const tab = page.getByRole("tab", { name, exact: true });
+  await tab.waitFor({ state: "visible", timeout: timeoutMs });
+  await tab.click();
+  if ((await tab.getAttribute("aria-selected")) !== "true") {
+    throw new SafeSmokeError(
+      "admin_tab_failed",
+      "an Admin Access tab did not become selected",
+    );
+  }
+}
+
+async function waitForCardHeading(page, name, timeoutMs) {
+  await page
+    .getByRole("heading", { name, exact: true, level: 3 })
+    .waitFor({ state: "visible", timeout: timeoutMs });
+}
+
+export async function waitForSuccessfulQueryCard(page, queryName, timeoutMs) {
+  await page
+    .locator(
+      `[data-loom-query="${queryName}"]` +
+        '[data-loom-query-status="success"]',
+    )
+    .waitFor({ state: "visible", timeout: timeoutMs });
+}
+
 async function waitForAuthenticatedMount(page, timeoutMs) {
   await page.waitForSelector(
     '#root[data-loom-mounted="true"]' +
@@ -447,18 +732,39 @@ async function waitForAuthenticatedMount(page, timeoutMs) {
   );
 }
 
-async function checkAdminAccess(page, options, checks) {
+async function checkAdminAccess(page, options, checks, auditIdentity, ledger) {
   const pageUrl = `${options.route}/admin/access`;
-  const auditApiUrl = `${options.route}/api/v1/admin/audit-events?limit=50`;
-  const auditResponsePromise = page.waitForResponse(
-    (response) => responsePathMatches(response, auditApiUrl),
-    { timeout: options.timeoutMs },
-  );
+  const urls = {
+    audit: `${options.route}/api/v1/admin/audit-events?limit=50`,
+    teams: `${options.route}/api/v1/admin/teams`,
+    registrations:
+      `${options.route}/api/v1/admin/registration-requests?status=pending`,
+    teamRegistrations:
+      `${options.route}/api/v1/admin/team-registrations?status=pending`,
+    invites: `${options.route}/api/v1/invites?status=pending`,
+    tokens: `${options.route}/api/v1/tokens`,
+    passwordResets:
+      `${options.route}/api/v1/admin/password-reset-requests?status=pending`,
+  };
   const navigation = await page.goto(pageUrl, {
     waitUntil: "domcontentloaded",
     timeout: options.timeoutMs,
   });
-  const auditResponse = await auditResponsePromise;
+  const [
+    auditResponse,
+    teamsResponse,
+    registrationsResponse,
+    teamRegistrationsResponse,
+    invitesResponse,
+    tokensResponse,
+  ] = await Promise.all([
+    ledger.waitForGet(urls.audit, options.timeoutMs),
+    ledger.waitForGet(urls.teams, options.timeoutMs),
+    ledger.waitForGet(urls.registrations, options.timeoutMs),
+    ledger.waitForGet(urls.teamRegistrations, options.timeoutMs),
+    ledger.waitForGet(urls.invites, options.timeoutMs),
+    ledger.waitForGet(urls.tokens, options.timeoutMs),
+  ]);
   checks.admin_access_document_2xx =
     navigation !== null && navigation.status() >= 200 && navigation.status() < 300;
   await waitForAuthenticatedMount(page, options.timeoutMs);
@@ -467,39 +773,131 @@ async function checkAdminAccess(page, options, checks) {
     .getByRole("heading", { name: "Team access", exact: true, level: 1 })
     .waitFor({ state: "visible", timeout: options.timeoutMs });
 
-  for (const name of ADMIN_TABS) {
-    const tab = page.getByRole("tab", { name, exact: true });
-    await tab.waitFor({ state: "visible", timeout: options.timeoutMs });
-    await tab.click();
-    if ((await tab.getAttribute("aria-selected")) !== "true") {
-      throw new SafeSmokeError(
-        "admin_tab_failed",
-        "an Admin Access tab did not become selected",
-      );
-    }
+  await selectAdminTab(page, "Requests", options.timeoutMs);
+  await waitForCardHeading(page, "Account requests", options.timeoutMs);
+  await waitForCardHeading(page, "Legacy team registrations", options.timeoutMs);
+  await waitForSuccessfulQueryCard(
+    page,
+    "registration-requests",
+    options.timeoutMs,
+  );
+  await waitForSuccessfulQueryCard(
+    page,
+    "team-registrations",
+    options.timeoutMs,
+  );
+  checks.admin_requests_apis_200 =
+    responseStatusIs200(registrationsResponse) &&
+    responseStatusIs200(teamRegistrationsResponse) &&
+    responseStatusIs200(teamsResponse);
+  checks.admin_requests_ui_visible = true;
+
+  await selectAdminTab(page, "Accounts", options.timeoutMs);
+  const passwordResetsResponse = await ledger.waitForGet(
+    urls.passwordResets,
+    options.timeoutMs,
+  );
+  await waitForCardHeading(page, "Account requests", options.timeoutMs);
+  await waitForCardHeading(page, "Password resets", options.timeoutMs);
+  await waitForSuccessfulQueryCard(
+    page,
+    "registration-requests",
+    options.timeoutMs,
+  );
+  await waitForSuccessfulQueryCard(
+    page,
+    "password-reset-requests",
+    options.timeoutMs,
+  );
+  checks.admin_accounts_apis_200 =
+    responseStatusIs200(registrationsResponse) &&
+    responseStatusIs200(passwordResetsResponse);
+  checks.admin_accounts_ui_visible = true;
+
+  await selectAdminTab(page, "Teams", options.timeoutMs);
+  await waitForCardHeading(page, "Internal teams", options.timeoutMs);
+  await waitForSuccessfulQueryCard(page, "admin-teams", options.timeoutMs);
+  checks.admin_teams_api_200 = responseStatusIs200(teamsResponse);
+  checks.admin_teams_ui_visible = true;
+
+  await selectAdminTab(page, "Invites", options.timeoutMs);
+  await waitForCardHeading(page, "Create invite", options.timeoutMs);
+  await waitForCardHeading(page, "Pending invites", options.timeoutMs);
+  await waitForSuccessfulQueryCard(page, "invites", options.timeoutMs);
+  checks.admin_invites_apis_200 =
+    responseStatusIs200(invitesResponse) && responseStatusIs200(teamsResponse);
+  checks.admin_invites_ui_visible = true;
+
+  await selectAdminTab(page, "API tokens", options.timeoutMs);
+  await waitForCardHeading(page, "API tokens", options.timeoutMs);
+  await waitForSuccessfulQueryCard(page, "api-tokens", options.timeoutMs);
+  checks.admin_tokens_api_200 = responseStatusIs200(tokensResponse);
+  checks.admin_tokens_ui_visible = true;
+
+  await selectAdminTab(page, "Audit", options.timeoutMs);
+  await waitForCardHeading(page, "Audit log", options.timeoutMs);
+  await waitForSuccessfulQueryCard(page, "audit-events", options.timeoutMs);
+  checks.admin_audit_api_200 = responseStatusIs200(auditResponse);
+  let auditPayload = null;
+  try {
+    auditPayload = await auditResponse.json();
+  } catch {
+    auditPayload = null;
   }
-  checks.all_admin_tabs_operable = true;
-  await page
-    .getByRole("heading", { name: "Audit log", exact: true })
-    .waitFor({ state: "visible", timeout: options.timeoutMs });
-  await page
-    .getByText(AUDIT_ACTION, { exact: true })
-    .waitFor({ state: "visible", timeout: options.timeoutMs });
-  checks.audit_tab_event_visible = auditResponse.status() === 200;
+  const pageAuditEvent = findCorrelatedAuditEvent(auditPayload, auditIdentity);
+  const exactAuditEvent =
+    pageAuditEvent !== null && pageAuditEvent.id === auditIdentity.auditEventId;
+  if (exactAuditEvent) {
+    const exactRow = page
+      .getByRole("row")
+      .filter({
+        has: page.getByRole("cell", { name: ADMIN_ACTOR, exact: true }),
+      })
+      .filter({
+        has: page.getByRole("cell", { name: AUDIT_ACTION, exact: true }),
+      })
+      .filter({
+        has: page.getByRole("cell", {
+          name: `user:${auditIdentity.targetUserId}`,
+          exact: true,
+        }),
+      })
+      .filter({
+        has: page.getByRole("cell", {
+          name: auditIdentity.requestId,
+          exact: true,
+        }),
+      });
+    await exactRow.first().waitFor({
+      state: "visible",
+      timeout: options.timeoutMs,
+    });
+  }
+  checks.audit_tab_event_visible = exactAuditEvent;
+  checks.all_admin_tabs_operable =
+    ADMIN_TABS.length === 6 &&
+    checks.admin_requests_apis_200 &&
+    checks.admin_requests_ui_visible &&
+    checks.admin_accounts_apis_200 &&
+    checks.admin_accounts_ui_visible &&
+    checks.admin_teams_api_200 &&
+    checks.admin_teams_ui_visible &&
+    checks.admin_invites_apis_200 &&
+    checks.admin_invites_ui_visible &&
+    checks.admin_tokens_api_200 &&
+    checks.admin_tokens_ui_visible &&
+    checks.admin_audit_api_200 &&
+    checks.audit_tab_event_visible;
 }
 
-async function checkRateCards(page, options, checks) {
+async function checkRateCards(page, options, checks, ledger) {
   const pageUrl = `${options.route}/rate-cards`;
   const apiUrl = `${options.route}/api/v1/rate-cards`;
-  const apiResponsePromise = page.waitForResponse(
-    (response) => responsePathMatches(response, apiUrl),
-    { timeout: options.timeoutMs },
-  );
   const navigation = await page.goto(pageUrl, {
     waitUntil: "domcontentloaded",
     timeout: options.timeoutMs,
   });
-  const apiResponse = await apiResponsePromise;
+  const apiResponse = await ledger.waitForGet(apiUrl, options.timeoutMs);
   await waitForAuthenticatedMount(page, options.timeoutMs);
   checks.rate_cards_api_200 = apiResponse.status() === 200;
   await page
@@ -511,6 +909,7 @@ async function checkRateCards(page, options, checks) {
   await page
     .getByRole("heading", { name: "Publish a new rate card", exact: true })
     .waitFor({ state: "visible", timeout: options.timeoutMs });
+  await waitForSuccessfulQueryCard(page, "rate-cards", options.timeoutMs);
   checks.rate_cards_ui_visible =
     navigation !== null && navigation.status() >= 200 && navigation.status() < 300;
 }
@@ -525,8 +924,9 @@ async function jsonResponse(response) {
   }
 }
 
-function reportStatus(checks, cleanup) {
+function reportStatus(checks, cleanup, failureCode) {
   return Object.values(checks).every(Boolean) &&
+    failureCode === null &&
     cleanup.logout_status === 204 &&
     cleanup.auth_me_after_logout_status === 401
     ? "pass"
@@ -539,13 +939,14 @@ export async function executeSmoke(
     env = process.env,
     fsModule = fs,
     stdin = process.stdin,
+    dnsLookup = lookup,
     playwrightModule,
     randomUUIDFn = randomUUID,
     nowFn = () => Date.now(),
   } = {},
 ) {
+  await assertInsecureKindBoundary(options, { env, dnsLookup });
   const token = await loadAdminToken(options.adminTokenSource, {
-    env,
     fsModule,
     stdin,
   });
@@ -563,10 +964,14 @@ export async function executeSmoke(
   let browserVersion = "unknown";
   let targetUserId = null;
   let auditEventId = null;
+  let observedDeployedSha = null;
   let bootstrapCreated = false;
 
   try {
-    browser = await playwright.chromium.launch({ headless: true });
+    browser = await playwright.chromium.launch({
+      headless: true,
+      env: scrubBrowserEnvironment(env, [token]),
+    });
     browserVersion = safeBrowserVersion(browser.version());
     context = await browser.newContext({
       viewport: { ...options.viewport },
@@ -594,6 +999,12 @@ export async function executeSmoke(
       checks.bootstrap_no_store =
         headers["cache-control"] === "no-store" &&
         headers.pragma === "no-cache";
+      observedDeployedSha = SHA_RE.test(headers["x-loom-build-sha"] ?? "")
+        ? headers["x-loom-build-sha"]
+        : null;
+      checks.deployed_build_sha_present = observedDeployedSha !== null;
+      checks.deployed_build_sha_matches_expected =
+        observedDeployedSha === options.expectedDeployedSha;
     } finally {
       await bootstrap.dispose().catch(() => {});
     }
@@ -602,6 +1013,12 @@ export async function executeSmoke(
       throw new SafeSmokeError(
         "bootstrap_rejected",
         "staging admin browser bootstrap was rejected",
+      );
+    }
+    if (!checks.deployed_build_sha_matches_expected) {
+      throw new SafeSmokeError(
+        "deployed_identity_mismatch",
+        "staging runtime does not match the expected deployed SHA",
       );
     }
 
@@ -642,13 +1059,32 @@ export async function executeSmoke(
       requestId,
       targetUserId,
       username: options.username,
+      buildSha: observedDeployedSha,
     });
     if (auditEvent) auditEventId = auditEvent.id;
     checks.audit_event_correlated = auditEvent !== null;
 
     page = await context.newPage();
-    await checkAdminAccess(page, options, checks);
-    await checkRateCards(page, options, checks);
+    const ledger = createResponseLedger(page);
+    const pageMonitor = createAuthenticatedPageMonitor(page, options.route);
+    await checkAdminAccess(
+      page,
+      options,
+      checks,
+      {
+        requestId,
+        targetUserId,
+        username: options.username,
+        buildSha: observedDeployedSha,
+        auditEventId,
+      },
+      ledger,
+    );
+    await checkRateCards(page, options, checks, ledger);
+    await pageMonitor.waitForQuiet(options.timeoutMs);
+    await page.close();
+    page = null;
+    pageMonitor.applyChecks(checks);
   } catch (error) {
     failureCode =
       error instanceof SafeSmokeError ? error.code : "browser_check_failed";
@@ -697,9 +1133,15 @@ export async function executeSmoke(
     failureCode ??= "cleanup_failed";
   }
   const report = {
-    schema_version: 1,
-    status: reportStatus(checks, cleanup),
-    candidate_sha: options.candidateSha,
+    schema_version: 2,
+    status: reportStatus(checks, cleanup, failureCode),
+    deployment_identity: {
+      expected_deployed_sha: options.expectedDeployedSha,
+      observed_deployed_sha: observedDeployedSha,
+      matched:
+        observedDeployedSha !== null &&
+        observedDeployedSha === options.expectedDeployedSha,
+    },
     route: options.route,
     request_id: requestId,
     target: {
@@ -729,8 +1171,8 @@ async function writeReport(reportPath, report) {
 
 const USAGE =
   "Usage: node web/scripts/staging-admin-browser-smoke.mjs " +
-  "--route https://host/dev --candidate-sha <40-hex-sha> " +
-  "--admin-token-source <env:VAR|file:/absolute/path|-> " +
+  "--route https://yylx.world/dev --expected-deployed-sha <40-hex-sha> " +
+  "--admin-token-source <file:/absolute/path|-> " +
   "--username <platform-admin> --report <sanitized.json> " +
   "[--timeout-ms <milliseconds>] [--insecure-for-kind]";
 
@@ -752,9 +1194,13 @@ async function main() {
     const code = error instanceof SafeSmokeError ? error.code : "execution_failed";
     if (options?.reportPath) {
       const failure = sanitizeReportValue({
-        schema_version: 1,
+        schema_version: 2,
         status: "fail",
-        candidate_sha: options.candidateSha,
+        deployment_identity: {
+          expected_deployed_sha: options.expectedDeployedSha,
+          observed_deployed_sha: null,
+          matched: false,
+        },
         route: options.route,
         target: { username: options.username },
         failure_code: code,

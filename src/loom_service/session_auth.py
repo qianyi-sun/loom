@@ -23,6 +23,8 @@ SessionSecretPrefix = Literal["loom_session", "loom_session_staging_admin"]
 
 _DEFAULT_SESSION_SECRET_PREFIX: SessionSecretPrefix = "loom_session"
 STAGING_ADMIN_SESSION_SECRET_PREFIX: SessionSecretPrefix = "loom_session_staging_admin"
+_STAGING_ADMIN_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_STAGING_ADMIN_LOGOUT_PATH = "/api/v1/auth/logout"
 
 
 @dataclass(frozen=True)
@@ -88,6 +90,20 @@ def is_staging_admin_browser_session(raw_cookie: str | None) -> bool:
     return bool(raw_cookie and raw_cookie.startswith(
         f"{STAGING_ADMIN_SESSION_SECRET_PREFIX}_",
     ))
+
+
+def staging_admin_browser_request_allowed(*, method: str, path: str) -> bool:
+    """Return whether a validation-only staging session may make a request.
+
+    The bootstrap bearer exchange is not authenticated by this session. Once
+    issued, its cookie is deliberately read-only across the entire ASGI app so
+    public mutation routes cannot be used to establish durable credentials.
+    The exact logout endpoint remains available so cleanup can revoke the row.
+    """
+    normalized_method = method.upper()
+    return normalized_method in _STAGING_ADMIN_SAFE_METHODS or (
+        normalized_method == "POST" and path == _STAGING_ADMIN_LOGOUT_PATH
+    )
 
 
 def verify_csrf(ctx: AuthContext, header_value: str | None) -> None:

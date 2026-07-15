@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -155,11 +156,26 @@ class _ResetCompleteReq(BaseModel):
 _ACTION_TOKEN_TTL = timedelta(days=14)
 _STAGING_ADMIN_BROWSER_SESSION_TTL_SEC = 900
 _SAFE_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_BUILD_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_IMAGE_BUILD_SHA_PATH = Path("/opt/loom/build-sha")
 
 
 def _require_staging_admin_browser_session_runtime() -> None:
     if os.environ.get("LOOM_ENV", "").strip().lower() != "staging":
         raise HTTPException(status_code=404, detail="not found")
+
+
+def _require_runtime_build_sha() -> str:
+    try:
+        build_sha = _IMAGE_BUILD_SHA_PATH.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError):
+        build_sha = ""
+    if not _BUILD_SHA_RE.fullmatch(build_sha):
+        raise HTTPException(
+            status_code=503,
+            detail="staging build identity unavailable",
+        )
+    return build_sha
 
 
 def _require_safe_audit_header(value: str | None, *, name: str) -> str:
@@ -897,6 +913,7 @@ async def create_staging_admin_browser_session(
             status_code=403,
             detail="singleton admin bearer required",
         )
+    build_sha = _require_runtime_build_sha()
 
     actor = _require_safe_audit_header(
         x_loom_admin_actor,
@@ -986,6 +1003,7 @@ async def create_staging_admin_browser_session(
             "target_status": user.status,
             "target_username": user.username_normalized,
             "ttl_seconds": _STAGING_ADMIN_BROWSER_SESSION_TTL_SEC,
+            "build_sha": build_sha,
         },
     )
     await session.commit()
@@ -1000,6 +1018,7 @@ async def create_staging_admin_browser_session(
     )
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
+    response.headers["X-Loom-Build-SHA"] = build_sha
 
 
 def _set_auth_cookies(

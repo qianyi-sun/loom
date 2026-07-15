@@ -169,6 +169,11 @@ jobs:
         run: |
           set -euo pipefail
           export DOCKER_BUILDKIT=1
+          checkout_sha=$(git rev-parse HEAD)
+          [[ "$checkout_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "FAIL: invalid checkout SHA" >&2
+            exit 1
+          }
           # (dockerfile-suffix, image-name) pairs.
           builds=(
             "control-plane:loom-control-plane"
@@ -184,8 +189,13 @@ jobs:
             image="${image_name}:${IMAGE_TAG}"
             (
               echo "::group::Build ${image}"
+              build_args=()
+              if [[ "$suffix" == "service" ]]; then
+                build_args+=(--build-arg "LOOM_BUILD_SHA=${checkout_sha}")
+              fi
               docker build -f "deploy/Dockerfile.${suffix}" \
-                -t "${image}" . 2>&1 | sed "s/^/[${suffix}] /"
+                -t "${image}" "${build_args[@]}" . 2>&1 \
+                | sed "s/^/[${suffix}] /"
               echo "::endgroup::"
             ) &
             pids+=($!)
@@ -194,7 +204,14 @@ jobs:
           for pid in "${pids[@]}"; do
             wait "$pid" || rc=$?
           done
-          exit "$rc"
+          [[ "$rc" -eq 0 ]] || exit "$rc"
+          service_revision=$(docker inspect --type=image --format \
+            '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "loom-service:${IMAGE_TAG}")
+          [[ "$service_revision" == "$checkout_sha" ]] || {
+            echo "FAIL: service image revision does not match checkout" >&2
+            exit 1
+          }
 
       - name: Create kind cluster
         # The ingress-nginx kind manifest pins its controller pod to
@@ -257,7 +274,13 @@ jobs:
         # to kind-loom-staging after cluster creation, so the generated kubectl
         # command targets the right cluster without an explicit --context flag.
         run: |
-          set -e
+          set -euo pipefail
+          admin_toml=/tmp/admin.toml
+          cleanup_bootstrap_secret() {
+            rm -f "$admin_toml"
+          }
+          trap cleanup_bootstrap_secret EXIT
+          umask 077
           kubectl --context kind-loom-staging create namespace loom
           ADMIN_TOKEN="loom_admin_$(openssl rand -hex 24)"
           echo "::add-mask::${ADMIN_TOKEN}"
@@ -266,10 +289,11 @@ jobs:
 
           eval "$(uv run loom cluster bootstrap-secrets --namespace=loom --smoke-defaults)"
 
-          printf '[admin]\ntoken="%s"\n' "${ADMIN_TOKEN}" > /tmp/admin.toml
+          printf '[admin]\ntoken="%s"\n' "${ADMIN_TOKEN}" > "$admin_toml"
           kubectl --context kind-loom-staging -n loom create secret generic loom-admin-secret \
-            --from-file=secrets.toml=/tmp/admin.toml
-          rm -f /tmp/admin.toml
+            --from-file="secrets.toml=${admin_toml}"
+          rm -f "$admin_toml"
+          trap - EXIT
 
       - name: Generate cluster-config.toml
         # image_tag must match what we built + loaded above.
@@ -774,10 +798,22 @@ jobs:
           set -euo pipefail
           admin_token_file=/tmp/loom-staging-admin-token
           trap 'rm -f "$admin_token_file"' EXIT
-          candidate_sha=$(git rev-parse HEAD)
+          checkout_sha=$(git rev-parse HEAD)
+          deployed_sha=$(
+            kubectl --context kind-loom-staging -n loom exec deploy/loom-service \
+              -- cat /opt/loom/build-sha | tr -d '\r\n'
+          )
+          [[ "$deployed_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "FAIL: deployed service build identity unavailable" >&2
+            exit 1
+          }
+          [[ "$deployed_sha" == "$checkout_sha" ]] || {
+            echo "FAIL: deployed service does not match checkout" >&2
+            exit 1
+          }
           CI=true npm --prefix web run smoke:staging-admin -- \
             --route https://yylx.world/dev \
-            --candidate-sha "$candidate_sha" \
+            --expected-deployed-sha "$deployed_sha" \
             --admin-token-source "file:${admin_token_file}" \
             --username qianyi \
             --report /tmp/loom-staging-admin-browser-smoke.json \
@@ -791,6 +827,10 @@ jobs:
           path: /tmp/loom-staging-admin-browser-smoke.json
           if-no-files-found: error
           retention-days: 7
+
+      - name: Cleanup staging admin browser secret files
+        if: always()
+        run: rm -f /tmp/loom-staging-admin-token /tmp/admin.toml
 
       - name: Verify /healthz on every service via port-forward
         # Probe each service's /healthz from a temporary port-forward.

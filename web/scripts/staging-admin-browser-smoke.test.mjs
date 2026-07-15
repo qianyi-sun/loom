@@ -4,29 +4,34 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   SafeSmokeError,
+  assertInsecureKindBoundary,
   canonicalStagingRoute,
+  createAuthenticatedPageMonitor,
   executeSmoke,
   findCorrelatedAuditEvent,
   loadAdminToken,
   parseArgs,
   sanitizeReportValue,
+  scrubBrowserEnvironment,
   validateBootstrapCookie,
+  waitForSuccessfulQueryCard,
 } from "./staging-admin-browser-smoke.mjs";
 
 const RAW_ADMIN_TOKEN = `loom_admin_${"A".repeat(43)}`;
-const CANDIDATE_SHA = "a".repeat(40);
+const DEPLOYED_SHA = "a".repeat(40);
 const originalCi = process.env.CI;
+const originalGithubActions = process.env.GITHUB_ACTIONS;
 
-function validArgs(tokenSource = "env:ADMIN_TOKEN") {
+function validArgs(tokenSource = "file:/run/secrets/admin-token") {
   return [
     "--route",
     "https://yylx.world/dev",
-    "--candidate-sha",
-    CANDIDATE_SHA,
+    "--expected-deployed-sha",
+    DEPLOYED_SHA,
     "--admin-token-source",
     tokenSource,
     "--username",
@@ -39,24 +44,27 @@ function validArgs(tokenSource = "env:ADMIN_TOKEN") {
 afterEach(() => {
   if (originalCi === undefined) delete process.env.CI;
   else process.env.CI = originalCi;
+  if (originalGithubActions === undefined) delete process.env.GITHUB_ACTIONS;
+  else process.env.GITHUB_ACTIONS = originalGithubActions;
 });
 
 describe("staging admin browser smoke arguments", () => {
   it("accepts the exact staging route and secret-source contract", () => {
     process.env.CI = "true";
+    process.env.GITHUB_ACTIONS = "true";
     const options = parseArgs([...validArgs(), "--insecure-for-kind"]);
 
     expect(options).toMatchObject({
       route: "https://yylx.world/dev",
-      candidateSha: CANDIDATE_SHA,
-      adminTokenSource: "env:ADMIN_TOKEN",
+      expectedDeployedSha: DEPLOYED_SHA,
+      adminTokenSource: "file:/run/secrets/admin-token",
       username: "qianyi",
       reportPath: "/tmp/staging-admin-browser-smoke.json",
       insecureForKind: true,
     });
   });
 
-  it.each(["env:ADMIN_TOKEN", "file:/run/secrets/admin-token", "-"])(
+  it.each(["file:/run/secrets/admin-token", "-"])(
     "accepts only supported source shape %s",
     (source) => {
       expect(parseArgs(validArgs(source)).adminTokenSource).toBe(source);
@@ -75,6 +83,9 @@ describe("staging admin browser smoke arguments", () => {
     expect(() =>
       parseArgs([...validArgs(), "--storage-state", "/tmp/state.json"]),
     ).toThrowError("unknown staging admin browser smoke argument");
+    expect(() => parseArgs(validArgs("env:ADMIN_TOKEN"))).toThrowError(
+      "admin token source must be file:/absolute/path or -",
+    );
   });
 
   it("rejects production, credentials, query strings, and ports", () => {
@@ -83,6 +94,7 @@ describe("staging admin browser smoke arguments", () => {
       "https://user@yylx.world/dev",
       "https://yylx.world/dev?debug=1",
       "https://yylx.world:444/dev",
+      "https://attacker.example/dev",
     ]) {
       expect(() => canonicalStagingRoute(route)).toThrowError(SafeSmokeError);
     }
@@ -96,14 +108,6 @@ describe("staging admin browser smoke arguments", () => {
 });
 
 describe("admin token source isolation", () => {
-  it("loads an environment source without changing the value", async () => {
-    await expect(
-      loadAdminToken("env:ADMIN_TOKEN", {
-        env: { ADMIN_TOKEN: RAW_ADMIN_TOKEN },
-      }),
-    ).resolves.toBe(RAW_ADMIN_TOKEN);
-  });
-
   it("loads a bounded stdin source", async () => {
     async function* stdin() {
       yield Buffer.from(`${RAW_ADMIN_TOKEN}\n`);
@@ -114,6 +118,13 @@ describe("admin token source isolation", () => {
     );
   });
 
+  it("rejects interactive stdin", async () => {
+    const stdin = { isTTY: true };
+    await expect(loadAdminToken("-", { stdin })).rejects.toMatchObject({
+      code: "interactive_stdin",
+    });
+  });
+
   it("loads a private regular file and rejects a public one", async () => {
     const directory = await fs.mkdtemp(
       path.join(os.tmpdir(), "loom-admin-browser-smoke-"),
@@ -121,10 +132,25 @@ describe("admin token source isolation", () => {
     const secretFile = path.join(directory, "admin-token");
     const secretLink = path.join(directory, "admin-token-link");
     try {
-      await fs.writeFile(secretFile, `${RAW_ADMIN_TOKEN}\n`, { mode: 0o640 });
+      await fs.writeFile(secretFile, `${RAW_ADMIN_TOKEN}\n`, { mode: 0o600 });
       await expect(loadAdminToken(`file:${secretFile}`)).resolves.toBe(
         RAW_ADMIN_TOKEN,
       );
+
+      await fs.chmod(secretFile, 0o640);
+      await expect(loadAdminToken(`file:${secretFile}`)).rejects.toMatchObject({
+        code: "unsafe_token_file",
+      });
+
+      await fs.chmod(secretFile, 0o400);
+      await expect(loadAdminToken(`file:${secretFile}`)).rejects.toMatchObject({
+        code: "unsafe_token_file",
+      });
+
+      await fs.chmod(secretFile, 0o700);
+      await expect(loadAdminToken(`file:${secretFile}`)).rejects.toMatchObject({
+        code: "unsafe_token_file",
+      });
 
       await fs.chmod(secretFile, 0o644);
       await expect(loadAdminToken(`file:${secretFile}`)).rejects.toMatchObject({
@@ -142,11 +168,152 @@ describe("admin token source isolation", () => {
   });
 });
 
+describe("kind TLS boundary", () => {
+  it("requires GitHub Actions and loopback-only DNS before bypassing TLS", async () => {
+    const options = {
+      route: "https://yylx.world/dev",
+      insecureForKind: true,
+    };
+    await expect(
+      assertInsecureKindBoundary(options, {
+        env: { CI: "true" },
+        dnsLookup: async () => [{ address: "127.0.0.1", family: 4 }],
+      }),
+    ).rejects.toMatchObject({ code: "invalid_tls_mode" });
+    await expect(
+      assertInsecureKindBoundary(options, {
+        env: { CI: "true", GITHUB_ACTIONS: "true" },
+        dnsLookup: async () => [{ address: "203.0.113.10", family: 4 }],
+      }),
+    ).rejects.toMatchObject({ code: "invalid_tls_target" });
+    await expect(
+      assertInsecureKindBoundary(options, {
+        env: { CI: "true", GITHUB_ACTIONS: "true" },
+        dnsLookup: async () => [
+          { address: "127.0.0.1", family: 4 },
+          { address: "::1", family: 6 },
+        ],
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("does not resolve DNS when strict TLS remains enabled", async () => {
+    let called = false;
+    await assertInsecureKindBoundary(
+      { route: "https://yylx.world/dev", insecureForKind: false },
+      {
+        env: {},
+        dnsLookup: async () => {
+          called = true;
+          return [];
+        },
+      },
+    );
+    expect(called).toBe(false);
+  });
+
+  it("rejects unsafe DNS before reading the singleton token", async () => {
+    process.env.CI = "true";
+    process.env.GITHUB_ACTIONS = "true";
+    const options = parseArgs([...validArgs(), "--insecure-for-kind"]);
+    let secretRead = false;
+
+    await expect(
+      executeSmoke(options, {
+        env: { CI: "true", GITHUB_ACTIONS: "true" },
+        dnsLookup: async () => [{ address: "203.0.113.10", family: 4 }],
+        fsModule: {
+          lstat: async () => {
+            secretRead = true;
+            throw new Error("must not read");
+          },
+        },
+      }),
+    ).rejects.toMatchObject({ code: "invalid_tls_target" });
+    expect(secretRead).toBe(false);
+  });
+});
+
 describe("sanitized evidence contract", () => {
+  it("requires a visible React query success marker before crediting UI", async () => {
+    const waitFor = vi.fn().mockResolvedValue(undefined);
+    const locator = vi.fn().mockReturnValue({ waitFor });
+
+    await waitForSuccessfulQueryCard(
+      { locator },
+      "audit-events",
+      12_345,
+    );
+
+    expect(locator).toHaveBeenCalledWith(
+      '[data-loom-query="audit-events"]' +
+        '[data-loom-query-status="success"]',
+    );
+    expect(waitFor).toHaveBeenCalledWith({
+      state: "visible",
+      timeout: 12_345,
+    });
+  });
+
+  it("requires a full trailing quiet window before sealing browser checks", async () => {
+    const handlers = new Map();
+    let now = 0;
+    const page = {
+      on: vi.fn().mockImplementation((event, handler) => {
+        handlers.set(event, handler);
+      }),
+      waitForTimeout: vi.fn().mockImplementation(async (milliseconds) => {
+        now += milliseconds;
+      }),
+    };
+    const monitor = createAuthenticatedPageMonitor(
+      page,
+      "https://yylx.world/dev",
+      { nowFn: () => now },
+    );
+
+    handlers.get("request")();
+    const waiting = monitor.waitForQuiet(1_000);
+    await Promise.resolve();
+    handlers.get("requestfinished")();
+    const requestFinishedAt = now;
+    await waiting;
+
+    expect(now - requestFinishedAt).toBeGreaterThanOrEqual(500);
+    expect(page.waitForTimeout).toHaveBeenCalled();
+  });
+
+  it("fails closed on authenticated page errors and same-origin 5xx", () => {
+    const handlers = new Map();
+    const page = {
+      on: vi.fn().mockImplementation((event, handler) => {
+        handlers.set(event, handler);
+      }),
+    };
+    const monitor = createAuthenticatedPageMonitor(
+      page,
+      "https://yylx.world/dev",
+    );
+    const checks = {};
+
+    handlers.get("pageerror")(new Error("render failed"));
+    handlers.get("response")({
+      status: () => 503,
+      url: () => "https://yylx.world/dev/api/v1/admin/audit-events",
+      request: () => ({ resourceType: () => "fetch" }),
+    });
+
+    expect(() => monitor.applyChecks(checks)).toThrowError(
+      "authenticated browser runtime reported a blocking error",
+    );
+    expect(checks.browser_page_errors_clean).toBe(false);
+    expect(checks.browser_server_errors_clean).toBe(false);
+  });
+
   it("redacts known values, Loom credentials, and sensitive keys", () => {
     const report = sanitizeReportValue(
       {
-        candidate_sha: CANDIDATE_SHA,
+        deployed_sha: DEPLOYED_SHA,
         detail: `Bearer ${RAW_ADMIN_TOKEN}`,
         authorization: `Bearer ${RAW_ADMIN_TOKEN}`,
         nested: { csrf_token: "loom_csrf_secret-value" },
@@ -155,7 +322,7 @@ describe("sanitized evidence contract", () => {
     );
     const rendered = JSON.stringify(report);
 
-    expect(report.candidate_sha).toBe(CANDIDATE_SHA);
+    expect(report.deployed_sha).toBe(DEPLOYED_SHA);
     expect(rendered).not.toContain(RAW_ADMIN_TOKEN);
     expect(rendered).not.toContain("loom_csrf_secret-value");
     expect(report.authorization).toBe("[REDACTED]");
@@ -167,6 +334,7 @@ describe("sanitized evidence contract", () => {
     const targetUserId = "22222222-2222-4222-8222-222222222222";
     const nowMs = 1_800_000_000_000;
     const calls = [];
+    let launchOptions = null;
     const closed = { browser: false, context: false, cookies: false };
 
     function response(status, payload = null, headers = {}) {
@@ -197,6 +365,7 @@ describe("sanitized evidence contract", () => {
           return response(204, null, {
             "cache-control": "no-store",
             pragma: "no-cache",
+            "x-loom-build-sha": DEPLOYED_SHA,
           });
         },
         get: async (url) => {
@@ -216,6 +385,7 @@ describe("sanitized evidence contract", () => {
                     target_status: "pending_setup",
                     auth_source: "singleton_admin_bearer",
                     ttl_seconds: 900,
+                    build_sha: DEPLOYED_SHA,
                   },
                 },
               ],
@@ -251,18 +421,30 @@ describe("sanitized evidence contract", () => {
     };
     const playwrightModule = {
       chromium: {
-        launch: async () => ({
-          version: () => "123.0.0",
-          newContext: async () => context,
-          close: async () => {
-            closed.browser = true;
-          },
-        }),
+        launch: async (options) => {
+          launchOptions = options;
+          return {
+            version: () => "123.0.0",
+            newContext: async () => context,
+            close: async () => {
+              closed.browser = true;
+            },
+          };
+        },
       },
     };
 
-    const report = await executeSmoke(parseArgs(validArgs()), {
-      env: { ADMIN_TOKEN: RAW_ADMIN_TOKEN },
+    async function* stdin() {
+      yield Buffer.from(`${RAW_ADMIN_TOKEN}\n`);
+    }
+
+    const report = await executeSmoke(parseArgs(validArgs("-")), {
+      env: {
+        PATH: "/usr/bin",
+        GITHUB_TOKEN: "must-not-reach-browser",
+        LEAK: RAW_ADMIN_TOKEN,
+      },
+      stdin: stdin(),
       playwrightModule,
       randomUUIDFn: () => requestUuid,
       nowFn: () => nowMs,
@@ -279,6 +461,10 @@ describe("sanitized evidence contract", () => {
       "https://yylx.world/dev/api/v1/auth/logout",
     ]);
     expect(closed).toEqual({ browser: true, context: true, cookies: true });
+    expect(launchOptions).toEqual({
+      headless: true,
+      env: { PATH: "/usr/bin" },
+    });
     expect(JSON.stringify(report)).not.toContain(RAW_ADMIN_TOKEN);
   });
 
@@ -347,6 +533,7 @@ describe("sanitized evidence contract", () => {
         target_status: "pending_setup",
         auth_source: "singleton_admin_bearer",
         ttl_seconds: 900,
+        build_sha: DEPLOYED_SHA,
       },
     };
     const found = findCorrelatedAuditEvent(
@@ -355,6 +542,7 @@ describe("sanitized evidence contract", () => {
         requestId: "staging-admin-browser-request",
         targetUserId: "22222222-2222-4222-8222-222222222222",
         username: "qianyi",
+        buildSha: DEPLOYED_SHA,
       },
     );
 
@@ -366,8 +554,36 @@ describe("sanitized evidence contract", () => {
           requestId: "staging-admin-browser-request",
           targetUserId: "22222222-2222-4222-8222-222222222222",
           username: "qianyi",
+          buildSha: DEPLOYED_SHA,
         },
       ),
     ).toBeNull();
+    expect(
+      findCorrelatedAuditEvent(
+        { items: [event] },
+        {
+          requestId: "staging-admin-browser-request",
+          targetUserId: "22222222-2222-4222-8222-222222222222",
+          username: "qianyi",
+          buildSha: "b".repeat(40),
+        },
+      ),
+    ).toBeNull();
+  });
+
+  it("scrubs secret-bearing keys and values from Chromium environment", () => {
+    expect(
+      scrubBrowserEnvironment(
+        {
+          PATH: "/usr/bin",
+          HOME: "/home/runner",
+          ADMIN_TOKEN: RAW_ADMIN_TOKEN,
+          GITHUB_TOKEN: "github-secret",
+          INDIRECT: `prefix-${RAW_ADMIN_TOKEN}`,
+          LOOM_VALUE: "loom_csrf_secret-value",
+        },
+        [RAW_ADMIN_TOKEN],
+      ),
+    ).toEqual({ PATH: "/usr/bin", HOME: "/home/runner" });
   });
 });
