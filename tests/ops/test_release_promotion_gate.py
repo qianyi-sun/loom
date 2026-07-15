@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 import yaml
+from scripts import component_ownership
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -18,12 +19,17 @@ def _candidate_sha() -> str:
 
 
 def _image_digests() -> dict[str, str]:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
     return {
-        "loom-control-plane": "ghcr.io/qianyi-sun/loom-control-plane@sha256:" + "1" * 64,
-        "loom-llm-gateway": "ghcr.io/qianyi-sun/loom-llm-gateway@sha256:" + "2" * 64,
-        "loom-service": "ghcr.io/qianyi-sun/loom-service@sha256:" + "3" * 64,
-        "loom-worker": "ghcr.io/qianyi-sun/loom-worker@sha256:" + "4" * 64,
-        "loom-web": "ghcr.io/qianyi-sun/loom-web@sha256:" + "5" * 64,
+        image_name: f"ghcr.io/qianyi-sun/{image_name}@sha256:" + f"{index:x}" * 64
+        for index, image_name in enumerate(
+            (
+                component.release_digest
+                for component in manifest.components
+                if component.kind == "release-image" and component.release_digest is not None
+            ),
+            start=1,
+        )
     }
 
 
@@ -99,7 +105,7 @@ def _prod_staging_isolation_evidence() -> dict[str, Any]:
                 "environment": "production",
                 "api_url": "https://yylx.world/prod/api",
                 "image": "ghcr.io/qianyi-sun/loom-worker:release-0123456789ab",
-                "image_digest": "ghcr.io/qianyi-sun/loom-worker@sha256:" + "4" * 64,
+                "image_digest": _image_digests()["loom-worker"],
                 "source_commit": _candidate_sha(),
                 "k8s_namespace": "loom-prod",
                 "k8s_deployment": "loom-prod-worker",
@@ -370,6 +376,48 @@ def test_release_gate_accepts_complete_manifest_and_writes_artifacts(tmp_path: P
     assert "frontend_route_evidence" in markdown
     assert "prod_staging_isolation" in markdown
     assert "raw_delivery_export_status" in markdown
+    assert all(image_name in markdown for image_name in _image_digests())
+
+
+def test_release_gate_requires_every_manifest_release_digest(tmp_path: Path) -> None:
+    manifest = _passing_evidence()
+    manifest["image_digests"].pop("loom-agent-sandbox")
+
+    result = _run_release_gate(
+        tmp_path,
+        manifest,
+        "validate",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "release-0123456789ab",
+    )
+
+    assert result.returncode != 0
+    assert "image_digests.loom-agent-sandbox must end with @sha256:<64 hex>" in result.stderr
+
+
+def test_release_gate_rejects_digest_without_manifest_owner(tmp_path: Path) -> None:
+    manifest = _passing_evidence()
+    manifest["image_digests"]["loom-unowned-extra"] = (
+        "ghcr.io/qianyi-sun/loom-unowned-extra@sha256:" + "a" * 64
+    )
+
+    result = _run_release_gate(
+        tmp_path,
+        manifest,
+        "validate",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "release-0123456789ab",
+    )
+
+    assert result.returncode != 0
+    assert (
+        "image_digests contains images without a manifest release owner: "
+        "loom-unowned-extra" in result.stderr
+    )
 
 
 def test_release_gate_official_json_round_trips_through_production_verifier(
