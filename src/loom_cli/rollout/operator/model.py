@@ -21,6 +21,9 @@ RequestEventType = Literal[
     "preview",
     "backup_started",
     "backup_failed",
+    "backup_cleanup_done",
+    "backup_cleanup_failed",
+    "backup_cleanup_started",
     "envelope_published",
     "launch_pending",
     "launch_failed",
@@ -50,6 +53,9 @@ _REQUEST_EVENTS = frozenset(
         "preview",
         "backup_started",
         "backup_failed",
+        "backup_cleanup_done",
+        "backup_cleanup_failed",
+        "backup_cleanup_started",
         "envelope_published",
         "launch_pending",
         "launch_failed",
@@ -605,6 +611,13 @@ class RequestEvent:
             reason = _require_string(self.reason, "reason")
             if len(reason) > 500 or any(ord(char) < 32 and char not in "\t" for char in reason):
                 raise ValueError("reason must be at most 500 characters without control bytes")
+            if self.event in {
+                "backup_failed",
+                "backup_cleanup_started",
+                "backup_cleanup_done",
+                "backup_cleanup_failed",
+            } and reason not in {"backup_failed", "backup_object_limit_exceeded"}:
+                raise ValueError("backup event reason is not an approved public token")
         if (
             self.current_step is not None
             and len(_require_string(self.current_step, "current_step")) > 128

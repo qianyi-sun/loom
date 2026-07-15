@@ -1421,6 +1421,9 @@ loom-staging-rollout resume REQUEST_ID
 
 # Stop an abandoned or unsafe attempt; the reason is mandatory audit evidence.
 loom-staging-rollout cancel REQUEST_ID --reason "bounded operational reason"
+
+# Remove only this failed pre-launch request's incomplete, no-manifest backup root.
+loom-staging-rollout cleanup-incomplete-backup REQUEST_ID
 ```
 
 `qianyi`, `hongjian`, and `devansh` are members of
@@ -1439,6 +1442,46 @@ envelope and launches a detached `loom-rollout` service unit. It never consumes
 a mutable `backups/latest` pointer. `resume` uses the original request's exact
 SHA, image tag, backup manifest and digest, rollout ID, and config binding even
 if `dev` has advanced.
+
+The staging sizing policy is based on an aggregate-only live inventory taken
+on 2026-07-15; no keys, credential values, or payloads were emitted. It measured
+579,714 objects and 12,517,813,079 bytes across
+the two protected buckets (13,460 trajectory objects / 807,799,196 bytes and
+566,254 artifact objects / 11,710,013,883 bytes). The installer-validated,
+root-owned policy allows at most 1,000,000 MinIO objects and 1,000,004 regular
+files across the complete bundle; the four-file allowance is the PostgreSQL
+dump plus three protected Secret exports. This replaces the accidental 99,996
+object ceiling while retaining finite headroom over the measured store.
+
+The current safe-key shape charges 6,420,179 conservative MinIO entries, has
+maximum mirror depth 18, maximum direct-directory fanout 6,530, and no unsafe
+keys. The independent fail-closed bounds are therefore 16,000,000 entries and
+16 TiB for the whole bundle (15 TiB for MinIO and 1 TiB for PostgreSQL), plus
+20,000 listing pages,
+depth 64, 22 hours elapsed time, safe relative object paths, 256 MiB free-space
+reserve, 1,024 free-inode reserve, and immutable manifest publication. The
+installed config must contain `backup_max_objects = 1000000` and
+`backup_max_entries = 16000000`; arbitrary operator overrides are rejected.
+At 800,000 objects or 12,800,000 conservative entries (80% of either hard cap),
+the platform owner must rerun the aggregate inventory and review objects,
+entries, pages, bytes, depth, and fanout in a merged PR before changing the
+root-owned literals. Runtime auto-growth is forbidden.
+
+These exact policy keys extend the operator config within schema v1 and are
+installed atomically with the matching broker package. A stale v1 config
+missing either key is rejected before backup or mutation, and downgrading an
+installed runner to a binary that does not know the keys is unsupported; use a
+merged revert and the normal atomic installer path instead.
+
+Object exhaustion is recorded as the secret-safe public reason
+`backup_object_limit_exceeded`, distinct from generic `backup_failed`, and
+still publishes no envelope or unit. `cleanup-incomplete-backup` accepts only a
+failed pre-launch request while staging is idle. It rejects previews, any
+request with an envelope or attempt, ambiguous roots, unsafe ownership/modes,
+symlinks, hard links, special files, traversal-limit drift, and every root containing
+`backup-manifest.json` or targeted by `backups/latest`. Cleanup is
+request-scoped and idempotent; it never deletes a valid manifest-backed restore
+point and leaves the request status failed for audit.
 
 Only one full staging request may be pending or running. A second `start` or
 `resume` fails instead of queueing or preempting and reports only safe active
@@ -1748,8 +1791,11 @@ snapshot, and protected Secret backup, verifies the manifest and freshness
 window, and binds its immutable path and digest into the request envelope
 before unit launch. Step 05 rechecks that same manifest and refuses to advance
 without sufficient remaining freshness. A backup failure launches no driver
-and performs no staging mutation; inspect the safe request status and fix the
-backup subsystem before starting a new request.
+and performs no staging mutation. Inspect the safe request status; if it is a
+failed pre-launch request with only an incomplete no-manifest root, use
+`loom-staging-rollout cleanup-incomplete-backup REQUEST_ID`, then fix the backup subsystem
+before starting a new request. Never remove a request root manually or delete a
+manifest-backed backup.
 
 `ADMIN_TOKEN_SOURCE` is a secret source reference, not a raw token; use
 `env:VAR` or `file:PATH` so shell history, process listings, logs, JSON, and

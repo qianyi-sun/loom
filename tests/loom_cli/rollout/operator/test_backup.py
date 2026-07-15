@@ -25,6 +25,7 @@ from loom_cli.rollout.operator import backup as backup_module
 from loom_cli.rollout.operator.backup import (
     BackupCreator,
     BackupError,
+    BackupPolicyLimitError,
     Boto3MinioMirror,
     SubprocessBackupCommandRunner,
     VerifiedBackup,
@@ -1074,6 +1075,10 @@ def test_creator_has_real_command_and_minio_defaults(tmp_path: Path) -> None:
 
     assert isinstance(creator._runner, SubprocessBackupCommandRunner)
     assert isinstance(creator._minio, Boto3MinioMirror)
+    assert creator._minio._max_objects == 1_000_000
+    assert creator._minio._max_entries == 15_999_994
+    assert creator._traversal_limits.max_files == 1_000_004
+    assert creator._traversal_limits.max_entries == 16_000_000
 
 
 def test_resume_revalidates_exact_old_backup_without_creating_another(tmp_path: Path) -> None:
@@ -3205,7 +3210,7 @@ def test_boto_mirror_has_total_object_bound(tmp_path: Path) -> None:
         available_bytes=lambda _path: 100_000,
     )
 
-    with pytest.raises(ValueError, match="object limit"):
+    with pytest.raises(BackupPolicyLimitError, match="object limit") as captured:
         mirror.mirror(
             endpoint_url="http://127.0.0.1:19000",
             access_key=MINIO_ACCESS_KEY,
@@ -3214,9 +3219,292 @@ def test_boto_mirror_has_total_object_bound(tmp_path: Path) -> None:
             destination=destination,
         )
 
+    assert captured.value.code == "minio_object_limit_exceeded"
+    assert captured.value.public_reason == "backup_object_limit_exceeded"
     assert (destination / "loom-staging-trajectories" / "first.bin").read_bytes() == b"x"
     assert not (destination / "loom-staging-trajectories" / "second.bin").exists()
     assert events == ["client_close"]
+
+
+def test_reviewed_policy_crosses_old_99996_object_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class LargeListingS3(LifecycleS3):
+        def list_objects_v2(self, **kwargs: str) -> dict[str, object]:
+            if kwargs["Bucket"] == "loom-staging-artifacts":
+                return {"Contents": [], "IsTruncated": False}
+            page = int(kwargs.get("ContinuationToken", "0"))
+            first = page * 1000
+            remaining = 100_001 - first
+            count = min(1000, remaining)
+            truncated = remaining > count
+            result: dict[str, object] = {
+                "Contents": [{"Key": f"object-{first + offset:06d}"} for offset in range(count)],
+                "IsTruncated": truncated,
+            }
+            if truncated:
+                result["NextContinuationToken"] = str(page + 1)
+            return result
+
+    client = LargeListingS3(events)
+    destination = tmp_path / "minio"
+    destination.mkdir(mode=0o700)
+    config = make_config(tmp_path)
+    mirror = Boto3MinioMirror(
+        client_factory=lambda *_args, **_kwargs: client,
+        max_objects=config.backup_max_objects,
+        disk_reserve_bytes=0,
+        inode_reserve=0,
+        available_bytes=lambda _path: 1024**4,
+        available_inodes=lambda _path: 2_000_000,
+    )
+    monkeypatch.setattr(backup_module, "_stream_s3_object", lambda *_args, **_kwargs: None)
+
+    mirror.mirror(
+        endpoint_url="http://127.0.0.1:19000",
+        access_key=MINIO_ACCESS_KEY,
+        secret_key=MINIO_SECRET_KEY,
+        buckets=("loom-staging-trajectories", "loom-staging-artifacts"),
+        destination=destination,
+    )
+
+    assert config.backup_max_objects == 1_000_000
+    assert events == ["client_close"]
+
+
+def _incomplete_bundle(tmp_path: Path) -> tuple[BackupCreator, Path]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    config = make_config(tmp_path)
+    backups = config.rollout_root / "backups"
+    backups.mkdir(mode=0o700)
+    bundle = backups / "20260713T200000Z-stg-20260713-abcdef12"
+    bundle.mkdir(mode=0o700)
+    component = bundle / "minio"
+    component.mkdir(mode=0o700)
+    payload = component / "object.bin"
+    payload.write_bytes(b"payload")
+    payload.chmod(0o600)
+    return BackupCreator(config, service_uid=os.geteuid()), bundle
+
+
+def test_cleanup_incomplete_is_request_scoped_and_idempotent(tmp_path: Path) -> None:
+    creator, bundle = _incomplete_bundle(tmp_path)
+
+    assert creator.cleanup_incomplete("stg-20260713-abcdef12") is True
+    assert not bundle.exists()
+    assert creator.cleanup_incomplete("stg-20260713-abcdef12") is False
+
+
+def test_cleanup_incomplete_refuses_manifest_backed_or_latest_bundle(tmp_path: Path) -> None:
+    manifest_creator, manifest_bundle = _incomplete_bundle(tmp_path / "manifest")
+    manifest = manifest_bundle / "backup-manifest.json"
+    manifest.write_bytes(b"{}")
+    manifest.chmod(0o600)
+
+    with pytest.raises(BackupError, match="backup_cleanup_failed"):
+        manifest_creator.cleanup_incomplete("stg-20260713-abcdef12")
+    assert manifest_bundle.exists()
+
+    latest_creator, latest_bundle = _incomplete_bundle(tmp_path / "latest")
+    (latest_bundle.parent / "latest").symlink_to(latest_bundle.name)
+
+    with pytest.raises(BackupError, match="backup_cleanup_failed"):
+        latest_creator.cleanup_incomplete("stg-20260713-abcdef12")
+    assert latest_bundle.exists()
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "hardlink", "fifo"])
+def test_cleanup_incomplete_refuses_unsafe_entries(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    creator, bundle = _incomplete_bundle(tmp_path)
+    unsafe = bundle / "unsafe"
+    if unsafe_kind == "symlink":
+        unsafe.symlink_to("/tmp")
+    elif unsafe_kind == "hardlink":
+        source = bundle / "minio" / "object.bin"
+        os.link(source, unsafe)
+    else:
+        os.mkfifo(unsafe, mode=0o600)
+
+    with pytest.raises(BackupError, match="backup_cleanup_failed"):
+        creator.cleanup_incomplete("stg-20260713-abcdef12")
+    assert bundle.exists()
+
+
+@pytest.mark.parametrize("late_guard", ["manifest", "latest"])
+def test_cleanup_rechecks_publication_guards_before_first_removal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    late_guard: str,
+) -> None:
+    creator, bundle = _incomplete_bundle(tmp_path)
+    original_validate = backup_module._validate_cleanup_directory
+
+    def inject_guard(*args: object, **kwargs: object) -> None:
+        original_validate(*args, **kwargs)  # type: ignore[arg-type]
+        if late_guard == "manifest":
+            manifest = bundle / "backup-manifest.json"
+            manifest.write_bytes(b"{}")
+            manifest.chmod(0o600)
+        else:
+            (bundle.parent / "latest").symlink_to(bundle.name)
+
+    monkeypatch.setattr(backup_module, "_validate_cleanup_directory", inject_guard)
+
+    with pytest.raises(BackupError, match="backup_cleanup_failed"):
+        creator.cleanup_incomplete("stg-20260713-abcdef12")
+
+    assert (bundle / "minio" / "object.bin").read_bytes() == b"payload"
+    assert bundle.exists()
+
+
+def test_interrupted_cleanup_is_safely_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    creator, bundle = _incomplete_bundle(tmp_path)
+    extra = bundle / "extra.bin"
+    extra.write_bytes(b"extra")
+    extra.chmod(0o600)
+    original_unlink = backup_module.os.unlink
+    interrupted = False
+
+    def unlink_then_interrupt(path: str, *, dir_fd: int | None = None) -> None:
+        nonlocal interrupted
+        original_unlink(path, dir_fd=dir_fd)
+        if not interrupted:
+            interrupted = True
+            raise OSError("simulated cleanup interruption")
+
+    monkeypatch.setattr(backup_module.os, "unlink", unlink_then_interrupt)
+    with pytest.raises(BackupError, match="backup_cleanup_failed"):
+        creator.cleanup_incomplete("stg-20260713-abcdef12")
+    assert bundle.exists()
+
+    monkeypatch.setattr(backup_module.os, "unlink", original_unlink)
+    assert creator.cleanup_incomplete("stg-20260713-abcdef12") is True
+    assert not bundle.exists()
+
+
+def test_cleanup_refuses_bundle_root_on_another_filesystem(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    creator, bundle = _incomplete_bundle(tmp_path)
+    original_stat = backup_module.os.stat
+    actual = bundle.lstat()
+    altered_values = list(actual)
+    altered_values[2] = actual.st_dev + 1
+    altered = os.stat_result(altered_values)
+
+    def cross_device_stat(
+        path: object,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        if path == bundle.name and dir_fd is not None and not follow_symlinks:
+            return altered
+        return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(backup_module.os, "stat", cross_device_stat)
+
+    with pytest.raises(BackupError, match="backup_cleanup_failed"):
+        creator.cleanup_incomplete("stg-20260713-abcdef12")
+    assert (bundle / "minio" / "object.bin").read_bytes() == b"payload"
+
+
+@pytest.mark.parametrize("limit_kind", ["files", "entries", "bytes", "depth", "directory"])
+def test_cleanup_enforces_traversal_bounds_before_removal(
+    tmp_path: Path,
+    limit_kind: str,
+) -> None:
+    original, bundle = _incomplete_bundle(tmp_path)
+    extra = bundle / "extra.bin"
+    extra.write_bytes(b"extra")
+    extra.chmod(0o600)
+    kwargs: dict[str, int] = {}
+    if limit_kind == "files":
+        kwargs["max_files"] = 1
+    elif limit_kind == "entries":
+        kwargs["max_entries"] = 1
+    elif limit_kind == "bytes":
+        kwargs["max_total_bytes"] = 1
+    elif limit_kind == "depth":
+        kwargs["max_depth"] = 0
+    else:
+        kwargs["max_directory_entries"] = 1
+    creator = BackupCreator(
+        original.config,
+        service_uid=os.geteuid(),
+        traversal_limits=BackupTraversalLimits(**kwargs),
+    )
+
+    with pytest.raises(BackupError, match="backup_cleanup_failed"):
+        creator.cleanup_incomplete("stg-20260713-abcdef12")
+
+    assert (bundle / "minio" / "object.bin").read_bytes() == b"payload"
+    assert extra.read_bytes() == b"extra"
+
+
+def test_cleanup_exact_bundle_binding_preserves_same_request_decoy(tmp_path: Path) -> None:
+    creator, bundle = _incomplete_bundle(tmp_path)
+    decoy = bundle.parent / "20260713T210000Z-stg-20260713-abcdef12"
+    decoy.mkdir(mode=0o700)
+    decoy_file = decoy / "keep.bin"
+    decoy_file.write_bytes(b"keep")
+    decoy_file.chmod(0o600)
+
+    assert (
+        creator.cleanup_incomplete(
+            "stg-20260713-abcdef12",
+            bundle_name=bundle.name,
+        )
+        is True
+    )
+    assert not bundle.exists()
+    assert decoy_file.read_bytes() == b"keep"
+
+
+def test_cleanup_rejects_mismatched_or_ambiguous_root_binding(tmp_path: Path) -> None:
+    creator, bundle = _incomplete_bundle(tmp_path)
+    decoy = bundle.parent / "20260713T210000Z-stg-20260713-abcdef12"
+    decoy.mkdir(mode=0o700)
+
+    with pytest.raises(BackupError, match="backup_cleanup_failed"):
+        creator.cleanup_incomplete(
+            "stg-20260713-abcdef12",
+            bundle_name="20260713T200000Z-req-another",
+        )
+    with pytest.raises(BackupError, match="backup_cleanup_failed"):
+        creator.cleanup_incomplete("stg-20260713-abcdef12")
+
+    assert (bundle / "minio" / "object.bin").read_bytes() == b"payload"
+    assert decoy.exists()
+
+
+def test_cleanup_uses_one_elapsed_deadline_across_discovery_and_validation(
+    tmp_path: Path,
+) -> None:
+    original, bundle = _incomplete_bundle(tmp_path)
+    ticks = iter((0.0, 0.25, 1.0))
+    creator = BackupCreator(
+        original.config,
+        service_uid=os.geteuid(),
+        traversal_limits=BackupTraversalLimits(
+            max_elapsed_seconds=0.5,
+            monotonic=lambda: next(ticks, 1.0),
+        ),
+    )
+
+    with pytest.raises(BackupError, match="backup_cleanup_failed"):
+        creator.cleanup_incomplete("stg-20260713-abcdef12")
+    assert (bundle / "minio" / "object.bin").read_bytes() == b"payload"
 
 
 def test_boto_mirror_has_disk_aware_inode_bound(tmp_path: Path) -> None:
