@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -48,22 +47,6 @@ def _image_matrix_step() -> dict[str, Any]:
     )
 
 
-def _image_matrix_python() -> str:
-    script = _image_matrix_step()["run"]
-    _, python_and_marker = script.split("python - <<'PY'\n", maxsplit=1)
-    python_body, trailing = python_and_marker.rsplit("\nPY", maxsplit=1)
-    assert not trailing.strip()
-    return python_body
-
-
-def _git(repo: Path, *args: str) -> str:
-    return subprocess.check_output(
-        ["git", *args],
-        cwd=repo,
-        text=True,
-    ).strip()
-
-
 def _run_image_matrix_plan(
     tmp_path: Path,
     *,
@@ -71,46 +54,32 @@ def _run_image_matrix_plan(
     unowned_runtime: str,
     changed_paths: tuple[str, ...] = ("unowned-runtime/new-input.bin",),
 ) -> tuple[subprocess.CompletedProcess[str], str]:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init", "--quiet")
-    _git(repo, "config", "user.email", "ci@example.invalid")
-    _git(repo, "config", "user.name", "CI Test")
-
-    (repo / "seed.txt").write_text("seed\n", encoding="utf-8")
-    _git(repo, "add", "seed.txt")
-    _git(repo, "commit", "--quiet", "-m", "base")
-    base_sha = _git(repo, "rev-parse", "HEAD")
-
-    for changed_path in changed_paths:
-        target = repo / changed_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b"runtime input\n")
-    _git(repo, "add", *changed_paths)
-    _git(repo, "commit", "--quiet", "-m", "head")
-    head_sha = _git(repo, "rev-parse", "HEAD")
-
+    changed_files = tmp_path / "changed-files.txt"
+    changed_files.write_text("\n".join(changed_paths) + "\n", encoding="utf-8")
     github_output = tmp_path / "github-output.txt"
     result = subprocess.run(
-        [sys.executable, "-"],
-        input=_image_matrix_python(),
-        cwd=repo,
+        ["bash"],
+        input=_image_matrix_step()["run"],
+        cwd=REPO_ROOT,
         text=True,
         capture_output=True,
         env={
             **os.environ,
             "EVENT_NAME": "pull_request",
-            "BASE_SHA": base_sha,
-            "HEAD_SHA": head_sha,
-            "PR_LABELS_JSON": "[]",
             "REQUIRED": required,
             "UNOWNED_RUNTIME": unowned_runtime,
+            "CHANGED_FILES": str(changed_files),
             "GITHUB_OUTPUT": str(github_output),
         },
         check=False,
     )
     output = github_output.read_text(encoding="utf-8") if github_output.exists() else ""
     return result, output
+
+
+def _github_output_value(output: str, key: str) -> str:
+    values = dict(line.split("=", maxsplit=1) for line in output.splitlines())
+    return values[key]
 
 
 GATE_CONTRACTS = {
@@ -141,7 +110,7 @@ def test_images_builds_use_planner_selection() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     jobs = workflow["jobs"]
 
-    assert "required" in jobs["plan"]["outputs"]
+    assert jobs["plan"]["outputs"]["required"] == "${{ steps.plan.outputs.required }}"
     assert jobs["build"]["needs"] == "plan"
     assert "needs.plan.outputs.required == 'true'" in jobs["build"]["if"]
 
@@ -149,31 +118,23 @@ def test_images_builds_use_planner_selection() -> None:
 def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     jobs = workflow["jobs"]
-    push_paths = _workflow_on(workflow)["push"]["paths"]
+    push_trigger = _workflow_on(workflow)["push"]
 
     assert "plan" in jobs
     assert "images" in jobs["plan"]["outputs"]
     build = jobs["build"]
     assert build["needs"] == "plan"
     assert build["strategy"]["matrix"]["include"] == "${{ fromJSON(needs.plan.outputs.images) }}"
-    plan_script = "\n".join(
-        step.get("run", "") for step in jobs["plan"]["steps"] if "run" in step
-    )
-    assert "web/index.html" in plan_script
-    assert "deploy/Dockerfile.worker" in plan_script
-    assert "migrations/" in plan_script
-    assert "web/tailwind.config.js" in push_paths
-    assert "deploy/nginx-spa-security-headers.conf" in push_paths
+    plan_script = "\n".join(step.get("run", "") for step in jobs["plan"]["steps"] if "run" in step)
+    assert "scripts/component_ownership.py" in plan_script
+    assert "plan-images" in plan_script
+    assert push_trigger == {"branches": ["dev", "main"]}
 
 
 def test_images_matrix_plan_receives_shared_required_decision() -> None:
     env = _image_matrix_step()["env"]
-    assert env["REQUIRED"] == (
-        "${{ steps.required.outputs.images }}"
-    )
-    assert env["UNOWNED_RUNTIME"] == (
-        "${{ steps.required.outputs.unowned_runtime }}"
-    )
+    assert env["REQUIRED"] == ("${{ steps.required.outputs.images }}")
+    assert env["UNOWNED_RUNTIME"] == ("${{ steps.required.outputs.unowned_runtime }}")
 
 
 def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path) -> None:
@@ -184,21 +145,21 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
     )
 
     assert result.returncode == 0, result.stderr
-    matrix = json.loads(output.removeprefix("images=").strip())
-    assert matrix == [
-        {"image": "worker", "dockerfile": "deploy/Dockerfile.worker"},
-        {"image": "service", "dockerfile": "deploy/Dockerfile.service"},
-        {
-            "image": "control-plane",
-            "dockerfile": "deploy/Dockerfile.control-plane",
-        },
-        {"image": "llm-gateway", "dockerfile": "deploy/Dockerfile.gateway"},
-        {"image": "web", "dockerfile": "deploy/Dockerfile.web"},
-        {
-            "image": "llm-gateway-sandbox",
-            "dockerfile": "deploy/Dockerfile.gateway-sandbox",
-        },
-    ]
+    matrix = json.loads(_github_output_value(output, "images"))
+    assert _github_output_value(output, "required") == "true"
+    assert len(matrix) == 9
+    assert {entry["image"] for entry in matrix} == {
+        "agent-sandbox",
+        "control-plane",
+        "egress-xds",
+        "family-orchestrator",
+        "llm-gateway",
+        "llm-gateway-sandbox",
+        "service",
+        "web",
+        "worker",
+    }
+    assert all(set(entry) == {"image", "image_name", "dockerfile", "context"} for entry in matrix)
 
 
 def test_images_mixed_known_and_unowned_paths_select_all_images(tmp_path: Path) -> None:
@@ -210,11 +171,14 @@ def test_images_mixed_known_and_unowned_paths_select_all_images(tmp_path: Path) 
     )
 
     assert result.returncode == 0, result.stderr
-    matrix = json.loads(output.removeprefix("images=").strip())
+    matrix = json.loads(_github_output_value(output, "images"))
     assert {entry["image"] for entry in matrix} == {
+        "agent-sandbox",
         "worker",
         "service",
         "control-plane",
+        "egress-xds",
+        "family-orchestrator",
         "llm-gateway",
         "web",
         "llm-gateway-sandbox",
@@ -230,9 +194,47 @@ def test_frontend_security_policy_change_selects_only_web_image(tmp_path: Path) 
     )
 
     assert result.returncode == 0, result.stderr
-    assert json.loads(output.removeprefix("images=").strip()) == [
-        {"image": "web", "dockerfile": "deploy/Dockerfile.web"},
+    assert json.loads(_github_output_value(output, "images")) == [
+        {
+            "image": "web",
+            "image_name": "loom-web",
+            "dockerfile": "deploy/Dockerfile.web",
+            "context": ".",
+        },
     ]
+
+
+def test_manifest_owned_markdown_build_input_requires_images(tmp_path: Path) -> None:
+    result, output = _run_image_matrix_plan(
+        tmp_path,
+        required="false",
+        unowned_runtime="false",
+        changed_paths=("README.md",),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _github_output_value(output, "required") == "true"
+    matrix = json.loads(_github_output_value(output, "images"))
+    assert {entry["image"] for entry in matrix} == {
+        "control-plane",
+        "family-orchestrator",
+        "llm-gateway",
+        "service",
+        "worker",
+    }
+
+
+def test_unowned_static_documentation_does_not_require_images(tmp_path: Path) -> None:
+    result, output = _run_image_matrix_plan(
+        tmp_path,
+        required="false",
+        unowned_runtime="false",
+        changed_paths=("docs/user-guide.md",),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _github_output_value(output, "required") == "false"
+    assert json.loads(_github_output_value(output, "images")) == []
 
 
 @pytest.mark.parametrize("required", ["", "invalid"])
@@ -247,7 +249,7 @@ def test_images_matrix_plan_rejects_malformed_required(
     )
 
     assert result.returncode != 0
-    assert "FAIL: invalid planner boolean required=" in result.stderr
+    assert "FAIL: invalid planner boolean:" in result.stderr
     assert output == ""
 
 
@@ -263,28 +265,25 @@ def test_images_matrix_plan_rejects_malformed_unowned_runtime(
     )
 
     assert result.returncode != 0
-    assert "FAIL: invalid planner boolean unowned_runtime=" in result.stderr
+    assert "FAIL: invalid planner boolean:" in result.stderr
     assert output == ""
 
 
 def test_images_merge_groups_select_a_nonempty_matrix() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     plan_script = "\n".join(
-        step.get("run", "")
-        for step in workflow["jobs"]["plan"]["steps"]
-        if "run" in step
+        step.get("run", "") for step in workflow["jobs"]["plan"]["steps"] if "run" in step
     )
 
-    assert 'if event in {"workflow_dispatch", "merge_group"}:' in plan_script
-    assert 'if event not in {"workflow_dispatch", "merge_group"}:' in plan_script
+    assert '"$EVENT_NAME" == "workflow_dispatch"' in plan_script
+    assert '"$EVENT_NAME" == "merge_group"' in plan_script
+    assert "--force-all" in plan_script
 
 
 def test_images_merge_groups_do_not_publish_or_write_cache() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     build_steps = workflow["jobs"]["build"]["steps"]
-    build_script = "\n".join(
-        str(step["run"]) for step in build_steps if "run" in step
-    )
+    build_script = "\n".join(str(step["run"]) for step in build_steps if "run" in step)
     publish = workflow["jobs"]["publish"]
 
     assert "docker login" not in build_script
@@ -292,9 +291,7 @@ def test_images_merge_groups_do_not_publish_or_write_cache() -> None:
     assert "--cache-to" not in build_script
     assert 'merge_group) image_tag="merge-group-${sha_short}"' in build_script
     assert "github.event_name == 'push'" in publish["if"]
-    assert any(
-        step.get("name") == "Log in to GHCR" for step in publish["steps"]
-    )
+    assert any(step.get("name") == "Log in to GHCR" for step in publish["steps"])
 
 
 def test_stable_gate_scripts_have_valid_bash_syntax() -> None:
@@ -696,14 +693,8 @@ def test_ci_planner_uses_merge_base_for_pr_changed_paths_only() -> None:
         if step.get("id") == "plan"
     )
 
-    assert (
-        'pull_request)\n    git diff --name-only "$BASE_SHA...$HEAD_SHA"'
-        in plan_script
-    )
-    assert (
-        'merge_group)\n    git diff --name-only "$BASE_SHA" "$HEAD_SHA"'
-        in plan_script
-    )
+    assert 'pull_request)\n    git diff --name-only "$BASE_SHA...$HEAD_SHA"' in plan_script
+    assert 'merge_group)\n    git diff --name-only "$BASE_SHA" "$HEAD_SHA"' in plan_script
     assert "pull_request|merge_group)" not in plan_script
 
 
@@ -718,9 +709,7 @@ def test_opt_in_pr_smokes_cancel_superseded_pr_runs() -> None:
         assert workflow["concurrency"]["cancel-in-progress"] == (
             "${{ github.event_name == 'pull_request' }}"
         )
-        assert "github.event.pull_request.number || github.ref" in workflow[
-            "concurrency"
-        ]["group"]
+        assert "github.event.pull_request.number || github.ref" in workflow["concurrency"]["group"]
 
 
 def test_pinned_ingress_controller_config_has_trusted_raw_path_guard() -> None:
@@ -745,10 +734,7 @@ def test_pinned_ingress_controller_config_has_trusted_raw_path_guard() -> None:
         "}\n"
     )
     assert data["server-snippet"] == (
-        "merge_slashes off;\n"
-        "if ($loom_ambiguous_path) {\n"
-        "  return 404;\n"
-        "}\n"
+        "merge_slashes off;\nif ($loom_ambiguous_path) {\n  return 404;\n}\n"
     )
     manifest = (REPO_ROOT / manifest_path).read_text(encoding="utf-8")
     assert "nginx.ingress.kubernetes.io/server-snippet" not in manifest
@@ -818,7 +804,7 @@ def test_staging_route_smoke_locks_exact_ingress_boundary_probes() -> None:
     )
     for probe in probes:
         assert probe in script
-    assert '--path-as-is --no-location --max-redirs 0' in script
+    assert "--path-as-is --no-location --max-redirs 0" in script
     assert 'if [[ "$status" != "404" ]]' in script
     assert "grep -qi '^location:' \"$headers\"" in script
     assert 'if [[ "$root_asset_status" != "404" ]]' in script
@@ -863,25 +849,16 @@ def test_web_nginx_has_same_raw_path_and_case_guard_as_controller() -> None:
     assert "merge_slashes off;" in config
     assert "if ($loom_ambiguous_path) {\n        return 404;\n    }" in config
     assert "location ~ ^/(?:prod|dev)/assets/(.+)$" in config
-    assert (
-        "location ~* ^/(?:prod|dev)(?:/|$) {\n"
-        "        return 404;\n"
-        "    }"
-        in config
-    )
+    assert "location ~* ^/(?:prod|dev)(?:/|$) {\n        return 404;\n    }" in config
 
 
 def test_staging_browser_route_smoke_uses_pinned_bundled_chromium() -> None:
     workflow = _workflow(".github/workflows/staging-smoke.yml")
     steps = workflow["jobs"]["smoke"]["steps"]
 
-    setup = next(
-        step for step in steps if step.get("name") == "Set up browser smoke Node"
-    )
+    setup = next(step for step in steps if step.get("name") == "Set up browser smoke Node")
     install = next(
-        step
-        for step in steps
-        if step.get("name") == "Install pinned browser smoke dependencies"
+        step for step in steps if step.get("name") == "Install pinned browser smoke dependencies"
     )
     browser = next(
         step
@@ -889,14 +866,10 @@ def test_staging_browser_route_smoke_uses_pinned_bundled_chromium() -> None:
         if step.get("name") == "Verify prefixed frontend routes mount in Chromium"
     )
     upload = next(
-        step
-        for step in steps
-        if step.get("name") == "Upload frontend route browser trace"
+        step for step in steps if step.get("name") == "Upload frontend route browser trace"
     )
 
-    assert setup["uses"] == (
-        f"actions/setup-node@{_locked_action_sha('actions/setup-node')}"
-    )
+    assert setup["uses"] == (f"actions/setup-node@{_locked_action_sha('actions/setup-node')}")
     assert str(setup["with"]["node-version"]) == "20"
     assert setup["with"]["cache-dependency-path"] == "web/package-lock.json"
     assert install["working-directory"] == "web"
@@ -914,9 +887,7 @@ def test_staging_browser_route_smoke_uses_pinned_bundled_chromium() -> None:
     assert upload["with"]["if-no-files-found"] == "ignore"
 
     package = json.loads((REPO_ROOT / "web/package.json").read_text(encoding="utf-8"))
-    lock = json.loads(
-        (REPO_ROOT / "web/package-lock.json").read_text(encoding="utf-8")
-    )
+    lock = json.loads((REPO_ROOT / "web/package-lock.json").read_text(encoding="utf-8"))
     assert package["devDependencies"]["@playwright/test"] == "1.61.1"
     assert lock["packages"]["node_modules/@playwright/test"]["version"] == "1.61.1"
     assert lock["packages"]["node_modules/playwright"]["version"] == "1.61.1"
@@ -925,9 +896,7 @@ def test_staging_browser_route_smoke_uses_pinned_bundled_chromium() -> None:
 
 def test_staging_browser_route_smoke_waits_for_explicit_settled_state() -> None:
     main = (REPO_ROOT / "web/src/main.tsx").read_text(encoding="utf-8")
-    smoke = (
-        REPO_ROOT / "web/scripts/frontend-route-browser-smoke.mjs"
-    ).read_text(encoding="utf-8")
+    smoke = (REPO_ROOT / "web/scripts/frontend-route-browser-smoke.mjs").read_text(encoding="utf-8")
 
     assert 'data-loom-mounted", "true"' in main
     assert 'data-loom-auth-settled", "true"' in main
@@ -938,12 +907,8 @@ def test_staging_browser_route_smoke_waits_for_explicit_settled_state() -> None:
     assert 'resourceType === "script"' in smoke
     assert "activeRequests.size === 0" in smoke
     assert "blocking browser activity did not become quiet" in smoke
-    assert smoke.index("await page.close();") < smoke.index(
-        "const initialAnonymousAuthValid"
-    )
-    assert smoke.index("await page.close();") < smoke.index(
-        "const observation = {"
-    )
+    assert smoke.index("await page.close();") < smoke.index("const initialAnonymousAuthValid")
+    assert smoke.index("await page.close();") < smoke.index("const observation = {")
     assert 'window.history.replaceState(null, "", directUrl)' in smoke
     assert "waitForTimeout(250)" not in smoke
 

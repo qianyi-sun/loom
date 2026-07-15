@@ -30,9 +30,10 @@ attestation_owners = [
   "runtime-payload-provenance",
 ]
 
-# Phase one makes this file the typed ownership authority. Workflow, rollout,
-# and release consumers migrate in later slices; the validator already rejects
-# any Dockerfile or test that is missing or ambiguously owned here.
+# This file is the typed ownership authority. The images workflow derives its
+# release matrix, build inputs, and changed-path selection from it. Planner,
+# staging, rollout, release, and test-lane consumers migrate in later slices;
+# the validator already rejects any missing or ambiguous Dockerfile/test owner.
 
 [[components]]
 id = "agent-sandbox"
@@ -171,6 +172,7 @@ source_paths = [
   ".dockerignore",
   "deploy/Dockerfile.web",
   "deploy/nginx-spa.conf",
+  "deploy/nginx-spa-security-headers.conf",
   "deploy/web-runtime-config.sh",
   "web/**",
 ]
