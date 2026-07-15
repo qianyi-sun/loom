@@ -616,6 +616,19 @@ def _append_gb10_node_source_drift(
 _TERMINAL_SLURM_JOB_STATES = {"completed", "failed", "cancelled", "stale"}
 
 
+def _normalized_allowed_slurm_nodes(value: object) -> list[str]:
+    raw_nodes: list[object]
+    if isinstance(value, str):
+        raw_nodes = list(value.split(","))
+    elif isinstance(value, list | tuple):
+        raw_nodes = list(value)
+    else:
+        raw_nodes = []
+    return list(
+        dict.fromkeys(node for node in (str(raw_node).strip() for raw_node in raw_nodes) if node),
+    )
+
+
 def _append_active_slurm_job_drift(
     drift: list[StateDrift],
     *,
@@ -638,14 +651,26 @@ def _append_active_slurm_job_drift(
         state = str(job.get("state") or "").strip().lower()
         if state in _TERMINAL_SLURM_JOB_STATES:
             continue
-        redacted_env = job.get("redacted_env")
-        if not isinstance(redacted_env, dict):
-            continue
         actuator_config = desired.get("actuator_config", {})
         if not isinstance(actuator_config, dict):
             continue
         job_id = str(job.get("job_id") or job.get("id") or "unknown")
         prefix = f"slurm_worker_jobs[{environment}/{pool_name}/{job_id}]"
+        allowed_nodes = _normalized_allowed_slurm_nodes(
+            actuator_config.get("allowed_nodes"),
+        )
+        live_nodelist = job.get("nodelist")
+        if not isinstance(live_nodelist, str) or live_nodelist not in allowed_nodes:
+            drift.append(
+                StateDrift(
+                    path=f"{prefix}.nodelist",
+                    desired=allowed_nodes,
+                    live=live_nodelist,
+                ),
+            )
+        redacted_env = job.get("redacted_env")
+        if not isinstance(redacted_env, dict):
+            continue
         expected = {
             "LOOM_REMOTE_WORKER_ENV_FILE": actuator_config.get("env_file"),
             "LOOM_REMOTE_WORKER_REPO_DIR": actuator_config.get("repo_dir"),

@@ -103,12 +103,17 @@ Scale up:
 Scale down:
 
 - Select running Slurm worker jobs only when capacity exceeds desired slots.
+- Treat a pending/running job outside the current `allowed_nodes` as release
+  drift, not as an active node or a job-cap occupant. Block scale-up on a
+  second-read drift race instead of silently submitting around it.
 - Mark linked workers draining.
 - Wait for in-flight trials to finish.
-- Once a draining worker reaches zero claimed/running trials, cancel the Slurm
-  job or let idle-exit release it, then mark the job completed/cancelled
-  according to Slurm observation.
+- Once a worker is `draining` and reaches zero claimed/running trials, cancel
+  the Slurm job or observe that it already exited, mark the worker `drained`,
+  and record the job completed/cancelled according to Slurm observation.
 - Do not cancel running jobs with active trials unless forced.
+- Keep pending or unlinked release-drift jobs blocked for explicit operator
+  reconciliation; do not invent a force-cancel path without worker linkage.
 
 Pending jobs:
 

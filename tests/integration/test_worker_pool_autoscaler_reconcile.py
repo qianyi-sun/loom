@@ -859,7 +859,7 @@ async def test_reconcile_releases_drained_slurm_worker_job(
         await engine.dispose()
 
 
-async def test_reconcile_releases_drained_slurm_job_by_worker_hostname(
+async def test_reconcile_does_not_cancel_unlinked_slurm_job_by_hostname(
     postgres_url: str,
 ) -> None:
     engine = create_async_engine(postgres_url)
@@ -940,13 +940,137 @@ async def test_reconcile_releases_drained_slurm_job_by_worker_hostname(
             await s.commit()
 
         assert results[0].action == "release_drained"
-        assert runner.cancelled_job_ids == ["9001"]
+        assert runner.cancelled_job_ids == []
 
         async with session_factory() as s:
+            worker = await s.get(Worker, worker_id)
             job = (await s.execute(select(SlurmWorkerJob))).scalar_one()
 
-        assert job.worker_id == worker_id
+        assert worker is not None
+        assert worker.drain_state == "drained"
+        assert job.worker_id is None
+        assert job.state == "running"
+    finally:
+        await engine.dispose()
+
+
+async def test_reconcile_drains_and_cancels_running_job_outside_allowed_nodes(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    worker_id = uuid4()
+    try:
+        async with session_factory() as s:
+            await s.execute(insert(Worker).values(
+                id=worker_id,
+                hostname="trt-gb10-7",
+                version="test",
+                capabilities=[{
+                    "backend": "docker",
+                    "os": "linux",
+                    "cpu_arch": "arm64",
+                    "gpu_vendor": "none",
+                    "network_policies": ["none"],
+                }],
+                max_concurrent=10,
+                pool_name="gb10-arm64",
+                drain_state="active",
+                registered_at=now,
+                last_seen_at=now,
+                status="active",
+            ))
+            await s.execute(insert(SlurmWorkerJob).values(
+                environment="staging",
+                pool_name="gb10-arm64",
+                nodelist="trt-gb10-7",
+                requested_cpus=20,
+                requested_memory_mib=115000,
+                requested_concurrency=10,
+                job_id="gb10-job-7",
+                slurm_state="RUNNING",
+                state="running",
+                worker_id=worker_id,
+                redacted_env=dict(_MATCHING_SLURM_RELEASE_ENV),
+                submitted_at=now - timedelta(seconds=900),
+                started_at=now - timedelta(seconds=800),
+            ))
+            await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
+                environment="staging",
+                pool_name="gb10-arm64",
+                actuator="slurm",
+                enabled=True,
+                min_slots=0,
+                max_slots=10,
+                scale_up_threshold_slots=1,
+                scale_down_idle_seconds=600,
+                scale_up_cooldown_seconds=60,
+                scale_down_cooldown_seconds=300,
+                drain_timeout_seconds=600,
+                actuator_config={
+                    "backend": "docker",
+                    "cpu_arch": "arm64",
+                    "allowed_nodes": ["trt-gb10-1"],
+                    "env_file": "/secure/.env.remote-worker",
+                    "repo_dir": "/opt/loom",
+                    "requested_cpus": 20,
+                    "requested_memory_mib": 115000,
+                    "requested_concurrency": 10,
+                    "max_jobs": 1,
+                    "pending_job_cap": 1,
+                    "time_limit": "2-00:00:00",
+                },
+            ))
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        async with session_factory() as s:
+            first = await reconcile_worker_pool_autoscaler_once(
+                s,
+                now=now,
+                slurm_runner=runner,
+            )
+            await s.commit()
+
+        assert first[0].action == "request_drain"
+        assert first[0].reason == "release_state_drift"
+        assert first[0].actual_slots == 0
+        assert first[0].blocked_reason == "release_state_drift"
+        assert runner.cancelled_job_ids == []
+
+        async with session_factory() as s:
+            worker = await s.get(Worker, worker_id)
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+
+        assert worker is not None
+        assert worker.drain_state == "draining"
+        assert policy.last_actual_slots == 0
+
+        async with session_factory() as s:
+            second = await reconcile_worker_pool_autoscaler_once(
+                s,
+                now=now + timedelta(seconds=1),
+                slurm_runner=runner,
+            )
+            await s.commit()
+
+        assert second[0].action == "release_drained"
+        assert second[0].reason == "release_state_drift"
+        assert second[0].actual_slots == 0
+        assert runner.cancelled_job_ids == ["gb10-job-7"]
+
+        async with session_factory() as s:
+            worker = await s.get(Worker, worker_id)
+            job = (await s.execute(select(SlurmWorkerJob))).scalar_one()
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+
+        assert worker is not None
+        assert worker.drain_state == "drained"
         assert job.state == "cancelled"
+        assert job.pending_reason == "cancelled after autoscaler drain"
+        assert policy.last_blocked_reason is None
+        assert policy.last_actual_slots == 0
     finally:
         await engine.dispose()
 

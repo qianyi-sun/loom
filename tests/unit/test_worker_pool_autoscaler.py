@@ -419,6 +419,46 @@ def test_decision_blocks_on_release_drift_slurm_capacity() -> None:
     assert decision.error_message == "release-state drift in Slurm job(s): 17928"
 
 
+def test_decision_drains_linked_worker_with_release_drift() -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+
+    decision = compute_autoscaler_decision(
+        _policy(min_slots=1),
+        _observation(
+            active_slots=0,
+            release_drift_slots=1,
+            release_drift_job_ids=("17928",),
+            release_drift_worker_ids_to_drain=("worker-7",),
+        ),
+        now=now,
+    )
+
+    assert decision.action == "request_drain"
+    assert decision.reason == "release_state_drift"
+    assert decision.worker_ids_to_drain == ("worker-7",)
+    assert decision.blocked_reason == "release_state_drift"
+
+
+def test_decision_releases_linked_worker_after_release_drift_drain() -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+
+    decision = compute_autoscaler_decision(
+        _policy(min_slots=1),
+        _observation(
+            active_slots=0,
+            release_drift_slots=1,
+            release_drift_job_ids=("17928",),
+            release_drift_worker_ids_to_release=("worker-7",),
+        ),
+        now=now,
+    )
+
+    assert decision.action == "release_drained"
+    assert decision.reason == "release_state_drift"
+    assert decision.worker_ids_to_release == ("worker-7",)
+    assert decision.blocked_reason is None
+
+
 def test_decision_waits_for_idle_window_before_scale_down() -> None:
     now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
     idle_since_at = now - timedelta(seconds=60)
@@ -788,16 +828,19 @@ async def test_load_observation_counts_slots_and_matching_queue() -> None:
     workers = [
         SimpleNamespace(
             id=idle_worker_id,
+            hostname="oldlab-1",
             max_concurrent=6,
             drain_state="active",
         ),
         SimpleNamespace(
             id=busy_worker_id,
+            hostname="oldlab-2",
             max_concurrent=6,
             drain_state="active",
         ),
         SimpleNamespace(
             id=drained_worker_id,
+            hostname="oldlab-3",
             max_concurrent=6,
             drain_state="draining",
         ),
@@ -916,6 +959,362 @@ async def test_load_observation_excludes_release_drift_slurm_jobs() -> None:
     assert observation.release_drift_slots == 1
     assert observation.release_drift_job_ids == ("17928",)
     assert observation.idle_worker_ids == ()
+
+
+async def test_load_observation_quarantines_running_job_outside_allowed_nodes() -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    worker_id = uuid4()
+    worker = SimpleNamespace(
+        id=worker_id,
+        hostname="trt-gb10-7",
+        max_concurrent=10,
+        drain_state="active",
+    )
+    session = _FakeSession(
+        [
+            _FakeResult(scalars=[worker]),
+            _FakeResult(rows=[]),
+            _FakeResult(
+                scalars=[
+                    SimpleNamespace(
+                        job_id="17928",
+                        state="running",
+                        requested_concurrency=10,
+                        worker_id=worker_id,
+                        nodelist="trt-gb10-7",
+                        redacted_env={
+                            "LOOM_REMOTE_WORKER_ENV_FILE": "/secure/.env.remote-worker",
+                            "LOOM_REMOTE_WORKER_REPO_DIR": "/opt/loom",
+                        },
+                    ),
+                ],
+            ),
+            _FakeResult(rows=[]),
+        ],
+    )
+
+    observation = await _load_observation(
+        cast(Any, session),
+        _policy_row(
+            pool_name="gb10-arm64",
+            min_slots=0,
+            actuator_config={
+                "allowed_nodes": ["trt-gb10-1"],
+                "env_file": "/secure/.env.remote-worker",
+                "repo_dir": "/opt/loom",
+                "requested_concurrency": 10,
+                "requested_cpus": 20,
+                "requested_memory_mib": 115000,
+                "max_jobs": 1,
+                "pending_job_cap": 1,
+            },
+        ),
+        now=now,
+        freshness_sec=120,
+    )
+
+    assert observation.active_slots == 0
+    assert observation.pending_slots == 0
+    assert observation.release_drift_slots == 10
+    assert observation.release_drift_job_ids == ("17928",)
+    assert observation.release_drift_worker_ids_to_drain == (str(worker_id),)
+    assert observation.idle_worker_ids == ()
+
+
+async def test_load_observation_does_not_drain_ambiguous_hostname_registration() -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    workers = [
+        SimpleNamespace(
+            id=uuid4(),
+            hostname="trt-gb10-7",
+            max_concurrent=10,
+            drain_state="active",
+        ),
+        SimpleNamespace(
+            id=uuid4(),
+            hostname="trt-gb10-7",
+            max_concurrent=10,
+            drain_state="active",
+        ),
+    ]
+    session = _FakeSession(
+        [
+            _FakeResult(scalars=workers),
+            _FakeResult(rows=[]),
+            _FakeResult(
+                scalars=[
+                    SimpleNamespace(
+                        job_id="17928",
+                        state="running",
+                        requested_concurrency=10,
+                        worker_id=None,
+                        nodelist="trt-gb10-7",
+                        redacted_env={
+                            "LOOM_REMOTE_WORKER_ENV_FILE": "/secure/.env.remote-worker",
+                            "LOOM_REMOTE_WORKER_REPO_DIR": "/opt/loom",
+                        },
+                    ),
+                ],
+            ),
+            _FakeResult(rows=[]),
+        ],
+    )
+
+    observation = await _load_observation(
+        cast(Any, session),
+        _policy_row(
+            pool_name="gb10-arm64",
+            min_slots=0,
+            actuator_config={
+                "allowed_nodes": ["trt-gb10-1"],
+                "env_file": "/secure/.env.remote-worker",
+                "repo_dir": "/opt/loom",
+                "requested_concurrency": 10,
+                "requested_cpus": 20,
+                "requested_memory_mib": 115000,
+                "max_jobs": 1,
+                "pending_job_cap": 1,
+            },
+        ),
+        now=now,
+        freshness_sec=120,
+    )
+
+    decision = compute_autoscaler_decision(
+        _policy(min_slots=0),
+        observation,
+        now=now,
+    )
+    assert observation.active_slots == 0
+    assert observation.release_drift_job_ids == ("17928",)
+    assert observation.release_drift_worker_ids_to_drain == ()
+    assert observation.release_drift_worker_ids_to_release == ()
+    assert decision.action == "blocked"
+    assert decision.blocked_reason == "release_state_drift"
+
+
+async def test_load_observation_does_not_drain_null_link_with_other_job_on_host() -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    worker_id = uuid4()
+    jobs = [
+        SimpleNamespace(
+            job_id="stale-job",
+            state="running",
+            requested_cpus=10,
+            requested_memory_mib=60000,
+            requested_concurrency=5,
+            worker_id=None,
+            nodelist="trt-gb10-1",
+            redacted_env={
+                "LOOM_REMOTE_WORKER_ENV_FILE": "/secure/stale.env",
+                "LOOM_REMOTE_WORKER_REPO_DIR": "/opt/loom",
+            },
+        ),
+        SimpleNamespace(
+            job_id="current-job",
+            state="running",
+            requested_cpus=20,
+            requested_memory_mib=115000,
+            requested_concurrency=10,
+            worker_id=None,
+            nodelist="trt-gb10-1",
+            redacted_env={
+                "LOOM_REMOTE_WORKER_ENV_FILE": "/secure/.env.remote-worker",
+                "LOOM_REMOTE_WORKER_REPO_DIR": "/opt/loom",
+            },
+        ),
+    ]
+    session = _FakeSession(
+        [
+            _FakeResult(
+                scalars=[
+                    SimpleNamespace(
+                        id=worker_id,
+                        hostname="trt-gb10-1",
+                        max_concurrent=10,
+                        drain_state="active",
+                    ),
+                ],
+            ),
+            _FakeResult(rows=[]),
+            _FakeResult(scalars=jobs),
+            _FakeResult(rows=[]),
+        ],
+    )
+
+    observation = await _load_observation(
+        cast(Any, session),
+        _policy_row(
+            pool_name="gb10-arm64",
+            min_slots=0,
+            actuator_config={
+                "allowed_nodes": ["trt-gb10-1"],
+                "env_file": "/secure/.env.remote-worker",
+                "repo_dir": "/opt/loom",
+                "requested_concurrency": 10,
+                "requested_cpus": 20,
+                "requested_memory_mib": 115000,
+                "max_jobs": 1,
+                "pending_job_cap": 1,
+            },
+        ),
+        now=now,
+        freshness_sec=120,
+    )
+
+    decision = compute_autoscaler_decision(
+        _policy(min_slots=0),
+        observation,
+        now=now,
+    )
+    assert observation.release_drift_job_ids == ("stale-job",)
+    assert observation.release_drift_worker_ids_to_drain == ()
+    assert observation.release_drift_worker_ids_to_release == ()
+    assert decision.action == "blocked"
+    assert decision.blocked_reason == "release_state_drift"
+
+
+async def test_load_observation_does_not_drain_duplicate_active_worker_link() -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    worker_id = uuid4()
+    jobs = [
+        SimpleNamespace(
+            job_id="stale-job",
+            state="running",
+            requested_concurrency=10,
+            worker_id=worker_id,
+            nodelist="trt-gb10-7",
+            redacted_env={
+                "LOOM_REMOTE_WORKER_ENV_FILE": "/secure/.env.remote-worker",
+                "LOOM_REMOTE_WORKER_REPO_DIR": "/opt/loom",
+            },
+        ),
+        SimpleNamespace(
+            job_id="current-job",
+            state="running",
+            requested_concurrency=10,
+            worker_id=worker_id,
+            nodelist="trt-gb10-1",
+            redacted_env={
+                "LOOM_REMOTE_WORKER_ENV_FILE": "/secure/.env.remote-worker",
+                "LOOM_REMOTE_WORKER_REPO_DIR": "/opt/loom",
+            },
+        ),
+    ]
+    session = _FakeSession(
+        [
+            _FakeResult(
+                scalars=[
+                    SimpleNamespace(
+                        id=worker_id,
+                        hostname="trt-gb10-7",
+                        max_concurrent=10,
+                        drain_state="active",
+                    ),
+                ],
+            ),
+            _FakeResult(rows=[]),
+            _FakeResult(scalars=jobs),
+            _FakeResult(rows=[]),
+        ],
+    )
+
+    observation = await _load_observation(
+        cast(Any, session),
+        _policy_row(
+            pool_name="gb10-arm64",
+            min_slots=0,
+            actuator_config={
+                "allowed_nodes": ["trt-gb10-1"],
+                "env_file": "/secure/.env.remote-worker",
+                "repo_dir": "/opt/loom",
+                "requested_concurrency": 10,
+                "requested_cpus": 20,
+                "requested_memory_mib": 115000,
+                "max_jobs": 1,
+                "pending_job_cap": 1,
+            },
+        ),
+        now=now,
+        freshness_sec=120,
+    )
+
+    decision = compute_autoscaler_decision(
+        _policy(min_slots=0),
+        observation,
+        now=now,
+    )
+    assert observation.release_drift_job_ids == ("stale-job",)
+    assert observation.release_drift_worker_ids_to_drain == ()
+    assert observation.release_drift_worker_ids_to_release == ()
+    assert decision.action == "blocked"
+    assert decision.blocked_reason == "release_state_drift"
+
+
+async def test_load_observation_does_not_drain_worker_with_mismatched_hostname() -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    worker_id = uuid4()
+    session = _FakeSession(
+        [
+            _FakeResult(
+                scalars=[
+                    SimpleNamespace(
+                        id=worker_id,
+                        hostname="trt-gb10-1",
+                        max_concurrent=10,
+                        drain_state="active",
+                    ),
+                ],
+            ),
+            _FakeResult(rows=[]),
+            _FakeResult(
+                scalars=[
+                    SimpleNamespace(
+                        job_id="17928",
+                        state="running",
+                        requested_concurrency=10,
+                        worker_id=worker_id,
+                        nodelist="trt-gb10-7",
+                        redacted_env={
+                            "LOOM_REMOTE_WORKER_ENV_FILE": "/secure/.env.remote-worker",
+                            "LOOM_REMOTE_WORKER_REPO_DIR": "/opt/loom",
+                        },
+                    ),
+                ],
+            ),
+            _FakeResult(rows=[]),
+        ],
+    )
+
+    observation = await _load_observation(
+        cast(Any, session),
+        _policy_row(
+            pool_name="gb10-arm64",
+            min_slots=0,
+            actuator_config={
+                "allowed_nodes": ["trt-gb10-1"],
+                "env_file": "/secure/.env.remote-worker",
+                "repo_dir": "/opt/loom",
+                "requested_concurrency": 10,
+                "requested_cpus": 20,
+                "requested_memory_mib": 115000,
+                "max_jobs": 1,
+                "pending_job_cap": 1,
+            },
+        ),
+        now=now,
+        freshness_sec=120,
+    )
+
+    decision = compute_autoscaler_decision(
+        _policy(min_slots=0),
+        observation,
+        now=now,
+    )
+    assert observation.release_drift_worker_ids_to_drain == ()
+    assert observation.release_drift_worker_ids_to_release == ()
+    assert decision.action == "blocked"
+    assert decision.blocked_reason == "release_state_drift"
 
 
 async def test_load_observation_excludes_worker_token_release_drift(
@@ -1074,12 +1473,93 @@ async def test_apply_slurm_scale_up_records_success_and_failure(
     assert "LOOM_WORKER_TOKEN" not in recorded_jobs[0]["env"]
 
 
+async def test_apply_slurm_scale_up_fail_closes_before_counting_drift_job_caps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded_jobs: list[dict[str, Any]] = []
+
+    async def fake_record_slurm_worker_job(*args: Any, **kwargs: Any) -> None:
+        recorded_jobs.append(kwargs)
+
+    monkeypatch.setattr(
+        "loom_control_plane.worker_pool_autoscaler.record_slurm_worker_job",
+        fake_record_slurm_worker_job,
+    )
+    session = _FakeSession(
+        [
+            _FakeResult(
+                scalars=[
+                    SimpleNamespace(
+                        nodelist="trt-gb10-7",
+                        state="running",
+                        job_id="old-job-7",
+                        redacted_env={
+                            "LOOM_REMOTE_WORKER_ENV_FILE": "/secure/.env.remote-worker",
+                            "LOOM_REMOTE_WORKER_REPO_DIR": "/opt/loom",
+                        },
+                    ),
+                ],
+            ),
+        ],
+    )
+    runner = _FakeSlurmRunner()
+
+    result = await _apply_slurm_scale_up(
+        cast(Any, session),
+        _policy_row(
+            pool_name="gb10-arm64",
+            min_slots=0,
+            max_slots=10,
+            actuator_config={
+                "allowed_nodes": ["trt-gb10-1"],
+                "env_file": "/secure/.env.remote-worker",
+                "repo_dir": "/opt/loom",
+                "requested_concurrency": 10,
+                "requested_cpus": 20,
+                "requested_memory_mib": 115000,
+                "max_jobs": 1,
+                "pending_job_cap": 1,
+            },
+        ),
+        AutoscalerDecision(
+            action="scale_up",
+            reason="queued_deficit",
+            desired_slots=10,
+            actual_slots=0,
+            pending_slots=0,
+            draining_slots=0,
+            occupied_slots=0,
+            queued_slots=10,
+        ),
+        runner=runner,
+        now=datetime(2026, 6, 27, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.error == "release-state drift in Slurm job(s): old-job-7"
+    assert result.blocked_reason == "release_state_drift"
+    assert result.blocked_details == {
+        "reason": "release_state_drift",
+        "job_ids": ["old-job-7"],
+        "nodes": ["trt-gb10-7"],
+    }
+    assert runner.submitted_nodes == []
+    assert recorded_jobs == []
+
+
 async def test_apply_slurm_scale_up_respects_pending_job_cap() -> None:
     session = _FakeSession(
         [
             _FakeResult(
                 scalars=[
-                    SimpleNamespace(nodelist="oldlab-1", state="pending"),
+                    SimpleNamespace(
+                        nodelist="oldlab-1",
+                        state="pending",
+                        job_id="pending-1",
+                        redacted_env={
+                            "LOOM_REMOTE_WORKER_ENV_FILE": "/secure/.env.remote-worker",
+                            "LOOM_REMOTE_WORKER_REPO_DIR": "/opt/loom",
+                        },
+                    ),
                 ]
             ),
         ]
@@ -1360,20 +1840,39 @@ async def test_apply_slurm_release_drained_cancels_jobs_after_drain() -> None:
 
     assert empty_session.executed == []
 
+    worker_id = uuid4()
+    policy = _policy_row()
+    worker = SimpleNamespace(
+        id=worker_id,
+        hostname="oldlab-1",
+        status="active",
+        last_seen_at=now,
+        drain_state="draining",
+    )
     job = SimpleNamespace(
         job_id="9001",
-        worker_id="worker-1",
+        worker_id=worker_id,
+        environment="production",
+        pool_name="oldlab",
+        nodelist="oldlab-1",
         state="running",
         slurm_state="RUNNING",
         pending_reason=None,
         finished_at=None,
         updated_at=None,
     )
-    session = _FakeSession([_FakeResult(rows=[]), _FakeResult(scalars=[job])])
+    session = _FakeSession(
+        [
+            _FakeResult(scalar=policy),
+            _FakeResult(scalars=[worker]),
+            _FakeResult(rows=[]),
+            _FakeResult(scalars=[job]),
+        ],
+    )
 
-    await _apply_slurm_release_drained(
+    result = await _apply_slurm_release_drained(
         cast(Any, session),
-        _policy_row(),
+        policy,
         AutoscalerDecision(
             action="release_drained",
             reason="drain_complete",
@@ -1383,7 +1882,7 @@ async def test_apply_slurm_release_drained_cancels_jobs_after_drain() -> None:
             draining_slots=6,
             occupied_slots=0,
             queued_slots=0,
-            worker_ids_to_release=("worker-1",),
+            worker_ids_to_release=(str(worker_id),),
         ),
         runner=runner,
         now=now,
@@ -1394,7 +1893,275 @@ async def test_apply_slurm_release_drained_cancels_jobs_after_drain() -> None:
     assert job.slurm_state == "CANCELLED"
     assert job.pending_reason == "cancelled after autoscaler drain"
     assert job.finished_at == now
-    assert len(session.executed) == 3
+    assert result.blocked_reason is None
+    assert len(session.executed) == 5
+
+
+async def test_apply_slurm_release_drained_accepts_job_that_naturally_finished() -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    worker_id = uuid4()
+    policy = _policy_row()
+    worker = SimpleNamespace(
+        id=worker_id,
+        hostname="oldlab-1",
+        status="active",
+        last_seen_at=now,
+        drain_state="draining",
+    )
+    session = _FakeSession(
+        [
+            _FakeResult(scalar=policy),
+            _FakeResult(scalars=[worker]),
+            _FakeResult(rows=[]),
+            _FakeResult(scalars=[]),
+        ],
+    )
+    runner = _FakeSlurmRunner()
+
+    result = await _apply_slurm_release_drained(
+        cast(Any, session),
+        policy,
+        AutoscalerDecision(
+            action="release_drained",
+            reason="drain_complete",
+            desired_slots=6,
+            actual_slots=0,
+            pending_slots=0,
+            draining_slots=6,
+            occupied_slots=0,
+            queued_slots=0,
+            worker_ids_to_release=(str(worker_id),),
+        ),
+        runner=runner,
+        now=now,
+    )
+
+    assert result.blocked_reason is None
+    assert runner.cancelled_job_ids == []
+    assert len(session.executed) == 5
+
+
+async def test_apply_slurm_release_drained_blocks_duplicate_active_job_link() -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    worker_id = uuid4()
+    policy = _policy_row()
+    worker = SimpleNamespace(
+        id=worker_id,
+        hostname="oldlab-1",
+        status="active",
+        last_seen_at=now,
+        drain_state="draining",
+    )
+    jobs = [
+        SimpleNamespace(worker_id=worker_id),
+        SimpleNamespace(worker_id=worker_id),
+    ]
+    session = _FakeSession(
+        [
+            _FakeResult(scalar=policy),
+            _FakeResult(scalars=[worker]),
+            _FakeResult(rows=[]),
+            _FakeResult(scalars=jobs),
+        ],
+    )
+    runner = _FakeSlurmRunner()
+
+    result = await _apply_slurm_release_drained(
+        cast(Any, session),
+        policy,
+        AutoscalerDecision(
+            action="release_drained",
+            reason="release_state_drift",
+            desired_slots=0,
+            actual_slots=0,
+            pending_slots=0,
+            draining_slots=0,
+            occupied_slots=0,
+            queued_slots=0,
+            worker_ids_to_release=(str(worker_id),),
+        ),
+        runner=runner,
+        now=now,
+    )
+
+    assert result.blocked_reason == "release_state_drift"
+    assert result.blocked_details is not None
+    assert result.blocked_details["guard_errors"] == [
+        f"{worker_id}: expected at most one active Slurm job, found 2",
+    ]
+    assert runner.cancelled_job_ids == []
+    assert len(session.executed) == 4
+
+
+async def test_apply_slurm_release_drift_uses_locked_current_allowlist() -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    worker_id = uuid4()
+    stale_policy = _policy_row(
+        pool_name="gb10-arm64",
+        actuator_config={
+            "backend": "docker",
+            "cpu_arch": "arm64",
+            "allowed_nodes": ["trt-gb10-1"],
+            "env_file": "/secure/.env.remote-worker",
+            "repo_dir": "/opt/loom",
+            "requested_concurrency": 10,
+            "requested_cpus": 20,
+            "requested_memory_mib": 115000,
+            "max_jobs": 1,
+            "pending_job_cap": 1,
+        },
+    )
+    current_policy = _policy_row(
+        id=stale_policy.id,
+        pool_name="gb10-arm64",
+        actuator_config={
+            **dict(stale_policy.actuator_config or {}),
+            "allowed_nodes": ["trt-gb10-1", "trt-gb10-7"],
+        },
+    )
+    worker = SimpleNamespace(
+        id=worker_id,
+        hostname="trt-gb10-7",
+        status="active",
+        last_seen_at=now,
+        drain_state="draining",
+    )
+    job = SimpleNamespace(
+        worker_id=worker_id,
+        environment="production",
+        pool_name="gb10-arm64",
+        nodelist="trt-gb10-7",
+        state="running",
+        job_id="gb10-job-7",
+        redacted_env={
+            "LOOM_REMOTE_WORKER_ENV_FILE": "/secure/.env.remote-worker",
+            "LOOM_REMOTE_WORKER_REPO_DIR": "/opt/loom",
+        },
+    )
+    session = _FakeSession(
+        [
+            _FakeResult(scalar=current_policy),
+            _FakeResult(scalars=[worker]),
+            _FakeResult(rows=[]),
+            _FakeResult(scalars=[job]),
+        ],
+    )
+    runner = _FakeSlurmRunner()
+
+    result = await _apply_slurm_release_drained(
+        cast(Any, session),
+        stale_policy,
+        AutoscalerDecision(
+            action="release_drained",
+            reason="release_state_drift",
+            desired_slots=0,
+            actual_slots=0,
+            pending_slots=0,
+            draining_slots=0,
+            occupied_slots=0,
+            queued_slots=0,
+            worker_ids_to_release=(str(worker_id),),
+        ),
+        runner=runner,
+        now=now,
+    )
+
+    assert result.blocked_reason == "release_state_drift"
+    assert result.blocked_details is not None
+    assert result.blocked_details["guard_errors"] == [
+        f"{worker_id}: Slurm job no longer has release-state drift",
+    ]
+    assert runner.cancelled_job_ids == []
+    assert len(session.executed) == 4
+
+
+@pytest.mark.parametrize(
+    ("case", "drain_state", "has_in_flight", "worker_hostname", "guard_message"),
+    [
+        (
+            "in_flight_appeared",
+            "draining",
+            True,
+            "oldlab-1",
+            "worker still has in-flight trials",
+        ),
+        (
+            "worker_reactivated",
+            "active",
+            False,
+            "oldlab-1",
+            "worker is not draining",
+        ),
+        (
+            "hostname_changed",
+            "draining",
+            False,
+            "oldlab-2",
+            "Slurm job hostname does not match worker",
+        ),
+    ],
+)
+async def test_apply_slurm_release_revalidates_worker_state(
+    case: str,
+    drain_state: str,
+    has_in_flight: bool,
+    worker_hostname: str,
+    guard_message: str,
+) -> None:
+    del case
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    worker_id = uuid4()
+    policy = _policy_row()
+    worker = SimpleNamespace(
+        id=worker_id,
+        hostname=worker_hostname,
+        status="active",
+        last_seen_at=now,
+        drain_state=drain_state,
+    )
+    job = SimpleNamespace(
+        worker_id=worker_id,
+        environment="production",
+        pool_name="oldlab",
+        nodelist="oldlab-1",
+        state="running",
+        job_id="9001",
+    )
+    session = _FakeSession(
+        [
+            _FakeResult(scalar=policy),
+            _FakeResult(scalars=[worker]),
+            _FakeResult(rows=[(worker_id,)] if has_in_flight else []),
+            _FakeResult(scalars=[job]),
+        ],
+    )
+    runner = _FakeSlurmRunner()
+
+    result = await _apply_slurm_release_drained(
+        cast(Any, session),
+        policy,
+        AutoscalerDecision(
+            action="release_drained",
+            reason="drain_complete",
+            desired_slots=6,
+            actual_slots=0,
+            pending_slots=0,
+            draining_slots=6,
+            occupied_slots=0,
+            queued_slots=0,
+            worker_ids_to_release=(str(worker_id),),
+        ),
+        runner=runner,
+        now=now,
+    )
+
+    assert result.blocked_reason == "release_state_drift"
+    assert result.blocked_details is not None
+    assert result.blocked_details["guard_errors"] == [
+        f"{worker_id}: {guard_message}",
+    ]
+    assert runner.cancelled_job_ids == []
+    assert len(session.executed) == 4
 
 
 async def test_apply_gb10_host_intent_creates_desired_state_and_updates_nodes() -> None:

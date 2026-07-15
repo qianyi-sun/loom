@@ -4007,11 +4007,18 @@ The command collects catalog audit data through the `loom-service` pod, reads
 task-level runtime mirror provenance from the target DB, finds a succeeded
 SkillLearnBench GB10 canary unless `--canary-batch-id` is supplied, and checks
 GB10 worker `.env` files plus worker container env keys for `HF_TOKEN`
-presence. It records only counts, paths, prefixes, batch ids, booleans, and
-redacted/secret-safe references. It also binds the evidence to the candidate
+presence. It records only counts, paths, prefixes, batch ids, worker
+registration ids, booleans, and redacted/secret-safe references. It also binds the evidence to the candidate
 environment, image tag, full Git SHA, and canonical SHA-256 of the exact GB10
 status artifact consumed by the release gate; reusing evidence from an older
-candidate or a different status snapshot fails closed. The GB10 check uses the same
+candidate or a different status snapshot fails closed. Every canary trial's
+persisted `worker_id` must belong to an active, fresh manifest-selected worker
+registration in that same GB10 status snapshot. A worker restart therefore
+invalidates an older canary even when the batch otherwise succeeded, and an
+explicit `--canary-batch-id` does not bypass this check. Arrange the small
+SkillLearnBench canary after current-candidate GB10 prep and before release-gate;
+if none exists yet, release-gate fails closed and can be resumed after that
+canary completes. The GB10 check uses the same
 `[gb10_pool].ssh_config`, `ssh_identity_file`, and optional
 `ssh_certificate_file` as rollout GB10 prep; failed SSH, failed container
 listing or inspection, or no running inspected worker container on any active
@@ -4074,7 +4081,8 @@ The generated artifact has this shape:
       "target_benchmark_trial_count": 2,
       "non_target_trial_count": 0,
       "task_set_trial_count": 0,
-      "benchmark_ids": ["skilllearnbench"]
+      "benchmark_ids": ["skilllearnbench"],
+      "worker_ids": ["$CURRENT_WORKER_UUID_1", "$CURRENT_WORKER_UUID_2"]
     },
     "hf_token_present": false,
     "hf_token_isolated": true,
@@ -4108,7 +4116,8 @@ The release gate fails staging/production when the release manifest records the
 SkillLearnBench HF catalog gate but this artifact is missing, has non-`s3://`
 runtime sources, lacks HF provenance, uses a task filter that can select any
 non-SkillLearnBench source, cannot prove every actual canary trial joined to a
-SkillLearnBench benchmark task, reports worker `HF_TOKEN` presence, has
+SkillLearnBench benchmark task, cannot bind every canary trial to the current
+candidate's active GB10 worker registrations, reports worker `HF_TOKEN` presence, has
 missing/failed GB10 token inspection, requires direct worker HF egress, or
 contains raw secret-looking values. This repo-side check does not replace live
 staging validation; it makes the required evidence acceptance-testable and
@@ -5477,7 +5486,8 @@ link it from #217; do not merge incomplete evidence.
   missing-Slurm records are exposed as `stale=<slots>` and
   `stale_jobs=<count>` in the CLI plus
   `loom_slurm_worker_stale_slots` / `loom_slurm_worker_stale_jobs` metrics.
-  `loom admin environment-state check` also fails when a running Slurm job's
+  `loom admin environment-state check` also fails when a pending/running Slurm
+  job's node is absent from the current policy `allowed_nodes`, when its
   redacted `LOOM_REMOTE_WORKER_ENV_FILE` or
   `LOOM_REMOTE_WORKER_REPO_DIR` differs from the profile, when its non-secret
   `LOOM_WORKER_AUTH_FINGERPRINT` differs from the active `--worker-token`
@@ -5488,13 +5498,18 @@ link it from #217; do not merge incomplete evidence.
   service result such as `status=203/EXEC`, a disabled timer, or an inactive
   timer.
   The worker-pool autoscaler uses the same Slurm job release-state evidence
-  before computing healthy capacity. Pending or running jobs whose redacted
-  `LOOM_REMOTE_WORKER_ENV_FILE`, `LOOM_REMOTE_WORKER_REPO_DIR`, or worker-token
-  fingerprint does not match the active policy are excluded from
-  `actual_slots`; the autoscaler records a hard `release_state_drift` blocked
-  decision instead of treating the stale job as warm capacity. Replace or
-  cancel those jobs and rerun `environment-state check` before submitting
-  staging/full100 validation batches.
+  before computing healthy capacity. Pending or running jobs outside
+  `allowed_nodes`, or whose redacted `LOOM_REMOTE_WORKER_ENV_FILE`,
+  `LOOM_REMOTE_WORKER_REPO_DIR`, or worker-token fingerprint does not match the
+  active policy, are excluded from `actual_slots` and legal active-node/job
+  caps. The autoscaler records `release_state_drift` instead of treating the
+  stale job as warm capacity. A safely linked running worker is drained
+  normally; once it is `draining` and in-flight trials reach zero, the
+  autoscaler cancels the Slurm job (or observes that it already exited) and
+  marks the worker `drained`. Pending or unlinked jobs stay blocked for
+  operator reconciliation.
+  Rerun `environment-state check` before submitting staging/full100 validation
+  batches.
   Use `--format json` for release evidence or automation. If Loom backlog has
   drained but Slurm still has pending elastic jobs, cancel those Slurm job ids
   with `scancel`; the controller will record cancellation on its next

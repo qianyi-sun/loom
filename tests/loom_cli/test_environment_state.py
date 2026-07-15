@@ -603,6 +603,7 @@ max_slots = 40
 [worker_pool_autoscaler_policies.actuator_config]
 backend = "docker"
 cpu_arch = "x86_64"
+allowed_nodes = ["oldlab-1"]
 env_file = "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker.env"
 repo_dir = "/shared_work/qianyi/loom-remote-worker"
 requested_cpus = 2
@@ -636,6 +637,7 @@ external_runner = true
                         "actuator_config": {
                             "backend": "docker",
                             "cpu_arch": "x86_64",
+                            "allowed_nodes": ["oldlab-1"],
                             "env_file": "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker.env",
                             "repo_dir": "/shared_work/qianyi/loom-remote-worker",
                             "requested_cpus": 2,
@@ -654,6 +656,7 @@ external_runner = true
                         "pool_name": "oldlab",
                         "job_id": "14893",
                         "state": "running",
+                        "nodelist": "oldlab-1",
                         "redacted_env": {
                             "LOOM_REMOTE_WORKER_ENV_FILE": "/shared_work/qianyi/loom-worker-capacity/issue45-oldlab-4-warm-1608b05.env",
                             "LOOM_REMOTE_WORKER_REPO_DIR": "/shared_work/qianyi/loom-remote-worker-1608b05",
@@ -671,6 +674,66 @@ external_runner = true
     ]
     assert drift[0].desired.endswith("staging-oldlab-worker.env")
     assert drift[0].live.endswith("issue45-oldlab-4-warm-1608b05.env")
+
+
+def test_diff_environment_state_rejects_active_job_outside_allowed_nodes(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "staging.state.toml"
+    profile_path.write_text(
+        """
+environment = "staging"
+control_plane_environment = "production"
+
+[[worker_pool_autoscaler_policies]]
+pool_name = "gb10-arm64"
+actuator = "slurm"
+enabled = true
+min_slots = 0
+max_slots = 10
+
+[worker_pool_autoscaler_policies.actuator_config]
+allowed_nodes = ["trt-gb10-1"]
+env_file = "/secure/.env.remote-worker"
+repo_dir = "/opt/loom"
+requested_concurrency = 10
+external_runner = true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    profile = load_environment_state_profile(profile_path)
+
+    drift = diff_environment_state(
+        profile,
+        {
+            "autoscaler_status": {"policies": []},
+            "gb10_status": {"desired_states": []},
+            "slurm_status": {
+                "jobs": [
+                    {
+                        "environment": "production",
+                        "pool_name": "gb10-arm64",
+                        "job_id": "gb10-job-7",
+                        "state": "running",
+                        "nodelist": "trt-gb10-7",
+                        "redacted_env": {
+                            "LOOM_REMOTE_WORKER_ENV_FILE": "/secure/.env.remote-worker",
+                            "LOOM_REMOTE_WORKER_REPO_DIR": "/opt/loom",
+                        },
+                    },
+                ],
+            },
+        },
+    )
+
+    node_drift = next(
+        item
+        for item in drift
+        if item.path == "slurm_worker_jobs[production/gb10-arm64/gb10-job-7].nodelist"
+    )
+    assert node_drift.desired == ["trt-gb10-1"]
+    assert node_drift.live == "trt-gb10-7"
 
 
 def test_diff_environment_state_reports_active_slurm_job_worker_token_fingerprint_drift(
@@ -692,6 +755,7 @@ min_slots = 1
 max_slots = 40
 
 [worker_pool_autoscaler_policies.actuator_config]
+allowed_nodes = ["oldlab-1"]
 env_file = "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker.env"
 repo_dir = "/shared_work/qianyi/loom-remote-worker"
 requested_concurrency = 1
@@ -714,6 +778,7 @@ external_runner = true
                         "pool_name": "oldlab",
                         "job_id": "14893",
                         "state": "running",
+                        "nodelist": "oldlab-1",
                         "redacted_env": {
                             "LOOM_REMOTE_WORKER_ENV_FILE": "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker.env",
                             "LOOM_REMOTE_WORKER_REPO_DIR": "/shared_work/qianyi/loom-remote-worker",
