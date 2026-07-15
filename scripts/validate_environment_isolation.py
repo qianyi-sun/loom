@@ -19,12 +19,12 @@ from typing import Any
 import yaml
 
 EXPECTED_ENVIRONMENTS = {
-    "development": {
-        "namespace": "loom-dev",
+    "local": {
+        "namespace": "loom-local",
         "ingress_host": "yylx.world",
-        "frontend_route": "https://yylx.world/dev",
-        "frontend_api_base": "https://yylx.world/dev/api",
-        "github_environment": "development",
+        "frontend_route": "https://yylx.world/local",
+        "frontend_api_base": "https://yylx.world/local/api",
+        "github_environment": "local",
         "allowed_refs": ("refs/heads/dev",),
         "allowed_tag_prefixes": (),
     },
@@ -240,13 +240,16 @@ def validate_profiles(profiles: list[EnvironmentProfile], repo_root: Path) -> li
     if set(by_env) == set(EXPECTED_ENVIRONMENTS):
         for field in ("frontend_route", "frontend_api_base"):
             prod_value = getattr(by_env["production"], field)
-            dev_value = getattr(by_env["development"], field)
+            local_value = getattr(by_env["local"], field)
             staging_value = getattr(by_env["staging"], field)
-            if prod_value in {dev_value, staging_value}:
+            if prod_value in {local_value, staging_value}:
                 errors.append(f"production {field} must differ from non-production")
-            if dev_value != staging_value:
+            # Post-#857: local uses /local, staging uses /dev — no longer required
+            # to share the same surface. They MUST be distinct so route isolation
+            # holds.
+            if local_value == staging_value:
                 errors.append(
-                    f"development and staging {field} must share the canonical /dev surface",
+                    f"local and staging {field} must be distinct for route isolation",
                 )
 
     for profile in profiles:
@@ -339,6 +342,14 @@ def validate_workflow(workflow_path: Path) -> list[str]:
     jobs = workflow.get("jobs", {})
     errors: list[str] = []
     for env_name, expected in EXPECTED_ENVIRONMENTS.items():
+        # #857: `local` env is not CI-deployed (manual kind-cluster only) —
+        # only staging + production have deploy jobs.
+        if env_name == "local":
+            if f"deploy-{env_name}" in jobs:
+                errors.append(
+                    f"deploy-{env_name}: local env must not have a CI deploy job",
+                )
+            continue
         job_name = f"deploy-{env_name}"
         job = jobs.get(job_name)
         if job is None:
