@@ -841,6 +841,8 @@ def test_staging_route_smoke_locks_exact_ingress_boundary_probes() -> None:
         "Verify prefixed frontend routes through ingress-nginx",
         "Verify prefixed frontend routes mount in Chromium",
         "Upload frontend route browser trace",
+        "Verify authenticated staging admin browser surfaces",
+        "Upload sanitized staging admin browser report",
         "Verify /healthz on every service via port-forward",
     ]
     route_contract_indices = [step_names.index(name) for name in route_contract_steps]
@@ -979,6 +981,65 @@ def test_staging_browser_route_smoke_uses_pinned_bundled_chromium() -> None:
     assert lock["packages"]["node_modules/@playwright/test"]["version"] == "1.61.1"
     assert lock["packages"]["node_modules/playwright"]["version"] == "1.61.1"
     assert lock["packages"]["node_modules/playwright-core"]["version"] == "1.61.1"
+
+
+def test_staging_admin_browser_smoke_is_bounded_and_uploads_only_safe_json() -> None:
+    workflow = _workflow(".github/workflows/staging-smoke.yml")
+    steps = workflow["jobs"]["smoke"]["steps"]
+    names = [step.get("name") for step in steps]
+    anonymous_index = names.index("Verify prefixed frontend routes mount in Chromium")
+    anonymous_trace_index = names.index("Upload frontend route browser trace")
+    admin_index = names.index("Verify authenticated staging admin browser surfaces")
+    report_index = names.index("Upload sanitized staging admin browser report")
+    assert anonymous_index < anonymous_trace_index < admin_index < report_index
+
+    cluster_config = next(
+        step for step in steps if step.get("name") == "Generate cluster-config.toml"
+    )["run"]
+    assert 'runtime_environment = "staging"' in cluster_config
+
+    admin = steps[admin_index]
+    script = admin["run"]
+    assert "CI=true npm --prefix web run smoke:staging-admin --" in script
+    assert "--route https://yylx.world/dev" in script
+    assert '--candidate-sha "$candidate_sha"' in script
+    assert '--admin-token-source "file:${admin_token_file}"' in script
+    assert "trap 'rm -f \"$admin_token_file\"' EXIT" in script
+    assert "--username qianyi" in script
+    assert "--report /tmp/loom-staging-admin-browser-smoke.json" in script
+    assert "--insecure-for-kind" in script
+    for forbidden in ("--trace", "--screenshot", "--storage-state", "storageState"):
+        assert forbidden not in script
+
+    upload = steps[report_index]
+    assert upload["if"] == "always()"
+    assert upload["uses"] == (
+        f"actions/upload-artifact@{_locked_action_sha('actions/upload-artifact')}"
+    )
+    assert upload["with"]["path"] == "/tmp/loom-staging-admin-browser-smoke.json"
+    assert upload["with"]["if-no-files-found"] == "error"
+    assert list(upload["with"])[1:] == [
+        "path",
+        "if-no-files-found",
+        "retention-days",
+    ]
+
+    package = json.loads((REPO_ROOT / "web/package.json").read_text(encoding="utf-8"))
+    assert package["scripts"]["smoke:staging-admin"] == (
+        "node scripts/staging-admin-browser-smoke.mjs"
+    )
+    assert package["scripts"]["test:staging-admin-browser-unit"] == (
+        "vitest run scripts/staging-admin-browser-smoke.test.mjs"
+    )
+
+    smoke = (REPO_ROOT / "web/scripts/staging-admin-browser-smoke.mjs").read_text(
+        encoding="utf-8",
+    )
+    assert '`${options.route}/api/v1/auth/logout`' in smoke
+    assert "cleanup.auth_me_after_logout_status" in smoke
+    assert 'recordVideo: undefined' in smoke
+    assert "screenshot(" not in smoke
+    assert "storageState" not in smoke
 
 
 def test_staging_browser_route_smoke_waits_for_explicit_settled_state() -> None:

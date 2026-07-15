@@ -60,6 +60,13 @@ For public repository operation:
 - The singleton admin secret is an operator/bootstrap credential, not a normal
   browser identity. Public users use persisted user sessions and team
   memberships.
+- Staging browser acceptance has one narrow exception: a singleton admin bearer
+  may call `/api/v1/auth/staging-admin-browser-session` only when
+  `LOOM_ENV=staging`, targeting an existing enabled platform-admin owner of the
+  enabled `admin` team. The audited exchange changes no authority, issues a
+  distinct Secure HttpOnly SameSite=Lax cookie for at most 900 seconds, cannot
+  refresh, and is invalid outside staging. It is not a production or normal
+  user login mechanism.
 - Invite onboarding uses one-time revealed `loom_invite_...` links. The
   database stores only invite hashes and safe prefixes; invite list, lookup,
   logs, and audit metadata must never include raw invite codes. Accepting an

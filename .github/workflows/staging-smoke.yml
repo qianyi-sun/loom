@@ -261,13 +261,15 @@ jobs:
           kubectl --context kind-loom-staging create namespace loom
           ADMIN_TOKEN="loom_admin_$(openssl rand -hex 24)"
           echo "::add-mask::${ADMIN_TOKEN}"
-          echo "ADMIN_TOKEN=${ADMIN_TOKEN}" >> "$GITHUB_ENV"
+          install -m 0600 /dev/null /tmp/loom-staging-admin-token
+          printf '%s\n' "${ADMIN_TOKEN}" > /tmp/loom-staging-admin-token
 
           eval "$(uv run loom cluster bootstrap-secrets --namespace=loom --smoke-defaults)"
 
           printf '[admin]\ntoken="%s"\n' "${ADMIN_TOKEN}" > /tmp/admin.toml
           kubectl --context kind-loom-staging -n loom create secret generic loom-admin-secret \
             --from-file=secrets.toml=/tmp/admin.toml
+          rm -f /tmp/admin.toml
 
       - name: Generate cluster-config.toml
         # image_tag must match what we built + loaded above.
@@ -281,6 +283,7 @@ jobs:
           cat > /tmp/cluster-config.toml <<EOF
           namespace = "loom"
           image_tag = "${IMAGE_TAG}"
+          runtime_environment = "staging"
           ingress_host = "yylx.world"
           ingress_redirect_hosts = ["www.yylx.world"]
           frontend_environment = "staging"
@@ -764,6 +767,29 @@ jobs:
           name: frontend-route-browser-trace-${{ github.run_id }}
           path: /tmp/loom-frontend-route-browser-trace.zip
           if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Verify authenticated staging admin browser surfaces
+        run: |
+          set -euo pipefail
+          admin_token_file=/tmp/loom-staging-admin-token
+          trap 'rm -f "$admin_token_file"' EXIT
+          candidate_sha=$(git rev-parse HEAD)
+          CI=true npm --prefix web run smoke:staging-admin -- \
+            --route https://yylx.world/dev \
+            --candidate-sha "$candidate_sha" \
+            --admin-token-source "file:${admin_token_file}" \
+            --username qianyi \
+            --report /tmp/loom-staging-admin-browser-smoke.json \
+            --insecure-for-kind
+
+      - name: Upload sanitized staging admin browser report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: staging-admin-browser-smoke-${{ github.run_id }}
+          path: /tmp/loom-staging-admin-browser-smoke.json
+          if-no-files-found: error
           retention-days: 7
 
       - name: Verify /healthz on every service via port-forward

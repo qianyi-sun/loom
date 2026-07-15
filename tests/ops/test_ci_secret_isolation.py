@@ -225,6 +225,39 @@ def test_staging_pr_gate_is_credential_free_and_does_not_depend_on_real_aws() ->
         )
 
 
+def test_staging_admin_browser_smoke_uses_only_ephemeral_secret_indirection() -> None:
+    workflow = _workflow(".github/workflows/staging-smoke.yml")
+    smoke = workflow["jobs"]["smoke"]
+    bootstrap = _named_step(smoke, "Bootstrap namespace + Secrets")["run"]
+    browser = _named_step(
+        smoke,
+        "Verify authenticated staging admin browser surfaces",
+    )["run"]
+    upload = _named_step(
+        smoke,
+        "Upload sanitized staging admin browser report",
+    )
+
+    assert 'ADMIN_TOKEN="loom_admin_$(openssl rand -hex 24)"' in bootstrap
+    assert 'echo "::add-mask::${ADMIN_TOKEN}"' in bootstrap
+    assert "install -m 0600 /dev/null /tmp/loom-staging-admin-token" in bootstrap
+    assert "GITHUB_ENV" not in bootstrap
+    assert '--admin-token-source "file:${admin_token_file}"' in browser
+    assert "trap 'rm -f \"$admin_token_file\"' EXIT" in browser
+    assert "Authorization:" not in browser
+    assert "Bearer" not in browser
+    assert "${ADMIN_TOKEN}" not in browser
+    assert "${{ secrets." not in str(smoke)
+
+    assert upload["if"] == "always()"
+    assert upload["with"]["path"] == "/tmp/loom-staging-admin-browser-smoke.json"
+    assert upload["with"]["path"].endswith(".json")
+    assert all(
+        forbidden not in str(upload["with"])
+        for forbidden in ("trace", "screenshot", "storage", "cookie", "session")
+    )
+
+
 @pytest.mark.parametrize(
     ("event_name", "image_tag"),
     [

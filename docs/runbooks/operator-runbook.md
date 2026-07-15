@@ -4558,6 +4558,34 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    same-origin error is exempt. The trace comes only from the
    command's fresh logged-out context; retain it as rollout evidence and do not
    substitute a signed-in profile.
+
+   **Staging-only authenticated admin UI acceptance.** After the logged-out
+   route smoke passes, validate the protected Admin Access and Rate cards
+   surfaces with the short-lived, audited #692 exchange. Read the singleton
+   admin bearer from an approved mounted file, a masked environment variable,
+   or stdin; never place the raw bearer on the command line:
+
+   ```bash
+   CI=true npm --prefix web run smoke:staging-admin -- \
+     --route https://yylx.world/dev \
+     --candidate-sha "$(git rev-parse HEAD)" \
+     --admin-token-source file:/absolute/path/to/mounted/staging-admin-token \
+     --username qianyi \
+     --report /tmp/loom-staging-admin-browser-smoke.json
+   ```
+
+   Use only an existing enabled `active` or `pending_setup` platform admin who
+   is already an owner of the enabled `admin` team. The bootstrap must not
+   create, enable, promote, or repair any authority; normal grant/revoke remains
+   the #802 workflow. The check verifies the exact candidate route, correlated
+   safe audit event, all six Admin Access tabs, the Audit log, and Rate cards.
+   It emits only the sanitized JSON report: do not retain a trace, screenshot,
+   storage state, cookie, or bearer. Its `finally` cleanup logs out, revokes the
+   session, and proves `/api/v1/auth/me` returns `401`; a cleanup failure fails
+   the gate. The bootstrap route is deliberately `404` outside staging and its
+   fixed 900-second session cannot be refreshed. This admin-only report does
+   not replace the later normal-user onboarding and submission evidence.
+
 5. **Remote-worker private tunnels hold.** If remote workers are attached, the
    shared-staging broker collects watchdog evidence and verifies the exact
    worker-facing URLs from the control node and declared worker hosts. Inspect
