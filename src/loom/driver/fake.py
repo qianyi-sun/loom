@@ -14,6 +14,8 @@ Spec §6.2 + §6.4.
 from __future__ import annotations
 
 import asyncio
+import io
+import tarfile
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -144,6 +146,81 @@ class FakeDriver:
             raise FileNotFoundError(f"{src} not in FakeDriver filesystem")
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(self.filesystem[src])
+
+    async def export_workspace_archive(
+        self,
+        src: PurePosixPath,
+        dst: Path,
+    ) -> None:
+        """Test-only archive hook used by isolated verifier handoff.
+
+        FakeDriver's public filesystem stores regular-file bytes only.  The
+        hook still exercises the production archive validation/import path and
+        records inferred directories with ordinary POSIX modes.
+        """
+
+        self._require_running()
+        selected: list[tuple[PurePosixPath, bytes]] = []
+        directories: set[PurePosixPath] = set()
+        for path, data in self.filesystem.items():
+            try:
+                relative = path.relative_to(src)
+            except ValueError:
+                continue
+            if not relative.parts:
+                continue
+            selected.append((relative, data))
+            directories.update(relative.parents)
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            root = tarfile.TarInfo(".")
+            root.type = tarfile.DIRTYPE
+            root.mode = 0o755
+            tf.addfile(root)
+            for directory in sorted(
+                (path for path in directories if path.parts),
+                key=lambda path: (len(path.parts), path.as_posix()),
+            ):
+                info = tarfile.TarInfo(f"./{directory.as_posix()}")
+                info.type = tarfile.DIRTYPE
+                info.mode = 0o755
+                tf.addfile(info)
+            for relative, data in sorted(selected, key=lambda item: item[0].as_posix()):
+                info = tarfile.TarInfo(f"./{relative.as_posix()}")
+                info.mode = 0o644
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(buf.getvalue())
+
+    async def import_workspace_archive(
+        self,
+        src: Path,
+        dst: PurePosixPath,
+    ) -> None:
+        """Restore regular files from a pre-validated test archive."""
+
+        self._require_running()
+        hardlinks: list[tuple[PurePosixPath, PurePosixPath]] = []
+        with tarfile.open(src, mode="r:*") as tf:
+            for member in tf.getmembers():
+                relative = PurePosixPath(member.name)
+                parts = tuple(part for part in relative.parts if part not in {"", "."})
+                if not parts:
+                    continue
+                target = dst / PurePosixPath(*parts)
+                if member.isreg():
+                    fileobj = tf.extractfile(member)
+                    assert fileobj is not None
+                    self.filesystem[target] = fileobj.read()
+                elif member.islnk():
+                    link = PurePosixPath(member.linkname)
+                    link_parts = tuple(
+                        part for part in link.parts if part not in {"", "."}
+                    )
+                    hardlinks.append((target, dst / PurePosixPath(*link_parts)))
+            for target, link_target in hardlinks:
+                self.filesystem[target] = self.filesystem[link_target]
 
     async def set_network_policy(self, policy: NetworkPolicy) -> None:
         self._require_running()

@@ -145,6 +145,12 @@ def _tb21_audit_fixture(
                         "docker_build_context": None,
                         "cpu_arch": "x86_64",
                     },
+                    "resource_limits": {
+                        "cpus": None,
+                        "memory_mb": None,
+                        "storage_mb": None,
+                        "gpus": 0,
+                    },
                     "workspace_staging_policy": TB21_AGENT_WORKSPACE_POLICY,
                 },
             )

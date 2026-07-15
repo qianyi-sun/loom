@@ -98,6 +98,15 @@ class DaytonaDriver:
             raise DriverAlreadyStartedError(
                 f"DaytonaDriver.start() rejected in state {self._state!r}",
             )
+        opts = options or StartOptions()
+        if any(
+            value is not None
+            for value in (opts.cpus, opts.memory_mb, opts.storage_mb)
+        ) or opts.gpus:
+            raise DriverError(
+                "DaytonaDriver cannot enforce task resource limits; use a "
+                "compatible backend instead",
+            )
         self._client = DaytonaClient(self.config)
         await self._client.open()
         try:

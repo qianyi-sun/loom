@@ -3757,6 +3757,11 @@ async def test_rerun_failed_batch_creates_linked_exact_targets(
     sync_engine.dispose()
 
     assert row.rerun_of_batch_id == batch_id
+    assert row.resolved_task_ids == ["local/mit-0"]
+    assert row.source_provenance[0] == {
+        "kind": "supplemental_rerun",
+        "source_batch_id": str(batch_id),
+    }
     assert row.rerun_targets == [
         {
             "task_id": "local/mit-0",
@@ -3766,6 +3771,79 @@ async def test_rerun_failed_batch_creates_linked_exact_targets(
             "failure_reason": "gateway_error",
         }
     ]
+
+
+async def test_rerun_failed_rejects_historical_benchmark_task(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    profile_id = f"historical-rerun-{uuid4().hex}"
+    batch_id = uuid4()
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as connection:
+        connection.execute(
+            insert(Benchmark).values(
+                id=profile_id,
+                display_name="Historical rerun profile",
+                upstream_kind="test",
+                upstream_locator="test",
+                upstream_revision="1",
+                license_spdx="MIT",
+                license_url="https://example.test/license",
+                splits=["test"],
+                execution_state="historical",
+            )
+        )
+        connection.execute(
+            Task.__table__.update().where(Task.id == "local/mit-0").values(benchmark_id=profile_id)
+        )
+        connection.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="historical-failure",
+                task_filter={"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+                trial_config={
+                    "agent_name": "litellm",
+                    "agent_model": {"provider": "openai", "name": "qwen"},
+                },
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=1,
+                n_per_task=1,
+                result_status="all_failed",
+                finished_at=datetime.now(UTC),
+            )
+        )
+        connection.execute(
+            insert(Trial).values(
+                id=uuid4(),
+                task_id="local/mit-0",
+                team_id=team_id,
+                state="failed",
+                failure_reason="gateway_error",
+                failure_message="gateway 503",
+                config={},
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+                batch_id=batch_id,
+                sample_idx=0,
+                combination_idx=0,
+                result=None,
+            )
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            f"/api/v1/batches/{batch_id}/rerun-failed",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["reason"] == "benchmark_retired"
 
 
 async def test_rerun_failed_batch_preserves_duplicate_task_coordinates(
@@ -4562,6 +4640,7 @@ async def test_post_batch_allows_oracle_against_terminal_bench_tasks(
                 config=_script_verifier_task_config(task_id),
                 source="local",
                 license="MIT",
+                tags={"oracle_eligible": "true"},
             ),
         )
         s.commit()

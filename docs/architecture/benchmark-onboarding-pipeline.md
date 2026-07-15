@@ -239,7 +239,7 @@ loom datasets activate terminal-bench-2 \
 The rev-6 audit checks all 89 Hub lock digests, the one reviewed
 source-reference divergence, normalized task configs, internal bundle bytes
 and checksums, each configured verifier script's regular/executable mode and
-content checksum, verifier/image provenance, the same compatibility gate used
+content checksum, verifier/image/resource-limit provenance, the same compatibility gate used
 by workers, and the persisted private-workspace isolation policy. The audit
 JSON is evidence identity only: activation locks the profile/task rows and
 performs this audit again against the current object-store bytes before its

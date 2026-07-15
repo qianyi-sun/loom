@@ -319,7 +319,13 @@ There are three supported task-registration shapes today:
   Terminal-Bench 2.1 rev-6 publication additionally records a private
   workspace policy: normal agents do not receive `solution/`, `tests/`,
   `verifier/`, or `upstream-task.toml`; those files are staged only in a
-  fresh verifier-only driver after the agent driver has completed. Its
+  fresh verifier-only driver after the agent driver has completed. Public
+  agent output crosses that boundary as one validated workspace snapshot,
+  preserving directories, executable modes, safe workspace-relative symlinks,
+  and hardlinks. Absolute or escaping links, private targets, devices, FIFOs,
+  sockets, and archive traversal fail the trial instead of reaching the
+  verifier. Verifier-driver teardown is also cancellation-safe: cancellation
+  is re-raised only after the sandbox stop finishes. Its
   provenance also records the configured script-verifier path and content
   checksum so public activation can attest to the executable that will run.
   Its physical profile stays `pending` after register or re-register: direct

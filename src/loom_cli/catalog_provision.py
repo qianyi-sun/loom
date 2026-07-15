@@ -18,9 +18,9 @@ from typing import Any, Protocol, TypeVar
 
 from botocore.exceptions import ClientError
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.benchmark_readiness import (
     BenchmarkAuditSource,
@@ -37,6 +37,7 @@ from loom_service.agent_catalog import AgentEntry, list_agents
 POSTGRES_CATALOG_UPSERT_BATCH_SIZE = 1000
 AGENT_CATALOG_VERSION = "service-catalog-v1"
 AGENT_CATALOG_SPEC_SCHEMA_VERSION = 1
+TB21_PROFILE_ID = "terminal-bench-2@tb2.1-r6"
 T = TypeVar("T")
 
 
@@ -129,6 +130,186 @@ class CatalogObjectStore(Protocol):
     async def put_object(self, *, bucket: str, key: str, body: bytes) -> None: ...
 
 
+def _immutable_profile_provenance(value: dict[str, Any]) -> dict[str, Any]:
+    return {key: item for key, item in value.items() if key != "activation_audit"}
+
+
+def _stable_runtime_tags(value: dict[str, str]) -> dict[str, str]:
+    return {key: item for key, item in value.items() if key != "runtime_source_mirrored_at"}
+
+
+def _tb21_benchmark_identity(row: BenchmarkRow | Benchmark) -> dict[str, Any]:
+    return {
+        "display_name": row.display_name,
+        "upstream_kind": row.upstream_kind,
+        "upstream_locator": row.upstream_locator,
+        "upstream_revision": row.upstream_revision,
+        "license_spdx": row.license_spdx,
+        "license_url": row.license_url,
+        "splits": list(row.splits),
+        "series": row.series,
+        "profile_provenance": _immutable_profile_provenance(
+            dict(row.profile_provenance or {}),
+        ),
+    }
+
+
+def _tb21_task_identity(row: TaskRow | TaskModel) -> dict[str, Any]:
+    return {
+        "checksum": row.checksum,
+        "config": row.config,
+        "source": row.source,
+        "license": row.license,
+        "benchmark_id": row.benchmark_id,
+        "tags": _stable_runtime_tags(dict(row.tags or {})),
+        "source_provenance": dict(row.source_provenance or {}),
+    }
+
+
+def _tb21_profile_drift(
+    *,
+    existing_benchmark: BenchmarkRow | Benchmark,
+    existing_tasks: Iterable[TaskRow | TaskModel],
+    incoming_benchmark: BenchmarkRow,
+    incoming_tasks: Iterable[TaskRow],
+) -> list[str]:
+    drift: list[str] = []
+    if _tb21_benchmark_identity(existing_benchmark) != _tb21_benchmark_identity(
+        incoming_benchmark,
+    ):
+        drift.append("benchmark identity/provenance")
+
+    existing_by_id = {row.id: row for row in existing_tasks}
+    incoming_by_id = {row.id: row for row in incoming_tasks}
+    if set(existing_by_id) != set(incoming_by_id):
+        drift.append("task set")
+    for task_id in sorted(set(existing_by_id) & set(incoming_by_id)):
+        if _tb21_task_identity(existing_by_id[task_id]) != _tb21_task_identity(
+            incoming_by_id[task_id],
+        ):
+            drift.append(f"task {task_id}")
+    return drift
+
+
+def _assert_tb21_catalog_rows_absent_or_exact(
+    *,
+    existing: CatalogRows,
+    incoming: CatalogRows,
+) -> None:
+    """Fail before object copying if target TB2.1 differs from the restore."""
+
+    incoming_benchmark = next(
+        (row for row in incoming.benchmarks if row.id == TB21_PROFILE_ID),
+        None,
+    )
+    if incoming_benchmark is None:
+        return
+    incoming_tasks = [row for row in incoming.tasks if row.benchmark_id == TB21_PROFILE_ID]
+    existing_benchmark = next(
+        (row for row in existing.benchmarks if row.id == TB21_PROFILE_ID),
+        None,
+    )
+    if existing_benchmark is None:
+        incoming_task_ids = {row.id for row in incoming_tasks}
+        if any(row.id in incoming_task_ids for row in existing.tasks):
+            raise ValueError(
+                "immutable TB2.1 task ID collision during catalog provisioning",
+            )
+        return
+
+    drift = _tb21_profile_drift(
+        existing_benchmark=existing_benchmark,
+        existing_tasks=(row for row in existing.tasks if row.benchmark_id == TB21_PROFILE_ID),
+        incoming_benchmark=incoming_benchmark,
+        incoming_tasks=incoming_tasks,
+    )
+    if drift:
+        raise ValueError(
+            "immutable TB2.1 profile drift during catalog provisioning in "
+            f"{', '.join(drift)}; register a new physical profile instead",
+        )
+
+
+def _tb21_fail_closed_restore_rows(
+    *,
+    existing: CatalogRows,
+    incoming: CatalogRows,
+) -> CatalogRows | None:
+    """Build the minimal pre-copy write that disables an existing profile."""
+
+    existing_benchmark = next(
+        (row for row in existing.benchmarks if row.id == TB21_PROFILE_ID),
+        None,
+    )
+    incoming_benchmark = next(
+        (row for row in incoming.benchmarks if row.id == TB21_PROFILE_ID),
+        None,
+    )
+    if existing_benchmark is None or incoming_benchmark is None:
+        return None
+    return CatalogRows(
+        benchmarks=[incoming_benchmark],
+        tasks=[row for row in existing.tasks if row.benchmark_id == TB21_PROFILE_ID],
+    )
+
+
+async def _assert_tb21_target_is_absent_or_exact(
+    session: AsyncSession,
+    *,
+    rows: CatalogRows,
+) -> None:
+    """Prevent generic catalog restore from rewriting the immutable TB2.1 ID."""
+
+    incoming_benchmark = next(
+        (row for row in rows.benchmarks if row.id == TB21_PROFILE_ID),
+        None,
+    )
+    if incoming_benchmark is None:
+        return
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:profile_id))"),
+        {"profile_id": TB21_PROFILE_ID},
+    )
+    incoming_tasks = sorted(
+        (row for row in rows.tasks if row.benchmark_id == TB21_PROFILE_ID),
+        key=lambda row: row.id,
+    )
+    existing_benchmark = await session.scalar(
+        select(Benchmark).where(Benchmark.id == TB21_PROFILE_ID).with_for_update(),
+    )
+    if existing_benchmark is None:
+        colliding = await session.scalar(
+            select(TaskModel.id).where(TaskModel.id.in_([row.id for row in incoming_tasks])),
+        )
+        if colliding is not None:
+            raise ValueError(
+                "immutable TB2.1 task ID collision during catalog provisioning",
+            )
+        return
+
+    existing_tasks = list(
+        (
+            await session.scalars(
+                select(TaskModel)
+                .where(TaskModel.benchmark_id == TB21_PROFILE_ID)
+                .order_by(TaskModel.id)
+                .with_for_update(),
+            )
+        ).all()
+    )
+    drift = _tb21_profile_drift(
+        existing_benchmark=existing_benchmark,
+        existing_tasks=existing_tasks,
+        incoming_benchmark=incoming_benchmark,
+        incoming_tasks=incoming_tasks,
+    )
+    if drift:
+        raise ValueError(
+            "immutable TB2.1 profile drift during catalog provisioning in "
+            f"{', '.join(drift)}; register a new physical profile instead",
+        )
+
+
 class PostgresCatalogStore:
     def __init__(self, db_url: str) -> None:
         self.db_url = normalize_db_url(db_url)
@@ -200,6 +381,7 @@ class PostgresCatalogStore:
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with session_factory() as session:
+                await _assert_tb21_target_is_absent_or_exact(session, rows=rows)
                 if rows.benchmarks:
                     for bench_batch in _batched(
                         rows.benchmarks,
@@ -413,10 +595,29 @@ async def provision_ready_benchmark_catalog(
             ready_rows,
             benchmarks=[replace(row, imported_by=imported_by) for row in ready_rows.benchmarks],
         )
+    source_tasks_by_id = {row.id: row for row in source_rows.tasks}
+    object_copy_rows = replace(
+        ready_rows,
+        tasks=[replace(row, source=source_tasks_by_id[row.id].source) for row in ready_rows.tasks],
+    )
 
+    target_rows = await target_catalog.load_rows()
+    _assert_tb21_catalog_rows_absent_or_exact(
+        existing=target_rows,
+        incoming=ready_rows,
+    )
+    fail_closed_rows = _tb21_fail_closed_restore_rows(
+        existing=target_rows,
+        incoming=ready_rows,
+    )
+    if fail_closed_rows is not None:
+        # Never inspect or replace target bytes while the existing physical
+        # profile is runnable. A fresh target-local audit is required after
+        # the complete object copy and final catalog upsert.
+        await target_catalog.upsert_rows(fail_closed_rows)
     await target_objects.ensure_bucket(target_bucket)
     stats = await _copy_s3_bundle_objects(
-        rows=ready_rows,
+        rows=object_copy_rows,
         source_objects=source_objects,
         target_objects=target_objects,
         target_bucket=target_bucket,
@@ -453,6 +654,16 @@ def _ready_catalog_rows(rows: CatalogRows, *, target_bucket: str) -> CatalogRows
         )
         if readiness.readiness_state != "runnable":
             continue
+        if benchmark.id == TB21_PROFILE_ID:
+            # Activation evidence is environment-local: copied object bytes
+            # must receive a fresh target audit before any selector can run.
+            benchmark = replace(
+                benchmark,
+                execution_state="pending",
+                profile_provenance=_immutable_profile_provenance(
+                    benchmark.profile_provenance,
+                ),
+            )
         ready_benchmarks.append(benchmark)
         ready_tasks.extend(
             _rewrite_s3_task_source(task, target_bucket=target_bucket)

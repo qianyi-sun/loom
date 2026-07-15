@@ -59,6 +59,13 @@ class StartOptions:
     # Docker labels applied to the primary sandbox container. Workers use this
     # for operator-safe inspection/reaping of Loom-owned containers.
     labels: tuple[tuple[str, str], ...] = ()
+    # Optional per-sandbox limits. Drivers must either enforce non-None values
+    # or fail closed; silently ignoring an audited benchmark's limits is not a
+    # valid implementation of the Driver contract.
+    cpus: float | None = None
+    memory_mb: int | None = None
+    storage_mb: int | None = None
+    gpus: int = 0
 
 
 @dataclass

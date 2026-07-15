@@ -393,7 +393,7 @@ divergence never replaces the Hub package or creates a fallback.
 
 The adapter preserves native schema-1.1 `task.toml` as
 `upstream-task.toml`, emits a Loom schema-1 task config, retains native build,
-timeout, architecture, test, solution, and verifier assets, and tags Oracle
+timeout, CPU/memory/storage/GPU, network, architecture, test, solution, and verifier assets, and tags Oracle
 eligibility explicitly from a real non-symlink `solution/solve.sh`. Task IDs or
 benchmark prefixes never imply Oracle compatibility.
 
@@ -404,7 +404,8 @@ policy before atomically marking the profile `runnable` and moving the public
 alias. Agent execution and verification use separate drivers: the agent never
 receives `solution/`, `tests/`, `verifier/`, or `upstream-task.toml`. A worker
 rehashes the materialized bundle before starting either driver. A numeric
-reward, including `0`, is a valid benchmark result; missing or malformed reward
+resource limits are supplied to both agent and verifier sandboxes; unsupported
+drivers fail closed. A numeric reward, including `0`, is a valid benchmark result; missing or malformed reward
 evidence is a platform/verifier failure.
 Compose fields used only by the upstream harness runner, such as
 `container_name` and log `volumes`, are not copied into Loom task config.

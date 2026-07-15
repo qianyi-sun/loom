@@ -21,6 +21,7 @@ from loom.trajectory.storage import BUNDLE_FILE_METADATA_NAME
 from loom_benchmark_tool.publish_cmd import (
     MANIFEST_SCHEMA_VERSION,
     _bundle_checksum,
+    _prepare_adapter_source,
     _safe_dirname,
     repo_id_for,
 )
@@ -105,6 +106,62 @@ def test_manifest_schema_version_is_int() -> None:
     to a string would silently break the manifest reader."""
     assert isinstance(MANIFEST_SCHEMA_VERSION, int)
     assert MANIFEST_SCHEMA_VERSION >= 3
+
+
+def test_prepare_adapter_source_fetches_independent_audit_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execution = tmp_path / "execution"
+    execution.mkdir()
+    audit = tmp_path / "audit-fetch" / "repo"
+    manifest = audit / "tasks" / "dataset.toml"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("[dataset]\nname='terminal-bench/terminal-bench-2-1'\n")
+    execution_source = UpstreamSource(
+        kind="harbor-package",
+        locator="terminal-bench/terminal-bench-2-1",
+        revision="6",
+    )
+    audit_source = UpstreamSource(
+        kind="git",
+        locator="https://example.test/tb21.git",
+        revision="d" * 40,
+    )
+    calls: list[UpstreamSource] = []
+
+    def fake_fetch(
+        source: UpstreamSource,
+        *,
+        cache_root: Path,
+        refresh: bool,
+    ) -> Path:
+        assert cache_root == tmp_path / "cache"
+        assert refresh is True
+        calls.append(source)
+        return execution if source is execution_source else audit.parent
+
+    monkeypatch.setattr(
+        "loom_benchmark_tool.publish_cmd.fetch_upstream",
+        fake_fetch,
+    )
+    adapter = SimpleNamespace(
+        upstream_source=execution_source,
+        audit_source=audit_source,
+        audit_manifest_source="tasks/dataset.toml",
+    )
+
+    result = _prepare_adapter_source(
+        adapter=adapter,
+        cache_dir=tmp_path / "cache",
+        refresh=True,
+    )
+
+    assert result == execution
+    assert calls == [execution_source, audit_source]
+    assert (execution / "audit" / "tasks" / "dataset.toml").read_bytes() == (
+        manifest.read_bytes()
+    )
 
 
 @pytest.mark.asyncio

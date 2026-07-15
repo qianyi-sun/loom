@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import Select, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom.benchmark_profiles import resolve_benchmark_selectors
 from loom.benchmark_readiness import (
     BenchmarkAuditSource,
     BenchmarkReadinessItem,
@@ -25,7 +26,6 @@ from loom.benchmark_readiness import (
     readiness_display_fields,
 )
 from loom.db.schema import Benchmark, BenchmarkAlias, Task
-from loom_service.benchmark_profiles import resolve_benchmark_selectors
 from loom_service.dependencies import SessionAndCtx
 
 router = APIRouter()
@@ -215,9 +215,7 @@ async def list_benchmarks(
                 benchmark,
                 readiness,
                 aliases=aliases_by_profile.get(benchmark.id, []),
-                public_selector=(
-                    aliases_by_profile.get(benchmark.id, [benchmark.id])[0]
-                ),
+                public_selector=(aliases_by_profile.get(benchmark.id, [benchmark.id])[0]),
             )
             for benchmark, readiness in rows
         ],
@@ -260,7 +258,9 @@ async def get_benchmark(
         rows[0][0],
         rows[0][1],
         aliases=aliases_by_profile.get(b.id, []),
-        public_selector=(benchmark_id if benchmark_id in aliases_by_profile.get(b.id, []) else b.id),
+        public_selector=(
+            benchmark_id if benchmark_id in aliases_by_profile.get(b.id, []) else b.id
+        ),
     )
 
 

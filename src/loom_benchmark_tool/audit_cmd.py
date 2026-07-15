@@ -15,7 +15,7 @@ from typing import Any
 
 from loom_benchmark_terminal_bench_2.upstream import TB21_TASK_COUNT, load_tb21_lock
 from loom_benchmarks.util import sha256_of_dir
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -170,7 +170,10 @@ async def activate_tb21_alias(
             .values(alias=TB21_PUBLIC_ALIAS, benchmark_id=TB21_PROFILE_ID)
             .on_conflict_do_update(
                 index_elements=["alias"],
-                set_={"benchmark_id": TB21_PROFILE_ID},
+                set_={
+                    "benchmark_id": TB21_PROFILE_ID,
+                    "activated_at": func.now(),
+                },
             ),
         )
     return current
@@ -316,6 +319,12 @@ async def audit_tb21_profile(
                 "image provenance",
                 provenance.get("image_provenance"),
                 expected_image,
+            )
+            _require_equal(
+                row_issues,
+                "resource limit provenance",
+                provenance.get("resource_limits"),
+                _resource_limit_provenance(config),
             )
             architecture_diagnostics.append(
                 f"{row.id}: cpu_arch={config.environment.cpu_arch}",
@@ -504,6 +513,16 @@ def _image_provenance(config: TaskConfig) -> dict[str, object]:
             else None
         ),
         "cpu_arch": environment.cpu_arch,
+    }
+
+
+def _resource_limit_provenance(config: TaskConfig) -> dict[str, object]:
+    environment = config.environment
+    return {
+        "cpus": environment.cpus,
+        "memory_mb": environment.memory_mb,
+        "storage_mb": environment.storage_mb,
+        "gpus": environment.gpus,
     }
 
 

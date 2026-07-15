@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import shutil
 import tempfile
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -163,9 +164,9 @@ def _stage_bundles(
     object-store consumers expect."""
     adapter = REGISTRY[benchmark]
     cache_dir.mkdir(parents=True, exist_ok=True)
-    source_dir = fetch_upstream(
-        adapter.upstream_source,
-        cache_root=cache_dir,
+    source_dir = _prepare_adapter_source(
+        adapter=adapter,
+        cache_dir=cache_dir,
         refresh=refresh,
     )
     selected_instances = _select_instances(
@@ -253,6 +254,58 @@ def _stage_bundles(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
     )
     return manifest, task_entries, stats
+
+
+def _prepare_adapter_source(
+    *,
+    adapter: Any,
+    cache_dir: Path,
+    refresh: bool,
+) -> Path:
+    """Fetch an adapter's execution source and any independent audit source.
+
+    Most adapters have one upstream.  Audited physical profiles may also
+    declare ``audit_source`` plus ``audit_manifest_source``.  The latter is
+    fetched independently at its immutable revision and copied beneath the
+    execution materialization's ``audit/`` directory before the adapter is
+    allowed to enumerate instances.  This keeps the generic publish command
+    usable without weakening the profile's two-authority verification gate.
+    """
+    source_dir = cast(
+        Path,
+        fetch_upstream(
+            adapter.upstream_source,
+            cache_root=cache_dir,
+            refresh=refresh,
+        ),
+    )
+    audit_source = getattr(adapter, "audit_source", None)
+    audit_manifest_source = getattr(adapter, "audit_manifest_source", None)
+    if audit_source is None and audit_manifest_source is None:
+        return source_dir
+    if audit_source is None or not isinstance(audit_manifest_source, str):
+        raise ValueError(
+            "audited benchmark adapters must declare both audit_source and "
+            "audit_manifest_source",
+        )
+    audit_root = cast(
+        Path,
+        fetch_upstream(
+            audit_source,
+            cache_root=cache_dir,
+            refresh=refresh,
+        ),
+    )
+    audit_checkout = audit_root / "repo" if audit_source.kind == "git" else audit_root
+    source_manifest = audit_checkout / audit_manifest_source
+    if not source_manifest.is_file():
+        raise ValueError(
+            f"audit source is missing required manifest {audit_manifest_source!r}",
+        )
+    target_manifest = source_dir / "audit" / audit_manifest_source
+    target_manifest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_manifest, target_manifest)
+    return source_dir
 
 
 def _publish_to_hf(

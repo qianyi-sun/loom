@@ -29,7 +29,12 @@ record both the Harbor Hub rev-6 package/profile provenance and the Terminus-2
 worker/bridge provenance; matching one does not attest the other. The benchmark
 worker also verifies the materialized task checksum before agent startup, keeps
 private tests/solutions/verifier files out of this agent runtime, and creates a
-fresh verifier-only driver after Terminus-2 exits.
+fresh verifier-only driver after Terminus-2 exits. The public agent workspace
+is handed to that driver as a validated archive snapshot so directory layout,
+regular-file modes, safe workspace-relative symlinks, and hardlinks remain
+score-equivalent. Traversal, absolute/private link targets, devices, FIFOs, and
+sockets fail closed. Cancellation waits for verifier-driver teardown before it
+propagates, preventing sandbox cleanup from racing network/sidecar teardown.
 
 ## Runtime shape
 

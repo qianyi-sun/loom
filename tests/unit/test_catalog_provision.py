@@ -38,10 +38,7 @@ class FakeCatalog:
 
     async def upsert_rows(self, rows: CatalogRows) -> None:
         self.upserts.append(rows)
-        agents = {
-            (row.name, row.version): row
-            for row in self.rows.agents
-        }
+        agents = {(row.name, row.version): row for row in self.rows.agents}
         benchmarks = {row.id: row for row in self.rows.benchmarks}
         tasks = {row.id: row for row in self.rows.tasks}
         agents.update({(row.name, row.version): row for row in rows.agents})
@@ -58,6 +55,7 @@ class FakeObjects:
     def __init__(self, objects: dict[tuple[str, str], bytes] | None = None) -> None:
         self.objects = objects or {}
         self.buckets: set[str] = set()
+        self.put_calls: list[tuple[str, str]] = []
 
     async def ensure_bucket(self, bucket: str) -> None:
         self.buckets.add(bucket)
@@ -79,11 +77,14 @@ class FakeObjects:
         return self.objects[(bucket, key)]
 
     async def put_object(self, *, bucket: str, key: str, body: bytes) -> None:
+        self.put_calls.append((bucket, key))
         self.objects[(bucket, key)] = body
 
 
 @pytest.mark.asyncio
-async def test_postgres_catalog_store_batches_large_task_upserts(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_postgres_catalog_store_batches_large_task_upserts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class FakeEngine:
         def __init__(self) -> None:
             self.disposed = False
@@ -167,6 +168,198 @@ def test_agent_rows_from_service_catalog_include_contract_and_provenance() -> No
     }
 
 
+def test_tb21_catalog_provision_requires_target_local_activation() -> None:
+    profile_id = "terminal-bench-2@tb2.1-r6"
+    task_id = f"{profile_id}/task"
+    source = CatalogRows(
+        benchmarks=[
+            BenchmarkRow(
+                id=profile_id,
+                display_name="Terminal-Bench 2.1",
+                upstream_kind="harbor-package",
+                upstream_locator="terminal-bench/terminal-bench-2-1",
+                upstream_revision="6",
+                license_spdx="Apache-2.0",
+                license_url="https://example.test/license",
+                splits=["test"],
+                series=None,
+                imported_by="source",
+                execution_state="runnable",
+                profile_provenance={
+                    "physical_profile": profile_id,
+                    "activation_audit": {"snapshot_id": "sha256:source-only"},
+                },
+            )
+        ],
+        tasks=[
+            TaskRow(
+                id=task_id,
+                checksum="a" * 64,
+                config=_valid_task_config(task_id),
+                source=f"s3://source-bucket/{profile_id}/task/",
+                license="Apache-2.0",
+                benchmark_id=profile_id,
+                tags={},
+            )
+        ],
+    )
+
+    ready = catalog_provision._ready_catalog_rows(
+        source,
+        target_bucket="target-bucket",
+    )
+
+    assert len(ready.benchmarks) == 1
+    assert ready.benchmarks[0].execution_state == "pending"
+    assert ready.benchmarks[0].profile_provenance == {
+        "physical_profile": profile_id,
+    }
+    assert ready.tasks[0].source == f"s3://target-bucket/{profile_id}/task/"
+
+
+@pytest.mark.asyncio
+async def test_tb21_catalog_drift_fails_before_target_object_copy() -> None:
+    profile_id = "terminal-bench-2@tb2.1-r6"
+    task_id = f"{profile_id}/task"
+    benchmark = BenchmarkRow(
+        id=profile_id,
+        display_name="Terminal-Bench 2.1",
+        upstream_kind="harbor-package",
+        upstream_locator="terminal-bench/terminal-bench-2-1",
+        upstream_revision="6",
+        license_spdx="Apache-2.0",
+        license_url="https://example.test/license",
+        splits=["test"],
+        series=None,
+        imported_by="source",
+        execution_state="runnable",
+        profile_provenance={"physical_profile": profile_id},
+    )
+    source_task = TaskRow(
+        id=task_id,
+        checksum="a" * 64,
+        config=_valid_task_config(task_id),
+        source=f"s3://source-bucket/{profile_id}/task/",
+        license="Apache-2.0",
+        benchmark_id=profile_id,
+        tags={},
+    )
+    target_task = replace(
+        source_task,
+        checksum="b" * 64,
+        source=f"s3://target-bucket/{profile_id}/task/",
+    )
+    target = FakeCatalog(CatalogRows(benchmarks=[benchmark], tasks=[target_task]))
+    target_objects = FakeObjects(
+        {("target-bucket", f"{profile_id}/task/task.toml"): b"activated"},
+    )
+
+    with pytest.raises(ValueError, match=r"immutable TB2.1 profile drift"):
+        await provision_ready_benchmark_catalog(
+            source_catalog=FakeCatalog(
+                CatalogRows(benchmarks=[benchmark], tasks=[source_task]),
+            ),
+            target_catalog=target,
+            source_objects=FakeObjects(
+                {("source-bucket", f"{profile_id}/task/task.toml"): b"replacement"},
+            ),
+            target_objects=target_objects,
+            target_bucket="target-bucket",
+        )
+
+    assert target_objects.put_calls == []
+    assert target_objects.objects == {
+        ("target-bucket", f"{profile_id}/task/task.toml"): b"activated",
+    }
+    assert target.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_exact_runnable_tb21_target_is_reset_for_local_reactivation() -> None:
+    profile_id = "terminal-bench-2@tb2.1-r6"
+    task_id = f"{profile_id}/task"
+    source_benchmark = BenchmarkRow(
+        id=profile_id,
+        display_name="Terminal-Bench 2.1",
+        upstream_kind="harbor-package",
+        upstream_locator="terminal-bench/terminal-bench-2-1",
+        upstream_revision="6",
+        license_spdx="Apache-2.0",
+        license_url="https://example.test/license",
+        splits=["test"],
+        series=None,
+        imported_by="source",
+        execution_state="runnable",
+        profile_provenance={
+            "physical_profile": profile_id,
+            "activation_audit": {"snapshot_id": "sha256:source"},
+        },
+    )
+    source_task = TaskRow(
+        id=task_id,
+        checksum="a" * 64,
+        config=_valid_task_config(task_id),
+        source=f"s3://source-bucket/{profile_id}/task/",
+        license="Apache-2.0",
+        benchmark_id=profile_id,
+        tags={},
+    )
+    target = FakeCatalog(
+        CatalogRows(
+            benchmarks=[
+                replace(
+                    source_benchmark,
+                    imported_by="target",
+                    profile_provenance={
+                        "physical_profile": profile_id,
+                        "activation_audit": {"snapshot_id": "sha256:target"},
+                    },
+                ),
+            ],
+            tasks=[
+                replace(
+                    source_task,
+                    source=f"s3://target-bucket/{profile_id}/task/",
+                ),
+            ],
+        ),
+    )
+    source_objects = FakeObjects(
+        {("source-bucket", f"{profile_id}/task/task.toml"): b"task"},
+    )
+
+    class FailClosedObjects(FakeObjects):
+        async def put_object(self, *, bucket: str, key: str, body: bytes) -> None:
+            current = next(row for row in target.rows.benchmarks if row.id == profile_id)
+            assert current.execution_state == "pending"
+            assert "activation_audit" not in current.profile_provenance
+            await super().put_object(bucket=bucket, key=key, body=body)
+
+    target_objects = FailClosedObjects(
+        {("target-bucket", f"{profile_id}/task/task.toml"): b"stale"},
+    )
+
+    await provision_ready_benchmark_catalog(
+        source_catalog=FakeCatalog(
+            CatalogRows(benchmarks=[source_benchmark], tasks=[source_task]),
+        ),
+        target_catalog=target,
+        source_objects=source_objects,
+        target_objects=target_objects,
+        target_bucket="target-bucket",
+        imported_by="restore",
+    )
+
+    restored = next(row for row in target.rows.benchmarks if row.id == profile_id)
+    assert restored.execution_state == "pending"
+    assert restored.profile_provenance == {"physical_profile": profile_id}
+    assert target_objects.put_calls == [
+        ("target-bucket", f"{profile_id}/task/task.toml"),
+    ]
+    assert target.upserts[0].benchmarks[0].execution_state == "pending"
+    assert "activation_audit" not in target.upserts[0].benchmarks[0].profile_provenance
+
+
 @pytest.mark.asyncio
 async def test_provision_ready_catalog_filters_blocked_rows_and_copies_missing_objects() -> None:
     source = FakeCatalog(
@@ -232,14 +425,18 @@ async def test_provision_ready_catalog_filters_blocked_rows_and_copies_missing_o
         ),
     )
     target = FakeCatalog()
-    source_objects = FakeObjects({
-        ("loom-benchmarks", "humaneval/HumanEval/0/task.toml"): b"task",
-        ("loom-benchmarks", "humaneval/HumanEval/0/solution/solve.sh"): b"solve",
-        ("loom-benchmarks", "legacy/0/task.toml"): b"legacy",
-    })
-    target_objects = FakeObjects({
-        ("loom-benchmarks", "humaneval/HumanEval/0/task.toml"): b"task",
-    })
+    source_objects = FakeObjects(
+        {
+            ("loom-benchmarks", "humaneval/HumanEval/0/task.toml"): b"task",
+            ("loom-benchmarks", "humaneval/HumanEval/0/solution/solve.sh"): b"solve",
+            ("loom-benchmarks", "legacy/0/task.toml"): b"legacy",
+        }
+    )
+    target_objects = FakeObjects(
+        {
+            ("loom-benchmarks", "humaneval/HumanEval/0/task.toml"): b"task",
+        }
+    )
 
     stats = await provision_ready_benchmark_catalog(
         source_catalog=source,
@@ -362,21 +559,25 @@ async def test_provision_ready_catalog_preserves_existing_agent_rows_on_second_r
             ],
         ),
     )
-    target = FakeCatalog(CatalogRows(
-        agents=[
-            AgentRow(
-                name="oracle",
-                version="service-catalog-v1",
-                mode="builtin",
-                spec={"stale": True},
-            ),
-        ],
-        benchmarks=[],
-        tasks=[],
-    ))
-    source_objects = FakeObjects({
-        ("loom-benchmarks", "humaneval/HumanEval/0/task.toml"): b"task",
-    })
+    target = FakeCatalog(
+        CatalogRows(
+            agents=[
+                AgentRow(
+                    name="oracle",
+                    version="service-catalog-v1",
+                    mode="builtin",
+                    spec={"stale": True},
+                ),
+            ],
+            benchmarks=[],
+            tasks=[],
+        )
+    )
+    source_objects = FakeObjects(
+        {
+            ("loom-benchmarks", "humaneval/HumanEval/0/task.toml"): b"task",
+        }
+    )
 
     first = await provision_ready_benchmark_catalog(
         source_catalog=source,
@@ -390,9 +591,11 @@ async def test_provision_ready_catalog_preserves_existing_agent_rows_on_second_r
         source_catalog=source,
         target_catalog=target,
         source_objects=source_objects,
-        target_objects=FakeObjects({
-            ("loom-benchmarks", "humaneval/HumanEval/0/task.toml"): b"task",
-        }),
+        target_objects=FakeObjects(
+            {
+                ("loom-benchmarks", "humaneval/HumanEval/0/task.toml"): b"task",
+            }
+        ),
         target_bucket="loom-benchmarks",
         imported_by="staging-provision",
     )
@@ -401,6 +604,4 @@ async def test_provision_ready_catalog_preserves_existing_agent_rows_on_second_r
     assert second.ready_agents == first.ready_agents
     by_name = {row.name: row for row in target.rows.agents}
     assert "stale" not in by_name["oracle"].spec
-    assert by_name["oracle"].spec["catalog_provenance"]["provisioned_by"] == (
-        "staging-provision"
-    )
+    assert by_name["oracle"].spec["catalog_provenance"]["provisioned_by"] == ("staging-provision")

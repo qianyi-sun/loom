@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -20,6 +21,16 @@ from loom.trajectory.storage import FakeObjectStore
 from loom_benchmark_tool.audit_cmd import AuditResult, activate_tb21_alias
 from loom_benchmark_tool.manifest import TB21_AGENT_WORKSPACE_POLICY
 from loom_benchmark_tool.register_cmd import run_register
+from loom_cli.catalog_provision import (
+    BenchmarkRow as CatalogBenchmarkRow,
+)
+from loom_cli.catalog_provision import (
+    CatalogRows,
+    PostgresCatalogStore,
+)
+from loom_cli.catalog_provision import (
+    TaskRow as CatalogTaskRow,
+)
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
 
 PROFILE = "terminal-bench-2@tb2.1-r6"
@@ -86,7 +97,18 @@ def _manifest() -> dict[str, object]:
             "mode": "0755",
         },
         "bundle_file_metadata_sha256": "sha256:" + "e" * 64,
-        "image_provenance": {"docker_image": "python:3.12-slim", "cpu_arch": "x86_64"},
+        "image_provenance": {
+            "docker_image": "python:3.12-slim",
+            "dockerfile": None,
+            "docker_build_context": None,
+            "cpu_arch": "x86_64",
+        },
+        "resource_limits": {
+            "cpus": None,
+            "memory_mb": None,
+            "storage_mb": None,
+            "gpus": 0,
+        },
         "workspace_staging_policy": TB21_AGENT_WORKSPACE_POLICY,
     }
     return {
@@ -173,6 +195,84 @@ async def test_register_keeps_tb21_profile_pending_and_rejects_direct_physical_s
         )
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail["reason"] == "benchmark_not_runnable"
+
+
+async def test_catalog_provision_rejects_tb21_physical_profile_drift(
+    db: AsyncSession,
+    postgres_url: str,
+) -> None:
+    manifest = _manifest()
+    profile_provenance = dict(manifest["benchmark_profile_provenance"])  # type: ignore[arg-type]
+    task = manifest["tasks"][0]  # type: ignore[index]
+    db.add(
+        Benchmark(
+            id=PROFILE,
+            display_name=str(manifest["display_name"]),
+            upstream_kind=str(manifest["upstream_kind"]),
+            upstream_locator=str(manifest["upstream_locator"]),
+            upstream_revision=str(manifest["upstream_revision"]),
+            license_spdx=str(manifest["license_spdx"]),
+            license_url=str(manifest["license_url"]),
+            splits=["test"],
+            execution_state="runnable",
+            profile_provenance={
+                **profile_provenance,
+                "activation_audit": {"snapshot_id": "sha256:" + "c" * 64},
+            },
+        )
+    )
+    db.add(
+        TaskRow(
+            id=TASK_ID,
+            checksum=str(task["checksum"]),
+            config=dict(task["task_config"]),
+            source=f"s3://loom-benchmarks/{PROFILE}/test-revision/chess-best-move/",
+            license="Apache-2.0",
+            benchmark_id=PROFILE,
+            tags={},
+            source_provenance=dict(task["source_provenance"]),
+        )
+    )
+    await db.commit()
+
+    rows = CatalogRows(
+        benchmarks=[
+            CatalogBenchmarkRow(
+                id=PROFILE,
+                display_name=str(manifest["display_name"]),
+                upstream_kind=str(manifest["upstream_kind"]),
+                upstream_locator=str(manifest["upstream_locator"]),
+                upstream_revision=str(manifest["upstream_revision"]),
+                license_spdx=str(manifest["license_spdx"]),
+                license_url=str(manifest["license_url"]),
+                splits=["test"],
+                series=None,
+                imported_by="target-provision",
+                execution_state="pending",
+                profile_provenance=profile_provenance,
+            )
+        ],
+        tasks=[
+            CatalogTaskRow(
+                id=TASK_ID,
+                checksum="sha256:" + "d" * 64,
+                config=dict(task["task_config"]),
+                source=f"s3://loom-benchmarks/{PROFILE}/test-revision/chess-best-move/",
+                license="Apache-2.0",
+                benchmark_id=PROFILE,
+                tags={},
+                source_provenance=dict(task["source_provenance"]),
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match=r"immutable TB2\.1 profile drift"):
+        await PostgresCatalogStore(postgres_url).upsert_rows(rows)
+
+    db.expire_all()
+    persisted = await db.get(TaskRow, TASK_ID)
+    assert persisted is not None
+    assert persisted.checksum == task["checksum"]
 
 
 async def test_exact_reregister_preserves_runnable_profile_and_alias(
@@ -333,3 +433,54 @@ async def test_activation_writes_alias_only_after_exact_isolated_audit(
     assert benchmark is not None
     assert benchmark.execution_state == "runnable"
     assert benchmark.profile_provenance["activation_audit"]["snapshot_id"] == ("sha256:" + "c" * 64)
+
+
+async def test_reactivation_refreshes_alias_activated_at(
+    db: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_activated_at = datetime(2000, 1, 1, tzinfo=UTC)
+    db.add(
+        Benchmark(
+            id=PROFILE,
+            display_name="Terminal-Bench 2.1",
+            upstream_kind="harbor-package",
+            upstream_locator="terminal-bench/terminal-bench-2-1",
+            upstream_revision="6",
+            license_spdx="Apache-2.0",
+            license_url="https://example.test/license",
+            splits=["test"],
+            execution_state="runnable",
+            profile_provenance={},
+        )
+    )
+    db.add(
+        BenchmarkAlias(
+            alias="terminal-bench-2",
+            benchmark_id=PROFILE,
+            activated_at=old_activated_at,
+        )
+    )
+    await db.commit()
+
+    current = AuditResult(
+        profile=PROFILE,
+        verified_bundles=89,
+        private_workspace_isolation=True,
+        snapshot_id="sha256:" + "c" * 64,
+    )
+
+    async def fresh_audit(*_args: object, **_kwargs: object) -> AuditResult:
+        return current
+
+    monkeypatch.setattr("loom_benchmark_tool.audit_cmd.audit_tb21_profile", fresh_audit)
+    await activate_tb21_alias(
+        db,
+        object_store=object(),  # type: ignore[arg-type]
+        audit_evidence=current,
+    )
+
+    db.expire_all()
+    alias = await db.get(BenchmarkAlias, "terminal-bench-2")
+    assert alias is not None
+    assert alias.activated_at > old_activated_at

@@ -98,6 +98,10 @@ class TestNormalizeMapping:
         assert cfg.environment.os == "linux"
         assert cfg.environment.docker_image == "example/tb21:rev6"
         assert cfg.environment.build_timeout_sec == 600.0
+        assert cfg.environment.cpus == 1
+        assert cfg.environment.memory_mb == 2048
+        assert cfg.environment.storage_mb == 10240
+        assert cfg.environment.gpus == 0
         assert cfg.environment.workdir.as_posix() == "/app"
         assert cfg.environment.environment == {
             "NATIVE_ENV": "preserve-supported-values",
@@ -112,6 +116,21 @@ class TestNormalizeMapping:
         assert cfg.steps[0].artifacts == ["logs/verifier/**"]
         assert raw["schema_version"] == "1.1"
         assert raw["environment"]["architecture"] == "x86_64"
+
+    def test_native_tb21_maps_no_internet_to_no_network(self) -> None:
+        raw = {
+            "schema_version": "1.1",
+            "task": {"name": "terminal-bench/offline"},
+            "environment": {
+                "docker_image": "example/tb21:rev6",
+                "allow_internet": False,
+            },
+        }
+
+        cfg = TaskConfig.model_validate(normalize_terminal_bench_task_toml(raw))
+
+        assert cfg.environment.network_policies_supported == frozenset({"no-network"})
+        assert cfg.environment.baseline_network_policy.kind == "no-network"
 
     def test_native_tb21_appends_verifier_artifact_glob_without_replacing_source_patterns(
         self,

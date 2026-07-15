@@ -158,6 +158,10 @@ def _normalize_native_tb21_task_toml(payload: dict[str, Any]) -> dict[str, Any]:
         "skills_dir",
         "mcp_servers",
         "build_timeout_sec",
+        "cpus",
+        "memory_mb",
+        "storage_mb",
+        "gpus",
         "sidecars",
     ):
         if field in source_environment:
@@ -172,6 +176,15 @@ def _normalize_native_tb21_task_toml(payload: dict[str, Any]) -> dict[str, Any]:
         source_env = source_environment.get("env")
     if isinstance(source_env, dict):
         environment["environment"] = {str(key): str(value) for key, value in source_env.items()}
+    allow_internet = source_environment.get("allow_internet")
+    if allow_internet is False:
+        environment["network_policies_supported"] = ["no-network"]
+        environment["baseline_network_policy"] = {"kind": "no-network"}
+    elif allow_internet not in {None, True}:
+        raise ValueError("Terminal-Bench environment.allow_internet must be boolean")
+    gpus = source_environment.get("gpus")
+    if isinstance(gpus, int) and gpus > 0 and "gpu_vendor" not in environment:
+        environment["gpu_vendor"] = "nvidia"
 
     source_agent = payload.get("agent")
     source_agent = source_agent if isinstance(source_agent, dict) else {}

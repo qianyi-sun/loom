@@ -220,6 +220,10 @@ class Trial:
                                     }.items()
                                 )
                             ),
+                            cpus=self.ctx.task_config.environment.cpus,
+                            memory_mb=self.ctx.task_config.environment.memory_mb,
+                            storage_mb=self.ctx.task_config.environment.storage_mb,
+                            gpus=self.ctx.task_config.environment.gpus,
                         )
                     )
                     driver_started = True

@@ -139,6 +139,19 @@ class DockerDriver:
                 run_kwargs["tmpfs"] = _tmpfs_specs_to_docker_map(opts.tmpfs)
             if opts.labels:
                 run_kwargs["labels"] = dict(opts.labels)
+            if opts.cpus is not None:
+                run_kwargs["nano_cpus"] = int(opts.cpus * 1_000_000_000)
+            if opts.memory_mb is not None:
+                run_kwargs["mem_limit"] = f"{opts.memory_mb}m"
+            if opts.storage_mb is not None:
+                run_kwargs["storage_opt"] = {"size": f"{opts.storage_mb}M"}
+            if opts.gpus:
+                run_kwargs["device_requests"] = [
+                    docker.types.DeviceRequest(
+                        count=opts.gpus,
+                        capabilities=[["gpu"]],
+                    )
+                ]
             # docker-py's high-level containers.run() creates before it starts,
             # but it does not return the Container if start() raises. Split the
             # steps so the failure cleanup path can remove Created containers.

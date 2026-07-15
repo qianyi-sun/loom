@@ -2324,12 +2324,25 @@ async def rerun_failed_batch(
         for target in selected_targets
     ]
     task_ids = sorted({target["task_id"] for target in selected_targets})
+    rerun_task_result = await resolve_task_filter_with_diagnostics(
+        s,
+        {"subset_kind": "explicit", "task_ids": task_ids},
+        team_id=b.team_id,
+        require_runnable=True,
+    )
+    if set(rerun_task_result.task_ids) != set(task_ids):
+        _reject_submission(
+            reason="invalid_input",
+            status_code=400,
+            detail="rerun target tasks are missing or no longer runnable",
+        )
     token_prefix = ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
     rerun = Batch(
         team_id=b.team_id,
         name=f"{b.name} failed-case rerun",
         description=(f"Reruns {len(targets)} transient failed case(s) from batch {b.id}."),
         task_filter={"subset_kind": "explicit", "task_ids": task_ids},
+        resolved_task_ids=list(rerun_task_result.task_ids),
         trial_config=dict(b.trial_config),
         state="submitted",
         created_by_token_prefix=token_prefix,
@@ -2344,6 +2357,13 @@ async def rerun_failed_batch(
         provider_model_id=b.provider_model_id,
         rerun_of_batch_id=b.id,
         rerun_targets=targets,
+        source_provenance=[
+            {
+                "kind": "supplemental_rerun",
+                "source_batch_id": str(b.id),
+            },
+            *rerun_task_result.benchmark_selection_provenance,
+        ],
     )
     s.add(rerun)
     await s.commit()

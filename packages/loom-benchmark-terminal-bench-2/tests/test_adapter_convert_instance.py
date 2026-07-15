@@ -7,6 +7,7 @@ from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 
+import pytest
 from loom_benchmark_terminal_bench_2 import upstream
 from loom_benchmark_terminal_bench_2.adapter import TerminalBench2Adapter
 from loom_benchmarks.base import BenchmarkInstance
@@ -126,6 +127,10 @@ def test_convert_preserves_native_bytes_modes_and_supported_contract(
     assert cfg.task.labels == ["native", "terminal"]
     assert cfg.environment.docker_image == "example/native:rev6"
     assert cfg.environment.build_timeout_sec == 333.0
+    assert cfg.environment.cpus == 2
+    assert cfg.environment.memory_mb == 4096
+    assert cfg.environment.storage_mb == 20480
+    assert cfg.environment.gpus == 0
     assert cfg.environment.workdir.as_posix() == "/app"
     assert cfg.environment.environment == {"NATIVE": "true"}
     assert cfg.agent.timeout_sec == 222.0
@@ -148,3 +153,40 @@ def test_convert_preserves_native_bytes_modes_and_supported_contract(
         "sha256": f"sha256:{sha256((out_dir / 'verifier' / 'run.sh').read_bytes()).hexdigest()}",
         "mode": "0755",
     }
+    assert provenance["resource_limits"] == {
+        "cpus": 2.0,
+        "memory_mb": 4096,
+        "storage_mb": 20480,
+        "gpus": 0,
+    }
+
+
+def test_convert_fails_closed_without_explicit_runnable_image(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source" / "tasks" / "native-copy"
+    _write_native_task(source)
+    task_toml = source / "task.toml"
+    task_toml.write_text(
+        task_toml.read_text().replace('docker_image = "example/native:rev6"\n', ""),
+    )
+    instance = BenchmarkInstance(
+        instance_id="native-copy",
+        split="test",
+        raw={"source_path": str(source)},
+    )
+    test_lock = replace(
+        upstream.load_tb21_lock(),
+        tasks=(
+            upstream.TB21TaskLock(
+                "terminal-bench/native-copy",
+                "sha256:" + "a" * 64,
+            ),
+        ),
+    )
+    monkeypatch.setattr(upstream, "load_tb21_lock", lambda: test_lock)
+    monkeypatch.setattr(upstream, "verify_tb21_materialization", lambda _root: None)
+
+    with pytest.raises(upstream.TB21LockError, match="no explicit runnable image"):
+        TerminalBench2Adapter().convert_instance(instance, out_dir=tmp_path / "bundle")

@@ -26,6 +26,8 @@ class TerminalBench2Adapter:
     display_name = "Terminal-Bench 2.1 (Harbor rev 6)"
     series = "tool-use"
     upstream_source: UpstreamSource = upstream.TB21_HARBOR_SOURCE
+    audit_source: UpstreamSource = upstream.TB21_AUDIT_SOURCE
+    audit_manifest_source = upstream.TB21_MANIFEST_SOURCE
     license_spdx = "Apache-2.0"
     license_url = "https://github.com/harbor-framework/terminal-bench-2-1/blob/dde3cd95b80ff25af5abd99a80b6513a018ad3b4/LICENSE"
     splits = ("test",)
@@ -97,6 +99,12 @@ class TerminalBench2Adapter:
                 "docker_build_context": env.get("docker_build_context"),
                 "cpu_arch": env.get("cpu_arch"),
             },
+            "resource_limits": {
+                "cpus": env.get("cpus"),
+                "memory_mb": env.get("memory_mb"),
+                "storage_mb": env.get("storage_mb"),
+                "gpus": env.get("gpus", 0),
+            },
             "workspace_staging_policy": TB21_AGENT_WORKSPACE_POLICY,
         }
 
@@ -166,11 +174,23 @@ class TerminalBench2Adapter:
             raise upstream.TB21LockError(
                 f"native TB2.1 task TOML is invalid: {source_task_toml}",
             ) from exc
-        normalized = normalize_terminal_bench_task_toml(native_config)
+        try:
+            normalized = normalize_terminal_bench_task_toml(native_config)
+        except ValueError as exc:
+            raise upstream.TB21LockError(
+                f"native TB2.1 task has unsupported environment semantics: {source_task_toml}",
+            ) from exc
         task = normalized.get("task")
         if not isinstance(task, dict):
             raise upstream.TB21LockError(
                 f"native TB2.1 task has no normalizable [task] section: {source_task_toml}",
+            )
+        environment = normalized.get("environment")
+        if not isinstance(environment, dict) or not (
+            environment.get("docker_image") or environment.get("dockerfile")
+        ):
+            raise upstream.TB21LockError(
+                f"native TB2.1 task has no explicit runnable image: {source_task_toml}",
             )
         task["id"] = task_id
         (out_dir / "task.toml").write_text(tomli_w.dumps(normalized))
@@ -218,6 +238,16 @@ class TerminalBench2Adapter:
         if missing:
             raise upstream.TB21LockError(
                 f"native TB2.1 task {task_name!r} lacks required paths: {missing}",
+            )
+        compose_files = sorted(
+            path.name
+            for pattern in ("docker-compose.yml", "docker-compose.yaml")
+            for path in (task_dir / "environment").glob(pattern)
+        )
+        if compose_files:
+            raise upstream.TB21LockError(
+                f"native TB2.1 task {task_name!r} requires unsupported compose "
+                f"semantics: {compose_files}",
             )
 
     @staticmethod

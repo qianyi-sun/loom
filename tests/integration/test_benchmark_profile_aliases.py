@@ -10,8 +10,8 @@ from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
+from loom.benchmark_profiles import resolve_benchmark_selectors
 from loom.db.schema import Benchmark, BenchmarkAlias, Task
-from loom_service.benchmark_profiles import resolve_benchmark_selectors
 from loom_service.routes.benchmarks import get_benchmark, list_benchmarks
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
 

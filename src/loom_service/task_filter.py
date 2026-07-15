@@ -36,13 +36,13 @@ from sqlalchemy import cast, false, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom.benchmark_readiness import CURRENTLY_UNSUPPORTED_BENCHMARK_IDS
-from loom.db.schema import Task, TaskSet
-from loom.db.task_set_visibility import visible_task_sets
-from loom_service.benchmark_profiles import (
+from loom.benchmark_profiles import (
     reject_non_runnable_benchmark_profiles,
     resolve_benchmark_selectors,
 )
+from loom.benchmark_readiness import CURRENTLY_UNSUPPORTED_BENCHMARK_IDS
+from loom.db.schema import Task, TaskSet
+from loom.db.task_set_visibility import visible_task_sets
 
 # Recognized task_filter keys. Anything else is rejected so a typo
 # (`liscense` instead of `license`) doesn't silently match nothing.
@@ -122,29 +122,28 @@ async def _reject_invisible_or_unrunnable_task_sets(
         return
 
     rows = (
-        await session.execute(
-            visible_task_sets(team_id=team_id).where(
-                TaskSet.id.in_(task_set_ids),
-            ),
+        (
+            await session.execute(
+                visible_task_sets(team_id=team_id).where(
+                    TaskSet.id.in_(task_set_ids),
+                ),
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     visible_by_id = {row.id: row for row in rows}
     missing = sorted(set(task_set_ids) - set(visible_by_id))
     if missing:
         raise HTTPException(status_code=404, detail="task set not found")
 
     unrunnable = sorted(
-        row.id
-        for row in visible_by_id.values()
-        if row.status not in {"ready", "partial"}
+        row.id for row in visible_by_id.values() if row.status not in {"ready", "partial"}
     )
     if unrunnable:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "task_filter references TaskSets that are not ready: "
-                f"{unrunnable}"
-            ),
+            detail=(f"task_filter references TaskSets that are not ready: {unrunnable}"),
         )
 
 

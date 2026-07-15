@@ -181,3 +181,20 @@ def test_list_instances_fails_closed_without_a_verified_materialization(
                 split="test",
             )
         )
+
+
+def test_list_instances_fails_closed_on_untranslated_compose_semantics(
+    source_root: Path,
+) -> None:
+    task_dir = source_root / "tasks" / "adaptive-rejection-sampler"
+    (task_dir / "environment" / "docker-compose.yaml").write_text(
+        "services:\n  helper:\n    image: redis:7\n",
+    )
+
+    with pytest.raises(upstream.TB21LockError, match="unsupported compose semantics"):
+        list(
+            TerminalBench2Adapter().list_instances(
+                source_dir=source_root,
+                split="test",
+            )
+        )

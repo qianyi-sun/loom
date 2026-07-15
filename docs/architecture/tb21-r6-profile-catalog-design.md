@@ -195,10 +195,12 @@ tasks/<task>/
 The converter preserves the exact native schema-1.1 TOML as
 `upstream-task.toml` beside a Loom-schema-1 `task.toml`. The Loom config is
 produced by an explicit native-1.1 normalizer, which rewrites only the physical
-task ID and maps representable execution fields. Native resource quota,
-internet, and architecture fields that Loom's current `TaskConfig` cannot
-represent remain byte-preserved in `upstream-task.toml` and are carried into
-task provenance and preflight/audit rather than being silently dropped. The
+task ID and maps the native image, build, CPU, memory, storage, GPU, internet,
+architecture, and timeout contract. Those runtime-significant values are also
+attested in task provenance and activation audit. A driver that cannot enforce
+the requested limits fails closed; unsupported compose or missing-image
+semantics cannot activate. The complete source remains byte-preserved in
+`upstream-task.toml`. The
 converter also preserves instruction bytes, environment assets and image/build
 definition, timeout limits, test files, and solution isolation. It never exposes
 `solution/solve.sh` to a normal agent. It does not retain the legacy

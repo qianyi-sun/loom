@@ -11,6 +11,7 @@ from sqlalchemy import insert, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from loom.auth import verify_bearer_token
+from loom.benchmark_profiles import reject_non_runnable_benchmark_profiles
 from loom.db.schema import Batch, LlmCall, TeamQuota
 from loom.db.schema import Task as TaskRow
 from loom.db.schema import Trial as TrialRow
@@ -36,10 +37,7 @@ def _required_worker_pool(payload: dict[str, Any]) -> str | None:
     if len(pool) > 80 or any(ch.isspace() for ch in pool):
         raise HTTPException(
             status_code=400,
-            detail=(
-                "required_worker_pool must be 1-80 characters "
-                "and contain no whitespace"
-            ),
+            detail=("required_worker_pool must be 1-80 characters and contain no whitespace"),
         )
     return pool
 
@@ -146,6 +144,11 @@ async def submit_trial(
                 select(TaskRow).where(TaskRow.id == task_id),
             )
         ).scalar_one_or_none()
+        if task_row is not None and task_row.benchmark_id is not None:
+            await reject_non_runnable_benchmark_profiles(
+                session,
+                [task_row.benchmark_id],
+            )
     if task_row is None:
         raise HTTPException(status_code=404, detail=f"unknown task {task_id}")
 
@@ -212,11 +215,15 @@ async def submit_trial(
             )
         ).scalar_one()
         if trial_config.retry.max_attempts > ceiling:
-            trial_config = trial_config.model_copy(update={
-                "retry": trial_config.retry.model_copy(update={
-                    "max_attempts": ceiling,
-                }),
-            })
+            trial_config = trial_config.model_copy(
+                update={
+                    "retry": trial_config.retry.model_copy(
+                        update={
+                            "max_attempts": ceiling,
+                        }
+                    ),
+                }
+            )
         # Plan 19: batch_id + idempotency_key are optional. When
         # `idempotency_key` is set we use pg_insert + ON CONFLICT DO
         # NOTHING so a concurrent race (two runner instances picking
@@ -402,9 +409,7 @@ async def get_trial(
         "submitted_at": row.submitted_at.isoformat(),
         "claimed_at": row.claimed_at.isoformat() if row.claimed_at else None,
         "pre_start_heartbeat_at": (
-            row.pre_start_heartbeat_at.isoformat()
-            if row.pre_start_heartbeat_at
-            else None
+            row.pre_start_heartbeat_at.isoformat() if row.pre_start_heartbeat_at else None
         ),
         "started_at": row.started_at.isoformat() if row.started_at else None,
         "finished_at": row.finished_at.isoformat() if row.finished_at else None,

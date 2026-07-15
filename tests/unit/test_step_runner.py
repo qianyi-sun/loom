@@ -591,6 +591,8 @@ async def test_private_verifier_driver_is_stopped_when_step_is_cancelled(
     context: TrialContext,
 ) -> None:
     entered_verifier = asyncio.Event()
+    stop_started = asyncio.Event()
+    allow_stop = asyncio.Event()
 
     class _HandoffDriver(FakeDriver):
         async def exec(self, cmd, **kwargs):  # type: ignore[no-untyped-def]
@@ -608,6 +610,11 @@ async def test_private_verifier_driver_is_stopped_when_step_is_cancelled(
                     duration_sec=0,
                 )
             return await super().exec(cmd, **kwargs)
+
+        async def stop(self, *, delete: bool = True) -> None:
+            stop_started.set()
+            await allow_stop.wait()
+            await super().stop(delete=delete)
 
     class _BlockingVerifier:
         name = "blocking"
@@ -647,6 +654,10 @@ async def test_private_verifier_driver_is_stopped_when_step_is_cancelled(
         )
         await asyncio.wait_for(entered_verifier.wait(), timeout=2)
         running.cancel()
+        await asyncio.wait_for(stop_started.wait(), timeout=2)
+        await asyncio.sleep(0)
+        assert not running.done(), "cancellation must wait for verifier teardown"
+        allow_stop.set()
         with pytest.raises(asyncio.CancelledError):
             await running
 

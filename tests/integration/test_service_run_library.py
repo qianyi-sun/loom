@@ -22,6 +22,7 @@ from loom.db.schema import (
     Artifact,
     ArtifactLineageEdge,
     Batch,
+    Benchmark,
     LlmCall,
     ProviderConnection,
     Task,
@@ -1438,6 +1439,8 @@ async def test_typed_registry_policy_controls_reuse_and_records_provenance(
         assert row.provider_connection_id != conn_a
         assert row.submitted_by_user_id == user_b
         assert row.source_provenance[0]["source_artifact_id"] == str(safe_artifact_id)
+        assert row.resolved_task_ids == [run_library_setup["task_id"]]
+        assert row.expected_trial_count == 1
     sync_engine.dispose()
 
 
@@ -1452,6 +1455,15 @@ async def test_clone_config_uses_destination_provider_and_records_provenance(
     team_b = run_library_setup["team_b"]
     user_b = run_library_setup["user_b"]
     postgres_url = run_library_setup["postgres_url"]
+
+    sync_engine = create_engine(str(postgres_url))
+    with sync_engine.begin() as conn:
+        conn.execute(
+            update(Batch)
+            .where(Batch.id == batch_shared)
+            .values(required_worker_pools=["gpu-a", "gpu-b"]),
+        )
+    sync_engine.dispose()
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
@@ -1493,7 +1505,67 @@ async def test_clone_config_uses_destination_provider_and_records_provenance(
         assert row.provider_connection_id == conn_b
         assert row.provider_connection_id != conn_a
         assert row.source_provenance[0]["source_batch_id"] == str(batch_shared)
+        assert row.resolved_task_ids == [run_library_setup["task_id"]]
+        assert row.required_worker_pools == ["gpu-a", "gpu-b"]
+        assert row.expected_trial_count == 3
     sync_engine.dispose()
+
+
+async def test_clone_and_reuse_reject_historical_benchmark_tasks(
+    run_library_setup: dict[str, object],
+) -> None:
+    app = run_library_setup["app"]
+    raw_b = run_library_setup["raw_b"]
+    batch_shared = run_library_setup["batch_shared"]
+    trial_id = run_library_setup["trial_shared"]
+    safe_key = run_library_setup["safe_key"]
+    conn_b = run_library_setup["conn_b"]
+    task_id = run_library_setup["task_id"]
+    postgres_url = str(run_library_setup["postgres_url"])
+    profile_id = f"historical-clone-{uuid4().hex}"
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as connection:
+        connection.execute(
+            insert(Benchmark).values(
+                id=profile_id,
+                display_name="Historical clone profile",
+                upstream_kind="test",
+                upstream_locator="test",
+                upstream_revision="1",
+                license_spdx="MIT",
+                license_url="https://example.test/license",
+                splits=["test"],
+                execution_state="historical",
+            )
+        )
+        connection.execute(update(Task).where(Task.id == task_id).values(benchmark_id=profile_id))
+
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+            cloned = await ac.post(
+                f"/api/v1/run-library/batches/{batch_shared}/clone-config",
+                json={
+                    "name": "must reject historical clone",
+                    "provider_connection_id": str(conn_b),
+                },
+                headers={"Authorization": f"Bearer {raw_b}"},
+            )
+            reused = await ac.post(
+                f"/api/v1/run-library/trials/{trial_id}/artifacts/reuse",
+                json={"key": safe_key, "name": "must reject historical reuse"},
+                headers={"Authorization": f"Bearer {raw_b}"},
+            )
+
+        for response in (cloned, reused):
+            assert response.status_code == 409, response.text
+            assert response.json()["detail"]["reason"] == "benchmark_retired"
+    finally:
+        with sync_engine.begin() as connection:
+            connection.execute(update(Task).where(Task.id == task_id).values(benchmark_id=None))
+            connection.execute(delete(Benchmark).where(Benchmark.id == profile_id))
+        sync_engine.dispose()
 
 
 async def test_clone_config_surfaces_retry_default_mismatch(
@@ -1622,6 +1694,17 @@ async def test_reuse_shared_artifact_creates_provenance_and_blocks_raw(
     trial_id = run_library_setup["trial_shared"]
     safe_key = run_library_setup["safe_key"]
     blocked_key = run_library_setup["blocked_key"]
+    batch_shared = run_library_setup["batch_shared"]
+    postgres_url = run_library_setup["postgres_url"]
+
+    sync_engine = create_engine(str(postgres_url))
+    with sync_engine.begin() as conn:
+        conn.execute(
+            update(Batch)
+            .where(Batch.id == batch_shared)
+            .values(required_worker_pools=["gpu-a", "gpu-b"]),
+        )
+    sync_engine.dispose()
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
@@ -1647,3 +1730,13 @@ async def test_reuse_shared_artifact_creates_provenance_and_blocks_raw(
     assert body["source_provenance"][0]["source_artifact_key"] == safe_key
     assert blocked.status_code == 403
     assert blocked.json()["detail"] == "secret-like content detected"
+
+    sync_engine = create_engine(str(postgres_url))
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        row = s.execute(
+            select(Batch).where(Batch.id == UUID(body["batch_id"])),
+        ).scalar_one()
+        assert row.required_worker_pools == ["gpu-a", "gpu-b"]
+        assert row.expected_trial_count == 3
+    sync_engine.dispose()

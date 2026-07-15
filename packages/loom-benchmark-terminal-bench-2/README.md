@@ -37,10 +37,12 @@ It preserves the source `task.toml` byte-for-byte as `upstream-task.toml` and
 writes a runnable Loom schema-1 `task.toml`, changing the Loom task id to
 `terminal-bench-2@tb2.1-r6/<task>`. Supported timeouts, image/build settings,
 environment values, task metadata, and artifact paths are normalized into the
-runnable config. Native resource, internet, architecture, verifier-env, and
-solution metadata remains intact in `upstream-task.toml` for provenance and
-preflight. Instructions, environment assets, tests, and solution files retain
-their original bytes and modes.
+runnable config. Native CPU, memory, storage, GPU, internet, architecture, and
+build limits are projected into the runnable contract and attested in task
+provenance; unsupported environment semantics fail publication instead of
+falling back to a generic image. `upstream-task.toml` still retains every
+source field byte-for-byte. Instructions, environment assets, tests, and
+solution files retain their original bytes and modes.
 
 Oracle eligibility is derived only from a non-empty, non-symlink native
 `solution/solve.sh`; it is not inferred from a task-id prefix.

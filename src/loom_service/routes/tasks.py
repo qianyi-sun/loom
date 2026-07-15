@@ -16,8 +16,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom.benchmark_profiles import resolve_benchmark_selectors
 from loom.db.schema import Task, TaskSet
-from loom_service.benchmark_profiles import resolve_benchmark_selectors
 from loom_service.dependencies import SessionAndCtx
 from loom_service.task_config_validation import split_valid_task_configs
 from loom_service.task_filter import resolve_task_filter_with_diagnostics

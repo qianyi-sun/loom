@@ -11,10 +11,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import tempfile
 import time
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from loom.driver.base import Driver, StartOptions
@@ -31,6 +30,7 @@ from loom.trajectory.writer import TrajectoryWriter
 from loom.trial.artifacts import ArtifactCollector
 from loom.trial.phase_network import phase_network
 from loom.trial.workspace import materialize_workspace
+from loom.trial.workspace_snapshot import handoff_workspace_snapshot
 
 if TYPE_CHECKING:
     from loom.trial.trial import TrialContext
@@ -72,7 +72,12 @@ async def run_step(
         # Cancellation and watchdog paths bypass ordinary result assembly.
         # The lease makes this cleanup idempotent with the normal path below.
         try:
-            await asyncio.shield(lease.close(delete=ctx.trial_config.delete_env))
+            await _close_verifier_driver(
+                lease,
+                delete=ctx.trial_config.delete_env,
+            )
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.exception("failed to stop isolated verifier driver")
 
@@ -284,9 +289,12 @@ async def _run_step_impl(
 
     if isolated_verifier_driver is not None:
         try:
-            await asyncio.shield(
-                verifier_driver_lease.close(delete=ctx.trial_config.delete_env),
+            await _close_verifier_driver(
+                verifier_driver_lease,
+                delete=ctx.trial_config.delete_env,
             )
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             if sr_error is None:
                 sr_error = StepError(
@@ -350,6 +358,10 @@ def _isolated_verifier_start_options(ctx: TrialContext) -> StartOptions:
         ),
         dns=tuple(ctx.task_config.environment.dns),
         tmpfs=tuple(ctx.task_config.environment.tmpfs),
+        cpus=ctx.task_config.environment.cpus,
+        memory_mb=ctx.task_config.environment.memory_mb,
+        storage_mb=ctx.task_config.environment.storage_mb,
+        gpus=ctx.task_config.environment.gpus,
         labels=tuple(
             sorted(
                 {
@@ -371,38 +383,51 @@ async def _handoff_agent_workspace(
     workdir: PurePosixPath,
     policy: object,
 ) -> None:
-    """Copy public agent workspace files into the fresh verifier driver.
-
-    Listing and downloading happen through the agent driver protocol; private
-    paths are rejected again at the handoff boundary even if a malicious agent
-    creates their names after initial staging.
-    """
+    """Snapshot the public agent workspace into the fresh verifier driver."""
     from loom.trial.workspace import WorkspaceStagingPolicy
 
     if not isinstance(policy, WorkspaceStagingPolicy):
         raise TypeError("private verifier handoff requires WorkspaceStagingPolicy")
-    listing = await agent_driver.exec(
-        f"find {workdir.as_posix()} -type f -print0",
-        user="root",
+    await handoff_workspace_snapshot(
+        agent_driver=agent_driver,
+        verifier_driver=verifier_driver,
+        workdir=workdir,
+        policy=policy,
     )
-    if listing.return_code != 0:
-        raise RuntimeError("unable to enumerate agent workspace for verifier handoff")
-    with tempfile.TemporaryDirectory(prefix="loom-verifier-handoff-") as temp:
-        handoff_root = Path(temp)
-        for raw_path in listing.stdout.split(b"\x00"):
-            if not raw_path:
-                continue
-            try:
-                source = PurePosixPath(raw_path.decode("utf-8"))
-                relative = source.relative_to(workdir)
-            except (UnicodeDecodeError, ValueError) as exc:
-                raise RuntimeError("agent workspace listing contains an invalid path") from exc
-            if not relative.parts or policy.is_private(relative):
-                continue
-            local = handoff_root.joinpath(*relative.parts)
-            local.parent.mkdir(parents=True, exist_ok=True)
-            await agent_driver.download(source, local)
-            await verifier_driver.upload(local, workdir / relative)
+
+
+async def _close_verifier_driver(
+    lease: _VerifierDriverLease,
+    *,
+    delete: bool,
+) -> None:
+    """Finish verifier teardown before propagating caller cancellation.
+
+    ``asyncio.shield`` alone returns immediately when its caller is cancelled,
+    leaving the protected stop task detached.  Retain and wait for the cleanup
+    task so sidecar/network teardown cannot race a still-running verifier.
+    """
+
+    cleanup = asyncio.create_task(lease.close(delete=delete))
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(cleanup)
+            break
+        except asyncio.CancelledError as exc:
+            if cleanup.cancelled():
+                raise
+            cancellation = exc
+            continue
+    try:
+        cleanup.result()
+    except Exception:
+        if cancellation is not None:
+            logger.exception("isolated verifier cleanup failed during cancellation")
+        else:
+            raise
+    if cancellation is not None:
+        raise cancellation
 
 
 def _artifact_patterns(ctx: TrialContext, step: StepConfig) -> list[str]:
