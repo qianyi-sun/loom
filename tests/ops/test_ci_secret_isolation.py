@@ -64,6 +64,7 @@ def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache()
     assert build["permissions"] == {"contents": "read"}
     assert _normalized_expression(build["if"]) == (
         "github.event_name != 'push' && "
+        "needs.plan.outputs.gate_mode == 'full' && "
         "needs.plan.outputs.required == 'true' && "
         "needs.plan.outputs.images != '[]'"
     )
@@ -99,6 +100,7 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
     assert _normalized_expression(publish["if"]) == (
         "github.event_name == 'push' && "
         "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
+        "needs.plan.outputs.gate_mode == 'full' && "
         "needs.plan.outputs.required == 'true' && "
         "needs.plan.outputs.images != '[]'"
     )

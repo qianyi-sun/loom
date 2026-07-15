@@ -16,12 +16,15 @@
 ## Target Branch
 
 - [ ] This PR targets `dev` for normal development.
-- [ ] For this normal `dev` PR, GitHub squash auto-merge was enabled
-      immediately after opening it. GitHub keeps it queued until
+- [ ] For this normal `dev` PR, squash auto-merge and the coordinator-owned
+      `ci:merge-ready` label are enabled only while it is the queue head.
+      GitHub keeps that selected candidate queued until
       `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
       `staging-smoke-gate` succeed on the current head SHA. These four strict,
       app-bound checks are the only merge authority: `dev` requires no human
       approval, no CODEOWNER approval, and no conversation resolution.
+      Non-head PRs run distinct preflight checks and cannot satisfy these
+      protected contexts.
 - [ ] This PR targets `main` only for a production release promotion from `dev`;
       Qianyi (`@qianyi-sun`) reviews the fixed candidate and its evidence and
       performs the manual squash merge. Never enable auto-merge for this PR.

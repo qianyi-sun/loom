@@ -24,7 +24,7 @@ name: staging-smoke
 on:
   workflow_dispatch:
   pull_request:
-    types: [labeled, opened, synchronize, reopened, edited]
+    types: [labeled, unlabeled, opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
   merge_group:
     types: [checks_requested]
 
@@ -41,6 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       required: ${{ steps.plan.outputs.staging_smoke }}
+      gate_mode: ${{ steps.plan.outputs.gate_mode }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -60,6 +61,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_ACTION: ${{ github.event.action }}
+          PR_ACTION_LABEL: ${{ github.event.label.name }}
+          PR_DRAFT: ${{ github.event.pull_request.draft || false }}
+          PR_BASE_CHANGED: ${{ github.event.changes.base != null }}
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
@@ -89,12 +94,18 @@ jobs:
             --changed-files /tmp/loom-changed-files.txt \
             --labels-json "$PR_LABELS_JSON" \
             --event-name "$EVENT_NAME" \
+            --pull-request-action "$PR_ACTION" \
+            --pull-request-action-label "$PR_ACTION_LABEL" \
+            --pull-request-draft "$PR_DRAFT" \
+            --pull-request-base-changed "$PR_BASE_CHANGED" \
             --github-output "$GITHUB_OUTPUT"
 
   smoke:
     name: kind staging smoke (build images → cluster up → verify ready)
     needs: plan
-    if: needs.plan.outputs.required == 'true'
+    if: >-
+      needs.plan.outputs.gate_mode == 'full' &&
+      needs.plan.outputs.required == 'true'
     runs-on: ubuntu-latest
     # 5 image builds (uncached) + kind boot + ingress-nginx + apply +
     # wait-for-ready easily run 30-40 min on a cold runner. 45 leaves
@@ -978,7 +989,11 @@ jobs:
         run: kind delete cluster --name loom-staging || true
 
   staging-smoke-gate:
-    name: ${{ github.event_name == 'workflow_dispatch' && 'staging-smoke-gate-manual' || 'staging-smoke-gate' }}
+    name: >-
+      ${{ github.event_name == 'workflow_dispatch' && 'staging-smoke-gate-manual' ||
+          (needs.plan.outputs.gate_mode == 'full' || needs.plan.outputs.gate_mode == 'invalidate') && 'staging-smoke-gate' ||
+          needs.plan.outputs.gate_mode == 'preflight' && 'staging-smoke-gate-preflight' ||
+          'staging-smoke-gate-filtered' }}
     runs-on: ubuntu-latest
     if: always()
     needs: [plan, smoke]
@@ -986,11 +1001,24 @@ jobs:
       - name: Enforce selected staging smoke results
         env:
           PLAN_RESULT: ${{ needs.plan.result }}
+          GATE_MODE: ${{ needs.plan.outputs.gate_mode }}
           REQUIRED: ${{ needs.plan.outputs.required }}
           SMOKE_RESULT: ${{ needs.smoke.result }}
         run: |
           set -euo pipefail
           [[ "$PLAN_RESULT" == "success" ]] || exit 1
+          case "$GATE_MODE" in
+            full|preflight|filtered|invalidate) ;;
+            *) echo "FAIL: invalid gate mode ${GATE_MODE@Q}" >&2; exit 1 ;;
+          esac
+          if [[ "$GATE_MODE" == "invalidate" ]]; then
+            echo "FAIL: merge-ready authority was removed from this candidate" >&2
+            exit 1
+          fi
+          if [[ "$GATE_MODE" == "filtered" || "$GATE_MODE" == "preflight" ]]; then
+            [[ "$SMOKE_RESULT" == "skipped" ]] || exit 1
+            exit 0
+          fi
           case "$REQUIRED" in
             true|false) ;;
             *) echo "FAIL: invalid planner boolean required=${REQUIRED@Q}" >&2; exit 1 ;;

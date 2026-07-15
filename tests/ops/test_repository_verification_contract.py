@@ -32,12 +32,9 @@ def test_contributor_quickstart_uses_ci_python_for_local_verification() -> None:
 
 def test_contributor_quickstart_documents_full_fast_coverage_gate() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
-    root_steps = workflow["jobs"]["tests-root"]["steps"]
+    root_job = workflow["jobs"]["tests-root"]
     package_steps = workflow["jobs"]["tests-packages"]["steps"]
     fast_steps = workflow["jobs"]["fast-checks"]["steps"]
-    root_pytest_step = next(
-        step for step in root_steps if step.get("name") == "Pytest — unit + contract + property + loom_cli"
-    )
     sibling_pytest_step = next(
         step for step in package_steps if step.get("name") == "Pytest — sibling packages"
     )
@@ -54,7 +51,19 @@ def test_contributor_quickstart_documents_full_fast_coverage_gate() -> None:
         "--cov=src --cov=packages --cov-append \\",
     )
 
-    assert _normalize_command(root_pytest_step["run"]) in normalized_text
+    root_paths = [
+        path
+        for shard in root_job["strategy"]["matrix"]["include"]
+        for path in shard["test_paths"].split()
+    ]
+    assert set(root_paths) == {
+        "tests/unit",
+        "tests/contract",
+        "tests/property",
+        "tests/loom_cli",
+        "tests/ops",
+    }
+    assert _normalize_command(f"uv run pytest {' '.join(root_paths)}") in normalized_text
     assert _normalize_command(local_sibling_run) in normalized_text
     assert "coverage report --fail-under=70" in coverage_gate_step["run"]
     assert "uv run coverage report --fail-under=70" in text

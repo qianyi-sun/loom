@@ -85,14 +85,16 @@ cycle, documentation update, CI labels, acceptance evidence, and rollback.
 Issue #700 is the first implementation workstream because every later PR relies
 on correct merge gating.
 
-Every PR and merge-group candidate reports four stable required contexts:
+Every merge-group candidate and the coordinator-selected PR queue head reports
+four stable required contexts:
 `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
 `staging-smoke-gate`. The shared planner computes the validation work required
 by changed paths and labels, and each gate enforces its selected result. A
 selected job that is cancelled, skipped unexpectedly, or absent is a failure.
 Labels may add validation but cannot remove path-inferred validation. Docs-only
-PRs keep a bounded location-and-format fast path while the stable contexts
-still report. Runtime Markdown, executable files under `docs/`, and unknown
+PRs keep a bounded location-and-format fast path. Non-head PRs report distinct
+preflight/filtered contexts; only a non-draft PR with `ci:merge-ready` reports
+the protected names. Runtime Markdown, executable files under `docs/`, and unknown
 non-document paths are not docs-only; unknown runtime paths select every heavy
 lane until a canonical owner is declared.
 
@@ -117,9 +119,10 @@ on the kind smoke. Real AWS validation belongs to a separately protected,
 trusted post-merge/release lane and a skipped cloud run cannot count as cloud
 evidence.
 
-Every normal `dev` PR uses squash auto-merge immediately after opening. GitHub
-queues the merge until every required gate is visible and successful
-on the current head SHA. These four strict, GitHub-Actions-app-bound checks are
+The coordinator enables squash auto-merge and applies `ci:merge-ready` only to
+the current `dev` queue head. GitHub queues that candidate until every required
+gate is visible and successful on the current head SHA. These four strict,
+GitHub-Actions-app-bound checks are
 the only merge authority: `dev` requires no human approval, no CODEOWNER
 approval, and no conversation resolution. CODEOWNERS remains advisory routing
 on `dev`, while its changes still select full CI.

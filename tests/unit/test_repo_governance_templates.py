@@ -20,17 +20,18 @@ def test_contributing_and_pr_template_accept_issue_scoped_external_prs() -> None
     assert "pull request code must not rely on protected secrets" in pr_template
 
 
-def test_normal_dev_prs_use_ci_only_squash_auto_merge() -> None:
+def test_dev_queue_head_uses_ci_only_squash_auto_merge() -> None:
     contributing = _read("CONTRIBUTING.md")
     quickstart = _read("docs/contributing/contributor-quickstart.md")
     pr_template = _read(".github/PULL_REQUEST_TEMPLATE.md")
 
-    assert "Every\n> normal `dev` PR uses GitHub squash auto-merge" in contributing
-    assert "Every normal `dev` PR uses squash auto-merge" in quickstart
+    assert "current `dev` queue head" in contributing
+    assert "current `dev` queue head" in quickstart
     assert "For this normal `dev` PR" in pr_template
 
     for document in (contributing, quickstart, pr_template):
         normalized_document = " ".join(document.split()).lower()
+        assert "ci:merge-ready" in normalized_document
         for gate in (
             "repository-checks",
             "images-gate",
@@ -64,7 +65,8 @@ def test_governance_docs_define_path_inferred_validation_gates() -> None:
         assert gate in quickstart
 
     assert "Labels may add validation but cannot remove path-inferred validation" in contributing
-    assert "GitHub squash auto-merge was enabled" in pr_template
+    assert "squash auto-merge" in pr_template
+    assert "only while it is the queue head" in pr_template
 
     for document in (contributing, quickstart):
         normalized_document = " ".join(document.split())
