@@ -4,7 +4,6 @@ import { useState } from "react";
 import {
   api,
   type AccountActionApproval,
-  type AdminAuditEvent,
   type AdminTeam,
   type ApiTokenEntry,
   type ApiTokenReveal,
@@ -19,6 +18,7 @@ import {
 import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
+import AdminAuditLog from "../components/admin/AdminAuditLog";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
@@ -40,40 +40,6 @@ function downloadInviteLink(link: string, teamName: string | null): void {
   anchor.download = `${teamName ?? "loom"}-invite-link.txt`;
   anchor.click();
   URL.revokeObjectURL(url);
-}
-
-function AuditRows({ events }: { events: AdminAuditEvent[] }): JSX.Element {
-  if (events.length === 0) return <EmptyState label="No admin audit events." />;
-  return (
-    <div className="overflow-x-auto">
-      <table className="min-w-full divide-y divide-slate-200 text-sm">
-        <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
-          <tr>
-            <th className="px-3 py-2 font-semibold">Time</th>
-            <th className="px-3 py-2 font-semibold">Actor</th>
-            <th className="px-3 py-2 font-semibold">Action</th>
-            <th className="px-3 py-2 font-semibold">Target</th>
-            <th className="px-3 py-2 font-semibold">Request ID</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-100 bg-white">
-          {events.map((event) => (
-            <tr key={event.id}>
-              <td className="whitespace-nowrap px-3 py-2 text-slate-600">{formatDate(event.created_at)}</td>
-              <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-800">{event.actor}</td>
-              <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-slate-700">{event.action}</td>
-              <td className="px-3 py-2 text-slate-600">
-                {event.target_type}:{event.target_id}
-              </td>
-              <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-slate-600">
-                {event.request_id ?? "—"}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
 }
 
 function statusClass(status: InviteStatus): string {
@@ -233,11 +199,6 @@ export default function AdminAccess(): JSX.Element {
   const registrations = useQuery({
     queryKey: ["admin", "team-registrations", "pending"],
     queryFn: () => api.listTeamRegistrations("pending"),
-    enabled: isAdmin,
-  });
-  const audit = useQuery({
-    queryKey: ["admin", "audit-events"],
-    queryFn: () => api.listAdminAuditEvents(50),
     enabled: isAdmin,
   });
   const adminTeams = useQuery({
@@ -1382,22 +1343,7 @@ export default function AdminAccess(): JSX.Element {
         </>
       ) : null}
 
-      {isAdmin && activeSection === "audit" ? (
-        <Card
-          data-loom-query="audit-events"
-          data-loom-query-status={audit.status}
-        >
-          <Card.Header
-            title="Audit log"
-            description="Recent admin access decisions with actor, action, and target."
-          />
-          <Card.Body>
-            {audit.isPending ? <LoadingState /> : null}
-            {audit.isError ? <ErrorState error={audit.error} /> : null}
-            {audit.data ? <AuditRows events={audit.data.items} /> : null}
-          </Card.Body>
-        </Card>
-      ) : null}
+            {isAdmin && activeSection === "audit" ? <AdminAuditLog /> : null}
           </>
         )}
       />

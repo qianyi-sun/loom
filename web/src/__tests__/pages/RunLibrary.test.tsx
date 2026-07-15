@@ -1,6 +1,6 @@
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Route, Routes } from "react-router-dom";
+import { Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import RunLibrary from "../../pages/RunLibrary";
@@ -210,6 +210,113 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function LocationProbe(): JSX.Element {
+  const location = useLocation();
+  return <div data-testid="location-search">{location.search}</div>;
+}
+
+function mockCursorRunLibrary({
+  holdSecondPage = false,
+  firstPage = null,
+  failFirstPageOnce = false,
+}: {
+  holdSecondPage?: boolean;
+  firstPage?: Record<string, unknown> | null;
+  failFirstPageOnce?: boolean;
+} = {}) {
+  const requests: URL[] = [];
+  let basePageAttempts = 0;
+  let resolveDeferredSecondPage: ((response: Response) => void) | null = null;
+  const secondPage = holdSecondPage
+    ? new Promise<Response>((resolve) => {
+        resolveDeferredSecondPage = resolve;
+      })
+    : Promise.resolve(
+        jsonResponse({
+          items: [
+            {
+              ...sharedBatch,
+              id: "batch-page-2",
+              name: "cursor page two run",
+              created_at: "2026-06-21T20:00:00Z",
+            },
+          ],
+          next_cursor: null,
+        }),
+      );
+
+  const fetchMock = vi
+    .spyOn(globalThis, "fetch")
+    .mockImplementation((input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/v1/auth/me") {
+        return Promise.resolve(
+          jsonResponse({
+            user: {
+              id: "user-beta",
+              username: "Beta",
+              email: "beta@example.com",
+              display_name: "Beta User",
+              is_platform_admin: false,
+            },
+            teams: [{ id: "team-beta", name: "Beta Apps", role: "owner" }],
+            current_team: { id: "team-beta", name: "Beta Apps", role: "owner" },
+            role: "owner",
+            scopes: ["read:own", "submit"],
+            is_platform_admin: false,
+            csrf_token: "csrf-test",
+          }),
+        );
+      }
+      if (url.pathname === "/api/v1/run-library/batches") {
+        requests.push(url);
+        if (url.searchParams.get("state") === "finished") {
+          return Promise.resolve(
+            jsonResponse({
+              items: [
+                {
+                  ...sharedBatch,
+                  id: "batch-filtered",
+                  name: "filtered page one run",
+                },
+              ],
+              next_cursor: null,
+            }),
+          );
+        }
+        if (url.searchParams.get("cursor") === "run-library-page-2") {
+          return secondPage;
+        }
+        basePageAttempts += 1;
+        if (failFirstPageOnce && basePageAttempts === 1) {
+          return Promise.resolve(
+            jsonResponse({ detail: "library unavailable" }, 503),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(
+            firstPage ?? {
+              items: [{ ...sharedBatch, name: "cursor page one run" }],
+              next_cursor: "run-library-page-2",
+            },
+          ),
+        );
+      }
+      return Promise.resolve(jsonResponse({ detail: `unhandled ${url}` }, 404));
+    });
+
+  return {
+    fetchMock,
+    requests,
+    resolveSecondPage(response: Response): void {
+      if (resolveDeferredSecondPage === null) {
+        throw new Error("second page is not deferred");
+      }
+      resolveDeferredSecondPage(response);
+    },
+  };
+}
+
 function mockRunLibrary({
   platformAdmin = false,
   truncatedSummary = false,
@@ -269,52 +376,48 @@ function mockRunLibrary({
         );
       }
       const parsed = new URL(url, "http://localhost");
-      if (
-        parsed.pathname === "/api/v1/run-library/batches" &&
-        parsed.searchParams.has("q")
-      ) {
-        return Promise.resolve(
-          jsonResponse({
-            items: [sharedBatch],
-            next_cursor: null,
-          }),
-        );
-      }
-      if (
-        url.endsWith(
-          "/api/v1/run-library/batches?scope=all&team_id=team-alpha",
-        )
-      ) {
-        return Promise.resolve(
-          jsonResponse({
-            items: [sharedBatch],
-            next_cursor: null,
-          }),
-        );
-      }
-      if (url.endsWith("/api/v1/run-library/batches?scope=all")) {
-        return Promise.resolve(
-          jsonResponse({
-            items: [
-              {
-                ...sharedBatch,
-                artifact_summary_truncated: truncatedSummary,
-              },
-              {
-                ...sharedBatch,
-                id: "batch-beta",
-                team_id: "team-beta",
-                owner_team: { id: "team-beta", name: "Beta Apps" },
-                name: "beta team run",
-                visibility: "team",
-                share_status: "pending_scan",
-              },
-            ],
-            next_cursor: null,
-          }),
-        );
-      }
-      if (url.endsWith("/api/v1/run-library/batches")) {
+      if (parsed.pathname === "/api/v1/run-library/batches") {
+        if (parsed.searchParams.has("q")) {
+          return Promise.resolve(
+            jsonResponse({
+              items: [sharedBatch],
+              next_cursor: null,
+            }),
+          );
+        }
+        if (
+          parsed.searchParams.get("scope") === "all" &&
+          parsed.searchParams.get("team_id") === "team-alpha"
+        ) {
+          return Promise.resolve(
+            jsonResponse({
+              items: [sharedBatch],
+              next_cursor: null,
+            }),
+          );
+        }
+        if (parsed.searchParams.get("scope") === "all") {
+          return Promise.resolve(
+            jsonResponse({
+              items: [
+                {
+                  ...sharedBatch,
+                  artifact_summary_truncated: truncatedSummary,
+                },
+                {
+                  ...sharedBatch,
+                  id: "batch-beta",
+                  team_id: "team-beta",
+                  owner_team: { id: "team-beta", name: "Beta Apps" },
+                  name: "beta team run",
+                  visibility: "team",
+                  share_status: "pending_scan",
+                },
+              ],
+              next_cursor: null,
+            }),
+          );
+        }
         return Promise.resolve(
           jsonResponse({
             items: [{ ...sharedBatch, id: "batch-beta", name: "beta team run" }],
@@ -455,7 +558,7 @@ describe("RunLibrary", () => {
     expect(await screen.findByText("beta team run")).toBeInTheDocument();
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
-        "/api/v1/run-library/batches",
+        "/api/v1/run-library/batches?limit=50",
         expect.objectContaining({ credentials: "include" }),
       );
     });
@@ -521,7 +624,156 @@ describe("RunLibrary", () => {
       expect(url.searchParams.get("model_name")).toBe("gpt-4o-mini");
       expect(url.searchParams.get("provider_connection_id")).toBe("source-provider");
       expect(url.searchParams.get("provider_model_id")).toBe("gpt-4o-mini");
+      expect(url.searchParams.get("limit")).toBe("50");
     });
+  });
+
+  it("traverses Next and Prev with loading, focus, and terminal states", async () => {
+    const mock = mockCursorRunLibrary({ holdSecondPage: true });
+    const user = userEvent.setup();
+    renderWithProviders(
+      <>
+        <RunLibrary />
+        <LocationProbe />
+      </>,
+      { route: "/library?scope=all" },
+    );
+
+    expect(await screen.findByText("cursor page one run")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Page 1, more results available",
+    );
+    expect(screen.getByRole("button", { name: /previous page/i })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    const nextButton = screen.getByRole("button", { name: /next page/i });
+    await user.click(nextButton);
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Loading page 2");
+    expect(nextButton).toHaveFocus();
+    expect(screen.getByRole("button", { name: /previous page/i })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: /next page/i })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    await act(async () => {
+      mock.resolveSecondPage(
+        jsonResponse({
+          items: [
+            {
+              ...sharedBatch,
+              id: "batch-page-2",
+              name: "cursor page two run",
+            },
+          ],
+          next_cursor: null,
+        }),
+      );
+    });
+
+    expect(await screen.findByText("cursor page two run")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Page 2, end of results",
+    );
+    expect(screen.getByRole("button", { name: /next page/i })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: /next page/i })).not.toHaveAttribute(
+      "disabled",
+    );
+    expect(nextButton).toHaveFocus();
+    expect(screen.getByTestId("location-search")).toHaveTextContent("scope=all");
+    expect(screen.getByTestId("location-search")).not.toHaveTextContent("cursor");
+
+    await user.click(screen.getByRole("button", { name: /previous page/i }));
+    expect(await screen.findByText("cursor page one run")).toBeInTheDocument();
+    expect(mock.requests.some((url) => url.searchParams.get("cursor") === "run-library-page-2"))
+      .toBe(true);
+  });
+
+  it("resets before a changed URL filter request and preserves filter focus", async () => {
+    const mock = mockCursorRunLibrary({ holdSecondPage: true });
+    const user = userEvent.setup();
+    renderWithProviders(
+      <>
+        <RunLibrary />
+        <LocationProbe />
+      </>,
+      { route: "/library?scope=all" },
+    );
+
+    expect(await screen.findByText("cursor page one run")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /next page/i }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Loading page 2");
+    const stateFilter = screen.getByLabelText("State");
+    await user.selectOptions(stateFilter, "finished");
+
+    expect(await screen.findByText("filtered page one run")).toBeInTheDocument();
+    const filteredRequests = mock.requests.filter(
+      (url) => url.searchParams.get("state") === "finished",
+    );
+    expect(filteredRequests).toHaveLength(1);
+    expect(filteredRequests[0].searchParams.get("cursor")).toBeNull();
+    expect(screen.getByRole("button", { name: /previous page/i })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(screen.getByTestId("location-search")).toHaveTextContent("state=finished");
+    expect(screen.getByTestId("location-search")).not.toHaveTextContent("cursor");
+    expect(stateFilter).toHaveFocus();
+
+    await act(async () => {
+      mock.resolveSecondPage(
+        jsonResponse({
+          items: [
+            {
+              ...sharedBatch,
+              id: "batch-page-2",
+              name: "stale cursor page two run",
+            },
+          ],
+          next_cursor: null,
+        }),
+      );
+    });
+    expect(screen.getByText("filtered page one run")).toBeInTheDocument();
+    expect(screen.queryByText("stale cursor page two run")).not.toBeInTheDocument();
+  });
+
+  it("renders an explicit terminal state for an empty page", async () => {
+    mockCursorRunLibrary({
+      firstPage: { items: [], next_cursor: null },
+    });
+    renderWithProviders(<RunLibrary />, { route: "/library" });
+
+    expect(
+      await screen.findByText("No runs match this library view."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Page 1, end of results",
+    );
+  });
+
+  it("exposes an accessible retry after a page error", async () => {
+    mockCursorRunLibrary({ failFirstPageOnce: true });
+    const user = userEvent.setup();
+    renderWithProviders(<RunLibrary />, { route: "/library" });
+
+    expect(await screen.findByText("library unavailable")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Page 1 could not be loaded",
+    );
+    await user.click(screen.getByRole("button", { name: /retry page/i }));
+
+    expect(await screen.findByText("cursor page one run")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Page 1, more results available",
+    );
   });
 });
 
