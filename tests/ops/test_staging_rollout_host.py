@@ -345,10 +345,15 @@ class FakeSystem:
         owner: str,
         mode: int,
         group: str | None = None,
+        nlink: int | None = None,
     ) -> bool:
         del owner, group
         mapped = self.filesystem.path(path)
-        return mapped.is_file() and (mapped.stat().st_mode & 0o777) == mode
+        return bool(
+            mapped.is_file()
+            and (mapped.stat().st_mode & 0o777) == mode
+            and (nlink is None or mapped.stat().st_nlink == nlink)
+        )
 
     def gb10_trust_ready(self) -> bool:
         return self.trust_ready
@@ -475,6 +480,40 @@ def _installer(tmp_path: Path) -> tuple[host.HostInstaller, FakeSystem]:
     return host.HostInstaller(filesystem, system, 0), system  # type: ignore[arg-type]
 
 
+def test_atomic_write_retries_parent_fsync_after_replace_was_not_durable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    filesystem = host.LocalFilesystem(tmp_path)
+    destination = Path("/etc/loom/atomic-write-retry")
+    payload = b"durable-payload\n"
+    original_fsync = host.os.fsync
+    directory_fsyncs = 0
+
+    def fail_first_directory_fsync(descriptor: int) -> None:
+        nonlocal directory_fsyncs
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            directory_fsyncs += 1
+            if directory_fsyncs == 1:
+                raise OSError("injected parent directory fsync failure")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(host.os, "fsync", fail_first_directory_fsync)
+
+    with pytest.raises(
+        (OSError, host.InstallError),
+        match="parent directory fsync failure",
+    ):
+        filesystem.atomic_write(destination, payload, 0o640)
+
+    installed = filesystem.path(destination)
+    assert installed.read_bytes() == payload
+    assert stat.S_IMODE(installed.stat().st_mode) == 0o640
+
+    assert filesystem.atomic_write(destination, payload, 0o640) is False
+    assert directory_fsyncs == 2
+
+
 def test_installer_known_hosts_authority_rejects_missing_or_malformed_hosts() -> None:
     payload = (host.REPO_ROOT / "deploy/worker-pools/gb10/known_hosts").read_bytes()
     host._validate_known_hosts_authority(payload)
@@ -552,6 +591,30 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     }
 
 
+def test_install_atomically_detaches_hardlinked_config_authority(tmp_path: Path) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    config_path = installer.filesystem.path(host.CONFIG_PATH)
+    linked_path = config_path.with_name("staging-rollout-attacker-link.toml")
+    original_inode = config_path.stat().st_ino
+    original_payload = config_path.read_bytes()
+    os.link(config_path, linked_path)
+
+    assert config_path.stat().st_nlink == 2
+    assert linked_path.stat().st_ino == original_inode
+
+    result = installer.install(TEAM_ID)
+
+    assert f"file:{host.CONFIG_PATH}" in result["changed"]
+    assert system.admission_disabled_at_status
+    assert config_path.read_bytes() == original_payload
+    assert config_path.stat().st_nlink == 1
+    assert config_path.stat().st_ino != original_inode
+    assert linked_path.read_bytes() == original_payload
+    assert linked_path.stat().st_nlink == 1
+    assert linked_path.stat().st_ino == original_inode
+
+
 def test_install_migrates_legacy_revocation_before_replacing_trust_tool(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -578,10 +641,18 @@ def test_install_migrates_legacy_revocation_before_replacing_trust_tool(
         absolute: Path,
         payload: bytes,
         mode: int,
+        *,
+        expected_nlink: int | None = None,
     ) -> bool:
         if absolute == host.TRUST_TOOL_PATH:
             system.events.append("trust-tool:replace")
-        return original_atomic_write(filesystem, absolute, payload, mode)
+        return original_atomic_write(
+            filesystem,
+            absolute,
+            payload,
+            mode,
+            expected_nlink=expected_nlink,
+        )
 
     monkeypatch.setattr(host.LocalFilesystem, "atomic_write", record_authority_write)
 
@@ -665,13 +736,21 @@ def test_legacy_source_binding_survives_post_migration_record_write_failure(
         absolute: Path,
         payload: bytes,
         mode: int,
+        *,
+        expected_nlink: int | None = None,
     ) -> bool:
         nonlocal install_record_writes
         if absolute == host.INSTALL_RECORD:
             install_record_writes += 1
             if install_record_writes == 2:
                 raise host.InstallError("injected post-ledger record failure")
-        return original_atomic_write(filesystem, absolute, payload, mode)
+        return original_atomic_write(
+            filesystem,
+            absolute,
+            payload,
+            mode,
+            expected_nlink=expected_nlink,
+        )
 
     monkeypatch.setattr(host.LocalFilesystem, "atomic_write", fail_second_install_record_write)
 
@@ -1042,6 +1121,43 @@ def test_update_failure_stays_fail_closed_with_maintenance_marker(tmp_path: Path
     assert not installer.filesystem.exists(host.INSTALL_RECORD)
 
 
+def test_retry_resyncs_candidate_and_venv_for_non_ready_new_sha_record(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    system.remote_source_sha = "b" * 40
+    system.status = "done"
+    original_sync_venv = system.sync_venv
+
+    def fail_before_venv_sync(source_root: Path) -> None:
+        assert source_root == host.REPO_ROOT
+        assert system.candidate_sha == "b" * 40
+        raise host.InstallError("injected pre-venv crash")
+
+    system.sync_venv = fail_before_venv_sync  # type: ignore[method-assign]
+    with pytest.raises(host.InstallError, match="pre-venv crash"):
+        installer.install(TEAM_ID_2)
+
+    interrupted = installer.filesystem.load_install_record()
+    assert interrupted is not None
+    assert interrupted["installation_state"] == "installing"
+    assert interrupted["source_sha"] == "b" * 40
+    assert system.install_source_sha == "b" * 40
+    assert system.candidate_sha == "b" * 40
+    syncs_before_retry = system.candidate_syncs
+
+    system.sync_venv = original_sync_venv  # type: ignore[method-assign]
+    result = installer.install(TEAM_ID_2)
+
+    assert "venv" in result["changed"]
+    assert system.candidate_syncs == syncs_before_retry + 2
+    ready = installer.filesystem.load_install_record()
+    assert ready is not None
+    assert ready["installation_state"] == "ready"
+    assert ready["source_sha"] == "b" * 40
+
+
 def test_interrupted_install_repairs_uv_lock_before_venv_readiness(
     tmp_path: Path,
 ) -> None:
@@ -1066,7 +1182,7 @@ def test_interrupted_install_repairs_uv_lock_before_venv_readiness(
     assert "venv-lock" in result["changed"]
     assert system.venv_lock_mode == 0o600
     assert system.venv_lock_hardenings == 1
-    assert system.candidate_syncs == 2
+    assert system.candidate_syncs == 4
     record = installer.filesystem.load_install_record()
     assert record is not None
     assert record["installation_state"] == "ready"
@@ -1685,6 +1801,26 @@ def _runtime_probe_argv(service_uid: int, program: str) -> list[str]:
     ]
 
 
+def _service_identity_result(
+    call: list[str],
+    *,
+    uid: int = 1001,
+    gid: int = 1002,
+) -> host.CommandResult | None:
+    if call == ["id", "-u", host.SERVICE_USER]:
+        return host.CommandResult(0, f"{uid}\n")
+    if call == ["getent", "passwd", host.SERVICE_USER]:
+        return host.CommandResult(
+            0,
+            (f"{host.SERVICE_USER}:x:{uid}:{gid}::{host.STATE_ROOT}:/usr/sbin/nologin\n"),
+        )
+    if call == ["getent", "group", host.SERVICE_GROUP]:
+        return host.CommandResult(0, f"{host.SERVICE_GROUP}:x:{gid}:\n")
+    if call == ["id", "-g", host.SERVICE_USER]:
+        return host.CommandResult(0, f"{gid}\n")
+    return None
+
+
 def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1699,10 +1835,9 @@ def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
             self.calls.append((call, kwargs))
             if call[1:3] == ["-I", "-S"]:
                 return host.CommandResult(0, "3.12\n")
-            if call == ["id", "-u", host.SERVICE_USER]:
-                return host.CommandResult(0, "1001\n")
-            if call == ["id", "-g", host.SERVICE_USER]:
-                return host.CommandResult(0, "1002\n")
+            service_identity = _service_identity_result(call)
+            if service_identity is not None:
+                return service_identity
             if call == _runtime_probe_argv(1001, host._PACKAGE_RUNTIME_PROBE):
                 events.append("broker-import")
                 return host.CommandResult(0)
@@ -1756,9 +1891,11 @@ def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
         "UV_PROJECT_ENVIRONMENT": str(host.VENV),
     }
     assert events == ["uv-sync", "harden-lock", "validate-authority", "broker-import"]
-    assert runner.calls[-3:] == [
-        (["id", "-u", host.SERVICE_USER], {}),
-        (["id", "-g", host.SERVICE_USER], {}),
+    assert runner.calls[-5:] == [
+        (["getent", "passwd", host.SERVICE_USER], {"check": False}),
+        (["getent", "group", host.SERVICE_GROUP], {"check": False}),
+        (["id", "-u", host.SERVICE_USER], {"check": False}),
+        (["id", "-g", host.SERVICE_USER], {"check": False}),
         (_runtime_probe_argv(1001, host._PACKAGE_RUNTIME_PROBE), {"check": False}),
     ]
 
@@ -1773,10 +1910,9 @@ def test_sync_venv_rejects_broken_installed_broker_import(
                 return host.CommandResult(0, "3.12\n")
             if call[0] == "/usr/local/bin/uv":
                 return host.CommandResult(0)
-            if call == ["id", "-u", host.SERVICE_USER]:
-                return host.CommandResult(0, "1001\n")
-            if call == ["id", "-g", host.SERVICE_USER]:
-                return host.CommandResult(0, "1002\n")
+            service_identity = _service_identity_result(call)
+            if service_identity is not None:
+                return service_identity
             assert call == _runtime_probe_argv(1001, host._PACKAGE_RUNTIME_PROBE)
             assert kwargs == {"check": False}
             return host.CommandResult(1, stderr="missing packaged schema")
@@ -1805,10 +1941,9 @@ def test_broker_runtime_probe_loads_fixed_config_as_service_user() -> None:
         def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
             call = list(argv)
             self.calls.append((call, kwargs))
-            if call == ["id", "-u", host.SERVICE_USER]:
-                return host.CommandResult(0, "1001\n")
-            if call == ["id", "-g", host.SERVICE_USER]:
-                return host.CommandResult(0, "1002\n")
+            service_identity = _service_identity_result(call)
+            if service_identity is not None:
+                return service_identity
             assert call == _runtime_probe_argv(1001, host._BROKER_RUNTIME_PROBE)
             assert "OperatorConfig.load(fixed_operator_config_path())" in call[-1]
             return host.CommandResult(0)
@@ -1817,6 +1952,93 @@ def test_broker_runtime_probe_loads_fixed_config_as_service_user() -> None:
 
     assert host.HostSystem(runner).broker_runtime_ready() is True
     assert runner.calls[-1][1] == {"check": False}
+
+
+@pytest.mark.parametrize(
+    ("passwd_gid", "group_gid", "id_gid"),
+    [
+        ("1001", "1002", "1001"),
+        ("1001", "1001", "1002"),
+        ("1002", "1001", "1001"),
+    ],
+)
+def test_service_account_rejects_inconsistent_primary_gid_authorities(
+    passwd_gid: str,
+    group_gid: str,
+    id_gid: str,
+) -> None:
+    class PrimaryGroupRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            call = list(argv)
+            if call == ["getent", "passwd", host.SERVICE_USER]:
+                return host.CommandResult(
+                    0,
+                    (
+                        f"{host.SERVICE_USER}:x:1001:{passwd_gid}:"
+                        f":{host.STATE_ROOT}:/usr/sbin/nologin\n"
+                    ),
+                )
+            if call == ["getent", "group", host.SERVICE_GROUP]:
+                return host.CommandResult(0, f"{host.SERVICE_GROUP}:x:{group_gid}:\n")
+            if call == ["id", "-u", host.SERVICE_USER]:
+                return host.CommandResult(0, "1001\n")
+            if call == ["id", "-g", host.SERVICE_USER]:
+                return host.CommandResult(0, f"{id_gid}\n")
+            raise AssertionError(f"unexpected command: {call}")
+
+    with pytest.raises(host.InstallError, match="primary group is inconsistent"):
+        host.HostSystem(PrimaryGroupRunner()).service_user_present()
+
+
+@pytest.mark.parametrize(
+    ("passwd_uid", "id_uid"),
+    [("1001", "1002"), ("0", "0")],
+)
+def test_service_ids_reject_uid_mismatch_and_root_uid(
+    passwd_uid: str,
+    id_uid: str,
+) -> None:
+    class UidRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            call = list(argv)
+            if call == ["getent", "passwd", host.SERVICE_USER]:
+                return host.CommandResult(
+                    0,
+                    (
+                        f"{host.SERVICE_USER}:x:{passwd_uid}:1002:"
+                        f":{host.STATE_ROOT}:/usr/sbin/nologin\n"
+                    ),
+                )
+            if call == ["getent", "group", host.SERVICE_GROUP]:
+                return host.CommandResult(0, f"{host.SERVICE_GROUP}:x:1002:\n")
+            if call == ["id", "-u", host.SERVICE_USER]:
+                return host.CommandResult(0, f"{id_uid}\n")
+            if call == ["id", "-g", host.SERVICE_USER]:
+                return host.CommandResult(0, "1002\n")
+            raise AssertionError(f"unexpected command: {call}")
+
+    with pytest.raises(host.InstallError, match="UID is inconsistent"):
+        host.HostSystem(UidRunner())._service_ids()
+
+
+def test_service_account_rejects_root_uid() -> None:
+    class RootIdentityRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            call = list(argv)
+            assert call == ["getent", "passwd", host.SERVICE_USER]
+            return host.CommandResult(
+                0,
+                (
+                    f"{host.SERVICE_USER}:x:0:1002:"
+                    f":{host.STATE_ROOT}:/usr/sbin/nologin\n"
+                ),
+            )
+
+    with pytest.raises(host.InstallError, match="unexpected identity"):
+        host.HostSystem(RootIdentityRunner()).service_user_present()
 
 
 def test_config_authority_converges_to_root_owned_service_group_readable() -> None:
@@ -1829,8 +2051,10 @@ def test_config_authority_converges_to_root_owned_service_group_readable() -> No
             del kwargs
             call = list(argv)
             self.calls.append(call)
-            if call[:3] == ["stat", "-c", "%U:%G:%a"]:
-                return host.CommandResult(0, self.metadata + "\n")
+            if call[:2] == ["stat", "-c"]:
+                assert call[2] in {"%U:%G:%a", "%U:%G:%a:%h"}
+                suffix = ":1" if call[2].endswith(":%h") else ""
+                return host.CommandResult(0, self.metadata + suffix + "\n")
             if call == [
                 "chown",
                 f"root:{host.SERVICE_GROUP}",
@@ -1857,6 +2081,7 @@ def test_config_authority_converges_to_root_owned_service_group_readable() -> No
         owner="root",
         group=host.SERVICE_GROUP,
         mode=0o640,
+        nlink=1,
     )
 
 
@@ -2110,10 +2335,13 @@ def test_active_status_uses_protected_pointer_and_user_units_without_broker_impo
         def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
             call = list(argv)
             self.calls.append((call, kwargs))
-            if call == ["id", "-u", host.SERVICE_USER]:
-                return host.CommandResult(0, f"{service_uid}\n")
-            if call == ["id", "-g", host.SERVICE_USER]:
-                return host.CommandResult(0, f"{service_gid}\n")
+            service_identity = _service_identity_result(
+                call,
+                uid=service_uid,
+                gid=service_gid,
+            )
+            if service_identity is not None:
+                return service_identity
             return unit_result
 
     def fake_lstat(path: Path) -> os.stat_result:
@@ -2133,33 +2361,36 @@ def test_active_status_uses_protected_pointer_and_user_units_without_broker_impo
 
     assert host.HostSystem(runner).active_status() == expected
     assert all(str(host.BROKER_PATH) not in call for call, _ in runner.calls)
-    assert runner.calls[-1] == (
-        [
-            "sudo",
-            "-n",
-            "-u",
-            host.SERVICE_USER,
-            "--",
-            "/usr/bin/env",
-            "-i",
-            f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
-            f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
-            "PATH=/usr/bin:/bin",
-            "LANG=C.UTF-8",
-            "LC_ALL=C.UTF-8",
-            "/usr/bin/systemctl",
-            "--user",
-            "list-units",
-            "--all",
-            "--plain",
-            "--full",
-            "--type=service",
-            "--no-legend",
-            "--no-pager",
-            "loom-staging-rollout-*.service",
-        ],
-        {"check": False},
-    )
+    systemd_calls = [call for call in runner.calls if "/usr/bin/systemctl" in call[0]]
+    assert systemd_calls == [
+        (
+            [
+                "sudo",
+                "-n",
+                "-u",
+                host.SERVICE_USER,
+                "--",
+                "/usr/bin/env",
+                "-i",
+                f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
+                f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
+                "PATH=/usr/bin:/bin",
+                "LANG=C.UTF-8",
+                "LC_ALL=C.UTF-8",
+                "/usr/bin/systemctl",
+                "--user",
+                "list-units",
+                "--all",
+                "--plain",
+                "--full",
+                "--type=service",
+                "--no-legend",
+                "--no-pager",
+                "loom-staging-rollout-*.service",
+            ],
+            {"check": False},
+        )
+    ]
 
 
 def test_active_status_refuses_safe_active_pointer_without_querying_systemd(
@@ -2176,10 +2407,13 @@ def test_active_status_refuses_safe_active_pointer_without_querying_systemd(
             del kwargs
             call = list(argv)
             self.calls.append(call)
-            if call == ["id", "-u", host.SERVICE_USER]:
-                return host.CommandResult(0, f"{service_uid}\n")
-            assert call == ["id", "-g", host.SERVICE_USER]
-            return host.CommandResult(0, f"{service_gid}\n")
+            service_identity = _service_identity_result(
+                call,
+                uid=service_uid,
+                gid=service_gid,
+            )
+            assert service_identity is not None
+            return service_identity
 
     def fake_lstat(path: Path) -> os.stat_result:
         if path == host.MAINTENANCE_MARKER:
@@ -2202,6 +2436,8 @@ def test_active_status_refuses_safe_active_pointer_without_querying_systemd(
 
     assert host.HostSystem(runner).active_status() == "busy"
     assert runner.calls == [
+        ["getent", "passwd", host.SERVICE_USER],
+        ["getent", "group", host.SERVICE_GROUP],
         ["id", "-u", host.SERVICE_USER],
         ["id", "-g", host.SERVICE_USER],
     ]
@@ -2229,10 +2465,9 @@ def test_active_status_fails_closed_on_unsafe_state_authority(
         def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
             del kwargs
             call = list(argv)
-            if call == ["id", "-u", host.SERVICE_USER]:
-                return host.CommandResult(0, "1001\n")
-            if call == ["id", "-g", host.SERVICE_USER]:
-                return host.CommandResult(0, "1002\n")
+            service_identity = _service_identity_result(call)
+            if service_identity is not None:
+                return service_identity
             raise AssertionError(f"unexpected systemd query: {call}")
 
     def fake_lstat(path: Path) -> os.stat_result:
@@ -3486,10 +3721,9 @@ def test_candidate_convergence_hardens_existing_checkout_and_uses_fixed_umask(
             del kwargs
             call = list(argv)
             self.calls.append(call)
-            if call[:2] == ["id", "-u"]:
-                return host.CommandResult(0, f"{uid}\n")
-            if call[:2] == ["id", "-g"]:
-                return host.CommandResult(0, f"{gid}\n")
+            service_identity = _service_identity_result(call, uid=uid, gid=gid)
+            if service_identity is not None:
+                return service_identity
             if call[:2] == ["test", "-d"]:
                 return host.CommandResult(0)
             git_index = call.index("/usr/bin/git")

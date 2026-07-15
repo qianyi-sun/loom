@@ -405,12 +405,35 @@ class LocalFilesystem:
             changed = True
         return changed
 
-    def atomic_write(self, absolute: Path, payload: bytes, mode: int) -> bool:
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0)
+        directory_fd = os.open(path, flags)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    def atomic_write(
+        self,
+        absolute: Path,
+        payload: bytes,
+        mode: int,
+        *,
+        expected_nlink: int | None = None,
+    ) -> bool:
         path = self.path(absolute)
-        if path.exists():
-            if path.is_symlink() or not path.is_file():
+        if path.exists() or path.is_symlink():
+            metadata = os.lstat(path)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
                 raise InstallError(f"installation destination is unsafe: {absolute}")
-            if path.read_bytes() == payload and stat.S_IMODE(path.stat().st_mode) == mode:
+            if (
+                stat.S_IMODE(metadata.st_mode) == mode
+                and (expected_nlink is None or metadata.st_nlink == expected_nlink)
+                and metadata.st_size == len(payload)
+                and path.read_bytes() == payload
+            ):
+                self._fsync_directory(path.parent)
                 return False
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -421,11 +444,9 @@ class LocalFilesystem:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, path)
-            directory_fd = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            if expected_nlink is not None and os.lstat(path).st_nlink != expected_nlink:
+                raise InstallError(f"installation destination link count is unsafe: {absolute}")
+            self._fsync_directory(path.parent)
         except BaseException:
             try:
                 os.close(fd)
@@ -640,14 +661,27 @@ class LocalFilesystem:
             raise InstallError("install record is invalid")
         return record
 
-    def file_matches(self, absolute: Path, payload: bytes, mode: int) -> bool:
+    def file_matches(
+        self,
+        absolute: Path,
+        payload: bytes,
+        mode: int,
+        *,
+        expected_nlink: int | None = None,
+    ) -> bool:
         path = self.path(absolute)
-        return bool(
-            path.is_file()
-            and not path.is_symlink()
-            and stat.S_IMODE(path.stat().st_mode) == mode
-            and path.read_bytes() == payload
-        )
+        try:
+            metadata = os.lstat(path)
+            return bool(
+                stat.S_ISREG(metadata.st_mode)
+                and not stat.S_ISLNK(metadata.st_mode)
+                and stat.S_IMODE(metadata.st_mode) == mode
+                and (expected_nlink is None or metadata.st_nlink == expected_nlink)
+                and metadata.st_size == len(payload)
+                and path.read_bytes() == payload
+            )
+        except OSError:
+            return False
 
 
 def _validate_owned_tree(
@@ -1257,6 +1291,37 @@ class HostSystem:
     def group_present(self, name: str) -> bool:
         return self._probe(["getent", "group", name]).returncode == 0
 
+    def _service_ids(self) -> tuple[int, int]:
+        passwd_result = self._probe(["getent", "passwd", SERVICE_USER])
+        group_result = self._probe(["getent", "group", SERVICE_GROUP])
+        uid_result = self._probe(["id", "-u", SERVICE_USER])
+        gid_result = self._probe(["id", "-g", SERVICE_USER])
+        passwd_fields = passwd_result.stdout.strip().split(":")
+        group_fields = group_result.stdout.strip().split(":")
+        rendered_uid = uid_result.stdout.strip()
+        rendered_gid = gid_result.stdout.strip()
+        if (
+            passwd_result.returncode != 0
+            or group_result.returncode != 0
+            or uid_result.returncode != 0
+            or gid_result.returncode != 0
+            or len(passwd_fields) < 4
+            or len(group_fields) < 3
+            or not passwd_fields[2].isdigit()
+            or not passwd_fields[3].isdigit()
+            or not group_fields[2].isdigit()
+            or not rendered_uid.isdigit()
+            or not rendered_gid.isdigit()
+        ):
+            raise InstallError("service account identity is unavailable")
+        uids = {int(passwd_fields[2]), int(rendered_uid)}
+        gids = {int(passwd_fields[3]), int(group_fields[2]), int(rendered_gid)}
+        if len(uids) != 1 or 0 in uids:
+            raise InstallError("service account UID is inconsistent")
+        if len(gids) != 1 or 0 in gids:
+            raise InstallError("service account primary group is inconsistent")
+        return uids.pop(), gids.pop()
+
     def ensure_operator_membership(self, username: str) -> bool:
         if self.operator_membership_present(username):
             return False
@@ -1282,6 +1347,8 @@ class HostSystem:
                     SERVICE_USER,
                 ]
             )
+            if not self.service_user_present():  # pragma: no cover - convergence invariant
+                raise InstallError("service account creation did not converge")
             return True
         return False
 
@@ -1290,8 +1357,15 @@ class HostSystem:
         if result.returncode != 0:
             return False
         fields = result.stdout.strip().split(":")
-        if len(fields) < 7 or fields[5] != str(STATE_ROOT) or fields[6] != "/usr/sbin/nologin":
-            raise InstallError("existing service account has unexpected home or shell")
+        if (
+            len(fields) < 7
+            or not fields[2].isdigit()
+            or int(fields[2]) == 0
+            or fields[5] != str(STATE_ROOT)
+            or fields[6] != "/usr/sbin/nologin"
+        ):
+            raise InstallError("existing service account has unexpected identity, home, or shell")
+        self._service_ids()
         return True
 
     def ensure_docker_membership(self) -> bool:
@@ -2307,10 +2381,15 @@ class HostSystem:
         owner: str,
         mode: int,
         group: str | None = None,
+        nlink: int | None = None,
     ) -> bool:
         target_group = owner if group is None else group
         expected = f"{owner}:{target_group}:{mode:o}"
-        current = self._probe(["stat", "-c", "%U:%G:%a", str(path)]).stdout.strip()
+        stat_format = "%U:%G:%a"
+        if nlink is not None:
+            stat_format += ":%h"
+            expected += f":{nlink}"
+        current = self._probe(["stat", "-c", stat_format, str(path)]).stdout.strip()
         return current == expected
 
     def gb10_trust_ready(self) -> bool:
@@ -2414,11 +2493,19 @@ class HostSystem:
         service_account_ready = not (
             service.returncode != 0
             or len(fields) < 7
+            or not fields[2].isdigit()
+            or int(fields[2]) == 0
             or fields[5] != str(STATE_ROOT)
             or fields[6] != "/usr/sbin/nologin"
         )
         if not service_account_ready:
             failures.append("service-account")
+        else:
+            try:
+                self._service_ids()
+            except InstallError:
+                service_account_ready = False
+                failures.append("service-primary-group")
         service_groups = set(self._probe(["id", "-nG", SERVICE_USER]).stdout.split())
         if service_groups != {SERVICE_USER, "docker"}:
             failures.append("service-groups")
@@ -2484,6 +2571,9 @@ class HostSystem:
             actual = self._probe(["stat", "-c", "%F:%U:%G:%a", str(path)])
             if actual.returncode != 0 or actual.stdout.strip() != expected:
                 failures.append(f"metadata:{path}")
+        config_links = self._probe(["stat", "-c", "%h", str(CONFIG_PATH)])
+        if config_links.returncode != 0 or config_links.stdout.strip() != "1":
+            failures.append(f"metadata-links:{CONFIG_PATH}")
         venv_ready = self.venv_ready()
         if not venv_ready:
             failures.append("root-venv")
@@ -2594,13 +2684,6 @@ class HostSystem:
             if active_state not in {"inactive", "failed"}:
                 return "busy"
         return "idle"
-
-    def _service_ids(self) -> tuple[int, int]:
-        uid = self.runner.run(["id", "-u", SERVICE_USER]).stdout.strip()
-        gid = self.runner.run(["id", "-g", SERVICE_USER]).stdout.strip()
-        if not uid.isdigit() or not gid.isdigit():
-            raise InstallError("service account IDs are unavailable")
-        return int(uid), int(gid)
 
     def begin_maintenance(self) -> None:
         uid, gid = self._service_ids()
@@ -3010,7 +3093,11 @@ class HostInstaller:
             raise InstallError("required staging data directory is unavailable or unsafe")
         config = self._render_config(team_id, protected_payloads[0])
         kubeconfig = self.system.export_kubeconfig()
-        refresh_runtime = previous_record is None or previous_record.get("source_sha") != source_sha
+        refresh_runtime = bool(
+            previous_record is None
+            or previous_record.get("source_sha") != source_sha
+            or previous_record.get("installation_state") != "ready"
+        )
 
         installed_files = (
             (CLIENT_PATH, self._asset("loom-staging-rollout"), 0o755, "root", "root"),
@@ -3192,12 +3279,18 @@ class HostInstaller:
             not service_user_missing and venv_ready and self.system.package_runtime_ready()
         )
         installed_files_ready = all(
-            self.filesystem.file_matches(destination, payload, mode)
+            self.filesystem.file_matches(
+                destination,
+                payload,
+                mode,
+                expected_nlink=1 if destination == CONFIG_PATH else None,
+            )
             and self.system.file_owner_ready(
                 destination,
                 owner=owner,
                 group=group,
                 mode=mode,
+                nlink=1 if destination == CONFIG_PATH else None,
             )
             for destination, payload, mode, owner, group in installed_files
         )
@@ -3360,7 +3453,12 @@ class HostInstaller:
             )
 
         for destination, payload, mode, owner, group in installed_files:
-            if self.filesystem.atomic_write(destination, payload, mode):
+            if self.filesystem.atomic_write(
+                destination,
+                payload,
+                mode,
+                expected_nlink=1 if destination == CONFIG_PATH else None,
+            ):
                 changes.append(f"file:{destination}")
             if self.system.install_owner(destination, owner, mode, group=group):
                 changes.append(f"ownership:{destination}")

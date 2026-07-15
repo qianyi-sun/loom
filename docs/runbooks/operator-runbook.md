@@ -1458,14 +1458,25 @@ rm -rf "$uv_tmp"
 /usr/local/bin/uv --version
 ```
 
+The `loom-rollout` service identity must expose the same nonzero UID through
+its passwd entry and `id -u loom-rollout`. It also has one exact primary-group
+authority: the passwd primary GID, the GID of the named `loom-rollout` group,
+and `id -g loom-rollout` must be the same nonzero value. Installation and
+`check` fail closed on any disagreement; file ownership must not silently
+target a different group from the service's actual primary group.
+
 The repository deliberately does not track a cross-environment `uv.lock`;
 `pyproject.toml` and the selected merged candidate are its dependency
 authority. The installer therefore resolves that candidate's declared
 constraints into the root-owned venv without editable installs. It does not
 use `--frozen`, which would always fail in a fresh checkout with no lockfile.
 A repeated install at the same source is a no-op; a newly merged source causes
-the service venv to be synchronized again. A failed package-resource probe also
-forces synchronization at the same SHA, and the exact
+the service venv to be synchronized again. Any prior install record whose
+`installation_state` is not `ready` forces both candidate-checkout and venv
+resynchronization even when its recorded source SHA already matches the fresh
+`dev` head. This closes the crash window after publishing the provisional
+record but before replacing the installed package. A failed package-resource
+probe also forces synchronization at the same SHA, and the exact
 `--reinstall-package loom` option restores the project package even when uv
 would otherwise consider it satisfied. Immediately after `uv sync`, the
 installer opens uv's generated `/opt/loom-staging-runner/venv/.lock` without
@@ -1488,9 +1499,15 @@ Python `-I -B`; this package-only probe does not require a pre-existing host
 configuration on a first install. The installer then writes
 `/etc/loom/staging-rollout.toml` as `root:loom-rollout` mode `0640` and runs the
 full broker probe as the service user, including loading that fixed operator
-configuration, before it can restore admission. The file is service-group
-readable but never group- or world-writable, and contains path bindings,
-fingerprints, and the smoke-on-behalf team ID rather than raw secret values.
+configuration, before it can restore admission. The final file must also be a
+single-link regular file (`nlink=1`): the installed loader and host `check`
+enforce the same exact owner, group, mode, type, and link-count authority. The
+file is service-group readable but never group- or world-writable, and contains
+path bindings, fingerprints, and the smoke-on-behalf team ID rather than raw
+secret values. A hard-linked config is never accepted as ready or edited in
+place. Only after the protected-pointer plus systemd-unit inactivity proof
+described below succeeds may the installer atomically republish the canonical
+path with a fresh single-link inode, detaching it from every pre-existing alias.
 The installed broker wrapper also uses `-I -B -m`, preventing caller
 working-directory module shadowing and bytecode writes.
 
@@ -1638,7 +1655,9 @@ metadata, unreadable state, systemd stderr, malformed output, present active
 pointer, or user-manager query failure blocks the operation. A valid but stale
 pointer must be cleared through supported broker reconciliation, never manual
 file deletion. This permits a merged installer to repair a broken packaged
-runtime without weakening the no-active-rollout gate.
+runtime without weakening the no-active-rollout gate. Config hardlink
+detachment and every other installed-file mutation remain strictly after this
+pointer-and-systemd proof.
 
 The rollout-local cluster config is synthesized from the resolved candidate
 worktree's repo-local profile, rather than from the long-lived runner checkout,

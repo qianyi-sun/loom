@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import grp
 import hashlib
 import os
+import pwd
 import re
 import stat
 import tomllib
@@ -55,6 +57,7 @@ _CONFIG_KEYS = frozenset(
         "gb10_prep_concurrency",
     }
 )
+_MAX_CONFIG_BYTES = 1 << 20
 
 
 class ConfigError(ValueError):
@@ -95,30 +98,118 @@ def _require_file_source(raw: dict[str, object], key: str) -> str:
     return rendered
 
 
-def _read_protected_config(path: Path, expected_owner_uid: int) -> bytes:
+def _read_protected_config(
+    path: Path,
+    expected_owner_uid: int,
+    *,
+    expected_owner_gid: int | None = None,
+    expected_mode: int | None = None,
+    validate_parent_authority: bool = False,
+) -> bytes:
     if not path.is_absolute():
         raise ConfigError("config path must be absolute")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    if validate_parent_authority:
+        try:
+            for parent in path.parents:
+                metadata = os.lstat(parent)
+                if (
+                    not stat.S_ISDIR(metadata.st_mode)
+                    or stat.S_ISLNK(metadata.st_mode)
+                    or metadata.st_uid != expected_owner_uid
+                    or stat.S_IMODE(metadata.st_mode) & 0o022
+                ):
+                    raise ConfigError("config parent authority is unsafe")
+        except OSError as exc:
+            raise ConfigError("config parent authority is unavailable") from exc
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         fd = os.open(path, flags)
     except OSError as exc:
         raise ConfigError(f"config must be a readable regular file, not a symlink: {path}") from exc
 
+    failure: BaseException | None = None
+    payload = b""
     try:
-        metadata = os.fstat(fd)
-        if not stat.S_ISREG(metadata.st_mode):
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
             raise ConfigError(f"config must be a regular file: {path}")
-        if metadata.st_uid != expected_owner_uid:
+        if before.st_uid != expected_owner_uid:
             raise ConfigError(
-                f"config owner UID {metadata.st_uid} does not match expected owner UID "
+                f"config owner UID {before.st_uid} does not match expected owner UID "
                 f"{expected_owner_uid}"
             )
-        if stat.S_IMODE(metadata.st_mode) & 0o022:
+        if expected_owner_gid is not None and before.st_gid != expected_owner_gid:
+            raise ConfigError(
+                f"config owner GID {before.st_gid} does not match expected owner GID "
+                f"{expected_owner_gid}"
+            )
+        mode = stat.S_IMODE(before.st_mode)
+        if expected_mode is not None and mode != expected_mode:
+            raise ConfigError(
+                f"config mode {mode:04o} does not match expected mode {expected_mode:04o}"
+            )
+        if mode & 0o022:
             raise ConfigError("config must not be group/world writable")
-        with os.fdopen(fd, "rb", closefd=False) as handle:
-            return handle.read()
+        if (
+            before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > _MAX_CONFIG_BYTES
+        ):
+            raise ConfigError("config metadata is unsafe")
+        chunks: list[bytes] = []
+        remaining = _MAX_CONFIG_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        after = os.fstat(fd)
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mode,
+            before.st_uid,
+            before.st_gid,
+            before.st_nlink,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mode,
+            after.st_uid,
+            after.st_gid,
+            after.st_nlink,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if len(payload) != before.st_size or after_identity != before_identity:
+            raise ConfigError("config changed while it was read")
+    except OSError as exc:
+        failure = ConfigError("config could not be read safely")
+        failure.__cause__ = exc
+    except ConfigError as exc:
+        failure = exc
     finally:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except OSError as exc:
+            if failure is None:
+                failure = ConfigError("config descriptor could not be closed safely")
+                failure.__cause__ = exc
+    if failure is not None:
+        raise failure
+    return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,9 +245,38 @@ class OperatorConfig:
         cls,
         path: Path,
         *,
-        expected_owner_uid: int = 0,
+        expected_owner_uid: int | None = None,
+        expected_owner_gid: int | None = None,
+        expected_mode: int | None = None,
     ) -> OperatorConfig:
-        payload = _read_protected_config(path, expected_owner_uid)
+        installed_authority = (
+            expected_owner_uid is None
+            and expected_owner_gid is None
+            and expected_mode is None
+        )
+        if expected_owner_uid is None:
+            expected_owner_uid = 0
+        if installed_authority:
+            try:
+                account = pwd.getpwnam(APPROVED_SERVICE_USER)
+                group_gid = grp.getgrnam(APPROVED_SERVICE_USER).gr_gid
+            except KeyError as exc:
+                raise ConfigError("approved service account is unavailable") from exc
+            if account.pw_uid <= 0:
+                raise ConfigError("approved service account UID is invalid")
+            if account.pw_gid != group_gid or group_gid <= 0:
+                raise ConfigError("approved service account primary group is invalid")
+            expected_owner_gid = group_gid
+            expected_mode = 0o640
+        if expected_owner_uid is None:  # pragma: no cover - narrowed above
+            raise ConfigError("config owner authority is unavailable")
+        payload = _read_protected_config(
+            path,
+            expected_owner_uid,
+            expected_owner_gid=expected_owner_gid,
+            expected_mode=expected_mode,
+            validate_parent_authority=installed_authority,
+        )
         try:
             decoded = payload.decode("utf-8")
         except UnicodeDecodeError as exc:
