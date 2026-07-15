@@ -6,8 +6,9 @@ import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import { AuthProvider } from "./auth/AuthContext";
 import { useAuth } from "./auth/useAuth";
+import { FrontendBootstrap } from "./bootstrap/FrontendBootstrap";
+import { RootErrorBoundary } from "./components/RootErrorBoundary";
 import "./index.css";
-import { getFrontendConfig, loadFrontendConfig } from "./lib/frontendConfig";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -45,30 +46,21 @@ function MountedApp({ rootElement }: { rootElement: HTMLElement }): JSX.Element 
   return <App />;
 }
 
-function renderApp(): void {
-  const routePath = getFrontendConfig().routePath;
-  const rootElement = document.getElementById("root")!;
-  ReactDOM.createRoot(rootElement).render(
-    <React.StrictMode>
-      <QueryClientProvider client={queryClient}>
-        <BrowserRouter basename={routePath || undefined}>
-          <AuthProvider>
-            <MountedApp rootElement={rootElement} />
-          </AuthProvider>
-        </BrowserRouter>
-      </QueryClientProvider>
-    </React.StrictMode>,
-  );
-}
-
-void loadFrontendConfig()
-  .then(renderApp)
-  .catch((err: unknown) => {
-    console.error("Failed to load Loom frontend config", err);
-    const rootElement = document.getElementById("root")!;
-    const message = document.createElement("div");
-    message.className = "frontend-config-error";
-    message.setAttribute("role", "alert");
-    message.textContent = "Frontend configuration error.";
-    rootElement.replaceChildren(message);
-  });
+const rootElement = document.getElementById("root")!;
+ReactDOM.createRoot(rootElement).render(
+  <React.StrictMode>
+    <RootErrorBoundary>
+      <FrontendBootstrap>
+        {(config) => (
+          <QueryClientProvider client={queryClient}>
+            <BrowserRouter basename={config.routePath || undefined}>
+              <AuthProvider>
+                <MountedApp rootElement={rootElement} />
+              </AuthProvider>
+            </BrowserRouter>
+          </QueryClientProvider>
+        )}
+      </FrontendBootstrap>
+    </RootErrorBoundary>
+  </React.StrictMode>,
+);

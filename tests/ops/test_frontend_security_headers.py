@@ -210,6 +210,15 @@ def test_frontend_has_no_third_party_font_or_avoidable_inline_fallback() -> None
     index_css = (REPO_ROOT / "web/src/index.css").read_text(encoding="utf-8")
     tailwind = (REPO_ROOT / "web/tailwind.config.js").read_text(encoding="utf-8")
     main = (REPO_ROOT / "web/src/main.tsx").read_text(encoding="utf-8")
+    recovery_sources = "\n".join(
+        (REPO_ROOT / path).read_text(encoding="utf-8")
+        for path in (
+            "web/src/bootstrap/FrontendBootstrap.tsx",
+            "web/src/components/RecoveryPanel.tsx",
+            "web/src/components/RootErrorBoundary.tsx",
+            "web/src/lib/errorReporting.ts",
+        )
+    )
     combined = "\n".join((index_html, index_css, tailwind))
 
     assert "fonts.googleapis.com" not in combined
@@ -218,5 +227,7 @@ def test_frontend_has_no_third_party_font_or_avoidable_inline_fallback() -> None
     assert "JetBrains Mono" not in combined
     assert "<style" not in index_html.lower()
     assert "style=" not in index_html.lower()
-    assert ".innerHTML" not in main
-    assert "replaceChildren(message)" in main
+    assert ".innerHTML" not in "\n".join((main, recovery_sources))
+    assert '<main role="status" aria-live="polite" aria-busy="true">' in index_html
+    assert "Starting Loom" in index_html
+    assert "ReactDOM.createRoot(rootElement).render(" in main
