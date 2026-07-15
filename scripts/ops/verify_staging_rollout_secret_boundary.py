@@ -19,10 +19,10 @@ from pathlib import Path
 from dotenv import dotenv_values as parse_dotenv
 
 CONFIG_PATH = Path("/etc/loom/staging-rollout.toml")
-CATALOG_PATH = Path("/shared_work/qianyi/loom-worker-capacity/staging-catalog-provisioning.env")
+CATALOG_PATH = Path("/shared_work/loom/loom-worker-capacity/staging-catalog-provisioning.env")
 PRIVATE_KEY_PATH = Path("/var/lib/loom-staging-rollout/gb10-deploy-ed25519")
 TASKSET_TOKEN_PATH = Path(
-    "/shared_work/qianyi/loom-worker-capacity/staging-taskset-fence-canary-token"
+    "/shared_work/loom/loom-worker-capacity/staging-taskset-fence-canary-token"
 )
 REQUEST_ROOT = Path("/var/lib/loom-staging-rollout/requests")
 ROLLOUT_ROOT = Path("/data/loom-staging/rollouts")

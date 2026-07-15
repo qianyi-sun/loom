@@ -69,11 +69,11 @@ SYSTEM_SHELL = Path("/bin/sh")
 SYSTEM_GIT = Path("/usr/bin/git")
 
 PROTECTED_INPUTS = (
-    Path("/shared_work/qianyi/loom-worker-capacity/staging-admin-token"),
-    Path("/shared_work/qianyi/loom-worker-capacity/staging-service-token"),
-    Path("/shared_work/qianyi/loom-worker-capacity/staging-worker-token"),
-    Path("/shared_work/qianyi/loom-worker-capacity/staging-taskset-fence-canary-token"),
-    Path("/shared_work/qianyi/loom-worker-capacity/staging-catalog-provisioning.env"),
+    Path("/shared_work/loom/loom-worker-capacity/staging-admin-token"),
+    Path("/shared_work/loom/loom-worker-capacity/staging-service-token"),
+    Path("/shared_work/loom/loom-worker-capacity/staging-worker-token"),
+    Path("/shared_work/loom/loom-worker-capacity/staging-taskset-fence-canary-token"),
+    Path("/shared_work/loom/loom-worker-capacity/staging-catalog-provisioning.env"),
 )
 DATA_DIRECTORIES = (
     Path("/data/loom-staging/rollouts"),
