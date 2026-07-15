@@ -16,12 +16,17 @@ import sys
 from pathlib import Path
 from typing import Any
 
-REQUIRED_IMAGE_DIGESTS = (
-    "loom-control-plane",
-    "loom-llm-gateway",
-    "loom-service",
-    "loom-worker",
-    "loom-web",
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.component_ownership import load_manifest  # noqa: E402
+
+COMPONENT_MANIFEST = REPO_ROOT / "config/component-ownership.toml"
+REQUIRED_IMAGE_DIGESTS = tuple(
+    component.release_digest
+    for component in load_manifest(COMPONENT_MANIFEST).components
+    if component.kind == "release-image" and component.release_digest is not None
 )
 
 REQUIRED_CHECKS: dict[str, tuple[str, ...]] = {
@@ -231,6 +236,12 @@ def _validate_top_level(
     if not isinstance(digests, dict):
         errors.append("image_digests must be an object")
         return errors
+    extra_images = sorted(set(digests) - set(REQUIRED_IMAGE_DIGESTS))
+    if extra_images:
+        errors.append(
+            "image_digests contains images without a manifest release owner: "
+            + ", ".join(extra_images)
+        )
     for image_name in REQUIRED_IMAGE_DIGESTS:
         digest = digests.get(image_name)
         if not isinstance(digest, str) or not DIGEST_RE.search(digest):
