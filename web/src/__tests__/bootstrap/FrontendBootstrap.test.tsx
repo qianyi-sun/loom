@@ -44,7 +44,12 @@ describe("FrontendBootstrap", () => {
       </React.StrictMode>,
     );
 
-    expect(screen.getByRole("status")).toHaveTextContent("Starting Loom");
+    const startupStatus = screen.getByRole("status");
+    expect(startupStatus).toHaveTextContent("Starting Loom");
+    expect(startupStatus).toHaveAttribute("id", "main-content");
+    expect(
+      screen.getByRole("link", { name: "Skip to main content" }),
+    ).toHaveAttribute("href", "#main-content");
     expect(await screen.findByText("Ready on /dev")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -75,6 +80,18 @@ describe("FrontendBootstrap", () => {
       "href",
       "/dev/",
     );
+    expect(screen.getByRole("button", { name: "Try again" })).toHaveClass(
+      "min-h-11",
+      "min-w-11",
+    );
+    expect(screen.getByRole("link", { name: "Go to Loom home" })).toHaveClass(
+      "min-h-11",
+      "min-w-11",
+    );
+    expect(
+      screen.getByRole("link", { name: "Skip to main content" }),
+    ).toHaveAttribute("href", "#main-content");
+    expect(alert).toHaveAttribute("id", "main-content");
     expect(reports).toEqual([
       expect.objectContaining({
         kind: "frontend-config-network",

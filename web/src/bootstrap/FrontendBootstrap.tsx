@@ -1,6 +1,7 @@
 import React from "react";
 
 import { RecoveryPanel } from "../components/RecoveryPanel";
+import { SkipLink } from "../components/SkipLink";
 import {
   createBrowserFailureId,
   reportBrowserFailure,
@@ -80,15 +81,20 @@ export function FrontendBootstrap({
 
   if (!config) {
     return (
-      <main
-        role="status"
-        aria-live="polite"
-        aria-busy="true"
-        className="mx-auto mt-16 max-w-xl rounded-xl border border-slate-200 bg-white p-6 shadow-sm"
-      >
-        <h1 className="text-xl font-semibold text-slate-900">Loom</h1>
-        <p className="mt-2 text-sm text-slate-600">Starting Loom…</p>
-      </main>
+      <>
+        <SkipLink />
+        <main
+          id="main-content"
+          role="status"
+          aria-live="polite"
+          aria-busy="true"
+          tabIndex={-1}
+          className="mx-auto mt-16 max-w-xl rounded-xl border border-slate-200 bg-white p-6 shadow-sm"
+        >
+          <h1 className="text-xl font-semibold text-slate-900">Loom</h1>
+          <p className="mt-2 text-sm text-slate-600">Starting Loom…</p>
+        </main>
+      </>
     );
   }
 

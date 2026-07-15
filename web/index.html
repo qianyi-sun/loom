@@ -7,7 +7,19 @@
   </head>
   <body>
     <div id="root">
-      <main role="status" aria-live="polite" aria-busy="true">
+      <a
+        href="#main-content"
+        class="fixed left-4 top-4 z-[100] -translate-y-24 rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-lg focus:translate-y-0 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2"
+      >
+        Skip to main content
+      </a>
+      <main
+        id="main-content"
+        role="status"
+        aria-live="polite"
+        aria-busy="true"
+        tabindex="-1"
+      >
         <h1>Loom</h1>
         <p>Starting Loom…</p>
       </main>

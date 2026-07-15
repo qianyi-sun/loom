@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -216,6 +217,7 @@ def test_frontend_has_no_third_party_font_or_avoidable_inline_fallback() -> None
             "web/src/bootstrap/FrontendBootstrap.tsx",
             "web/src/components/RecoveryPanel.tsx",
             "web/src/components/RootErrorBoundary.tsx",
+            "web/src/components/SkipLink.tsx",
             "web/src/lib/errorReporting.ts",
         )
     )
@@ -228,7 +230,20 @@ def test_frontend_has_no_third_party_font_or_avoidable_inline_fallback() -> None
     assert "<style" not in index_html.lower()
     assert "style=" not in index_html.lower()
     assert ".innerHTML" not in "\n".join((main, recovery_sources))
-    assert '<main role="status" aria-live="polite" aria-busy="true">' in index_html
+    static_main = re.search(r"<main\b[^>]*>", index_html)
+    assert static_main is not None
+    for attribute in (
+        'id="main-content"',
+        'role="status"',
+        'aria-live="polite"',
+        'aria-busy="true"',
+        'tabindex="-1"',
+    ):
+        assert attribute in static_main.group(0)
+    assert re.search(
+        r'<a\b[^>]*href="#main-content"[^>]*>\s*Skip to main content\s*</a>',
+        index_html,
+    )
     assert "Starting Loom" in index_html
     assert "installBrowserConsoleErrorRedaction();" in main
     assert main.index("installBrowserConsoleErrorRedaction();") < main.index(
