@@ -21,10 +21,22 @@ def test_client_and_sudoers_fix_the_broker_command() -> None:
     assert "%loom-staging-operators ALL=(loom-rollout) NOPASSWD:NOSETENV:" in sudoers
     assert "/usr/local/libexec/loom-staging-rollout-broker *" in sudoers
     assert "/usr/bin/env -i" in broker
+    assert broker.index("umask 077") < broker.index("exec /usr/bin/env -i")
     assert 'SUDO_USER="${SUDO_USER}"' in broker
-    assert (
+    python_command = (
         "/opt/loom-staging-runner/venv/bin/python -I -B -m loom_cli.rollout.operator.broker"
-    ) in broker
+    )
+    assert python_command in broker
+    for setting in (
+        "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null",
+        "GIT_TERMINAL_PROMPT=0",
+    ):
+        assert (
+            broker.index("exec /usr/bin/env -i")
+            < broker.index(setting)
+            < broker.index(python_command)
+        )
     assert "PYTHONPATH" not in broker
     assert tmpfiles.strip() == "d /run/loom-staging-rollout 0700 loom-rollout loom-rollout -"
 

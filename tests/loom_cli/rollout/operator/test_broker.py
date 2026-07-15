@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import grp
 import io
+import os
 import pwd
 import subprocess
 from contextlib import contextmanager
@@ -903,6 +904,35 @@ def test_default_broker_run_and_stream_use_exact_sanitized_environment(
     stream.close()
     assert run_environments == [expected]
     assert popen_environments == [expected]
+
+
+def test_main_scopes_restrictive_umask_and_restores_caller(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    created = tmp_path / "broker-created"
+    observed_umasks: list[int] = []
+    authenticate = deps.dependencies.authenticate
+    original_umask = os.umask(0o002)
+
+    def capture_umask() -> CallerIdentity:
+        current = os.umask(0o077)
+        os.umask(current)
+        observed_umasks.append(current)
+        created.write_text("broker\n", encoding="utf-8")
+        return authenticate()
+
+    deps.dependencies.authenticate = capture_umask
+    try:
+        assert broker_main(["status"], dependencies=deps.dependencies) == 0
+        restored_umask = os.umask(0o077)
+        os.umask(restored_umask)
+        assert restored_umask == 0o002
+    finally:
+        os.umask(original_umask)
+
+    assert observed_umasks == [0o077]
+    assert created.stat().st_mode & 0o777 == 0o600
 
 
 def test_group_resolution_includes_primary_and_supplementary_groups(

@@ -878,6 +878,18 @@ def main(
     dependencies: BrokerDependencies | None = None,
 ) -> int:
     """Parse the fixed operator surface and execute one authenticated action."""
+    previous_umask = os.umask(0o077)
+    try:
+        return _main(argv, dependencies=dependencies)
+    finally:
+        os.umask(previous_umask)
+
+
+def _main(
+    argv: Sequence[str] | None = None,
+    *,
+    dependencies: BrokerDependencies | None = None,
+) -> int:
     deps = dependencies
     try:
         args = _parser().parse_args(list(argv) if argv is not None else None)
