@@ -117,6 +117,9 @@ there.
 
 ## Human-readable SPA
 
+- **[frontend-error-recovery.md](frontend-error-recovery.md)** — startup,
+  auth-session, root, and route recovery boundaries; safe `WEB-*` reports;
+  retry policy and redaction invariants.
 - **[human-readable-spa-ux.md](human-readable-spa-ux.md)** — two-layer
   default/diagnostics rule; humanizer libraries; SPA specifications for
   New Batch, Monitor, Trial Detail, Batch Detail, Providers.

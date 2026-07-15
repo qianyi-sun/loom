@@ -193,6 +193,53 @@ describe("Settings", () => {
     });
   });
 
+  it("renders a fixed sign-in failure without exposing the response body", async () => {
+    const loginFailure = jsonResponse(
+      {
+        detail:
+          "upstream-debug-secret-783 token=raw-token signed_url=https://secret",
+      },
+      401,
+    );
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = String(input);
+      if (url.includes("/api/v1/auth/me")) {
+        return new Response("", { status: 401 });
+      }
+      if (url.endsWith("/api/v1/auth/public-teams")) {
+        return jsonResponse({ items: [] });
+      }
+      if (url.endsWith("/api/v1/auth/login") && init?.method === "POST") {
+        return loginFailure;
+      }
+      return jsonResponse({ detail: `unhandled ${url}` }, 404);
+    });
+    const user = userEvent.setup();
+
+    renderWithProviders(<Settings />, { route: "/settings" });
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Username"), "Owner");
+    await user.type(screen.getByLabelText("Password"), "long-passphrase-1");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "Sign-in failed. Check your username and password, then try again.",
+    );
+    expect(alert).not.toHaveTextContent("upstream-debug-secret-783");
+    expect(alert).not.toHaveTextContent("raw-token");
+    expect(alert).not.toHaveTextContent("signed_url");
+    expect(loginFailure.bodyUsed).toBe(false);
+    expect(
+      fetchSpy.mock.calls.filter(([input, init]) =>
+        String(input).endsWith("/api/v1/auth/login") && init?.method === "POST",
+      ),
+    ).toHaveLength(1);
+  });
+
   it("summarizes the current team, members, and owner setup actions", async () => {
     const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {

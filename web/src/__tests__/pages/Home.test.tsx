@@ -14,6 +14,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 const ownerMe = {
   user: {
     id: "owner-user",
+    username: "Owner",
     email: "owner@example.com",
     display_name: "Owner Example",
     is_platform_admin: false,

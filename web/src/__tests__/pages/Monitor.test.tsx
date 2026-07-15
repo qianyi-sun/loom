@@ -202,6 +202,7 @@ function mockFilteredMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
             JSON.stringify({
               user: {
                 id: "admin",
+                username: "Admin",
                 email: "admin@example.com",
                 display_name: "Admin",
                 is_platform_admin: true,
@@ -289,6 +290,7 @@ function mockFailureMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
             JSON.stringify({
               user: {
                 id: "admin",
+                username: "Admin",
                 email: "admin@example.com",
                 display_name: "Admin",
                 is_platform_admin: true,

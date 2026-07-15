@@ -89,6 +89,108 @@ describe("BrowserErrorBoundary", () => {
     }
   });
 
+  it.each([
+    [
+      "frozen error",
+      Object.freeze(new Error("raw frozen loom_api_abcdefghijklmnopqrstuvwxyz012345")),
+    ],
+    ["primitive", "raw primitive loom_api_abcdefghijklmnopqrstuvwxyz012345"],
+  ])("keeps fallback and report references equal for a %s", (_label, throwable) => {
+    const reports: BrowserFailureReport[] = [];
+    setBrowserFailureReporter((report) => reports.push(report));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const restoreConsoleRedaction = installBrowserConsoleErrorRedaction();
+
+    function BrokenRoute(): JSX.Element {
+      throw throwable;
+    }
+
+    try {
+      render(
+        <BrowserErrorBoundary
+          resetKey="non-extensible"
+          pathname="/dev/non-extensible"
+          renderFallback={({ referenceId }) => (
+            <div role="alert">Failed safely {referenceId}</div>
+          )}
+        >
+          <BrokenRoute />
+        </BrowserErrorBoundary>,
+      );
+
+      const referenceId = screen
+        .getByRole("alert")
+        .textContent?.match(/WEB-[0-9A-F]{8}/u)?.[0];
+      expect(referenceId).toBeDefined();
+      expect(reports).toEqual([
+        expect.objectContaining({
+          kind: "route-render",
+          referenceId,
+        }),
+      ]);
+      expect(JSON.stringify(reports)).not.toContain("loom_api_");
+    } finally {
+      restoreConsoleRedaction();
+    }
+  });
+
+  it.each([
+    ["frozen error", Object.freeze(new Error("raw frozen sibling secret"))],
+    ["primitive", "raw primitive sibling secret"],
+  ])("keeps sibling fallback/report references aligned for a shared %s", (
+    _label,
+    throwable,
+  ) => {
+    const reports: BrowserFailureReport[] = [];
+    setBrowserFailureReporter((report) => reports.push(report));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const restoreConsoleRedaction = installBrowserConsoleErrorRedaction();
+
+    function BrokenRoute(): JSX.Element {
+      throw throwable;
+    }
+
+    try {
+      render(
+        <>
+          <BrowserErrorBoundary
+            resetKey="shared-one"
+            pathname="/dev/shared-one"
+            renderFallback={({ referenceId }) => (
+              <div data-testid="shared-one">{referenceId}</div>
+            )}
+          >
+            <BrokenRoute />
+          </BrowserErrorBoundary>
+          <BrowserErrorBoundary
+            resetKey="shared-two"
+            pathname="/dev/shared-two"
+            renderFallback={({ referenceId }) => (
+              <div data-testid="shared-two">{referenceId}</div>
+            )}
+          >
+            <BrokenRoute />
+          </BrowserErrorBoundary>
+        </>,
+      );
+
+      const fallbackReferences = [
+        screen.getByTestId("shared-one").textContent,
+        screen.getByTestId("shared-two").textContent,
+      ];
+      expect(fallbackReferences).toEqual([
+        expect.stringMatching(/^WEB-[0-9A-F]{8}$/u),
+        expect.stringMatching(/^WEB-[0-9A-F]{8}$/u),
+      ]);
+      expect(reports.map(({ referenceId }) => referenceId)).toEqual(
+        fallbackReferences,
+      );
+      expect(JSON.stringify(reports)).not.toContain("sibling secret");
+    } finally {
+      restoreConsoleRedaction();
+    }
+  });
+
   it("clears a failed route when the router reset key changes", () => {
     let shouldFail = true;
     const error = new Error("failed route");

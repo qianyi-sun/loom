@@ -48,6 +48,7 @@ describe("UsageDashboard", () => {
           return jsonResponse({
             user: {
               id: "user-1",
+              username: platformAdmin ? "PlatformAdmin" : "Member",
               email: "user@example.com",
               display_name: null,
               is_platform_admin: platformAdmin,

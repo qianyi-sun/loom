@@ -15,6 +15,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 const authMe = {
   user: {
     id: "user-1",
+    username: "Beta",
     email: "beta@example.com",
     display_name: null,
     is_platform_admin: false,

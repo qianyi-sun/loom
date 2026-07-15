@@ -1,6 +1,9 @@
 import { redactText } from "./redaction";
 
 export type BrowserFailureKind =
+  | "auth-session-network"
+  | "auth-session-http"
+  | "auth-session-invalid"
   | "frontend-config-network"
   | "frontend-config-http"
   | "frontend-config-invalid"
@@ -299,16 +302,30 @@ export function clearBrowserFailureConsoleRedaction(value: unknown): void {
   if (isObjectLike(value)) {
     return;
   }
+  // Keep primitive siblings covered through the complete boundary commit.
+  // The bounded pending-context timer releases both the raw Map key and marker.
+  if (existingPendingFailureContext(value)?.claimedByBoundary) return;
   capturedPrimitives.delete(value);
 }
 
 export function prepareBrowserFailureForBoundary(error: unknown): string {
   redactBrowserThrowable(error);
   markBrowserFailureForConsoleRedaction(error);
-  const context =
-    failureContext(error) ??
-    existingPendingFailureContext(error) ??
-    createFailureContext();
+  let context = failureContext(error) ?? existingPendingFailureContext(error);
+  if (!context) {
+    context = pendingFailureContext(error);
+    // Keep one context through the React boundary commit. This lets sibling
+    // boundaries that captured the same frozen/primitive throwable report the
+    // same reference their fallbacks rendered, while bounding raw primitive
+    // Map-key retention and retiring frozen-object episodes.
+    const pendingContext = context;
+    window.setTimeout(() => {
+      clearPendingFailureContext(error, pendingContext);
+      if (!isObjectLike(error)) {
+        capturedPrimitives.delete(error);
+      }
+    }, BOUNDARY_CLAIM_WINDOW_MS);
+  }
   context.claimedByBoundary = true;
   if (isObjectLike(error)) {
     defineRedactedProperty(error, failureContextKey, context);
@@ -369,8 +386,8 @@ export function installBrowserErrorEventRedaction(): () => void {
     ): void => {
       const timer = window.setTimeout(() => {
         pendingReports.delete(timer);
-        clearBrowserFailureConsoleRedaction(rawValue);
         clearPendingFailureContext(rawValue, context);
+        clearBrowserFailureConsoleRedaction(rawValue);
         if (context.settled) return;
         context.settled = true;
         if (!context.claimedByBoundary) {

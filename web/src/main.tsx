@@ -28,17 +28,21 @@ const queryClient = new QueryClient({
 // a browser-smoke signal only after React commits the application tree.
 // eslint-disable-next-line react-refresh/only-export-components
 function MountedApp({ rootElement }: { rootElement: HTMLElement }): JSX.Element {
-  const { authError, isAuthenticated, isLoading } = useAuth();
+  const { sessionStatus } = useAuth();
   React.useLayoutEffect(() => {
     rootElement.setAttribute("data-loom-mounted", "true");
-    if (isLoading) {
+    if (sessionStatus === "loading") {
       rootElement.removeAttribute("data-loom-auth-settled");
       rootElement.removeAttribute("data-loom-auth-state");
     } else {
       rootElement.setAttribute("data-loom-auth-settled", "true");
       rootElement.setAttribute(
         "data-loom-auth-state",
-        authError ? "error" : isAuthenticated ? "authenticated" : "anonymous",
+        sessionStatus === "authenticated"
+          ? "authenticated"
+          : sessionStatus === "unavailable"
+            ? "error"
+            : "anonymous",
       );
     }
     return () => {
@@ -46,7 +50,7 @@ function MountedApp({ rootElement }: { rootElement: HTMLElement }): JSX.Element 
       rootElement.removeAttribute("data-loom-auth-settled");
       rootElement.removeAttribute("data-loom-auth-state");
     };
-  }, [authError, isAuthenticated, isLoading, rootElement]);
+  }, [rootElement, sessionStatus]);
   return <App />;
 }
 
