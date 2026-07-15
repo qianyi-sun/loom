@@ -31,4 +31,4 @@ exec /usr/bin/env -i \
   SUDO_USER="${SUDO_USER}" \
   SUDO_UID="${SUDO_UID}" \
   SUDO_GID="${SUDO_GID}" \
-  /opt/loom-staging-runner/venv/bin/python -m loom_cli.rollout.operator.broker "$@"
+  /opt/loom-staging-runner/venv/bin/python -I -B -m loom_cli.rollout.operator.broker "$@"

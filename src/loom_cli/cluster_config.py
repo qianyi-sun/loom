@@ -15,10 +15,10 @@ from dataclasses import dataclass, field, fields, make_dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from loom_config.loader import RenderConfigEntry, load_schema
+from loom_cli.runtime_resources import load_bundled_schema
+from loom_config.loader import RenderConfigEntry
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_SCHEMA = load_schema(_REPO_ROOT / "config" / "loom-schema.toml")
+_SCHEMA = load_bundled_schema()
 
 
 def _make_table_dataclass(entry: RenderConfigEntry) -> type:

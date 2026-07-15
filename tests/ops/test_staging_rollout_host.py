@@ -4,6 +4,7 @@ import contextlib
 import json
 import os
 import stat
+import threading
 from pathlib import Path
 from typing import ClassVar
 
@@ -34,6 +35,7 @@ class FakeSystem:
         self.status = "idle"
         self.validated = 0
         self.candidate_syncs = 0
+        self.sync_safety_snapshots: list[tuple[bool, bool]] = []
         self.candidate_sha: str | None = None
         self.revoked = False
         self.revoke_error: str | None = None
@@ -47,6 +49,8 @@ class FakeSystem:
         self.trust_ready = False
         self.dry_runs = 0
         self.venv = False
+        self.package_ready = True
+        self.broker_ready = True
         self.venv_lock_mode: int | None = None
         self.venv_lock_hardenings = 0
         self.admission_disabled_at_status = False
@@ -56,6 +60,7 @@ class FakeSystem:
         self.source_reads: list[str] = []
         self.remote_source_sha = "a" * 40
         self.install_source_sha: str | None = None
+        self.install_owner_calls: list[tuple[Path, str, str, int]] = []
 
     def validate_prerequisites(self) -> None:
         self.validated += 1
@@ -190,9 +195,20 @@ class FakeSystem:
 
     def sync_venv(self, source_root: Path) -> None:
         assert source_root == host.REPO_ROOT
+        self.sync_safety_snapshots.append(
+            (self.maintenance, self.filesystem.exists(host.SUDOERS_PATH))
+        )
         self.candidate_syncs += 1
         self.venv = True
+        self.package_ready = True
+        self.broker_ready = True
         self.venv_lock_mode = 0o600
+
+    def broker_runtime_ready(self) -> bool:
+        return self.broker_ready
+
+    def package_runtime_ready(self) -> bool:
+        return self.package_ready
 
     def ensure_service_key(self) -> bool:
         if self.service_key_present():
@@ -305,15 +321,30 @@ class FakeSystem:
         if self._trust_ledger().get("revocation_hosts") != []:
             raise host.InstallError("fake GB10 trust revocation is incomplete")
 
-    def install_owner(self, path: Path, owner: str, mode: int) -> bool:
-        del owner
+    def install_owner(
+        self,
+        path: Path,
+        owner: str,
+        mode: int,
+        *,
+        group: str | None = None,
+    ) -> bool:
+        target_group = owner if group is None else group
+        self.install_owner_calls.append((path, owner, target_group, mode))
         mapped = self.filesystem.path(path)
         if mapped.exists():
             mapped.chmod(mode)
         return False
 
-    def file_owner_ready(self, path: Path, *, owner: str, mode: int) -> bool:
-        del owner
+    def file_owner_ready(
+        self,
+        path: Path,
+        *,
+        owner: str,
+        mode: int,
+        group: str | None = None,
+    ) -> bool:
+        del owner, group
         mapped = self.filesystem.path(path)
         return mapped.is_file() and (mapped.stat().st_mode & 0o777) == mode
 
@@ -468,6 +499,14 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     assert "admin-token-fixture" not in rendered
     assert "__ADMIN_TOKEN_FINGERPRINT__" not in rendered
     assert "__SMOKE_ON_BEHALF_TEAM_ID__" not in rendered
+    config_path = installer.filesystem.path(host.CONFIG_PATH)
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o640
+    assert (
+        host.CONFIG_PATH,
+        "root",
+        host.SERVICE_GROUP,
+        0o640,
+    ) in system.install_owner_calls
     known_hosts = installer.filesystem.path(host.KNOWN_HOSTS_PATH)
     assert (
         known_hosts.read_bytes()
@@ -855,6 +894,81 @@ def test_unchanged_reinstall_does_not_repeat_post_install_dry_run(tmp_path: Path
     assert first["changed"]
     assert second["changed"] == []
     assert system.dry_runs == 1
+
+
+def test_unchanged_reinstall_repairs_broken_broker_runtime(tmp_path: Path) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    syncs_before = system.candidate_syncs
+    system.package_ready = False
+    system.broker_ready = False
+
+    result = installer.install(TEAM_ID)
+
+    assert "venv" in result["changed"]
+    assert system.candidate_syncs == syncs_before + 1
+    assert system.package_ready is True
+    assert system.broker_ready is True
+    assert system.sync_safety_snapshots[-1] == (True, False)
+
+
+def test_same_sha_broker_repair_failure_stays_admission_closed(tmp_path: Path) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    system.package_ready = False
+    system.broker_ready = False
+
+    def fail_sync(source_root: Path) -> None:
+        assert source_root == host.REPO_ROOT
+        assert system.maintenance is True
+        assert not installer.filesystem.exists(host.SUDOERS_PATH)
+        raise host.InstallError("injected same-SHA runtime repair failure")
+
+    system.sync_venv = fail_sync  # type: ignore[method-assign]
+
+    with pytest.raises(host.InstallError, match="same-SHA runtime repair failure"):
+        installer.install(TEAM_ID)
+
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    assert record["installation_state"] == "installing"
+    assert record["admission_enabled"] is False
+    assert record["maintenance_enabled"] is True
+    assert system.maintenance is True
+    assert not installer.filesystem.exists(host.SUDOERS_PATH)
+
+
+def test_config_probe_failure_stays_admission_closed_without_package_reinstall(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    syncs_before = system.candidate_syncs
+    system.broker_ready = False
+
+    with pytest.raises(host.InstallError, match="broker config probe failed"):
+        installer.install(TEAM_ID)
+
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    assert record["installation_state"] == "installing"
+    assert record["admission_enabled"] is False
+    assert record["maintenance_enabled"] is True
+    assert system.candidate_syncs == syncs_before
+    assert system.maintenance is True
+    assert not installer.filesystem.exists(host.SUDOERS_PATH)
+
+
+def test_existing_venv_with_missing_service_user_converges(tmp_path: Path) -> None:
+    installer, system = _installer(tmp_path)
+    system.venv = True
+    system.package_ready = True
+    system.broker_ready = True
+
+    result = installer.install(TEAM_ID)
+
+    assert result["ok"] is True
+    assert system.service_user is True
 
 
 def test_update_refuses_active_rollout_before_replacing_runtime(tmp_path: Path) -> None:
@@ -1538,6 +1652,33 @@ def test_system_python_version_probe_fails_closed(returncode: int, version: str)
         )
 
 
+def _runtime_probe_argv(service_uid: int, program: str) -> list[str]:
+    return [
+        "sudo",
+        "-n",
+        "-u",
+        host.SERVICE_USER,
+        "--",
+        "/usr/bin/env",
+        "-i",
+        f"HOME={host.STATE_ROOT}",
+        f"USER={host.SERVICE_USER}",
+        f"LOGNAME={host.SERVICE_USER}",
+        f"PATH={host.VENV / 'bin'}:{host._ROOT_PATH}",
+        "LANG=C.UTF-8",
+        "LC_ALL=C.UTF-8",
+        f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
+        f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
+        f"KUBECONFIG={host.KUBECONFIG_PATH}",
+        f"LOOM_STAGING_ROLLOUT_CONFIG={host.CONFIG_PATH}",
+        str(host.VENV / "bin/python"),
+        "-I",
+        "-B",
+        "-c",
+        program,
+    ]
+
+
 def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1552,6 +1693,13 @@ def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
             self.calls.append((call, kwargs))
             if call[1:3] == ["-I", "-S"]:
                 return host.CommandResult(0, "3.12\n")
+            if call == ["id", "-u", host.SERVICE_USER]:
+                return host.CommandResult(0, "1001\n")
+            if call == ["id", "-g", host.SERVICE_USER]:
+                return host.CommandResult(0, "1002\n")
+            if call == _runtime_probe_argv(1001, host._PACKAGE_RUNTIME_PROBE):
+                events.append("broker-import")
+                return host.CommandResult(0)
             events.append("uv-sync")
             return host.CommandResult(0)
 
@@ -1576,7 +1724,9 @@ def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
 
     system.sync_venv(source_root)
 
-    sync_call, sync_kwargs = runner.calls[-1]
+    sync_call, sync_kwargs = next(
+        call for call in runner.calls if call[0][0] == "/usr/local/bin/uv"
+    )
     assert sync_call == [
         "/usr/local/bin/uv",
         "sync",
@@ -1587,6 +1737,8 @@ def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
         "cluster",
         "--extra",
         "rollout",
+        "--reinstall-package",
+        "loom",
         "--python",
         "/usr/bin/python3.12",
     ]
@@ -1597,7 +1749,109 @@ def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
         "LC_ALL": "C.UTF-8",
         "UV_PROJECT_ENVIRONMENT": str(host.VENV),
     }
-    assert events == ["uv-sync", "harden-lock", "validate-authority"]
+    assert events == ["uv-sync", "harden-lock", "validate-authority", "broker-import"]
+    assert runner.calls[-3:] == [
+        (["id", "-u", host.SERVICE_USER], {}),
+        (["id", "-g", host.SERVICE_USER], {}),
+        (_runtime_probe_argv(1001, host._PACKAGE_RUNTIME_PROBE), {"check": False}),
+    ]
+
+
+def test_sync_venv_rejects_broken_installed_broker_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BrokenBrokerRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            call = list(argv)
+            if call[1:3] == ["-I", "-S"]:
+                return host.CommandResult(0, "3.12\n")
+            if call[0] == "/usr/local/bin/uv":
+                return host.CommandResult(0)
+            if call == ["id", "-u", host.SERVICE_USER]:
+                return host.CommandResult(0, "1001\n")
+            if call == ["id", "-g", host.SERVICE_USER]:
+                return host.CommandResult(0, "1002\n")
+            assert call == _runtime_probe_argv(1001, host._PACKAGE_RUNTIME_PROBE)
+            assert kwargs == {"check": False}
+            return host.CommandResult(1, stderr="missing packaged schema")
+
+    monkeypatch.setattr(
+        host,
+        "_safe_root_executable",
+        lambda path, *, label: {
+            host.SYSTEM_PYTHON: Path("/usr/bin/python3.12"),
+            host.UV_BINARY: Path("/usr/local/bin/uv"),
+        }[path],
+    )
+    system = host.HostSystem(BrokenBrokerRunner())
+    monkeypatch.setattr(system, "harden_venv_lock", lambda: None)
+    monkeypatch.setattr(system, "venv_ready", lambda: True)
+
+    with pytest.raises(host.InstallError, match="broker import probe failed"):
+        system.sync_venv(Path("/opt/loom-staging-runner/source"))
+
+
+def test_broker_runtime_probe_loads_fixed_config_as_service_user() -> None:
+    class ProbeRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            call = list(argv)
+            self.calls.append((call, kwargs))
+            if call == ["id", "-u", host.SERVICE_USER]:
+                return host.CommandResult(0, "1001\n")
+            if call == ["id", "-g", host.SERVICE_USER]:
+                return host.CommandResult(0, "1002\n")
+            assert call == _runtime_probe_argv(1001, host._BROKER_RUNTIME_PROBE)
+            assert "OperatorConfig.load(fixed_operator_config_path())" in call[-1]
+            return host.CommandResult(0)
+
+    runner = ProbeRunner()
+
+    assert host.HostSystem(runner).broker_runtime_ready() is True
+    assert runner.calls[-1][1] == {"check": False}
+
+
+def test_config_authority_converges_to_root_owned_service_group_readable() -> None:
+    class OwnershipRunner:
+        def __init__(self) -> None:
+            self.metadata = "root:root:600"
+            self.calls: list[list[str]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            call = list(argv)
+            self.calls.append(call)
+            if call[:3] == ["stat", "-c", "%U:%G:%a"]:
+                return host.CommandResult(0, self.metadata + "\n")
+            if call == [
+                "chown",
+                f"root:{host.SERVICE_GROUP}",
+                str(host.CONFIG_PATH),
+            ]:
+                self.metadata = f"root:{host.SERVICE_GROUP}:600"
+                return host.CommandResult(0)
+            if call == ["chmod", "0640", str(host.CONFIG_PATH)]:
+                self.metadata = f"root:{host.SERVICE_GROUP}:640"
+                return host.CommandResult(0)
+            raise AssertionError(f"unexpected command: {call}")
+
+    runner = OwnershipRunner()
+    system = host.HostSystem(runner)
+
+    assert system.install_owner(
+        host.CONFIG_PATH,
+        "root",
+        0o640,
+        group=host.SERVICE_GROUP,
+    )
+    assert system.file_owner_ready(
+        host.CONFIG_PATH,
+        owner="root",
+        group=host.SERVICE_GROUP,
+        mode=0o640,
+    )
 
 
 def test_venv_lock_hardening_converges_root_regular_file_to_mode_0600(
@@ -1798,6 +2052,213 @@ def test_verify_user_manager_rejects_invalid_manager_version(version: str) -> No
 
     with pytest.raises(host.InstallError, match="manager version is invalid"):
         host.HostSystem(UserManagerRunner()).verify_user_manager()
+
+
+def _status_metadata(mode: int, *, uid: int, gid: int) -> os.stat_result:
+    return os.stat_result((mode, 11, 7, 1, uid, gid, 0, 0, 0, 0))
+
+
+@pytest.mark.parametrize(
+    ("unit_result", "expected"),
+    [
+        (host.CommandResult(0), "idle"),
+        (
+            host.CommandResult(
+                0,
+                "loom-staging-rollout-request-1.service loaded active running rollout\n",
+            ),
+            "busy",
+        ),
+        (
+            host.CommandResult(
+                0,
+                "loom-staging-rollout-request-1.service loaded maintenance dead rollout\n",
+            ),
+            "busy",
+        ),
+        (
+            host.CommandResult(
+                0,
+                "loom-staging-rollout-request-1.service loaded inactive dead rollout\n"
+                "loom-staging-rollout-request-2.service loaded failed failed rollout\n",
+            ),
+            "idle",
+        ),
+        (host.CommandResult(1, stderr="manager unavailable"), "unknown"),
+        (host.CommandResult(0, stderr="manager warning"), "unknown"),
+        (host.CommandResult(0, "malformed-unit-output\n"), "unknown"),
+    ],
+)
+def test_active_status_uses_protected_pointer_and_user_units_without_broker_import(
+    monkeypatch: pytest.MonkeyPatch,
+    unit_result: host.CommandResult,
+    expected: str,
+) -> None:
+    service_uid = 1001
+    service_gid = 1002
+
+    class StatusRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            call = list(argv)
+            self.calls.append((call, kwargs))
+            if call == ["id", "-u", host.SERVICE_USER]:
+                return host.CommandResult(0, f"{service_uid}\n")
+            if call == ["id", "-g", host.SERVICE_USER]:
+                return host.CommandResult(0, f"{service_gid}\n")
+            return unit_result
+
+    def fake_lstat(path: Path) -> os.stat_result:
+        if path == host.MAINTENANCE_MARKER:
+            return _status_metadata(stat.S_IFREG | 0o600, uid=0, gid=0)
+        if path == host.STATE_ROOT:
+            return _status_metadata(
+                stat.S_IFDIR | 0o700,
+                uid=service_uid,
+                gid=service_gid,
+            )
+        assert path == host.ACTIVE_POINTER
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(host.os, "lstat", fake_lstat)
+    runner = StatusRunner()
+
+    assert host.HostSystem(runner).active_status() == expected
+    assert all(str(host.BROKER_PATH) not in call for call, _ in runner.calls)
+    assert runner.calls[-1] == (
+        [
+            "sudo",
+            "-n",
+            "-u",
+            host.SERVICE_USER,
+            "--",
+            "/usr/bin/env",
+            "-i",
+            f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
+            f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
+            "PATH=/usr/bin:/bin",
+            "LANG=C.UTF-8",
+            "LC_ALL=C.UTF-8",
+            "/usr/bin/systemctl",
+            "--user",
+            "list-units",
+            "--all",
+            "--plain",
+            "--full",
+            "--type=service",
+            "--no-legend",
+            "--no-pager",
+            "loom-staging-rollout-*.service",
+        ],
+        {"check": False},
+    )
+
+
+def test_active_status_refuses_safe_active_pointer_without_querying_systemd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_uid = 1001
+    service_gid = 1002
+
+    class PointerRunner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            call = list(argv)
+            self.calls.append(call)
+            if call == ["id", "-u", host.SERVICE_USER]:
+                return host.CommandResult(0, f"{service_uid}\n")
+            assert call == ["id", "-g", host.SERVICE_USER]
+            return host.CommandResult(0, f"{service_gid}\n")
+
+    def fake_lstat(path: Path) -> os.stat_result:
+        if path == host.MAINTENANCE_MARKER:
+            return _status_metadata(stat.S_IFREG | 0o600, uid=0, gid=0)
+        if path == host.STATE_ROOT:
+            return _status_metadata(
+                stat.S_IFDIR | 0o700,
+                uid=service_uid,
+                gid=service_gid,
+            )
+        assert path == host.ACTIVE_POINTER
+        return _status_metadata(
+            stat.S_IFREG | 0o600,
+            uid=service_uid,
+            gid=service_gid,
+        )
+
+    monkeypatch.setattr(host.os, "lstat", fake_lstat)
+    runner = PointerRunner()
+
+    assert host.HostSystem(runner).active_status() == "busy"
+    assert runner.calls == [
+        ["id", "-u", host.SERVICE_USER],
+        ["id", "-g", host.SERVICE_USER],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("unsafe_path", "unsafe_metadata"),
+    [
+        (
+            host.STATE_ROOT,
+            _status_metadata(stat.S_IFDIR | 0o755, uid=1001, gid=1002),
+        ),
+        (
+            host.ACTIVE_POINTER,
+            _status_metadata(stat.S_IFREG | 0o600, uid=0, gid=0),
+        ),
+    ],
+)
+def test_active_status_fails_closed_on_unsafe_state_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_path: Path,
+    unsafe_metadata: os.stat_result,
+) -> None:
+    class StatusRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            call = list(argv)
+            if call == ["id", "-u", host.SERVICE_USER]:
+                return host.CommandResult(0, "1001\n")
+            if call == ["id", "-g", host.SERVICE_USER]:
+                return host.CommandResult(0, "1002\n")
+            raise AssertionError(f"unexpected systemd query: {call}")
+
+    def fake_lstat(path: Path) -> os.stat_result:
+        if path == unsafe_path:
+            return unsafe_metadata
+        if path == host.MAINTENANCE_MARKER:
+            return _status_metadata(stat.S_IFREG | 0o600, uid=0, gid=0)
+        if path == host.STATE_ROOT:
+            return _status_metadata(stat.S_IFDIR | 0o700, uid=1001, gid=1002)
+        assert path == host.ACTIVE_POINTER
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(host.os, "lstat", fake_lstat)
+
+    assert host.HostSystem(StatusRunner()).active_status() == "unknown"
+
+
+def test_active_status_fails_closed_without_safe_maintenance_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StatusRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            return host.CommandResult(0, "1001\n" if list(argv)[1] == "-u" else "1002\n")
+
+    monkeypatch.setattr(
+        host.os,
+        "lstat",
+        lambda path: (_ for _ in ()).throw(FileNotFoundError(path)),
+    )
+
+    assert host.HostSystem(StatusRunner()).active_status() == "unknown"
 
 
 def _root_directory_metadata(*, mode: int = 0o700, uid: int = 0) -> os.stat_result:
@@ -2879,6 +3340,48 @@ def test_maintenance_marker_transition_is_locked_and_idempotent(tmp_path: Path) 
         enabled=False,
     )
     assert not (runtime / "maintenance").exists()
+
+
+def test_maintenance_marker_waits_for_inflight_launch_guard(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    uid, gid = os.geteuid(), os.getegid()
+    lock_fd = os.open(runtime / "launch.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    os.fchmod(lock_fd, 0o600)
+    host.fcntl.flock(lock_fd, host.fcntl.LOCK_EX)
+    started = threading.Event()
+    finished = threading.Event()
+    failures: list[BaseException] = []
+
+    def publish_marker() -> None:
+        started.set()
+        try:
+            host._maintenance_marker(
+                runtime,
+                service_uid=uid,
+                service_gid=gid,
+                authority_uid=uid,
+                authority_gid=gid,
+                enabled=True,
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=publish_marker)
+    worker.start()
+    try:
+        assert started.wait(timeout=2)
+        assert not finished.wait(timeout=0.1)
+    finally:
+        host.fcntl.flock(lock_fd, host.fcntl.LOCK_UN)
+        os.close(lock_fd)
+    assert finished.wait(timeout=2)
+    worker.join(timeout=2)
+
+    assert not failures
+    assert (runtime / "maintenance").is_file()
 
 
 def test_owned_tree_rejects_writable_descendant_and_escaping_symlink(tmp_path: Path) -> None:

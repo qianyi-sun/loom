@@ -43,6 +43,7 @@ INSTALL_SOURCE = RUNNER_ROOT / "source"
 CANDIDATE_REPO = RUNNER_ROOT / "repo"
 VENV = RUNNER_ROOT / "venv"
 STATE_ROOT = Path("/var/lib/loom-staging-rollout")
+ACTIVE_POINTER = STATE_ROOT / "active.json"
 GENERATED_ROOT = STATE_ROOT / "generated"
 RUNTIME_ROOT = Path("/run/loom-staging-rollout")
 MAINTENANCE_MARKER = RUNTIME_ROOT / "maintenance"
@@ -85,6 +86,22 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_PROTECTED_INPUT_BYTES = 4 << 20
 _MAX_KUBECONFIG_BYTES = 1 << 20
 _ROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+_ROLLOUT_UNIT_RE = re.compile(r"^loom-staging-rollout-[A-Za-z0-9_.@:-]+-[1-9][0-9]*[.]service$")
+_SYSTEMD_STATE_TOKEN_RE = re.compile(r"^[a-z0-9-]+$")
+_RUNTIME_IMPORT_RENDER = (
+    "import loom_cli.rollout.operator.broker; "
+    "from loom_cli.cluster_cmd import render_manifests; "
+    "from loom_cli.cluster_config import ClusterConfig; "
+    "rendered = render_manifests(ClusterConfig())"
+)
+_PACKAGE_RUNTIME_PROBE = _RUNTIME_IMPORT_RENDER + "; raise SystemExit(0 if rendered.strip() else 1)"
+_BROKER_RUNTIME_PROBE = (
+    _RUNTIME_IMPORT_RENDER
+    + "; from loom_cli.rollout.operator.config import OperatorConfig"
+    + "; from loom_cli.rollout.operator.envelope import fixed_operator_config_path"
+    + "; OperatorConfig.load(fixed_operator_config_path())"
+    + "; raise SystemExit(0 if rendered.strip() else 1)"
+)
 _ACL_PERMISSIONS_RE = re.compile(r"^[r-][w-][x-]$")
 _ACL_ENTRY_RE = re.compile(
     r"(?:(default):)?(user|group|mask|other):([^:]*):([rwx-]{3})"
@@ -1504,6 +1521,8 @@ class HostSystem:
                 "cluster",
                 "--extra",
                 "rollout",
+                "--reinstall-package",
+                "loom",
                 "--python",
                 str(system_python),
             ],
@@ -1512,6 +1531,47 @@ class HostSystem:
         self.harden_venv_lock()
         if not self.venv_ready():  # pragma: no cover - venv_ready either succeeds or raises
             raise InstallError("root venv installation did not converge")
+        if not self.package_runtime_ready():
+            raise InstallError("root venv broker import probe failed")
+
+    def _runtime_probe(self, program: str) -> bool:
+        service_uid, _service_gid = self._service_ids()
+        result = self.runner.run(
+            [
+                "sudo",
+                "-n",
+                "-u",
+                SERVICE_USER,
+                "--",
+                "/usr/bin/env",
+                "-i",
+                f"HOME={STATE_ROOT}",
+                f"USER={SERVICE_USER}",
+                f"LOGNAME={SERVICE_USER}",
+                f"PATH={VENV / 'bin'}:{_ROOT_PATH}",
+                "LANG=C.UTF-8",
+                "LC_ALL=C.UTF-8",
+                f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
+                f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
+                f"KUBECONFIG={KUBECONFIG_PATH}",
+                f"LOOM_STAGING_ROLLOUT_CONFIG={CONFIG_PATH}",
+                str(VENV / "bin/python"),
+                "-I",
+                "-B",
+                "-c",
+                program,
+            ],
+            check=False,
+        )
+        return result.returncode == 0
+
+    def package_runtime_ready(self) -> bool:
+        """Import the broker and render packaged assets as the service user."""
+        return self._runtime_probe(_PACKAGE_RUNTIME_PROBE)
+
+    def broker_runtime_ready(self) -> bool:
+        """Exercise packaged assets and load the protected broker config."""
+        return self._runtime_probe(_BROKER_RUNTIME_PROBE)
 
     def ensure_service_key(self) -> bool:
         if self.service_key_present():
@@ -2073,15 +2133,31 @@ class HostSystem:
         if re.fullmatch(r"[0-9]+(?:[.][0-9]+)*(?:[-+~.A-Za-z0-9]*)?", manager_version) is None:
             raise InstallError("service user manager version is invalid")
 
-    def install_owner(self, path: Path, owner: str, mode: int) -> bool:
-        if self.file_owner_ready(path, owner=owner, mode=mode):
+    def install_owner(
+        self,
+        path: Path,
+        owner: str,
+        mode: int,
+        *,
+        group: str | None = None,
+    ) -> bool:
+        target_group = owner if group is None else group
+        if self.file_owner_ready(path, owner=owner, group=target_group, mode=mode):
             return False
-        self.runner.run(["chown", f"{owner}:{owner}", str(path)])
+        self.runner.run(["chown", f"{owner}:{target_group}", str(path)])
         self.runner.run(["chmod", f"{mode:04o}", str(path)])
         return True
 
-    def file_owner_ready(self, path: Path, *, owner: str, mode: int) -> bool:
-        expected = f"{owner}:{owner}:{mode:o}"
+    def file_owner_ready(
+        self,
+        path: Path,
+        *,
+        owner: str,
+        mode: int,
+        group: str | None = None,
+    ) -> bool:
+        target_group = owner if group is None else group
+        expected = f"{owner}:{target_group}:{mode:o}"
         current = self._probe(["stat", "-c", "%U:%G:%a", str(path)]).stdout.strip()
         return current == expected
 
@@ -2183,12 +2259,13 @@ class HostSystem:
                 failures.append("operator-membership")
         service = self._probe(["getent", "passwd", SERVICE_USER])
         fields = service.stdout.strip().split(":")
-        if (
+        service_account_ready = not (
             service.returncode != 0
             or len(fields) < 7
             or fields[5] != str(STATE_ROOT)
             or fields[6] != "/usr/sbin/nologin"
-        ):
+        )
+        if not service_account_ready:
             failures.append("service-account")
         service_groups = set(self._probe(["id", "-nG", SERVICE_USER]).stdout.split())
         if service_groups != {SERVICE_USER, "docker"}:
@@ -2270,7 +2347,7 @@ class HostSystem:
             BROKER_PATH: "regular file:root:root:755",
             SUDOERS_PATH: "regular file:root:root:440",
             TMPFILES_PATH: "regular file:root:root:644",
-            CONFIG_PATH: "regular file:root:root:600",
+            CONFIG_PATH: "regular file:root:loom-rollout:640",
             INSTALL_RECORD: "regular file:root:root:600",
             TRUST_REVOCATION_LEDGER: "regular file:root:root:600",
             TRUST_TOOL_PATH: "regular file:root:root:755",
@@ -2288,8 +2365,18 @@ class HostSystem:
             actual = self._probe(["stat", "-c", "%F:%U:%G:%a", str(path)])
             if actual.returncode != 0 or actual.stdout.strip() != expected:
                 failures.append(f"metadata:{path}")
-        if not self.venv_ready():
+        venv_ready = self.venv_ready()
+        if not venv_ready:
             failures.append("root-venv")
+        elif not service_account_ready:
+            failures.append("broker-runtime")
+        else:
+            try:
+                broker_ready = self.broker_runtime_ready()
+            except InstallError:
+                broker_ready = False
+            if not broker_ready:
+                failures.append("broker-runtime")
         try:
             self._validate_service_key_pair()
         except InstallError:
@@ -2301,10 +2388,48 @@ class HostSystem:
         return failures
 
     def active_status(self) -> str:
-        uid = self._probe(["id", "-u", "qianyi"]).stdout.strip()
-        gid = self._probe(["id", "-g", "qianyi"]).stdout.strip()
-        if not uid.isdigit() or not gid.isdigit():
+        """Prove inactivity without importing the runtime being replaced.
+
+        Install and uninstall call this only after ``begin_maintenance`` has
+        acquired the broker launch lock and published the root-owned admission
+        marker. A safe active pointer or any active rollout unit blocks the
+        operation; malformed or unreadable state returns ``unknown``.
+        """
+        try:
+            service_uid, service_gid = self._service_ids()
+            marker = os.lstat(MAINTENANCE_MARKER)
+            state_root = os.lstat(STATE_ROOT)
+        except (InstallError, OSError):
             return "unknown"
+
+        if (
+            not stat.S_ISREG(marker.st_mode)
+            or marker.st_uid != 0
+            or marker.st_gid != 0
+            or stat.S_IMODE(marker.st_mode) != 0o600
+            or not stat.S_ISDIR(state_root.st_mode)
+            or state_root.st_uid != service_uid
+            or state_root.st_gid != service_gid
+            or stat.S_IMODE(state_root.st_mode) != 0o700
+        ):
+            return "unknown"
+
+        try:
+            pointer = os.lstat(ACTIVE_POINTER)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return "unknown"
+        else:
+            if (
+                not stat.S_ISREG(pointer.st_mode)
+                or pointer.st_uid != service_uid
+                or pointer.st_gid != service_gid
+                or stat.S_IMODE(pointer.st_mode) != 0o600
+            ):
+                return "unknown"
+            return "busy"
+
         result = self.runner.run(
             [
                 "sudo",
@@ -2314,21 +2439,42 @@ class HostSystem:
                 "--",
                 "/usr/bin/env",
                 "-i",
-                "SUDO_USER=qianyi",
-                f"SUDO_UID={uid}",
-                f"SUDO_GID={gid}",
-                str(BROKER_PATH),
-                "status",
+                f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
+                f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
+                "PATH=/usr/bin:/bin",
+                "LANG=C.UTF-8",
+                "LC_ALL=C.UTF-8",
+                "/usr/bin/systemctl",
+                "--user",
+                "list-units",
+                "--all",
+                "--plain",
+                "--full",
+                "--type=service",
+                "--no-legend",
+                "--no-pager",
+                "loom-staging-rollout-*.service",
             ],
             check=False,
         )
-        if result.returncode != 0:
+        if result.returncode != 0 or result.stderr.strip():
             return "unknown"
-        try:
-            status = json.loads(result.stdout).get("status", "unknown")
-        except (AttributeError, json.JSONDecodeError):
-            return "unknown"
-        return str(status)
+        for line in result.stdout.splitlines():
+            fields = line.split(maxsplit=4)
+            if len(fields) < 4:
+                return "unknown"
+            unit_name, load_state, active_state, sub_state = fields[:4]
+            if (
+                len(unit_name) > 255
+                or _ROLLOUT_UNIT_RE.fullmatch(unit_name) is None
+                or load_state != "loaded"
+                or _SYSTEMD_STATE_TOKEN_RE.fullmatch(active_state) is None
+                or _SYSTEMD_STATE_TOKEN_RE.fullmatch(sub_state) is None
+            ):
+                return "unknown"
+            if active_state not in {"inactive", "failed"}:
+                return "busy"
+        return "idle"
 
     def _service_ids(self) -> tuple[int, int]:
         uid = self.runner.run(["id", "-u", SERVICE_USER]).stdout.strip()
@@ -2748,12 +2894,13 @@ class HostInstaller:
         refresh_runtime = previous_record is None or previous_record.get("source_sha") != source_sha
 
         installed_files = (
-            (CLIENT_PATH, self._asset("loom-staging-rollout"), 0o755, "root"),
-            (BROKER_PATH, self._asset("loom-staging-rollout-broker"), 0o755, "root"),
+            (CLIENT_PATH, self._asset("loom-staging-rollout"), 0o755, "root", "root"),
+            (BROKER_PATH, self._asset("loom-staging-rollout-broker"), 0o755, "root", "root"),
             (
                 TRUST_TOOL_PATH,
                 self._source_file("scripts/ops/staging_rollout_gb10_trust.py"),
                 0o755,
+                "root",
                 "root",
             ),
             (
@@ -2761,14 +2908,16 @@ class HostInstaller:
                 self._asset("loom-staging-rollout.tmpfiles"),
                 0o644,
                 "root",
+                "root",
             ),
             (
                 KNOWN_HOSTS_PATH,
                 self._source_file("deploy/worker-pools/gb10/known_hosts"),
                 0o644,
                 "root",
+                "root",
             ),
-            (CONFIG_PATH, config, 0o600, "root"),
+            (CONFIG_PATH, config, 0o640, "root", SERVICE_GROUP),
         )
         sudoers = self._asset("loom-staging-rollout.sudoers")
 
@@ -2920,10 +3069,21 @@ class HostInstaller:
         candidate_ready = service_directories_ready and self.system.candidate_ready(source_sha)
         venv_lock_requires_hardening = self.system.venv_lock_requires_hardening()
         venv_ready = not venv_lock_requires_hardening and self.system.venv_ready()
+        package_runtime_ready = (
+            not service_user_missing and venv_ready and self.system.package_runtime_ready()
+        )
         installed_files_ready = all(
             self.filesystem.file_matches(destination, payload, mode)
-            and self.system.file_owner_ready(destination, owner=owner, mode=mode)
-            for destination, payload, mode, owner in installed_files
+            and self.system.file_owner_ready(
+                destination,
+                owner=owner,
+                group=group,
+                mode=mode,
+            )
+            for destination, payload, mode, owner, group in installed_files
+        )
+        broker_runtime_ready = (
+            package_runtime_ready and installed_files_ready and self.system.broker_runtime_ready()
         )
         runtime_ready = not service_user_missing and self.system.runtime_directory_ready()
         kubeconfig_ready = (
@@ -2974,6 +3134,8 @@ class HostInstaller:
             or not candidate_ready
             or venv_lock_requires_hardening
             or not venv_ready
+            or not package_runtime_ready
+            or not broker_runtime_ready
             or not installed_files_ready
             or not runtime_ready
             or not kubeconfig_ready
@@ -3036,7 +3198,11 @@ class HostInstaller:
         if venv_lock_requires_hardening:
             self.system.harden_venv_lock()
             changes.append("venv-lock")
-        if refresh_runtime or not self.system.venv_ready():
+        if (
+            refresh_runtime
+            or not self.system.venv_ready()
+            or not self.system.package_runtime_ready()
+        ):
             self.system.sync_venv(self.source_root)
             changes.append("venv")
         if self.system.ensure_service_key():
@@ -3073,11 +3239,13 @@ class HostInstaller:
                 maintenance=maintenance_enabled,
             )
 
-        for destination, payload, mode, owner in installed_files:
+        for destination, payload, mode, owner, group in installed_files:
             if self.filesystem.atomic_write(destination, payload, mode):
                 changes.append(f"file:{destination}")
-            if self.system.install_owner(destination, owner, mode):
+            if self.system.install_owner(destination, owner, mode, group=group):
                 changes.append(f"ownership:{destination}")
+        if not self.system.broker_runtime_ready():
+            raise InstallError("installed broker config probe failed")
         if self.system.create_runtime_directory():
             changes.append(f"directory:{RUNTIME_ROOT}")
 
