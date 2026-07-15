@@ -331,6 +331,17 @@ python_type = "float"
 default     = 20.0
 description = "Timeout for each Slurm command invoked by the elastic controller."
 
+[service_config.slurm_worker_controllers_json]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = ""
+description = """JSON array of controller configs enabling multi-pool on-demand \
+dispatch (e.g. one controller per Slurm pool like `oldlab` + `gb10`). Each \
+entry mirrors the singleton `slurm_worker_controller_*` field names (minus \
+the prefix) and MUST include `enabled=true`. When non-empty, takes precedence \
+over the singleton fields; when empty, the singleton fields are used to \
+build at most one controller. See #857 for the multi-pool design."""
+
 # ─── llm-gateway only ───
 
 [service_config.anthropic_api_key]

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import math
 import re
@@ -281,6 +282,101 @@ def build_controller_config(
         max_concurrency_per_node=max_concurrency_per_node,
         max_cpu_load_ratio=max_cpu_load_ratio,
     )
+
+
+def build_controller_configs_from_json(
+    controllers_json: str,
+) -> tuple[ElasticSlurmWorkerControllerConfig, ...]:
+    """Parse a JSON list of controller specs into `ElasticSlurmWorkerControllerConfig`
+    instances. Each spec is a JSON object mirroring the singleton
+    `slurm_worker_controller_*` field names (dropping that prefix, plus
+    `allowed_nodes_csv` may be spelled `allowed_nodes` as a list).
+
+    Empty or missing string returns an empty tuple. Each spec MUST include
+    `enabled=true`; entries with `enabled=false` are skipped so operators
+    can leave dormant configs in place without ripping them out.
+
+    Multi-controller support (#857): CP spawns one loop task per returned
+    config, enabling multiple pools (e.g. `oldlab` + `gb10`) to be dispatched
+    independently by one control-plane deployment.
+    """
+    controllers_json = controllers_json.strip()
+    if not controllers_json:
+        return ()
+    try:
+        raw = json.loads(controllers_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"slurm_worker_controllers_json is not valid JSON: {exc}",
+        ) from exc
+    if not isinstance(raw, list):
+        raise ValueError(
+            "slurm_worker_controllers_json must be a JSON list of controller specs; "
+            f"got {type(raw).__name__}",
+        )
+
+    configs: list[ElasticSlurmWorkerControllerConfig] = []
+    for idx, spec in enumerate(raw):
+        if not isinstance(spec, dict):
+            raise ValueError(
+                f"slurm_worker_controllers_json[{idx}] must be an object, "
+                f"got {type(spec).__name__}",
+            )
+        # Normalize allowed_nodes: accept a list of strings OR a CSV string.
+        allowed_nodes_value: Any = spec.get(
+            "allowed_nodes_csv",
+            spec.get("allowed_nodes", ""),
+        )
+        if isinstance(allowed_nodes_value, (list, tuple)):
+            allowed_nodes_csv = ",".join(str(x) for x in allowed_nodes_value)
+        else:
+            allowed_nodes_csv = str(allowed_nodes_value or "")
+        config = build_controller_config(
+            enabled=bool(spec.get("enabled", False)),
+            environment=str(spec.get("environment", "")),
+            pool_name=str(spec.get("pool_name", "")),
+            allowed_nodes_csv=allowed_nodes_csv,
+            env_file=str(spec.get("env_file", "")),
+            repo_dir=str(spec.get("repo_dir", "")),
+            partition=str(spec.get("partition", "")),
+            time_limit=str(spec.get("time_limit", "7-00:00:00")),
+            requested_cpus=int(spec.get("requested_cpus", 12)),
+            requested_memory_mib=int(spec.get("requested_memory_mib", 58000)),
+            requested_concurrency=int(spec.get("requested_concurrency", 6)),
+            max_jobs=int(spec.get("max_jobs", 0)),
+            pending_job_cap=int(spec.get("pending_job_cap", 1)),
+            min_queued_trials=int(spec.get("min_queued_trials", 1)),
+            stale_after_seconds=int(spec.get("stale_after_seconds", 300)),
+            sbatch_path=str(spec.get("sbatch_path", "sbatch")),
+            squeue_path=str(spec.get("squeue_path", "squeue")),
+            sacct_path=str(spec.get("sacct_path", "sacct")),
+            scancel_path=str(spec.get("scancel_path", "scancel")),
+            command_timeout_seconds=float(spec.get("command_timeout_seconds", 20.0)),
+            exclusive=bool(spec.get("exclusive", True)),
+            sinfo_path=str(spec.get("sinfo_path", "sinfo")),
+            resource_aware=bool(spec.get("resource_aware", False)),
+            cpu_per_slot=int(spec.get("cpu_per_slot", 2)),
+            memory_mib_per_slot=int(spec.get("memory_mib_per_slot", 8192)),
+            reserved_cpus=int(spec.get("reserved_cpus", 4)),
+            reserved_memory_mib=int(spec.get("reserved_memory_mib", 24_576)),
+            max_concurrency_per_node=int(spec.get("max_concurrency_per_node", 8)),
+            max_cpu_load_ratio=float(spec.get("max_cpu_load_ratio", 1.0)),
+        )
+        if config is not None:
+            configs.append(config)
+
+    # Reject duplicate pool_name — two controllers writing to the same pool
+    # would race on slurm_worker_jobs bookkeeping.
+    seen_pools: set[str] = set()
+    for config in configs:
+        if config.pool_name in seen_pools:
+            raise ValueError(
+                f"slurm_worker_controllers_json has duplicate pool_name={config.pool_name!r}; "
+                "each controller must own a distinct pool",
+            )
+        seen_pools.add(config.pool_name)
+
+    return tuple(configs)
 
 
 def _normalize_node_state(state: str) -> str:

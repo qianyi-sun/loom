@@ -9,6 +9,7 @@ from loom_control_plane.elastic_slurm_worker_controller import (
     SlurmWorkerCapacitySnapshot,
     SlurmWorkerControllerDecision,
     build_controller_config,
+    build_controller_configs_from_json,
     build_sbatch_request,
     compute_controller_decision,
     parse_sinfo_node_resources,
@@ -365,3 +366,126 @@ def test_build_controller_config_parses_allowed_nodes_and_caps() -> None:
 
     assert config.allowed_nodes == ("oldlab-1", "oldlab-2", "oldlab-3")
     assert config.max_jobs == 3
+
+
+# ─── Multi-controller JSON parsing (#857) ─────────────────────────────
+
+
+def _multi_spec(
+    *,
+    pool_name: str,
+    max_jobs: int = 1,
+    **overrides: object,
+) -> dict[str, object]:
+    """Return a minimally-valid JSON spec dict for one controller entry."""
+    spec: dict[str, object] = {
+        "enabled": True,
+        "environment": "dev",
+        "pool_name": pool_name,
+        "allowed_nodes": ["node-1", "node-2"],
+        "env_file": "/shared_work/loom/loom-worker-capacity/dev.env",
+        "repo_dir": "/shared_work/loom/loom-remote-worker",
+        "time_limit": "1-00:00:00",
+        "requested_cpus": 4,
+        "requested_memory_mib": 16000,
+        "requested_concurrency": 2,
+        "max_jobs": max_jobs,
+        "pending_job_cap": 1,
+        "min_queued_trials": 1,
+        "stale_after_seconds": 300,
+        "command_timeout_seconds": 20.0,
+    }
+    spec.update(overrides)
+    return spec
+
+
+def test_build_controller_configs_from_json_empty_returns_empty() -> None:
+    """No JSON => no controllers. This is the code path CP falls through
+    to the singleton fields for backwards compat."""
+    assert build_controller_configs_from_json("") == ()
+    assert build_controller_configs_from_json("   ") == ()
+
+
+def test_build_controller_configs_from_json_parses_multi_pool() -> None:
+    """Two pools (oldlab + gb10) → two independent configs, each with its
+    own pool_name. This is the shape #857 unlocks."""
+    import json as _json
+
+    payload = _json.dumps(
+        [
+            _multi_spec(pool_name="oldlab", max_jobs=1),
+            _multi_spec(
+                pool_name="gb10",
+                max_jobs=1,
+                allowed_nodes=["gb10-1", "gb10-2"],
+                partition="gb10-partition",
+            ),
+        ]
+    )
+    configs = build_controller_configs_from_json(payload)
+
+    assert len(configs) == 2
+    assert configs[0].pool_name == "oldlab"
+    assert configs[1].pool_name == "gb10"
+    assert configs[1].partition == "gb10-partition"
+
+
+def test_build_controller_configs_from_json_skips_disabled_entries() -> None:
+    """`enabled=false` entries are dropped so operators can pause a pool
+    without deleting the config block."""
+    import json as _json
+
+    payload = _json.dumps(
+        [
+            _multi_spec(pool_name="oldlab", enabled=True),
+            _multi_spec(pool_name="gb10", enabled=False),
+        ]
+    )
+    configs = build_controller_configs_from_json(payload)
+
+    assert len(configs) == 1
+    assert configs[0].pool_name == "oldlab"
+
+
+def test_build_controller_configs_from_json_rejects_duplicate_pool_names() -> None:
+    """Two configs owning the same pool would race on the
+    slurm_worker_jobs table — reject at parse time so this surfaces
+    at CP boot, not later during a scheduling window."""
+    import json as _json
+
+    payload = _json.dumps(
+        [
+            _multi_spec(pool_name="oldlab"),
+            _multi_spec(pool_name="oldlab", allowed_nodes=["other-1"]),
+        ]
+    )
+    with pytest.raises(ValueError, match="duplicate pool_name"):
+        build_controller_configs_from_json(payload)
+
+
+def test_build_controller_configs_from_json_rejects_invalid_json() -> None:
+    with pytest.raises(ValueError, match="not valid JSON"):
+        build_controller_configs_from_json("not-json")
+
+
+def test_build_controller_configs_from_json_rejects_non_list() -> None:
+    with pytest.raises(ValueError, match="must be a JSON list"):
+        build_controller_configs_from_json('{"enabled": true}')
+
+
+def test_build_controller_configs_from_json_normalizes_allowed_nodes_csv() -> None:
+    """Accept `allowed_nodes` as either a list or a CSV string —
+    the singleton env-var path uses CSV, the JSON path prefers list, but
+    operators mixing the two shouldn't have to remember which."""
+    import json as _json
+
+    payload = _json.dumps(
+        [
+            _multi_spec(
+                pool_name="oldlab",
+                allowed_nodes="node-a, node-b, node-c",  # CSV form
+            ),
+        ]
+    )
+    configs = build_controller_configs_from_json(payload)
+    assert configs[0].allowed_nodes == ("node-a", "node-b", "node-c")

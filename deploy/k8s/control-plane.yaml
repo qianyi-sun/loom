@@ -110,6 +110,8 @@ spec:
               value: "300"
             - name: LOOM_CP_SLURM_WORKER_CONTROLLER_TIME_LIMIT
               value: "7-00:00:00"
+            - name: LOOM_CP_SLURM_WORKER_CONTROLLERS_JSON
+              value: ""
             - name: LOOM_CP_STALE_RUNNING_TRIAL_GRACE_SEC
               value: "900.0"
             - name: LOOM_CP_STALE_RUNNING_TRIAL_RECLAIM_ENABLED
