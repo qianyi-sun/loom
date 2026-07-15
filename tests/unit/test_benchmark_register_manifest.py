@@ -674,9 +674,7 @@ class ManifestFakeObjectStore:
         try:
             return self.objects[(bucket, key)]
         except KeyError as exc:
-            raise FileNotFoundError(
-                f"missing object s3://{bucket}/{key}"
-            ) from exc
+            raise FileNotFoundError(f"missing object s3://{bucket}/{key}") from exc
 
     async def put_object(self, *, bucket: str, key: str, body: bytes) -> str:
         self.objects[(bucket, key)] = body
@@ -697,9 +695,7 @@ async def test_read_manifest_from_object_store_returns_parsed_dict() -> None:
     }
     store = ManifestFakeObjectStore(
         objects={
-            ("loom-benchmarks", "fake-bench/rev-abc/manifest.json"): _json.dumps(
-                manifest
-            ).encode(),
+            ("loom-benchmarks", "fake-bench/rev-abc/manifest.json"): _json.dumps(manifest).encode(),
         },
     )
     got = await _read_manifest_from_object_store(
@@ -822,6 +818,9 @@ async def test_run_register_source_object_store_writes_s3_task_rows(
 
         async def __aexit__(self, *_args: object) -> None:
             return None
+
+        def begin(self) -> FakeSession:
+            return self
 
         async def execute(self, statement: FakeInsert) -> None:
             executed.append(statement)

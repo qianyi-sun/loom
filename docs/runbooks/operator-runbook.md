@@ -5292,24 +5292,26 @@ Prerequisites:
   release tarball).
 - A team API token with permission to launch batches.
 - The MinIO endpoint, access key, and secret key for the target environment.
-- A Hugging Face token if publishing the bundle from outside the cluster.
+- Object-store credentials authorized to publish the immutable bundle prefix.
 
-### Publish, mirror, fresh-audit, and activate
+### Direct publish, register, fresh-audit, and activate
 
 The bundle is large enough that pulling it from Hugging Face at trial-time
-saturates the worker setup budget. Publish once, register, mirror, and audit:
+saturates the worker setup budget. Publish it directly to the deployment-owned
+object store, register that exact content-addressed revision, and audit:
 
 ```bash
 # Development/custom example only; never substitute shared-staging secrets.
-export LOOM_HF_ORG=loom-development
 export LOOM_DB_URL="postgresql+psycopg://loom:$LOOM_DB_PASS@dev-db.yylx.world:5432/loom_dev"
 export LOOM_MINIO_ENDPOINT=https://minio.dev.yylx.world
 export LOOM_MINIO_ACCESS_KEY=...
 export LOOM_MINIO_SECRET_KEY=...
 
-loom datasets publish terminal-bench-2 --hf-org "$LOOM_HF_ORG"
-loom datasets register terminal-bench-2 --hf-org "$LOOM_HF_ORG" \
-  --mirror-to-object-store
+loom datasets publish terminal-bench-2 --target object-store
+# Copy the rev=<16-hex> value from the successful publish output.
+export TB21_OBJECT_REVISION=<published-revision>
+loom datasets register terminal-bench-2 --source object-store \
+  --revision "$TB21_OBJECT_REVISION"
 loom datasets audit terminal-bench-2@tb2.1-r6 \
   --tb21-audit-json "$PWD/tb21-audit.json" \
   --minio-endpoint "$LOOM_MINIO_ENDPOINT"

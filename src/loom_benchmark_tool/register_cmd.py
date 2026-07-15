@@ -111,8 +111,7 @@ async def _read_manifest_from_object_store(
         ) from exc
     if not isinstance(manifest, dict):
         raise ValueError(
-            f"manifest at s3://{bucket}/{key} must be a JSON object, "
-            f"got {type(manifest).__name__}",
+            f"manifest at s3://{bucket}/{key} must be a JSON object, got {type(manifest).__name__}",
         )
     if manifest.get("benchmark_id") != benchmark_id:
         raise ValueError(
@@ -490,8 +489,7 @@ async def _download_hf_bundle_snapshot(
     from huggingface_hub import snapshot_download
 
     patterns = [
-        f"{_validate_relative_prefix(str(task['hf_path']), label='hf_path')}/*"
-        for task in tasks
+        f"{_validate_relative_prefix(str(task['hf_path']), label='hf_path')}/*" for task in tasks
     ]
 
     if chunk_size is None or chunk_size <= 0 or len(patterns) <= chunk_size:
@@ -525,8 +523,7 @@ async def _download_hf_bundle_snapshot(
         )
         if batch_idx < total_batches - 1 and chunk_sleep_secs > 0:
             print(
-                f"mirror snapshot: sleeping {chunk_sleep_secs}s "
-                "to stay under HF resolve budget",
+                f"mirror snapshot: sleeping {chunk_sleep_secs}s to stay under HF resolve budget",
                 flush=True,
             )
             await asyncio.sleep(chunk_sleep_secs)
@@ -613,13 +610,18 @@ async def run_register(
     if source == "hf":
         repo_id = repo_id_for(hf_org, benchmark)
         manifest = manifest or read_manifest_from_hf(
-            hf_org=hf_org, benchmark=benchmark, hf_token=hf_token, revision=revision,
+            hf_org=hf_org,
+            benchmark=benchmark,
+            hf_token=hf_token,
+            revision=revision,
         )
     else:
         assert object_store is not None
         manifest = manifest or await _read_manifest_from_object_store(
-            object_store=object_store, bucket=bucket,
-            benchmark_id=benchmark_id_hint, revision=revision,
+            object_store=object_store,
+            bucket=bucket,
+            benchmark_id=benchmark_id_hint,
+            revision=revision,
         )
         repo_id = f"s3://{bucket}/{manifest['benchmark_id']}"
 
@@ -631,6 +633,11 @@ async def run_register(
     # promotes the row and its public alias together.
     execution_state = "pending" if manifest.get("benchmark_id") == _TB21_PROFILE_ID else "runnable"
     if manifest.get("benchmark_id") == _TB21_PROFILE_ID:
+        if source == "hf" and not mirror_to_object_store:
+            raise ValueError(
+                "TB2.1 HF registration requires mirror_to_object_store; "
+                "use source='object-store' for a direct publish",
+            )
         if not tb21_workspace_policy_isolated(
             profile_provenance.get("workspace_staging_policy"),
         ):
@@ -727,9 +734,7 @@ async def run_register(
             "bundle_file_metadata_sha256",
         )
         file_metadata_sha256 = (
-            provenance_metadata_sha256
-            if isinstance(provenance_metadata_sha256, str)
-            else None
+            provenance_metadata_sha256 if isinstance(provenance_metadata_sha256, str) else None
         )
         if source == "object-store":
             tags.update(

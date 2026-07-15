@@ -16,6 +16,7 @@ from sqlalchemy.orm import sessionmaker
 from loom.db.schema import Benchmark, BenchmarkAlias, Team, Trial
 from loom.db.schema import Task as TaskRow
 from loom.models.task import TaskConfig
+from loom.trajectory.storage import FakeObjectStore
 from loom_benchmark_tool.audit_cmd import AuditResult, activate_tb21_alias
 from loom_benchmark_tool.manifest import TB21_AGENT_WORKSPACE_POLICY
 from loom_benchmark_tool.register_cmd import run_register
@@ -121,6 +122,17 @@ def _manifest() -> dict[str, object]:
     }
 
 
+async def test_tb21_hf_registration_requires_internal_mirror() -> None:
+    with pytest.raises(ValueError, match="requires mirror_to_object_store"):
+        await run_register(
+            benchmark="terminal-bench-2",
+            source="hf",
+            hf_org="test-org",
+            db_url="postgresql://unused/test",
+            manifest=_manifest(),
+        )
+
+
 async def test_register_keeps_tb21_profile_pending_and_rejects_direct_physical_selection(
     db: AsyncSession,
     postgres_url: str,
@@ -134,8 +146,9 @@ async def test_register_keeps_tb21_profile_pending_and_rejects_direct_physical_s
 
     result = await run_register(
         benchmark="terminal-bench-2",
-        hf_org="test-org",
-        hf_token=None,
+        source="object-store",
+        revision="test-revision",
+        object_store=FakeObjectStore(),
         db_url=postgres_url,
         registered_by="test",
         manifest=manifest,
@@ -169,8 +182,9 @@ async def test_exact_reregister_preserves_runnable_profile_and_alias(
     manifest = _manifest()
     await run_register(
         benchmark="terminal-bench-2",
-        hf_org="test-org",
-        hf_token=None,
+        source="object-store",
+        revision="test-revision",
+        object_store=FakeObjectStore(),
         db_url=postgres_url,
         registered_by="test",
         manifest=manifest,
@@ -190,8 +204,9 @@ async def test_exact_reregister_preserves_runnable_profile_and_alias(
 
     result = await run_register(
         benchmark="terminal-bench-2",
-        hf_org="test-org",
-        hf_token=None,
+        source="object-store",
+        revision="test-revision",
+        object_store=FakeObjectStore(),
         db_url=postgres_url,
         registered_by="second-operator",
         manifest=manifest,
@@ -215,8 +230,9 @@ async def test_reregister_drift_cannot_change_task_referenced_by_queued_trial(
     manifest = _manifest()
     await run_register(
         benchmark="terminal-bench-2",
-        hf_org="test-org",
-        hf_token=None,
+        source="object-store",
+        revision="test-revision",
+        object_store=FakeObjectStore(),
         db_url=postgres_url,
         registered_by="test",
         manifest=manifest,
@@ -243,8 +259,9 @@ async def test_reregister_drift_cannot_change_task_referenced_by_queued_trial(
     with pytest.raises(ValueError, match="new physical profile ID"):
         await run_register(
             benchmark="terminal-bench-2",
-            hf_org="test-org",
-            hf_token=None,
+            source="object-store",
+            revision="test-revision",
+            object_store=FakeObjectStore(),
             db_url=postgres_url,
             registered_by="drifted-operator",
             manifest=drifted,

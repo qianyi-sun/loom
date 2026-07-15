@@ -277,6 +277,7 @@ def test_run_publish_rejects_unsafe_converted_dockerfile(
 
     with pytest.raises(ValueError, match="package-specific pip index"):
         import asyncio
+
         asyncio.run(
             publish_cmd.run_publish(
                 benchmark="fake-bench",
@@ -422,6 +423,27 @@ def test_object_store_revision_differs_on_content_change() -> None:
     assert _object_store_revision(base) != _object_store_revision(perturbed)
 
 
+def test_object_store_revision_differs_on_file_mode_change() -> None:
+    """Same bundle bytes with different executable modes need distinct prefixes."""
+    from loom_benchmark_tool.publish_cmd import _object_store_revision
+
+    base = [
+        {
+            "task_id": "fake/a",
+            "checksum": "aa" * 32,
+            "source_provenance": {"bundle_file_metadata_sha256": "sha256:" + "1" * 64},
+        }
+    ]
+    changed = [
+        {
+            "task_id": "fake/a",
+            "checksum": "aa" * 32,
+            "source_provenance": {"bundle_file_metadata_sha256": "sha256:" + "2" * 64},
+        }
+    ]
+    assert _object_store_revision(base) != _object_store_revision(changed)
+
+
 @pytest.mark.asyncio
 async def test_run_publish_target_object_store_uploads_manifest_and_bundles(
     monkeypatch: pytest.MonkeyPatch,
@@ -497,9 +519,9 @@ async def test_run_publish_target_object_store_uploads_manifest_and_bundles(
 
     # Manifest lands at the revision root.
     manifest_key = f"fake-bench/{revision}/manifest.json"
-    assert (
-        ("loom-benchmarks", manifest_key) in store.objects
-    ), f"expected manifest at {manifest_key}, got {sorted(store.objects)}"
+    assert ("loom-benchmarks", manifest_key) in store.objects, (
+        f"expected manifest at {manifest_key}, got {sorted(store.objects)}"
+    )
     manifest = json.loads(store.objects[("loom-benchmarks", manifest_key)])
     assert manifest["task_count"] == 2
     assert manifest["schema_version"] == MANIFEST_SCHEMA_VERSION
@@ -507,11 +529,10 @@ async def test_run_publish_target_object_store_uploads_manifest_and_bundles(
     # Each task's bundle files land under {benchmark_id}/{revision}/{safe_id}/.
     for task_entry in manifest["tasks"]:
         safe = task_entry["hf_path"].rstrip("/")
-        for filename in ("task.toml", "solution.py"):
+        assert task_entry["source_provenance"]["bundle_file_metadata_sha256"].startswith("sha256:")
+        for filename in ("task.toml", "solution.py", BUNDLE_FILE_METADATA_NAME):
             key = f"fake-bench/{revision}/{safe}/{filename}"
-            assert (
-                ("loom-benchmarks", key) in store.objects
-            ), f"expected {key} in uploaded objects"
+            assert ("loom-benchmarks", key) in store.objects, f"expected {key} in uploaded objects"
 
 
 @pytest.mark.asyncio
