@@ -1,10 +1,9 @@
 name: images
 
-# Builds and (on push to dev/main) pushes multi-arch container images
-# for the 5 cluster-deploy components: worker, service, control-plane,
-# llm-gateway, web. Three more images (llm-gateway-sandbox,
-# gateway-router, preflight) join the matrix when the corresponding
-# Go binaries land in Phase 2/3.
+# Builds and (on push to dev/main) publishes every release image declared
+# in config/component-ownership.toml. The manifest owns image identity,
+# Dockerfile, build context, and source-path selection; this workflow contains
+# no editable image allowlist.
 #
 # Why multi-arch: cluster-deploy target includes ASUS Ascent GX10
 # (ARM v9.2-A). See docs/architecture/cluster-deploy.md.
@@ -29,27 +28,6 @@ on:
     types: [checks_requested]
   push:
     branches: [dev, main]
-    paths:
-      - "deploy/Dockerfile.*"
-      - "deploy/nginx-spa.conf"
-      - "deploy/nginx-spa-security-headers.conf"
-      - "deploy/web-runtime-config.sh"
-      - "src/**"
-      - "packages/**"
-      - "pyproject.toml"
-      - "web/index.html"
-      - "web/package*.json"
-      - "web/src/**"
-      - "web/tailwind.config.js"
-      - "web/vite.config.ts"
-      # Go source for the llm-gateway-sandbox binary (#547 item #3).
-      - "cmd/**"
-      - "go.mod"
-      - "go.sum"
-      - ".github/workflows/images.yml"
-      # Markdown is never baked into the image; trailing negation
-      # overrides any positive match above (e.g. packages/<x>/README.md).
-      - "!**/*.md"
   workflow_dispatch:
 
 permissions:
@@ -64,7 +42,7 @@ jobs:
     name: image plan
     runs-on: ubuntu-latest
     outputs:
-      required: ${{ steps.required.outputs.images }}
+      required: ${{ steps.plan.outputs.required }}
       images: ${{ steps.plan.outputs.images }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -131,132 +109,28 @@ jobs:
           REQUIRED: ${{ steps.required.outputs.images }}
           UNOWNED_RUNTIME: ${{ steps.required.outputs.unowned_runtime }}
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          CHANGED_FILES: /tmp/loom-changed-files.txt
         run: |
-          python - <<'PY'
-          import json
-          import os
-          import subprocess
-          from pathlib import Path
-
-          images = {
-              "worker": "deploy/Dockerfile.worker",
-              "service": "deploy/Dockerfile.service",
-              "control-plane": "deploy/Dockerfile.control-plane",
-              "llm-gateway": "deploy/Dockerfile.gateway",
-              "web": "deploy/Dockerfile.web",
-              # #547 item #3: Go binary, distroless-static runtime.
-              # NOT in python_images — built with Go toolchain.
-              "llm-gateway-sandbox": "deploy/Dockerfile.gateway-sandbox",
-          }
-          python_images = {"worker", "service", "control-plane", "llm-gateway"}
-          required = os.environ["REQUIRED"]
-          unowned_runtime = os.environ["UNOWNED_RUNTIME"]
-          for name, value in {
-              "required": required,
-              "unowned_runtime": unowned_runtime,
-          }.items():
-              if value not in {"true", "false"}:
-                  raise SystemExit(
-                      f"FAIL: invalid planner boolean {name}={value!r}"
-                  )
-
-          def all_images() -> set[str]:
-              return set(images)
-
-          def diff_names(base: str, head: str) -> list[str]:
-              if not base or base.startswith("0000000"):
-                  return []
-              out = subprocess.check_output(
-                  ["git", "diff", "--name-only", base, head],
-                  text=True,
-              )
-              return [line.strip() for line in out.splitlines() if line.strip()]
-
-          event = os.environ["EVENT_NAME"]
-          selected: set[str] = set()
-          if event in {"workflow_dispatch", "merge_group"}:
-              selected = all_images()
-          elif event in {"pull_request", "merge_group"}:
-              changed = diff_names(os.environ["BASE_SHA"], os.environ["HEAD_SHA"])
-          else:
-              changed = diff_names(os.environ["BASE_SHA"], os.environ["HEAD_SHA"])
-
-          if event not in {"workflow_dispatch", "merge_group"}:
-              if not changed:
-                  selected = all_images()
-              for path in changed:
-                  if path.endswith(".md"):
-                      continue
-                  if path in {
-                      ".dockerignore",
-                      ".github/workflows/images.yml",
-                      "README.md",
-                      "pyproject.toml",
-                      "uv.lock",
-                  }:
-                      selected = all_images()
-                      break
-                  if path.startswith("src/"):
-                      selected |= python_images
-                  elif path.startswith("packages/"):
-                      selected |= {"worker", "service"}
-                  elif path.startswith("migrations/"):
-                      selected |= {"service", "control-plane", "llm-gateway"}
-                  elif path.startswith("web/") or path in {
-                      "web/index.html",
-                      "web/package.json",
-                      "web/package-lock.json",
-                      "web/vite.config.ts",
-                      "deploy/nginx-spa.conf",
-                      "deploy/nginx-spa-security-headers.conf",
-                      "deploy/web-runtime-config.sh",
-                  }:
-                      selected.add("web")
-                  elif path == "deploy/Dockerfile.worker":
-                      selected.add("worker")
-                  elif path == "deploy/Dockerfile.service":
-                      selected.add("service")
-                  elif path == "deploy/Dockerfile.control-plane":
-                      selected.add("control-plane")
-                  elif path == "deploy/Dockerfile.gateway":
-                      selected.add("llm-gateway")
-                  elif path == "deploy/Dockerfile.gateway-sandbox":
-                      selected.add("llm-gateway-sandbox")
-                  elif path == "deploy/Dockerfile.web":
-                      selected.add("web")
-                  # #547 item #3: Go source or go.mod/go.sum touches
-                  # rebuild the sandbox proxy image.
-                  elif path.startswith("cmd/loom-llm-gateway-sandbox/") or path in {
-                      "go.mod",
-                      "go.sum",
-                  }:
-                      selected.add("llm-gateway-sandbox")
-                  elif path.startswith("deploy/"):
-                      selected = all_images()
-                      break
-
-          labels = set(json.loads(os.environ["PR_LABELS_JSON"] or "[]") or [])
-          if "ci:images" in labels and not selected:
-              selected = all_images()
-          if unowned_runtime == "true":
-              selected = all_images()
-          elif required == "true" and not selected:
-              selected = all_images()
-
-          matrix = [
-              {"image": image, "dockerfile": dockerfile}
-              for image, dockerfile in images.items()
-              if image in selected
-          ]
-          payload = json.dumps(matrix, separators=(",", ":"))
-          Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8").write(
-              f"images={payload}\n"
+          set -euo pipefail
+          for value in "$REQUIRED" "$UNOWNED_RUNTIME"; do
+            [[ "$value" == "true" || "$value" == "false" ]] || {
+              echo "FAIL: invalid planner boolean: $value" >&2
+              exit 1
+            }
+          done
+          args=(
+            plan-images
+            --changed-files "$CHANGED_FILES"
+            --github-output "$GITHUB_OUTPUT"
           )
-          print(f"selected_images={payload}")
-          PY
+          if [[ "$EVENT_NAME" == "workflow_dispatch" || \
+                "$EVENT_NAME" == "merge_group" || \
+                "$UNOWNED_RUNTIME" == "true" ]]; then
+            args+=(--force-all)
+          elif [[ "$REQUIRED" == "true" ]]; then
+            args+=(--fallback-all)
+          fi
+          python3 scripts/component_ownership.py "${args[@]}"
 
   build:
     name: ${{ matrix.image }} (multi-arch)
@@ -266,7 +140,7 @@ jobs:
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.images != '[]'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
     strategy:
@@ -282,7 +156,9 @@ jobs:
         shell: bash
         env:
           IMAGE_NAME: ${{ matrix.image }}
+          IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
           DOCKERFILE: ${{ matrix.dockerfile }}
+          BUILD_CONTEXT: ${{ matrix.context }}
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
           PR_NUMBER: ${{ github.event.pull_request.number || '' }}
@@ -290,18 +166,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          case "${IMAGE_NAME}:${DOCKERFILE}" in
-            worker:deploy/Dockerfile.worker | \
-            service:deploy/Dockerfile.service | \
-            control-plane:deploy/Dockerfile.control-plane | \
-            llm-gateway:deploy/Dockerfile.gateway | \
-            web:deploy/Dockerfile.web | \
-            llm-gateway-sandbox:deploy/Dockerfile.gateway-sandbox) ;;
-            *)
-              echo "FAIL: invalid image/dockerfile pair" >&2
-              exit 1
-              ;;
-          esac
+          python3 scripts/component_ownership.py validate-image \
+            --image "$IMAGE_NAME" \
+            --image-name "$IMAGE_DIGEST_NAME" \
+            --dockerfile "$DOCKERFILE" \
+            --build-context "$BUILD_CONTEXT"
           [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || {
             echo "FAIL: invalid head SHA" >&2
             exit 1
@@ -346,7 +215,9 @@ jobs:
         shell: bash
         env:
           IMAGE_NAME: ${{ matrix.image }}
+          IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
           DOCKERFILE: ${{ matrix.dockerfile }}
+          BUILD_CONTEXT: ${{ matrix.context }}
           EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number || '' }}
           HEAD_SHA: ${{ github.sha }}
@@ -367,9 +238,9 @@ jobs:
             docker buildx build
             --platform "linux/amd64,linux/arm64"
             --file "$DOCKERFILE"
-            --tag "loom-ci-${IMAGE_NAME}:${image_tag}"
+            --tag "loom-ci-${IMAGE_DIGEST_NAME}:${image_tag}"
             --provenance=false
-            .
+            "$BUILD_CONTEXT"
           )
           "${build_args[@]}"
 
@@ -382,7 +253,7 @@ jobs:
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.images != '[]'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
@@ -399,7 +270,9 @@ jobs:
         shell: bash
         env:
           IMAGE_NAME: ${{ matrix.image }}
+          IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
           DOCKERFILE: ${{ matrix.dockerfile }}
+          BUILD_CONTEXT: ${{ matrix.context }}
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
           HEAD_SHA: ${{ github.sha }}
@@ -408,18 +281,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          case "${IMAGE_NAME}:${DOCKERFILE}" in
-            worker:deploy/Dockerfile.worker | \
-            service:deploy/Dockerfile.service | \
-            control-plane:deploy/Dockerfile.control-plane | \
-            llm-gateway:deploy/Dockerfile.gateway | \
-            web:deploy/Dockerfile.web | \
-            llm-gateway-sandbox:deploy/Dockerfile.gateway-sandbox) ;;
-            *)
-              echo "FAIL: invalid image/dockerfile pair" >&2
-              exit 1
-              ;;
-          esac
+          python3 scripts/component_ownership.py validate-image \
+            --image "$IMAGE_NAME" \
+            --image-name "$IMAGE_DIGEST_NAME" \
+            --dockerfile "$DOCKERFILE" \
+            --build-context "$BUILD_CONTEXT"
           [[ "$EVENT_NAME" == "push" ]] || {
             echo "FAIL: publishing requires a push event" >&2
             exit 1
@@ -463,7 +329,9 @@ jobs:
         shell: bash
         env:
           IMAGE_NAME: ${{ matrix.image }}
+          IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
           DOCKERFILE: ${{ matrix.dockerfile }}
+          BUILD_CONTEXT: ${{ matrix.context }}
           REF_NAME: ${{ github.ref_name }}
           HEAD_SHA: ${{ github.sha }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
@@ -471,7 +339,7 @@ jobs:
           set -euo pipefail
 
           owner_lower=$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
-          image="ghcr.io/${owner_lower}/loom-${IMAGE_NAME}"
+          image="ghcr.io/${owner_lower}/${IMAGE_DIGEST_NAME}"
           sha_short="${HEAD_SHA:0:12}"
           build_args=(
             docker buildx build
@@ -481,7 +349,7 @@ jobs:
             --tag "${image}:${REF_NAME}"
             --push
             --provenance=false
-            .
+            "$BUILD_CONTEXT"
           )
           "${build_args[@]}"
 

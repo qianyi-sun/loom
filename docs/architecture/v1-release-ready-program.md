@@ -144,13 +144,14 @@ add checks but may not remove checks inferred from changed paths. The PR
 template and contributor guidance describe the rule, while a repository test
 prevents workflow-to-documentation drift.
 
-The phase-one machine-readable inventory lives at
+The machine-readable ownership authority lives at
 `config/component-ownership.toml`. Its fail-closed validator owns the schema,
 all tracked Dockerfile and test-path assignments, allowed CI lanes, component
-owner registries, and rollout image identity checks. The current planner and
-workflow mappings remain independent consumers during the staged #788
-migration; this inventory is not yet evidence that every downstream list is
-generated from one source.
+owner registries, and rollout image identity checks. The images workflow now
+derives its nine-image build matrix, build contexts, release names, and
+changed-path selection directly from the authority. Planner, staging, rollout,
+release, and test-lane consumers remain staged #788 work; this slice alone is
+not evidence that every downstream list is generated from one source.
 
 GitHub settings are part of the acceptance evidence:
 

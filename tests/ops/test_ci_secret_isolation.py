@@ -278,33 +278,60 @@ def test_untrusted_workflow_shell_receives_context_only_through_env(
 
 
 @pytest.mark.parametrize(
-    ("job_name", "field", "payload"),
+    ("job_name", "field", "payload", "error_marker"),
     [
-        ("build", "IMAGE_NAME", "worker$(id)"),
-        ("build", "DOCKERFILE", "../deploy/Dockerfile.worker"),
-        ("build", "EVENT_NAME", "pull_request\npush"),
-        ("build", "REF_NAME", "dev; id"),
-        ("build", "PR_NUMBER", "--help"),
-        ("build", "HEAD_SHA", "abc`id`"),
-        ("publish", "IMAGE_NAME", "worker; id"),
-        ("publish", "DOCKERFILE", "deploy/Dockerfile.worker\n--push"),
-        ("publish", "EVENT_NAME", "push$(id)"),
-        ("publish", "REF_NAME", "dev/../../main"),
-        ("publish", "REPOSITORY_OWNER", "owner`id`"),
-        ("publish", "GHCR_ACTOR", "--password-stdin"),
-        ("publish", "HEAD_SHA", "deadbeef$(id)"),
+        ("build", "IMAGE_NAME", "worker$(id)", "component ownership validation failed:"),
+        (
+            "build",
+            "IMAGE_DIGEST_NAME",
+            "loom-worker; id",
+            "component ownership validation failed:",
+        ),
+        (
+            "build",
+            "DOCKERFILE",
+            "../deploy/Dockerfile.worker",
+            "component ownership validation failed:",
+        ),
+        ("build", "BUILD_CONTEXT", "..", "component ownership validation failed:"),
+        ("build", "EVENT_NAME", "pull_request\npush", "FAIL:"),
+        ("build", "REF_NAME", "dev; id", "FAIL:"),
+        ("build", "PR_NUMBER", "--help", "FAIL:"),
+        ("build", "HEAD_SHA", "abc`id`", "FAIL:"),
+        ("publish", "IMAGE_NAME", "worker; id", "component ownership validation failed:"),
+        (
+            "publish",
+            "IMAGE_DIGEST_NAME",
+            "loom-worker$(id)",
+            "component ownership validation failed:",
+        ),
+        (
+            "publish",
+            "DOCKERFILE",
+            "deploy/Dockerfile.worker\n--push",
+            "component ownership validation failed:",
+        ),
+        ("publish", "BUILD_CONTEXT", "../.", "component ownership validation failed:"),
+        ("publish", "EVENT_NAME", "push$(id)", "FAIL:"),
+        ("publish", "REF_NAME", "dev/../../main", "FAIL:"),
+        ("publish", "REPOSITORY_OWNER", "owner`id`", "FAIL:"),
+        ("publish", "GHCR_ACTOR", "--password-stdin", "FAIL:"),
+        ("publish", "HEAD_SHA", "deadbeef$(id)", "FAIL:"),
     ],
 )
 def test_image_input_validation_rejects_shell_metacharacters_and_ambiguous_values(
     job_name: str,
     field: str,
     payload: str,
+    error_marker: str,
 ) -> None:
     workflow = _workflow(".github/workflows/images.yml")
     step = _named_step(workflow["jobs"][job_name], "Validate image build inputs")
     env = {
         "IMAGE_NAME": "worker",
+        "IMAGE_DIGEST_NAME": "loom-worker",
         "DOCKERFILE": "deploy/Dockerfile.worker",
+        "BUILD_CONTEXT": ".",
         "EVENT_NAME": "pull_request" if job_name == "build" else "push",
         "REF_NAME": "feature-safe" if job_name == "build" else "dev",
         "PR_NUMBER": "42" if job_name == "build" else "",
@@ -317,7 +344,7 @@ def test_image_input_validation_rejects_shell_metacharacters_and_ambiguous_value
     result = _run_validation_step(step, env=env)
 
     assert result.returncode != 0, (job_name, field, payload, result.stdout)
-    assert "FAIL:" in result.stderr
+    assert error_marker in result.stderr
 
 
 def test_image_input_validation_never_evaluates_command_substitution(
@@ -330,7 +357,9 @@ def test_image_input_validation_never_evaluates_command_substitution(
         step,
         env={
             "IMAGE_NAME": f"worker$(touch {sentinel})",
+            "IMAGE_DIGEST_NAME": "loom-worker",
             "DOCKERFILE": "deploy/Dockerfile.worker",
+            "BUILD_CONTEXT": ".",
             "EVENT_NAME": "pull_request",
             "REF_NAME": "42/merge",
             "PR_NUMBER": "42",
@@ -369,7 +398,9 @@ def test_image_input_validation_accepts_actual_github_context_shapes(
         step,
         env={
             "IMAGE_NAME": "worker",
+            "IMAGE_DIGEST_NAME": "loom-worker",
             "DOCKERFILE": "deploy/Dockerfile.worker",
+            "BUILD_CONTEXT": ".",
             "EVENT_NAME": event_name,
             "REF_NAME": ref_name,
             "PR_NUMBER": pr_number,

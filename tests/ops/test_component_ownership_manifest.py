@@ -776,6 +776,80 @@ def test_rollout_release_images_have_exact_manifest_owner() -> None:
     )
 
 
+def test_release_image_matrix_is_derived_from_all_release_components() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+
+    matrix = component_ownership.release_image_matrix(manifest)
+
+    assert len(matrix) == 9
+    assert {entry["image_name"] for entry in matrix} == {
+        component.release_digest for component in manifest.release_components()
+    }
+    assert all(entry["context"] == "." for entry in matrix)
+
+
+def test_release_image_selection_uses_manifest_source_ownership() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+
+    matrix = component_ownership.select_release_image_matrix(
+        manifest,
+        changed_paths=("deploy/nginx-spa-security-headers.conf",),
+        force_all=False,
+    )
+
+    assert matrix == (
+        {
+            "image": "web",
+            "image_name": "loom-web",
+            "dockerfile": "deploy/Dockerfile.web",
+            "context": ".",
+        },
+    )
+
+
+def test_release_image_selection_fails_safe_for_authority_changes() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+
+    matrix = component_ownership.select_release_image_matrix(
+        manifest,
+        changed_paths=("config/component-ownership.toml",),
+        force_all=False,
+    )
+
+    assert matrix == component_ownership.release_image_matrix(manifest)
+
+
+def test_each_release_dockerfile_selects_only_its_owned_build() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+
+    for component in manifest.release_components():
+        matrix = component_ownership.select_release_image_matrix(
+            manifest,
+            changed_paths=(component.dockerfile,),
+            force_all=False,
+        )
+
+        assert [entry["image"] for entry in matrix] == [component.id]
+
+
+def test_release_image_pair_rejects_matrix_tampering() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+
+    errors = component_ownership.validate_release_image_pair(
+        manifest,
+        image="worker",
+        image_name="loom-service",
+        dockerfile="deploy/Dockerfile.worker",
+        build_context=".",
+    )
+
+    assert errors == [
+        "release image matrix row differs from manifest: worker: "
+        "observed=('loom-service', 'deploy/Dockerfile.worker', '.') "
+        "expected=('loom-worker', 'deploy/Dockerfile.worker', '.')"
+    ]
+
+
 def test_load_manifest_rejects_unknown_test_language(tmp_path: Path) -> None:
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
