@@ -744,8 +744,11 @@ knob you need.
    This is a repo-only desired-state/evidence check: it does not mutate worker
    pools, mint tokens, or read live credentials. The default manifest assigns
    every eligible GB10/OLDLAB slot to production and leaves staging/dev at zero
-   borrowed slots. The v1.0 GB10 baseline is all 15 GB10 hosts at 10 slots
-   each; the repo-owned GB10 SSH topology uses `trt-gb10-1` as its sole public
+   borrowed slots. The physical v1.0 inventory remains all 15 GB10 hosts at 10
+   slots each. While #822 is open, node 7 is `unreachable`, production receives
+   zero slots from it, and staging declares the other 14 hosts / 140 slots as
+   its fail-closed active set. The repo-owned GB10 SSH topology uses
+   `trt-gb10-1` as its sole public
    entrypoint on port `2221` and reaches private `trt-gb10-2..15` on port `22`
    through `ProxyJump trt-gb10-1`. When an observed worker
    registration/status artifact is available, pass it with `--observed-json`
@@ -841,8 +844,9 @@ knob you need.
    because it proves no external worker target was declared. A GB10 desired
    state without `[gb10_pool]` hosts is also a release-contract error because
    rollout step 12 would have no actual hosts to prepare. For the v1.0 staging
-   gate, `deploy/environments/staging.cluster.toml` enumerates all 15 GB10
-   hosts and points `[gb10_pool].ssh_config` at the repo-owned GB10 SSH config
+   gate, the current profile enumerates all 14 active GB10 hosts while the
+   repo-owned SSH config retains the full 15-host inventory.
+   `deploy/environments/staging.cluster.toml` points `[gb10_pool].ssh_config` at that config
    plus `[gb10_pool].ssh_identity_file` at a platform-dev-local deploy
    identity. Step 12 therefore does not depend on `platform-dev` having
    operator-local `trt-gb10-*` aliases or a Mac forwarded-agent session. Step
@@ -1493,8 +1497,10 @@ sudo ./scripts/ops/staging_rollout_host.py install \
 ```
 
 Once per newly generated service-key lifecycle, use an existing root-held admin
-identity as a bootstrap channel to add the new service public key to all 15
-GB10 hosts. The idempotent bootstrap is also the controlled repair when trust
+identity as a bootstrap channel to add the new service public key to the exact
+14-host active set. The fixed 15-host topology remains validated, and a migrated
+legacy revocation ledger can retain all 15 hosts until node 7 is reachable.
+The idempotent bootstrap is also the controlled repair when trust
 `check` reports drift. It reads the service `.pub` file and sends it over
 stdin; it never copies or prints the private service key:
 
@@ -1529,8 +1535,9 @@ construct that argv from a validated private envelope.
 The broker intentionally does not use `ssh -A`. Step 12 authenticates with the
 service-owned `/var/lib/loom-staging-rollout/gb10-deploy-ed25519` declared by
 the candidate-bound cluster config. The private file is mode 0600, is never
-shared with operators, and is not committed or printed. Every rollout keeps the
-existing all-15-host fail-closed gate. Host checkout, env update, legacy worker
+shared with operators, and is not committed or printed. While #822 is open,
+every rollout keeps the merged 14-active-host fail-closed gate and refuses a
+runtime re-addition of node 7. Host checkout, env update, legacy worker
 retirement, and node-agent start remain ordered per host while the fixed broker
 policy bounds concurrency across independent hosts.
 
@@ -1551,11 +1558,13 @@ sudo ./scripts/ops/staging_rollout_host.py uninstall --retain-ledger
 ```
 
 Uninstall removes admission, takes the maintenance/launch lock, refuses an
-active request, revokes only the recorded service public key on all 15 GB10
-hosts, removes only installer-recorded ACLs/memberships/linger and generated
-key/runtime state, and retains request plus rollout evidence. If any revocation
-or reconciliation step fails, stop and repair it; do not delete the local key
-or ledger first.
+active request, and revokes only the recorded service public key from every
+host in the root-owned revocation ledger. New #822-era installs record the 14
+active hosts; a legacy ledger can retain all 15 until node 7 is reachable and
+its old trust is removed. Only installer-recorded ACLs/memberships/linger and
+generated key/runtime state are removed, while request and rollout evidence are
+retained. If any revocation or reconciliation step fails, stop and repair it;
+do not delete the local key or ledger first.
 
 For `--environment staging`, the driver intentionally refuses legacy physical
 targets. Use `--cluster-name loom-staging`, `--namespace loom-staging`, and
@@ -1793,7 +1802,7 @@ desired state.
 | 09 | migrate | candidate-source `loom cluster render-migration`, apply the rendered Postgres/MinIO stateful substrate plus static worker trajectory PV/PVC from step 07 and wait for those StatefulSets, then apply/wait for the migration Job (#332, #206). This keeps missing-kind recovery restartable without starting application Deployments before Alembic and without leaving protected preflight with a partial critical PVC set. |
 | 10 | cluster-up | candidate-source `loom cluster up --backup-manifest <path> --recover-sandbox-deadlines --sandbox-deadline-max-pods 4` using the same manifest verified by step 05 and preflighted by step 08. Running this immediately after migration recreates the Control Plane before env-state uses the CP API during missing-kind recovery (#203 fix for updated replicas, #206 bounded kind/containerd sandbox-deadline retry). |
 | 11 | env-state | candidate-source `loom admin environment-state apply`, then required profile `catalog_provisioning.command` via protected env/env-source inputs, then `loom admin environment-state check --admin-token <source> --expect-admin-token-fingerprint <fingerprint>` (#331 fix for stop-on-disable, #533 guard for scoped admin token drift, #543 catalog-owned GB10 smoke task provisioning). Before the apply, rollout waits for the private CP URL's `/healthz` and records `control-plane-readiness.json`, so cluster-up pod recreation and managed tunnel restarts cannot race the env-state mutation. Pure GB10 node-status convergence drift is recorded and deferred because step 12 has not started node-agent apply yet; mixed drift still fails immediately. |
-| 12 | gb10-prep | SSH ×N hosts after desired-state apply: fetch, checkout, write env file, retire the legacy `loom-gb10-worker.service`, install/start node-agent, verify. The GB10 node-agent unit is `Type=oneshot`; successful prep is verified from `systemctl show` `Result=success` and `ExecMainStatus=0`, even though the unit is normally `inactive/dead` after completion. This step intentionally runs after step 11 so a host-local node-agent cannot apply a stale Control Plane desired-state row (#593). The staging GB10 desired-state profile keeps `LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS=7200` so early hosts in the 15-host prep stay online through release-gate and smoke. |
+| 12 | gb10-prep | SSH ×N hosts after desired-state apply: fetch, checkout, write env file, retire the legacy `loom-gb10-worker.service`, install/start node-agent, verify. The GB10 node-agent unit is `Type=oneshot`; successful prep is verified from `systemctl show` `Result=success` and `ExecMainStatus=0`, even though the unit is normally `inactive/dead` after completion. This step intentionally runs after step 11 so a host-local node-agent cannot apply a stale Control Plane desired-state row (#593). Under #822, prep targets the exact 14-host active set and leaves node 7 stopped/unreachable; the staging profile keeps `LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS=7200` so early hosts stay online through release-gate and smoke. |
 | 13 | production-defaults | candidate-source `loom admin rate-cards sync-yibuapi --format json`, then `loom providers update/show` for hosted provider pricing defaults declared in the environment-state profile, using `--service-token <source>` in an isolated CLI config derived from the rollout route. This keeps DB-backed cost-attribution defaults from disappearing after a fresh rollout without depending on ambient operator login state. |
 | 14 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, run `loom cluster minio-storage-preflight --output minio-storage-preflight-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment`, rerun `loom admin environment-state check --format json`, then `loom cluster release-gate --manifest <that file> --minio-storage-preflight <that storage artifact>` (#339 fix for stale kind-import, #536 guard for GB10 status token drift, #593 post-prep env-state recheck). GB10 convergence mismatches are retried for up to 15 minutes so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. This retry window includes release-target mismatches returned directly by `loom admin gb10-workers status`, such as a worker registration that exists before its first fresh heartbeat lands. Active GB10 hosts must also show a linked fresh active docker worker registration (`worker_id`, `worker_status=active`, `worker_fresh=true`, `worker_backend_names` contains `docker`), because smoke/admin submission uses `/api/v1/backends`, not node-agent metadata alone. |
 | 15 | smoke | HTTP health + smoke identity + benchmarks + smoke task lookup. Default `user-token` mode submits a user-owned trial and checks trajectory/usage; `admin-on-behalf` mode submits an audited represented-user batch through the admin API, uses a batch-compatible current-GB10 default task, and polls batch success. |
@@ -3998,14 +4007,34 @@ The command collects catalog audit data through the `loom-service` pod, reads
 task-level runtime mirror provenance from the target DB, finds a succeeded
 SkillLearnBench GB10 canary unless `--canary-batch-id` is supplied, and checks
 GB10 worker `.env` files plus worker container env keys for `HF_TOKEN`
-presence. It records only counts, paths, prefixes, batch ids, booleans, and
-redacted/secret-safe references. The GB10 check uses the same
+presence. It records only counts, paths, prefixes, batch ids, worker
+registration ids, booleans, and redacted/secret-safe references. It also binds the evidence to the candidate
+environment, image tag, full Git SHA, and canonical SHA-256 of the exact GB10
+status artifact consumed by the release gate; reusing evidence from an older
+candidate or a different status snapshot fails closed. Every canary trial's
+persisted `worker_id` must belong to an active, fresh manifest-selected worker
+registration in that same GB10 status snapshot. A worker restart therefore
+invalidates an older canary even when the batch otherwise succeeded, and an
+explicit `--canary-batch-id` does not bypass this check. Arrange the small
+SkillLearnBench canary after current-candidate GB10 prep and before release-gate;
+if none exists yet, release-gate fails closed and can be resumed after that
+canary completes. The GB10 check uses the same
 `[gb10_pool].ssh_config`, `ssh_identity_file`, and optional
 `ssh_certificate_file` as rollout GB10 prep; failed SSH, failed container
-inspection, or zero inspected active worker containers are release-gate
-failures. The remote worker probe is sent to `python3 -` over SSH stdin rather
-than embedded as a multiline `python3 -c` argument, so the check does not depend
-on remote shell quoting preserving Python source code.
+listing or inspection, or no running inspected worker container on any active
+host are release-gate failures. The remote probe uses `docker ps` without
+`-a`, so stopped or exited historical containers do not count as coverage.
+Under the #822 quarantine, the exact active
+staging set is `trt-gb10-1` through `trt-gb10-15` excluding `trt-gb10-7` (14
+hosts); node 7 remains in the physical 15-host inventory but is declared
+`stopped` and must not appear in the active HF boundary probe until the
+quarantine is deliberately removed through a merged change. The evidence
+therefore records the sorted, actual SSH targets in `checked_host_names`, plus
+`docker_ps_failed_hosts` and `hosts_without_containers`, so a matching count
+cannot hide a wrong or partially inspected host set. The remote worker probe is
+sent to `python3 -` over SSH stdin rather than embedded as a multiline
+`python3 -c` argument, so the check does not depend on remote shell quoting
+preserving Python source code.
 
 The generated artifact has this shape:
 
@@ -4014,6 +4043,12 @@ The generated artifact has this shape:
   "schema_version": 1,
   "environment": "staging",
   "benchmark_id": "skilllearnbench",
+  "candidate_binding": {
+    "environment": "staging",
+    "release_image_tag": "staging-$CANDIDATE_SHA",
+    "release_git_sha": "$CANDIDATE_FULL_SHA",
+    "gb10_workers_status_sha256": "$CANONICAL_STATUS_SHA256"
+  },
   "catalog": {
     "runnable_tasks": 100,
     "requires_caps": {"cpu_arch": "any"}
@@ -4032,16 +4067,42 @@ The generated artifact has this shape:
   "worker_boundary": {
     "canary_started": true,
     "terminal_state": "succeeded",
+    "canary_task_filter": {
+      "benchmark_id": "skilllearnbench"
+    },
+    "canary_worker_pools": {
+      "active": {},
+      "terminal": {"gb10-arm64": 2}
+    },
+    "expected_trial_count": 2,
+    "succeeded_trials": 2,
+    "canary_task_provenance": {
+      "trial_count": 2,
+      "target_benchmark_trial_count": 2,
+      "non_target_trial_count": 0,
+      "task_set_trial_count": 0,
+      "benchmark_ids": ["skilllearnbench"],
+      "worker_ids": ["$CURRENT_WORKER_UUID_1", "$CURRENT_WORKER_UUID_2"]
+    },
     "hf_token_present": false,
     "hf_token_isolated": true,
     "direct_hf_egress_required": false,
     "materialized_from_internal_source": true,
     "gb10_hf_token_check_summary": {
-      "checked_hosts": 15,
+      "checked_hosts": 14,
+      "checked_host_names": [
+        "trt-gb10-1", "trt-gb10-10", "trt-gb10-11", "trt-gb10-12",
+        "trt-gb10-13", "trt-gb10-14", "trt-gb10-15", "trt-gb10-2",
+        "trt-gb10-3", "trt-gb10-4", "trt-gb10-5", "trt-gb10-6",
+        "trt-gb10-8", "trt-gb10-9"
+      ],
       "ssh_failed_hosts": [],
+      "docker_ps_failed_hosts": [],
+      "hosts_without_containers": [],
+      "env_file_missing_hosts": [],
       "env_file_hf_token_present_hosts": [],
       "hosts_with_container_hf_token_present": [],
-      "containers_checked": 15,
+      "containers_checked": 14,
       "inspect_failed": []
     }
   },
@@ -4053,8 +4114,11 @@ Pass the artifact to `loom cluster release-gate` with
 `--hf-mirror-boundary-evidence "$ROLLOUT_DIR/hf-mirror-boundary-evidence-$IMAGE_TAG.json"`.
 The release gate fails staging/production when the release manifest records the
 SkillLearnBench HF catalog gate but this artifact is missing, has non-`s3://`
-runtime sources, lacks HF provenance, reports worker `HF_TOKEN` presence,
-has missing/failed GB10 token inspection, requires direct worker HF egress, or
+runtime sources, lacks HF provenance, uses a task filter that can select any
+non-SkillLearnBench source, cannot prove every actual canary trial joined to a
+SkillLearnBench benchmark task, cannot bind every canary trial to the current
+candidate's active GB10 worker registrations, reports worker `HF_TOKEN` presence, has
+missing/failed GB10 token inspection, requires direct worker HF egress, or
 contains raw secret-looking values. This repo-side check does not replace live
 staging validation; it makes the required evidence acceptance-testable and
 production-promotion-blocking.
@@ -5365,8 +5429,10 @@ link it from #217; do not merge incomplete evidence.
   summaries and metrics group the hosts together. Keep Docker data-root, worker
   trajectory cache, benchmark cache, and trial scratch on each node's local
   ext4 disk; do not put those hot paths on `/shared_work`. Current staging
-  validation uses `trt-gb10-1..15` at `LOOM_WORKER_MAX_CONCURRENT=10`, for 150
-  configured ARM64 slots. Every shared-staging rollout must use the broker,
+  validation uses 14 active hosts (all of `trt-gb10-1..15` except node 7) at
+  `LOOM_WORKER_MAX_CONCURRENT=10`, for 140 configured ARM64 slots. Node 7
+  remains stopped under #822 until merged re-admission. Every shared-staging
+  rollout must use the broker,
   which applies and checks the versioned environment profile, verifies the
   OLDLAB tunnel and Slurm prerequisites, prepares all declared GB10 hosts, and
   evaluates the release gate inside the candidate-bound request envelope.
@@ -5420,7 +5486,8 @@ link it from #217; do not merge incomplete evidence.
   missing-Slurm records are exposed as `stale=<slots>` and
   `stale_jobs=<count>` in the CLI plus
   `loom_slurm_worker_stale_slots` / `loom_slurm_worker_stale_jobs` metrics.
-  `loom admin environment-state check` also fails when a running Slurm job's
+  `loom admin environment-state check` also fails when a pending/running Slurm
+  job's node is absent from the current policy `allowed_nodes`, when its
   redacted `LOOM_REMOTE_WORKER_ENV_FILE` or
   `LOOM_REMOTE_WORKER_REPO_DIR` differs from the profile, when its non-secret
   `LOOM_WORKER_AUTH_FINGERPRINT` differs from the active `--worker-token`
@@ -5431,13 +5498,18 @@ link it from #217; do not merge incomplete evidence.
   service result such as `status=203/EXEC`, a disabled timer, or an inactive
   timer.
   The worker-pool autoscaler uses the same Slurm job release-state evidence
-  before computing healthy capacity. Pending or running jobs whose redacted
-  `LOOM_REMOTE_WORKER_ENV_FILE`, `LOOM_REMOTE_WORKER_REPO_DIR`, or worker-token
-  fingerprint does not match the active policy are excluded from
-  `actual_slots`; the autoscaler records a hard `release_state_drift` blocked
-  decision instead of treating the stale job as warm capacity. Replace or
-  cancel those jobs and rerun `environment-state check` before submitting
-  staging/full100 validation batches.
+  before computing healthy capacity. Pending or running jobs outside
+  `allowed_nodes`, or whose redacted `LOOM_REMOTE_WORKER_ENV_FILE`,
+  `LOOM_REMOTE_WORKER_REPO_DIR`, or worker-token fingerprint does not match the
+  active policy, are excluded from `actual_slots` and legal active-node/job
+  caps. The autoscaler records `release_state_drift` instead of treating the
+  stale job as warm capacity. A safely linked running worker is drained
+  normally; once it is `draining` and in-flight trials reach zero, the
+  autoscaler cancels the Slurm job (or observes that it already exited) and
+  marks the worker `drained`. Pending or unlinked jobs stay blocked for
+  operator reconciliation.
+  Rerun `environment-state check` before submitting staging/full100 validation
+  batches.
   Use `--format json` for release evidence or automation. If Loom backlog has
   drained but Slurm still has pending elastic jobs, cancel those Slurm job ids
   with `scancel`; the controller will record cancellation on its next
@@ -5454,7 +5526,7 @@ link it from #217; do not merge incomplete evidence.
   only releases allocations after queue drain.
 - Release-managed staging GB10 Docker Compose workers use a 7200-second idle
   window from `deploy/environment-state/staging.toml`. That is the validation
-  lease bound for the 15 hosts x 10 slots gate; shorter values can let early
+  lease bound for the exact 14 active hosts x 10 slots gate; shorter values can let early
   hosts exit during bounded-parallel prep before release-gate observes fresh
   workers.
 - For shared OLDLAB and GB10 pools, prefer the worker-pool autoscaler over

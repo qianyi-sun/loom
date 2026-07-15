@@ -24,10 +24,7 @@ RAW_ADMIN_TOKEN = "loom_admin_" + "G" * 43
 
 def _write_admin_secret(path: Path) -> None:
     path.write_text(
-        "[admin]\n"
-        f"token = \"{RAW_ADMIN_TOKEN}\"\n"
-        "created_at = \"2026-06-26T00:00:00Z\"\n"
-        "version = 1\n",
+        f'[admin]\ntoken = "{RAW_ADMIN_TOKEN}"\ncreated_at = "2026-06-26T00:00:00Z"\nversion = 1\n',
         encoding="utf-8",
     )
     path.chmod(0o600)
@@ -105,9 +102,7 @@ def test_desired_state_node_report_and_status_round_trip(app) -> None:
         assert body["image_tag"] == "2026-06-26-gb10"
         assert body["max_concurrent"] == 10
         assert body["env_config_version"] == "gb10-env-v2"
-        assert body["source_git_commit"] == (
-            "76875ac6d38c91c947c44b22788348db27a8d45b"
-        )
+        assert body["source_git_commit"] == ("76875ac6d38c91c947c44b22788348db27a8d45b")
         assert body["target_slots"] == 10
         assert body["host_intents"] == {"trt-gb10-1": "draining"}
         assert body["previous_image_tag"] is None
@@ -119,9 +114,7 @@ def test_desired_state_node_report_and_status_round_trip(app) -> None:
         )
         assert fetched.status_code == 200, fetched.text
         assert fetched.json()["image_tag"] == "2026-06-26-gb10"
-        assert fetched.json()["source_git_commit"] == (
-            "76875ac6d38c91c947c44b22788348db27a8d45b"
-        )
+        assert fetched.json()["source_git_commit"] == ("76875ac6d38c91c947c44b22788348db27a8d45b")
 
         reported = client.post(
             "/admin/gb10-worker-pools/production/gb10-arm64/nodes/trt-gb10-1/report",
@@ -145,9 +138,7 @@ def test_desired_state_node_report_and_status_round_trip(app) -> None:
         assert node["desired_image_tag"] == "2026-06-26-gb10"
         assert node["desired_max_concurrent"] == 10
         assert node["desired_env_config_version"] == "gb10-env-v2"
-        assert node["desired_source_git_commit"] == (
-            "76875ac6d38c91c947c44b22788348db27a8d45b"
-        )
+        assert node["desired_source_git_commit"] == ("76875ac6d38c91c947c44b22788348db27a8d45b")
         assert node["desired_intent"] == "draining"
         assert node["current_intent"] == "draining"
         assert node["apply_state"] == "applied"
@@ -165,8 +156,7 @@ def test_desired_state_node_report_and_status_round_trip(app) -> None:
     assert len(status_body["nodes"]) == 1
     assert status_body["nodes"][0]["hostname"] == "trt-gb10-1"
     assert (
-        status_body["nodes"][0]["source_git_commit"]
-        == "76875ac6d38c91c947c44b22788348db27a8d45b"
+        status_body["nodes"][0]["source_git_commit"] == "76875ac6d38c91c947c44b22788348db27a8d45b"
     )
     assert status_body["nodes"][0]["source_git_dirty"] is False
     assert status_body["desired_states"][0]["source_git_commit"] == (
@@ -326,16 +316,19 @@ def test_status_marks_stale_linked_worker_not_fresh(
     )
     with TestClient(app) as client:
         headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
-        assert client.put(
-            "/admin/gb10-worker-pools/production/gb10-arm64/desired-state",
-            headers=headers,
-            json={
-                "image_tag": "staging-abc123",
-                "max_concurrent": 10,
-                "env_config_version": "staging-abc123",
-                "host_intents": {"trt-gb10-1": "active"},
-            },
-        ).status_code == 200
+        assert (
+            client.put(
+                "/admin/gb10-worker-pools/production/gb10-arm64/desired-state",
+                headers=headers,
+                json={
+                    "image_tag": "staging-abc123",
+                    "max_concurrent": 10,
+                    "env_config_version": "staging-abc123",
+                    "host_intents": {"trt-gb10-1": "active"},
+                },
+            ).status_code
+            == 200
+        )
         report = client.post(
             "/admin/gb10-worker-pools/production/gb10-arm64/nodes/trt-gb10-1/report",
             headers=headers,
@@ -356,6 +349,113 @@ def test_status_marks_stale_linked_worker_not_fresh(
     assert node["worker_id"] == worker_id
     assert node["worker_status"] == "active"
     assert node["worker_fresh"] is False
+
+
+def test_status_lists_fresh_worker_without_node_report_as_unlinked(
+    app,
+    postgres_url: str,
+) -> None:
+    worker_id = _seed_worker(
+        postgres_url,
+        hostname="trt-gb10-7",
+        pool_name="gb10-arm64",
+        capabilities=[{"backend": "docker"}],
+    )
+    with TestClient(app) as client:
+        headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+        desired = client.put(
+            "/admin/gb10-worker-pools/production/gb10-arm64/desired-state",
+            headers=headers,
+            json={
+                "image_tag": "staging-abc123",
+                "max_concurrent": 10,
+                "env_config_version": "staging-abc123",
+                "host_intents": {
+                    "trt-gb10-1": "active",
+                    "trt-gb10-7": "stopped",
+                },
+            },
+        )
+        assert desired.status_code == 200, desired.text
+        status = client.get(
+            "/admin/gb10-worker-pools/status?environment=production&pool_name=gb10-arm64",
+            headers=headers,
+        )
+        assert status.status_code == 200, status.text
+
+    body = status.json()
+    assert body["nodes"] == []
+    assert body["unlinked_workers"] == [
+        {
+            "worker_id": worker_id,
+            "hostname": "trt-gb10-7",
+            "pool_name": "gb10-arm64",
+            "worker_status": "active",
+            "worker_last_seen_at": body["unlinked_workers"][0]["worker_last_seen_at"],
+            "worker_fresh": True,
+            "worker_backend_names": ["docker"],
+            "worker_drain_state": "active",
+            "max_concurrent": 10,
+        }
+    ]
+
+
+def test_status_lists_second_fresh_registration_for_node_as_unlinked(
+    app,
+    postgres_url: str,
+) -> None:
+    worker_ids = {
+        _seed_worker(
+            postgres_url,
+            hostname="trt-gb10-1",
+            pool_name="gb10-arm64",
+            capabilities=[{"backend": "docker"}],
+        )
+        for _ in range(2)
+    }
+    with TestClient(app) as client:
+        headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+        assert (
+            client.put(
+                "/admin/gb10-worker-pools/production/gb10-arm64/desired-state",
+                headers=headers,
+                json={
+                    "image_tag": "staging-abc123",
+                    "max_concurrent": 10,
+                    "env_config_version": "staging-abc123",
+                    "host_intents": {"trt-gb10-1": "active"},
+                },
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/admin/gb10-worker-pools/production/gb10-arm64/nodes/trt-gb10-1/report",
+                headers=headers,
+                json={
+                    "current_image_tag": "staging-abc123",
+                    "current_max_concurrent": 10,
+                    "current_env_config_version": "staging-abc123",
+                    "current_intent": "active",
+                    "apply_state": "applied",
+                },
+            ).status_code
+            == 200
+        )
+        status = client.get(
+            "/admin/gb10-worker-pools/status?environment=production&pool_name=gb10-arm64",
+            headers=headers,
+        )
+        assert status.status_code == 200, status.text
+
+    body = status.json()
+    assert len(body["nodes"]) == 1
+    assert len(body["unlinked_workers"]) == 1
+    assert body["unlinked_workers"][0]["worker_fresh"] is True
+    assert {
+        body["nodes"][0]["worker_id"],
+        body["unlinked_workers"][0]["worker_id"],
+    } == worker_ids
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -385,9 +485,7 @@ def _seed_worker(
                 hostname=hostname,
                 version="test",
                 capabilities=(
-                    capabilities
-                    if capabilities is not None
-                    else [{"backend": "docker"}]
+                    capabilities if capabilities is not None else [{"backend": "docker"}]
                 ),
                 pool_name=pool_name,
                 max_concurrent=max_concurrent,
@@ -447,8 +545,7 @@ def test_stopped_host_intent_forces_worker_drain_regardless_of_apply_result(
         # last_apply_result=already current, but container is still up
         # (would still be heartbeating in production).
         report = client.post(
-            "/admin/gb10-worker-pools/production/gb10-arm64/nodes/"
-            "trt-gb10-15/report",
+            "/admin/gb10-worker-pools/production/gb10-arm64/nodes/trt-gb10-15/report",
             headers=headers,
             json={
                 "current_image_tag": "staging-6b76a48",
@@ -496,8 +593,7 @@ def test_stopped_intent_reconciliation_ignores_hosts_with_no_worker_id(
             == 200
         )
         report = client.post(
-            "/admin/gb10-worker-pools/production/gb10-arm64/nodes/"
-            "trt-gb10-15/report",
+            "/admin/gb10-worker-pools/production/gb10-arm64/nodes/trt-gb10-15/report",
             headers=headers,
             json={
                 "current_image_tag": "staging-6b76a48",
@@ -540,8 +636,7 @@ def test_stopped_intent_reconciliation_is_idempotent_across_heartbeats(
         }
         assert (
             client.post(
-                "/admin/gb10-worker-pools/production/gb10-arm64/nodes/"
-                "trt-gb10-15/report",
+                "/admin/gb10-worker-pools/production/gb10-arm64/nodes/trt-gb10-15/report",
                 headers=headers,
                 json=report_body,
             ).status_code
@@ -549,8 +644,7 @@ def test_stopped_intent_reconciliation_is_idempotent_across_heartbeats(
         )
         assert (
             client.post(
-                "/admin/gb10-worker-pools/production/gb10-arm64/nodes/"
-                "trt-gb10-15/report",
+                "/admin/gb10-worker-pools/production/gb10-arm64/nodes/trt-gb10-15/report",
                 headers=headers,
                 json=report_body,
             ).status_code
@@ -581,8 +675,7 @@ def test_active_host_intent_does_not_touch_worker_drain_state(
         )
         assert (
             client.post(
-                "/admin/gb10-worker-pools/production/gb10-arm64/nodes/"
-                "trt-gb10-1/report",
+                "/admin/gb10-worker-pools/production/gb10-arm64/nodes/trt-gb10-1/report",
                 headers=headers,
                 json={
                     "current_image_tag": "staging-6b76a48",

@@ -65,6 +65,9 @@ Host trt-gb10-*
   IdentitiesOnly yes
   PubkeyAuthentication yes
   PasswordAuthentication no
-  StrictHostKeyChecking accept-new
+  StrictHostKeyChecking yes
+  UserKnownHostsFile /etc/loom/staging-rollout-gb10-known-hosts
+  GlobalKnownHostsFile /dev/null
+  UpdateHostKeys no
   ServerAliveInterval 30
   ServerAliveCountMax 3

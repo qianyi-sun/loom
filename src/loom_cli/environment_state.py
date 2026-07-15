@@ -34,6 +34,7 @@ def _release_source_prefix(image_tag: Any) -> str | None:
     match = _RELEASE_TAG_SHA_RE.search(image_tag)
     return match.group(1) if match else None
 
+
 _AUTOSCALER_DEFAULTS: dict[str, Any] = {
     "enabled": False,
     "min_slots": 0,
@@ -457,9 +458,7 @@ def load_environment_state_profile(
             external_slurm_runner_prerequisites,
             "external_slurm_runner_prerequisites",
         ),
-        external_slurm_autoscaler_supervisors=(
-            external_slurm_autoscaler_supervisors
-        ),
+        external_slurm_autoscaler_supervisors=(external_slurm_autoscaler_supervisors),
     )
 
 
@@ -533,12 +532,13 @@ def _append_gb10_node_source_drift(
     release-gate passes on `staging-baa1d327` / `staging-c72f50d`
     while GB10 workers actually ran pre-#350 code.
 
-    For each desired state whose `image_tag` embeds a git-SHA suffix,
-    verify every active node in the same (environment, pool) reports
-    a `source_git_commit` starting with that SHA prefix and
-    `source_git_dirty is False`. Otherwise emit a StateDrift so the
-    same `environment-state check` artifact consumed by the release
-    gate fails hard instead of silently passing.
+    For each desired state, verify every active node in the same
+    (environment, pool) reports the exact explicitly declared
+    `source_git_commit`. Only legacy desired states without that field may
+    fall back to the SHA prefix embedded in `image_tag`. The checkout must
+    also report `source_git_dirty is False`. Otherwise emit a StateDrift so
+    the same `environment-state check` artifact consumed by the release gate
+    fails hard instead of silently passing.
     """
     if not isinstance(nodes, list):
         return
@@ -554,45 +554,51 @@ def _append_gb10_node_source_drift(
     for node in nodes:
         if not isinstance(node, dict):
             continue
-        intent = node.get("desired_intent") or node.get("current_intent")
-        apply_state = node.get("apply_state")
-        if (
-            intent in _GB10_NODE_SOURCE_DRIFT_IGNORED_INTENTS
-            or apply_state in _GB10_NODE_SOURCE_DRIFT_IGNORED_APPLY_STATES
-        ):
-            continue
         env = node.get("environment")
         pool = node.get("pool_name")
         hostname = node.get("hostname")
-        if not (
-            isinstance(env, str)
-            and isinstance(pool, str)
-            and isinstance(hostname, str)
-        ):
+        if not (isinstance(env, str) and isinstance(pool, str) and isinstance(hostname, str)):
             continue
         matched_desired = desired_by_key.get((env, pool))
         if matched_desired is None:
             continue
-        expected_source = matched_desired.get("source_git_commit")
-        if not isinstance(expected_source, str) or not expected_source.strip():
+        host_intents = matched_desired.get("host_intents")
+        authoritative_intent = (
+            host_intents.get(hostname)
+            if isinstance(host_intents, dict) and hostname in host_intents
+            else None
+        )
+        if authoritative_intent is not None:
+            if authoritative_intent in _GB10_NODE_SOURCE_DRIFT_IGNORED_INTENTS:
+                continue
+        else:
+            intent = node.get("desired_intent") or node.get("current_intent")
+            apply_state = node.get("apply_state")
+            if (
+                intent in _GB10_NODE_SOURCE_DRIFT_IGNORED_INTENTS
+                or apply_state in _GB10_NODE_SOURCE_DRIFT_IGNORED_APPLY_STATES
+            ):
+                continue
+        declared_source = matched_desired.get("source_git_commit")
+        source_is_explicit = isinstance(declared_source, str) and bool(declared_source.strip())
+        expected_source = declared_source if source_is_explicit else None
+        if expected_source is None:
             expected_source = _release_source_prefix(matched_desired.get("image_tag"))
         if expected_source is None:
             continue
         expected_source = expected_source.strip()
         source_commit = node.get("source_git_commit")
         source_dirty = node.get("source_git_dirty")
-        source_commit_bad = (
-            not isinstance(source_commit, str)
-            or not source_commit.startswith(expected_source)
+        source_commit_bad = not isinstance(source_commit, str) or (
+            source_commit != expected_source
+            if source_is_explicit
+            else not source_commit.startswith(expected_source)
         )
         source_dirty_bad = source_dirty is not False
         if source_commit_bad:
             drift.append(
                 StateDrift(
-                    path=(
-                        f"gb10_worker_node_status[{env}/{pool}/{hostname}]"
-                        ".source_git_commit"
-                    ),
+                    path=(f"gb10_worker_node_status[{env}/{pool}/{hostname}].source_git_commit"),
                     desired=expected_source,
                     live=source_commit,
                 ),
@@ -600,10 +606,7 @@ def _append_gb10_node_source_drift(
         elif source_dirty_bad:
             drift.append(
                 StateDrift(
-                    path=(
-                        f"gb10_worker_node_status[{env}/{pool}/{hostname}]"
-                        ".source_git_dirty"
-                    ),
+                    path=(f"gb10_worker_node_status[{env}/{pool}/{hostname}].source_git_dirty"),
                     desired=False,
                     live=source_dirty,
                 ),
@@ -611,6 +614,19 @@ def _append_gb10_node_source_drift(
 
 
 _TERMINAL_SLURM_JOB_STATES = {"completed", "failed", "cancelled", "stale"}
+
+
+def _normalized_allowed_slurm_nodes(value: object) -> list[str]:
+    raw_nodes: list[object]
+    if isinstance(value, str):
+        raw_nodes = list(value.split(","))
+    elif isinstance(value, list | tuple):
+        raw_nodes = list(value)
+    else:
+        raw_nodes = []
+    return list(
+        dict.fromkeys(node for node in (str(raw_node).strip() for raw_node in raw_nodes) if node),
+    )
 
 
 def _append_active_slurm_job_drift(
@@ -635,14 +651,26 @@ def _append_active_slurm_job_drift(
         state = str(job.get("state") or "").strip().lower()
         if state in _TERMINAL_SLURM_JOB_STATES:
             continue
-        redacted_env = job.get("redacted_env")
-        if not isinstance(redacted_env, dict):
-            continue
         actuator_config = desired.get("actuator_config", {})
         if not isinstance(actuator_config, dict):
             continue
         job_id = str(job.get("job_id") or job.get("id") or "unknown")
         prefix = f"slurm_worker_jobs[{environment}/{pool_name}/{job_id}]"
+        allowed_nodes = _normalized_allowed_slurm_nodes(
+            actuator_config.get("allowed_nodes"),
+        )
+        live_nodelist = job.get("nodelist")
+        if not isinstance(live_nodelist, str) or live_nodelist not in allowed_nodes:
+            drift.append(
+                StateDrift(
+                    path=f"{prefix}.nodelist",
+                    desired=allowed_nodes,
+                    live=live_nodelist,
+                ),
+            )
+        redacted_env = job.get("redacted_env")
+        if not isinstance(redacted_env, dict):
+            continue
         expected = {
             "LOOM_REMOTE_WORKER_ENV_FILE": actuator_config.get("env_file"),
             "LOOM_REMOTE_WORKER_REPO_DIR": actuator_config.get("repo_dir"),
@@ -751,8 +779,7 @@ def autoscaler_blockers(
     live: dict[str, Any],
 ) -> list[dict[str, Any]]:
     expected_keys = {
-        (policy["environment"], policy["pool_name"])
-        for policy in profile.autoscaler_policies
+        (policy["environment"], policy["pool_name"]) for policy in profile.autoscaler_policies
     }
     policies = _as_dict(live.get("autoscaler_status", {}), "autoscaler_status").get(
         "policies",
@@ -980,11 +1007,7 @@ def render_external_slurm_autoscaler_timer(supervisor: dict[str, Any]) -> str:
 
 
 def _unit_payload(text: str) -> str:
-    lines = [
-        line.rstrip()
-        for line in text.splitlines()
-        if not line.startswith("# ")
-    ]
+    lines = [line.rstrip() for line in text.splitlines() if not line.startswith("# ")]
     return "\n".join(lines).strip()
 
 
@@ -1083,9 +1106,7 @@ def _append_service_status_drift(
     exec_status = status.get("ExecMainStatus", "")
     active_state = status.get("ActiveState", "")
     failed = (
-        active_state == "failed"
-        or result not in {"", "success"}
-        or exec_status not in {"", "0"}
+        active_state == "failed" or result not in {"", "success"} or exec_status not in {"", "0"}
     )
     if not failed:
         return

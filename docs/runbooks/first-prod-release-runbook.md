@@ -245,13 +245,17 @@ drains them on failure:
 `READ-ONLY LIVE` until the validation command starts; `LIVE PROD AUTHORITY
 REQUIRED` for the desired-state and node-agent mutations.
 
+While #822 remains open, the merged capacity authority excludes node 7. The
+runner rejects any attempt to add it back through `--hosts`; use the 14-host
+set below only from the fixed merged candidate. Re-admission is a separate PR.
+
 ```bash
 uv run python scripts/ops/staging_validation_capacity_runner.py \
   --cp-url http://127.0.0.1:18081 \
   --admin-token file:/shared_work/qianyi/loom-worker-capacity/staging-admin-token \
   --environment staging \
   --pool-name gb10-arm64 \
-  --hosts trt-gb10-1,trt-gb10-2,trt-gb10-3,trt-gb10-4,trt-gb10-5,trt-gb10-6,trt-gb10-7,trt-gb10-8,trt-gb10-9,trt-gb10-10,trt-gb10-11,trt-gb10-12,trt-gb10-13,trt-gb10-14,trt-gb10-15 \
+  --hosts trt-gb10-1,trt-gb10-2,trt-gb10-3,trt-gb10-4,trt-gb10-5,trt-gb10-6,trt-gb10-8,trt-gb10-9,trt-gb10-10,trt-gb10-11,trt-gb10-12,trt-gb10-13,trt-gb10-14,trt-gb10-15 \
   --ssh-config deploy/worker-pools/gb10/ssh_config \
   --ssh-identity /shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519 \
   --lease-ttl 6h \
@@ -269,7 +273,14 @@ path; after a failed validation the default `auto` release intent switches to
 `draining` instead of stopping active work.
 
 The runner queues host-local node-agent starts with `systemctl --no-block` and
-uses the Control Plane status gate to prove convergence. A long-running
+uses the Control Plane status gate to prove convergence. Before it mutates
+desired state, the runner requires one coherent candidate identity: identical
+image/env tags, a matching tag SHA prefix, and an exact full
+`source_git_commit`. Before the validation command starts, every selected node
+must then report the exact environment/pool/image/env/source, clean checkout,
+unique linked active/fresh worker id, and docker backend; malformed or reused
+linked/unlinked worker ids fail closed. A candidate-identity failure occurs
+before any active or cleanup desired-state mutation. A long-running
 `Type=oneshot` node-agent must not block summary writing or validation resume;
 per-host SSH start calls are bounded by `--node-agent-command-timeout`.
 

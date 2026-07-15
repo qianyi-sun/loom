@@ -18,9 +18,8 @@ from loom_cli.environment_state import (
 )
 
 
-def _write_profile(path: Path) -> None:
-    path.write_text(
-        """
+def _write_profile(path: Path, *, host1_intent: str = "active") -> None:
+    payload = """
 environment = "staging"
 
 [[worker_pool_autoscaler_policies]]
@@ -73,7 +72,12 @@ name = "mz_tn_canada_qianyi"
 pricing_source = "rate-card"
 rate_card_provider = "yibuapi"
 """.strip()
-        + "\n",
+    payload = payload.replace(
+        'trt-gb10-1 = "active"',
+        f'trt-gb10-1 = "{host1_intent}"',
+    )
+    path.write_text(
+        payload + "\n",
         encoding="utf-8",
     )
 
@@ -154,11 +158,7 @@ def test_staging_gb10_desired_state_sets_two_hour_worker_idle_ttl() -> None:
         expected_environment="staging",
     )
 
-    gb10 = next(
-        row
-        for row in profile.gb10_desired_states
-        if row["pool_name"] == "gb10-arm64"
-    )
+    gb10 = next(row for row in profile.gb10_desired_states if row["pool_name"] == "gb10-arm64")
 
     assert gb10["env"]["LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS"] == "7200"
 
@@ -354,6 +354,35 @@ def test_diff_environment_state_reports_gb10_node_source_git_commit_drift(
     assert source_drift[0].live == "ce55a358d8472bce4b580a363806993678d8f116"
 
 
+def test_diff_environment_state_rejects_suffix_after_explicit_source_commit(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "staging.state.toml"
+    _write_profile(profile_path)
+    expected_source = "c72f50d67f0d571fef55a9abbbced4e37752ca0e"
+    profile = load_environment_state_profile(
+        profile_path,
+        variables={
+            "IMAGE_TAG": "staging-c72f50d",
+            "ENV_CONFIG_VERSION": "staging-c72f50d",
+            "GIT_SHA": expected_source,
+        },
+    )
+    live = _gb10_live_with_node_source(
+        image_tag="staging-c72f50d",
+        env_config_version="staging-c72f50d",
+        source_git_commit=f"{expected_source}-junk",
+        source_git_dirty=False,
+    )
+
+    drift = diff_environment_state(profile, live)
+
+    source_drift = [item for item in drift if "source_git_commit" in item.path]
+    assert len(source_drift) == 1
+    assert source_drift[0].desired == expected_source
+    assert source_drift[0].live == f"{expected_source}-junk"
+
+
 def test_diff_environment_state_reports_gb10_node_dirty_source(
     tmp_path: Path,
 ) -> None:
@@ -423,7 +452,7 @@ def test_diff_environment_state_ignores_source_drift_on_stopped_gb10_node(
     """A node whose intent is 'stopped' or 'draining' is not part of
     active capacity — the release cannot demand it be fresh."""
     profile_path = tmp_path / "staging.state.toml"
-    _write_profile(profile_path)
+    _write_profile(profile_path, host1_intent="stopped")
     profile = load_environment_state_profile(
         profile_path,
         variables={
@@ -444,6 +473,63 @@ def test_diff_environment_state_ignores_source_drift_on_stopped_gb10_node(
     drift = diff_environment_state(profile, live)
     source_related = [item for item in drift if "source_git" in item.path]
     assert source_related == []
+
+
+def test_diff_environment_state_uses_authoritative_stopped_intent_over_stale_node(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "staging.state.toml"
+    _write_profile(profile_path, host1_intent="stopped")
+    profile = load_environment_state_profile(
+        profile_path,
+        variables={
+            "IMAGE_TAG": "staging-c72f50d",
+            "ENV_CONFIG_VERSION": "staging-c72f50d",
+            "GIT_SHA": "c72f50d67f0d571fef55a9abbbced4e37752ca0e",
+        },
+    )
+    live = _gb10_live_with_node_source(
+        image_tag="staging-c72f50d",
+        env_config_version="staging-c72f50d",
+        source_git_commit="stalesha11111111111111111111111111111111",
+        source_git_dirty=True,
+        intent="active",
+    )
+    live["gb10_status"]["desired_states"][0]["host_intents"]["trt-gb10-1"] = "stopped"
+
+    drift = diff_environment_state(profile, live)
+
+    assert [item for item in drift if "source_git" in item.path] == []
+
+
+def test_diff_environment_state_authoritative_active_intent_checks_stale_stopped_node(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "staging.state.toml"
+    _write_profile(profile_path)
+    profile = load_environment_state_profile(
+        profile_path,
+        variables={
+            "IMAGE_TAG": "staging-c72f50d",
+            "ENV_CONFIG_VERSION": "staging-c72f50d",
+            "GIT_SHA": "c72f50d67f0d571fef55a9abbbced4e37752ca0e",
+        },
+    )
+    live = _gb10_live_with_node_source(
+        image_tag="staging-c72f50d",
+        env_config_version="staging-c72f50d",
+        source_git_commit="stalesha11111111111111111111111111111111",
+        source_git_dirty=True,
+        intent="stopped",
+        apply_state="stopped",
+    )
+
+    drift = diff_environment_state(profile, live)
+
+    source_paths = [item.path for item in drift if "source_git" in item.path]
+    assert source_paths == [
+        "gb10_worker_node_status[staging/gb10-arm64/trt-gb10-1].source_git_commit",
+    ]
 
 
 def test_diff_environment_state_uses_explicit_source_when_image_tag_has_no_sha(
@@ -517,6 +603,7 @@ max_slots = 40
 [worker_pool_autoscaler_policies.actuator_config]
 backend = "docker"
 cpu_arch = "x86_64"
+allowed_nodes = ["oldlab-1"]
 env_file = "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker.env"
 repo_dir = "/shared_work/qianyi/loom-remote-worker"
 requested_cpus = 2
@@ -550,6 +637,7 @@ external_runner = true
                         "actuator_config": {
                             "backend": "docker",
                             "cpu_arch": "x86_64",
+                            "allowed_nodes": ["oldlab-1"],
                             "env_file": "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker.env",
                             "repo_dir": "/shared_work/qianyi/loom-remote-worker",
                             "requested_cpus": 2,
@@ -568,6 +656,7 @@ external_runner = true
                         "pool_name": "oldlab",
                         "job_id": "14893",
                         "state": "running",
+                        "nodelist": "oldlab-1",
                         "redacted_env": {
                             "LOOM_REMOTE_WORKER_ENV_FILE": "/shared_work/qianyi/loom-worker-capacity/issue45-oldlab-4-warm-1608b05.env",
                             "LOOM_REMOTE_WORKER_REPO_DIR": "/shared_work/qianyi/loom-remote-worker-1608b05",
@@ -585,6 +674,66 @@ external_runner = true
     ]
     assert drift[0].desired.endswith("staging-oldlab-worker.env")
     assert drift[0].live.endswith("issue45-oldlab-4-warm-1608b05.env")
+
+
+def test_diff_environment_state_rejects_active_job_outside_allowed_nodes(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "staging.state.toml"
+    profile_path.write_text(
+        """
+environment = "staging"
+control_plane_environment = "production"
+
+[[worker_pool_autoscaler_policies]]
+pool_name = "gb10-arm64"
+actuator = "slurm"
+enabled = true
+min_slots = 0
+max_slots = 10
+
+[worker_pool_autoscaler_policies.actuator_config]
+allowed_nodes = ["trt-gb10-1"]
+env_file = "/secure/.env.remote-worker"
+repo_dir = "/opt/loom"
+requested_concurrency = 10
+external_runner = true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    profile = load_environment_state_profile(profile_path)
+
+    drift = diff_environment_state(
+        profile,
+        {
+            "autoscaler_status": {"policies": []},
+            "gb10_status": {"desired_states": []},
+            "slurm_status": {
+                "jobs": [
+                    {
+                        "environment": "production",
+                        "pool_name": "gb10-arm64",
+                        "job_id": "gb10-job-7",
+                        "state": "running",
+                        "nodelist": "trt-gb10-7",
+                        "redacted_env": {
+                            "LOOM_REMOTE_WORKER_ENV_FILE": "/secure/.env.remote-worker",
+                            "LOOM_REMOTE_WORKER_REPO_DIR": "/opt/loom",
+                        },
+                    },
+                ],
+            },
+        },
+    )
+
+    node_drift = next(
+        item
+        for item in drift
+        if item.path == "slurm_worker_jobs[production/gb10-arm64/gb10-job-7].nodelist"
+    )
+    assert node_drift.desired == ["trt-gb10-1"]
+    assert node_drift.live == "trt-gb10-7"
 
 
 def test_diff_environment_state_reports_active_slurm_job_worker_token_fingerprint_drift(
@@ -606,6 +755,7 @@ min_slots = 1
 max_slots = 40
 
 [worker_pool_autoscaler_policies.actuator_config]
+allowed_nodes = ["oldlab-1"]
 env_file = "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker.env"
 repo_dir = "/shared_work/qianyi/loom-remote-worker"
 requested_concurrency = 1
@@ -628,6 +778,7 @@ external_runner = true
                         "pool_name": "oldlab",
                         "job_id": "14893",
                         "state": "running",
+                        "nodelist": "oldlab-1",
                         "redacted_env": {
                             "LOOM_REMOTE_WORKER_ENV_FILE": "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker.env",
                             "LOOM_REMOTE_WORKER_REPO_DIR": "/shared_work/qianyi/loom-remote-worker",
@@ -1537,11 +1688,14 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert profile.control_plane_environment == environment
     assert gb10_policy["environment"] == environment
     assert gb10_policy["actuator"] == "slurm"
-    assert gb10_policy["max_slots"] == 150
+    assert gb10_policy["max_slots"] == 140
     assert gb10_policy["actuator_config"]["backend"] == "docker"
     assert gb10_policy["actuator_config"]["cpu_arch"] == "arm64"
     assert gb10_policy["actuator_config"]["partition"] == "gb10"
-    assert len(gb10_policy["actuator_config"]["allowed_nodes"]) == 15
+    assert gb10_policy["actuator_config"]["allowed_nodes"] == [
+        f"trt-gb10-{index}" for index in range(1, 16) if index != 7
+    ]
+    assert gb10_policy["actuator_config"]["max_jobs"] == 14
     assert (
         gb10_policy["actuator_config"]["env_file"]
         == "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-test.env"
@@ -1557,10 +1711,11 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert gb10_state["env_config_version"] == "staging-test"
     assert gb10_state["source_git_commit"] == ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     assert gb10_state["max_concurrent"] == 10
-    assert gb10_state["target_slots"] == 150
+    assert gb10_state["target_slots"] == 140
     assert gb10_state["host_intents"]["trt-gb10-1"] == "active"
     assert gb10_state["host_intents"]["trt-gb10-14"] == "active"
-    assert set(gb10_state["host_intents"].values()) == {"active"}
+    assert gb10_state["host_intents"]["trt-gb10-7"] == "stopped"
+    assert set(gb10_state["host_intents"].values()) == {"active", "stopped"}
     assert gb10_state["rollout_policy"] == {"mode": "all"}
     assert profile.catalog_provisioning["required"] is True
     command = profile.catalog_provisioning["command"]
@@ -1625,4 +1780,5 @@ def test_staging_profile_is_gb10_only_for_first_prod_validation() -> None:
         state for state in profile.gb10_desired_states if state["pool_name"] == "gb10-arm64"
     )
     assert len(gb10_state["host_intents"]) == 15
-    assert set(gb10_state["host_intents"].values()) == {"active"}
+    assert gb10_state["host_intents"]["trt-gb10-7"] == "stopped"
+    assert sum(intent == "active" for intent in gb10_state["host_intents"].values()) == 14

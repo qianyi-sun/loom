@@ -43,6 +43,12 @@ _REQUIRED_IMPORTS = (
     "loom_benchmarks.adapters.skilllearnbench",
     "loom_benchmark_terminal_bench_2.adapter",
 )
+FULL_GB10_HOSTS = tuple(f"trt-gb10-{number}" for number in range(1, 16))
+TEMPORARILY_EXCLUDED_GB10_HOSTS = frozenset({"trt-gb10-7"})
+ACTIVE_GB10_HOSTS = tuple(
+    host for host in FULL_GB10_HOSTS if host not in TEMPORARILY_EXCLUDED_GB10_HOSTS
+)
+EXPECTED_GB10_SSH_CONFIG_SHA256 = "7ac3cbe20670762590b9efe4daea46126caa823f192e060be109b96350e82b4e"
 
 
 class CommandResult(Protocol):
@@ -317,8 +323,11 @@ def _gb10_inputs(
         if not isinstance(item, dict) or not isinstance(item.get("ssh_target"), str):
             return None
         hosts.append(item["ssh_target"])
-    expected = tuple(f"trt-gb10-{number}" for number in range(1, 16))
-    if tuple(hosts) != expected:
+    # The checked-in SSH/trust topology remains the fixed 15-host authority.
+    # Cluster hosts are the separately declared rollout target and must match
+    # the merged #822 active set exactly; runtime skips and reordering fail
+    # closed here before any SSH probe.
+    if tuple(hosts) != ACTIVE_GB10_HOSTS:
         return None
     ssh_config = Path(ssh_config_value)
     if not ssh_config.is_absolute():
@@ -326,7 +335,7 @@ def _gb10_inputs(
     identity = Path(identity_value)
     if not identity.is_absolute() or ".." in identity.parts:
         return None
-    return Path(os.path.normpath(ssh_config)), identity, expected
+    return Path(os.path.normpath(ssh_config)), identity, ACTIVE_GB10_HOSTS
 
 
 def catalog_secret_values(
@@ -579,12 +588,17 @@ def collect_preflight(
     add("backup-commands", backup_ok, "restore staging backup command readiness")
 
     gb10 = _gb10_inputs(config, service_uid=service_uid) if service_uid >= 0 else None
+    gb10_topology_ok = False
     gb10_ok = trusted_checkout and gb10 is not None
     if gb10 is not None and trusted_checkout:
         ssh_config, identity, hosts = gb10
+        ssh_config_payload = _readable_config_bytes(ssh_config, service_uid=service_uid)
+        gb10_topology_ok = bool(
+            ssh_config_payload is not None
+            and hashlib.sha256(ssh_config_payload).hexdigest() == EXPECTED_GB10_SSH_CONFIG_SHA256
+        )
         gb10_ok = (
-            _readable_config_bytes(ssh_config, service_uid=service_uid) is not None
-            and _private_file_bytes(identity, service_uid=service_uid) is not None
+            gb10_topology_ok and _private_file_bytes(identity, service_uid=service_uid) is not None
         )
         if gb10_ok:
             for host in hosts:
@@ -606,6 +620,11 @@ def collect_preflight(
                 ):
                     gb10_ok = False
                     break
+    add(
+        "gb10-topology",
+        gb10_topology_ok,
+        "restore the exact merged full GB10 SSH topology",
+    )
     add(
         "gb10-batch-mode",
         gb10_ok,

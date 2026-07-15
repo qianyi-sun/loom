@@ -68,9 +68,11 @@ def _substitute_release_vars(
     git_sha: str,
 ) -> Any:
     if isinstance(value, str):
-        return value.replace("${IMAGE_TAG}", image_tag).replace(
-            "${ENV_CONFIG_VERSION}", env_config_version
-        ).replace("${GIT_SHA}", git_sha)
+        return (
+            value.replace("${IMAGE_TAG}", image_tag)
+            .replace("${ENV_CONFIG_VERSION}", env_config_version)
+            .replace("${GIT_SHA}", git_sha)
+        )
     if isinstance(value, list):
         return [
             _substitute_release_vars(
@@ -145,10 +147,17 @@ def _external_worker_summary(
             continue
         gb10_desired_states.append(
             {
+                "environment": desired.get(
+                    "environment",
+                    control_plane_environment,
+                ),
                 "pool_name": desired.get("pool_name"),
                 "image_tag": desired.get("image_tag"),
+                "max_concurrent": desired.get("max_concurrent"),
                 "env_config_version": desired.get("env_config_version"),
                 "source_git_commit": desired.get("source_git_commit"),
+                "target_slots": desired.get("target_slots"),
+                "host_intents": desired.get("host_intents"),
             }
         )
 
@@ -206,10 +215,7 @@ def _catalog_provisioning_summary(
         }
     required_env = catalog.get("required_env")
     if isinstance(required_env, list):
-        summary["required_env"] = [
-            item for item in required_env
-            if isinstance(item, str) and item
-        ]
+        summary["required_env"] = [item for item in required_env if isinstance(item, str) and item]
     return summary
 
 

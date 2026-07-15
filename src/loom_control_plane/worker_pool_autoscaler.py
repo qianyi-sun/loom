@@ -75,6 +75,8 @@ class AutoscalerObservation:
     drained_worker_ids: tuple[str, ...]
     release_drift_slots: int = 0
     release_drift_job_ids: tuple[str, ...] = ()
+    release_drift_worker_ids_to_drain: tuple[str, ...] = ()
+    release_drift_worker_ids_to_release: tuple[str, ...] = ()
 
     @property
     def claimable_free_slots(self) -> int:
@@ -168,6 +170,29 @@ def compute_autoscaler_decision(
 
     if observation.release_drift_job_ids:
         job_ids = ", ".join(observation.release_drift_job_ids)
+        if observation.release_drift_worker_ids_to_release:
+            return _base_decision(
+                action="release_drained",
+                reason="release_state_drift",
+                policy=policy,
+                observation=observation,
+                desired_slots=max(policy.min_slots, observation.active_slots),
+                worker_ids_to_release=(observation.release_drift_worker_ids_to_release),
+                idle_since_at=None,
+                error_message=f"release-state drift in Slurm job(s): {job_ids}",
+            )
+        if observation.release_drift_worker_ids_to_drain:
+            return _base_decision(
+                action="request_drain",
+                reason="release_state_drift",
+                policy=policy,
+                observation=observation,
+                desired_slots=max(policy.min_slots, observation.active_slots),
+                worker_ids_to_drain=observation.release_drift_worker_ids_to_drain,
+                blocked_reason="release_state_drift",
+                idle_since_at=None,
+                error_message=f"release-state drift in Slurm job(s): {job_ids}",
+            )
         return _base_decision(
             action="blocked",
             reason="release_state_drift",
@@ -577,6 +602,30 @@ def _field(obj: Any, name: str, default: Any = None) -> Any:
     return getattr(obj, name, default)
 
 
+def _allowed_slurm_nodes(row: WorkerPoolAutoscalerPolicy) -> frozenset[str]:
+    raw_nodes = (row.actuator_config or {}).get("allowed_nodes", ())
+    values: list[object]
+    if isinstance(raw_nodes, str):
+        values = list(raw_nodes.split(","))
+    elif isinstance(raw_nodes, list | tuple | set | frozenset):
+        values = list(raw_nodes)
+    else:
+        values = []
+    return frozenset(node for node in (str(raw_node).strip() for raw_node in values) if node)
+
+
+def _expected_slurm_worker_token_fingerprint(
+    row: WorkerPoolAutoscalerPolicy,
+) -> str | None:
+    env_file = (row.actuator_config or {}).get("env_file")
+    if not isinstance(env_file, str) or not env_file:
+        return None
+    try:
+        return worker_token_fingerprint_from_env_file(Path(env_file))
+    except OSError:
+        return None
+
+
 def _slurm_release_state_drift(
     row: WorkerPoolAutoscalerPolicy,
     job: Any,
@@ -584,9 +633,13 @@ def _slurm_release_state_drift(
     expected_worker_token_fingerprint: str | None,
 ) -> bool:
     actor_config = row.actuator_config or {}
+    nodelist = str(_field(job, "nodelist", "") or "").strip()
+    if not nodelist or nodelist not in _allowed_slurm_nodes(row):
+        return True
+
     redacted_env = _field(job, "redacted_env", {}) or {}
     if not isinstance(redacted_env, dict):
-        return False
+        return True
 
     expected_env_file = actor_config.get("env_file")
     if (
@@ -661,18 +714,12 @@ async def _load_observation(
     release_drift_job_ids: list[str] = []
     release_drift_worker_ids: set[Any] = set()
     release_drift_hostnames: set[str] = set()
+    release_drift_worker_ids_to_drain: set[str] = set()
+    release_drift_worker_ids_to_release: set[str] = set()
     if row.actuator == "slurm":
         pending_slots = 0
-        actor_config = row.actuator_config or {}
-        expected_worker_token_fingerprint: str | None = None
-        env_file = actor_config.get("env_file")
-        if isinstance(env_file, str) and env_file:
-            try:
-                expected_worker_token_fingerprint = worker_token_fingerprint_from_env_file(
-                    Path(env_file),
-                )
-            except OSError:
-                expected_worker_token_fingerprint = None
+        expected_worker_token_fingerprint = _expected_slurm_worker_token_fingerprint(row)
+        worker_by_id = {worker.id: worker for worker in workers}
         slurm_jobs = (
             (
                 await session.execute(
@@ -686,6 +733,13 @@ async def _load_observation(
             .scalars()
             .all()
         )
+        active_job_count_by_worker_id: dict[Any, int] = {}
+        for job in slurm_jobs:
+            job_worker_id = _field(job, "worker_id")
+            if job_worker_id is not None:
+                active_job_count_by_worker_id[job_worker_id] = (
+                    active_job_count_by_worker_id.get(job_worker_id, 0) + 1
+                )
         for job in slurm_jobs:
             slots = max(0, int(_field(job, "requested_concurrency", 0) or 0))
             if _slurm_release_state_drift(
@@ -694,15 +748,36 @@ async def _load_observation(
                 expected_worker_token_fingerprint=expected_worker_token_fingerprint,
             ):
                 release_drift_slots += slots
-                release_drift_job_ids.append(
-                    str(_field(job, "job_id") or _field(job, "id") or "unknown"),
-                )
+                job_id = str(_field(job, "job_id") or _field(job, "id") or "unknown")
+                release_drift_job_ids.append(job_id)
                 worker_id = _field(job, "worker_id")
                 if worker_id is not None:
                     release_drift_worker_ids.add(worker_id)
                 nodelist = _field(job, "nodelist")
                 if nodelist:
                     release_drift_hostnames.add(str(nodelist))
+                linked_worker = (
+                    worker_by_id.get(worker_id)
+                    if worker_id is not None
+                    and active_job_count_by_worker_id.get(worker_id) == 1
+                    else None
+                )
+                if linked_worker is not None and str(linked_worker.hostname) != str(nodelist):
+                    linked_worker = None
+                job_state = str(_field(job, "state", "")).strip().lower()
+                if (
+                    job_state == "running"
+                    and linked_worker is not None
+                    and linked_worker.drain_state == "active"
+                ):
+                    release_drift_worker_ids_to_drain.add(str(linked_worker.id))
+                elif (
+                    job_state == "running"
+                    and linked_worker is not None
+                    and linked_worker.drain_state in {"draining", "drained"}
+                ):
+                    if in_flight_by_worker.get(linked_worker.id, 0) == 0:
+                        release_drift_worker_ids_to_release.add(str(linked_worker.id))
                 continue
             if str(_field(job, "state", "")).strip().lower() == "pending":
                 pending_slots += slots
@@ -755,6 +830,12 @@ async def _load_observation(
         drained_worker_ids=tuple(drained_worker_ids),
         release_drift_slots=release_drift_slots,
         release_drift_job_ids=tuple(release_drift_job_ids),
+        release_drift_worker_ids_to_drain=tuple(
+            sorted(release_drift_worker_ids_to_drain),
+        ),
+        release_drift_worker_ids_to_release=tuple(
+            sorted(release_drift_worker_ids_to_release),
+        ),
     )
 
 
@@ -1046,7 +1127,7 @@ async def _apply_slurm_scale_up(
             blocked_details=blocked_details,
         )
     runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
-    active_jobs = (
+    recorded_active_jobs = (
         (
             await session.execute(
                 select(SlurmWorkerJob).where(
@@ -1059,6 +1140,37 @@ async def _apply_slurm_scale_up(
         .scalars()
         .all()
     )
+    expected_worker_token_fingerprint = _expected_slurm_worker_token_fingerprint(row)
+    release_drift_jobs = [
+        job
+        for job in recorded_active_jobs
+        if _slurm_release_state_drift(
+            row,
+            job,
+            expected_worker_token_fingerprint=expected_worker_token_fingerprint,
+        )
+    ]
+    if release_drift_jobs:
+        drift_job_ids = sorted(
+            str(_field(job, "job_id") or _field(job, "id") or "unknown")
+            for job in release_drift_jobs
+        )
+        return SlurmScaleUpActuatorResult(
+            error=f"release-state drift in Slurm job(s): {', '.join(drift_job_ids)}",
+            blocked_reason="release_state_drift",
+            blocked_details={
+                "reason": "release_state_drift",
+                "job_ids": drift_job_ids,
+                "nodes": sorted(
+                    {
+                        str(_field(job, "nodelist"))
+                        for job in release_drift_jobs
+                        if _field(job, "nodelist")
+                    },
+                ),
+            },
+        )
+    active_jobs = recorded_active_jobs
     active_nodes = {job.nodelist for job in active_jobs}
     pending_jobs = sum(1 for job in active_jobs if job.state == "pending")
     running_jobs = sum(1 for job in active_jobs if job.state == "running")
@@ -1150,43 +1262,145 @@ async def _apply_slurm_release_drained(
     *,
     runner: SlurmWorkerCommandRunner | None,
     now: datetime,
-) -> None:
+    freshness_sec: int = 120,
+) -> SlurmScaleUpActuatorResult:
     if not decision.worker_ids_to_release:
-        return
-    config = _slurm_config_from_policy(row)
+        return SlurmScaleUpActuatorResult()
+    policy_id = row.id
+    expected_environment = row.environment
+    expected_pool_name = row.pool_name
+    current_row = (
+        await session.execute(
+            select(WorkerPoolAutoscalerPolicy)
+            .where(WorkerPoolAutoscalerPolicy.id == policy_id)
+            .execution_options(populate_existing=True)
+            .with_for_update(),
+        )
+    ).scalar_one_or_none()
+    if (
+        current_row is None
+        or not current_row.enabled
+        or current_row.actuator != "slurm"
+        or current_row.environment != expected_environment
+        or current_row.pool_name != expected_pool_name
+    ):
+        return SlurmScaleUpActuatorResult(
+            error="release-state drift release blocked: autoscaler policy changed",
+            blocked_reason="release_state_drift",
+            blocked_details={
+                "reason": "release_state_drift",
+                "worker_ids": sorted(decision.worker_ids_to_release),
+                "guard_errors": ["autoscaler policy changed"],
+            },
+        )
+    config = _slurm_config_from_policy(current_row)
     runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
     released_worker_ids = set(decision.worker_ids_to_release)
     release_workers = (
-        await session.execute(
-            select(Worker.id, Worker.hostname).where(Worker.id.in_(released_worker_ids)),
-        )
-    ).all()
-    worker_id_by_hostname = {str(hostname): worker_id for worker_id, hostname in release_workers}
-    hostname_matches = tuple(worker_id_by_hostname)
-    job_match_filters: list[Any] = [
-        SlurmWorkerJob.worker_id.in_(released_worker_ids),
-    ]
-    if hostname_matches:
-        job_match_filters.append(
-            SlurmWorkerJob.worker_id.is_(None) & SlurmWorkerJob.nodelist.in_(hostname_matches)
-        )
-    jobs = (
         (
             await session.execute(
-                select(SlurmWorkerJob).where(
-                    SlurmWorkerJob.environment == row.environment,
-                    SlurmWorkerJob.pool_name == row.pool_name,
-                    SlurmWorkerJob.state == "running",
-                    or_(*job_match_filters),
-                ),
+                select(Worker)
+                .where(Worker.id.in_(released_worker_ids))
+                .with_for_update(),
             )
         )
         .scalars()
         .all()
     )
+    worker_by_id = {str(worker.id): worker for worker in release_workers}
+    in_flight_rows = (
+        await session.execute(
+            select(Trial.worker_id)
+            .where(
+                Trial.worker_id.in_(released_worker_ids),
+                Trial.state.in_(("claimed", "running")),
+            )
+            .with_for_update(),
+        )
+    ).all()
+    jobs = (
+        (
+            await session.execute(
+                select(SlurmWorkerJob)
+                .where(
+                    SlurmWorkerJob.worker_id.in_(released_worker_ids),
+                    SlurmWorkerJob.state.in_(ACTIVE_STATES),
+                )
+                .with_for_update(),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    jobs_by_worker_id: dict[str, list[SlurmWorkerJob]] = {}
     for job in jobs:
-        if job.worker_id is None:
-            job.worker_id = worker_id_by_hostname.get(job.nodelist)
+        if job.worker_id is not None:
+            jobs_by_worker_id.setdefault(str(job.worker_id), []).append(job)
+
+    expected_worker_ids = {str(worker_id) for worker_id in released_worker_ids}
+    in_flight_worker_ids = {
+        str(worker_id) for (worker_id,) in in_flight_rows if worker_id is not None
+    }
+    guard_errors: list[str] = []
+    expected_worker_token_fingerprint = _expected_slurm_worker_token_fingerprint(
+        current_row,
+    )
+    jobs_to_cancel: list[SlurmWorkerJob] = []
+    for worker_id in sorted(expected_worker_ids):
+        worker = worker_by_id.get(worker_id)
+        worker_jobs = jobs_by_worker_id.get(worker_id, [])
+        if worker is None:
+            guard_errors.append(f"{worker_id}: fresh active worker missing")
+            continue
+        if (
+            worker.status != "active"
+            or worker.last_seen_at < now - timedelta(seconds=freshness_sec)
+        ):
+            guard_errors.append(f"{worker_id}: worker is not fresh and active")
+        if worker.drain_state not in {"draining", "drained"}:
+            guard_errors.append(f"{worker_id}: worker is not draining")
+        if worker_id in in_flight_worker_ids:
+            guard_errors.append(f"{worker_id}: worker still has in-flight trials")
+        if len(worker_jobs) > 1:
+            guard_errors.append(
+                f"{worker_id}: expected at most one active Slurm job, found {len(worker_jobs)}",
+            )
+            continue
+        if not worker_jobs:
+            continue
+        job = worker_jobs[0]
+        if (
+            job.environment != current_row.environment
+            or job.pool_name != current_row.pool_name
+        ):
+            guard_errors.append(f"{worker_id}: Slurm job belongs to another policy")
+        if job.state != "running":
+            guard_errors.append(f"{worker_id}: Slurm job is not running")
+        if job.nodelist != worker.hostname:
+            guard_errors.append(f"{worker_id}: Slurm job hostname does not match worker")
+        if not job.job_id:
+            guard_errors.append(f"{worker_id}: Slurm job id is missing")
+        if decision.reason == "release_state_drift" and not _slurm_release_state_drift(
+            current_row,
+            job,
+            expected_worker_token_fingerprint=expected_worker_token_fingerprint,
+        ):
+            guard_errors.append(f"{worker_id}: Slurm job no longer has release-state drift")
+        jobs_to_cancel.append(job)
+
+    if guard_errors:
+        message = "; ".join(guard_errors)
+        return SlurmScaleUpActuatorResult(
+            error=f"release-state drift release blocked: {message}",
+            blocked_reason="release_state_drift",
+            blocked_details={
+                "reason": "release_state_drift",
+                "worker_ids": sorted(expected_worker_ids),
+                "guard_errors": guard_errors,
+            },
+        )
+
+    for job in jobs_to_cancel:
         if job.job_id:
             await runner.cancel_job(job.job_id)
         job.state = "cancelled"
@@ -1204,6 +1418,7 @@ async def _apply_slurm_release_drained(
             drain_owner="worker-pool-autoscaler",
         ),
     )
+    return SlurmScaleUpActuatorResult()
 
 
 async def _apply_gb10_host_intent(
@@ -1491,13 +1706,25 @@ async def reconcile_worker_pool_autoscaler_once(
                 now=now,
             )
         elif decision.action == "release_drained" and row.actuator == "slurm":
-            await _apply_slurm_release_drained(
+            slurm_result = await _apply_slurm_release_drained(
                 session,
                 row,
                 decision,
                 runner=slurm_runner,
                 now=now,
+                freshness_sec=freshness_sec,
             )
+            actuator_error = slurm_result.error
+            actuator_blocked_reason = slurm_result.blocked_reason
+            actuator_blocked_details = slurm_result.blocked_details
+            if actuator_blocked_reason is not None:
+                decision = replace(
+                    decision,
+                    action="blocked",
+                    reason=actuator_blocked_reason,
+                    blocked_reason=actuator_blocked_reason,
+                    blocked_details=actuator_blocked_details,
+                )
         elif decision.action == "release_drained" and row.actuator == "gb10":
             await _apply_gb10_host_intent(
                 session,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import subprocess
@@ -16,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from loom_benchmark_tool.db_url import normalize_db_url
+from loom_cli.canary_task_filter import task_filter_targets_only_benchmark
 
 _RAW_SECRET_RE = re.compile(r"(?:hf_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})")
 
@@ -38,7 +40,7 @@ if env_file.exists():
         if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
             env_keys.append(key)
 ps = subprocess.run(
-    ["docker", "ps", "-a", "--filter", "name=worker", "--format", "{{.Names}}"],
+    ["docker", "ps", "--filter", "name=worker", "--format", "{{.Names}}"],
     capture_output=True,
     text=True,
 )
@@ -88,6 +90,42 @@ def _int(value: Any) -> int:
 
 def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _canonical_json_sha256(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _candidate_binding_from_gb10_status(
+    status: dict[str, Any],
+    *,
+    environment: str,
+) -> dict[str, Any]:
+    desired_states = status.get("desired_states")
+    if not isinstance(desired_states, list) or len(desired_states) != 1:
+        raise HfBoundaryEvidenceError(
+            "--gb10-workers-status must contain exactly one desired state"
+        )
+    desired = desired_states[0]
+    if not isinstance(desired, dict):
+        raise HfBoundaryEvidenceError("GB10 desired state must be an object")
+    if desired.get("environment") != environment:
+        raise HfBoundaryEvidenceError(
+            "GB10 desired-state environment does not match HF evidence environment"
+        )
+    image_tag = desired.get("image_tag")
+    source_git_commit = desired.get("source_git_commit")
+    if not isinstance(image_tag, str) or not image_tag:
+        raise HfBoundaryEvidenceError("GB10 desired state image_tag is required")
+    if not isinstance(source_git_commit, str) or not source_git_commit:
+        raise HfBoundaryEvidenceError("GB10 desired state source_git_commit is required")
+    return {
+        "environment": environment,
+        "release_image_tag": image_tag,
+        "release_git_sha": source_git_commit,
+        "gb10_workers_status_sha256": _canonical_json_sha256(status),
+    }
 
 
 def _secret_leak_paths(value: Any, *, path: str = "") -> list[str]:
@@ -178,15 +216,19 @@ def compose_boundary_evidence(
         raise HfBoundaryEvidenceError(
             "sample task tags must include hf_repo_id and hf_revision",
         )
+    valid_task_config_count = audit_item.get("valid_task_config_count")
+    runnable_tasks = _int(
+        audit_item.get("raw_task_count")
+        if valid_task_config_count is None
+        else valid_task_config_count
+    )
 
     return {
         "schema_version": 1,
         "environment": environment,
         "benchmark_id": benchmark_id,
         "catalog": {
-            "runnable_tasks": _int(
-                audit_item.get("valid_task_config_count") or audit_item.get("raw_task_count")
-            ),
+            "runnable_tasks": runnable_tasks,
             "requires_caps": {
                 "cpu_arch": str(task_environment.get("cpu_arch") or ""),
             },
@@ -219,6 +261,9 @@ def compose_boundary_evidence(
             "canary_batch_id": canary_summary.get("batch_id"),
             "canary_task_filter": canary_summary.get("task_filter"),
             "canary_worker_pools": canary_summary.get("worker_pools"),
+            "expected_trial_count": canary_summary.get("expected_trial_count"),
+            "succeeded_trials": canary_summary.get("succeeded_trials"),
+            "canary_task_provenance": canary_summary.get("task_provenance"),
             "gb10_hf_token_check_summary": worker_summary,
         },
         "secret_scan": {"raw_secret_values_present": False},
@@ -334,21 +379,69 @@ async def collect_source_summary_from_db(
     }
 
 
-def _task_filter_mentions_benchmark(
-    task_filter: Mapping[str, Any],
+def _is_successful_canary_row(
+    row: Mapping[str, Any],
+    *,
     benchmark_id: str,
+    worker_pool: str,
 ) -> bool:
-    if task_filter.get("benchmark_id") == benchmark_id:
-        return True
-    benchmark_ids = task_filter.get("benchmark_ids")
-    if isinstance(benchmark_ids, list) and benchmark_id in benchmark_ids:
-        return True
-    task_ids = task_filter.get("task_ids")
-    return isinstance(task_ids, list) and any(
-        isinstance(task_id, str)
-        and (task_id == benchmark_id or task_id.startswith(f"{benchmark_id}/"))
-        for task_id in task_ids
+    task_filter = _mapping(row.get("task_filter"))
+    required_pools = row.get("required_worker_pools")
+    return (
+        row.get("state") == "finished"
+        and row.get("result_status") == "succeeded"
+        and task_filter_targets_only_benchmark(task_filter, benchmark_id)
+        and isinstance(required_pools, list)
+        and worker_pool in required_pools
     )
+
+
+def _summarize_canary_trials(
+    trial_rows: Sequence[Mapping[str, Any]],
+    *,
+    benchmark_id: str,
+) -> dict[str, Any]:
+    terminal: dict[str, int] = {}
+    active: dict[str, int] = {}
+    succeeded_trials = 0
+    target_benchmark_trials = 0
+    non_target_trials = 0
+    task_set_trials = 0
+    task_benchmark_ids: set[str] = set()
+    worker_ids: list[str | None] = []
+    for row in trial_rows:
+        state = str(row.get("state") or "")
+        pool = str(row.get("pool_name") or "unknown")
+        task_benchmark_id = row.get("task_benchmark_id")
+        task_set_id = row.get("task_set_id")
+        worker_id = row.get("worker_id")
+        worker_ids.append(
+            worker_id if isinstance(worker_id, str) and worker_id else None,
+        )
+        if state == "succeeded":
+            succeeded_trials += 1
+        if task_benchmark_id == benchmark_id:
+            target_benchmark_trials += 1
+        else:
+            non_target_trials += 1
+        if isinstance(task_benchmark_id, str) and task_benchmark_id:
+            task_benchmark_ids.add(task_benchmark_id)
+        if task_set_id is not None:
+            task_set_trials += 1
+        bucket = terminal if state in {"succeeded", "failed", "cancelled"} else active
+        bucket[pool] = bucket.get(pool, 0) + 1
+    return {
+        "worker_pools": {"active": active, "terminal": terminal},
+        "succeeded_trials": succeeded_trials,
+        "task_provenance": {
+            "trial_count": len(trial_rows),
+            "target_benchmark_trial_count": target_benchmark_trials,
+            "non_target_trial_count": non_target_trials,
+            "task_set_trial_count": task_set_trials,
+            "benchmark_ids": sorted(task_benchmark_ids),
+            "worker_ids": worker_ids,
+        },
+    }
 
 
 async def collect_canary_summary_from_db(
@@ -405,12 +498,10 @@ async def collect_canary_summary_from_db(
 
             selected: dict[str, Any] | None = None
             for row in rows:
-                task_filter = _mapping(row.get("task_filter"))
-                required_pools = row.get("required_worker_pools")
-                if (
-                    _task_filter_mentions_benchmark(task_filter, benchmark_id)
-                    and isinstance(required_pools, list)
-                    and worker_pool in required_pools
+                if _is_successful_canary_row(
+                    dict(row),
+                    benchmark_id=benchmark_id,
+                    worker_pool=worker_pool,
                 ):
                     selected = dict(row)
                     break
@@ -425,10 +516,15 @@ async def collect_canary_summary_from_db(
                     await conn.execute(
                         text(
                             """
-                        SELECT t.state, w.pool_name
+                        SELECT t.state, t.worker_id::text AS worker_id,
+                               w.pool_name,
+                               task.benchmark_id AS task_benchmark_id,
+                               task.task_set_id
                         FROM trials t
                         LEFT JOIN workers w ON w.id = t.worker_id
+                        LEFT JOIN tasks task ON task.id = t.task_id
                         WHERE t.batch_id = CAST(:batch_id AS uuid)
+                        ORDER BY t.id
                         """
                         ),
                         {"batch_id": selected["id"]},
@@ -440,25 +536,20 @@ async def collect_canary_summary_from_db(
     finally:
         await engine.dispose()
 
-    terminal: dict[str, int] = {}
-    active: dict[str, int] = {}
-    succeeded_trials = 0
-    for row in trial_rows:
-        state = str(row.get("state") or "")
-        pool = str(row.get("pool_name") or "unknown")
-        if state == "succeeded":
-            succeeded_trials += 1
-        bucket = terminal if state in {"succeeded", "failed", "cancelled"} else active
-        bucket[pool] = bucket.get(pool, 0) + 1
+    trial_summary = _summarize_canary_trials(
+        [dict(row) for row in trial_rows],
+        benchmark_id=benchmark_id,
+    )
 
     return {
         "batch_id": selected["id"],
         "canary_started": bool(selected.get("created_at")),
         "terminal_state": selected.get("result_status") or selected.get("state"),
         "task_filter": selected.get("task_filter"),
-        "worker_pools": {"active": active, "terminal": terminal},
+        "worker_pools": trial_summary["worker_pools"],
         "expected_trial_count": selected.get("expected_trial_count"),
-        "succeeded_trials": succeeded_trials,
+        "succeeded_trials": trial_summary["succeeded_trials"],
+        "task_provenance": trial_summary["task_provenance"],
     }
 
 
@@ -588,12 +679,14 @@ def collect_worker_boundary_from_gb10(
             argv.extend(["-i", str(ssh_identity), "-o", "IdentitiesOnly=yes"])
         if ssh_certificate is not None:
             argv.extend(["-o", f"CertificateFile={ssh_certificate}"])
-        argv.extend([
-            target,
-            "python3",
-            "-",
-            repo_path,
-        ])
+        argv.extend(
+            [
+                target,
+                "python3",
+                "-",
+                repo_path,
+            ]
+        )
         proc = subprocess.run(
             argv,
             capture_output=True,
@@ -614,7 +707,16 @@ def collect_worker_boundary_from_gb10(
         results.append(entry)
     summary = {
         "checked_hosts": len(results),
+        "checked_host_names": sorted(r["host"] for r in results),
         "ssh_failed_hosts": [r["host"] for r in results if not r.get("ssh_ok")],
+        "docker_ps_failed_hosts": sorted(
+            r["host"] for r in results if r.get("ssh_ok") and r.get("docker_ps_ok") is not True
+        ),
+        "hosts_without_containers": sorted(
+            r["host"]
+            for r in results
+            if r.get("ssh_ok") and r.get("docker_ps_ok") is True and not (r.get("containers") or [])
+        ),
         "env_file_missing_hosts": [
             r["host"] for r in results if r.get("ssh_ok") and not r.get("env_file_exists")
         ],
@@ -777,6 +879,16 @@ def run_hf_boundary_evidence_command(args: Any) -> int:
             source_summary=source_summary,
             canary_summary=canary,
             worker_boundary=worker_boundary,
+        )
+        if not args.gb10_workers_status:
+            raise HfBoundaryEvidenceError(
+                "hf-boundary-evidence requires --gb10-workers-status for candidate binding"
+            )
+        gb10_status_path = Path(args.gb10_workers_status)
+        gb10_status = _read_json(gb10_status_path)
+        evidence["candidate_binding"] = _candidate_binding_from_gb10_status(
+            gb10_status,
+            environment=args.environment,
         )
         evidence["evidence_inputs"] = {
             "audit_json": str(args.audit_json) if args.audit_json else None,

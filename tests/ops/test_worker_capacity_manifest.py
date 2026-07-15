@@ -69,9 +69,10 @@ def test_default_manifest_is_prod_first_and_secret_safe() -> None:
     assert completed.returncode == 0, completed.stderr
     report = json.loads(completed.stdout)
     assert report["status"] == "pass"
-    assert report["summary"]["prod_slots"] == 190
+    assert report["summary"]["total_slots"] == 190
+    assert report["summary"]["prod_slots"] == 180
     assert report["summary"]["staging_slots"] == 0
-    assert report["summary"]["state_counts"].get("unreachable", 0) == 0
+    assert report["summary"]["state_counts"].get("unreachable", 0) == 1
 
     hosts = {item["host"]: item for item in report["desired_hosts"]}
     assert hosts["trt-gb10-1"]["prod_slots"] == 10
@@ -79,6 +80,10 @@ def test_default_manifest_is_prod_first_and_secret_safe() -> None:
     assert hosts["trt-gb10-14"]["state"] == "eligible"
     assert hosts["trt-gb10-14"]["prod_slots"] == 10
     assert hosts["trt-gb10-14"]["staging_slots"] == 0
+    assert hosts["trt-gb10-7"]["state"] == "unreachable"
+    assert hosts["trt-gb10-7"]["prod_slots"] == 0
+    assert hosts["trt-gb10-7"]["staging_slots"] == 0
+    assert "#822" in hosts["trt-gb10-7"]["reason"]
     assert "Bearer" not in completed.stdout
     assert "sk-" not in completed.stdout
     assert "loom_api_" not in completed.stdout

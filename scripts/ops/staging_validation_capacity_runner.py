@@ -21,7 +21,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -33,7 +33,12 @@ from loom_cli.secret_source import (
     secret_source_argparse_type,
 )
 
-DEFAULT_HOSTS = tuple(f"trt-gb10-{i}" for i in range(1, 16))
+FULL_GB10_HOSTS = tuple(f"trt-gb10-{i}" for i in range(1, 16))
+TEMPORARILY_EXCLUDED_HOSTS = frozenset({"trt-gb10-7"})
+DEFAULT_HOSTS = tuple(host for host in FULL_GB10_HOSTS if host not in TEMPORARILY_EXCLUDED_HOSTS)
+EXPECTED_MAX_CONCURRENT = 10
+FULL_GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
+STAGING_IMAGE_TAG_RE = re.compile(r"staging-([0-9a-f]{7,40})")
 DEFAULT_NODE_AGENT_SERVICE = "loom-gb10-node-agent.service"
 SECRET_PATTERNS = (
     re.compile(r"\b[Bb]earer\s+[A-Za-z0-9._~+/=-]{8,}"),
@@ -112,10 +117,28 @@ def _host_list(value: str | None) -> tuple[str, ...]:
     hosts = tuple(host.strip() for host in value.split(",") if host.strip())
     if not hosts:
         raise argparse.ArgumentTypeError("--hosts must contain at least one host")
+    if len(hosts) != len(set(hosts)):
+        raise argparse.ArgumentTypeError("--hosts must not contain duplicate hosts")
+    unknown = sorted(set(hosts) - set(FULL_GB10_HOSTS))
+    if unknown:
+        raise argparse.ArgumentTypeError(
+            f"--hosts contains hosts outside the fixed GB10 inventory: {', '.join(unknown)}"
+        )
+    excluded = sorted(set(hosts) & TEMPORARILY_EXCLUDED_HOSTS)
+    if excluded:
+        raise argparse.ArgumentTypeError(
+            "--hosts contains temporarily excluded hosts that require merged re-admission: "
+            + ", ".join(excluded)
+        )
+    if hosts != DEFAULT_HOSTS:
+        raise argparse.ArgumentTypeError(
+            "--hosts must match the exact merged active GB10 host set; runtime host skips "
+            "or reordering are not allowed"
+        )
     return hosts
 
 
-def replayable_secret_source_arg(flag_name: str):
+def replayable_secret_source_arg(flag_name: str) -> Callable[[str], str]:
     base = secret_source_argparse_type(flag_name)
 
     def _validate(value: str) -> str:
@@ -144,19 +167,45 @@ def desired_state_payload(
     ttl_seconds: int,
     adjust_idle_exit: bool,
 ) -> dict[str, Any]:
-    max_concurrent = int(current.get("max_concurrent") or 0)
-    if max_concurrent <= 0:
-        raise ValueError("current desired state lacks positive max_concurrent")
+    try:
+        max_concurrent = int(current.get("max_concurrent") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("current desired state max_concurrent is invalid") from exc
+    if max_concurrent != EXPECTED_MAX_CONCURRENT:
+        raise ValueError(
+            "current desired state max_concurrent must match the exact merged "
+            f"GB10 value {EXPECTED_MAX_CONCURRENT}"
+        )
     env = dict(current.get("env") or {})
     if adjust_idle_exit and intent == "active":
         env["LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS"] = str(ttl_seconds)
+    raw_host_intents = current.get("host_intents") or {}
+    if not isinstance(raw_host_intents, Mapping):
+        raise ValueError("current desired state host_intents must be an object")
+    host_intents = {str(host): str(value) for host, value in raw_host_intents.items()}
+    unknown_intents = sorted(set(host_intents) - set(FULL_GB10_HOSTS))
+    if unknown_intents:
+        raise ValueError(
+            "current desired state contains hosts outside the fixed GB10 inventory: "
+            + ", ".join(unknown_intents)
+        )
+    selected = set(hosts)
+    excluded_selected = sorted(selected & TEMPORARILY_EXCLUDED_HOSTS)
+    if excluded_selected:
+        raise ValueError(
+            "temporarily excluded hosts require merged re-admission: "
+            + ", ".join(excluded_selected)
+        )
+    for host in TEMPORARILY_EXCLUDED_HOSTS:
+        host_intents[host] = "stopped"
+    host_intents.update({host: intent for host in hosts})
     return {
         "image_tag": current["image_tag"],
         "max_concurrent": max_concurrent,
         "env_config_version": current["env_config_version"],
         "source_git_commit": current.get("source_git_commit"),
         "target_slots": _target_slots(hosts, max_concurrent, intent),
-        "host_intents": {host: intent for host in hosts},
+        "host_intents": host_intents,
         "rollout_policy": current.get("rollout_policy") or {},
         "env": env,
         "force": bool(current.get("force") or False),
@@ -190,7 +239,9 @@ def _http_json(
             payload = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"{method} {path} failed HTTP {exc.code}: {redact_text(detail)}") from exc
+        raise RuntimeError(
+            f"{method} {path} failed HTTP {exc.code}: {redact_text(detail)}"
+        ) from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"{method} {path} failed: {redact_text(str(exc.reason))}") from exc
     if not payload:
@@ -244,58 +295,200 @@ def fetch_status(args: argparse.Namespace, admin_token: str) -> dict[str, Any]:
     )
 
 
-def _node_by_host(status: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
-    nodes = status.get("nodes")
-    if not isinstance(nodes, list):
-        return {}
+def _candidate_identity_mismatches(
+    *, image_tag: str, env_config_version: str, source_git_commit: str | None
+) -> list[str]:
+    errors: list[str] = []
+    if env_config_version != image_tag:
+        errors.append(
+            "candidate env_config_version must exactly match image_tag "
+            f"({env_config_version!r} != {image_tag!r})"
+        )
+    image_match = STAGING_IMAGE_TAG_RE.fullmatch(image_tag)
+    if image_match is None:
+        errors.append("candidate image_tag must be staging-<7-to-40-character-lowercase-sha>")
+    if (
+        not isinstance(source_git_commit, str)
+        or FULL_GIT_SHA_RE.fullmatch(source_git_commit) is None
+    ):
+        errors.append("expected source_git_commit must be a full lowercase 40-character SHA")
+    elif image_match is not None and not source_git_commit.startswith(image_match.group(1)):
+        errors.append("candidate image_tag SHA must match the source_git_commit prefix")
+    return errors
+
+
+def _nodes_by_host(
+    status: Mapping[str, Any], *, environment: str, pool_name: str
+) -> tuple[dict[str, Mapping[str, Any]], list[str]]:
+    raw_nodes = status.get("nodes")
+    if not isinstance(raw_nodes, list):
+        return {}, ["nodes: missing or invalid node inventory"]
     out: dict[str, Mapping[str, Any]] = {}
-    for node in nodes:
-        if isinstance(node, Mapping) and isinstance(node.get("hostname"), str):
-            out[str(node["hostname"])] = node
-    return out
+    errors: list[str] = []
+    for index, node in enumerate(raw_nodes):
+        if not isinstance(node, Mapping):
+            errors.append(f"nodes[{index}]: invalid node entry")
+            continue
+        hostname = node.get("hostname")
+        if not isinstance(hostname, str) or not hostname.strip():
+            errors.append(f"nodes[{index}]: invalid hostname")
+            continue
+        hostname = hostname.strip()
+        if node.get("environment") != environment:
+            errors.append(f"{hostname}: environment={node.get('environment')!r}")
+        if node.get("pool_name") != pool_name:
+            errors.append(f"{hostname}: pool_name={node.get('pool_name')!r}")
+        if hostname in out:
+            errors.append(f"nodes: duplicate hostname {hostname}")
+            continue
+        out[hostname] = node
+    return out, errors
 
 
 def status_mismatches(
     status: Mapping[str, Any],
     *,
     hosts: Sequence[str],
+    environment: str,
+    pool_name: str,
     intent: str,
     image_tag: str,
     env_config_version: str,
+    source_git_commit: str | None,
 ) -> list[str]:
-    nodes = _node_by_host(status)
-    errors: list[str] = []
+    nodes, errors = _nodes_by_host(status, environment=environment, pool_name=pool_name)
+    if intent == "active":
+        errors.extend(
+            _candidate_identity_mismatches(
+                image_tag=image_tag,
+                env_config_version=env_config_version,
+                source_git_commit=source_git_commit,
+            )
+        )
+    unlinked_workers = status.get("unlinked_workers")
+    if not isinstance(unlinked_workers, list):
+        errors.append("unlinked_workers: missing or invalid worker inventory")
+        unlinked_workers = []
+    unlinked_worker_ids: set[str] = set()
+    for index, worker in enumerate(unlinked_workers):
+        if not isinstance(worker, Mapping):
+            errors.append(f"unlinked_workers[{index}]: invalid worker entry")
+            continue
+        worker_id = worker.get("worker_id")
+        hostname = worker.get("hostname")
+        unlinked_pool_name = worker.get("pool_name")
+        worker_fresh = worker.get("worker_fresh")
+        if not isinstance(worker_id, str) or not worker_id.strip():
+            errors.append(f"unlinked_workers[{index}]: invalid worker_id")
+        else:
+            normalized_worker_id = worker_id.strip()
+            if normalized_worker_id in unlinked_worker_ids:
+                errors.append(f"unlinked_workers: duplicate worker_id {normalized_worker_id}")
+            else:
+                unlinked_worker_ids.add(normalized_worker_id)
+        if not isinstance(hostname, str) or not hostname.strip():
+            errors.append(f"unlinked_workers[{index}]: invalid hostname")
+        if not isinstance(unlinked_pool_name, str) or not unlinked_pool_name.strip():
+            errors.append(f"unlinked_workers[{index}]: invalid pool_name")
+        if not isinstance(worker_fresh, bool):
+            errors.append(f"unlinked_workers[{index}]: invalid worker_fresh")
+        elif worker_fresh:
+            errors.append(f"{hostname or '-'}: unlinked fresh worker {worker_id or '-'}")
+    allowed_hosts = set(hosts) | set(TEMPORARILY_EXCLUDED_HOSTS)
+    for host in sorted(set(nodes) - allowed_hosts):
+        node = nodes[host]
+        self_reported_intent = node.get("desired_intent") or node.get("current_intent")
+        if (
+            node.get("worker_fresh") is True
+            or node.get("worker_status") == "active"
+            or self_reported_intent == "active"
+            or node.get("apply_state") == "applied"
+        ):
+            errors.append(f"{host}: undeclared host reports active worker state")
+    for host in sorted(TEMPORARILY_EXCLUDED_HOSTS):
+        excluded_node = nodes.get(host)
+        if excluded_node is not None:
+            if excluded_node.get("desired_intent") != "stopped":
+                errors.append(
+                    f"{host}: excluded desired_intent={excluded_node.get('desired_intent')!r}"
+                )
+            if excluded_node.get("current_intent") != "stopped":
+                errors.append(
+                    f"{host}: excluded current_intent={excluded_node.get('current_intent')!r}"
+                )
+            if excluded_node.get("apply_state") != "stopped":
+                errors.append(f"{host}: excluded apply_state={excluded_node.get('apply_state')!r}")
+            if excluded_node.get("worker_fresh") is True:
+                errors.append(f"{host}: temporarily excluded host still has a fresh worker")
+    active_worker_hosts: dict[str, str] = {}
     for host in hosts:
-        node = nodes.get(host)
-        if node is None:
+        selected_node = nodes.get(host)
+        if selected_node is None:
             errors.append(f"{host}: missing node report")
             continue
-        if node.get("desired_intent") != intent:
-            errors.append(f"{host}: desired_intent={node.get('desired_intent')!r}")
-        if node.get("current_intent") != intent:
-            errors.append(f"{host}: current_intent={node.get('current_intent')!r}")
+        if selected_node.get("desired_intent") != intent:
+            errors.append(f"{host}: desired_intent={selected_node.get('desired_intent')!r}")
+        if selected_node.get("current_intent") != intent:
+            errors.append(f"{host}: current_intent={selected_node.get('current_intent')!r}")
+        if selected_node.get("desired_max_concurrent") != EXPECTED_MAX_CONCURRENT:
+            errors.append(
+                f"{host}: desired_max_concurrent={selected_node.get('desired_max_concurrent')!r}"
+            )
+        if selected_node.get("current_max_concurrent") != EXPECTED_MAX_CONCURRENT:
+            errors.append(
+                f"{host}: current_max_concurrent={selected_node.get('current_max_concurrent')!r}"
+            )
         expected_apply_state = {
             "active": "applied",
             "draining": "draining",
             "stopped": "stopped",
         }[intent]
-        if node.get("apply_state") != expected_apply_state:
-            errors.append(f"{host}: apply_state={node.get('apply_state')!r}")
-        if node.get("current_image_tag") != image_tag:
-            errors.append(f"{host}: current_image_tag={node.get('current_image_tag')!r}")
-        if node.get("current_env_config_version") != env_config_version:
+        if selected_node.get("apply_state") != expected_apply_state:
+            errors.append(f"{host}: apply_state={selected_node.get('apply_state')!r}")
+        if selected_node.get("current_image_tag") != image_tag:
+            errors.append(f"{host}: current_image_tag={selected_node.get('current_image_tag')!r}")
+        if selected_node.get("current_env_config_version") != env_config_version:
             errors.append(
-                f"{host}: current_env_config_version={node.get('current_env_config_version')!r}",
+                f"{host}: current_env_config_version={selected_node.get('current_env_config_version')!r}",
             )
         if intent == "active":
-            if node.get("worker_fresh") is not True:
-                errors.append(f"{host}: worker_fresh={node.get('worker_fresh')!r}")
-            backend_names = node.get("worker_backend_names") or []
+            worker_id = selected_node.get("worker_id")
+            if not isinstance(worker_id, str) or not worker_id.strip():
+                errors.append(f"{host}: worker_id={worker_id!r}")
+            else:
+                worker_id = worker_id.strip()
+                previous_host = active_worker_hosts.get(worker_id)
+                if previous_host is not None:
+                    errors.append(
+                        f"{host}: worker_id={worker_id!r} is already linked to {previous_host}"
+                    )
+                else:
+                    active_worker_hosts[worker_id] = host
+                if worker_id in unlinked_worker_ids:
+                    errors.append(f"{host}: worker_id={worker_id!r} also appears unlinked")
+            if selected_node.get("worker_status") != "active":
+                errors.append(f"{host}: worker_status={selected_node.get('worker_status')!r}")
+            if selected_node.get("worker_fresh") is not True:
+                errors.append(f"{host}: worker_fresh={selected_node.get('worker_fresh')!r}")
+            backend_names = selected_node.get("worker_backend_names")
+            if not isinstance(backend_names, list) or not all(
+                isinstance(name, str) and name for name in backend_names
+            ):
+                errors.append(f"{host}: worker_backend_names must be a list of non-empty strings")
+                backend_names = []
             if "docker" not in backend_names:
                 errors.append(f"{host}: docker backend missing")
-        elif intent == "draining" and node.get("worker_fresh") is True:
+            if selected_node.get("source_git_commit") != source_git_commit:
+                errors.append(
+                    f"{host}: source_git_commit={selected_node.get('source_git_commit')!r}"
+                )
+            if selected_node.get("source_git_dirty") is not False:
+                errors.append(
+                    f"{host}: source_git_dirty={selected_node.get('source_git_dirty')!r}"
+                )
+        elif intent == "draining" and selected_node.get("worker_fresh") is True:
             errors.append(f"{host}: worker still fresh after draining intent")
-        elif intent == "stopped" and node.get("worker_fresh") is True:
+        elif intent == "stopped" and selected_node.get("worker_fresh") is True:
             errors.append(f"{host}: worker still fresh after stopped intent")
     return errors
 
@@ -331,7 +524,9 @@ def start_node_agents(
             (run_dir / f"{host}.log").write_text(
                 "dry_run=true\n"
                 + "command="
-                + shlex.join([*_ssh_base(args), host, _node_agent_start_command(args.node_agent_service)])
+                + shlex.join(
+                    [*_ssh_base(args), host, _node_agent_start_command(args.node_agent_service)]
+                )
                 + "\n",
                 encoding="utf-8",
             )
@@ -392,6 +587,7 @@ def wait_for_status(
     intent: str,
     image_tag: str,
     env_config_version: str,
+    source_git_commit: str | None,
     evidence_dir: Path,
     phase: str,
 ) -> PhaseResult:
@@ -403,9 +599,12 @@ def wait_for_status(
         last_mismatches = status_mismatches(
             last_status,
             hosts=hosts,
+            environment=args.environment,
+            pool_name=args.pool_name,
             intent=intent,
             image_tag=image_tag,
             env_config_version=env_config_version,
+            source_git_commit=source_git_commit,
         )
         if not last_mismatches:
             path = evidence_dir / f"gb10-status-{phase}.json"
@@ -433,7 +632,9 @@ def wait_for_status(
 
 def run_validation_command(args: argparse.Namespace, evidence_dir: Path) -> PhaseResult:
     if not args.validation_command:
-        return PhaseResult(phase="validation-command", ok=True, detail="no validation command supplied")
+        return PhaseResult(
+            phase="validation-command", ok=True, detail="no validation command supplied"
+        )
     log_path = evidence_dir / "validation-command.log"
     if args.dry_run:
         log_path.write_text(
@@ -478,6 +679,7 @@ def run(args: argparse.Namespace) -> int:
     phases: list[PhaseResult] = []
     validation_rc = 0
     release_intent = "stopped"
+    activation_mutation_started = False
     try:
         admin_token = resolve_secret_source(args.admin_token, flag_name="--admin-token")
     except SecretSourceError as exc:
@@ -497,6 +699,18 @@ def run(args: argparse.Namespace) -> int:
             ttl_seconds=args.lease_ttl_seconds,
             adjust_idle_exit=not args.no_adjust_idle_exit,
         )
+        active_source_git_commit = active_payload.get("source_git_commit")
+        identity_errors = _candidate_identity_mismatches(
+            image_tag=str(active_payload["image_tag"]),
+            env_config_version=str(active_payload["env_config_version"]),
+            source_git_commit=(
+                active_source_git_commit if isinstance(active_source_git_commit, str) else None
+            ),
+        )
+        if identity_errors:
+            raise ValueError("; ".join(identity_errors))
+        assert isinstance(active_source_git_commit, str)
+        activation_mutation_started = True
         active_desired = put_desired_state(args, admin_token, active_payload)
         active_desired_path = evidence_dir / "gb10-desired-state-active.json"
         _write_json(active_desired_path, active_desired)
@@ -515,6 +729,7 @@ def run(args: argparse.Namespace) -> int:
             intent="active",
             image_tag=str(active_payload["image_tag"]),
             env_config_version=str(active_payload["env_config_version"]),
+            source_git_commit=active_source_git_commit,
             evidence_dir=evidence_dir,
             phase="active",
         )
@@ -534,39 +749,51 @@ def run(args: argparse.Namespace) -> int:
         return 1
     finally:
         try:
-            release_intent = release_intent_for_result(validation_rc, args.release_intent)
-            current_for_release = fetch_desired_state(args, admin_token)
-            release_payload = desired_state_payload(
-                current_for_release,
-                hosts=hosts,
-                intent=release_intent,
-                ttl_seconds=args.lease_ttl_seconds,
-                adjust_idle_exit=False,
-            )
-            released = put_desired_state(args, admin_token, release_payload)
-            release_path = evidence_dir / f"gb10-desired-state-{release_intent}.json"
-            _write_json(release_path, released)
-            phases.append(PhaseResult(f"desired-state-{release_intent}", True, str(release_path)))
-            phase = start_node_agents(
-                args,
-                hosts=hosts,
-                phase=release_intent,
-                evidence_dir=evidence_dir,
-            )
-            phases.append(phase)
-            if phase.ok and args.wait_for_release:
+            if not activation_mutation_started:
                 phases.append(
-                    wait_for_status(
-                        args,
-                        admin_token,
-                        hosts=hosts,
-                        intent=release_intent,
-                        image_tag=str(release_payload["image_tag"]),
-                        env_config_version=str(release_payload["env_config_version"]),
-                        evidence_dir=evidence_dir,
-                        phase=release_intent,
-                    ),
+                    PhaseResult(
+                        "desired-state-release-skipped",
+                        True,
+                        detail="active desired-state mutation was not attempted",
+                    )
                 )
+            else:
+                release_intent = release_intent_for_result(validation_rc, args.release_intent)
+                current_for_release = fetch_desired_state(args, admin_token)
+                release_payload = desired_state_payload(
+                    current_for_release,
+                    hosts=hosts,
+                    intent=release_intent,
+                    ttl_seconds=args.lease_ttl_seconds,
+                    adjust_idle_exit=False,
+                )
+                released = put_desired_state(args, admin_token, release_payload)
+                release_path = evidence_dir / f"gb10-desired-state-{release_intent}.json"
+                _write_json(release_path, released)
+                phases.append(
+                    PhaseResult(f"desired-state-{release_intent}", True, str(release_path))
+                )
+                phase = start_node_agents(
+                    args,
+                    hosts=hosts,
+                    phase=release_intent,
+                    evidence_dir=evidence_dir,
+                )
+                phases.append(phase)
+                if phase.ok and args.wait_for_release:
+                    phases.append(
+                        wait_for_status(
+                            args,
+                            admin_token,
+                            hosts=hosts,
+                            intent=release_intent,
+                            image_tag=str(release_payload["image_tag"]),
+                            env_config_version=str(release_payload["env_config_version"]),
+                            source_git_commit=None,
+                            evidence_dir=evidence_dir,
+                            phase=release_intent,
+                        ),
+                    )
         except Exception as exc:
             phases.append(PhaseResult("release-error", False, detail=redact_text(str(exc))))
         finally:
@@ -604,7 +831,10 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument("--environment", default="staging")
     parser.add_argument("--pool-name", default="gb10-arm64")
-    parser.add_argument("--hosts", help="Comma-separated GB10 SSH aliases.")
+    parser.add_argument(
+        "--hosts",
+        help="Exact comma-separated merged active GB10 set; runtime host skips are rejected.",
+    )
     parser.add_argument("--ssh-config", required=True, type=Path)
     parser.add_argument("--ssh-identity", type=Path)
     parser.add_argument("--ssh-connect-timeout", type=int, default=10)

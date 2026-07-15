@@ -10,11 +10,12 @@
 environment = "staging"
 
 [[worker_pool_autoscaler_policies]]
+# #822: active capacity is 14 hosts / 140 slots; node 7 remains stopped below.
 pool_name = "gb10-arm64"
 actuator = "slurm"
 enabled = true
 min_slots = 0
-max_slots = 150
+max_slots = 140
 scale_up_threshold_slots = 1
 scale_down_idle_seconds = 600
 scale_up_cooldown_seconds = 60
@@ -33,7 +34,6 @@ allowed_nodes = [
   "trt-gb10-4",
   "trt-gb10-5",
   "trt-gb10-6",
-  "trt-gb10-7",
   "trt-gb10-8",
   "trt-gb10-9",
   "trt-gb10-10",
@@ -48,7 +48,7 @@ repo_dir = "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}"
 requested_cpus = 20
 requested_memory_mib = 115000
 requested_concurrency = 10
-max_jobs = 15
+max_jobs = 14
 pending_job_cap = 2
 time_limit = "2-00:00:00"
 exclusive = true
@@ -60,7 +60,7 @@ image_tag = "${IMAGE_TAG}"
 max_concurrent = 10
 env_config_version = "${ENV_CONFIG_VERSION}"
 source_git_commit = "${GIT_SHA}"
-target_slots = 150
+target_slots = 140
 
 [gb10_worker_pool_desired_states.host_intents]
 trt-gb10-1 = "active"
@@ -69,7 +69,7 @@ trt-gb10-3 = "active"
 trt-gb10-4 = "active"
 trt-gb10-5 = "active"
 trt-gb10-6 = "active"
-trt-gb10-7 = "active"
+trt-gb10-7 = "stopped"
 trt-gb10-8 = "active"
 trt-gb10-9 = "active"
 trt-gb10-10 = "active"

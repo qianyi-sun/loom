@@ -56,6 +56,7 @@ PLANNER_PATHS = {
 PROTECTED_STAGING_ROLLOUT_EXACT = {
     "deploy/environments/staging.cluster.toml",
     "deploy/environment-state/staging.toml",
+    "deploy/worker-pools/gb10/known_hosts",
     "deploy/worker-pools/gb10/ssh_config",
     "scripts/ops/verify_staging_rollout_secret_boundary.py",
     "tests/loom_cli/test_cluster_render.py",
