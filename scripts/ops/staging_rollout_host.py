@@ -85,10 +85,59 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_PROTECTED_INPUT_BYTES = 4 << 20
 _MAX_KUBECONFIG_BYTES = 1 << 20
 _ROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+_ACL_PERMISSIONS_RE = re.compile(r"^[r-][w-][x-]$")
+_ACL_ENTRY_RE = re.compile(
+    r"(?:(default):)?(user|group|mask|other):([^:]*):([rwx-]{3})"
+    r"(?:\s+#effective:([rwx-]{3}))?"
+)
+_ACL_SNAPSHOT_ENTRY_RE = re.compile(r"(user|group|mask|other):([^:]*):([rwx-]{3})")
+_ACL_ENTRY_ORDER = {"user": 0, "group": 1, "mask": 2, "other": 3}
 
 
 class InstallError(RuntimeError):
     """Fail-closed installation or convergence error."""
+
+
+def _acl_snapshot_map(
+    snapshot: Sequence[str],
+    *,
+    allow_empty: bool,
+) -> dict[tuple[str, str], str]:
+    entries: dict[tuple[str, str], str] = {}
+    for raw_entry in snapshot:
+        if not isinstance(raw_entry, str):
+            raise InstallError("install record ACL snapshot is invalid")
+        match = _ACL_SNAPSHOT_ENTRY_RE.fullmatch(raw_entry)
+        if match is None:
+            raise InstallError("install record ACL snapshot is invalid")
+        tag, qualifier, permissions = match.groups()
+        if tag in {"mask", "other"} and qualifier:
+            raise InstallError("install record ACL snapshot is invalid")
+        key = (tag, qualifier)
+        if key in entries:
+            raise InstallError("install record ACL snapshot contains duplicate entries")
+        entries[key] = permissions
+    if not entries:
+        if allow_empty:
+            return entries
+        raise InstallError("install record ACL snapshot is empty")
+    required = {("user", ""), ("group", ""), ("other", "")}
+    if not required.issubset(entries):
+        raise InstallError("install record ACL snapshot has invalid base entries")
+    named = any(qualifier and tag in {"user", "group"} for tag, qualifier in entries)
+    if named and ("mask", "") not in entries:
+        raise InstallError("install record ACL snapshot has named entries without a mask")
+    return entries
+
+
+def _canonical_acl_snapshot(entries: dict[tuple[str, str], str]) -> tuple[str, ...]:
+    return tuple(
+        f"{tag}:{qualifier}:{permissions}"
+        for (tag, qualifier), permissions in sorted(
+            entries.items(),
+            key=lambda item: (_ACL_ENTRY_ORDER[item[0][0]], item[0][1]),
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,9 +170,127 @@ class AclGrant:
 
 
 @dataclass(frozen=True, slots=True)
+class AclMaskAdjustment:
+    path: Path
+    default: bool
+    before_mask: str | None
+    after_mask: str
+    before_acl: tuple[str, ...]
+    after_acl: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "path": str(self.path),
+            "default": self.default,
+            "before_mask": self.before_mask,
+            "after_mask": self.after_mask,
+            "before_acl": list(self.before_acl),
+            "after_acl": list(self.after_acl),
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> AclMaskAdjustment:
+        if not isinstance(value, dict) or set(value) != {
+            "path",
+            "default",
+            "before_mask",
+            "after_mask",
+            "before_acl",
+            "after_acl",
+        }:
+            raise InstallError("install record contains an invalid ACL mask adjustment")
+        raw_path = value["path"]
+        default = value["default"]
+        before_mask = value["before_mask"]
+        after_mask = value["after_mask"]
+        raw_before_acl = value["before_acl"]
+        raw_after_acl = value["after_acl"]
+        if (
+            not isinstance(raw_path, str)
+            or type(default) is not bool
+            or (before_mask is not None and not isinstance(before_mask, str))
+            or not isinstance(after_mask, str)
+            or (before_mask is not None and _ACL_PERMISSIONS_RE.fullmatch(before_mask) is None)
+            or _ACL_PERMISSIONS_RE.fullmatch(after_mask) is None
+            or not isinstance(raw_before_acl, list)
+            or not isinstance(raw_after_acl, list)
+        ):
+            raise InstallError("install record contains an invalid ACL mask adjustment")
+        path = Path(raw_path)
+        if not path.is_absolute() or ".." in path.parts:
+            raise InstallError("install record contains an unsafe ACL mask path")
+        before_acl = tuple(raw_before_acl)
+        after_acl = tuple(raw_after_acl)
+        before_entries = _acl_snapshot_map(before_acl, allow_empty=default)
+        after_entries = _acl_snapshot_map(after_acl, allow_empty=False)
+        if (
+            before_entries.get(("mask", "")) != before_mask
+            or after_entries.get(("mask", "")) != after_mask
+        ):
+            raise InstallError("install record ACL mask snapshot is inconsistent")
+        if before_mask is not None and (
+            before_mask == after_mask
+            or not all(
+                wanted == "-" or after_mask[index] == wanted
+                for index, wanted in enumerate(before_mask)
+            )
+        ):
+            raise InstallError("install record ACL mask adjustment is not monotonic")
+        service_key = ("user", SERVICE_USER)
+        if service_key not in after_entries:
+            raise InstallError("install record ACL snapshot omits the service entry")
+        if service_key in before_entries and (
+            before_entries[service_key] != after_entries[service_key]
+        ):
+            raise InstallError("install record ACL snapshot changes a pre-existing service entry")
+        before_stable = {
+            key: permissions
+            for key, permissions in before_entries.items()
+            if key not in {service_key, ("mask", "")}
+        }
+        after_stable = {
+            key: permissions
+            for key, permissions in after_entries.items()
+            if key not in {service_key, ("mask", "")}
+        }
+        if before_entries:
+            if before_stable != after_stable:
+                raise InstallError("install record ACL snapshot changes unrelated entries")
+        elif not default or set(after_stable) != {
+            ("user", ""),
+            ("group", ""),
+            ("other", ""),
+        }:
+            raise InstallError("install record default ACL initialization is invalid")
+        if before_acl == after_acl:
+            raise InstallError("install record ACL mask adjustment is empty")
+        return cls(
+            path=path,
+            default=default,
+            before_mask=before_mask,
+            after_mask=after_mask,
+            before_acl=before_acl,
+            after_acl=after_acl,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedAclEntry:
+    default: bool
+    tag: str
+    qualifier: str
+    permissions: str
+    effective: str
+
+
+@dataclass(frozen=True, slots=True)
 class AclPlan:
     grant: AclGrant
     permissions: str
+    adds_service_entry: bool = True
+    before_acl: tuple[str, ...] = ()
+    after_acl: tuple[str, ...] = ()
+    mask_adjustment: AclMaskAdjustment | None = None
 
 
 class Runner(Protocol):
@@ -441,13 +608,17 @@ class LocalFilesystem:
             parsed = json.loads(payload)
         except json.JSONDecodeError as exc:
             raise InstallError("install record is invalid") from exc
-        if (
-            not isinstance(parsed, dict)
-            or type(parsed.get("schema_version")) is not int
-            or parsed.get("schema_version") not in {1, 2}
-        ):
+        if not isinstance(parsed, dict):
             raise InstallError("install record is invalid")
-        return parsed
+        record: dict[str, object] = {}
+        for key, value in parsed.items():
+            if not isinstance(key, str):
+                raise InstallError("install record is invalid")
+            record[key] = value
+        schema_version = record.get("schema_version")
+        if type(schema_version) is not int or schema_version not in {1, 2, 3}:
+            raise InstallError("install record is invalid")
+        return record
 
     def file_matches(self, absolute: Path, payload: bytes, mode: int) -> bool:
         path = self.path(absolute)
@@ -1429,48 +1600,323 @@ class HostSystem:
             wanted == "-" or actual[index] == wanted for index, wanted in enumerate(required)
         )
 
-    def _acl_entry(self, path: Path, *, default: bool) -> tuple[str, str] | None:
+    @staticmethod
+    def _permission_union(left: str, right: str) -> str:
+        return "".join(left[index] if left[index] != "-" else right[index] for index in range(3))
+
+    @staticmethod
+    def _permission_intersection(left: str, right: str) -> str:
+        return "".join(
+            left[index] if left[index] != "-" and right[index] != "-" else "-" for index in range(3)
+        )
+
+    def _acl_entries(self, path: Path) -> tuple[ParsedAclEntry, ...]:
         lines = self.runner.run(["getfacl", "-cp", str(path)]).stdout.splitlines()
-        prefix = ("default:" if default else "") + f"user:{SERVICE_USER}:"
+        entries: list[ParsedAclEntry] = []
         for line in lines:
-            match = re.fullmatch(
-                re.escape(prefix) + r"([rwx-]{3})(?:\s+#effective:([rwx-]{3}))?",
-                line.strip(),
-            )
-            if match is None:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or stripped.startswith("flags:"):
                 continue
-            permissions = match.group(1)
-            effective = match.group(2) or permissions
-            return permissions, effective
+            match = _ACL_ENTRY_RE.fullmatch(stripped)
+            if match is None:
+                if stripped.startswith(("user:", "group:", "mask:", "other:", "default:")):
+                    raise InstallError("host ACL output is invalid")
+                continue
+            entries.append(
+                ParsedAclEntry(
+                    default=match.group(1) is not None,
+                    tag=match.group(2),
+                    qualifier=match.group(3),
+                    permissions=match.group(4),
+                    effective=match.group(5) or match.group(4),
+                )
+            )
+        parsed = tuple(entries)
+        self._acl_snapshot(parsed, default=False)
+        self._acl_snapshot(parsed, default=True)
+        return parsed
+
+    def _acl_snapshot(
+        self,
+        entries: Sequence[ParsedAclEntry],
+        *,
+        default: bool,
+    ) -> tuple[str, ...]:
+        selected = [entry for entry in entries if entry.default == default]
+        raw = {(entry.tag, entry.qualifier): entry.permissions for entry in selected}
+        if len(raw) != len(selected):
+            raise InstallError("host ACL output contains duplicate entries")
+        snapshot = _canonical_acl_snapshot(raw)
+        try:
+            validated = _acl_snapshot_map(snapshot, allow_empty=default)
+        except InstallError as exc:
+            raise InstallError("host ACL output is invalid") from exc
+        mask = validated.get(("mask", ""))
+        for entry in selected:
+            masked = (entry.tag == "user" and bool(entry.qualifier)) or entry.tag == "group"
+            expected = (
+                self._permission_intersection(entry.permissions, mask)
+                if masked and mask is not None
+                else entry.permissions
+            )
+            if entry.effective != expected:
+                raise InstallError("host ACL effective permissions are inconsistent")
+        return snapshot
+
+    @staticmethod
+    def _acl_entry_from(
+        entries: Sequence[ParsedAclEntry], *, default: bool
+    ) -> tuple[str, str] | None:
+        matches = [
+            entry
+            for entry in entries
+            if entry.default == default and entry.tag == "user" and entry.qualifier == SERVICE_USER
+        ]
+        if len(matches) > 1:
+            raise InstallError("service ACL entry is duplicated")
+        if matches:
+            return matches[0].permissions, matches[0].effective
         return None
 
+    def _declared_operator_acl_user(self, qualifier: str) -> bool:
+        if qualifier == "2012":
+            return False
+        numeric = qualifier.isdigit()
+        if not numeric and qualifier not in OPERATORS:
+            return False
+        result = self._probe(["getent", "passwd", qualifier])
+        fields = result.stdout.strip().split(":")
+        return (
+            result.returncode == 0
+            and len(fields) >= 3
+            and fields[0] in OPERATORS
+            and fields[2].isdigit()
+            and fields[2] != "2012"
+            and (fields[2] == qualifier if numeric else fields[0] == qualifier)
+        )
+
+    def _effective_acl(
+        self,
+        snapshot: Sequence[str],
+        *,
+        allow_empty: bool,
+    ) -> dict[tuple[str, str], str]:
+        entries = _acl_snapshot_map(snapshot, allow_empty=allow_empty)
+        mask = entries.get(("mask", ""))
+        effective: dict[tuple[str, str], str] = {}
+        for key, permissions in entries.items():
+            tag, qualifier = key
+            if tag == "mask":
+                continue
+            masked = (tag == "user" and bool(qualifier)) or tag == "group"
+            effective[key] = (
+                self._permission_intersection(permissions, mask)
+                if masked and mask is not None
+                else permissions
+            )
+        return effective
+
+    def _assert_acl_transition_safe(
+        self,
+        before_acl: Sequence[str],
+        after_acl: Sequence[str],
+        *,
+        default: bool,
+    ) -> None:
+        before = self._effective_acl(before_acl, allow_empty=default)
+        after = self._effective_acl(after_acl, allow_empty=False)
+        service_key = ("user", SERVICE_USER)
+        for key, permissions_after in after.items():
+            if key == service_key:
+                continue
+            if key not in before:
+                if (
+                    default
+                    and not before_acl
+                    and key
+                    in {
+                        ("user", ""),
+                        ("group", ""),
+                        ("other", ""),
+                    }
+                ):
+                    continue
+                raise InstallError("ACL transition would add an undeclared principal")
+            permissions_before = before[key]
+            gained = any(
+                permissions_before[index] == "-" and permissions_after[index] != "-"
+                for index in range(3)
+            )
+            if not gained:
+                continue
+            tag, qualifier = key
+            if tag == "user" and qualifier and self._declared_operator_acl_user(qualifier):
+                continue
+            raise InstallError("ACL mask transition would change an undeclared principal")
+
+    def _planned_acl_snapshots(
+        self,
+        entries: Sequence[ParsedAclEntry],
+        *,
+        default: bool,
+        permissions: str,
+        existing: tuple[str, str] | None,
+    ) -> tuple[tuple[str, ...], tuple[str, ...], str | None, str]:
+        before_acl = self._acl_snapshot(entries, default=default)
+        before = _acl_snapshot_map(before_acl, allow_empty=default)
+        after = dict(before)
+        if default and not after:
+            access_acl = self._acl_snapshot(entries, default=False)
+            access = self._effective_acl(
+                access_acl,
+                allow_empty=False,
+            )
+            after = {key: access[key] for key in (("user", ""), ("group", ""), ("other", ""))}
+        service_key = ("user", SERVICE_USER)
+        after[service_key] = existing[0] if existing is not None else permissions
+        before_mask = before.get(("mask", ""))
+        mask_baseline = before_mask or after[("group", "")]
+        after_mask = self._permission_union(mask_baseline, permissions)
+        after[("mask", "")] = after_mask
+        after_acl = _canonical_acl_snapshot(after)
+        self._assert_acl_transition_safe(before_acl, after_acl, default=default)
+        effective = self._effective_acl(after_acl, allow_empty=False)[service_key]
+        if not self._permissions_allow(effective, permissions):
+            raise InstallError("planned service ACL would remain ineffective")
+        return before_acl, after_acl, before_mask, after_mask
+
+    def _acl_entry(self, path: Path, *, default: bool) -> tuple[str, str] | None:
+        return self._acl_entry_from(self._acl_entries(path), default=default)
+
     def _plan_acl(self, path: Path, *, permissions: str, default: bool) -> AclPlan | None:
-        existing = self._acl_entry(path, default=default)
+        entries = self._acl_entries(path)
+        existing = self._acl_entry_from(entries, default=default)
         if existing is not None:
             if all(self._permissions_allow(value, permissions) for value in existing):
                 return None
-            raise InstallError("pre-existing service ACL is insufficient or masked")
-        return AclPlan(AclGrant(path=path, default=default), permissions)
+            if not self._permissions_allow(existing[0], permissions):
+                raise InstallError("pre-existing service ACL is insufficient")
+        before_acl, after_acl, before_mask, after_mask = self._planned_acl_snapshots(
+            entries,
+            default=default,
+            permissions=permissions,
+            existing=existing,
+        )
+        adjustment = None
+        if before_mask != after_mask:
+            adjustment = AclMaskAdjustment(
+                path=path,
+                default=default,
+                before_mask=before_mask,
+                after_mask=after_mask,
+                before_acl=before_acl,
+                after_acl=after_acl,
+            )
+        return AclPlan(
+            AclGrant(path=path, default=default),
+            permissions,
+            adds_service_entry=existing is None,
+            before_acl=before_acl,
+            after_acl=after_acl,
+            mask_adjustment=adjustment,
+        )
+
+    @staticmethod
+    def _acl_spec(
+        key: tuple[str, str],
+        *,
+        default: bool,
+        permissions: str | None,
+    ) -> str:
+        tag, qualifier = key
+        short_tag = {"user": "u", "group": "g", "mask": "m", "other": "o"}[tag]
+        prefix = "d:" if default else ""
+        if permissions is None:
+            return f"{prefix}{short_tag}:{qualifier}" if qualifier else f"{prefix}{short_tag}"
+        return f"{prefix}{short_tag}:{qualifier}:{permissions}"
+
+    def _apply_acl_transition(
+        self,
+        path: Path,
+        *,
+        default: bool,
+        before_acl: Sequence[str],
+        after_acl: Sequence[str],
+    ) -> None:
+        before = _acl_snapshot_map(before_acl, allow_empty=default)
+        after = _acl_snapshot_map(after_acl, allow_empty=default)
+        if before == after:
+            return
+        if default and not after:
+            self.runner.run(["setfacl", "-k", str(path)])
+            return
+        removed = [key for key in before if key not in after]
+        modified = [key for key, value in after.items() if before.get(key) != value]
+        argv = ["setfacl", "-n"]
+        if modified:
+            argv.extend(
+                [
+                    "-m",
+                    ",".join(
+                        self._acl_spec(
+                            key,
+                            default=default,
+                            permissions=after[key],
+                        )
+                        for key in modified
+                    ),
+                ]
+            )
+        if removed:
+            argv.extend(
+                [
+                    "-x",
+                    ",".join(
+                        self._acl_spec(key, default=default, permissions=None) for key in removed
+                    ),
+                ]
+            )
+        argv.append(str(path))
+        self.runner.run(argv)
 
     def apply_acl(self, plan: AclPlan) -> AclGrant:
         path = plan.grant.path
         default = plan.grant.default
-        prefix = "d:u" if default else "u"
-        self.runner.run(
-            [
-                "setfacl",
-                "-n",
-                "-m",
-                f"{prefix}:{SERVICE_USER}:{plan.permissions}",
-                str(path),
-            ]
+        entries = self._acl_entries(path)
+        current_acl = self._acl_snapshot(entries, default=default)
+        if current_acl != plan.before_acl:
+            raise InstallError("ACL changed before convergence")
+        self._apply_acl_transition(
+            path,
+            default=default,
+            before_acl=plan.before_acl,
+            after_acl=plan.after_acl,
         )
-        confirmed = self._acl_entry(path, default=default)
+        confirmed_entries = self._acl_entries(path)
+        if self._acl_snapshot(confirmed_entries, default=default) != plan.after_acl:
+            raise InstallError("service ACL transition did not converge")
+        confirmed = self._acl_entry_from(confirmed_entries, default=default)
         if confirmed is None or not all(
             self._permissions_allow(value, plan.permissions) for value in confirmed
         ):
             raise InstallError("service ACL did not become effective")
         return plan.grant
+
+    def acl_adjustment_state(self, adjustment: AclMaskAdjustment) -> str:
+        self._assert_acl_transition_safe(
+            adjustment.before_acl,
+            adjustment.after_acl,
+            default=adjustment.default,
+        )
+        current = self._acl_snapshot(
+            self._acl_entries(adjustment.path),
+            default=adjustment.default,
+        )
+        if current == adjustment.before_acl:
+            return "before"
+        if current == adjustment.after_acl:
+            return "after"
+        return "drift"
 
     def plan_input_acl(self, path: Path) -> tuple[AclPlan, ...]:
         plans: list[AclPlan] = []
@@ -1504,13 +1950,56 @@ class HostSystem:
     def ensure_data_acl(self, path: Path) -> tuple[AclGrant, ...]:
         return tuple(self.apply_acl(plan) for plan in self.plan_data_acl(path))
 
-    def remove_acl(self, grant: AclGrant) -> None:
-        if self._acl_entry(grant.path, default=grant.default) is None:
-            return
-        flag = "d:u" if grant.default else "u"
-        self.runner.run(["setfacl", "-n", "-x", f"{flag}:{SERVICE_USER}", str(grant.path)])
-        if self._acl_entry(grant.path, default=grant.default) is not None:
-            raise InstallError("service ACL removal did not converge")
+    def remove_acl(
+        self,
+        grant: AclGrant,
+        mask_adjustment: AclMaskAdjustment | None = None,
+        *,
+        remove_service_entry: bool = True,
+    ) -> None:
+        entries = self._acl_entries(grant.path)
+        current_acl = self._acl_snapshot(entries, default=grant.default)
+        service_key = ("user", SERVICE_USER)
+        if mask_adjustment is not None:
+            if (mask_adjustment.path, mask_adjustment.default) != (
+                grant.path,
+                grant.default,
+            ):
+                raise InstallError("ACL mask ledger scope is inconsistent")
+            before = _acl_snapshot_map(
+                mask_adjustment.before_acl,
+                allow_empty=grant.default,
+            )
+            target = dict(before)
+            if remove_service_entry:
+                target.pop(service_key, None)
+            target_acl = _canonical_acl_snapshot(target)
+            if current_acl == target_acl:
+                return
+            if current_acl not in {
+                mask_adjustment.before_acl,
+                mask_adjustment.after_acl,
+            }:
+                raise InstallError("service ACL changed before removal")
+        else:
+            current = _acl_snapshot_map(current_acl, allow_empty=grant.default)
+            if not remove_service_entry or service_key not in current:
+                return
+            target = dict(current)
+            target.pop(service_key)
+            target_acl = _canonical_acl_snapshot(target)
+        self._apply_acl_transition(
+            grant.path,
+            default=grant.default,
+            before_acl=current_acl,
+            after_acl=target_acl,
+        )
+        restored = self._acl_snapshot(
+            self._acl_entries(grant.path),
+            default=grant.default,
+        )
+        if restored != target_acl:
+            raise InstallError("service ACL restoration did not converge")
 
     def export_kubeconfig(self) -> bytes:
         source_payload = _read_root_kubeconfig_source()
@@ -2040,13 +2529,67 @@ class HostInstaller:
             raise InstallError("rendered staging config fingerprint is invalid")
 
     @staticmethod
-    def _record_grants(record: dict[str, object] | None) -> set[AclGrant]:
+    def _managed_acl_scope() -> set[AclGrant]:
+        scope: set[AclGrant] = set()
+        for path in PROTECTED_INPUTS:
+            for parent in path.parents:
+                if parent == Path("/"):
+                    continue
+                scope.add(AclGrant(parent))
+                if parent == Path("/shared_work"):
+                    break
+            scope.add(AclGrant(path))
+        for path in DATA_DIRECTORIES:
+            scope.update({AclGrant(path), AclGrant(path, default=True)})
+        return scope
+
+    @classmethod
+    def _record_grants(cls, record: dict[str, object] | None) -> set[AclGrant]:
         if record is None:
             return set()
         raw = record.get("added_acls", [])
         if not isinstance(raw, list):
             raise InstallError("install record ACL ledger is invalid")
-        return {AclGrant.from_dict(value) for value in raw}
+        parsed = [AclGrant.from_dict(value) for value in raw]
+        grants = set(parsed)
+        if len(grants) != len(parsed) or not grants.issubset(cls._managed_acl_scope()):
+            raise InstallError("install record ACL ledger is invalid")
+        return grants
+
+    @classmethod
+    def _record_mask_adjustments(
+        cls,
+        record: dict[str, object] | None,
+    ) -> dict[AclGrant, AclMaskAdjustment]:
+        if record is None:
+            return {}
+        if record.get("schema_version") in {1, 2} and "acl_mask_adjustments" in record:
+            raise InstallError("legacy install record contains an unsupported ACL mask ledger")
+        raw = record.get("acl_mask_adjustments", [])
+        if not isinstance(raw, list):
+            raise InstallError("install record ACL mask ledger is invalid")
+        adjustments: dict[AclGrant, AclMaskAdjustment] = {}
+        for value in raw:
+            adjustment = AclMaskAdjustment.from_dict(value)
+            grant = AclGrant(adjustment.path, default=adjustment.default)
+            if grant in adjustments or grant not in cls._managed_acl_scope():
+                raise InstallError("install record ACL mask ledger is invalid")
+            adjustments[grant] = adjustment
+        return adjustments
+
+    @staticmethod
+    def _validate_acl_ledgers(
+        grants: set[AclGrant],
+        adjustments: dict[AclGrant, AclMaskAdjustment],
+    ) -> None:
+        service_key = ("user", SERVICE_USER)
+        for grant, adjustment in adjustments.items():
+            before = _acl_snapshot_map(
+                adjustment.before_acl,
+                allow_empty=grant.default,
+            )
+            if service_key not in before and grant not in grants:
+                raise InstallError("install record ACL ledgers are inconsistent")
 
     @staticmethod
     def _record_operator_memberships(record: dict[str, object] | None) -> set[str]:
@@ -2075,6 +2618,41 @@ class HostInstaller:
         value = record.get("service_key_fingerprint")
         if not isinstance(value, str) or re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}", value) is None:
             raise InstallError("install record service-key fingerprint is invalid")
+        return value
+
+    @staticmethod
+    def _record_legacy_trust_source_sha(
+        record: dict[str, object] | None,
+        *,
+        trust_ledger_migrated: bool,
+        trust_requires_revocation: bool,
+    ) -> str | None:
+        if record is None:
+            return None
+        schema_version = record.get("schema_version")
+        field = "trust_legacy_source_sha"
+        if schema_version == 1 and any(
+            key in record for key in ("trust_ledger_migrated", "trust_ledger_removed", field)
+        ):
+            raise InstallError("legacy v1 trust-ledger state is invalid")
+        if schema_version == 2 and field in record:
+            raise InstallError("trust-ledger v2 record contains an unsupported legacy source")
+        if trust_ledger_migrated or not trust_requires_revocation:
+            if field in record:
+                raise InstallError("install record contains a stale legacy trust source")
+            return None
+        if schema_version == 1:
+            value = record.get("source_sha")
+        elif schema_version == 3:
+            if field not in record:
+                raise InstallError("install record legacy trust source is unavailable")
+            value = record[field]
+        else:
+            raise InstallError(
+                "interrupted trust-ledger v2 migration lost its legacy source binding"
+            )
+        if not isinstance(value, str) or _SHA_RE.fullmatch(value) is None:
+            raise InstallError("install record legacy trust source is invalid")
         return value
 
     def _bind_existing_source(self, record: dict[str, object]) -> None:
@@ -2210,12 +2788,38 @@ class HostInstaller:
         created_service_key = self._record_flag(previous_record, "created_service_key")
         service_key_missing = not self.system.service_key_present()
         created_service_key = created_service_key or service_key_missing
-        acl_plans = [plan for path in PROTECTED_INPUTS for plan in self.system.plan_input_acl(path)]
-        acl_plans.extend(
+        raw_acl_plans = [
+            plan for path in PROTECTED_INPUTS for plan in self.system.plan_input_acl(path)
+        ]
+        raw_acl_plans.extend(
             plan for path in DATA_DIRECTORIES for plan in self.system.plan_data_acl(path)
         )
+        acl_plan_by_grant: dict[AclGrant, AclPlan] = {}
+        for plan in raw_acl_plans:
+            previous_plan = acl_plan_by_grant.get(plan.grant)
+            if previous_plan is not None and previous_plan != plan:
+                raise InstallError("conflicting ACL convergence plans")
+            acl_plan_by_grant[plan.grant] = plan
+        acl_plans = list(acl_plan_by_grant.values())
         grants = self._record_grants(previous_record)
-        grants.update(plan.grant for plan in acl_plans)
+        mask_adjustments = self._record_mask_adjustments(previous_record)
+        self._validate_acl_ledgers(grants, mask_adjustments)
+        grants.update(plan.grant for plan in acl_plans if plan.adds_service_entry)
+        for plan in acl_plans:
+            adjustment = plan.mask_adjustment
+            if adjustment is None:
+                continue
+            previous_adjustment = mask_adjustments.get(plan.grant)
+            if previous_adjustment is not None and previous_adjustment != adjustment:
+                raise InstallError("ACL mask ledger conflicts with the live baseline")
+            mask_adjustments[plan.grant] = adjustment
+        for grant, adjustment in mask_adjustments.items():
+            state = self.system.acl_adjustment_state(adjustment)
+            live_plan = acl_plan_by_grant.get(grant)
+            if state == "drift" or (
+                state == "before" and (live_plan is None or live_plan.mask_adjustment != adjustment)
+            ):
+                raise InstallError("ACL mask ledger does not match the live ACL")
         previous_fingerprint = (
             previous_record.get("service_key_fingerprint") if previous_record is not None else None
         )
@@ -2232,8 +2836,13 @@ class HostInstaller:
         )
         trust_ledger_migrated = bool(
             previous_record is not None
-            and previous_record.get("schema_version") == 2
+            and previous_record.get("schema_version") in {2, 3}
             and self._record_flag(previous_record, "trust_ledger_migrated")
+        )
+        legacy_trust_source_sha = self._record_legacy_trust_source_sha(
+            previous_record,
+            trust_ledger_migrated=trust_ledger_migrated,
+            trust_requires_revocation=trust_requires_revocation,
         )
 
         def record_value(
@@ -2242,8 +2851,8 @@ class HostInstaller:
             admission: bool,
             maintenance: bool,
         ) -> dict[str, object]:
-            return {
-                "schema_version": 2,
+            value: dict[str, object] = {
+                "schema_version": 3,
                 "installation_state": state,
                 "admission_enabled": admission,
                 "maintenance_enabled": maintenance,
@@ -2264,6 +2873,17 @@ class HostInstaller:
                     )
                 ],
             }
+            if mask_adjustments:
+                value["acl_mask_adjustments"] = [
+                    adjustment.to_dict()
+                    for _, adjustment in sorted(
+                        mask_adjustments.items(),
+                        key=lambda item: (str(item[0].path), item[0].default),
+                    )
+                ]
+            if legacy_trust_source_sha is not None:
+                value["trust_legacy_source_sha"] = legacy_trust_source_sha
+            return value
 
         def persist_record(
             state: str,
@@ -2435,19 +3055,16 @@ class HostInstaller:
             ledger_mode = "fresh"
         if self.source_root is None:  # pragma: no cover - prepare_install_source owns this
             raise InstallError("root installation source is unavailable")
-        previous_source_sha = (
-            previous_record.get("source_sha")
-            if previous_record is not None and ledger_mode == "legacy"
-            else None
-        )
-        if previous_source_sha is not None and not isinstance(previous_source_sha, str):
-            raise InstallError("legacy GB10 trust source binding is invalid")
+        previous_source_sha = legacy_trust_source_sha if ledger_mode == "legacy" else None
+        if ledger_mode == "legacy" and previous_source_sha is None:
+            raise InstallError("legacy GB10 trust source binding is unavailable")
         self.system.prepare_gb10_trust_ledger(
             self.source_root,
             mode=ledger_mode,
             previous_source_sha=previous_source_sha,
         )
         trust_ledger_migrated = True
+        legacy_trust_source_sha = None
         if ledger_prepared:
             changes.append("trust-ledger")
             persist_record(
@@ -2530,6 +3147,21 @@ class HostInstaller:
             or self._record_flag(record, "maintenance_enabled")
         ):
             return {"ok": False, "failures": ["installation-incomplete"]}
+        trust_requires_revocation = self._record_flag(record, "trust_requires_revocation")
+        trust_ledger_migrated = bool(
+            record.get("schema_version") in {2, 3}
+            and self._record_flag(record, "trust_ledger_migrated")
+        )
+        self._record_legacy_trust_source_sha(
+            record,
+            trust_ledger_migrated=trust_ledger_migrated,
+            trust_requires_revocation=trust_requires_revocation,
+        )
+        if not trust_requires_revocation or not trust_ledger_migrated:
+            return {"ok": False, "failures": ["trust-ledger-incomplete"]}
+        mask_adjustments = self._record_mask_adjustments(record)
+        grants = self._record_grants(record)
+        self._validate_acl_ledgers(grants, mask_adjustments)
         self._bind_existing_source(record)
         expected = (
             (CLIENT_PATH, self._asset("loom-staging-rollout"), 0o755),
@@ -2573,6 +3205,10 @@ class HostInstaller:
         if not isinstance(source_sha, str):  # _bind_existing_source has already validated this
             raise InstallError("install record source SHA is invalid")
         failures.extend(self.system.check_runtime(source_sha))
+        for grant, adjustment in mask_adjustments.items():
+            if self.system.acl_adjustment_state(adjustment) != "after":
+                namespace = "default" if grant.default else "access"
+                failures.append(f"acl-mask:{namespace}:{grant.path}")
         return {"ok": not failures, "failures": failures}
 
     def uninstall(
@@ -2595,6 +3231,14 @@ class HostInstaller:
         if record is None:
             raise InstallError("uninstall requires a valid install record")
         self._bind_existing_source(record)
+        grants = self._record_grants(record)
+        mask_adjustments = self._record_mask_adjustments(record)
+        self._validate_acl_ledgers(grants, mask_adjustments)
+        enabled_linger = self._record_flag(record, "enabled_linger")
+        added_operator_memberships = self._record_operator_memberships(record)
+        added_docker_membership = self._record_flag(record, "added_docker_membership")
+        created_service_key = self._record_flag(record, "created_service_key")
+        maintenance_enabled = self._record_flag(record, "maintenance_enabled")
 
         resuming_uninstall = record.get("installation_state") == "uninstalling"
         admission_enabled = self._record_flag(record, "admission_enabled")
@@ -2604,12 +3248,18 @@ class HostInstaller:
             and (record.get("installation_state") == "ready" or admission_enabled)
         )
         trust_ledger_migrated = bool(
-            record.get("schema_version") == 2 and self._record_flag(record, "trust_ledger_migrated")
+            record.get("schema_version") in {2, 3}
+            and self._record_flag(record, "trust_ledger_migrated")
         )
         trust_ledger_removed = (
             self._record_flag(record, "trust_ledger_removed")
             if "trust_ledger_removed" in record
             else False
+        )
+        self._record_legacy_trust_source_sha(
+            record,
+            trust_ledger_migrated=trust_ledger_migrated,
+            trust_requires_revocation=trust_requires_revocation,
         )
         uninstall_state_fields = {
             "admission_enabled",
@@ -2619,7 +3269,7 @@ class HostInstaller:
             "trust_requires_revocation",
         }
         if resuming_uninstall and (
-            record.get("schema_version") != 2
+            record.get("schema_version") not in {2, 3}
             or not uninstall_state_fields.issubset(record)
             or admission_enabled
             or trust_requires_revocation
@@ -2642,7 +3292,6 @@ class HostInstaller:
                 raise InstallError("install record service-key fingerprint is invalid")
             self.system.validate_service_key_continuity(expected_fingerprint)
         admission_was_present = self.filesystem.remove(SUDOERS_PATH)
-        maintenance_enabled = self._record_flag(record, "maintenance_enabled")
         if admission_was_present or admission_enabled:
             try:
                 self.system.begin_maintenance()
@@ -2691,7 +3340,7 @@ class HostInstaller:
             record = dict(record)
             record.update(
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "installation_state": "uninstalling",
                     "admission_enabled": False,
                     "maintenance_enabled": maintenance_enabled,
@@ -2703,20 +3352,26 @@ class HostInstaller:
             trust_ledger_removed = not trust_ledger_migrated
             persist_uninstall_record()
 
+        acl_scopes = grants | set(mask_adjustments)
         removed: list[str] = []
         for grant in reversed(
             sorted(
-                self._record_grants(record), key=lambda item: (len(item.path.parts), item.default)
+                acl_scopes,
+                key=lambda item: (len(item.path.parts), item.default),
             )
         ):
-            self.system.remove_acl(grant)
-        if self._record_flag(record, "enabled_linger"):
+            self.system.remove_acl(
+                grant,
+                mask_adjustments.get(grant),
+                remove_service_entry=grant in grants,
+            )
+        if enabled_linger:
             self.system.disable_linger()
         for username in OPERATORS:
-            if username not in self._record_operator_memberships(record):
+            if username not in added_operator_memberships:
                 continue
             self.system.remove_operator_membership(username)
-        if self._record_flag(record, "added_docker_membership"):
+        if added_docker_membership:
             self.system.remove_docker_membership()
         removable_files = [
             CLIENT_PATH,
@@ -2727,7 +3382,7 @@ class HostInstaller:
             TMPFILES_PATH,
             KNOWN_HOSTS_PATH,
         ]
-        if self._record_flag(record, "created_service_key"):
+        if created_service_key:
             removable_files.extend((SERVICE_KEY, Path(str(SERVICE_KEY) + ".pub")))
         for path in removable_files:
             if self.filesystem.remove(path):

@@ -1490,6 +1490,18 @@ deterministic when the installer's clean subprocess environment intentionally
 omits `HOME`; relying on kubectl's implicit home-directory lookup is
 unsupported and fails closed.
 
+For declared input and data ACLs, the installer reads the full raw and effective
+ACL, computes the smallest explicit mask expansion needed by `loom-rollout`,
+and writes the service entry and mask together with `setfacl -n`. A mask change
+is allowed only when no undeclared user or group gains an effective permission;
+raw permissions for the declared `qianyi`, `hongjian`, and `devansh` operators
+may become effective, while the OLDLAB-2 numeric UID 2012 exception is preserved
+without gaining any new bit. If a data directory has no default ACL, the
+installer creates the required default base from its effective access base and
+records that the whole default ACL was absent. Because the ACL mask is represented in
+the numeric group mode bits, inspect `getfacl` raw/effective entries rather than
+using mode alone as the permission proof.
+
 ```bash
 sudo ./scripts/ops/staging_rollout_host.py plan
 sudo ./scripts/ops/staging_rollout_host.py install \
@@ -1518,7 +1530,17 @@ policy, files, ownership, ACLs, service state, and merged `dev` SHA already
 match. An update first disables broker admission under the shared launch lock
 and refuses while a rollout is active. A failed update keeps admission disabled
 and records an uninstall-safe recovery ledger rather than exposing a partially
-updated runner.
+updated runner. Before any ACL write, that provisional root-owned ledger stores
+the complete before and expected after ACL for every mask change. A retry accepts
+only those exact states and never resamples drift as a new baseline. The write
+also upgrades legacy schema v1 or trust-ledger schema v2 install records to v3;
+the current installer can migrate either predecessor, while old v1/v2 installer
+versions reject v3 and therefore cannot perform an incomplete downgrade
+uninstall. While a v1 trust migration is pending, v3 separately records the
+legacy source SHA and keeps using it across retries; the field disappears only
+after the trust ledger is durable. An interrupted v2 migration without that
+binding is ambiguous and must be repaired rather than retried with a guessed
+source.
 
 The rollout-local cluster config is synthesized from the resolved candidate
 worktree's repo-local profile, rather than from the long-lived runner checkout,
@@ -1562,9 +1584,12 @@ active request, and revokes only the recorded service public key from every
 host in the root-owned revocation ledger. New #822-era installs record the 14
 active hosts; a legacy ledger can retain all 15 until node 7 is reachable and
 its old trust is removed. Only installer-recorded ACLs/memberships/linger and
-generated key/runtime state are removed, while request and rollout evidence are
-retained. If any revocation or reconciliation step fails, stop and repair it;
-do not delete the local key or ledger first.
+generated key/runtime state are removed, while each recorded ACL preimage is
+restored, including removal of a wholly installer-created default ACL. A
+pre-existing service ACL is never removed merely because its mask required
+convergence. If any revocation step fails, or the live ACL matches neither the
+recorded before nor after state, stop and repair the drift; do not run a manual
+`setfacl` workaround or delete the local key or ledger first.
 
 For `--environment staging`, the driver intentionally refuses legacy physical
 targets. Use `--cluster-name loom-staging`, `--namespace loom-staging`, and
