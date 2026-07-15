@@ -43,6 +43,7 @@ loom-staging-rollout status [REQUEST_ID]
 loom-staging-rollout logs REQUEST_ID [--follow]
 loom-staging-rollout resume REQUEST_ID
 loom-staging-rollout cancel REQUEST_ID --reason TEXT
+loom-staging-rollout cleanup-incomplete-backup REQUEST_ID
 ```
 
 The broker derives the caller from the authenticated sudo context and records
@@ -154,7 +155,29 @@ than claiming that `st_mode` is unchanged.
 
 A non-dry `start` creates and verifies a new immutable backup manifest before
 the rollout can mutate staging. It never relies on a mutable `latest` pointer.
-A failed backup keeps the prior valid backup and prevents unit launch.
+A failed backup keeps the prior valid backup and prevents unit launch. An
+aggregate-only live inventory on 2026-07-15 (no keys, credential values, or
+payloads emitted) measured 579,714 protected objects and
+12,517,813,079 bytes. The root-owned config therefore fixes the reviewed
+staging policy at 1,000,000 MinIO objects (1,000,004 files across the complete
+bundle) and 16,000,000 conservative entries, while the byte, inode, page, depth,
+elapsed-time, path-safety, free-capacity, and immutable-publication bounds
+remain independent and fail closed. Object exhaustion has the stable public
+reason `backup_object_limit_exceeded`.
+
+The measured conservative entry charge is 6,420,179, maximum mirror depth is
+18, and maximum direct fanout is 6,530. At 80% utilization (800,000 objects or
+12,800,000 entries), the platform owner must repeat the aggregate shape review
+in a merged PR; runtime auto-growth is forbidden.
+
+`cleanup-incomplete-backup` is the only supported incomplete-backup removal
+path. It runs under the same admission/launch lock, accepts only a failed
+request before any envelope or attempt, selects exactly that request's
+timestamped root, and performs bounded no-follow validation before removal. A
+manifest, `latest`
+target, symlink, hard link, special file, ownership/mode drift, or traversal
+limit causes refusal. The command is idempotent and the request remains failed
+in the append-only audit ledger.
 
 The broker launch mutex atomically arbitrates request admission. One separate
 full-lifecycle lock covers the detached driver from pending through terminal

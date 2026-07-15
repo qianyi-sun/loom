@@ -76,6 +76,7 @@ loom-staging-rollout status REQUEST_ID
 loom-staging-rollout logs REQUEST_ID
 loom-staging-rollout resume REQUEST_ID
 loom-staging-rollout cancel REQUEST_ID --reason "bounded operational reason"
+loom-staging-rollout cleanup-incomplete-backup REQUEST_ID
 ```
 
 A disconnected terminal does not stop the service unit. Do not run a personal
@@ -85,6 +86,9 @@ or substitute an arbitrary commit. A code rollback is a merged revert on
 `dev`, followed by another broker request. A host-runtime failure is repaired
 at its root cause and then continued with `resume REQUEST_ID` against the same
 immutable envelope and SHA.
+The cleanup command is not a retention or arbitrary delete surface: it accepts
+only a failed pre-launch request and refuses manifest-backed or `latest`
+backups.
 
 ## SSH Trust
 

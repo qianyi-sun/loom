@@ -21,3 +21,5 @@ smoke_on_behalf_username = "devansh"
 smoke_on_behalf_team_id = "__SMOKE_ON_BEHALF_TEAM_ID__"
 scope = "current-gb10"
 gb10_prep_concurrency = 8
+backup_max_objects = 1000000
+backup_max_entries = 16000000

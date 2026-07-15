@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
-from typing import Any, BinaryIO, Protocol, TypeVar, cast
+from typing import Any, BinaryIO, Literal, Protocol, TypeVar, cast
 from uuid import uuid4
 
 import boto3
@@ -29,7 +29,6 @@ from loom_cli.cluster_backup_guard import (
     DEFAULT_BACKUP_MAX_DEPTH,
     DEFAULT_BACKUP_MAX_ELAPSED_SECONDS,
     DEFAULT_BACKUP_MAX_ENTRIES,
-    DEFAULT_BACKUP_MAX_FILES,
     BackupTraversalLimits,
     backup_manifest_created_at,
     backup_manifest_sha256,
@@ -38,7 +37,11 @@ from loom_cli.cluster_backup_guard import (
 )
 from loom_cli.cluster_config import load_cluster_config
 
-from .config import OperatorConfig
+from .config import (
+    APPROVED_BACKUP_MAX_ENTRIES,
+    APPROVED_BACKUP_MAX_OBJECTS,
+    OperatorConfig,
+)
 from .model import RolloutRequest
 
 _PRIVATE_FILE_MODE = 0o600
@@ -58,8 +61,10 @@ _MINIO_LOCAL_PORT = 19000
 _POSTGRES_MAX_BYTES = 1024**4
 _BACKUP_MAX_TOTAL_BYTES = 16 * 1024**4
 _MINIO_MAX_PAGES = 20_000
-_MINIO_MAX_OBJECTS = DEFAULT_BACKUP_MAX_FILES - 4
-_MINIO_MAX_ENTRIES = DEFAULT_BACKUP_MAX_ENTRIES - 6
+_BACKUP_NON_MINIO_FILE_ALLOWANCE = 4
+_BACKUP_NON_MINIO_ENTRY_ALLOWANCE = 6
+_MINIO_MAX_OBJECTS = APPROVED_BACKUP_MAX_OBJECTS
+_MINIO_MAX_ENTRIES = APPROVED_BACKUP_MAX_ENTRIES - _BACKUP_NON_MINIO_ENTRY_ALLOWANCE
 _MINIO_MAX_TOTAL_BYTES = _BACKUP_MAX_TOTAL_BYTES - _POSTGRES_MAX_BYTES
 _MINIO_TOTAL_TIMEOUT_SECONDS = float(DEFAULT_BACKUP_MAX_ELAPSED_SECONDS)
 _MINIO_DISK_RESERVE_BYTES = 256 * 1024**2
@@ -72,6 +77,7 @@ _POSTGRES_TIMEOUT_SECONDS = 600.0
 _KUBECTL_READ_TIMEOUT_SECONDS = 30.0
 _BACKUP_MIN_REMAINING_HOURS = 2
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_BUNDLE_NAME_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-(?P<request_id>[a-z0-9][a-z0-9-]{7,79})$")
 
 
 class PortForwardHandle(Protocol):
@@ -139,6 +145,14 @@ DeadlineWaiter = Callable[[threading.Event, float], bool]
 
 
 Clock = Callable[[], datetime]
+BackupPublicReason = Literal["backup_failed", "backup_object_limit_exceeded"]
+_BACKUP_PUBLIC_REASONS = frozenset({"backup_failed", "backup_object_limit_exceeded"})
+
+
+def normalize_backup_public_reason(value: object) -> BackupPublicReason:
+    if isinstance(value, str) and value in _BACKUP_PUBLIC_REASONS:
+        return cast(BackupPublicReason, value)
+    return "backup_failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,6 +393,32 @@ class _BudgetedWriter:
 class BackupError(RuntimeError):
     """Safe stage-coded backup failure with no captured secret-bearing cause."""
 
+    def __init__(
+        self,
+        code: str,
+        *,
+        public_reason: BackupPublicReason = "backup_failed",
+    ) -> None:
+        if public_reason not in _BACKUP_PUBLIC_REASONS:
+            raise ValueError("backup public reason is not approved")
+        super().__init__(code)
+        self.code = code
+        self.public_reason = public_reason
+
+
+class BackupPolicyLimitError(BackupError, ValueError):
+    """A stable, secret-safe backup policy exhaustion signal."""
+
+    def __init__(
+        self,
+        code: str,
+        *,
+        public_reason: BackupPublicReason,
+        message: str,
+    ) -> None:
+        super().__init__(code, public_reason=public_reason)
+        self.args = (message,)
+
 
 class _LatestPublicationError(RuntimeError):
     def __init__(self, *, rollback_confirmed: bool) -> None:
@@ -571,6 +611,8 @@ def _stage(code: str, operation: Callable[[], _T]) -> _T:
     """Run a stage and discard any secret-bearing exception before raising."""
     try:
         result = operation()
+    except BackupError:
+        raise
     except Exception:
         pass
     else:
@@ -1099,6 +1141,149 @@ def _require_private_directory(path: Path) -> None:
         raise ValueError("private snapshot directory mode must be 0700")
 
 
+@dataclass(slots=True)
+class _CleanupTraversal:
+    limits: BackupTraversalLimits
+    deadline: float
+    root_device: int
+    files: int = 0
+    entries: int = 0
+    total_bytes: int = 0
+
+    def fresh_pass(self) -> _CleanupTraversal:
+        return _CleanupTraversal(
+            limits=self.limits,
+            deadline=self.deadline,
+            root_device=self.root_device,
+        )
+
+    def check_deadline(self) -> None:
+        if self.limits.monotonic() >= self.deadline:
+            raise ValueError("backup cleanup exceeded elapsed-time limit")
+
+    def check(self, metadata: os.stat_result, *, depth: int) -> None:
+        self.check_deadline()
+        if metadata.st_dev != self.root_device:
+            raise ValueError("backup cleanup crossed a filesystem boundary")
+        if depth > self.limits.max_depth:
+            raise ValueError("backup cleanup exceeded depth limit")
+        self.entries += 1
+        if self.entries > self.limits.max_entries:
+            raise ValueError("backup cleanup exceeded entry limit")
+        if stat.S_ISREG(metadata.st_mode):
+            self.files += 1
+            self.total_bytes += metadata.st_size
+            if self.files > self.limits.max_files:
+                raise ValueError("backup cleanup exceeded file limit")
+            if self.total_bytes > self.limits.max_total_bytes:
+                raise ValueError("backup cleanup exceeded byte limit")
+
+
+def _require_cleanup_entry(metadata: os.stat_result, *, service_uid: int) -> None:
+    if metadata.st_uid != service_uid:
+        raise ValueError("backup cleanup entry owner does not match service account")
+    mode = stat.S_IMODE(metadata.st_mode)
+    if stat.S_ISDIR(metadata.st_mode):
+        if mode != _PRIVATE_DIRECTORY_MODE:
+            raise ValueError("backup cleanup directory mode must be 0700")
+        return
+    if stat.S_ISREG(metadata.st_mode):
+        if mode != _PRIVATE_FILE_MODE or metadata.st_nlink != 1:
+            raise ValueError("backup cleanup file metadata is unsafe")
+        return
+    raise ValueError("backup cleanup tree contains a non-regular entry")
+
+
+def _validate_cleanup_directory(
+    directory_fd: int,
+    *,
+    service_uid: int,
+    budget: _CleanupTraversal,
+    depth: int,
+) -> None:
+    directory_metadata = os.fstat(directory_fd)
+    _require_cleanup_entry(directory_metadata, service_uid=service_uid)
+    if directory_metadata.st_dev != budget.root_device:
+        raise ValueError("backup cleanup crossed a filesystem boundary")
+    names: list[str] = []
+    with os.scandir(directory_fd) as entries:
+        for entry in entries:
+            budget.check_deadline()
+            names.append(entry.name)
+            if len(names) > budget.limits.max_directory_entries:
+                raise ValueError("backup cleanup exceeded directory entry limit")
+    for name in names:
+        metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        _require_cleanup_entry(metadata, service_uid=service_uid)
+        budget.check(metadata, depth=depth)
+        if not stat.S_ISDIR(metadata.st_mode):
+            continue
+        child_fd = os.open(name, _directory_open_flags(), dir_fd=directory_fd)
+        try:
+            opened = os.fstat(child_fd)
+            if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                raise ValueError("backup cleanup tree changed during validation")
+            _validate_cleanup_directory(
+                child_fd,
+                service_uid=service_uid,
+                budget=budget,
+                depth=depth + 1,
+            )
+        finally:
+            os.close(child_fd)
+
+
+def _remove_cleanup_directory(
+    directory_fd: int,
+    *,
+    service_uid: int,
+    budget: _CleanupTraversal,
+    depth: int,
+) -> None:
+    directory_metadata = os.fstat(directory_fd)
+    _require_cleanup_entry(directory_metadata, service_uid=service_uid)
+    if directory_metadata.st_dev != budget.root_device:
+        raise ValueError("backup cleanup crossed a filesystem boundary")
+    names: list[str] = []
+    with os.scandir(directory_fd) as entries:
+        for entry in entries:
+            budget.check_deadline()
+            names.append(entry.name)
+            if len(names) > budget.limits.max_directory_entries:
+                raise ValueError("backup cleanup exceeded directory entry limit")
+    if depth == 1 and "backup-manifest.json" in names:
+        raise ValueError("manifest-backed backup cannot be cleaned")
+    for name in names:
+        metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        _require_cleanup_entry(metadata, service_uid=service_uid)
+        budget.check(metadata, depth=depth)
+        if stat.S_ISDIR(metadata.st_mode):
+            budget.check_deadline()
+            child_fd = os.open(name, _directory_open_flags(), dir_fd=directory_fd)
+            try:
+                opened = os.fstat(child_fd)
+                if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                    raise ValueError("backup cleanup tree changed during removal")
+                _remove_cleanup_directory(
+                    child_fd,
+                    service_uid=service_uid,
+                    budget=budget,
+                    depth=depth + 1,
+                )
+            finally:
+                os.close(child_fd)
+            budget.check_deadline()
+            os.rmdir(name, dir_fd=directory_fd)
+            budget.check_deadline()
+        else:
+            budget.check_deadline()
+            os.unlink(name, dir_fd=directory_fd)
+            budget.check_deadline()
+    budget.check_deadline()
+    os.fsync(directory_fd)
+    budget.check_deadline()
+
+
 def _ensure_private_directory(
     path: Path,
     *,
@@ -1170,7 +1355,11 @@ class _MirrorBudget:
     def consume_object(self) -> None:
         self.check_deadline()
         if self.objects >= self.max_objects:
-            raise ValueError("MinIO mirror exceeded object limit")
+            raise BackupPolicyLimitError(
+                "minio_object_limit_exceeded",
+                public_reason="backup_object_limit_exceeded",
+                message="MinIO mirror exceeded object limit",
+            )
         self.objects += 1
 
     def reserve_bytes(self, size: int) -> None:
@@ -1841,7 +2030,10 @@ class BackupCreator:
             raise BackupError("service_account_unavailable")
         self.service_uid = service_uid
         self._runner = runner or SubprocessBackupCommandRunner()
-        self._minio = minio or Boto3MinioMirror()
+        self._minio = minio or Boto3MinioMirror(
+            max_objects=config.backup_max_objects,
+            max_entries=config.backup_max_entries - _BACKUP_NON_MINIO_ENTRY_ALLOWANCE,
+        )
         self._now = now or (lambda: datetime.now(UTC))
         self._env = _command_environment(config)
         for name, value in (
@@ -1864,12 +2056,25 @@ class BackupCreator:
         self._inode_reserve = inode_reserve
         self._capacity_provider = capacity_provider
         self._traversal_limits = traversal_limits or BackupTraversalLimits(
+            max_files=config.backup_max_objects + _BACKUP_NON_MINIO_FILE_ALLOWANCE,
+            max_entries=config.backup_max_entries,
             max_total_bytes=max_total_bytes,
         )
 
     def _bundle_root(self, request: RolloutRequest, created_at: datetime) -> Path:
+        return (
+            self.config.rollout_root
+            / "backups"
+            / self.bundle_name(
+                request.request_id,
+                created_at,
+            )
+        )
+
+    @staticmethod
+    def bundle_name(request_id: str, created_at: datetime) -> str:
         timestamp = created_at.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
-        return self.config.rollout_root / "backups" / f"{timestamp}-{request.request_id}"
+        return f"{timestamp}-{request_id}"
 
     def _load_buckets(self) -> tuple[str, ...]:
         cluster_config = load_cluster_config(self.config.cluster_config_path)
@@ -2151,13 +2356,161 @@ class BackupCreator:
             )
         return backup
 
-    def create(self, request: RolloutRequest) -> VerifiedBackup:
+    def cleanup_incomplete(self, request_id: str, *, bundle_name: str | None = None) -> bool:
+        """Remove only the no-manifest backup root bound to one failed request."""
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{7,79}", request_id):
+            raise BackupError("backup_cleanup_request_invalid")
+
+        backups_root = self.config.rollout_root / "backups"
+        requested_bundle_name = bundle_name
+
+        def cleanup() -> bool:
+            backups_fd = _open_directory_no_follow(backups_root)
+            bundle_fd: int | None = None
+            try:
+                cleanup_deadline = (
+                    self._traversal_limits.monotonic() + self._traversal_limits.max_elapsed_seconds
+                )
+                backups_metadata = os.fstat(backups_fd)
+                if not _existing_backups_directory_is_approved(
+                    backups_metadata,
+                    service_uid=self.service_uid,
+                ):
+                    raise ValueError("backups directory metadata is not approved")
+                matches: list[str] = []
+                if requested_bundle_name is not None:
+                    matched = _BUNDLE_NAME_RE.fullmatch(requested_bundle_name)
+                    if matched is None or matched.group("request_id") != request_id:
+                        raise ValueError("backup cleanup root binding is invalid")
+                    matches.append(requested_bundle_name)
+                else:
+                    scanned = 0
+                    with os.scandir(backups_fd) as entries:
+                        for entry in entries:
+                            if self._traversal_limits.monotonic() >= cleanup_deadline:
+                                raise ValueError("backup cleanup exceeded elapsed-time limit")
+                            scanned += 1
+                            if scanned > self._traversal_limits.max_directory_entries:
+                                raise ValueError("backup cleanup exceeded directory entry limit")
+                            matched = _BUNDLE_NAME_RE.fullmatch(entry.name)
+                            if matched is not None and matched.group("request_id") == request_id:
+                                matches.append(entry.name)
+                if not matches:
+                    return False
+                if len(matches) != 1:
+                    raise ValueError("backup cleanup request has ambiguous roots")
+                bundle_name = matches[0]
+                try:
+                    bundle_metadata = os.stat(
+                        bundle_name,
+                        dir_fd=backups_fd,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    if requested_bundle_name is not None:
+                        return False
+                    raise
+                _require_cleanup_entry(bundle_metadata, service_uid=self.service_uid)
+                if not stat.S_ISDIR(bundle_metadata.st_mode):
+                    raise ValueError("backup cleanup target is not a directory")
+                if bundle_metadata.st_dev != backups_metadata.st_dev:
+                    raise ValueError("backup cleanup root crosses a filesystem boundary")
+                latest_target = _read_previous_latest_target(backups_fd)
+                if latest_target == bundle_name:
+                    raise ValueError("manifest-backed latest backup cannot be cleaned")
+                bundle_fd = os.open(bundle_name, _directory_open_flags(), dir_fd=backups_fd)
+                opened = os.fstat(bundle_fd)
+                if (opened.st_dev, opened.st_ino) != (
+                    bundle_metadata.st_dev,
+                    bundle_metadata.st_ino,
+                ):
+                    raise ValueError("backup cleanup root changed during validation")
+                traversal = _CleanupTraversal(
+                    limits=self._traversal_limits,
+                    deadline=cleanup_deadline,
+                    root_device=backups_metadata.st_dev,
+                )
+                try:
+                    manifest_metadata = os.stat(
+                        "backup-manifest.json",
+                        dir_fd=bundle_fd,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    pass
+                else:
+                    del manifest_metadata
+                    raise ValueError("manifest-backed backup cannot be cleaned")
+                _validate_cleanup_directory(
+                    bundle_fd,
+                    service_uid=self.service_uid,
+                    budget=traversal,
+                    depth=1,
+                )
+                current = os.stat(bundle_name, dir_fd=backups_fd, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (
+                    bundle_metadata.st_dev,
+                    bundle_metadata.st_ino,
+                ):
+                    raise ValueError("backup cleanup root changed during validation")
+                if _read_previous_latest_target(backups_fd) == bundle_name:
+                    raise ValueError("manifest-backed latest backup cannot be cleaned")
+                try:
+                    os.stat(
+                        "backup-manifest.json",
+                        dir_fd=bundle_fd,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise ValueError("manifest-backed backup cannot be cleaned")
+                _remove_cleanup_directory(
+                    bundle_fd,
+                    service_uid=self.service_uid,
+                    budget=traversal.fresh_pass(),
+                    depth=1,
+                )
+                traversal.check_deadline()
+                os.close(bundle_fd)
+                bundle_fd = None
+                current = os.stat(bundle_name, dir_fd=backups_fd, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (
+                    bundle_metadata.st_dev,
+                    bundle_metadata.st_ino,
+                ):
+                    raise ValueError("backup cleanup root changed during removal")
+                os.rmdir(bundle_name, dir_fd=backups_fd)
+                traversal.check_deadline()
+                os.fsync(backups_fd)
+                traversal.check_deadline()
+                return True
+            finally:
+                if bundle_fd is not None:
+                    os.close(bundle_fd)
+                os.close(backups_fd)
+
+        return _stage("backup_cleanup_failed", cleanup)
+
+    def create(
+        self,
+        request: RolloutRequest,
+        *,
+        created_at: datetime | None = None,
+    ) -> VerifiedBackup:
         if request.status != "pending":
             raise BackupError("backup_request_not_pending")
-        created_at = _stage(
-            "backup_clock_invalid",
-            lambda: _clock_utc(self._now),
-        )
+        if created_at is None:
+            created_at = _stage(
+                "backup_clock_invalid",
+                lambda: _clock_utc(self._now),
+            )
+        else:
+            provided_created_at = created_at
+            created_at = _stage(
+                "backup_clock_invalid",
+                lambda: _clock_utc(lambda: provided_created_at),
+            )
         bundle_root = self._bundle_root(request, created_at)
         resources = _BackupResourceBudget(
             self.config.rollout_root,
@@ -2293,8 +2646,11 @@ __all__ = [
     "BackupCommandRunner",
     "BackupCreator",
     "BackupError",
+    "BackupPolicyLimitError",
+    "BackupPublicReason",
     "MinioMirror",
     "PortForwardHandle",
     "SubprocessBackupCommandRunner",
     "VerifiedBackup",
+    "normalize_backup_public_reason",
 ]

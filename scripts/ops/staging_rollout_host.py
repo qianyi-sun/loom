@@ -2840,6 +2840,8 @@ class HostInstaller:
             "smoke_on_behalf_team_id",
             "scope",
             "gb10_prep_concurrency",
+            "backup_max_objects",
+            "backup_max_entries",
         }
         if set(raw) != required:
             raise InstallError("rendered staging config keys are invalid")
@@ -2866,6 +2868,8 @@ class HostInstaller:
             "smoke_on_behalf_team_id": team_id,
             "scope": "current-gb10",
             "gb10_prep_concurrency": 8,
+            "backup_max_objects": 1_000_000,
+            "backup_max_entries": 16_000_000,
         }
         if any(raw.get(key) != value for key, value in literals.items()):
             raise InstallError("rendered staging config policy is invalid")

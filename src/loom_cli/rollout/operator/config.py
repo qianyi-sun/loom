@@ -22,6 +22,8 @@ APPROVED_NAMESPACE = "loom-staging"
 APPROVED_ENVIRONMENT = "staging"
 APPROVED_CP_URL = "http://127.0.0.1:18081"
 APPROVED_SCOPE = "current-gb10"
+APPROVED_BACKUP_MAX_OBJECTS = 1_000_000
+APPROVED_BACKUP_MAX_ENTRIES = 16_000_000
 
 ServiceUser = Literal["loom-rollout"]
 OperatorGroup = Literal["loom-staging-operators"]
@@ -55,6 +57,8 @@ _CONFIG_KEYS = frozenset(
         "smoke_on_behalf_team_id",
         "scope",
         "gb10_prep_concurrency",
+        "backup_max_objects",
+        "backup_max_entries",
     }
 )
 _MAX_CONFIG_BYTES = 1 << 20
@@ -155,11 +159,7 @@ def _read_protected_config(
             )
         if mode & 0o022:
             raise ConfigError("config must not be group/world writable")
-        if (
-            before.st_nlink != 1
-            or before.st_size <= 0
-            or before.st_size > _MAX_CONFIG_BYTES
-        ):
+        if before.st_nlink != 1 or before.st_size <= 0 or before.st_size > _MAX_CONFIG_BYTES:
             raise ConfigError("config metadata is unsafe")
         chunks: list[bytes] = []
         remaining = _MAX_CONFIG_BYTES + 1
@@ -237,6 +237,8 @@ class OperatorConfig:
     smoke_on_behalf_team_id: str
     scope: RolloutScope
     gb10_prep_concurrency: int
+    backup_max_objects: int = APPROVED_BACKUP_MAX_OBJECTS
+    backup_max_entries: int = APPROVED_BACKUP_MAX_ENTRIES
     config_path: Path = Path("/etc/loom/staging-rollout.toml")
     config_sha256: str = "0" * 64
 
@@ -250,9 +252,7 @@ class OperatorConfig:
         expected_mode: int | None = None,
     ) -> OperatorConfig:
         installed_authority = (
-            expected_owner_uid is None
-            and expected_owner_gid is None
-            and expected_mode is None
+            expected_owner_uid is None and expected_owner_gid is None and expected_mode is None
         )
         if expected_owner_uid is None:
             expected_owner_uid = 0
@@ -326,6 +326,19 @@ class OperatorConfig:
         if type(concurrency) is not int or not 1 <= concurrency <= 15:
             raise ConfigError("gb10_prep_concurrency must be an integer between 1 and 15")
 
+        backup_max_objects = raw["backup_max_objects"]
+        if type(backup_max_objects) is not int or backup_max_objects != APPROVED_BACKUP_MAX_OBJECTS:
+            raise ConfigError(
+                f"backup_max_objects must be the reviewed staging policy value "
+                f"{APPROVED_BACKUP_MAX_OBJECTS}"
+            )
+        backup_max_entries = raw["backup_max_entries"]
+        if type(backup_max_entries) is not int or backup_max_entries != APPROVED_BACKUP_MAX_ENTRIES:
+            raise ConfigError(
+                f"backup_max_entries must be the reviewed staging policy value "
+                f"{APPROVED_BACKUP_MAX_ENTRIES}"
+            )
+
         return cls(
             schema_version=1,
             service_user=cast(ServiceUser, service_user),
@@ -350,9 +363,17 @@ class OperatorConfig:
             smoke_on_behalf_team_id=smoke_team_id,
             scope=cast(RolloutScope, scope),
             gb10_prep_concurrency=concurrency,
+            backup_max_objects=backup_max_objects,
+            backup_max_entries=backup_max_entries,
             config_path=path,
             config_sha256=hashlib.sha256(payload).hexdigest(),
         )
 
 
-__all__ = ["APPROVED_REMOTE_URL", "ConfigError", "OperatorConfig"]
+__all__ = [
+    "APPROVED_BACKUP_MAX_ENTRIES",
+    "APPROVED_BACKUP_MAX_OBJECTS",
+    "APPROVED_REMOTE_URL",
+    "ConfigError",
+    "OperatorConfig",
+]

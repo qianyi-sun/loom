@@ -3,6 +3,8 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -38,6 +40,22 @@ def test_cluster_rollout_workflows_sync_rollout_extra() -> None:
         assert "--extra rollout" in text
 
 
+def test_integration_jobs_install_terminal_bench_sibling_independent_of_cache() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+
+    for job_name in ("integration", "integration-docker"):
+        install_step = next(
+            step
+            for step in workflow["jobs"][job_name]["steps"]
+            if step.get("name") == "Install project + dev deps + sibling packages"
+        )
+        assert "if" not in install_step
+        assert (
+            "uv pip install -e packages/loom-benchmark-terminal-bench-2"
+            in install_step["run"]
+        )
+
+
 def test_operator_runbook_bootstraps_rollout_extra() -> None:
     runbook = (ROOT / "docs/runbooks/operator-runbook.md").read_text(encoding="utf-8")
 
@@ -57,6 +75,7 @@ def test_independent_staging_operator_runbook_is_merged_only_and_complete() -> N
         "loom-staging-rollout logs REQUEST_ID --follow",
         "loom-staging-rollout resume REQUEST_ID",
         'loom-staging-rollout cancel REQUEST_ID --reason "bounded operational reason"',
+        "loom-staging-rollout cleanup-incomplete-backup REQUEST_ID",
     ):
         assert command in runbook
 
@@ -129,4 +148,6 @@ def test_independent_staging_adr_and_launch_gate_preserve_acceptance_boundary() 
     assert "approved for implementation planning" not in design
     assert "It remains emergency break-glass" not in design
     assert "loom-staging-rollout resume REQUEST_ID" in design
+    assert "loom-staging-rollout cleanup-incomplete-backup REQUEST_ID" in design
+    assert "loom-staging-rollout cleanup-incomplete-backup REQUEST_ID" in gb10
     assert "`loom-rollout` with `--resume`" not in design
