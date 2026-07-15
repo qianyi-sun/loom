@@ -1,6 +1,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  namespace: loom
   name: loom-control-plane
 spec:
   replicas: 2
@@ -168,6 +169,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  namespace: loom
   name: loom-control-plane
 spec:
   selector: { app: loom-control-plane }

@@ -2,6 +2,7 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  namespace: loom
   name: loom-postgres
 spec:
   podSelector:
@@ -50,6 +51,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  namespace: loom
   name: loom-minio
 spec:
   podSelector:
@@ -102,6 +104,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  namespace: loom
   name: loom-control-plane
 spec:
   podSelector:
@@ -155,6 +158,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  namespace: loom
   name: loom-llm-gateway
 spec:
   podSelector:
@@ -231,6 +235,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  namespace: loom
   name: loom-worker
 spec:
   podSelector:
@@ -278,6 +283,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  namespace: loom
   name: loom-service
 spec:
   podSelector:
@@ -356,6 +362,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  namespace: loom
   name: loom-web
 spec:
   podSelector:
@@ -383,6 +390,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  namespace: loom
   name: loom-egress-xds
 spec:
   podSelector:
@@ -433,6 +441,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  namespace: loom
   name: loom-egress-proxy
 spec:
   podSelector:
@@ -476,6 +485,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  namespace: loom
   name: loom-pgbouncer
 spec:
   podSelector:
@@ -540,6 +550,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  namespace: loom
   name: loom-family-orchestrator
 spec:
   podSelector:

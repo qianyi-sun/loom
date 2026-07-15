@@ -2,6 +2,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  namespace: loom
   name: loom-pgbouncer
 spec:
   replicas: 2
@@ -96,6 +97,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  namespace: loom
   name: loom-pgbouncer
 spec:
   selector:
@@ -111,6 +113,7 @@ spec:
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
+  namespace: loom
   name: loom-pgbouncer
 spec:
   minAvailable: 1

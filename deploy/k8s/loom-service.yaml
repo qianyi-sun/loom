@@ -1,6 +1,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  namespace: loom
   name: loom-service
 spec:
   replicas: 2
@@ -207,6 +208,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  namespace: loom
   name: loom-service
 spec:
   selector:
