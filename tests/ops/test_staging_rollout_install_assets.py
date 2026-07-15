@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -19,8 +22,39 @@ def test_client_and_sudoers_fix_the_broker_command() -> None:
     assert "/usr/local/libexec/loom-staging-rollout-broker *" in sudoers
     assert "/usr/bin/env -i" in broker
     assert 'SUDO_USER="${SUDO_USER}"' in broker
+    assert (
+        "/opt/loom-staging-runner/venv/bin/python -I -B -m loom_cli.rollout.operator.broker"
+    ) in broker
     assert "PYTHONPATH" not in broker
     assert tmpfiles.strip() == "d /run/loom-staging-rollout 0700 loom-rollout loom-rollout -"
+
+
+def test_isolated_broker_interpreter_ignores_caller_working_directory(tmp_path: Path) -> None:
+    shadow = tmp_path / "loom_cli"
+    shadow.mkdir()
+    marker = tmp_path / "shadow-executed"
+    (shadow / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('executed')\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            "import pathlib, loom_cli; print(pathlib.Path(loom_cli.__file__).resolve())",
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert str(shadow) not in result.stdout
+    assert not marker.exists()
 
 
 def test_config_template_is_non_secret_and_fixed_to_merged_dev() -> None:

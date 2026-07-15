@@ -1,0 +1,1216 @@
+[meta]
+version = 1
+
+[service_prefix]
+control-plane = "CP"
+llm-gateway   = "GW"
+loom-service  = "SVC"
+worker        = "WORKER"
+
+# ─── service_config: shared fields first ───
+
+[service_config.db_url]
+used_by     = ["control-plane", "llm-gateway", "loom-service"]
+python_type = "PostgresDsn"
+required    = true
+secret      = { key_per_service = { control-plane = "cp-db-url", llm-gateway = "gw-db-url", loom-service = "svc-db-url" } }
+description = "Postgres connection string. Per-service Secret keys so DB credentials rotate independently."
+
+[service_config.db_url_pool]
+used_by     = ["control-plane", "llm-gateway", "loom-service"]
+python_type = "PostgresDsn"
+required    = false
+default     = ""
+secret      = { key_per_service = { control-plane = "cp-db-url-pool", llm-gateway = "gw-db-url-pool", loom-service = "svc-db-url-pool" } }
+description = "PgBouncer pool DSN (transaction-mode multiplexer, #609). When non-empty, SQLAlchemy engines use this instead of db_url. Empty (default) = direct-to-Postgres, no pooler. LISTEN/NOTIFY watchers and Alembic migrations always use db_url regardless."
+
+[service_config.db_pool_size]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 20
+description = "Control Plane SQLAlchemy DB connection pool size. Size this for concurrent worker heartbeats, claims, state patches, and trajectory index writes."
+
+[service_config.db_max_overflow]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 40
+description = "Control Plane SQLAlchemy DB overflow connections above db_pool_size for short writeback bursts."
+
+[service_config.db_pool_timeout_sec]
+used_by     = ["control-plane"]
+python_type = "float"
+default     = 30.0
+description = "Control Plane SQLAlchemy timeout in seconds when waiting for a DB connection from the pool."
+
+[service_config.step_jwt_signing_key]
+used_by     = ["control-plane", "llm-gateway"]
+python_type = "SecretStr"
+required    = true
+secret      = { key = "step-jwt-signing-key", generate = "openssl rand -hex 64" }
+description = "HS256 step-JWT key. CP mints, gateway verifies; mismatch → 401 on every facade call."
+
+[service_config.storage_backend]
+used_by     = ["control-plane", "loom-service", "worker"]
+python_type = "str"
+default     = "minio"
+description = "Object-store backend. S3-compatible: minio (default), s3, r2, b2, wasabi. Non-S3 (renderers TBD): gcs (#254). Drives `bootstrap-storage-lifecycle` renderer selection and informs the credentials provider chain."
+
+[service_config.storage_auth_kind]
+used_by     = ["control-plane", "loom-service", "worker"]
+python_type = "str"
+default     = "static_keys"
+description = "Credentials resolution strategy. static_keys (default): read minio-access-key + minio-secret-key from loom-secrets — works for MinIO + every S3-compatible provider. irsa: boto3 discovers the AWS IAM role from the pod's projected serviceAccountToken (EKS); no static keys needed. workload_identity / sa_json: GCS analogues, available once #254 lands."
+
+[service_config.minio_endpoint]
+used_by     = ["control-plane", "loom-service", "worker"]
+python_type = "str"
+default     = "http://loom-minio:9000"
+
+[service_config.minio_access_key]
+used_by     = ["control-plane", "loom-service", "worker"]
+python_type = "SecretStr"
+required    = true
+secret      = { key = "minio-access-key" }
+
+[service_config.minio_secret_key]
+used_by     = ["control-plane", "loom-service", "worker"]
+python_type = "SecretStr"
+required    = true
+secret      = { key = "minio-secret-key" }
+
+[service_config.minio_region]
+used_by     = ["control-plane", "loom-service", "worker"]
+python_type = "str"
+default     = "us-east-1"
+
+[service_config.minio_max_pool_connections]
+used_by     = ["worker"]
+python_type = "int"
+default     = 256
+description = "Worker-side boto3 S3 connection pool size. Size this with worker concurrency because task materialization, artifact upload, and trajectory upload can overlap heavily during benchmark sweeps."
+
+[service_config.minio_connect_timeout_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 5.0
+description = "Worker-side boto3 S3 connect timeout in seconds."
+
+[service_config.minio_read_timeout_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 120.0
+description = "Worker-side boto3 S3 socket read timeout in seconds. Keep above transient MinIO latency under high-concurrency materialization/upload pressure."
+
+[service_config.minio_operation_timeout_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 300.0
+description = "Worker-side wall-clock timeout for each S3 operation wrapper such as download_prefix, put_object, multipart part upload, and presign."
+
+[service_config.minio_operation_attempts]
+used_by     = ["worker"]
+python_type = "int"
+default     = 3
+description = "Worker-side S3 operation attempts after timeout/reconnect. Each attempt uses minio_operation_timeout_sec."
+
+[service_config.llm_gateway_url]
+used_by     = ["control-plane"]
+python_type = "HttpUrl"
+default     = "http://loom-llm-gateway:9100"
+
+[service_config.control_plane_url]
+used_by     = ["loom-service", "worker"]
+python_type = "HttpUrl"
+default     = "http://loom-control-plane:8080"
+
+[service_config.gateway_url]
+used_by     = ["loom-service", "worker"]
+python_type = "HttpUrl"
+default     = "http://loom-llm-gateway:9100"
+
+[service_config.subprocess_gateway_url]
+used_by     = ["worker"]
+python_type = "HttpUrl"
+description = "Optional OpenAI-compatible facade base URL as seen from trial sandbox subprocess agents. Use when the worker's own gateway_url is not resolvable from Docker sandboxes, e.g. http://host.docker.internal:30443/openai/v1 on k8s nodes with gateway-router hostPort."
+
+[service_config.admin_secret_file]
+used_by     = ["control-plane", "llm-gateway", "loom-service"]
+python_type = "Path"
+# no required, no default → `Path | None = None`
+# k8s templates inject a template-local literal after the env_block macro
+
+[service_config.log_level]
+used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]
+python_type = "LogLevel"
+default     = "info"
+
+[service_config.dev_reload]
+used_by     = ["control-plane", "llm-gateway", "loom-service"]
+python_type = "bool"
+default     = false
+
+[service_config.bind_host]
+used_by     = ["control-plane", "llm-gateway", "loom-service"]
+python_type = "str"
+default     = "0.0.0.0"
+
+[service_config.bind_port]
+used_by             = ["control-plane", "llm-gateway", "loom-service"]
+python_type         = "int"
+default_per_service = { control-plane = 8080, llm-gateway = 9100, loom-service = 8090 }
+
+[service_config.metrics_port]
+used_by             = ["control-plane", "llm-gateway", "worker"]
+python_type         = "int"
+default_per_service = { control-plane = 9090, llm-gateway = 9101, worker = 9090 }
+
+# ─── control-plane only ───
+
+[service_config.worker_heartbeat_expiry_sec]
+used_by     = ["control-plane", "loom-service"]
+python_type = "int"
+default     = 120
+
+[service_config.worker_reclaim_sweep_interval_sec]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 30
+
+[service_config.claimed_without_start_expiry_sec]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 3600
+description = "Seconds before the crash detector reclaims a trial stuck in claimed with no started_at while the owning worker is still fresh. The crash detector measures from pre_start_heartbeat_at when upgraded workers report setup/cache progress, falling back to claimed_at for older workers. Default is sized for GB10/source-useful cold setup while preserving abandoned-claim recovery."
+
+[service_config.stale_running_trial_reclaim_enabled]
+used_by     = ["control-plane", "loom-service"]
+python_type = "bool"
+default     = true
+description = "Enable the conservative #378 stale-running reclaim sweep. The sweep only fails running trials whose worker heartbeat is still fresh, runtime exceeds the effective agent timeout backstop, and trial events/LLM calls have been silent beyond the configured silence window."
+
+[service_config.stale_running_trial_timeout_multiplier]
+used_by     = ["control-plane", "loom-service"]
+python_type = "float"
+default     = 3.0
+description = "Multiplier applied to the effective agent timeout for the control-plane stale-running reclaim decision (#378). The CP uses this with stale_running_trial_grace_sec and only reclaims when the worker heartbeat is fresh."
+
+[service_config.stale_running_trial_grace_sec]
+used_by     = ["control-plane", "loom-service"]
+python_type = "float"
+default     = 900.0
+description = "Additive grace for the control-plane stale-running reclaim deadline (#378). Default is intentionally larger than the worker hard-deadline grace so the worker normally records the terminal diagnostic first."
+
+[service_config.stale_running_trial_silence_sec]
+used_by     = ["control-plane", "loom-service"]
+python_type = "float"
+default     = 900.0
+description = "Required silence window for stale-running reclaim (#378). A running trial is not failed while it has recent trial_events or llm_calls activity inside this window, even if runtime already exceeds the timeout backstop."
+
+[service_config.signed_url_expiry_sec]
+used_by     = ["control-plane", "loom-service"]
+python_type = "int"
+default     = 3600
+
+[service_config.slurm_worker_controller_enabled]
+used_by     = ["control-plane"]
+python_type = "bool"
+default     = false
+description = "Enable the Control Plane elastic Slurm worker controller loop."
+
+[service_config.slurm_worker_controller_environment]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = "development"
+description = "Environment label written to slurm_worker_jobs for elastic worker jobs."
+
+[service_config.slurm_worker_controller_pool_name]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = "oldlab"
+description = "Slurm worker pool label written to slurm_worker_jobs."
+
+[service_config.slurm_worker_controller_allowed_nodes]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = ""
+description = "Comma-separated Slurm nodes the controller may target."
+
+[service_config.slurm_worker_controller_env_file]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = ""
+description = "Remote-worker env file path exported into elastic Slurm jobs."
+
+[service_config.slurm_worker_controller_repo_dir]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = ""
+description = "Repository directory path used by elastic Slurm worker jobs."
+
+[service_config.slurm_worker_controller_partition]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = ""
+description = "Optional Slurm partition for elastic worker jobs."
+
+[service_config.slurm_worker_controller_time_limit]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = "7-00:00:00"
+description = "Slurm --time value for elastic worker jobs."
+
+[service_config.slurm_worker_controller_requested_cpus]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 12
+description = "CPU count requested per elastic Slurm worker job."
+
+[service_config.slurm_worker_controller_requested_memory_mib]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 58000
+description = "Memory requested per elastic Slurm worker job, in MiB."
+
+[service_config.slurm_worker_controller_requested_concurrency]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 6
+description = "LOOM_WORKER_MAX_CONCURRENT value requested per elastic worker job."
+
+[service_config.slurm_worker_controller_max_jobs]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 0
+description = "Maximum running plus pending elastic Slurm worker jobs."
+
+[service_config.slurm_worker_controller_pending_job_cap]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 1
+description = "Maximum pending elastic Slurm worker jobs allowed at once."
+
+[service_config.slurm_worker_controller_min_queued_trials]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 1
+description = "Queued trial threshold before the elastic Slurm controller submits jobs."
+
+[service_config.slurm_worker_controller_stale_after_seconds]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 300
+description = "Seconds before an unobserved active Slurm worker job is marked stale."
+
+[service_config.slurm_worker_controller_sbatch_path]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = "sbatch"
+description = "Path to sbatch for the elastic Slurm controller."
+
+[service_config.slurm_worker_controller_squeue_path]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = "squeue"
+description = "Path to squeue for the elastic Slurm controller."
+
+[service_config.slurm_worker_controller_sacct_path]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = "sacct"
+description = "Path to sacct for the elastic Slurm controller."
+
+[service_config.slurm_worker_controller_scancel_path]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = "scancel"
+description = "Path to scancel for the elastic Slurm controller."
+
+[service_config.slurm_worker_controller_command_timeout_seconds]
+used_by     = ["control-plane"]
+python_type = "float"
+default     = 20.0
+description = "Timeout for each Slurm command invoked by the elastic controller."
+
+# ─── llm-gateway only ───
+
+[service_config.anthropic_api_key]
+used_by     = ["llm-gateway"]
+python_type = "SecretStr"
+secret      = { key = "anthropic-api-key" }
+
+[service_config.openai_api_key]
+used_by     = ["llm-gateway"]
+python_type = "SecretStr"
+secret      = { key = "openai-api-key" }
+
+[service_config.google_api_key]
+used_by     = ["llm-gateway"]
+python_type = "SecretStr"
+secret      = { key = "google-api-key" }
+
+[service_config.together_api_key]
+used_by     = ["llm-gateway"]
+python_type = "SecretStr"
+secret      = { key = "together-api-key" }
+
+[service_config.huggingface_api_key]
+used_by      = ["llm-gateway", "loom-service"]
+python_type  = "SecretStr"
+secret       = { key = "huggingface-api-key" }
+env_override = { "loom-service" = "HF_TOKEN" }
+description  = "Optional Hugging Face read token. Gateway uses it for HF model endpoints; loom-service exposes it as HF_TOKEN for catalog mirror provisioning. Workers must materialize from internal object-store mirrors without HF_TOKEN."
+
+[service_config.rate_card_cache_ttl_sec]
+used_by     = ["llm-gateway"]
+python_type = "int"
+default     = 300
+
+[service_config.upstream_timeout_sec]
+used_by     = ["llm-gateway"]
+python_type = "float"
+default     = 120.0
+
+# ─── Per-request retry on transient upstream failures (#298 Slice A) ───
+# Retry classification + budget live in `loom_llm_gateway/retry.py`.
+# Defaults are sized to ride out a rolling LLM-gateway / upstream
+# restart window (#416 Slice 3): 5 attempts with up to 8s backoff each,
+# capped at a 60s wall-clock budget. Agent timeouts on TaskConfig are
+# 30min default; keeping the budget at 60s leaves ample headroom for
+# the rest of the agent run.
+
+[service_config.llm_retry_max_attempts]
+used_by     = ["llm-gateway"]
+python_type = "int"
+default     = 5
+description = "Max attempts per upstream LLM request including the initial call. 1 disables retry (#298 Slice A). Bumped to 5 in #416 Slice 3 so a request hitting the middle of a rolling-restart window (k8s `maxUnavailable=1` on a 2-replica gateway is ~10-30s of transient 502s) gets enough chances to land on a healthy replica."
+
+[service_config.llm_retry_base_backoff_sec]
+used_by     = ["llm-gateway"]
+python_type = "float"
+default     = 0.5
+description = "Exponential-backoff base. Attempt N waits min(base * 2^(N-1) + jitter, max_backoff_sec)."
+
+[service_config.llm_retry_jitter_sec]
+used_by     = ["llm-gateway"]
+python_type = "float"
+default     = 0.25
+description = "Uniform jitter ±this many seconds added to each backoff wait. Reduces thundering-herd against the upstream."
+
+[service_config.llm_retry_max_backoff_sec]
+used_by     = ["llm-gateway"]
+python_type = "float"
+default     = 8.0
+description = "Per-attempt backoff ceiling. Stops exponential growth before subprocess agent timeouts kick in. Bumped from 4s to 8s in #416 Slice 3 to give the rolling-restart window time to settle without burning all 5 attempts in <10s."
+
+[service_config.llm_retry_budget_sec]
+used_by     = ["llm-gateway"]
+python_type = "float"
+default     = 60.0
+description = "Total wall-clock retry budget per request. We stop retrying once cumulative wait + elapsed exceeds this, even if attempts remain. Bumped from 30s to 60s in #416 Slice 3 to cover a full k8s rolling-restart window; well below TaskConfig.agent.timeout_sec (default 1800s)."
+
+# ─── Deployment-wide RetryPolicy defaults snapshotted at trial submit (#401) ───
+# Loom's trial retry defaults used to be Pydantic-model defaults, a Plan 3
+# artifact from before this schema existed. Moved here so operators can retune
+# per environment without a code change; the submit route snapshots the values
+# into TrialConfig.retry when the submitter didn't set an explicit policy, so
+# a saved trial is reproducible on any cluster regardless of subsequent retunes.
+
+[service_config.trial_retry_default_max_attempts]
+used_by     = ["control-plane", "loom-service"]
+python_type = "int"
+default     = 3
+description = "Default TrialConfig.retry.max_attempts snapshotted into the trial payload at submit time when the submitter didn't set an explicit RetryPolicy. Represents 'how many attempts does a well-behaved trial want?'. Clamped at submit to min(this, team_quota_max_attempts_ceiling_default). Semantically distinct from the team ceiling below."
+
+[service_config.trial_retry_default_retry_on]
+used_by     = ["control-plane", "loom-service"]
+python_type = "str_list"
+default     = ["gateway_error", "provider_transport_disconnect"]
+description = "Default TrialConfig.retry.retry_on snapshotted at submit time when unset. Members of the RetryReason enum (see src/loom/models/trial.py). Deployment-policy knob: CI dev might set [] (fail-fast, no wasted tokens); prod release-gate might add 'agent_timeout' to survive transient LLM slowdowns; sensitive prod might keep only ['provider_transport_disconnect']."
+
+[service_config.trial_retry_default_backoff_base_sec]
+used_by     = ["control-plane", "loom-service"]
+python_type = "float"
+default     = 30.0
+description = "Default BackoffSpec.base_sec snapshotted at submit time when unset. First-retry delay before exponential growth kicks in."
+
+[service_config.trial_retry_default_backoff_max_sec]
+used_by     = ["control-plane", "loom-service"]
+python_type = "float"
+default     = 600.0
+description = "Default BackoffSpec.max_sec snapshotted at submit time when unset. Cap on the exponential curve so retries don't stretch beyond a reasonable outer bound."
+
+[service_config.trial_retry_default_backoff_multiplier]
+used_by     = ["control-plane", "loom-service"]
+python_type = "float"
+default     = 2.0
+description = "Default BackoffSpec.multiplier snapshotted at submit time when unset. Exponential growth factor: attempt N waits base * multiplier^(N-1)."
+
+[service_config.trial_retry_default_backoff_jitter]
+used_by     = ["control-plane", "loom-service"]
+python_type = "float"
+default     = 0.2
+description = "Default BackoffSpec.jitter snapshotted at submit time when unset. Fractional jitter in [0, 1]: actual wait = curve * Uniform(1-jitter, 1+jitter) to spread thundering-herd across restarts."
+
+# ─── family-run orchestrator (#672) ───
+# Shared across control-plane + worker: CP owns the finalize hook,
+# orchestrator (deployed as a CP-siblings service that loads
+# ControlPlaneSettings) owns the adapting -> pending transition, and
+# workers read family_state_download_timeout_sec at pre-start.
+
+[service_config.skill_evolver_default_model]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = "anthropic/claude-sonnet-4-6"
+description = "Cluster-default evolver model for skill_patcher_llm when the batch does not override it in trial_config.family_run.adapter.params.model."
+
+[service_config.family_orchestrator_poll_sec]
+used_by     = ["control-plane"]
+python_type = "float"
+default     = 5.0
+description = "Family-run orchestrator poll cadence for the adapting-state scan."
+
+[service_config.family_adapter_call_timeout_sec]
+used_by     = ["control-plane"]
+python_type = "float"
+default     = 300.0
+description = "Per-call timeout wrapping the family adapter's evolve(); a trip is fed to the batch's failure_policy."
+
+[service_config.family_state_download_timeout_sec]
+used_by     = ["control-plane", "worker"]
+python_type = "float"
+default     = 120.0
+description = "Bounds worker-side family state materialisation before trial start."
+
+[service_config.team_quota_max_attempts_ceiling_default]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 3
+description = "Default value written to TeamQuota.max_attempts_ceiling at team creation. Represents 'how many attempts is this team allowed at most?' — the admin's ceiling, enforced by the scheduler at claim time. Semantically distinct from trial_retry_default_max_attempts (the submitter's requested count)."
+
+[service_config.egress_proxy_url]
+used_by     = ["llm-gateway"]
+python_type = "str"
+default     = ""
+description = "Envoy egress-proxy URL (#190 PR-C2). Empty disables proxy mode → upstream HTTP goes direct. Set to e.g. `http://loom-egress-proxy:30443` to route every facade/native passthrough through the Envoy egress chain."
+
+# ─── loom-service only ───
+
+[service_config.team_registration_open]
+used_by     = ["loom-service"]
+python_type = "bool"
+default     = false
+
+[service_config.public_base_url]
+used_by     = ["loom-service"]
+python_type = "HttpUrl"
+description = "Canonical public Web/API origin used for one-time setup, reset, and invite links. Deployed k8s environments render this as https://<ingress_host>; local/dev may leave it unset and use forwarded headers or the request base URL."
+
+[service_config.auth_session_cookie_name]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "loom_session"
+description = "Browser auth HttpOnly session cookie name for invite-only public Loom (#326)."
+
+[service_config.auth_csrf_header_name]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "X-Loom-CSRF"
+description = "Header required on unsafe browser session requests. The SPA gets this token from auth JSON responses and keeps it in memory; bearer-token service/CLI requests are not CSRF-gated (#326)."
+
+[service_config.auth_csrf_cookie_name]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "loom_csrf"
+description = "Legacy CSRF cookie name to clear during logout; current SPA keeps CSRF tokens in memory."
+
+[service_config.auth_session_ttl_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 604800
+description = "Browser session lifetime in seconds. Default is 7 days (#326)."
+
+[service_config.auth_login_challenge_ttl_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 900
+description = "Existing-user login challenge lifetime in seconds. Default is 15 minutes (#326)."
+
+[service_config.auth_return_login_token]
+used_by     = ["loom-service"]
+python_type = "bool"
+default     = false
+description = "When true, POST /auth/login/start includes the raw login token for local/dev/testing. Keep false in production (#326)."
+
+[service_config.trajectories_bucket]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "trajectories"
+
+[service_config.minio_public_endpoint]
+used_by     = ["loom-service"]
+python_type = "str"
+# no required, no default → `str | None = None` (codegen rule 4)
+description = "Public-facing MinIO endpoint for presigned URLs. When unset, falls back to minio_endpoint (works for in-cluster clients only)."
+
+[service_config.artifacts_bucket]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "artifacts"
+
+[service_config.batch_runner_batch_size]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 50
+
+[service_config.batch_runner_submit_rate_per_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 100
+
+[service_config.batch_runner_poll_interval_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 5
+
+[service_config.batch_runner_cp_token]
+used_by     = ["loom-service"]
+python_type = "SecretStr"
+secret      = { key = "batch-runner-cp-token" }
+# no required, no default → `SecretStr | None = None`
+
+[service_config.batch_budget_estimate_llm_calls_per_trial]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 1
+description = "Pre-run batch budget estimate assumption for model calls per trial. Actual live/final accounting still uses llm_calls rows."
+
+[service_config.batch_budget_estimate_input_tokens_per_call]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 1000000
+description = "Pre-run batch budget estimate assumption for prompt/input tokens per LLM call. Operators can tune this conservative default per deployment."
+
+[service_config.batch_budget_estimate_output_tokens_per_call]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 0
+description = "Pre-run batch budget estimate assumption for completion/output tokens per LLM call. Actual live/final accounting uses provider-reported tokens."
+
+[service_config.taskset_materializer_poll_interval_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 5
+
+[service_config.taskset_materializer_batch_size]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 1
+
+[service_config.taskset_materializer_claim_ttl_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 600
+
+[service_config.taskset_fence_canary_token]
+used_by     = ["loom-service"]
+python_type = "SecretStr"
+required    = false
+secret      = { key = "taskset-fence-canary-token" }
+description = "Deployment-only capability for the disposable TaskSet lease-fencing canary. It is never accepted by a public API or written to evidence."
+
+[service_config.taskset_materializer_upstream_cache_root]
+used_by     = ["loom-service"]
+python_type = "Path"
+default     = "/tmp/loom-taskset-upstream"
+
+[service_config.taskset_quota_max_count_per_team]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 50
+description = "Default maximum active (non-deleted) TaskSets allowed per team. Per-team overrides live in team_quotas.taskset_max_count."
+
+[service_config.taskset_quota_max_storage_bytes_per_team]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 21474836480
+description = "Default maximum total storage bytes for TaskSet blobs per team (20 GiB). Enforced at materialization time."
+
+[service_config.taskset_quota_max_bundle_bytes]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 5368709120
+description = "Maximum bytes a single TaskSet bundle may occupy (5 GiB). Materialization aborts with size_exceeded if exceeded."
+
+[service_config.taskset_gc_retention_days]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 7
+description = "Days after soft_deleted_at before GC removes the complete TaskSet root and hard-deletes the row; it does not control live generation cleanup."
+
+[service_config.taskset_gc_poll_interval_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 3600
+description = "Poll interval in seconds for both bounded live-generation reconciliation and retention-delayed TaskSet root GC."
+
+[service_config.taskset_manifest_max_bytes]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 1048576
+description = "Maximum allowed manifest upload size in bytes (1 MiB). Rejected with 413 before parsing."
+
+[service_config.taskset_materializer_transforms_enabled]
+used_by     = ["loom-service"]
+python_type = "bool"
+default     = false
+
+[service_config.taskset_materializer_transform_network_isolated]
+used_by     = ["loom-service"]
+python_type = "bool"
+default     = false
+
+[service_config.untrusted_workload_isolation]
+used_by     = ["loom-service"]
+python_type = "bool"
+default     = false
+description = "Whether untrusted workload isolation is available. v1 permits only false."
+
+[service_config.workload_trust_mode]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "internal_trusted"
+description = "Workload trust mode. v1 permits only internal_trusted."
+
+[service_config.taskset_materializer_transform_wall_timeout_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 30
+
+[service_config.taskset_materializer_transform_cpu_limit_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 10
+
+[service_config.taskset_materializer_transform_memory_limit_mb]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 256
+
+[service_config.local_servers_json]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "{}"
+
+# Secret-store master-key rotation (closes #80).
+# LOOM_SECRET_STORE_MASTER_KEYS (plural): comma-separated base64 AES-256 keys.
+#   First key = PRIMARY (new encrypts + rewrap target).
+#   Remaining keys = FALLBACKS (decrypt-only for rows encrypted under an older key).
+# LOOM_SECRET_STORE_MASTER_KEY (singular, legacy): single key at version 1.
+# Both set simultaneously → startup error. Loaded directly via
+# load_master_keys_from_env() rather than as a Pydantic field (keeps them
+# out of settings validation errors that could log values). The bootstrap-
+# secrets flow generates the singular key for new clusters; operators switch
+# to the plural form during online rotation.
+#
+# [service_config.secret_store_master_keys]
+# used_by     = ["loom-service"]
+# python_type = "str"
+# required    = true
+# secret      = { key = "secret-store-master-keys" }
+# description = "Comma-separated base64 AES-256 keys. First=PRIMARY; rest=FALLBACKS."
+# NOTE: not yet emitted by codegen (env-only field, see secret_store.py).
+
+# ─── worker only ───
+
+[service_config.token]
+used_by     = ["worker"]
+python_type = "SecretStr"
+required    = true
+secret      = { key = "worker-token" }
+description = "Worker bearer token, minted by `loom admin tokens worker mint`."
+
+[service_config.max_concurrent]
+used_by     = ["worker"]
+python_type = "int"
+default     = 5
+
+[service_config.hostname]
+used_by     = ["worker"]
+python_type = "str"
+description = "Optional worker hostname override used for registration and fleet observability. Defaults to the runtime hostname when unset."
+
+[service_config.pool_name]
+used_by     = ["worker"]
+python_type = "str"
+default     = "default"
+description = "Resource-pool label advertised at worker registration for slot capacity summaries. Set to values like k8s-worker, gb10-arm64, or oldlab."
+
+[service_config.blocking_io_max_workers]
+used_by     = ["worker"]
+python_type = "int"
+description = "Maximum threads for the worker event-loop default executor used by blocking Docker, S3, HF, and filesystem calls. Leave unset to derive from max_concurrent."
+
+[service_config.task_image_build_max_files]
+used_by      = ["worker"]
+python_type  = "int"
+default      = 2000
+env_override = { worker = "LOOM_TASK_IMAGE_BUILD_MAX_FILES" }
+description  = "Maximum file count allowed in a task-bundle Dockerfile build context before the worker rejects the build."
+
+[service_config.task_image_build_max_bytes]
+used_by      = ["worker"]
+python_type  = "int"
+default      = 536870912
+env_override = { worker = "LOOM_TASK_IMAGE_BUILD_MAX_BYTES" }
+description  = "Maximum byte size allowed in a task-bundle Dockerfile build context before the worker rejects the build."
+
+[service_config.sandbox_isolation]
+used_by     = ["worker"]
+python_type = "bool"
+default     = false
+description = "Enable #78 Phase B sandbox isolation: per-trial --internal docker bridge + per-node loom-llm-gateway-sandbox singleton. Default off → pre-Phase-B behavior. When true, the worker needs a writable singleton-secrets dir + the loom-llm-gateway-sandbox image pulled."
+
+[service_config.sandbox_singleton_image]
+used_by     = ["worker"]
+python_type = "str"
+default     = "loom-llm-gateway-sandbox:dev"
+description = "Container image for the per-node CONNECT proxy singleton (Phase B PR-B1)."
+
+[service_config.sandbox_singleton_secrets_dir]
+used_by     = ["worker"]
+python_type = "str"
+default     = "/var/lib/loom/sandbox-secrets"
+description = "Host directory mounted into the singleton container at /run/loom. Contains the loom-ca cert + step-JWT signing key. Operator-provisioned."
+
+[service_config.sandbox_worker_index]
+used_by     = ["worker"]
+python_type = "int"
+default     = 0
+description = "Partitions the per-trial subnet pool when multiple workers run on the same host (see #189). 0..15."
+
+[service_config.sandbox_step_jwt_ttl_sec]
+used_by     = ["worker"]
+python_type = "int"
+default     = 600
+description = "Step-JWT TTL the worker requests when minting tokens for rotation (Phase D PR-D1). Rotation cadence is TTL/2 — so a 600s TTL rotates every 5 minutes."
+
+[service_config.drain_timeout_sec]
+used_by     = ["worker"]
+python_type = "int"
+default     = 600
+
+[service_config.claim_poll_interval_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 1.0
+
+[service_config.idle_exit_after_seconds]
+used_by     = ["worker"]
+python_type = "float"
+# no default -> `float | None = None`; fixed workers stay long-running unless
+# elastic Slurm launchers opt in through LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS.
+description = "Optional idle window after which a worker exits successfully when no trials are in flight and repeated claims find no work."
+
+[service_config.heartbeat_interval_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 5.0
+
+[service_config.pre_start_heartbeat_interval_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 60.0
+description = "Interval for worker trial-specific pre-start progress heartbeats while claimed work is still in setup/materialization/task-image/layered-cache preparation and has not yet set started_at. Keep this below LOOM_CP_CLAIMED_WITHOUT_START_EXPIRY_SEC."
+
+[service_config.trajectory_cache_dir]
+used_by     = ["worker"]
+python_type = "Path"
+default     = "/var/lib/loom/trajectories"
+
+[service_config.docker_socket]
+used_by     = ["worker"]
+python_type = "Path"
+default     = "/var/run/docker.sock"
+
+[service_config.docker_api_timeout_sec]
+used_by     = ["worker"]
+python_type = "int"
+default     = 1800
+description = "Docker SDK API timeout in seconds for worker-created clients. Keeps large pulls/builds/sidecars from failing at docker-py's shorter default during benchmark sweeps."
+
+[service_config.fixtures_root]
+used_by     = ["worker"]
+python_type = "Path"
+# no default → `Path | None = None`
+
+[service_config.benchmark_cache]
+used_by     = ["worker"]
+python_type = "Path"
+# no default → `Path | None = None`
+
+[service_config.task_materialize_timeout_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 300.0
+description = "Wall-clock timeout for pre-start task bundle materialization, including hf://, fixture://, and s3:// sources. Exceeding it fails the claimed trial through setup failure writeback instead of leaving it stuck claimed."
+
+[service_config.trial_cancel_poll_interval_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 30.0
+description = "Cancellation watchdog poll cadence (#360). The worker polls the CP for each in-flight trial's state every N seconds; if the CP reports `cancelled`, the worker cancels the running asyncio task so the in-container agent process stops instead of continuing to spend budget."
+
+[service_config.trial_hard_deadline_multiplier]
+used_by     = ["worker"]
+python_type = "float"
+default     = 3.0
+description = "Multiplier applied to `agent.timeout_sec` to derive the worker-side hard-deadline backstop (#378). If a trial exceeds `agent.timeout_sec * multiplier + trial_hard_deadline_grace_sec`, the cancellation watchdog force-cancels the runner so a stuck opencode/subprocess-agent doesn't keep the trial `running` for hours past its declared timeout. Set to 0 to disable the backstop (not recommended for production)."
+
+[service_config.trial_hard_deadline_grace_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 600.0
+description = "Additive grace on top of `agent.timeout_sec * trial_hard_deadline_multiplier` for the hard-deadline backstop (#378). Covers task setup, verifier, and artifact-collection budget so a legitimate long run doesn't trip the watchdog."
+
+[service_config.enable_worker_vllm]
+used_by     = ["worker"]
+python_type = "bool"
+default     = false
+
+[service_config.vllm_gpu_memory_utilization]
+used_by     = ["worker"]
+python_type = "float"
+default     = 0.90
+
+[service_config.vllm_tensor_parallel_size]
+used_by     = ["worker"]
+python_type = "int"
+default     = 1
+
+# ─── Per-trial agent install + cache (#317 Phase 1) ────────────────
+# Worker builds a content-addressed image per (task_image_digest,
+# install_script) combo the first time it's encountered. Cluster-wide
+# coordination via the active_trial_cache_builds table (CP-owned;
+# workers reach it via /api/v1/internal/trial-cache/*). Optional
+# shared registry sharing for cross-worker cache hits.
+
+[service_config.trial_cache_registry_repo]
+used_by     = ["worker"]
+python_type = "str"
+default     = ""
+description = "Full repo path for the shared trial-image cache (#317). Works with any registry the worker can authenticate to: Docker Hub (`docker.io/<org>/<repo>`), GHCR (`ghcr.io/<org>/<repo>`), ECR (`<acct>.dkr.ecr.<region>.amazonaws.com/<repo>`), or self-hosted (`registry.cluster.local:5000/<repo>`). Empty = per-worker local cache only. Workers need pull+push perms via mounted docker-config Secret. Cached images are tagged as `<this>:<cache_key>`."
+
+[service_config.trial_cache_registry_pull_timeout_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 15.0
+description = "Max wait for shared-registry pull of a cached agent-installed image before falling back to local build. Keeps registry outage from slowing trial start. Distinct from `trial_cache_base_image_pull_timeout_sec` which controls the slower task-base-image pull."
+
+[service_config.trial_cache_base_image_pull_timeout_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 1800.0
+description = "Max wait for the task base image pull (e.g. `python:3.11-slim`, `swebench/sweb.eval...`). SWE-Bench instance images are 1-2GB; on slow networks the pull can take 10-20 min. 30-min default."
+
+[service_config.trial_cache_ttl_hours]
+used_by     = ["worker"]
+python_type = "int"
+default     = 168
+description = "TTL on cached trial images before `docker image prune --filter until=<ttl>h` evicts them. 7 days default. Docker tracks creation age, not last-access — operators size for cache-warmth horizon."
+
+[service_config.trial_cache_min_free_gb]
+used_by     = ["worker"]
+python_type = "int"
+default     = 20
+description = "Capacity-pressure backstop: when worker disk free drops below this, delete oldest-by-creation trial-cache images regardless of TTL."
+
+[service_config.trial_cache_build_lock_timeout_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 1800.0
+description = "TTL on the builder slot in active_trial_cache_builds (30-min default). Sized for worst-case base-image-pull + install + push budget. Builder refreshes TTL every 60s during long operations; on crash, the heartbeat dies and the slot expires within ~60s."
+
+[service_config.trial_cache_build_max_concurrent]
+used_by     = ["worker"]
+python_type = "int"
+default     = 1
+description = "Maximum concurrent layered trial-cache image builds allowed for the same worker daemon group. Workers coordinate daemon-wide synthetic slots through active_trial_cache_builds using pool_name, hostname, and docker_socket as the daemon fingerprint. Keep 1 for shared OLDLAB/k8s Docker daemons; raise only for isolated daemon hosts."
+
+[service_config.setup_health_guard_enabled]
+used_by     = ["worker"]
+python_type = "bool"
+default     = true
+description = "Enable worker-side node-health admission before Docker setup/build work. When enabled, task-image builds, layered trial-cache builds, and sidecar image pulls/builds wait or fail before launching setup containers if host I/O pressure, swap, or D-state process counts exceed configured thresholds."
+
+[service_config.setup_health_io_full_avg10_max]
+used_by     = ["worker"]
+python_type = "float"
+default     = 50.0
+description = "Maximum Linux /proc/pressure/io full avg10 value allowed before a worker admits new Docker setup/build work. Values above this indicate sustained host I/O stalls; shared OLDLAB incident evidence saw avg10 around 76 during SSH/login symptoms."
+
+[service_config.setup_health_min_swap_free_mb]
+used_by     = ["worker"]
+python_type = "int"
+default     = 1024
+description = "Minimum free swap in MiB required before a worker admits new Docker setup/build work on hosts with swap configured. Hosts with SwapTotal=0 are treated as no-swap systems and are not blocked by this threshold."
+
+[service_config.setup_health_dstate_max]
+used_by     = ["worker"]
+python_type = "int"
+default     = 32
+description = "Maximum number of Linux D-state processes allowed before a worker admits new Docker setup/build work. D-state pressure is a strong signal of storage or kernel I/O stalls on shared worker hosts."
+
+[service_config.setup_health_wait_timeout_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 300.0
+description = "Maximum seconds a claimed trial waits for setup-health recovery before failing setup with failure_reason=node_setup_health. The worker keeps pre-start heartbeats running while it waits."
+
+[service_config.setup_health_poll_interval_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 5.0
+description = "Polling interval while a claimed trial waits for setup-health recovery before Docker setup/build admission."
+
+[service_config.k8s_worker_enabled]
+used_by     = ["loom-service"]
+python_type = "bool"
+default     = true
+description = "Whether the k8s loom-worker Deployment is rendered on this cluster (#383). When false, POST /api/v1/batches rejects submissions whose required_worker_pools list contains 'k8s-worker' because that pool cannot exist on this cluster. Rendered by cluster-render from k8s_worker.enabled in the profile config."
+
+[service_config.gateway_drain_timeout_sec]
+used_by     = ["llm-gateway"]
+python_type = "float"
+default     = 270.0
+description = "Maximum wall-clock seconds `POST /drain` will wait for in-flight requests to reach zero before returning a 503 diagnostic (#547). Set ~30s under `terminationGracePeriodSeconds` (currently 300s in llm-gateway.yaml.j2) so the drain response arrives before kubelet SIGKILLs the pod."
+
+# ─── non-codegen secrets: keys mounted from loom-secrets without Settings fields ───
+# Not Pydantic fields — bootstrap-secrets covers them, doctor verifies them,
+# but no codegen Settings field is emitted. Use this for third-party containers
+# and env-only secrets that must not appear in Settings validation errors.
+#
+# Note: minio uses the same minio-access-key / minio-secret-key as the loom
+# services (declared in service_config above), so they need no entry here.
+
+[infra_secrets.postgres-user]
+description = "Postgres superuser (POSTGRES_USER in postgres.yaml.j2)"
+
+[infra_secrets.postgres-password]
+description = "Postgres superuser password (POSTGRES_PASSWORD in postgres.yaml.j2)"
+generate    = "openssl rand -hex 16"
+
+[infra_secrets.secret-store-master-key]
+description = "Base64 AES-256 key for LocalEncryptedSecretStore (LOOM_SECRET_STORE_MASTER_KEY)."
+generate    = "python -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip(\"=\"))'"
+
+[infra_secrets.family-orchestrator-team-id]
+description = "Optional family-run orchestrator gateway team id (LOOM_FAMILY_ORCHESTRATOR_GATEWAY_TEAM_ID). Rendered as an optional secretKeyRef and owned by schema-doctor; omitted from bootstrap-secrets so new clusters do not install placeholder gateway credentials."
+bootstrap   = false
+
+[infra_secrets.family-orchestrator-token]
+description = "Optional family-run orchestrator gateway token (LOOM_FAMILY_ORCHESTRATOR_GATEWAY_TOKEN). Rendered as an optional secretKeyRef and owned by schema-doctor; omitted from bootstrap-secrets so new clusters do not install placeholder gateway credentials."
+bootstrap   = false
+
+# ─── render_config ───
+
+[render_config.namespace]
+python_type = "str"
+default     = "loom"
+
+[render_config.image_tag]
+python_type = "str"
+default     = "0.7"
+description = "Image tag applied to every loom-* image."
+
+[render_config.container_registry]
+python_type = "str"
+default     = ""
+description = "Optional container registry prefix applied to every locally-built loom-* image reference in the rendered manifest (no trailing slash). Empty (default) keeps the historical unprefixed shape that kind's in-cluster load-images path depends on. For multi-node k3s / production, set to the registry host+port (e.g. 192.168.50.13:5000) and point each node's /etc/rancher/k3s/registries.yaml at the same endpoint so containerd can pull without side-channel image imports."
+
+[render_config.runtime_environment]
+python_type = "str"
+default     = "production"
+description = "Backend runtime identity written to LOOM_ENV for service/control-plane/gateway pods. Staging profiles must set this to staging; production profiles set production."
+
+[render_config.ingress_host]
+python_type = "str"
+default     = "loom.example.com"
+
+[render_config.ingress_redirect_hosts]
+python_type = "str_list"
+default     = []
+description = "Optional www/non-www HTTPS counterpart hostnames that bind the public ingress TLS secret and redirect to ingress_host. They must not serve separate frontend/API routes."
+
+[render_config.ingress_class_name]
+python_type = "str"
+default     = "nginx"
+description = "Kubernetes IngressClass used by the public Web/API ingress."
+
+[render_config.ingress_tls_secret_name]
+python_type = "str"
+default     = "loom-tls"
+description = "TLS Secret name referenced by the public Web/API ingress."
+
+[render_config.ingress_cert_manager_cluster_issuer]
+python_type = "str"
+default     = ""
+description = "Optional cert-manager ClusterIssuer name for automatic TLS."
+
+[render_config.frontend_environment]
+python_type = "str"
+default     = "local"
+description = "Public SPA environment identity written to the runtime frontend config."
+
+[render_config.frontend_environment_label]
+python_type = "str"
+default     = "Local development"
+description = "Human-readable public SPA environment label shown in the UI chrome."
+
+[render_config.frontend_route_path]
+python_type = "str"
+default     = ""
+description = "Public SPA path prefix on ingress_host. Empty means host root; production uses /prod and staging uses /dev."
+
+[render_config.frontend_api_base_path]
+python_type = "str"
+default     = ""
+description = "Public path prefix prepended by the SPA API client before /api/v1. Must match frontend_route_path for protected prod/dev routes."
+
+[render_config.postgres_image]
+python_type = "str"
+default     = "postgres:16"
+
+[render_config.postgres_storage_gi]
+python_type = "int"
+default     = 50
+
+[render_config.minio_image]
+python_type = "str"
+default     = "minio/minio"
+
+[render_config.minio_storage_gi]
+python_type = "int"
+default     = 500
+
+[render_config.persistent_storage_backend]
+python_type = "str"
+default     = "dynamic"
+description = "Persistent storage binding mode for Postgres, MinIO, and worker trajectories. Use \"dynamic\" for the cluster default StorageClass, or \"static-host-path\" for explicit host-managed Retain PVs."
+
+[render_config.persistent_storage_host_path_root]
+python_type = "str"
+default     = ""
+description = "Absolute host path root used when persistent_storage_backend is \"static-host-path\", for example /data/loom-staging. Loom renders postgres, minio, and trajectories subdirectories under this root."
+
+[render_config.provider_egress_allowlist]
+python_type = "str_list"
+default     = []
+description = "Approved BYO provider egress targets as IP-or-CIDR:TCP-port entries, e.g. [\"202.78.161.51:18001\"]. Hostnames must be resolved by the operator before rendering because Kubernetes NetworkPolicy enforces CIDRs, not DNS names."
+
+[render_config.trajectories_bucket]
+python_type = "str"
+default     = "trajectories"
+description = "Object-store bucket used by loom-service for trial trajectories. Set per environment when deployments share an object-store endpoint."
+
+[render_config.artifacts_bucket]
+python_type = "str"
+default     = "artifacts"
+description = "Object-store bucket used by loom-service for safe artifacts. Set per environment when deployments share an object-store endpoint."
+
+[render_config.env_state_profile]
+python_type = "str"
+default     = ""
+description = "Optional environment-state TOML profile used by protected rollout steps. Relative paths resolve from the cluster-config file directory."
+
+[render_config.worker_trajectory_storage_gi]
+python_type = "int"
+default     = 100
+
+[render_config.workload_contract]
+python_type = "table"
+description = "Canonical v1 workload-trust contract injected into loom-service."
+fields      = { workload_trust_mode = "internal_trusted", taskset_transforms_enabled = false, taskset_transform_network_isolated = false, untrusted_workload_isolation = false }
+
+[render_config.worker_capacity]
+python_type = "table"
+description = "Production worker Deployment capacity knobs. One worker pod handles max_concurrent trials; replicas.worker multiplies total in-cluster trial slots."
+fields      = { max_concurrent = 16, cpu_request = "500m", cpu_limit = "8", memory_request = "1Gi", memory_limit = "16Gi" }
+
+[render_config.worker_subprocess_gateway_url]
+python_type = "str"
+default     = "http://host.docker.internal:30443/openai/v1"
+description = "Sandbox-facing OpenAI-compatible gateway URL injected into k8s workers as LOOM_WORKER_SUBPROCESS_GATEWAY_URL. The default targets the rendered gateway-router hostPort; kind-on-host deployments with another host service on 30443 should override this, for example to http://host.docker.internal:30444/openai/v1 with a durable host port-forward."
+
+[render_config.replicas]
+python_type = "table"
+# egress_xds + egress_proxy default 0 — Phase C is not yet wired
+# into gateway-router (PR-C2), so by default the components stay
+# scaled to zero. Operators flip both to 1+ when enabling sandbox-
+# isolated egress.
+fields      = { service = 2, control_plane = 2, gateway = 2, web = 0, worker = 3, egress_xds = 0, egress_proxy = 0, pgbouncer = 2 }
+
+[render_config.k8s_worker]
+python_type = "table"
+# enabled=false is the safe default so profiles that share OLDLAB
+# hosts with Slurm do not double-schedule the host Docker daemon
+# (#383). The `development` profile explicitly flips this back to
+# true because local kind clusters have no external Slurm capacity;
+# k8s workers ARE the trial execution path there. `staging`,
+# `production`, and staging ship with the default and rely on
+# Slurm-managed pools for x86 trial execution. Toggling this to
+# false omits the loom-worker Deployment YAML entirely from the
+# rendered manifest and causes `POST /api/v1/batches` to reject
+# submissions whose `required_worker_pools` list contains
+# `k8s-worker`.
+fields      = { enabled = false }
+
+[render_config.gb10_pool]
+python_type = "table"
+description = "GB10 hosts managed by protected rollout step 11. ssh_config optionally points at an operator SSH config file used for every host; ssh_identity_file and ssh_certificate_file point at platform-dev-local deploy auth material for detached rollout runners; each host entry is an inline TOML table with ssh_target, repo_path, env_file_path, optional repo_url, and optional node_agent_service."
+fields      = { ssh_config = "", ssh_identity_file = "", ssh_certificate_file = "", hosts = [] }
+
+[render_config.trial_cache_registry_repo]
+python_type = "str"
+default     = ""
+description = "Registry repo path for the shared trial-image cache (#547 item #2). Enables cross-node build sharing so workers on node B can pull layered images built on node A instead of rebuilding. Empty (default) = per-worker local cache only. Set to e.g. `ghcr.io/qianyi-sun/loom-trial-cache` on staging/production to activate. Workers need push+pull credentials via a mounted docker-config secret; without them the pull-fail case falls back cleanly to a local build (harmless)."
+
+[render_config.gateway_hpa]
+python_type = "table"
+# Off by default so the schema-default render is identical to the
+# pre-#547 behaviour (fixed `replicas.gateway` pods, no HorizontalPod-
+# Autoscaler object). Profiles that expect variable trial-batch load
+# flip `enabled = true` and tune `min_replicas` / `max_replicas` /
+# `cpu_target_pct`. Requires a metrics-server or equivalent CPU-metric
+# provider in the cluster; kind + development don't have one by
+# default, so leave this off for local dev.
+fields      = { enabled = false, min_replicas = 2, max_replicas = 8, cpu_target_pct = 60 }
+
+[render_config.llm_gateway_sandbox]
+python_type = "table"
+# Off by default because the DaemonSet requires operator to pre-
+# provision `loom-sandbox-gateway-tls` Secret (a `tls`-shaped
+# k8s Secret with cert + key for `loom-sandbox-gateway.local`).
+# The `loom cluster bootstrap-secrets` command intentionally does
+# NOT generate this — operators pick a cert issuance path
+# (self-signed for dev, cert-manager or loom-CA-signed for prod).
+# When enabled, the DaemonSet places one loom-llm-gateway-sandbox
+# pod per node (hostPort 8443) that terminates TLS + verifies the
+# HS256 step-JWT before tunneling bytes to loom-llm-gateway.
+# Closes #78 Phase B — per-node edge auth instead of destination-
+# only.
+fields      = { enabled = false }
+
+[render_config.pgbouncer]
+python_type = "table"
+description = "PgBouncer connection multiplexer (#609). When enabled, renders a Deployment (2 replicas), Service (loom-pgbouncer:6432), PodDisruptionBudget, and NetworkPolicy; bootstrap populates *-db-url-pool secrets by deriving from the direct DSN. Rollback: enabled=false, re-render, redeploy — services fall back to db_url (direct). See docs/architecture/pgbouncer-transaction-mode-design.md."
+fields      = { enabled = true, default_pool_size = 25, max_client_conn = 500, min_pool_size = 5 }
+
+[render_config.postgres]
+python_type = "table"
+description = "Postgres runtime tuning knobs. max_connections bumped from Postgres default 100 to leave room for pgbouncer backend pool (default_pool_size × pgbouncer.replicas) + LISTEN watchers + Alembic + admin slack."
+fields      = { max_connections = 150 }
+
+[render_config.topology]
+python_type = "table"
+description = "Cluster topology (#637). `multi_node=true` opts into HA-shaped resources: Postgres replicas via CloudNativePG, distributed MinIO, cross-node anti-affinity, PDBs with minAvailable≥1, and Longhorn-backed persistent storage. `multi_node=false` renders single-pod stateful services with hostPath storage — the current pilot-cluster shape. Currently schema-default `false`; production will flip to `true` once the k3s multi-node cluster is provisioned. Profile overrides pin explicit values so a schema-default flip cannot silently break existing deployments. Storage backend `host_path` matches today; `longhorn` is the target for the multi-node production cluster; `nfs`/`csi` are unimplemented placeholders."
+fields      = { multi_node = false, storage_backend = "host_path", postgres_replicas = 1, minio_replicas = 1, min_available = 1, anti_affinity = "preferred" }

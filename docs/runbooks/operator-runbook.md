@@ -1458,7 +1458,10 @@ authority. The installer therefore resolves that candidate's declared
 constraints into the root-owned venv without editable installs. It does not
 use `--frozen`, which would always fail in a fresh checkout with no lockfile.
 A repeated install at the same source is a no-op; a newly merged source causes
-the service venv to be synchronized again. Immediately after `uv sync`, the
+the service venv to be synchronized again. A failed package-resource probe also
+forces synchronization at the same SHA, and the exact
+`--reinstall-package loom` option restores the project package even when uv
+would otherwise consider it satisfied. Immediately after `uv sync`, the
 installer opens uv's generated `/opt/loom-staging-runner/venv/.lock` without
 following symlinks, requires a regular root-owned file, converges it to mode
 `0600`, and only then validates the complete venv authority tree. A symlink,
@@ -1467,6 +1470,23 @@ An interrupted install is retried through the same boundary: the installer
 detects this exact root-owned regular lock-mode drift before full-tree readiness,
 enters its fail-closed install transaction, hardens the lock, and then resumes
 authority validation. It does not repair any other ownership or file-type drift.
+The wheel carries exact tested copies of `config/loom-schema.toml`, the five
+Grafana dashboards, the Envoy egress bootstrap, and the imported `_env.j2`
+template partial as package data. The non-editable broker therefore never
+resolves runtime resources relative to `site-packages`. CI builds and replaces
+the editable install with the wheel, imports it from a temporary working
+directory, compares the copied assets byte-for-byte, and renders the complete
+default manifest set. Immediately after package synchronization, the installer
+repeats that import/render probe as `loom-rollout` under `/usr/bin/env -i` with
+Python `-I -B`; this package-only probe does not require a pre-existing host
+configuration on a first install. The installer then writes
+`/etc/loom/staging-rollout.toml` as `root:loom-rollout` mode `0640` and runs the
+full broker probe as the service user, including loading that fixed operator
+configuration, before it can restore admission. The file is service-group
+readable but never group- or world-writable, and contains path bindings,
+fingerprints, and the smoke-on-behalf team ID rather than raw secret values.
+The installed broker wrapper also uses `-I -B -m`, preventing caller
+working-directory module shadowing and bytecode writes.
 
 The service user-manager probe also constructs its clean
 `XDG_RUNTIME_DIR`/D-Bus/`PATH` environment *after* `sudo -u loom-rollout` via
@@ -1563,6 +1583,17 @@ legacy source SHA and keeps using it across retries; the field disappears only
 after the trust ledger is durable. An interrupted v2 migration without that
 binding is ambiguous and must be repaired rather than retried with a guessed
 source.
+
+The inactivity proof used during update and uninstall does not import the old
+broker runtime being replaced. After publishing the root-owned maintenance
+marker under the broker launch lock, it requires the service-owned state root,
+an absent `active.json`, and only loaded terminal (`inactive` or `failed`)
+`loom-staging-rollout-*` user units. Any nonterminal unit state, unsafe
+metadata, unreadable state, systemd stderr, malformed output, present active
+pointer, or user-manager query failure blocks the operation. A valid but stale
+pointer must be cleared through supported broker reconciliation, never manual
+file deletion. This permits a merged installer to repair a broken packaged
+runtime without weakening the no-active-rollout gate.
 
 The rollout-local cluster config is synthesized from the resolved candidate
 worktree's repo-local profile, rather than from the long-lived runner checkout,

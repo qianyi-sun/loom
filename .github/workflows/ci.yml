@@ -231,6 +231,82 @@ jobs:
             --cov=src --cov=packages \
             --cov-report=term --cov-report=xml
 
+      - name: Build and exercise non-editable runtime wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel_dir="${RUNNER_TEMP}/loom-wheel"
+          rm -rf "${wheel_dir}"
+          uv build --wheel --out-dir "${wheel_dir}"
+          wheels=("${wheel_dir}"/loom-*.whl)
+          if [[ ${#wheels[@]} -ne 1 || ! -f "${wheels[0]}" ]]; then
+            echo "expected exactly one Loom wheel" >&2
+            exit 1
+          fi
+          uv pip install \
+            --python .venv/bin/python \
+            --reinstall \
+            --no-deps \
+            "${wheels[0]}"
+          cd "${RUNNER_TEMP}"
+          "${GITHUB_WORKSPACE}/.venv/bin/python" -I -B - <<'PY'
+          from __future__ import annotations
+
+          import os
+          from importlib import resources
+          from pathlib import Path
+
+          import loom_cli
+          import loom_cli.rollout.operator.broker
+          from loom_cli.cluster_cmd import render_manifests
+          from loom_cli.cluster_config import ClusterConfig
+
+          repo_root = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          module_path = Path(loom_cli.__file__).resolve()
+          assert not module_path.is_relative_to(repo_root / "src"), module_path
+          runtime_assets = {
+              Path("config/loom-schema.toml"): ("loom-schema.toml",),
+              Path("deploy/grafana/dashboards/operator-overview.json"): (
+                  "grafana",
+                  "operator-overview.json",
+              ),
+              Path("deploy/grafana/dashboards/control-plane.json"): (
+                  "grafana",
+                  "control-plane.json",
+              ),
+              Path("deploy/grafana/dashboards/llm-gateway.json"): (
+                  "grafana",
+                  "llm-gateway.json",
+              ),
+              Path("deploy/grafana/dashboards/loom-service.json"): (
+                  "grafana",
+                  "loom-service.json",
+              ),
+              Path("deploy/grafana/dashboards/worker.json"): (
+                  "grafana",
+                  "worker.json",
+              ),
+              Path("deploy/envoy/egress-proxy.yaml"): (
+                  "envoy",
+                  "egress-proxy.yaml",
+              ),
+          }
+          package_root = resources.files("loom_cli.data")
+          for source_path, resource_parts in runtime_assets.items():
+              assert package_root.joinpath(*resource_parts).read_bytes() == (
+                  repo_root / source_path
+              ).read_bytes()
+          assert (
+              resources.files("loom_cli.templates.k8s")
+              .joinpath("_env.j2")
+              .read_text(encoding="utf-8")
+              .strip()
+          )
+          rendered = render_manifests(ClusterConfig())
+          assert "kind: ConfigMap" in rendered
+          assert "name: loom-grafana-dashboards" in rendered
+          PY
+
       - name: Upload root coverage data
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

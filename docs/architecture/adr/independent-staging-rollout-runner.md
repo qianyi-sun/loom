@@ -78,7 +78,24 @@ and remain under `/usr`. Because the repository intentionally treats
 `pyproject.toml` rather than a tracked `uv.lock` as its cross-environment
 dependency authority, the installer synchronizes the freshly selected merged
 candidate without editable installs and without the inapplicable `--frozen`
-flag. A source-SHA change forces another synchronization.
+flag. A source-SHA change forces another synchronization. Every synchronization
+also uses uv's exact `--reinstall-package loom` boundary, so a same-SHA repair
+restores deleted or corrupt package resources instead of accepting uv's
+already-satisfied result.
+The non-editable wheel bundles exact, repository-tested copies of the canonical
+Loom schema, Grafana dashboards, Envoy bootstrap, and imported Jinja template
+partial through `importlib.resources`; runtime code never derives those
+resources from the wheel's parent directories. CI builds and installs the wheel
+before exercising a full default manifest render. The installer first uses
+`sudo -u loom-rollout`, a clean environment, and Python `-I -B` to import the
+installed broker and render those packaged resources without requiring a
+pre-existing host configuration. It then writes the fixed operator config as
+`root:loom-rollout` mode `0640` and, before restoring admission, runs the full
+service-user broker probe, which also loads that config. The config is readable
+by the service group but is never group- or world-writable and contains no raw
+secret values. The installed broker entry point uses the same
+isolated/no-bytecode interpreter boundary, so an operator-controlled working
+directory cannot shadow `loom_cli`.
 
 The service account receives named ACLs only for the declared staging token,
 catalog, and data paths. Secret values stay in protected file sources and are
@@ -110,6 +127,15 @@ full-lifecycle lock covers the detached driver from pending through terminal
 bookkeeping, so two image tags cannot interleave. Existing short protected
 mutation leases remain in place for `cluster up` and environment-state steps;
 reusing one of those leases for the parent driver would self-deadlock.
+Update and uninstall publish the root-owned maintenance marker while holding
+the same launch mutex, then prove inactivity from the protected active pointer
+and every matching service user-manager rollout unit. A loaded unit is safe only
+in terminal `inactive` or `failed` state; every other state blocks, while
+malformed output, stderr, or unsafe metadata returns unknown and fails closed.
+That proof deliberately does not import the installed broker being replaced, so
+a broken package can be repaired without creating an admission bypass. A valid
+but stale `active.json` also blocks until the supported broker reconciliation
+path clears it; operators must not delete the pointer by hand.
 
 ### Failure, recovery, and break-glass
 

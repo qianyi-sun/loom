@@ -94,6 +94,7 @@ from loom_cli.rollout_lock import (
     default_rollout_lock_dir,
     rollout_owner_id,
 )
+from loom_cli.runtime_resources import load_bundled_schema, read_bundled_text
 from loom_config.doctor import (
     DoctorReport,
 )
@@ -103,7 +104,6 @@ from loom_config.doctor import (
 from loom_config.doctor import (
     reconcile_rendered as _doctor_reconcile_rendered,
 )
-from loom_config.loader import load_schema as _load_schema
 
 # Repo root: cluster_cmd.py → loom_cli → src → loom (parents[2])
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1806,24 +1806,21 @@ def render_manifests(config: ClusterConfig) -> str:
         ctx["ingress_host_is_ip"] = True
     except ValueError:
         ctx["ingress_host_is_ip"] = False
-    ctx["schema"] = _load_schema(_REPO_ROOT / "config" / "loom-schema.toml")
-    # Load dashboard JSON for the grafana-dashboards.yaml.j2 template.
-    # The JSON is read from deploy/grafana/dashboards/ and passed as
-    # pre-serialised strings so the Jinja2 `indent` filter can embed
-    # them cleanly inside the ConfigMap data block.
-    _dashboards_dir = _REPO_ROOT / "deploy" / "grafana" / "dashboards"
-    ctx["operator_overview_json"] = (_dashboards_dir / "operator-overview.json").read_text()
-    ctx["control_plane_json"] = (_dashboards_dir / "control-plane.json").read_text()
-    ctx["llm_gateway_json"] = (_dashboards_dir / "llm-gateway.json").read_text()
-    ctx["loom_service_json"] = (_dashboards_dir / "loom-service.json").read_text()
-    ctx["worker_json"] = (_dashboards_dir / "worker.json").read_text()
+    ctx["schema"] = load_bundled_schema()
+    # Load package-owned dashboard JSON for the grafana-dashboards.yaml.j2
+    # template. The canonical copies live under deploy/grafana/dashboards/;
+    # byte-equality tests keep the wheel copies synchronized. Pre-serialised
+    # strings let the Jinja2 `indent` filter embed them in the ConfigMap.
+    ctx["operator_overview_json"] = read_bundled_text("grafana", "operator-overview.json")
+    ctx["control_plane_json"] = read_bundled_text("grafana", "control-plane.json")
+    ctx["llm_gateway_json"] = read_bundled_text("grafana", "llm-gateway.json")
+    ctx["loom_service_json"] = read_bundled_text("grafana", "loom-service.json")
+    ctx["worker_json"] = read_bundled_text("grafana", "worker.json")
     # Egress proxy bootstrap (#190 Phase C). Mounted as a ConfigMap so
-    # operators can pin the Envoy config without a deploy/Dockerfile
-    # change. Source of truth lives at deploy/envoy/egress-proxy.yaml;
+    # operators can pin the Envoy config without a deploy/Dockerfile change.
+    # The canonical deploy copy and package-owned wheel copy are byte-checked;
     # the template embeds it via `| indent` into the ConfigMap data.
-    ctx["envoy_egress_bootstrap"] = (
-        _REPO_ROOT / "deploy" / "envoy" / "egress-proxy.yaml"
-    ).read_text()
+    ctx["envoy_egress_bootstrap"] = read_bundled_text("envoy", "egress-proxy.yaml")
     chunks: list[str] = []
     for name in _TEMPLATE_ORDER:
         rendered = env.get_template(name).render(**ctx)
@@ -3330,7 +3327,7 @@ def _append_target_schema_doctor_check(
     config: ClusterConfig,
     rendered_manifests: str | None = None,
 ) -> None:
-    schema = _load_schema(_REPO_ROOT / "config" / "loom-schema.toml")
+    schema = load_bundled_schema()
     try:
         manifests = rendered_manifests or render_manifests(config)
         doctor_report = _doctor_reconcile_rendered(
@@ -3511,7 +3508,7 @@ def _doctor(args: argparse.Namespace) -> int:
             f"error: cannot connect to cluster: {type(exc).__name__}: {exc}\n",
         )
         return 2
-    schema = _load_schema(_REPO_ROOT / "config" / "loom-schema.toml")
+    schema = load_bundled_schema()
     report = _doctor_reconcile(schema, core_v1, namespace=args.namespace)
     schema_ok = report.ok
     if schema_ok:
@@ -4874,7 +4871,7 @@ def _bootstrap_evidence_paths(args: argparse.Namespace) -> int:
 def _bootstrap_secrets(args: argparse.Namespace) -> int:
     from loom_config.bootstrap import render_bootstrap_command
 
-    schema = _load_schema(_REPO_ROOT / "config" / "loom-schema.toml")
+    schema = load_bundled_schema()
     # Resolve pgbouncer_enabled: CLI flag overrides schema default.
     pgbouncer_entry = schema.render_config.get("pgbouncer")
     schema_pgbouncer_default: bool = bool(
