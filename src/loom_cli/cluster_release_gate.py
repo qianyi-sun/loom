@@ -1518,6 +1518,79 @@ def _manifest_active_gb10_hosts(manifest: dict[str, Any]) -> list[str]:
     return sorted(active_hosts)
 
 
+def _current_active_gb10_worker_ids(
+    *,
+    manifest: dict[str, Any],
+    status: dict[str, Any] | None,
+) -> tuple[list[str], list[str]]:
+    """Resolve current worker registrations for the manifest-active GB10 hosts."""
+    expected_hosts = _manifest_active_gb10_hosts(manifest)
+    release = manifest.get("release")
+    release_environment = (
+        str(release.get("environment") or "") if isinstance(release, dict) else ""
+    )
+    errors: list[str] = []
+    if not expected_hosts:
+        errors.append("release manifest has no active GB10 hosts")
+    if not isinstance(status, dict):
+        return [], [*errors, "GB10 status artifact is missing or invalid"]
+    raw_nodes = status.get("nodes")
+    if not isinstance(raw_nodes, list):
+        return [], [*errors, "GB10 status nodes must be a list"]
+
+    nodes = [node for node in raw_nodes if isinstance(node, dict)]
+    worker_ids: list[str] = []
+    worker_host_by_id: dict[str, str] = {}
+    for hostname in expected_hosts:
+        matches = [
+            node
+            for node in nodes
+            if node.get("environment") == release_environment
+            and node.get("pool_name") == _STAGING_GB10_POOL_NAME
+            and node.get("hostname") == hostname
+        ]
+        if len(matches) != 1:
+            errors.append(
+                f"active GB10 host {hostname} must have exactly one current node status",
+            )
+            continue
+        node = matches[0]
+        worker_id = node.get("worker_id")
+        if not isinstance(worker_id, str) or not worker_id.strip():
+            errors.append(f"active GB10 host {hostname} has no worker_id")
+            continue
+        if node.get("worker_status") != "active" or node.get("worker_fresh") is not True:
+            errors.append(
+                f"active GB10 host {hostname} has no active fresh worker registration",
+            )
+            continue
+        previous_host = worker_host_by_id.get(worker_id)
+        if previous_host is not None:
+            errors.append(
+                f"worker_id {worker_id} is shared by active hosts {previous_host} and {hostname}",
+            )
+            continue
+        worker_host_by_id[worker_id] = hostname
+        worker_ids.append(worker_id)
+
+    raw_unlinked_workers = status.get("unlinked_workers")
+    if not isinstance(raw_unlinked_workers, list):
+        errors.append("GB10 status unlinked_workers must be a list")
+    else:
+        unlinked_worker_ids = {
+            worker.get("worker_id")
+            for worker in raw_unlinked_workers
+            if isinstance(worker, dict)
+            and isinstance(worker.get("worker_id"), str)
+            and worker.get("worker_id")
+        }
+        for worker_id in worker_ids:
+            if worker_id in unlinked_worker_ids:
+                errors.append(f"active worker_id {worker_id} also appears in unlinked_workers")
+
+    return worker_ids, errors
+
+
 def _secret_leak_paths(value: Any, *, path: str = "") -> list[str]:
     if isinstance(value, str):
         return [path or "$"] if _RAW_SECRET_RE.search(value) else []
@@ -1752,6 +1825,12 @@ def _hf_mirror_boundary_check(
         if isinstance(gb10_status_artifact, dict)
         else None
     )
+    current_active_worker_ids, active_worker_identity_errors = (
+        _current_active_gb10_worker_ids(
+            manifest=manifest,
+            status=gb10_status_artifact,
+        )
+    )
     evidence.update(
         {
             "candidate_binding_environment": candidate_binding.get("environment"),
@@ -1761,6 +1840,8 @@ def _hf_mirror_boundary_check(
             "expected_candidate_image_tag": release.get("image_tag"),
             "expected_candidate_git_sha": release.get("git_sha"),
             "expected_gb10_status_sha256": expected_status_sha256,
+            "gb10_current_active_worker_ids": current_active_worker_ids,
+            "gb10_active_worker_identity_errors": active_worker_identity_errors,
         }
     )
     issues: list[str] = []
@@ -1848,43 +1929,89 @@ def _hf_mirror_boundary_check(
     succeeded_trials = evidence.get("canary_succeeded_trials")
     canary_worker_pools = evidence.get("canary_worker_pools")
     task_provenance = evidence.get("canary_task_provenance")
+    raw_canary_worker_ids = (
+        task_provenance.get("worker_ids") if isinstance(task_provenance, dict) else None
+    )
+    canary_worker_ids = (
+        list(raw_canary_worker_ids) if isinstance(raw_canary_worker_ids, list) else []
+    )
+    provenance_trial_count = (
+        task_provenance.get("trial_count") if isinstance(task_provenance, dict) else None
+    )
+    canary_worker_ids_schema_valid = (
+        isinstance(raw_canary_worker_ids, list)
+        and isinstance(provenance_trial_count, int)
+        and not isinstance(provenance_trial_count, bool)
+        and provenance_trial_count > 0
+        and len(canary_worker_ids) == provenance_trial_count
+        and all(
+            isinstance(worker_id, str) and bool(worker_id.strip())
+            for worker_id in canary_worker_ids
+        )
+    )
+    current_active_worker_id_set = set(current_active_worker_ids)
+    unexpected_canary_worker_ids = sorted(
+        {
+            worker_id
+            for worker_id in canary_worker_ids
+            if isinstance(worker_id, str) and worker_id not in current_active_worker_id_set
+        }
+    )
+    canary_workers_match_current_candidate = (
+        canary_worker_ids_schema_valid
+        and not active_worker_identity_errors
+        and not unexpected_canary_worker_ids
+    )
+    evidence.update(
+        {
+            "canary_trial_worker_ids": canary_worker_ids,
+            "canary_worker_ids_schema_valid": canary_worker_ids_schema_valid,
+            "canary_unexpected_worker_ids": unexpected_canary_worker_ids,
+            "canary_workers_match_current_candidate": (
+                canary_workers_match_current_candidate
+            ),
+        }
+    )
     terminal_pools = (
         canary_worker_pools.get("terminal") if isinstance(canary_worker_pools, dict) else None
     )
     active_pools = (
         canary_worker_pools.get("active") if isinstance(canary_worker_pools, dict) else None
     )
-    if (
-        evidence.get("canary_started") is not True
-        or evidence.get("terminal_state") != "succeeded"
-        or isinstance(expected_trials, bool)
-        or not isinstance(expected_trials, int)
-        or expected_trials <= 0
-        or isinstance(succeeded_trials, bool)
-        or not isinstance(succeeded_trials, int)
-        or succeeded_trials != expected_trials
-        or not task_filter_targets_only_benchmark(
+    canary_shape_valid = (
+        evidence.get("canary_started") is True
+        and evidence.get("terminal_state") == "succeeded"
+        and not isinstance(expected_trials, bool)
+        and isinstance(expected_trials, int)
+        and expected_trials > 0
+        and not isinstance(succeeded_trials, bool)
+        and isinstance(succeeded_trials, int)
+        and succeeded_trials == expected_trials
+        and task_filter_targets_only_benchmark(
             evidence.get("canary_task_filter"),
             _HF_MIRROR_BENCHMARK_ID,
         )
-        or not isinstance(task_provenance, dict)
-        or isinstance(task_provenance.get("trial_count"), bool)
-        or task_provenance.get("trial_count") != expected_trials
-        or isinstance(task_provenance.get("target_benchmark_trial_count"), bool)
-        or task_provenance.get("target_benchmark_trial_count") != expected_trials
-        or isinstance(task_provenance.get("non_target_trial_count"), bool)
-        or task_provenance.get("non_target_trial_count") != 0
-        or isinstance(task_provenance.get("task_set_trial_count"), bool)
-        or task_provenance.get("task_set_trial_count") != 0
-        or task_provenance.get("benchmark_ids") != [_HF_MIRROR_BENCHMARK_ID]
-        or not isinstance(terminal_pools, dict)
-        or set(terminal_pools) != {_STAGING_GB10_POOL_NAME}
-        or isinstance(terminal_pools.get(_STAGING_GB10_POOL_NAME), bool)
-        or not isinstance(terminal_pools.get(_STAGING_GB10_POOL_NAME), int)
-        or terminal_pools.get(_STAGING_GB10_POOL_NAME) != expected_trials
-        or active_pools != {}
-    ):
+        and isinstance(task_provenance, dict)
+        and not isinstance(task_provenance.get("trial_count"), bool)
+        and task_provenance.get("trial_count") == expected_trials
+        and not isinstance(task_provenance.get("target_benchmark_trial_count"), bool)
+        and task_provenance.get("target_benchmark_trial_count") == expected_trials
+        and not isinstance(task_provenance.get("non_target_trial_count"), bool)
+        and task_provenance.get("non_target_trial_count") == 0
+        and not isinstance(task_provenance.get("task_set_trial_count"), bool)
+        and task_provenance.get("task_set_trial_count") == 0
+        and task_provenance.get("benchmark_ids") == [_HF_MIRROR_BENCHMARK_ID]
+        and isinstance(terminal_pools, dict)
+        and set(terminal_pools) == {_STAGING_GB10_POOL_NAME}
+        and not isinstance(terminal_pools.get(_STAGING_GB10_POOL_NAME), bool)
+        and isinstance(terminal_pools.get(_STAGING_GB10_POOL_NAME), int)
+        and terminal_pools.get(_STAGING_GB10_POOL_NAME) == expected_trials
+        and active_pools == {}
+    )
+    if not canary_shape_valid:
         issues.append("canary must be a fully succeeded SkillLearnBench GB10 batch")
+    elif not canary_workers_match_current_candidate:
+        issues.append("canary trials must use current candidate GB10 worker registrations")
     if not evidence.get("secret_safe"):
         issues.append("evidence must not contain raw HF/API/object-store secrets")
 

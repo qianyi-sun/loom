@@ -408,11 +408,16 @@ def _summarize_canary_trials(
     non_target_trials = 0
     task_set_trials = 0
     task_benchmark_ids: set[str] = set()
+    worker_ids: list[str | None] = []
     for row in trial_rows:
         state = str(row.get("state") or "")
         pool = str(row.get("pool_name") or "unknown")
         task_benchmark_id = row.get("task_benchmark_id")
         task_set_id = row.get("task_set_id")
+        worker_id = row.get("worker_id")
+        worker_ids.append(
+            worker_id if isinstance(worker_id, str) and worker_id else None,
+        )
         if state == "succeeded":
             succeeded_trials += 1
         if task_benchmark_id == benchmark_id:
@@ -434,6 +439,7 @@ def _summarize_canary_trials(
             "non_target_trial_count": non_target_trials,
             "task_set_trial_count": task_set_trials,
             "benchmark_ids": sorted(task_benchmark_ids),
+            "worker_ids": worker_ids,
         },
     }
 
@@ -510,13 +516,15 @@ async def collect_canary_summary_from_db(
                     await conn.execute(
                         text(
                             """
-                        SELECT t.state, w.pool_name,
+                        SELECT t.state, t.worker_id::text AS worker_id,
+                               w.pool_name,
                                task.benchmark_id AS task_benchmark_id,
                                task.task_set_id
                         FROM trials t
                         LEFT JOIN workers w ON w.id = t.worker_id
                         LEFT JOIN tasks task ON task.id = t.task_id
                         WHERE t.batch_id = CAST(:batch_id AS uuid)
+                        ORDER BY t.id
                         """
                         ),
                         {"batch_id": selected["id"]},

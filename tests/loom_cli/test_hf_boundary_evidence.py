@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import sys
@@ -88,6 +89,7 @@ def _canary_summary() -> dict[str, object]:
             "non_target_trial_count": 0,
             "task_set_trial_count": 0,
             "benchmark_ids": ["skilllearnbench"],
+            "worker_ids": ["worker-current-1", "worker-current-2"],
         },
     }
 
@@ -138,6 +140,10 @@ def test_compose_uses_task_mirror_provenance_not_adapter_origin() -> None:
     assert evidence["worker_boundary"]["hf_token_present"] is False
     assert evidence["worker_boundary"]["direct_hf_egress_required"] is False
     assert evidence["worker_boundary"]["materialized_from_internal_source"] is True
+    assert evidence["worker_boundary"]["canary_task_provenance"]["worker_ids"] == [
+        "worker-current-1",
+        "worker-current-2",
+    ]
 
 
 def test_compose_preserves_explicit_zero_valid_task_count() -> None:
@@ -242,18 +248,21 @@ def test_canary_trial_summary_records_actual_task_provenance() -> None:
                 "pool_name": "gb10-arm64",
                 "task_benchmark_id": "skilllearnbench",
                 "task_set_id": None,
+                "worker_id": "worker-current-1",
             },
             {
                 "state": "succeeded",
                 "pool_name": "gb10-arm64",
                 "task_benchmark_id": "other",
                 "task_set_id": None,
+                "worker_id": "worker-current-2",
             },
             {
                 "state": "succeeded",
                 "pool_name": "gb10-arm64",
                 "task_benchmark_id": None,
                 "task_set_id": "other-set",
+                "worker_id": None,
             },
         ],
         benchmark_id="skilllearnbench",
@@ -268,8 +277,100 @@ def test_canary_trial_summary_records_actual_task_provenance() -> None:
             "non_target_trial_count": 2,
             "task_set_trial_count": 1,
             "benchmark_ids": ["other", "skilllearnbench"],
+            "worker_ids": ["worker-current-1", "worker-current-2", None],
         },
     }
+
+
+def test_collect_explicit_canary_batch_persists_trial_worker_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batch_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+    class FakeResult:
+        def __init__(self, rows: list[dict[str, object]]) -> None:
+            self._rows = rows
+
+        def mappings(self) -> FakeResult:
+            return self
+
+        def all(self) -> list[dict[str, object]]:
+            return self._rows
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __aenter__(self) -> FakeConnection:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def execute(self, *_args: object, **_kwargs: object) -> FakeResult:
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResult(
+                    [
+                        {
+                            "id": batch_id,
+                            "name": "explicit historical canary",
+                            "task_filter": {"benchmark_id": "skilllearnbench"},
+                            "state": "finished",
+                            "result_status": "succeeded",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "finished_at": "2026-01-01T00:01:00Z",
+                            "expected_trial_count": 2,
+                            "required_worker_pools": ["gb10-arm64"],
+                        },
+                    ],
+                )
+            return FakeResult(
+                [
+                    {
+                        "state": "succeeded",
+                        "worker_id": "worker-old-1",
+                        "pool_name": "gb10-arm64",
+                        "task_benchmark_id": "skilllearnbench",
+                        "task_set_id": None,
+                    },
+                    {
+                        "state": "succeeded",
+                        "worker_id": "worker-old-2",
+                        "pool_name": "gb10-arm64",
+                        "task_benchmark_id": "skilllearnbench",
+                        "task_set_id": None,
+                    },
+                ],
+            )
+
+    class FakeEngine:
+        def __init__(self) -> None:
+            self.connection = FakeConnection()
+
+        def connect(self) -> FakeConnection:
+            return self.connection
+
+        async def dispose(self) -> None:
+            return None
+
+    engine = FakeEngine()
+    monkeypatch.setattr(hf_boundary_evidence, "create_async_engine", lambda _url: engine)
+
+    summary = asyncio.run(
+        hf_boundary_evidence.collect_canary_summary_from_db(
+            db_url="postgresql://loom:test@localhost/loom",
+            benchmark_id="skilllearnbench",
+            worker_pool="gb10-arm64",
+            canary_batch_id=batch_id,
+        ),
+    )
+
+    assert summary["batch_id"] == batch_id
+    assert summary["task_provenance"]["worker_ids"] == [
+        "worker-old-1",
+        "worker-old-2",
+    ]
 
 
 def test_write_secret_safe_json_rejects_raw_hf_token(tmp_path: Path) -> None:

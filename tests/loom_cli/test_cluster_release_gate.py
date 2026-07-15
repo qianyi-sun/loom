@@ -511,6 +511,13 @@ def _hf_boundary_evidence(
     status_sha256 = hashlib.sha256(
         json.dumps(gb10_status, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+    current_active_worker_ids = [
+        node["worker_id"]
+        for node in gb10_status.get("nodes", [])
+        if isinstance(node, dict)
+        and node.get("hostname") in _ACTIVE_GB10_HOSTS
+        and isinstance(node.get("worker_id"), str)
+    ]
     evidence: dict[str, Any] = {
         "schema_version": 1,
         "environment": "staging",
@@ -554,6 +561,7 @@ def _hf_boundary_evidence(
                 "non_target_trial_count": 0,
                 "task_set_trial_count": 0,
                 "benchmark_ids": ["skilllearnbench"],
+                "worker_ids": current_active_worker_ids[:2],
             },
             "hf_token_present": False,
             "hf_token_isolated": True,
@@ -1431,6 +1439,11 @@ def test_release_gate_accepts_secret_safe_hf_mirror_boundary_evidence() -> None:
     assert check.evidence["hf_provenance_retained"] is True
     assert check.evidence["worker_hf_token_present"] is False
     assert check.evidence["direct_hf_egress_required"] is False
+    assert check.evidence["canary_workers_match_current_candidate"] is True
+    assert check.evidence["canary_trial_worker_ids"] == [
+        "worker-trt-gb10-1",
+        "worker-trt-gb10-2",
+    ]
 
 
 def test_release_gate_rejects_hf_boundary_when_gb10_checks_do_not_run() -> None:
@@ -1582,6 +1595,91 @@ def test_hf_boundary_rejects_stale_candidate_binding(drift: str) -> None:
     assert check.detail == (
         "HF boundary evidence must bind the exact candidate and GB10 status artifact"
     )
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "explicit-old-batch",
+        "worker-restart",
+        "mixed-current-old",
+        "unknown-worker",
+        "unlinked-worker",
+        "stopped-host-worker",
+        "null-worker",
+        "missing-worker-ids",
+    ],
+)
+def test_hf_boundary_rejects_canary_from_non_current_worker_registration(
+    scenario: str,
+) -> None:
+    external_workers = _hf_external_workers_manifest_section()
+    manifest = _manifest(external_workers=external_workers)
+    manifest["catalog_provisioning"] = _catalog_manifest_section()
+    gb10_status = _gb10_status_for_external_workers(external_workers)
+    original_worker_ids = [node["worker_id"] for node in gb10_status["nodes"][:2]]
+
+    if scenario == "worker-restart":
+        gb10_status["nodes"][0]["worker_id"] = "worker-restarted-1"
+        gb10_status["nodes"][1]["worker_id"] = "worker-restarted-2"
+    elif scenario == "unlinked-worker":
+        gb10_status["unlinked_workers"] = [
+            {
+                "worker_id": "worker-unlinked",
+                "hostname": "trt-gb10-1",
+                "pool_name": "gb10-arm64",
+                "worker_fresh": False,
+            },
+        ]
+    elif scenario == "stopped-host-worker":
+        gb10_status["nodes"].append(
+            {
+                "environment": "staging",
+                "pool_name": "gb10-arm64",
+                "hostname": "trt-gb10-7",
+                "desired_intent": "stopped",
+                "worker_id": "worker-stopped-7",
+                "worker_status": "inactive",
+                "worker_fresh": False,
+            },
+        )
+
+    artifact = _hf_boundary_evidence(gb10_status=gb10_status)
+    provenance = artifact["worker_boundary"]["canary_task_provenance"]
+    if scenario == "explicit-old-batch":
+        artifact["worker_boundary"]["canary_batch_id"] = "11111111-1111-1111-1111-111111111111"
+        provenance["worker_ids"] = ["worker-old-1", "worker-old-2"]
+    elif scenario == "worker-restart":
+        provenance["worker_ids"] = original_worker_ids
+    elif scenario == "mixed-current-old":
+        provenance["worker_ids"] = [gb10_status["nodes"][0]["worker_id"], "worker-old"]
+    elif scenario == "unknown-worker":
+        provenance["worker_ids"] = ["worker-unknown-1", "worker-unknown-2"]
+    elif scenario == "unlinked-worker":
+        provenance["worker_ids"] = [gb10_status["nodes"][0]["worker_id"], "worker-unlinked"]
+    elif scenario == "stopped-host-worker":
+        provenance["worker_ids"] = [gb10_status["nodes"][0]["worker_id"], "worker-stopped-7"]
+    elif scenario == "null-worker":
+        provenance["worker_ids"] = [gb10_status["nodes"][0]["worker_id"], None]
+    elif scenario == "missing-worker-ids":
+        provenance.pop("worker_ids")
+
+    check = _hf_mirror_boundary_check(
+        manifest=manifest,
+        artifact=artifact,
+        artifact_path="hf-mirror-boundary.json",
+        artifact_error=None,
+        gb10_status_artifact=gb10_status,
+    )
+
+    assert check is not None
+    assert check.outcome == "fail"
+    assert check.detail == "canary trials must use current candidate GB10 worker registrations"
+    assert check.evidence["canary_workers_match_current_candidate"] is False
+    if scenario in {"null-worker", "missing-worker-ids"}:
+        assert check.evidence["canary_worker_ids_schema_valid"] is False
+    else:
+        assert check.evidence["canary_worker_ids_schema_valid"] is True
 
 
 @pytest.mark.parametrize(
@@ -1775,7 +1873,7 @@ def test_release_gate_rejects_non_s3_or_secret_leaking_hf_boundary_evidence() ->
     assert check.evidence["worker_hf_token_present"] is True
 
 
-def test_release_gate_fails_when_environment_state_check_reports_drift() -> None:
+def test_release_gate_fails_when_environment_state_reports_excluded_slurm_node() -> None:
     report = collect_release_gate_report(
         manifest=_manifest(external_workers=_external_workers_manifest_section()),
         apps_v1=_FakeAppsV1(
@@ -1808,10 +1906,10 @@ def test_release_gate_fails_when_environment_state_check_reports_drift() -> None
             "drift": [
                 {
                     "path": (
-                        "slurm_worker_jobs[production/oldlab/18186].LOOM_REMOTE_WORKER_ENV_FILE"
+                        "slurm_worker_jobs[production/gb10-arm64/18186].nodelist"
                     ),
-                    "desired": "staging-d46a16c",
-                    "live": "staging-cb6af75",
+                    "desired": ["trt-gb10-1", "trt-gb10-2"],
+                    "live": "trt-gb10-7",
                 },
             ],
         },
@@ -1826,7 +1924,7 @@ def test_release_gate_fails_when_environment_state_check_reports_drift() -> None
     assert check.outcome == "fail"
     assert check.detail == "live environment-state check reports drift"
     assert check.evidence["drift_count"] == 1
-    assert check.evidence["drift"][0]["live"] == "staging-cb6af75"
+    assert check.evidence["drift"][0]["live"] == "trt-gb10-7"
     assert "environment-state apply/check" in (check.remediation or "")
 
 
