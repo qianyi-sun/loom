@@ -21,6 +21,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 import stat
 import sys
 import tomllib
@@ -281,6 +282,7 @@ class _BrokerRolloutLockBinding:
 class _ClusterUpConfigSnapshot:
     path: Path | None
     config: ClusterConfig
+    raw_config: dict[str, Any]
     workload_contract_profile: object
     protected_target: str | None
 
@@ -528,6 +530,7 @@ def _load_cluster_up_config_snapshot(path: Path | None) -> _ClusterUpConfigSnaps
     return _ClusterUpConfigSnapshot(
         path=path,
         config=config,
+        raw_config=raw,
         workload_contract_profile=raw.get("workload_contract"),
         protected_target=_protected_cluster_config_target(raw),
     )
@@ -1479,6 +1482,186 @@ _RUNTIME_ENVIRONMENTS = frozenset(
     }
 )
 
+_KUBERNETES_NAMESPACE_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
+_CLUSTER_SCOPED_RENDER_KINDS = frozenset({"PersistentVolume"})
+_NAMESPACED_RENDER_KINDS = frozenset(
+    {
+        "Cluster",  # CloudNativePG custom resource
+        "ConfigMap",
+        "DaemonSet",
+        "Deployment",
+        "HorizontalPodAutoscaler",
+        "Ingress",
+        "NetworkPolicy",
+        "PersistentVolumeClaim",
+        "PodDisruptionBudget",
+        "Service",
+        "StatefulSet",
+    }
+)
+_TARGET_FLAG_UNSET = object()
+
+
+def _validate_kubernetes_namespace(namespace: str) -> str:
+    if (
+        not namespace
+        or len(namespace) > 63
+        or _KUBERNETES_NAMESPACE_RE.fullmatch(namespace) is None
+    ):
+        raise ValueError(
+            "namespace must be a valid Kubernetes DNS label: 1-63 lowercase "
+            "alphanumeric or '-' characters, starting and ending with alphanumeric"
+        )
+    return namespace
+
+
+def _resolve_config_target(
+    args: argparse.Namespace,
+    *,
+    defer_toml_errors: bool = False,
+) -> None:
+    """Resolve one command target from its config and explicit flags.
+
+    A supplied cluster config is authoritative for namespace and runtime
+    environment. Explicit flags remain useful as safety assertions, but may
+    not override that target. Commands without a config retain the historical
+    ``loom`` namespace default and namespace-based environment inference.
+    """
+
+    cfg_path = Path(args.config).resolve() if getattr(args, "config", None) else None
+    raw_config: dict[str, Any] | None = None
+    if cfg_path is not None:
+        if not cfg_path.exists():
+            raise FileNotFoundError(f"cluster config not found: {cfg_path}")
+        try:
+            raw_config = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+        except tomllib.TOMLDecodeError:
+            if not defer_toml_errors:
+                raise
+            # Preflight/up/down already have command-specific config error
+            # handling (including protected workload-contract diagnostics).
+            # Preserve that richer path instead of replacing it here.
+            raw_config = None
+        if raw_config is not None and not defer_toml_errors:
+            # ``status`` has no later render/preflight config load, so keep it
+            # from accepting unknown or malformed schema fields merely because
+            # the target keys themselves parsed.
+            load_cluster_config(cfg_path)
+
+    _apply_config_target_fields(args, raw_config)
+
+
+def _apply_config_target_fields(
+    args: argparse.Namespace,
+    raw_config: dict[str, Any] | None,
+    *,
+    explicit_namespace: str | None | object = _TARGET_FLAG_UNSET,
+    explicit_environment: str | None | object = _TARGET_FLAG_UNSET,
+) -> None:
+    """Apply already-read target fields without taking a second snapshot."""
+
+    if explicit_namespace is _TARGET_FLAG_UNSET:
+        explicit_namespace = getattr(args, "namespace", None)
+    assert explicit_namespace is None or isinstance(explicit_namespace, str)
+    config_namespace = raw_config.get("namespace") if raw_config is not None else None
+    if config_namespace is not None:
+        if not isinstance(config_namespace, str):
+            raise ValueError("cluster config namespace must be a string")
+        if config_namespace != config_namespace.strip():
+            raise ValueError("cluster config namespace must not contain surrounding whitespace")
+        _validate_kubernetes_namespace(config_namespace)
+        if explicit_namespace is not None and explicit_namespace != config_namespace:
+            raise ValueError(
+                f"--namespace {explicit_namespace!r} conflicts with cluster config "
+                f"namespace {config_namespace!r}"
+            )
+        namespace = config_namespace
+    else:
+        namespace = explicit_namespace or "loom"
+        _validate_kubernetes_namespace(namespace)
+    args.namespace = namespace
+
+    if hasattr(args, "environment") and raw_config is not None:
+        config_environment = raw_config.get("runtime_environment")
+        if config_environment is None:
+            return
+        if not isinstance(config_environment, str):
+            raise ValueError("cluster config runtime_environment must be a string")
+        if config_environment != config_environment.strip() or not config_environment:
+            raise ValueError(
+                "cluster config runtime_environment must be non-empty and must not "
+                "contain surrounding whitespace"
+            )
+        if explicit_environment is _TARGET_FLAG_UNSET:
+            explicit_environment = args.environment
+        assert explicit_environment is None or isinstance(explicit_environment, str)
+        if explicit_environment is not None and explicit_environment != config_environment:
+            raise ValueError(
+                f"--environment {explicit_environment!r} conflicts with cluster config "
+                f"runtime_environment {config_environment!r}"
+            )
+        args.environment = config_environment
+        # A protected namespace remains authoritative even when the config is
+        # internally inconsistent (for example loom-staging + production).
+        infer_environment(
+            environment=config_environment,
+            namespace=namespace,
+        )
+
+
+def _add_rendered_namespace_metadata(yaml_text: str, *, namespace: str) -> str:
+    """Embed the configured namespace in every namespaced rendered object.
+
+    Templates intentionally remain readable source YAML. This final render
+    guard parses every document, preserves its text/comments, and inserts the
+    namespace only when it is absent. Future cluster-scoped template kinds
+    must be added to ``_CLUSTER_SCOPED_RENDER_KINDS`` explicitly, keeping this
+    safety boundary fail-closed for manual ``kubectl apply -f`` workflows.
+    """
+
+    import yaml  # type: ignore[import-untyped]
+
+    chunks = yaml_text.split("\n---\n")
+    namespaced_chunks: list[str] = []
+    for chunk in chunks:
+        document = yaml.safe_load(chunk)
+        if not isinstance(document, dict):
+            namespaced_chunks.append(chunk)
+            continue
+        kind = str(document.get("kind") or "")
+        metadata = document.get("metadata")
+        if not isinstance(metadata, dict):
+            raise ValueError(f"rendered {kind or '<unknown>'} object is missing metadata")
+        rendered_namespace = metadata.get("namespace")
+        if rendered_namespace is not None:
+            if rendered_namespace != namespace:
+                raise ValueError(
+                    f"rendered {kind} object namespace {rendered_namespace!r} "
+                    f"does not match cluster config namespace {namespace!r}"
+                )
+            namespaced_chunks.append(chunk)
+            continue
+        if kind in _CLUSTER_SCOPED_RENDER_KINDS:
+            namespaced_chunks.append(chunk)
+            continue
+        if kind not in _NAMESPACED_RENDER_KINDS:
+            raise ValueError(
+                f"rendered {kind or '<unknown>'} object has unknown namespace scope; "
+                "classify the kind before adding it to cluster render"
+            )
+        updated, substitutions = re.subn(
+            r"(?m)^metadata:\n",
+            f"metadata:\n  namespace: {namespace}\n",
+            chunk,
+            count=1,
+        )
+        if substitutions != 1:
+            raise ValueError(
+                f"rendered {kind or '<unknown>'} object has no top-level metadata block"
+            )
+        namespaced_chunks.append(updated)
+    return "\n---\n".join(namespaced_chunks)
+
 
 def _normalise_static_host_path_root(config: ClusterConfig) -> str | None:
     backend = config.persistent_storage_backend
@@ -1776,6 +1959,7 @@ def render_manifests(config: ClusterConfig) -> str:
             "(or `pip install -e .`) to pick up dependencies.",
         ) from exc
 
+    namespace = _validate_kubernetes_namespace(config.namespace)
     pkg_path = resources.files("loom_cli.templates.k8s")
     env = Environment(
         # FileSystemLoader is required so that `{% import "_env.j2" %}`
@@ -1831,12 +2015,15 @@ def render_manifests(config: ClusterConfig) -> str:
         # trailing newline merge cleanly; the join trims any
         # double-blank-line drift.
         chunks.append(rendered.rstrip() + "\n")
-    return "\n---\n".join(chunks)
+    return _add_rendered_namespace_metadata(
+        "\n---\n".join(chunks),
+        namespace=namespace,
+    )
 
 
 def _rendered_deployment_images(yaml_text: str) -> dict[str, dict[str, str]]:
     try:
-        import yaml  # type: ignore[import-untyped]
+        import yaml
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "the 'PyYAML' package is required for deployment image drift checks.",
@@ -2301,6 +2488,22 @@ def _audit(args: argparse.Namespace) -> int:
 
 
 def _status(args: argparse.Namespace) -> int:
+    try:
+        _resolve_config_target(args)
+        environment, target_environment_failure = _resolve_target_environment(
+            environment=args.environment,
+            namespace=args.namespace,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        sys.stderr.write(f"error: target config invalid: {exc}\n")
+        return 2
+    if target_environment_failure is not None:
+        sys.stderr.write(
+            "error: protected-target-environment conflict — refusing to inspect "
+            "a different target than the cluster config.\n"
+        )
+        return 2
+    assert environment is not None
     try:
         apps_v1, net_v1, core_v1, _storage_v1 = _load_clients(args.context)
     except RuntimeError as exc:
@@ -3374,6 +3577,11 @@ def _resolve_target_environment(
 
 
 def _preflight(args: argparse.Namespace) -> int:
+    try:
+        _resolve_config_target(args, defer_toml_errors=True)
+    except (FileNotFoundError, ValueError) as exc:
+        sys.stderr.write(f"error: target config invalid: {exc}\n")
+        return 2
     environment, target_environment_failure = _resolve_target_environment(
         environment=args.environment,
         namespace=args.namespace,
@@ -4100,6 +4308,18 @@ def recover_sandbox_deadline_pods(
 
 
 def _up(args: argparse.Namespace) -> int:
+    explicit_namespace = args.namespace
+    explicit_environment = args.environment
+    try:
+        _apply_config_target_fields(
+            args,
+            None,
+            explicit_namespace=explicit_namespace,
+            explicit_environment=explicit_environment,
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"error: target config invalid: {exc}\n")
+        return 2
     environment, target_environment_failure = _resolve_target_environment(
         environment=args.environment,
         namespace=args.namespace,
@@ -4175,7 +4395,10 @@ def _up(args: argparse.Namespace) -> int:
         except ValueError as exc:
             sys.stderr.write(f"error: {exc}\n")
             return 1
-    if snapshot.protected_target == "production" and environment != "production":
+    if (
+        snapshot.protected_target == "production"
+        and explicit_environment not in (None, "production")
+    ):
         sys.stderr.write(
             "error: protected cluster config target production conflicts with "
             f"command target {environment}\n"
@@ -4187,6 +4410,26 @@ def _up(args: argparse.Namespace) -> int:
         except ValueError as exc:
             sys.stderr.write(f"error: {exc}\n")
             return 1
+    try:
+        _apply_config_target_fields(
+            args,
+            snapshot.raw_config,
+            explicit_namespace=explicit_namespace,
+            explicit_environment=explicit_environment,
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"error: target config invalid: {exc}\n")
+        return 2
+    environment, target_environment_failure = _resolve_target_environment(
+        environment=args.environment,
+        namespace=args.namespace,
+    )
+    if target_environment_failure is not None:
+        sys.stderr.write(
+            "error: protected-target-environment preflight failed — refusing to apply.\n"
+        )
+        return 1
+    assert environment is not None
     effective_environment = snapshot.protected_target or environment
     workload_contract_check = _protected_workload_trust_contract_check(
         environment=effective_environment,
@@ -4623,6 +4866,19 @@ def _guard_protected_destructive_down(args: argparse.Namespace) -> int | None:
 
 
 def _down(args: argparse.Namespace) -> int:
+    try:
+        _resolve_config_target(args, defer_toml_errors=True)
+    except (FileNotFoundError, ValueError) as exc:
+        sys.stderr.write(f"error: render failed: target config invalid: {exc}\n")
+        return 2
+    environment, target_environment_failure = _resolve_target_environment(
+        environment=args.environment,
+        namespace=args.namespace,
+    )
+    if target_environment_failure is not None:
+        sys.stderr.write("error: protected-target-environment conflict — refusing teardown.\n")
+        return 1
+    assert environment is not None
     guard_result = _guard_protected_destructive_down(args)
     if guard_result is not None:
         return guard_result
@@ -5041,8 +5297,24 @@ def dispatch(argv: list[str]) -> int:
     )
     p_status.add_argument(
         "--namespace",
-        default="loom",
-        help="Kubernetes namespace (default: loom).",
+        default=None,
+        help=(
+            "Kubernetes namespace. With --config, inferred from the config and "
+            "an explicit value must match; otherwise defaults to loom."
+        ),
+    )
+    p_status.add_argument(
+        "--environment",
+        default=None,
+        help=(
+            "Logical environment assertion. With --config, an explicit value "
+            "must match runtime_environment."
+        ),
+    )
+    p_status.add_argument(
+        "--config",
+        default=None,
+        help=("Path to cluster-config.toml used to infer and validate namespace and environment."),
     )
     p_status.add_argument(
         "--format",
@@ -5140,8 +5412,11 @@ def dispatch(argv: list[str]) -> int:
     )
     p_preflight.add_argument(
         "--namespace",
-        default="loom",
-        help="Kubernetes namespace (default: loom).",
+        default=None,
+        help=(
+            "Kubernetes namespace. With --config, inferred from the config and "
+            "an explicit value must match; otherwise defaults to loom."
+        ),
     )
     p_preflight.add_argument(
         "--environment",
@@ -5149,7 +5424,8 @@ def dispatch(argv: list[str]) -> int:
         help=(
             "Logical environment name. Protected environments "
             "(staging/production) get storage and backup "
-            "guard checks. If omitted, inferred from namespace when possible."
+            "guard checks. With --config, inferred from runtime_environment "
+            "and an explicit value must match; otherwise inferred from namespace."
         ),
     )
     p_preflight.add_argument(
@@ -5254,15 +5530,19 @@ def dispatch(argv: list[str]) -> int:
     )
     p_up.add_argument(
         "--namespace",
-        default="loom",
-        help="Kubernetes namespace (default: loom).",
+        default=None,
+        help=(
+            "Kubernetes namespace. With --config, inferred from the config and "
+            "an explicit value must match; otherwise defaults to loom."
+        ),
     )
     p_up.add_argument(
         "--environment",
         default=None,
         help=(
             "Logical environment name passed through to preflight. "
-            "Protected environments can require backup manifest checks."
+            "With --config, inferred from runtime_environment and an explicit "
+            "value must match. Protected environments can require backup checks."
         ),
     )
     p_up.add_argument(
@@ -5367,8 +5647,11 @@ def dispatch(argv: list[str]) -> int:
     )
     p_down.add_argument(
         "--namespace",
-        default="loom",
-        help="Kubernetes namespace (default: loom).",
+        default=None,
+        help=(
+            "Kubernetes namespace. With --config, inferred from the config and "
+            "an explicit value must match; otherwise defaults to loom."
+        ),
     )
     p_down.add_argument(
         "--environment",
@@ -5377,7 +5660,8 @@ def dispatch(argv: list[str]) -> int:
             "Logical environment name. Protected environments "
             "(staging/production) require a recent backup "
             "manifest and acknowledgement before --with-volumes or "
-            "--delete-namespace."
+            "--delete-namespace. With --config, inferred from "
+            "runtime_environment and an explicit value must match."
         ),
     )
     p_down.add_argument(

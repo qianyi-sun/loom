@@ -387,8 +387,9 @@ ingress_tls_secret_name = "loom-tls"
 EOF
 
 # 2. One-time bootstrap (Secrets) — see "Bootstrap Secrets" below
-# 3. Verify the cluster is ready to receive Loom
-loom cluster preflight --namespace loom
+# 3. Verify the cluster is ready to receive Loom. The config supplies the
+# namespace and runtime environment.
+loom cluster preflight --config cluster-config.toml
 
 # 4. Audit the manifests against the public/internal boundary
 loom cluster audit --config cluster-config.toml
@@ -402,7 +403,7 @@ loom cluster up \
   --rollout-lock-evidence "$ROLLOUT_DIR/rollout-mutation-lock-$IMAGE_TAG.json"
 
 # 6. Verify
-loom cluster status --namespace loom --format table
+loom cluster status --config cluster-config.toml --format table
 ```
 
 Each verb:
@@ -420,6 +421,31 @@ Each verb:
 | `loom cluster up` | Preflight → render → protected-environment rollout mutation lease acquisition → apply non-StatefulSet resources and patch existing StatefulSets only through mutable fields after checking immutable storage intent → prune resources intentionally removed by profile toggles, including stale `deploy/loom-worker` and `networkpolicy/loom-worker` when `k8s_worker.enabled=false` while retaining `persistentvolumeclaim/loom-worker-trajectories` → wait for components ready, Deployment generations observed, updated replicas converged, managed Deployment pods inspectable and free of blocking CrashLoop/image/config/start failures, kube-system rollout controllers healthy, and live Deployment images matching the rendered manifests; prints rendered/live image evidence for managed Deployments. Existing StatefulSet PVC templates may contain Kubernetes default/bound fields such as `volumeName`, empty `storageClassName`, default `volumeMode`, and runtime PVC template `status`; `cluster up` tolerates that drift, but real immutable changes such as claim name, access modes, storage size, selector, service name, or pod management policy still fail closed. With `--recover-sandbox-deadlines`, a not-ready status whose pod events classify as kind/containerd sandbox deadline stalls deletes only the classified pods, capped by `--sandbox-deadline-max-pods`, then retries readiness once. Preflight and backup/storage guards still run before apply/recovery unless the operator explicitly passes `--skip-preflight`. For staging/production, pass `--rollout-id` and `--rollout-lock-evidence` so evidence records acquisition and release/failure state. | 0 ready / 1 lock contention, immutable StatefulSet drift, not-ready, prune failure, recovery failed, or image drift / 2 unreachable, bad input, or kubectl missing |
 | `loom cluster status` | Live readiness snapshot with ingress endpoints; marks stale Deployment generations, incomplete updated replicas, failed managed-pod inspection, managed Deployment pod CrashLoop/image/config/start failures, classified `node_runtime_sandbox_deadline` pod sandbox create/kill failures, and visible kube-system controller/scheduler/etcd/API pod failures as not-ready | 0 all-ready / 1 not-ready / 2 unreachable |
 | `loom cluster down` | `kubectl delete` of the rendered manifests; opt-in `--with-volumes` (PVCs) and `--delete-namespace` for full teardown. Protected environments require `--backup-manifest` and `--acknowledge-data-loss` before destructive flags. | 0 / 1 on failure, invalid backup guard, or operator-cancelled prompt |
+
+`preflight`, `up`, `status`, and `down` share one target-resolution contract.
+When `--config` declares `namespace` and/or `runtime_environment`, those values
+are authoritative. Omitted flags are inferred from the config; explicitly
+supplied `--namespace` or `--environment` values are safety assertions and
+must match. The CLI fails before cluster access on a mismatch. Without a
+config, the namespace remains `loom` by default and the environment is inferred
+from the namespace unless supplied explicitly.
+
+`loom cluster render` embeds `metadata.namespace` on every namespaced object;
+cluster-scoped PersistentVolumes remain unnamespaced. For an explicitly
+authorized custom-cluster restore that must use manual `kubectl apply`, keep
+both the embedded metadata and an explicit matching `-n` assertion:
+
+```bash
+loom cluster render --config cluster-config.toml > /tmp/loom-rendered.yaml
+yq -e --arg ns "$NAMESPACE" \
+  'select(.kind != "PersistentVolume") | .metadata.namespace == $ns' \
+  /tmp/loom-rendered.yaml >/dev/null
+kubectl -n "$NAMESPACE" apply -f /tmp/loom-rendered.yaml
+```
+
+Never use a bare `kubectl apply -f` for rendered restore manifests. Shared
+staging remains broker/rollout-driver owned; this manual form does not grant
+authority to bypass that path.
 
 The detailed manual flow (build images → create Secrets → apply
 each manifest → mint internal tokens → approve registrations and deliver

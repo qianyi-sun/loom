@@ -1,6 +1,7 @@
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
+  namespace: loom
   name: loom-postgres
 spec:
   serviceName: loom-postgres
@@ -40,6 +41,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  namespace: loom
   name: loom-postgres
 spec:
   selector: { app: loom-postgres }

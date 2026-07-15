@@ -8,6 +8,7 @@ the YAML files in the repo are seeing the same thing the CLI emits.
 
 from __future__ import annotations
 
+import argparse
 import re
 from pathlib import Path
 from urllib.parse import unquote
@@ -16,7 +17,7 @@ import pytest
 import yaml
 
 from loom_cli.__main__ import main
-from loom_cli.cluster_cmd import render_manifests
+from loom_cli.cluster_cmd import _resolve_config_target, render_manifests
 from loom_cli.cluster_config import (
     ClusterConfig,
     load_cluster_config,
@@ -1274,6 +1275,84 @@ def test_cli_render_invalid_provider_egress_allowlist_exits_2(
     err = capsys.readouterr().err
     assert "provider_egress_allowlist" in err
     assert "IP address or CIDR" in err
+
+
+def test_render_embeds_config_namespace_in_every_namespaced_object() -> None:
+    namespace = "loom-incident-restore"
+    rendered = render_manifests(ClusterConfig(namespace=namespace))
+    documents = _load_docs(rendered)
+
+    assert documents
+    for document in documents:
+        if document["kind"] == "PersistentVolume":
+            assert "namespace" not in document["metadata"]
+        else:
+            assert document["metadata"]["namespace"] == namespace
+
+
+def test_config_target_is_inferred_when_flags_are_omitted(tmp_path: Path) -> None:
+    config_path = tmp_path / "staging.cluster.toml"
+    config_path.write_text(
+        'namespace = "loom-staging"\n'
+        'runtime_environment = "staging"\n',
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        config=str(config_path),
+        namespace=None,
+        environment=None,
+    )
+
+    _resolve_config_target(args)
+
+    assert args.namespace == "loom-staging"
+    assert args.environment == "staging"
+
+
+@pytest.mark.parametrize(
+    "command,extra",
+    [
+        ("status", []),
+        ("preflight", ["--no-doctor"]),
+        ("up", ["--no-wait"]),
+        ("down", ["--yes"]),
+    ],
+)
+@pytest.mark.parametrize(
+    "conflicting_flags,expected",
+    [
+        (["--namespace", "loom-team-b"], "--namespace 'loom-team-b' conflicts"),
+        (["--environment", "local"], "--environment 'local' conflicts"),
+    ],
+)
+def test_cluster_commands_reject_explicit_config_target_conflicts_before_cluster_access(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    extra: list[str],
+    conflicting_flags: list[str],
+    expected: str,
+) -> None:
+    config_path = tmp_path / "team-a.cluster.toml"
+    config_path.write_text(
+        'namespace = "loom-team-a"\n'
+        'runtime_environment = "development"\n',
+        encoding="utf-8",
+    )
+
+    rc = main(
+        [
+            "cluster",
+            command,
+            "--config",
+            str(config_path),
+            *conflicting_flags,
+            *extra,
+        ]
+    )
+
+    assert rc == 2
+    assert expected in capsys.readouterr().err
 
 
 # ──────────────────────────────────────────────────────────────────────

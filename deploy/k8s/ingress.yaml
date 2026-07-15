@@ -1,6 +1,7 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
+  namespace: loom
   name: loom-ingress
   annotations:
     # Adjust to match your cluster's ingress controller (nginx, traefik,
