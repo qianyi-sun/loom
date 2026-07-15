@@ -46,7 +46,7 @@ describe("FrontendBootstrap", () => {
 
     const startupStatus = screen.getByRole("status");
     expect(startupStatus).toHaveTextContent("Starting Loom");
-    expect(startupStatus).toHaveAttribute("id", "main-content");
+    expect(screen.getByRole("main")).toHaveAttribute("id", "main-content");
     expect(
       screen.getByRole("link", { name: "Skip to main content" }),
     ).toHaveAttribute("href", "#main-content");
@@ -80,7 +80,11 @@ describe("FrontendBootstrap", () => {
       "href",
       "/dev/",
     );
-    expect(screen.getByRole("button", { name: "Try again" })).toHaveClass(
+    expect(screen.getByRole("button", { name: "Retry" })).toHaveClass(
+      "min-h-11",
+      "min-w-11",
+    );
+    expect(screen.getByRole("button", { name: "Reload Loom" })).toHaveClass(
       "min-h-11",
       "min-w-11",
     );
@@ -91,7 +95,7 @@ describe("FrontendBootstrap", () => {
     expect(
       screen.getByRole("link", { name: "Skip to main content" }),
     ).toHaveAttribute("href", "#main-content");
-    expect(alert).toHaveAttribute("id", "main-content");
+    expect(screen.getByRole("main")).toHaveAttribute("id", "main-content");
     expect(reports).toEqual([
       expect.objectContaining({
         kind: "frontend-config-network",
@@ -119,7 +123,7 @@ describe("FrontendBootstrap", () => {
       </React.StrictMode>,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Try again" }));
+    await user.click(await screen.findByRole("button", { name: "Retry" }));
     expect(await screen.findByText("Recovered")).toBeInTheDocument();
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
   });

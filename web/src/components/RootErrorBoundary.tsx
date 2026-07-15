@@ -1,8 +1,8 @@
 import React from "react";
 
 import {
-  createBrowserFailureId,
-  markBrowserFailureForConsoleRedaction,
+  clearBrowserFailureConsoleRedaction,
+  prepareBrowserFailureForBoundary,
   reportBrowserFailure,
 } from "../lib/errorReporting";
 import { frontendHomePath } from "../lib/frontendConfig";
@@ -10,6 +10,7 @@ import { RecoveryPanel } from "./RecoveryPanel";
 
 interface RootErrorBoundaryProps {
   children: React.ReactNode;
+  onRetry?: () => void;
   onReload?: () => void;
 }
 
@@ -24,13 +25,16 @@ export class RootErrorBoundary extends React.Component<
   state: RootErrorBoundaryState = { referenceId: null };
 
   static getDerivedStateFromError(error: unknown): RootErrorBoundaryState {
-    markBrowserFailureForConsoleRedaction(error);
-    return { referenceId: createBrowserFailureId() };
+    return { referenceId: prepareBrowserFailureForBoundary(error) };
   }
 
-  componentDidCatch(): void {
-    if (this.state.referenceId) {
-      reportBrowserFailure("root-render", this.state.referenceId);
+  componentDidCatch(error: unknown): void {
+    try {
+      if (this.state.referenceId) {
+        reportBrowserFailure("root-render", this.state.referenceId);
+      }
+    } finally {
+      clearBrowserFailureConsoleRedaction(error);
     }
   }
 
@@ -42,6 +46,11 @@ export class RootErrorBoundary extends React.Component<
     window.location.reload();
   };
 
+  private readonly retry = (): void => {
+    this.props.onRetry?.();
+    this.setState({ referenceId: null });
+  };
+
   render(): React.ReactNode {
     if (!this.state.referenceId) return this.props.children;
 
@@ -50,8 +59,8 @@ export class RootErrorBoundary extends React.Component<
         title="Loom could not display this page"
         message="An unexpected browser error occurred. Reload the app or return to a safe starting point."
         referenceId={this.state.referenceId}
-        actionLabel="Reload Loom"
-        onAction={this.reload}
+        onRetry={this.retry}
+        onReload={this.reload}
         homeHref={frontendHomePath()}
       />
     );

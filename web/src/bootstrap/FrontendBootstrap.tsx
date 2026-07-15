@@ -69,8 +69,7 @@ export function FrontendBootstrap({
         title="Loom could not start"
         message={FAILURE_COPY[failure.kind]}
         referenceId={failure.referenceId}
-        actionLabel="Try again"
-        onAction={() => {
+        onRetry={() => {
           resetFrontendConfigLoad();
           setAttempt((value) => value + 1);
         }}
@@ -85,14 +84,13 @@ export function FrontendBootstrap({
         <SkipLink />
         <main
           id="main-content"
-          role="status"
-          aria-live="polite"
-          aria-busy="true"
           tabIndex={-1}
           className="mx-auto mt-16 max-w-xl rounded-xl border border-slate-200 bg-white p-6 shadow-sm"
         >
-          <h1 className="text-xl font-semibold text-slate-900">Loom</h1>
-          <p className="mt-2 text-sm text-slate-600">Starting Loom…</p>
+          <div role="status" aria-live="polite" aria-busy="true">
+            <h1 className="text-xl font-semibold text-slate-900">Loom</h1>
+            <p className="mt-2 text-sm text-slate-600">Starting Loom…</p>
+          </div>
         </main>
       </>
     );

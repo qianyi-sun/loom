@@ -20,6 +20,14 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: { "/api": apiProxyTarget },
+    // Vite registers its raw ErrorEvent forwarder before the application
+    // entrypoint. Disable that channel so root-boundary failures cannot be
+    // serialized to an agent/dev terminal before our capture listener redacts
+    // them. Bounded console.error reports remain forwarded for diagnostics.
+    forwardConsole: {
+      unhandledErrors: false,
+      logLevels: ["error", "warn"],
+    },
   },
   test: {
     environment: "happy-dom",

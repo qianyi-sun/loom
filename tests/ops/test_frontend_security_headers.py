@@ -210,6 +210,7 @@ def test_frontend_has_no_third_party_font_or_avoidable_inline_fallback() -> None
     index_html = (REPO_ROOT / "web/index.html").read_text(encoding="utf-8")
     index_css = (REPO_ROOT / "web/src/index.css").read_text(encoding="utf-8")
     tailwind = (REPO_ROOT / "web/tailwind.config.js").read_text(encoding="utf-8")
+    vite_config = (REPO_ROOT / "web/vite.config.ts").read_text(encoding="utf-8")
     main = (REPO_ROOT / "web/src/main.tsx").read_text(encoding="utf-8")
     recovery_sources = "\n".join(
         (REPO_ROOT / path).read_text(encoding="utf-8")
@@ -234,19 +235,30 @@ def test_frontend_has_no_third_party_font_or_avoidable_inline_fallback() -> None
     assert static_main is not None
     for attribute in (
         'id="main-content"',
-        'role="status"',
-        'aria-live="polite"',
-        'aria-busy="true"',
         'tabindex="-1"',
     ):
         assert attribute in static_main.group(0)
+    assert 'role="status"' not in static_main.group(0)
+    static_status = re.search(r"<div\b[^>]*role=\"status\"[^>]*>", index_html)
+    assert static_status is not None
+    for attribute in ('aria-live="polite"', 'aria-busy="true"'):
+        assert attribute in static_status.group(0)
     assert re.search(
         r'<a\b[^>]*href="#main-content"[^>]*>\s*Skip to main content\s*</a>',
         index_html,
     )
     assert "Starting Loom" in index_html
-    assert "installBrowserConsoleErrorRedaction();" in main
-    assert main.index("installBrowserConsoleErrorRedaction();") < main.index(
+    assert "installBrowserErrorEventRedaction()" in main
+    assert "installBrowserConsoleErrorRedaction()" in main
+    assert main.index("installBrowserErrorEventRedaction()") < main.index(
         "ReactDOM.createRoot(rootElement).render("
+    )
+    assert main.index("installBrowserConsoleErrorRedaction()") < main.index(
+        "ReactDOM.createRoot(rootElement).render("
+    )
+    assert re.search(
+        r"forwardConsole:\s*\{\s*unhandledErrors:\s*false,\s*"
+        r'logLevels:\s*\["error",\s*"warn"\],\s*\}',
+        vite_config,
     )
     assert "ReactDOM.createRoot(rootElement).render(" in main
