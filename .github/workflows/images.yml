@@ -140,7 +140,7 @@ jobs:
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.images != '[]'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
     strategy:
@@ -253,7 +253,7 @@ jobs:
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.images != '[]'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write

@@ -115,6 +115,14 @@ def test_images_builds_use_planner_selection() -> None:
     assert "needs.plan.outputs.required == 'true'" in jobs["build"]["if"]
 
 
+def test_images_multi_arch_jobs_have_bounded_build_budgets() -> None:
+    workflow = _workflow(".github/workflows/images.yml")
+    jobs = workflow["jobs"]
+
+    assert jobs["build"]["timeout-minutes"] == 45
+    assert jobs["publish"]["timeout-minutes"] == 45
+
+
 def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     jobs = workflow["jobs"]
