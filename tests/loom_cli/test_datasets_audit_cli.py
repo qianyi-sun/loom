@@ -88,6 +88,71 @@ def test_tb21_audit_json_requires_the_physical_profile(
     assert "terminal-bench-2@tb2.1-r6" in capsys.readouterr().err
 
 
+def test_tb21_audit_json_writes_activation_evidence(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from loom_benchmark_tool.audit_cmd import AuditResult
+
+    class FakeObjectStore:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+    class FakeEngine:
+        async def dispose(self) -> None:
+            pass
+
+    class FakeSession:
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            pass
+
+    async def fake_audit(_session: object, *, object_store: object) -> AuditResult:
+        assert isinstance(object_store, FakeObjectStore)
+        return AuditResult(
+            profile="terminal-bench-2@tb2.1-r6",
+            verified_bundles=89,
+            private_workspace_isolation=True,
+            snapshot_id="sha256:" + "a" * 64,
+        )
+
+    monkeypatch.setattr("loom.trajectory.storage.MinioObjectStore", FakeObjectStore)
+    monkeypatch.setattr("loom_benchmark_tool.audit_cmd.audit_tb21_profile", fake_audit)
+    monkeypatch.setattr(
+        "sqlalchemy.ext.asyncio.create_async_engine",
+        lambda _db_url: FakeEngine(),
+    )
+    monkeypatch.setattr(
+        "sqlalchemy.ext.asyncio.async_sessionmaker",
+        lambda *_args, **_kwargs: lambda: FakeSession(),
+    )
+    evidence = tmp_path / "tb21-audit.json"
+
+    rc = datasets_cmd.dispatch(
+        [
+            "audit",
+            "terminal-bench-2@tb2.1-r6",
+            "--tb21-audit-json",
+            str(evidence),
+            "--db-url",
+            "postgresql://x/y",
+            "--minio-endpoint",
+            "http://minio:9000",
+            "--minio-access-key",
+            "access",
+            "--minio-secret-key",
+            "secret",
+        ],
+    )
+
+    assert rc == 0
+    assert '"verified_bundles": 89' in evidence.read_text()
+    assert "verified_bundles=89" in capsys.readouterr().out
+
+
 def test_audit_prints_json(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
